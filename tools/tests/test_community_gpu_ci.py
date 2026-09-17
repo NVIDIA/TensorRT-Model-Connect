@@ -121,22 +121,53 @@ def test_family_plan_rejects_missing_or_duplicate_premerge_cases(
         community_gpu_ci.family_plan(tmp_path, "alpha")
 
 
-def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path) -> None:
-    """The E2E runtime tree contains core, backend, and the selected family DSO."""
+@pytest.mark.parametrize("with_byok", [False, True])
+def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, with_byok: bool) -> None:
+    """The staged native tree must satisfy the real E2E runtime consumer."""
     build = tmp_path / "build"
     build.mkdir()
     plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
     required = (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
         "libtrtmc_backend_trt.so",
         "libtrtmc_model_alpha.so",
     )
     for name in required:
         (build / name).write_bytes(b"native")
 
+    if with_byok:
+        (build / "libtrtmc_byok_tvm_ffi.so").write_bytes(b"native")
     runtime = community_gpu_ci._runtime_root(build, plan)
+    runner = community_gpu_ci.E2ERunner(community_gpu_ci.CiContext(tmp_path, {}))
+    with runner._isolated_runtime_root(runtime, plan.family) as isolated:
+        for name in required:
+            assert (isolated / name).resolve() == (build / name).resolve()
+        assert (isolated / "libtrtmc_byok_tvm_ffi.so").is_file() is with_byok
 
-    assert all((runtime / name).is_symlink() for name in required)
+
+@pytest.mark.parametrize("missing", ["libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1"])
+def test_runtime_root_rejects_missing_public_runtime_libraries(
+    tmp_path: Path, missing: str
+) -> None:
+    """Incomplete public runtime artifacts cannot reach family E2E execution."""
+    build = tmp_path / "build"
+    build.mkdir()
+    for name in (
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_alpha.so",
+    ):
+        if name != missing:
+            (build / name).write_bytes(b"native")
+    plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
+    with pytest.raises(CiError, match="native Community GPU build is missing"):
+        community_gpu_ci._runtime_root(build, plan)
 
 
 def test_checkpoint_staging_verifies_the_resolved_revision(
@@ -241,6 +272,8 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     native_builds = [command for command in commands if command[:2] == ["cmake", "--build"]]
     assert "trtmc" in native_builds[0]
     assert "trtmc_backend_trt" in native_builds[0]
+    assert "trtmc_runtime" in native_builds[0]
+    assert "trtmc_c" in native_builds[0]
     assert native_builds[1][-1] == "trtmc_model_alpha"
     assert len(e2e_calls) == 1
     runtime, families, testcases = e2e_calls[0]

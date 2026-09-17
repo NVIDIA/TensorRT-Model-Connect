@@ -43,9 +43,9 @@ on:
 
 permissions: {}
 
-# Promote GPU policy through a reviewed commit; stable retains the current default.
+# Experimental branch policy; Stable main keeps automatic GPU disabled.
 env:
-  COMMUNITY_GPU_EXECUTION_ENABLED: "false"
+  COMMUNITY_GPU_EXECUTION_ENABLED: "true"
 
 concurrency:
   group: community-ci-${{ inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || github.ref_name == 'main' && 'start-main' || 'start-dev' }}-${{ github.event.pull_request.number || inputs.pr_number }}
@@ -613,7 +613,7 @@ jobs:
   gpu-authorize:
     name: Community GPU / Authorize
     needs: [authorize, required]
-    if: ${{ always() && needs.authorize.result == 'success' && needs.required.result == 'success' }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && needs.authorize.result == 'success' && needs.required.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -658,7 +658,7 @@ jobs:
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
           GPU_EXECUTION_ENABLED: ${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}
-          MANUAL_GPU_EXECUTION_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.run_gpu_smoke || false }}
+          MANUAL_GPU_EXECUTION_ENABLED: ${{ inputs.run_gpu_smoke || false }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
@@ -791,69 +791,19 @@ jobs:
               raise SystemExit(f"{scope} scope must not select families")
           PY
 
-      - name: Report the GPU execution policy
-        env:
-          GPU_ENABLED: ${{ steps.impact.outputs.gpu_enabled }}
-          RUN_GPU: ${{ steps.impact.outputs.run_gpu }}
-          SCOPE: ${{ steps.impact.outputs.scope }}
-          FAMILIES: ${{ steps.impact.outputs.families }}
-          DIRECT_FAMILIES: ${{ steps.impact.outputs.direct_families }}
-        run: |
-          set -euo pipefail
-          if [ "$GPU_ENABLED" = "false" ]; then
-            message="Automatic Community GPU execution is disabled and is not a merge gate."
-            echo "::notice::$message"
-            printf '## Community GPU\n\n%s\n\nImpact scope: `%s`; directly changed families: `%s`.\n' \
-              "$message" "$SCOPE" "$DIRECT_FAMILIES" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          message="Experimental Community GPU smoke was manually enabled; it is not a merge gate."
-          echo "::notice::$message"
-          printf '## Community GPU\n\n%s\n\nRun decision: `%s`.\n' \
-            "$message" "$RUN_GPU" >> "$GITHUB_STEP_SUMMARY"
-
-  announce:
-    name: Community GPU / Publish pending result
-    needs: gpu-authorize
-    if: ${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      statuses: write
-
-    steps:
-      - name: Publish the pending automated status
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.gpu-authorize.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state=pending \
-            -f context="TRTMC Community GPU CI / Smoke test" \
-            -f description="Reserving a GPU and running the smoke test" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-
   provision-and-test:
     name: Community GPU / Provision and test
-    needs: [gpu-authorize, announce]
-    if: >-
-      ${{ always() && needs.gpu-authorize.result == 'success' &&
-      needs.gpu-authorize.outputs.run_gpu == 'true' &&
-      needs.announce.result == 'success' }}
+    needs: gpu-authorize
+    if: ${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}
     runs-on: ubuntu-24.04
     environment:
       name: gpu-ci-dispatch
       deployment: false
     # Upper runtime bound for one externally reserved GPU instance. The
     # separate cleanup job remains eligible if this job times out.
-    timeout-minutes: 60
+    timeout-minutes: 90
     concurrency:
-      # Scoped per PR so independent pull requests each lease their own
-      # Brev GPU instance and run in parallel; a new push on the same PR
-      # still cancels that PR's own stale, already-queued or in-flight run.
-      group: trtmc-community-gpu-${{ needs.gpu-authorize.outputs.pr_number }}
+      group: trtmc-community-gpu-${{ inputs.ci_lane }}-${{ needs.gpu-authorize.outputs.pr_number }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -864,7 +814,7 @@ jobs:
       - name: Check out trusted GPU orchestration
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.gpu-authorize.outputs.base_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Install the Brev CLI
@@ -890,15 +840,17 @@ jobs:
 
       - name: Reserve a GPU instance
         id: reserve
+        env:
+          GPU_TYPE: ${{ vars.TRTMC_COMMUNITY_GPU_TYPE || 'L40' }}
         run: |
           set -euo pipefail
           instance_name="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # Publish the deterministic name before creation so a timeout after
           # allocation cannot suppress best-effort cleanup.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
-          brev create "$instance_name" -g L40 --timeout 600
+          brev create "$instance_name" -g "$GPU_TYPE" --timeout 600
 
-      - name: Build the GPU image, check out the exact PR merge, and run the smoke test
+      - name: Build the GPU image and validate the exact PR merge
         id: test
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
@@ -908,10 +860,15 @@ jobs:
           DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
           ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
           SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          CUDA_ARCHITECTURES: ${{ vars.TRTMC_COMMUNITY_CUDA_ARCHITECTURES || '89' }}
+          CI_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin refs/pull/$PR_NUMBER/merge && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
+          brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
+          # The runner belongs to the chosen CI commit; models and manifests
+          # come from the untouched PR snapshot. Mount the runner separately.
+          [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py"
           # A freshly created instance's SSH session may not have its Docker
           # group membership yet. The first live GPU run reached this point
           # and failed on docker.sock, so do not depend on propagation timing.
@@ -921,12 +878,8 @@ jobs:
           # selected family DSOs, and configured CTest tree. It then stages
           # checkpoint revisions and uses E2ERunner's explicit premerge case
           # selection plus JUnit validation, which rejects skips and omissions.
-          # HF_TOKEN: some premerge checkpoints (e.g. sam3) are gated and
-          # fail to download without authorization. huggingface_hub reads
-          # HF_TOKEN from the environment automatically (verified directly
-          # against huggingface_hub.get_token()); no code change is needed
-          # in tools.community_gpu_ci to consume it. GitHub Actions masks
-          # the secret value everywhere it appears, including here.
+          # The top-level CPU suite already completed in this pipeline. This
+          # instance builds the runtime and uses the existing family E2E contract.
           echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
           python3 -m tools.brev_exec \
             --instance "$INSTANCE_NAME" \
@@ -934,13 +887,14 @@ jobs:
             --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             -- sudo docker run --rm --gpus all --shm-size 16g \
             -v /tmp/model_connect:/src -w /src \
+            -v /tmp/community_gpu_ci.py:/opt/community_gpu_ci.py:ro \
+            -e PYTHONPATH=/src \
             -e "TRTMC_GPU_SCOPE=$SCOPE" \
             -e "TRTMC_GPU_FAMILIES=$FAMILIES" \
             -e "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
             -e "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
-            -e "HF_TOKEN=$HF_TOKEN" \
-            -e CMAKE_CUDA_ARCHITECTURES=89 \
-            trtmc-quickstart-gpu python3.12 -m tools.community_gpu_ci
+            -e "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
+            trtmc-quickstart-gpu python3.12 /opt/community_gpu_ci.py
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
@@ -1017,46 +971,38 @@ jobs:
         run: brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
 
   publish:
-    name: Community GPU / Result
-    needs: [authorize, gpu-authorize, announce, provision-and-test, cleanup]
-    if: >-
-      ${{ always() && needs.authorize.result == 'success' &&
-      needs.gpu-authorize.result == 'success' &&
-      needs.gpu-authorize.outputs.gpu_enabled == 'true' }}
+    name: ${{ github.event_name == 'pull_request' && 'Stable Community CI' || inputs.ci_lane == 'dev' && 'Dev Community CI' || 'Stable Community CI' }} result
+    needs: [authorize, required, gpu-authorize, provision-and-test, cleanup]
+    if: ${{ always() && needs.authorize.outputs.enabled == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      statuses: write
-
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - name: Publish the terminal status
+      - name: Require the complete Community CI result
         env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          EVENT_NAME: ${{ github.event_name }}
           RUN_GPU: ${{ needs.gpu-authorize.outputs.run_gpu }}
-          CONCLUSION: ${{ needs.provision-and-test.outputs.conclusion }}
-          JOB_RESULT: ${{ needs.provision-and-test.result }}
+          AUTHORIZED_RESULT: ${{ needs.authorize.result }}
+          CPU_RESULT: ${{ needs.required.result }}
+          GPU_AUTHORIZED: ${{ needs.gpu-authorize.result }}
+          GPU_RESULT: ${{ needs.provision-and-test.result }}
+          TEST_RESULT: ${{ needs.provision-and-test.outputs.conclusion }}
           CLEANUP_RESULT: ${{ needs.cleanup.result }}
         run: |
           set -euo pipefail
-          state=failure
-          description="GPU smoke test did not complete"
-          if [ "$RUN_GPU" = "false" ] \
-            && [ "$JOB_RESULT" = "skipped" ] \
-            && [ "$CLEANUP_RESULT" = "skipped" ]; then
-            state=success
-            description="No GPU-impacting changes; GPU test not required"
-          elif [ "$RUN_GPU" = "true" ] \
-            && [ "$JOB_RESULT" = "success" ] \
-            && [ "$CONCLUSION" = "success" ] \
-            && [ "$CLEANUP_RESULT" = "success" ]; then
-            state=success
-            description="GPU smoke test passed"
+          test "$AUTHORIZED_RESULT" = success
+          test "$CPU_RESULT" = success
+          if [ "$EVENT_NAME" = pull_request ]; then
+            # Preserve the existing PR CPU contract during Dev qualification.
+            exit 0
           fi
-          gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state="$state" \
-            -f context="TRTMC Community GPU CI / Smoke test" \
-            -f description="$description" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          test "$state" = success
+          test "$GPU_AUTHORIZED" = success
+          if [ "$RUN_GPU" = false ]; then
+            test "$GPU_RESULT" = skipped
+            test "$CLEANUP_RESULT" = skipped
+          else
+            test "$RUN_GPU" = true
+            test "$GPU_RESULT" = success
+            test "$TEST_RESULT" = success
+            test "$CLEANUP_RESULT" = success
+          fi

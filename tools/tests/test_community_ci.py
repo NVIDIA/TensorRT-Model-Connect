@@ -236,17 +236,17 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
     ]
     assert jobs["gpu-authorize"]["needs"] == ["authorize", "required"]
     assert "needs.required.result == 'success'" in jobs["gpu-authorize"]["if"]
-    assert jobs["provision-and-test"]["needs"] == ["gpu-authorize", "announce"]
+    assert jobs["provision-and-test"]["needs"] == "gpu-authorize"
     assert "needs.gpu-authorize.outputs.run_gpu == 'true'" in jobs["provision-and-test"]["if"]
     assert jobs["publish"]["needs"] == [
         "authorize",
+        "required",
         "gpu-authorize",
-        "announce",
         "provision-and-test",
         "cleanup",
     ]
     assert "allow-unsafe-pr-checkout" not in json.dumps(workflow)
-    assert workflow["env"]["COMMUNITY_GPU_EXECUTION_ENABLED"] == "false"
+    assert workflow["env"]["COMMUNITY_GPU_EXECUTION_ENABLED"] == "true"
     assert workflow[True]["workflow_dispatch"]["inputs"]["run_gpu_smoke"]["default"] is False
     assert jobs["unit"]["steps"][-1]["run"] == "python3 -m tools.community_ci unit"
     docs = {step["name"]: step for step in jobs["docs"]["steps"]}
@@ -755,59 +755,45 @@ def test_gpu_step_conclusion_requires_completed_success(
 
 
 @pytest.mark.parametrize(
-    ("run_gpu", "job_result", "conclusion", "cleanup_result", "expected_state"),
+    "failed",
     [
-        ("false", "skipped", "", "skipped", "success"),
-        ("false", "success", "success", "success", "failure"),
-        ("true", "success", "success", "success", "success"),
-        ("true", "success", "success", "failure", "failure"),
-        ("true", "failure", "success", "success", "failure"),
-        ("true", "cancelled", "success", "success", "failure"),
-        ("true", "skipped", "", "skipped", "failure"),
-        ("true", "success", "failure", "success", "failure"),
-        ("true", "success", "cancelled", "success", "failure"),
-        ("true", "success", "", "success", "failure"),
+        "",
+        "AUTHORIZED_RESULT",
+        "CPU_RESULT",
+        "GPU_AUTHORIZED",
+        "GPU_RESULT",
+        "TEST_RESULT",
+        "CLEANUP_RESULT",
     ],
 )
-def test_gpu_published_status_requires_job_and_test_success(
-    tmp_path: Path,
-    run_gpu: str,
-    job_result: str,
-    conclusion: str,
-    cleanup_result: str,
-    expected_state: str,
-) -> None:
-    output = tmp_path / "status-args"
-    gh = tmp_path / "gh"
-    gh.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$STATUS_ARGS"\n', encoding="utf-8")
-    gh.chmod(0o755)
+@pytest.mark.parametrize("bad_result", ["failure", "cancelled", "skipped", ""])
+def test_complete_pipeline_requires_every_cpu_and_gpu_stage(failed, bad_result):
+    states = dict.fromkeys(
+        (
+            "AUTHORIZED_RESULT",
+            "CPU_RESULT",
+            "GPU_AUTHORIZED",
+            "GPU_RESULT",
+            "TEST_RESULT",
+            "CLEANUP_RESULT",
+        ),
+        "success",
+    )
+    if failed:
+        states[failed] = bad_result
     result = subprocess.run(
         [
             "bash",
             "-c",
-            _workflow_step_script("community-ci.yml", "publish", "Publish the terminal status"),
+            _workflow_step_script(
+                "community-ci.yml", "publish", "Require the complete Community CI result"
+            ),
         ],
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            "STATUS_ARGS": str(output),
-            "RUN_GPU": run_gpu,
-            "JOB_RESULT": job_result,
-            "CONCLUSION": conclusion,
-            "CLEANUP_RESULT": cleanup_result,
-            "GITHUB_REPOSITORY": "example/model-connect",
-            "GITHUB_SERVER_URL": "https://github.com",
-            "GITHUB_RUN_ID": "123",
-            "HEAD_SHA": "a" * 40,
-        },
+        env={**os.environ, **states, "EVENT_NAME": "workflow_dispatch", "RUN_GPU": "true"},
         capture_output=True,
         text=True,
-        check=False,
     )
-    assert result.returncode == (0 if expected_state == "success" else 1), (
-        result.stdout + result.stderr
-    )
-    assert f"state={expected_state}" in output.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == (1 if failed else 0), result.stderr
 
 
 def test_gpu_status_and_cleanup_fail_closed() -> None:
@@ -817,7 +803,7 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
     job = workflow["jobs"]["provision-and-test"]
     steps = {step["name"]: step for step in job["steps"]}
     assert steps["Reserve a GPU instance"]["id"] == "reserve"
-    test_step = steps["Build the GPU image, check out the exact PR merge, and run the smoke test"]
+    test_step = steps["Build the GPU image and validate the exact PR merge"]
     assert "sudo docker build -f Dockerfile.dev.x86-gpu" in test_step["run"]
     assert "sudo docker run --rm --gpus all" in test_step["run"]
     result = steps["Record the step conclusion"]
@@ -842,8 +828,8 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
         'brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true'
     )
     publish = workflow["jobs"]["publish"]["steps"][0]
-    assert publish["env"]["RUN_GPU"] == "${{ needs.gpu-authorize.outputs.run_gpu }}"
-    assert publish["env"]["JOB_RESULT"] == "${{ needs.provision-and-test.result }}"
+    assert publish["env"]["CPU_RESULT"] == "${{ needs.required.result }}"
+    assert publish["env"]["GPU_RESULT"] == "${{ needs.provision-and-test.result }}"
     assert publish["env"]["CLEANUP_RESULT"] == "${{ needs.cleanup.result }}"
 
     for install_step in (
@@ -1025,6 +1011,7 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
         "BREV_CALLS": str(calls),
         "CREATE_EXITCODE": str(create_exitcode),
+        "GPU_TYPE": "L40",
         "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "2",
         "GITHUB_OUTPUT": str(output),
@@ -1095,9 +1082,12 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert "sleep" not in step["run"]
     gpu = executor["jobs"]["provision-and-test"]
     test = next(step for step in gpu["steps"] if step.get("id") == "test")
-    # Stable retains the existing manual GPU implementation. Dev carries the
-    # automatic public-only GPU experiment as a separate branch commit.
-    assert test["env"]["HF_TOKEN"] == "${{ secrets.HF_TOKEN }}"
+    assert "HF_TOKEN" not in json.dumps(test)
+    assert "git show $CI_SHA:tools/community_gpu_ci.py" in test["run"]
+    assert "git fetch --depth 2 origin $MERGE_SHA" in test["run"]
+    assert "-v /tmp/community_gpu_ci.py:/opt/community_gpu_ci.py:ro" in test["run"]
+    assert "-e PYTHONPATH=/src" in test["run"]
+    assert "python3.12 /opt/community_gpu_ci.py" in test["run"]
     assert gpu["environment"]["name"] == "gpu-ci-dispatch"
     assert gpu["concurrency"]["cancel-in-progress"] is True
 

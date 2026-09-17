@@ -182,6 +182,9 @@ def _runtime_root(build: Path, plan: FamilyPlan) -> Path:
     runtime.mkdir(parents=True)
     names = (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
         "libtrtmc_backend_trt.so",
         f"libtrtmc_model_{plan.family}.so",
     )
@@ -191,8 +194,12 @@ def _runtime_root(build: Path, plan: FamilyPlan) -> Path:
             raise CiError(f"native Community GPU build is missing {source}")
         (runtime / name).symlink_to(source.resolve())
 
+    byok = build / "libtrtmc_byok_tvm_ffi.so"
+    if byok.is_file():
+        (runtime / byok.name).symlink_to(byok.resolve())
+
     site_packages = runtime.parent.parent
-    for package_name in ("tensorrt_libs", "torch"):
+    for package_name in ("tensorrt_libs", "torch", "tvm_ffi"):
         specification = importlib.util.find_spec(package_name)
         if specification is None or not specification.submodule_search_locations:
             continue
@@ -266,6 +273,8 @@ def run(repository: Path, env: dict[str, str]) -> None:
             "8",
             "--target",
             "trtmc",
+            "trtmc_runtime",
+            "trtmc_c",
             "trtmc_backend_trt",
         ],
         limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
