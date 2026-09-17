@@ -48,6 +48,16 @@ def test_one_model_file_owns_multiple_cases_without_testcase_indirection() -> No
         assert case.candidate["checkpoint"] == "openai-community/gpt2"
 
 
+def test_opt_uses_validated_profile_and_pre_refactor_performance_length() -> None:
+    cases = select(discover(REPOSITORY), ["opt-125m"])
+    accuracy = next(case for case in cases if case.kind == "accuracy")
+    performance = next(case for case in cases if case.kind == "performance")
+
+    assert accuracy.candidate["build"]["max_sequence_length"] == 256
+    assert accuracy.values["prompt_token_limit"] == 192
+    assert performance.values["request"]["max_new_tokens"] == 10
+
+
 def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
     for case in discover(REPOSITORY):
         definition = load_benchmark(REPOSITORY, case)
