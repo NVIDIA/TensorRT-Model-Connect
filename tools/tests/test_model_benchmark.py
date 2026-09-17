@@ -129,6 +129,10 @@ def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> N
         + minitron_depth.values["request"]["max_new_tokens"]
         + 1
     )
+    internlm = select(discover(REPOSITORY), ["internlm2-1.8b"])[0]
+    assert internlm.reference_requirements == (
+        REPOSITORY / "families/internlm/requirements.txt"
+    ).resolve()
 
 
 @pytest.mark.parametrize(
