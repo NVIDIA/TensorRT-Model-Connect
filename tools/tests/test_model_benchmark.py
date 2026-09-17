@@ -66,12 +66,17 @@ def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> N
         "deepseek-v2-lite": 10,
         "deepseek-v2-tiny": 10,
         "falcon3-1b": 20,
+        "gemma-2-2b": 10,
         "glm-4-9b": 20,
         "granite-3.1-2b": 20,
+        "internlm2-1.8b": 20,
         "minitron-4b-depth": 20,
         "minitron-4b-width": 20,
+        "mistral-7b": 10,
         "nemotron-hindi-4b": 20,
         "olmo2-1b": 8,
+        "phi3-mini": 10,
+        "qwen3-0.6b-fp16": 10,
         "stablelm2-1.6b": 22,
     }
 
