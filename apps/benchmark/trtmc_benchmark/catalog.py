@@ -83,7 +83,10 @@ def _parallel_sizes(model: ModelDescriptor) -> tuple[int, int]:
         for argument in spec["arguments"]:
             if "default" in argument:
                 settings.setdefault(argument["name"], argument["default"])
-    return int(settings.get("tensor_parallel_size", 1)), int(settings.get("context_parallel_size", 1))
+    try:
+        return int(settings.get("tensor_parallel_size", 1)), int(settings.get("context_parallel_size", 1))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise BenchmarkError(f"model {model.name!r} has invalid benchmark parallelism: {error}") from error
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,8 @@ class ManifestCatalog:
             try:
                 model = self._load(path)
                 task = selected_task_for_case(model)
+                if task in supported:
+                    tp, cp = _parallel_sizes(model)
             except BenchmarkError as error:
                 entries.append(
                     CatalogEntry(
@@ -149,7 +154,6 @@ class ManifestCatalog:
                 )
                 continue
             operation = default_operation(task)
-            tp, cp = _parallel_sizes(model)
             if tp > 1 or cp > 1:
                 entries.append(
                     CatalogEntry(

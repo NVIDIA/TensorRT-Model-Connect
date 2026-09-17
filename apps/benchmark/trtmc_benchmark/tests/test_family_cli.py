@@ -231,6 +231,35 @@ def test_parallel_provenance_requires_positive_integers(owner_manifest: Path, va
         ManifestCatalog(owner_manifest.parent).resolve(str(owner_manifest))
 
 
+def test_invalid_owner_parallelism_does_not_hide_healthy_catalog_entries(owner_manifest: Path) -> None:
+    root = family_cli._root()
+    declaration = root / "example_owner/cli.json"
+    descriptor = json.loads(declaration.read_text())
+    descriptor["commands"][0]["arguments"].append({
+        "name": "tensor_parallel_size", "type": "string", "flags": ["--parallel"],
+    })
+    declaration.write_text(json.dumps(descriptor))
+    invalid = json.loads(owner_manifest.read_text())
+    invalid["build"]["tensor_parallel_size"] = "auto"
+    invalid_path = root / "example_owner/tests/manifests/example.json"
+    invalid_path.parent.mkdir(parents=True)
+    invalid_path.write_text(json.dumps(invalid))
+    healthy = {**invalid, "name": "healthy", "family": "healthy_owner"}
+    healthy.pop("build")
+    healthy_path = root / "healthy_owner/tests/manifests/healthy.json"
+    healthy_path.parent.mkdir(parents=True)
+    healthy_path.write_text(json.dumps(healthy))
+
+    catalog = ManifestCatalog(root)
+    entries = {entry.name: entry for entry in catalog.entries()}
+    assert set(entries) == {"example", "healthy"}
+    assert entries["example"].status == "invalid"
+    assert "invalid benchmark parallelism" in entries["example"].reason
+    assert entries["healthy"].status == "ready"
+    with pytest.raises(BenchmarkError, match="invalid benchmark parallelism"):
+        catalog.resolve(str(invalid_path))
+
+
 def test_family_without_build_command_keeps_legacy_entrypoint(owner_manifest: Path, tmp_path: Path) -> None:
     root = family_cli._root()
     descriptor = root / "example_owner/cli.json"
