@@ -42,6 +42,7 @@ performance:
     request:
       <<: *greedy-generation
       prompt: The capital of France is
+      max_new_tokens: 10
     measurement:
       warmup: 5
       iterations: 10
