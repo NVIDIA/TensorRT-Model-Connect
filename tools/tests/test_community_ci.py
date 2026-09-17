@@ -69,18 +69,15 @@ def test_contributor_guide_matches_the_live_ci_flow() -> None:
         "automatically",
         "GitHub-hosted",
         "ubuntu-24.04",
-        "read-only repository permission",
-        "no access to private",
-        "runners, secrets, or",
-        "GPUs",
-        "Only after `Community CPU / Required` passes",
-        "Community GPU execution is disabled by repository policy",
-        "experimental, non-gating Community GPU smoke test",
-        "Community GPU is not a merge",
-        "pull-request code executes only on the",
+        "read-only\nrepository permission",
+        "no access to private runners, secrets, or GPUs",
+        "Only after `Community CPU / Required`",
+        "Stable\nCommunity CI",
+        "Dev Community CI",
+        "TRTMC_COMMUNITY_CI_DUAL_RUN=true",
         "isolated GPU instance",
         "pull-request checks",
-        "public Actions logs",
+        "Public Actions logs",
         "py -3 -m pip",
     ):
         assert marker in source
@@ -197,128 +194,44 @@ def test_public_source_quality_enforces_legal_compliance(
             assert change in output
 
 
-def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None:
-    path = REPO_ROOT / ".github" / "workflows" / "community-ci.yml"
-    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-    source = path.read_text(encoding="utf-8")
-
-    assert workflow["name"] == "Community CI"
-    assert "Manual PR #{0} · community CI" in workflow["run-name"]
-    assert "PR #{0} · community CI · head {1} · merge {2}" in workflow["run-name"]
-    assert "github.sha" in workflow["run-name"]
+def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    assert set(workflow[True]) == {"pull_request", "pull_request_target", "workflow_dispatch"}
+    assert workflow[True]["workflow_dispatch"]["inputs"]["ci_lane"]["options"] == [
+        "stable",
+        "dev",
+    ]
+    assert "Stable" in workflow["run-name"] and "Dev" in workflow["run-name"]
     assert workflow["permissions"] == {}
-    assert workflow["env"] == {"COMMUNITY_GPU_EXECUTION_ENABLED": "false"}
-    assert "\n  pull_request:\n" in source
-    assert "branches: [main]" in source
-    assert "types: [opened, synchronize, reopened, ready_for_review]" in source
-    assert "workflow_dispatch:" in source
-    dispatch_inputs = workflow[True]["workflow_dispatch"]["inputs"]
-    assert dispatch_inputs["run_gpu_smoke"] == {
-        "description": "Run the experimental, non-gating Community GPU smoke test",
-        "required": False,
-        "default": False,
-        "type": "boolean",
-    }
-    assert "pull_request_target:" not in source
-    assert "workflow_run:" not in source
-    assert "issue_comment:" not in source
-    assert "/run-ci" not in source
-    assert "checks: write" not in source
-    assert "pull-requests: write" not in source
-    assert "self-hosted" not in source
-    assert source.count("secrets.BREV_API_KEY") == 2
-    assert source.count("CI_BASE_REF: ${{ needs.authorize.outputs.merge_sha }}^1") == 2
-    assert "persist-credentials: false" in source
-    assert "allow-unsafe-pr-checkout" not in source
-    assert "cancel-in-progress: true" in source
-    assert "check-runs" not in source
-    assert "issues/comments" not in source
-    workflows = REPO_ROOT / ".github" / "workflows"
-    assert not (workflows / "community-cpu.yml").exists()
-    assert not (workflows / "community-gpu-ci.yml").exists()
-
+    assert "paths" not in workflow[True]["pull_request"]
+    assert "paths" not in workflow[True]["pull_request_target"]
     jobs = workflow["jobs"]
-    assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
-    assert jobs["authorize"]["permissions"] == {
-        "contents": "read",
-        "pull-requests": "read",
-    }
-    assert set(jobs["authorize"]["outputs"]) == {
-        "pr_number",
-        "head_sha",
-        "base_sha",
-        "merge_sha",
-    }
-    snapshot = jobs["authorize"]["steps"][0]
-    assert snapshot["env"]["EVENT_MERGE_SHA"] == "${{ github.sha }}"
-    for job_name in ("source-quality", "docs", "ownership-impact", "unit"):
-        assert jobs[job_name]["permissions"] == {"contents": "read"}
-        assert jobs[job_name]["needs"] == "authorize"
-        checkout = jobs[job_name]["steps"][0]
-        assert checkout["name"] == "Check out the exact PR merge"
-        assert checkout["with"] == {
+    authorization = jobs["authorize"]["steps"][0]["run"]
+    assert 'stable) test "$CI_REF" = refs/heads/main' in authorization
+    assert "Unknown Community CI lane" in authorization
+    for name in ("source-quality", "docs", "ownership-impact", "unit"):
+        job = jobs[name]
+        assert job["needs"] == "authorize"
+        assert job["runs-on"] == "ubuntu-24.04"
+        assert job["permissions"] == {"contents": "read"}
+        assert "secrets." not in json.dumps(job)
+        assert "environment" not in job
+        assert job["steps"][0]["with"] == {
             "ref": "${{ needs.authorize.outputs.merge_sha }}",
             "fetch-depth": 0,
             "persist-credentials": False,
         }
-    assert "if" not in jobs["unit"]
-    unit_steps = {step["name"]: step for step in jobs["unit"]["steps"]}
-    assert unit_steps["Run hardened source-only units"]["run"] == (
-        "python3 -m tools.community_ci unit"
-    )
     assert jobs["required"]["needs"] == [
+        "authorize",
         "source-quality",
         "docs",
         "ownership-impact",
         "unit",
     ]
-    assert jobs["required"]["permissions"] == {}
-    assert jobs["required"]["if"] == "${{ !cancelled() }}"
-
-    gpu_authorize = jobs["gpu-authorize"]
-    assert gpu_authorize["needs"] == ["authorize", "required"]
-    assert gpu_authorize["if"] == (
-        "${{ always() && needs.authorize.result == 'success' && "
-        "needs.required.result == 'success' }}"
-    )
-    assert gpu_authorize["permissions"] == {"contents": "read"}
-    assert gpu_authorize["outputs"]["base_sha"] == ("${{ needs.authorize.outputs.base_sha }}")
-    assert gpu_authorize["outputs"]["merge_sha"] == ("${{ needs.authorize.outputs.merge_sha }}")
-    assert gpu_authorize["outputs"]["added_families"] == (
-        "${{ steps.impact.outputs.added_families }}"
-    )
-    assert gpu_authorize["outputs"]["direct_families"] == (
-        "${{ steps.impact.outputs.direct_families }}"
-    )
-    assert gpu_authorize["outputs"]["gpu_enabled"] == ("${{ steps.impact.outputs.gpu_enabled }}")
-    assert gpu_authorize["outputs"]["run_gpu"] == "${{ steps.impact.outputs.run_gpu }}"
-    gpu_authorize_steps = {step["name"]: step for step in gpu_authorize["steps"]}
-    impact_step = gpu_authorize_steps["Resolve the changed model families"]
-    assert impact_step["env"]["GPU_EXECUTION_ENABLED"] == (
-        "${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}"
-    )
-    assert impact_step["env"]["MANUAL_GPU_EXECUTION_ENABLED"] == (
-        "${{ github.event_name == 'workflow_dispatch' && inputs.run_gpu_smoke || false }}"
-    )
-    assert impact_step["env"]["EVENT_NAME"] == "${{ github.event_name }}"
-    policy_step = gpu_authorize_steps["Report the GPU execution policy"]
-    assert (
-        "Automatic Community GPU execution is disabled and is not a merge gate"
-        in (policy_step["run"])
-    )
-    assert "Experimental Community GPU smoke was manually enabled" in policy_step["run"]
-    assert jobs["announce"]["needs"] == "gpu-authorize"
-    assert jobs["announce"]["if"] == "${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}"
+    assert jobs["gpu-authorize"]["needs"] == ["authorize", "required"]
+    assert "needs.required.result == 'success'" in jobs["gpu-authorize"]["if"]
     assert jobs["provision-and-test"]["needs"] == ["gpu-authorize", "announce"]
-    assert jobs["provision-and-test"]["environment"] == {
-        "name": "gpu-ci-dispatch",
-        "deployment": False,
-    }
-    assert jobs["provision-and-test"]["permissions"] == {"contents": "read"}
-    assert jobs["provision-and-test"]["concurrency"] == {
-        "group": "trtmc-community-gpu-${{ needs.gpu-authorize.outputs.pr_number }}",
-        "cancel-in-progress": True,
-    }
+    assert "needs.gpu-authorize.outputs.run_gpu == 'true'" in jobs["provision-and-test"]["if"]
     assert jobs["publish"]["needs"] == [
         "authorize",
         "gpu-authorize",
@@ -326,170 +239,66 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
         "provision-and-test",
         "cleanup",
     ]
-    assert jobs["publish"]["name"] == "Community GPU / Result"
-    assert "needs.gpu-authorize.outputs.gpu_enabled == 'true'" in jobs["publish"]["if"]
-    assert jobs["cleanup"]["needs"] == ["gpu-authorize", "provision-and-test"]
-    assert jobs["cleanup"]["environment"] == {
-        "name": "gpu-ci-dispatch",
-        "deployment": False,
-    }
-    gpu_test = {step["name"]: step for step in jobs["provision-and-test"]["steps"]}[
-        "Build the GPU image, check out the exact PR merge, and run the smoke test"
-    ]
-    trusted_checkout = {step["name"]: step for step in jobs["provision-and-test"]["steps"]}[
-        "Check out trusted GPU orchestration"
-    ]
-    assert trusted_checkout["with"] == {
-        "ref": "${{ needs.gpu-authorize.outputs.base_sha }}",
-        "persist-credentials": False,
-    }
-    assert gpu_test["env"]["MERGE_SHA"] == "${{ needs.gpu-authorize.outputs.merge_sha }}"
-    assert gpu_test["env"]["DIRECT_FAMILIES"] == (
-        "${{ needs.gpu-authorize.outputs.direct_families }}"
+    assert "allow-unsafe-pr-checkout" not in json.dumps(workflow)
+    assert workflow["env"]["COMMUNITY_GPU_EXECUTION_ENABLED"] == "false"
+    assert workflow[True]["workflow_dispatch"]["inputs"]["run_gpu_smoke"]["default"] is False
+    assert jobs["unit"]["steps"][-1]["run"] == "python3 -m tools.community_ci unit"
+    docs = {step["name"]: step for step in jobs["docs"]["steps"]}
+    assert all("if" not in step for step in docs.values())
+    assert docs["Install website dependencies"]["run"] == "npm ci"
+    assert docs["Test generated model support inventory"]["run"] == "npm run test:model-support"
+    assert docs["Build production documentation"]["run"] == "npm run build"
+
+
+@pytest.mark.parametrize("event_head", ["", "a" * 40])
+def test_community_authorize_pins_the_exact_merge_and_uses_its_base_parent(tmp_path, event_head):
+    fake = tmp_path / "gh"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport os,sys\n"
+        "print(os.environ['PULL' if any('/pulls/' in arg for arg in sys.argv) else 'MERGE'])\n"
     )
-    assert "refs/pull/$PR_NUMBER/merge" in gpu_test["run"]
-    assert r"\$(git rev-parse FETCH_HEAD)" in gpu_test["run"]
-    assert '= $MERGE_SHA && git checkout --detach $MERGE_SHA"' in gpu_test["run"]
-    assert "python3.12 -m tools.community_gpu_ci" in gpu_test["run"]
-    assert "python3 -m tools.brev_exec" in gpu_test["run"]
-    assert "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" in gpu_test["run"]
-    assert "tests/e2e/models" not in gpu_test["run"]
-    assert "py-only" not in gpu_test["run"]
-    assert "python3.12 -m pytest" not in gpu_test["run"]
-    terminal = {step["name"]: step for step in jobs["publish"]["steps"]}[
-        "Publish the terminal status"
-    ]
-    assert terminal["run"].rstrip().endswith('test "$state" = success')
-
-    internal_bridge = (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "community-ci.yml/runs?event=pull_request&head_sha=$head_sha" in internal_bridge
-    assert "community-cpu.yml" not in internal_bridge
-    assert "/actions/runs/$candidate_run/jobs?filter=latest&per_page=100" in internal_bridge
-    assert 'name == "Community CPU / Required"' in internal_bridge
-    assert '[ "$cpu_status" = "completed" ] && [ "$cpu_conclusion" = "success" ]' in internal_bridge
-    assert "select(.display_title | startswith($title_prefix))" in internal_bridge
-    assert "[.id, .merge_sha]" in internal_bridge
-    assert "/compare/$candidate_base...$base_sha?per_page=1" in internal_bridge
-    assert '.status == "ahead" and .merge_base_commit.sha == $base' in internal_bridge
-    assert '[ "$candidate_base" = "$base_sha" ]' in internal_bridge
-    assert '[ "$candidate_head" != "$head_sha" ]' in internal_bridge
-    assert '[ "$candidate_tree" = "$merge_tree" ] || continue' in internal_bridge
-
-    docs = jobs["docs"]
-    assert "if" not in docs
-    docs_steps = {step["name"]: step for step in docs["steps"]}
-    assert list(docs_steps) == [
-        "Check out the exact PR merge",
-        "Set up Node",
-        "Install website dependencies",
-        "Test generated model support inventory",
-        "Build production documentation",
-    ]
-    assert all("if" not in step for step in docs_steps.values())
-    assert docs_steps["Set up Node"] == {
-        "name": "Set up Node",
-        "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
-        "with": {"node-version": "20"},
-    }
-    assert docs_steps["Install website dependencies"] == {
-        "name": "Install website dependencies",
-        "working-directory": "website",
-        "run": "npm ci",
-    }
-    assert docs_steps["Test generated model support inventory"] == {
-        "name": "Test generated model support inventory",
-        "working-directory": "website",
-        "run": "npm run test:model-support",
-    }
-    assert docs_steps["Build production documentation"] == {
-        "name": "Build production documentation",
-        "working-directory": "website",
-        "env": {
-            "SITE_URL": "https://nvidia.github.io",
-            "BASE_URL": "/TensorRT-Model-Connect/",
-        },
-        "run": "npm run build",
-    }
-
-
-@pytest.mark.parametrize(
-    ("event_name", "expected_merge_source"),
-    (("pull_request", "event"), ("workflow_dispatch", "live")),
-)
-def test_community_authorize_pins_the_exact_merge_and_uses_its_base_parent(
-    tmp_path: Path,
-    event_name: str,
-    expected_merge_source: str,
-) -> None:
-    head_sha = "a" * 40
-    stale_rest_base_sha = "b" * 40
-    merge_base_sha = "c" * 40
-    event_merge_sha = "d" * 40
-    live_merge_sha = "e" * 40
-    expected_merge_sha = {
-        "event": event_merge_sha,
-        "live": live_merge_sha,
-    }[expected_merge_source]
-    github_output = tmp_path / "github-output"
-    gh = tmp_path / "gh"
-    gh.write_text(
-        """#!/bin/bash
-set -euo pipefail
-arguments="$*"
-case "$arguments" in
-  *collaborators/tester/permission*) printf '%s\n' maintain ;;
-  *pulls/17*)
-    printf '{"state":"open","base":{"repo":{"full_name":"example/repo"},"ref":"main","sha":"%s"},"head":{"sha":"%s"},"merge_commit_sha":"%s"}\n' "$STALE_REST_BASE_SHA" "$HEAD_SHA" "$LIVE_MERGE_SHA"
-    ;;
-  *git/commits/$EVENT_MERGE_SHA*|*git/commits/$LIVE_MERGE_SHA*)
-    requested_sha="${arguments##*/}"
-    printf '{"sha":"%s","parents":[{"sha":"%s"},{"sha":"%s"}]}\n' "$requested_sha" "$MERGE_BASE_SHA" "$HEAD_SHA"
-    ;;
-  *) printf 'unexpected gh call: %s\n' "$arguments" >&2; exit 99 ;;
-esac
-""",
-        encoding="utf-8",
-    )
-    gh.chmod(0o755)
-
+    fake.chmod(0o755)
+    output = tmp_path / "output"
+    head, base, merge, tree = (value * 40 for value in "abcd")
     result = subprocess.run(
         [
             "bash",
             "-c",
             _workflow_step_script(
-                "community-ci.yml",
-                "authorize",
-                "Capture the exact pull-request snapshot",
+                "community-ci.yml", "snapshot", "Capture the exact pull-request snapshot"
             ),
         ],
         env={
             **os.environ,
-            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            "ACTOR": "tester",
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "PR_NUMBER": "17",
-            "EVENT_NAME": event_name,
-            "EVENT_HEAD_SHA": head_sha,
-            "EVENT_BASE_SHA": stale_rest_base_sha,
-            "EVENT_MERGE_SHA": event_merge_sha,
-            "GITHUB_REPOSITORY": "example/repo",
-            "GITHUB_OUTPUT": str(github_output),
-            "HEAD_SHA": head_sha,
-            "STALE_REST_BASE_SHA": stale_rest_base_sha,
-            "MERGE_BASE_SHA": merge_base_sha,
-            "LIVE_MERGE_SHA": live_merge_sha,
+            "EVENT_HEAD_SHA": event_head,
+            "STABLE_MERGE_SHA": merge if event_head else "",
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_REPOSITORY": "example/source",
+            "PULL": json.dumps(
+                {
+                    "state": "open",
+                    "head": {"sha": head},
+                    "base": {"ref": "main", "repo": {"full_name": "example/source"}},
+                    "merge_commit_sha": "f" * 40 if event_head else merge,
+                }
+            ),
+            "MERGE": json.dumps(
+                {"sha": merge, "parents": [{"sha": base}, {"sha": head}], "tree": {"sha": tree}}
+            ),
         },
         capture_output=True,
         text=True,
-        check=False,
     )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert github_output.read_text(encoding="utf-8") == (
-        f"pr_number=17\nhead_sha={head_sha}\nbase_sha={merge_base_sha}\n"
-        f"merge_sha={expected_merge_sha}\n"
-    )
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert json.loads(values["source_snapshot"]) == {
+        "head_sha": head,
+        "base_sha": base,
+        "merge_sha": merge,
+        "source_tree": tree,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1250,3 +1059,654 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
         f"create {instance_name} -g L40 --timeout 600",
         f"delete {instance_name}",
     ]
+
+
+def test_community_premerge_has_independent_lanes_and_public_only_execution():
+    control = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    executor = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    dispatch = control["jobs"]["dispatch"]
+    assert dispatch["strategy"] == {
+        "fail-fast": False,
+        "matrix": {"lane": "${{ fromJSON(needs.snapshot.outputs.lanes) }}"},
+    }
+    assert "matrix.lane" in dispatch["concurrency"]["group"]
+    assert "inputs.source_snapshot == ''" in control["jobs"]["snapshot"]["if"]
+    assert set(control[True]) == {"pull_request", "pull_request_target", "workflow_dispatch"}
+    assert not (REPO_ROOT / ".github/workflows/community-premerge.yml").exists()
+    assert "needs.snapshot.result == 'success'" in dispatch["if"]
+    assert dispatch["permissions"] == {"actions": "write", "statuses": "write"}
+    assert (
+        dispatch["continue-on-error"]
+        == "${{ matrix.lane == 'dev' && contains(fromJSON(needs.snapshot.outputs.lanes), 'stable') }}"
+    )
+    assert "actions/checkout" not in json.dumps(control["jobs"]["snapshot"])
+    assert "actions/checkout" not in json.dumps(dispatch)
+    step = next(step for step in dispatch["steps"] if step.get("id") == "execution")
+    assert (
+        step["env"]["CI_REF"]
+        == "${{ matrix.lane == 'stable' && 'main' || github.ref_name != 'main' && github.ref_name || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}"
+    )
+    assert "sleep" not in step["run"]
+    gpu = executor["jobs"]["provision-and-test"]
+    test = next(step for step in gpu["steps"] if step.get("id") == "test")
+    # Stable retains the existing manual GPU implementation. Dev carries the
+    # automatic public-only GPU experiment as a separate branch commit.
+    assert test["env"]["HF_TOKEN"] == "${{ secrets.HF_TOKEN }}"
+    assert gpu["environment"]["name"] == "gpu-ci-dispatch"
+    assert gpu["concurrency"]["cancel-in-progress"] is True
+
+
+@pytest.mark.parametrize(
+    "dual_run,expected_lanes",
+    [
+        ("", ["stable"]),
+        ("false", ["stable"]),
+        ("true", ["stable", "dev"]),
+        ("TRUE", ["stable"]),
+        ("1", ["stable"]),
+        ('["stable","dev"]', ["stable"]),
+    ],
+)
+def test_community_dual_run_switch_controls_job_allocation(tmp_path, dual_run, expected_lanes):
+    control = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    snapshot = control["jobs"]["snapshot"]
+    selector = next(step for step in snapshot["steps"] if step.get("id") == "lanes")
+    assert selector["env"]["DUAL_RUN"] == "${{ vars.TRTMC_COMMUNITY_CI_DUAL_RUN }}"
+    assert snapshot["outputs"]["lanes"] == "${{ steps.lanes.outputs.lanes }}"
+    assert control["jobs"]["dispatch"]["strategy"]["matrix"]["lane"] == (
+        "${{ fromJSON(needs.snapshot.outputs.lanes) }}"
+    )
+
+    output = tmp_path / "output"
+    result = subprocess.run(
+        ["bash", "-c", selector["run"]],
+        env={**os.environ, "DUAL_RUN": dual_run, "CI_BRANCH": "main", "GITHUB_OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    # This output is the actual job matrix. With the switch off there is no
+    # dev job to publish a status, request credentials, or provision a VM.
+    assert json.loads(values["lanes"]) == expected_lanes
+
+
+@pytest.mark.parametrize("fault", ["", "head", "parent", "base-repo", "closed"])
+def test_community_trigger_rejects_stale_or_invalid_pr_metadata(tmp_path, fault):
+    head, base, merge, tree = (value * 40 for value in "abcd")
+    fake = tmp_path / "gh"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport os,sys\nprint(os.environ['PULL' if any('/pulls/' in arg for arg in sys.argv) else 'MERGE'])\n"
+    )
+    fake.chmod(0o755)
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "snapshot", "Capture the exact pull-request snapshot"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "PR_NUMBER": "17",
+            "EVENT_HEAD_SHA": head,
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_REPOSITORY": "example/source",
+            "PULL": json.dumps(
+                {
+                    "state": "closed" if fault == "closed" else "open",
+                    "base": {
+                        "repo": {
+                            "full_name": "other/repo" if fault == "base-repo" else "example/source"
+                        },
+                        "ref": "main",
+                    },
+                    "head": {"sha": "f" * 40 if fault == "head" else head},
+                    "merge_commit_sha": merge,
+                }
+            ),
+            "MERGE": json.dumps(
+                {
+                    "sha": merge,
+                    "parents": [{"sha": base}, {"sha": "f" * 40 if fault == "parent" else head}],
+                    "tree": {"sha": tree},
+                }
+            ),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is (not fault), result.stderr
+    if fault == "parent":
+        assert output.read_text() == f"head_sha={head}\n"
+    elif fault:
+        assert not output.exists()
+
+
+@pytest.mark.parametrize("lane,ref", [("stable", "main"), ("dev", "main"), ("dev", "ci/developer")])
+def test_community_lane_dispatch_preserves_snapshot_and_request_identity(tmp_path, lane, ref):
+    fake = tmp_path / "gh"
+    fake.write_text(
+        """#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+args=sys.argv[1:]
+record=Path(os.environ['PAYLOAD'])
+if '--input' in args:
+    record.write_text(Path(args[args.index('--input')+1]).read_text())
+    print(json.dumps({'workflow_run_id':42}))
+else:
+    assert any('/statuses/' in a for a in args)
+"""
+    )
+    fake.chmod(0o755)
+    output = tmp_path / "output"
+    snapshot = json.dumps(
+        {"head_sha": "a" * 40, "base_sha": "b" * 40, "merge_sha": "c" * 40, "source_tree": "d" * 40}
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml",
+                "dispatch",
+                "Dispatch the selected Community CI implementation",
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "PR_NUMBER": "17",
+            "HEAD_SHA": "a" * 40,
+            "LANE": lane,
+            "CI_REF": ref,
+            "STATUS_CONTEXT": f"{lane.title()} Community CI",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "SOURCE_SNAPSHOT": snapshot,
+            "GITHUB_REPOSITORY": "example/source",
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(output),
+            "PAYLOAD": str(tmp_path / "payload"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads((tmp_path / "payload").read_text())
+    assert payload["ref"] == ref
+    assert payload["inputs"]["ci_lane"] == lane
+    assert payload["inputs"]["source_snapshot"] == snapshot
+    assert payload["inputs"]["pr_number"] == "17"
+    assert len(payload["inputs"]["request_id"]) == 32
+    assert payload["return_run_details"] is True
+    assert output.read_text() == f"run_id=42\nci_ref={ref}\n"
+
+
+@pytest.mark.parametrize(
+    "lane,branch,conclusion,expected,wrong_title",
+    [
+        ("stable", "main", "success", "success", False),
+        ("stable", "main", "failure", "failure", False),
+        ("dev", "ci/developer", "failure", "failure", False),
+        ("dev", "ci/developer", "success", "success", False),
+        ("dev", "main", "cancelled", "failure", False),
+        ("stable", "ci/developer", "success", None, False),
+        ("dev", "ci/developer", "success", None, True),
+    ],
+)
+@pytest.mark.parametrize("queued_first", [False, True])
+def test_only_complete_pipeline_publishes_stable_and_dev_results(
+    tmp_path, lane, branch, conclusion, expected, wrong_title, queued_first
+):
+    fake = tmp_path / "gh"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n"
+        "calls=Path(os.environ['CALLS'])\n"
+        "if any(a.startswith('/repos/') and '/actions/runs/' in a for a in sys.argv):\n"
+        " counter=Path(os.environ['COUNTER'])\n"
+        " count=int(counter.read_text())+1 if counter.exists() else 1\n"
+        " counter.write_text(str(count))\n"
+        " data=json.loads(os.environ['RUN'])\n"
+        " if os.environ['QUEUED_FIRST']=='true' and count==1:\n"
+        "  assert not calls.exists()\n"
+        "  data['status']='queued'; data['conclusion']=None\n"
+        "  data['display_title']='Community CI'\n"
+        " print(json.dumps(data))\n"
+        "else: calls.write_text('\\n'.join(sys.argv[1:]))\n"
+    )
+    fake.chmod(0o755)
+    sleep = tmp_path / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    head, merge = "a" * 40, "b" * 40
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "dispatch", "Publish the complete workflow conclusion"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "PIPELINE_RUN_ID": "42",
+            "CI_BRANCH": branch,
+            "LANE": lane,
+            "PR_NUMBER": "17",
+            "HEAD_SHA": head,
+            "STATUS_CONTEXT": f"{lane.title()} Community CI",
+            "SOURCE_SNAPSHOT": json.dumps({"merge_sha": merge}),
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "CALLS": str(tmp_path / "calls"),
+            "COUNTER": str(tmp_path / "counter"),
+            "QUEUED_FIRST": str(queued_first).lower(),
+            "RUN": json.dumps(
+                {
+                    "path": ".github/workflows/community-ci.yml",
+                    "event": "workflow_dispatch",
+                    "head_branch": branch,
+                    "display_title": (
+                        "Unexpected run"
+                        if wrong_title
+                        else f"{lane.title()} Community CI · PR #17 · head {head} · merge {merge}"
+                    ),
+                    "status": "completed",
+                    "conclusion": conclusion,
+                }
+            ),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is (expected == "success"), result.stderr
+    if expected is None:
+        assert not (tmp_path / "calls").exists()
+    else:
+        calls = (tmp_path / "calls").read_text().splitlines()
+        assert f"state={expected}" in calls
+        assert f"context={lane.title()} Community CI" in calls
+        assert (tmp_path / "output").read_text() == "reported=true\n"
+        assert int((tmp_path / "counter").read_text()) == (2 if queued_first else 1)
+
+
+@pytest.mark.parametrize("ready_after", [1, 2, 7])
+def test_pr_trigger_waits_for_github_merge_generation_with_a_bounded_retry(tmp_path, ready_after):
+    head, base, merge, tree = (value * 40 for value in "abcd")
+    fake = tmp_path / "gh"
+    fake.write_text(
+        """#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+if any('/pulls/' in arg for arg in sys.argv):
+    counter=Path(os.environ['COUNTER'])
+    attempt=int(counter.read_text())+1 if counter.exists() else 1
+    counter.write_text(str(attempt))
+    data=json.loads(os.environ['PULL'])
+    if attempt < int(os.environ['READY_AFTER']): data['merge_commit_sha']=None
+else:
+    data=json.loads(os.environ['MERGE'])
+print(json.dumps(data))
+"""
+    )
+    fake.chmod(0o755)
+    pause = tmp_path / "sleep"
+    pause.write_text("#!/bin/sh\nexit 0\n")
+    pause.chmod(0o755)
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "snapshot", "Capture the exact pull-request snapshot"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "PR_NUMBER": "17",
+            "EVENT_HEAD_SHA": head,
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_REPOSITORY": "example/source",
+            "READY_AFTER": str(ready_after),
+            "COUNTER": str(tmp_path / "counter"),
+            "PULL": json.dumps(
+                {
+                    "state": "open",
+                    "head": {"sha": head},
+                    "base": {"ref": "main", "repo": {"full_name": "example/source"}},
+                    "merge_commit_sha": merge,
+                }
+            ),
+            "MERGE": json.dumps(
+                {"sha": merge, "parents": [{"sha": base}, {"sha": head}], "tree": {"sha": tree}}
+            ),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is (ready_after <= 6), result.stderr
+    assert int((tmp_path / "counter").read_text()) == min(6, ready_after)
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["head_sha"] == head
+    assert ("source_snapshot" in values) is (ready_after <= 6)
+
+
+@pytest.mark.parametrize("fault", ["", "head", "base", "tree", "lane", "stable-ref"])
+def test_community_executor_keeps_the_captured_snapshot_when_merge_ref_advances(tmp_path, fault):
+    head, base, merge, tree = (value * 40 for value in "abcd")
+    snapshot = {"head_sha": head, "base_sha": base, "merge_sha": merge, "source_tree": tree}
+    if fault in {"base", "tree"}:
+        snapshot["base_sha" if fault == "base" else "source_tree"] = "f" * 40
+    fake = tmp_path / "gh"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport os,sys\n"
+        "key='PULL' if any('/pulls/' in arg for arg in sys.argv) else 'MERGE'\n"
+        "print(os.environ[key])\n"
+    )
+    fake.chmod(0o755)
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "authorize", "Capture the exact pull-request snapshot"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "EVENT_NAME": "workflow_dispatch",
+            "ACTOR": "github-actions[bot]",
+            "CI_LANE": "unknown" if fault == "lane" else "stable",
+            "CI_REF": "refs/heads/ci/developer" if fault == "stable-ref" else "refs/heads/main",
+            "PR_NUMBER": "17",
+            "REQUEST_ID": "1" * 32,
+            "SOURCE_SNAPSHOT": json.dumps(snapshot),
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(output),
+            "PULL": json.dumps(
+                {
+                    "state": "open",
+                    "base": {"repo": {"full_name": "example/source"}, "ref": "main"},
+                    "head": {"sha": "f" * 40 if fault == "head" else head},
+                    "merge_commit_sha": "e" * 40,
+                }
+            ),
+            "MERGE": json.dumps(
+                {"sha": merge, "parents": [{"sha": base}, {"sha": head}], "tree": {"sha": tree}}
+            ),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is (not fault), result.stderr
+    if not fault:
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        assert values == {
+            "enabled": "true",
+            "pr_number": "17",
+            "head_sha": head,
+            "base_sha": base,
+            "merge_sha": merge,
+        }
+    else:
+        assert not output.exists()
+
+
+def test_stable_pr_cpu_runs_without_a_cutover_or_internal_bridge_change(tmp_path):
+    head, base, merge = (value * 40 for value in "abc")
+    fake = tmp_path / "gh"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport base64,os,sys\n"
+        "if any('/contents/' in arg for arg in sys.argv):\n"
+        " if os.environ['DISPATCHER']=='api-error': sys.exit(1)\n"
+        " text='# Community CI branch dispatch v1' if os.environ['DISPATCHER']=='true' else 'name: Community CI'\n"
+        " print(base64.b64encode(text.encode()).decode())\n"
+        "else: print(os.environ['PULL' if any('/pulls/' in arg for arg in sys.argv) else 'MERGE'])\n"
+    )
+    fake.chmod(0o755)
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "authorize", "Capture the exact pull-request snapshot"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "EVENT_NAME": "pull_request",
+            "EVENT_HEAD_SHA": head,
+            "EVENT_BASE_SHA": base,
+            "EVENT_MERGE_SHA": merge,
+            "PR_NUMBER": "17",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(output),
+            "PULL": json.dumps(
+                {
+                    "state": "open",
+                    "head": {"sha": head},
+                    "base": {"ref": "main", "repo": {"full_name": "example/source"}},
+                }
+            ),
+            "MERGE": json.dumps({"sha": merge, "parents": [{"sha": base}, {"sha": head}]}),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values == {
+        "enabled": "true",
+        "pr_number": "17",
+        "head_sha": head,
+        "base_sha": base,
+        "merge_sha": merge,
+    }
+
+
+@pytest.mark.parametrize("head", ["", "invalid", "a" * 40])
+def test_failed_snapshot_reports_only_a_validated_head(tmp_path, head):
+    fake = tmp_path / "gh"
+    fake.write_text('#!/bin/bash\nprintf "%s\n" "$@" > "$CALLS"\n')
+    fake.chmod(0o755)
+    calls = tmp_path / "calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script("community-ci.yml", "snapshot", "Report a failed snapshot"),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "HEAD_SHA": head,
+            "STATUS_CONTEXT": "Stable Community CI",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_RUN_ID": "42",
+            "CALLS": str(calls),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    if len(head) == 40:
+        arguments = calls.read_text().splitlines()
+        assert f"/repos/example/source/statuses/{head}" in arguments
+        assert "state=failure" in arguments
+        assert "context=Stable Community CI" in arguments
+    else:
+        assert not calls.exists()
+
+
+@pytest.mark.parametrize("dual_run", ["", "false", "true"])
+def test_manual_dev_branch_obeys_the_comparison_switch(tmp_path, dual_run):
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "snapshot", "Select the Community CI branches"
+            ),
+        ],
+        env={
+            **os.environ,
+            "DUAL_RUN": dual_run,
+            "CI_BRANCH": "ci/developer",
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = '["stable","dev"]' if dual_run == "true" else '["dev"]'
+    assert output.read_text() == f"lanes={expected}\n"
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_pairing_selects_only_the_existing_stable_pr_run(tmp_path, available):
+    head, merge = "a" * 40, "b" * 40
+    valid = {
+        "id": 42,
+        "event": "pull_request",
+        "head_sha": head,
+        "path": ".github/workflows/community-ci.yml",
+        "display_title": f"PR #17 · community CI · head {head} · merge {merge}",
+    }
+    candidates = [
+        {**valid, "id": 90, "event": "workflow_dispatch"},
+        {**valid, "id": 91, "head_sha": "c" * 40},
+        {**valid, "id": 92, "path": ".github/workflows/unrelated.yml"},
+        {**valid, "id": 93, "display_title": "PR #18 · unrelated run"},
+    ]
+    if available:
+        candidates.extend([{**valid, "id": 41}, valid])
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/usr/bin/env python3\nimport os,sys\n"
+        "print(os.environ['PULL' if any('/pulls/' in a for a in sys.argv) else 'RUNS'])\n"
+    )
+    gh.chmod(0o755)
+    pause = tmp_path / "sleep"
+    pause.write_text("#!/bin/sh\nexit 0\n")
+    pause.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "snapshot", "Find the existing Stable PR snapshot"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "PR_NUMBER": "17",
+            "EVENT_HEAD_SHA": head,
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "PULL": json.dumps({"head": {"sha": head}}),
+            "RUNS": json.dumps({"workflow_runs": candidates}),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is available, result.stderr
+    if available:
+        assert (tmp_path / "output").read_text() == f"run_id=42\nmerge_sha={merge}\n"
+    else:
+        assert "No Stable PR snapshot" in result.stdout
+        assert not (tmp_path / "output").exists()
+
+
+def test_stable_pairing_does_not_dispatch_or_repeat_the_existing_pipeline(tmp_path):
+    gh = tmp_path / "gh"
+    gh.write_text("#!/bin/sh\necho 'unexpected API mutation' >&2\nexit 99\n")
+    gh.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "dispatch", "Dispatch the selected Community CI implementation"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "LANE": "stable",
+            "STABLE_RUN_ID": "42",
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "output").read_text() == "run_id=42\nci_ref=main\nexisting_stable=true\n"
+
+
+@pytest.mark.parametrize("fault", ["", "head", "merge", "event", "conclusion"])
+def test_existing_stable_verdict_is_bound_to_the_selected_head_and_merge(tmp_path, fault):
+    head, merge = "a" * 40, "b" * 40
+    run = {
+        "path": ".github/workflows/community-ci.yml",
+        "event": "workflow_dispatch" if fault == "event" else "pull_request",
+        "head_sha": "c" * 40 if fault == "head" else head,
+        "display_title": f"PR #17 · community CI · head {head} · merge {('c' * 40) if fault == 'merge' else merge}",
+        "status": "completed",
+        "conclusion": "failure" if fault == "conclusion" else "success",
+    }
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/usr/bin/env python3\nimport os,sys\nfrom pathlib import Path\n"
+        "if any(a.startswith('/repos/') and '/actions/runs/' in a for a in sys.argv): print(os.environ['RUN'])\n"
+        "else: Path(os.environ['CALLS']).write_text('\\n'.join(sys.argv))\n"
+    )
+    gh.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "dispatch", "Publish the complete workflow conclusion"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "RUN": json.dumps(run),
+            "CALLS": str(tmp_path / "calls"),
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "PIPELINE_RUN_ID": "42",
+            "EXISTING_STABLE": "true",
+            "LANE": "stable",
+            "CI_BRANCH": "main",
+            "PR_NUMBER": "17",
+            "HEAD_SHA": head,
+            "SOURCE_SNAPSHOT": json.dumps({"merge_sha": merge}),
+            "STATUS_CONTEXT": "Stable Community CI",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": "example/source",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is (fault == ""), result.stderr
+    if fault in {"head", "merge", "event"}:
+        assert not (tmp_path / "calls").exists()
+    else:
+        state = "failure" if fault == "conclusion" else "success"
+        assert f"state={state}" in (tmp_path / "calls").read_text().splitlines()

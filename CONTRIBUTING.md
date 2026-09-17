@@ -198,42 +198,35 @@ public CI, protected CI, or maintainer review.
 
 ### 9. Run contributor-visible Community CI
 
-Opening a pull request or pushing a new commit automatically starts one ordered
-Community CI workflow. Its first stage validates GitHub's exact pull-request
-merge revision. Separate CPU jobs run source quality, ownership and impact
-analysis, documentation, and the selected source-only C++ and Python units. No
-comment or maintainer action is required.
+Opening a pull request or pushing a new commit automatically starts **Stable
+Community CI** with the existing four parallel CPU stages: source quality,
+documentation, ownership and impact, and C++/Python unit tests. The
+`Community CPU / Required` result requires all four to pass.
 
-Source quality first checks required SPDX headers on all tracked source files
-and rejects changes to `LICENSE` or `NOTICE` relative to the tested merge's base.
-To check headers locally before pushing, run `python3 tools/legal_headers.py --check`.
-To run the full source-quality gate locally, use
-`python3 -m tools.community_ci source-quality --base upstream/main` after fetching
-the target branch and installing `requirements/community-ci.txt`.
+Stable automatic Community GPU execution remains disabled during qualification.
+Maintainers retain the existing manual GPU smoke option. **Dev Community CI**
+is the experimental pipeline from the protected CI development branch. When
+`TRTMC_COMMUNITY_CI_DUAL_RUN=true`, it tests the same captured PR snapshot.
+Only after `Community CPU / Required` passes in Dev does Dev start the Brev GPU
+stage for GPU-impacting changes. Dev failures do not change Stable's result.
 
-The CPU jobs run on fresh GitHub-hosted `ubuntu-24.04` runners with
-read-only repository permission and no access to private runners, secrets, or
-GPUs.
-Only after `Community CPU / Required` passes does the workflow authorize and
-classify Community GPU impact with trusted base-branch code. Automatic
-Community GPU execution is disabled by repository policy, so the provision,
-test, cleanup, and result jobs are skipped and Community GPU is not a merge
-gate. A maintainer with `maintain` or `admin` permission may dispatch the
-workflow with **Run the experimental, non-gating Community GPU smoke test**
-enabled after the CPU stage has passed. This manual result is diagnostic and
-does not replace the required Internal CI status. The Brev credential remains
-in the hosted orchestration job; pull-request code executes only on the
-isolated GPU instance and cannot read that credential.
+The CPU jobs run on fresh GitHub-hosted `ubuntu-24.04` runners with read-only
+repository permission and no access to private runners, secrets, or GPUs.
+Source quality checks required SPDX headers and rejects changes to `LICENSE`
+or `NOTICE` relative to the tested merge's base. The Dev isolated GPU instance
+receives no repository, Hub, or Brev credentials.
 
-GitHub publishes native pull-request checks and public Actions logs, including
-the complete output for every failed command. Wait for `Community CPU /
-Required` to pass on the current pull-request head before requesting Internal
-CI with the maintainer-only label. A new commit automatically validates a
-fresh merge revision and cancels an older in-progress run for the same pull
-request. If `main` advances and GitHub asks for an update, rebase or update the
-branch so the new exact merge is validated.
+Public Actions logs show the individual stages and failing commands. The
+[Community CI guide](.github/community-ci.md) explains the switch, CI branch
+selection, qualification evidence, and later promotion. Native pull-request checks
+such as DCO and PR Metadata remain separate. The existing Internal CI trigger
+and merge gate continue unchanged during this comparison.
 
 ### 10. Ask a maintainer to trigger protected CI
+
+Internal premerge remains the required gate during Community premerge
+qualification. Follow the existing maintainer-triggered process below until
+the separate gate migration is complete.
 
 Opening a pull request or pushing to your fork does **not** start the protected
 premerge suite. After public CPU validation passes and the pull request is
@@ -245,7 +238,7 @@ comment:
 ```
 
 The maintainer verifies the pull-request head and a successful `Community CPU /
-Required` result for that head, then applies the one-shot `run-internal-ci`
+Required` stage in the existing PR run, then applies the one-shot `run-internal-ci`
 label. Only
 collaborators with repository `maintain` or `admin` permission can authorize
 that trigger.
