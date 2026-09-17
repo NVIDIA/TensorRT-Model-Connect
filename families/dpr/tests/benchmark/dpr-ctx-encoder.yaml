@@ -18,7 +18,8 @@ accuracy:
     samples: 50
     reference:
       precision: fp32
-      model_class: dpr-context-encoder
+      model_class: transformers.DPRContextEncoder
+      tokenizer_class: transformers.DPRContextEncoderTokenizerFast
     gate:
       min_vector_cosine: 0.99
       min_vector_pass_rate: 1.0
