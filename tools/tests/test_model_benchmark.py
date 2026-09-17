@@ -38,8 +38,10 @@ def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
     assert {
         "bloom-560m",
         "chronos-bolt-tiny-official",
+        "codegen-350m",
         "deepseek-v2-lite",
         "deepseek-v2-tiny",
+        "distilgpt2",
         "falcon-rw-1b",
         "falcon3-1b",
         "gemma-2-2b",
@@ -62,6 +64,7 @@ def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
         "qwen3-0.6b-fp16",
         "rwkv-169m",
         "stablelm2-1.6b",
+        "starcoder2-3b",
         "xglm-564m",
     } <= set(kinds_by_model)
     assert all(kinds == {"accuracy", "performance"} for kinds in kinds_by_model.values())
@@ -93,8 +96,10 @@ def test_opt_uses_validated_profile_and_pre_refactor_performance_length() -> Non
 
 def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> None:
     expected = {
+        "codegen-350m": 20,
         "deepseek-v2-lite": 10,
         "deepseek-v2-tiny": 10,
+        "distilgpt2": 12,
         "falcon3-1b": 20,
         "gemma-2-2b": 10,
         "glm-4-9b": 20,
@@ -108,6 +113,7 @@ def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> N
         "phi3-mini": 10,
         "qwen3-0.6b-fp16": 10,
         "stablelm2-1.6b": 22,
+        "starcoder2-3b": 20,
     }
 
     for model, tokens in expected.items():
