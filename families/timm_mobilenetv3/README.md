@@ -52,3 +52,15 @@ build/test_timm_mobilenetv3_sdk_cpp mobilenetv3.bundle build image.rgb.f32 480 6
 Each prints all scores as JSON and reads the result after releasing its model
 handle. These commands perform real inference and require the matching runtime
 and checkpoint bundle; the CPU contract test alone does not qualify a checkpoint.
+
+## Benchmark timing
+
+`tests/performance.yaml` takes over the existing `timm_mobilenetv3.classify`
+entry through the benchmark's family-owned reference protocol. The workload,
+precision, 3 warmups, 10 measurements, 5% margin and top-class oracle are unchanged.
+The reference times inference, complete float32 host logits and synchronization;
+argmax, finite checks and JSON reporting happen after timing, as in the semantic
+SDK benchmark worker. The existing reference policy still excludes input
+preparation (`task-model-call-wall`), while the native public Task call includes
+family preprocessing. This fixes reduction/reporting placement, not that existing
+scope difference, and does not establish a performance improvement.
