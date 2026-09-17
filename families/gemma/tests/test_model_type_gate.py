@@ -65,14 +65,15 @@ def test_the_gate_matches_what_support_claims() -> None:
 
 
 def test_a_later_gemma_generation_is_refused(tmp_path: Path) -> None:
-    """Gemma 3 and 4 need machinery this family does not have.
+    """Gemma 3n and 4 need machinery this family still does not have.
 
-    Both add sliding-window attention on a 5:1 or 4:1 schedule and a second
-    rope table for the local layers. Neither exists here, so a prefix check
-    would let them build a full-attention graph and generate quietly wrong
-    text. The refusal names the type so the message is actionable.
+    Gemma 4 adds vision and audio towers, per-layer input embeddings and
+    KV-shared layers; Gemma 3n is its own architecture again. Neither is built
+    here, so a prefix check would let them build a full-attention graph and
+    generate quietly wrong text. The refusal names the type so the message is
+    actionable. Gemma 3 text is supported and is covered below.
     """
-    for model_type in ("gemma3", "gemma3_text", "gemma3n", "gemma4", "gemma4_text"):
+    for model_type in ("gemma3n", "gemma4", "gemma4_text"):
         directory = _model_dir(tmp_path / model_type.replace("_", ""), model_type)
         with pytest.raises(ValueError, match=re.escape(f"model_type={model_type!r}")):
             _build(directory)
@@ -90,7 +91,7 @@ def test_the_supported_generations_pass_the_gate(tmp_path: Path) -> None:
     The directory holds no weights, so the build cannot finish; what matters is
     that it stops for a reason other than the model type.
     """
-    for model_type in ("gemma", "gemma2"):
+    for model_type in ("gemma", "gemma2", "gemma3", "gemma3_text"):
         directory = _model_dir(tmp_path / model_type, model_type)
         with pytest.raises(Exception) as caught:  # noqa: PT011 - any later failure will do
             _build(directory)

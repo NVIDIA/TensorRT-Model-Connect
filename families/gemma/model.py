@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import math
 from pathlib import Path
 
+from . import graph_blocks
 from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -30,6 +31,102 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+
+# Gemma 3 at 4B and above is published as Gemma3ForConditionalGeneration, which
+# keeps the decoder under `language_model.model` and adds a vision tower and a
+# projector beside it. This family builds the decoder only - image inputs are
+# refused in build() - so the vision tensors are simply never read.
+_DECODER_PREFIXES = ("model", "language_model.model")
+
+
+def _decoder_prefix(readers) -> str:
+    """Find where the decoder lives in this checkpoint."""
+    for prefix in _DECODER_PREFIXES:
+        if _has_tensor(readers, f"{prefix}.embed_tokens.weight"):
+            return prefix
+    raise ValueError(
+        "Gemma checkpoint has no decoder embedding under "
+        + " or ".join(f"{prefix}.embed_tokens.weight" for prefix in _DECODER_PREFIXES)
+    )
+
+
+
+
+# Fields a published Gemma 3 config may leave out because transformers supplies
+# them. google/gemma-3-4b-it omits vocab_size and hidden_activation; the unsloth
+# mirror of the same weights states both, which is why local runs passed and
+# internal CI did not. rms_norm_eps is listed because this family would
+# otherwise fall back to 1e-5 where Gemma 3 uses 1e-6 - wrong, and silently so.
+_GEMMA3_CONFIG_DEFAULTS = {
+    "hidden_activation": "gelu_pytorch_tanh",
+    "rms_norm_eps": 1e-6,
+    "max_position_embeddings": 131072,
+    "head_dim": 256,
+}
+
+
+def _apply_gemma3_config_defaults(config: ModelConfig, readers, model_prefix: str) -> None:
+    """Fill in what a Gemma 3 config may legitimately omit.
+
+    Shapes are taken from the checkpoint wherever they can be, because the
+    tensors are authoritative and a default is only a guess. Only the scalars
+    that no tensor carries fall back to the transformers value.
+    """
+    if str(config.model_type).lower() not in _GEMMA3_MODEL_TYPES:
+        return
+    raw = graph_blocks._gemma_raw(config)
+    if not (raw.get("hidden_activation") or raw.get("hidden_act")):
+        config.hidden_act = _GEMMA3_CONFIG_DEFAULTS["hidden_activation"]
+    if raw.get("rms_norm_eps") is None:
+        config.rms_norm_eps = _GEMMA3_CONFIG_DEFAULTS["rms_norm_eps"]
+    if raw.get("max_position_embeddings") is None:
+        config.max_position_embeddings = _GEMMA3_CONFIG_DEFAULTS["max_position_embeddings"]
+    if raw.get("head_dim") is None:
+        # head_dim is a derived property; _head_dim is the stated override it
+        # reads first. Without it the property falls back to
+        # hidden_size // num_attention_heads, which is not Gemma 3's head_dim.
+        config._head_dim = _GEMMA3_CONFIG_DEFAULTS["head_dim"]
+    head_dim = int(config.head_dim)
+    # q and k projections state the attention widths outright. Reading them is
+    # better than defaulting: google/gemma-3-4b-it omits num_key_value_heads,
+    # and the parser then falls back to num_attention_heads, giving a K/V cache
+    # twice the width the checkpoint actually has.
+    if raw.get("num_attention_heads") is None:
+        rows = _projection_rows(readers, model_prefix, "q_proj")
+        if rows and head_dim:
+            config.num_attention_heads = rows // head_dim
+    if raw.get("num_key_value_heads") is None:
+        rows = _projection_rows(readers, model_prefix, "k_proj")
+        if rows and head_dim:
+            config.num_key_value_heads = rows // head_dim
+
+
+def _projection_rows(readers, model_prefix: str, projection: str) -> int:
+    """Output width of a layer-0 attention projection, from tensor metadata."""
+    key = f"{model_prefix}.layers.0.self_attn.{projection}.weight"
+    reader = readers.tensor_map.get(key)
+    if reader is None:
+        return 0
+    return int(reader.get_slice(key).get_shape()[0])
+
+
+def _embedding_vocab_size(readers, model_prefix: str) -> int:
+    """Read the vocabulary size off the embedding rather than the config.
+
+    google/gemma-3-4b-it does not state vocab_size in its text_config, so the
+    config parser defaults it to 0 and the checkpoint mapper then rejects the
+    embedding it just loaded. The tensor itself is authoritative; the shape
+    comes from safetensors metadata, so nothing is read twice. The unsloth
+    mirror of the same weights does state it, which is why this only appeared
+    against the official checkpoint.
+    """
+    key = f"{model_prefix}.embed_tokens.weight"
+    reader = readers.tensor_map.get(key)
+    if reader is None:
+        raise ValueError(f"Gemma checkpoint has no {key}")
+    return int(reader.get_slice(key).get_shape()[0])
+
+
 class _GemmaModel:
     def load_weights(
         self,
@@ -38,13 +135,19 @@ class _GemmaModel:
         *,
         precision: str = "fp32",
     ) -> WeightDict:
-        weights = load_standard_weights(model_dir, config, precision=precision)
         readers = _open_safetensors(Path(model_dir))
+        model_prefix = _decoder_prefix(readers)
+        _apply_gemma3_config_defaults(config, readers, model_prefix)
+        if config.vocab_size <= 0:
+            config.vocab_size = _embedding_vocab_size(readers, model_prefix)
+        weights = load_standard_weights(
+            model_dir, config, precision=precision, model_prefix=model_prefix
+        )
 
         # Fix 1: Gemma uses (1 + gamma) * normalized instead of gamma * normalized.
         for layer_idx in range(config.num_hidden_layers):
             prefix = f"layer.{layer_idx}"
-            hf_prefix = f"model.layers.{layer_idx}"
+            hf_prefix = f"{model_prefix}.layers.{layer_idx}"
             weights[f"{prefix}.input_norm"] = weights[f"{prefix}.input_norm"] + 1.0
             weights[f"{prefix}.post_attn_norm"] = weights[f"{prefix}.post_attn_norm"] + 1.0
             pre_ffn_key = f"{hf_prefix}.pre_feedforward_layernorm.weight"
@@ -57,6 +160,14 @@ class _GemmaModel:
                 weights[f"{prefix}.post_ffn_norm"] = (
                     _load_tensor(readers, post_ffn_key).astype("float32") + 1.0
                 )
+            # Gemma 3's per-head query/key norms are RMSNorm too, so they take
+            # the same (1 + gamma). The mapper loads them whenever they are
+            # present; without this they are applied as gamma alone, which is
+            # near zero and destroys the attention scores.
+            for norm in ("q_norm", "k_norm"):
+                norm_key = f"{prefix}.{norm}"
+                if norm_key in weights:
+                    weights[norm_key] = weights[norm_key] + 1.0
         weights["final_norm"] = weights["final_norm"] + 1.0
 
         # Fix 2: Gemma scales embedding by sqrt(hidden_size).
@@ -103,10 +214,13 @@ class _GemmaModel:
 
 def _checkpoint_gated_activation(config: ModelConfig) -> str:
     """Return the checkpoint-declared activation for Gemma's gated MLP."""
+    # Gemma 3 at 4B and above states this under text_config beside a vision
+    # config, so the nested fields have to be consulted too.
+    raw = graph_blocks._gemma_raw(config)
     activation = str(
         config.hidden_act
-        or config.raw.get("hidden_activation")
-        or config.raw.get("hidden_act")
+        or raw.get("hidden_activation")
+        or raw.get("hidden_act")
         or ""
     ).strip()
     supported = {"gelu_pytorch_tanh", "gelu_new", "gelu", "silu"}
@@ -134,7 +248,8 @@ _BUNDLE_FILES = (
 # those add sliding-window attention and a second rope table, neither of which
 # this family has, so the prefix let them build a full-attention graph and
 # generate quietly wrong text rather than being refused.
-_SUPPORTED_MODEL_TYPES = frozenset({"gemma", "gemma2"})
+_GEMMA3_MODEL_TYPES = frozenset({"gemma3", "gemma3_text"})
+_SUPPORTED_MODEL_TYPES = frozenset({"gemma", "gemma2"}) | _GEMMA3_MODEL_TYPES
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -149,6 +264,25 @@ def _positive_int(value: object, name: str) -> int:
     return result
 
 
+
+def _eos_token_ids(value: object) -> list[int]:
+    """Normalise the stop tokens into a list.
+
+    Gemma 2 ships ``[1, 107]`` and Gemma 3 ``[1, 106]``. Keeping only the first
+    drops ``<end_of_turn>``, so a chat turn never terminates. Booleans are
+    rejected because ``bool`` is an ``int`` subclass and would pass as an id.
+    """
+    values = value if isinstance(value, list) else [value]
+    ids: list[int] = []
+    for item in values:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError("gemma eos_token_id must be an integer or a list of integers")
+        ids.append(int(item))
+    if not ids:
+        raise ValueError("gemma eos_token_id must name at least one token")
+    return ids
+
+
 def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
     runtime = {
         "vocab_size": config.vocab_size,
@@ -161,13 +295,22 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
         "eos_token_id": config.eos_token_id,
         "pad_token_id": config.pad_token_id,
     }
+    eos = config.eos_token_id
     generation_path = model_dir / "generation_config.json"
     if generation_path.is_file():
         generation = json.loads(generation_path.read_text(encoding="utf-8"))
         if not isinstance(generation, dict):
             raise ValueError("generation_config.json must contain one JSON object")
         if "eos_token_id" in generation:
-            runtime["eos_token_id"] = generation["eos_token_id"]
+            eos = generation["eos_token_id"]
+    eos_token_ids = _eos_token_ids(eos)
+    # The scalar stays the first id so a bundle keeps working on a runtime that
+    # predates the list; the list is written only when it adds something. Gemma
+    # 2 names [1, 107] and Gemma 3 names [1, 106], and in both the second id is
+    # <end_of_turn> - the token a chat turn actually ends on.
+    runtime["eos_token_id"] = eos_token_ids[0]
+    if len(eos_token_ids) > 1:
+        runtime["eos_token_ids"] = eos_token_ids
     runtime.update(updates)
     return runtime
 
@@ -206,6 +349,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         request.max_sequence_length or min(config.max_position_embeddings, 256),
         "max_sequence_length",
     )
+    # Gemma 2 and Gemma 3 interleave sliding-window and global attention. This
+    # family builds full attention for every layer, which is the same thing
+    # only while the sequence stays inside the window. Refuse anything longer
+    # rather than return quietly wrong text.
+    window = config.raw.get("sliding_window")
+    if window and max_sequence_length > int(window):
+        raise NotImplementedError(
+            f"gemma builds full attention for every layer, so it supports "
+            f"max_sequence_length up to the checkpoint's sliding_window "
+            f"({int(window)}); {max_sequence_length} was requested"
+        )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Gemma max_sequence_length exceeds checkpoint context capacity")
     if request.quantization not in {None, "none"}:

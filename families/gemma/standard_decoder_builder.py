@@ -230,22 +230,40 @@ def build_standard_decoder_engine(
     # Shape: [attention_window, rotary_ndims // 2].
     cos_half_tensor = None
     sin_half_tensor = None
+    local_cos_tensor = None
+    local_sin_tensor = None
+    schedule = graph_blocks.gemma3_attention_schedule(config, num_layers)
+    global_position_scale = graph_blocks.gemma_global_rope_position_scale(config)
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
 
     if position_type == "rope":
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
         cos_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            partial_rotary_factor, interleaved=interleaved_rope,
+            position_scale=global_position_scale)
         sin_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            partial_rotary_factor, interleaved=interleaved_rope,
+            position_scale=global_position_scale)
         cos_half_tensor = graph_ops.add_constant(
             network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
         cos_half_tensor = _cast_work_dtype(cos_half_tensor)
         sin_half_tensor = graph_ops.add_constant(
             network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
         sin_half_tensor = _cast_work_dtype(sin_half_tensor)
+        # Gemma 3's local layers rotate on a different base.
+        if schedule["local_theta"] != config.rope_theta:
+            local_cos_np = graph_ops.make_rope_table_half_dim(
+                attention_window, head_dim, schedule["local_theta"], True,
+                partial_rotary_factor, interleaved=interleaved_rope)
+            local_sin_np = graph_ops.make_rope_table_half_dim(
+                attention_window, head_dim, schedule["local_theta"], False,
+                partial_rotary_factor, interleaved=interleaved_rope)
+            local_cos_tensor = _cast_work_dtype(graph_ops.add_constant(
+                network, local_cos_np.shape, local_cos_np, dtype=work_np_dtype))
+            local_sin_tensor = _cast_work_dtype(graph_ops.add_constant(
+                network, local_sin_np.shape, local_sin_np, dtype=work_np_dtype))
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]
         position_embed_table = graph_ops.add_constant(
@@ -265,7 +283,9 @@ def build_standard_decoder_engine(
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
         dtype=work_np_dtype)
-    attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
+    attn_scale = (
+        graph_blocks.gemma_attention_scale(config, max(head_dim, 1))
+        if scale_attn_weights else 1.0)
     final_logit_softcap = config.raw.get("final_logit_softcapping")
     # ---------------------------------------------------------------
     # Embedding lookup (with optional embed_input override for VL)
@@ -341,6 +361,10 @@ def build_standard_decoder_engine(
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
 
+        use_local = schedule["is_local"][layer_idx] and local_cos_tensor is not None
+        layer_cos = local_cos_tensor if use_local else cos_half_tensor
+        layer_sin = local_sin_tensor if use_local else sin_half_tensor
+
         result = _add_decoder_layer(
             network=network,
             hidden=hidden_state,
@@ -370,8 +394,8 @@ def build_standard_decoder_engine(
             alibi_indices_tensor=alibi_indices_tensor,
             dtype=work_np_dtype,
             quant_ctx=quant_ctx,
-            cos_half_tensor=cos_half_tensor,
-            sin_half_tensor=sin_half_tensor,
+            cos_half_tensor=layer_cos,
+            sin_half_tensor=layer_sin,
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
         )

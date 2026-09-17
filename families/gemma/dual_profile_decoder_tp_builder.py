@@ -350,21 +350,42 @@ def build_dual_profile_tp_decoder_engine(
     # native IRotaryEmbeddingLayer.
     cos_half_table: trt.ITensor | None = None
     sin_half_table: trt.ITensor | None = None
+    local_cos_table: trt.ITensor | None = None
+    local_sin_table: trt.ITensor | None = None
+    schedule = graph_blocks.gemma3_attention_schedule(config, num_layers)
+    global_position_scale = graph_blocks.gemma_global_rope_position_scale(config)
     if position_type == "rope":
         kmax = max_cache_length + max_prefill_length
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
         cos_half_np = graph_ops.make_rope_table_half_dim(
             kmax, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            partial_rotary_factor, interleaved=interleaved_rope,
+            position_scale=global_position_scale)
         sin_half_np = graph_ops.make_rope_table_half_dim(
             kmax, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            partial_rotary_factor, interleaved=interleaved_rope,
+            position_scale=global_position_scale)
         cos_half_table = _const_in_work_dtype(
             network, cos_half_np.shape, cos_half_np,
             work_np_dtype, work_trt_dtype)
         sin_half_table = _const_in_work_dtype(
             network, sin_half_np.shape, sin_half_np,
             work_np_dtype, work_trt_dtype)
+        # Gemma 3's local layers rotate on a different base; the tables are
+        # otherwise identical, so build a second pair only when asked.
+        if schedule["local_theta"] != config.rope_theta:
+            local_cos_np = graph_ops.make_rope_table_half_dim(
+                kmax, head_dim, schedule["local_theta"], True,
+                partial_rotary_factor, interleaved=interleaved_rope)
+            local_sin_np = graph_ops.make_rope_table_half_dim(
+                kmax, head_dim, schedule["local_theta"], False,
+                partial_rotary_factor, interleaved=interleaved_rope)
+            local_cos_table = _const_in_work_dtype(
+                network, local_cos_np.shape, local_cos_np,
+                work_np_dtype, work_trt_dtype)
+            local_sin_table = _const_in_work_dtype(
+                network, local_sin_np.shape, local_sin_np,
+                work_np_dtype, work_trt_dtype)
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
     position_embed_table: trt.ITensor | None = None
@@ -403,7 +424,9 @@ def build_dual_profile_tp_decoder_engine(
         dtype=np.float32)
 
     # Attention scale.
-    attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
+    attn_scale = (
+        graph_blocks.gemma_attention_scale(config, max(head_dim, 1))
+        if scale_attn_weights else 1.0)
     attn_logit_softcap = config.raw.get("attn_logit_softcapping")
     final_logit_softcap = config.raw.get("final_logit_softcapping")
 
@@ -497,14 +520,17 @@ def build_dual_profile_tp_decoder_engine(
         # Position embedding (RoPE only; learned was applied above and ALiBi
         # is added into the attention mask).
         if position_type == "rope":
+            use_local = schedule["is_local"][layer_idx] and local_cos_table is not None
+            layer_cos = local_cos_table if use_local else cos_half_table
+            layer_sin = local_sin_table if use_local else sin_half_table
             q = graph_ops.add_apply_rope_native(
                 network, q, num_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
+                layer_cos, layer_sin, position_id,
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
             k = graph_ops.add_apply_rope_native(
                 network, k, num_kv_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
+                layer_cos, layer_sin, position_id,
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
 

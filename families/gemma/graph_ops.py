@@ -385,6 +385,7 @@ def make_rope_table_half_dim(
     cosine: bool,
     partial_rotary_factor: float = 1.0,
     interleaved: bool = False,
+    position_scale: float = 1.0,
 ) -> np.ndarray:
     """Build a RoPE cos/sin table of shape [max_cache_length, rotary_ndims // 2].
 
@@ -401,6 +402,8 @@ def make_rope_table_half_dim(
         partial_rotary_factor: Fraction of head dims that rotate (default 1.0).
         interleaved:      If True, adjacent-pair frequencies (CodeGen/GPT-J).
                           If False, half-split frequencies (LLaMA/Qwen).
+        position_scale:   Multiplies the position before the angle. Linear rope
+                          scaling with factor f is position_scale = 1 / f.
 
     Returns:
         Float32 array [max_cache_length, rotary_ndims // 2].
@@ -409,6 +412,8 @@ def make_rope_table_half_dim(
     rotary_ndims = validate_native_rope_dim(rotary_ndims)
     half = rotary_ndims // 2
     default = 1.0 if cosine else 0.0
+    if position_scale <= 0.0:
+        raise ValueError(f"rope position_scale must be positive, got {position_scale}")
     if max_cache_length <= 0 or rope_theta <= 0.0:
         return np.full((max(max_cache_length, 1), max(half, 1)),
                        default, dtype=np.float32)
@@ -420,7 +425,7 @@ def make_rope_table_half_dim(
             # freq assignment per half-dim is the same).
             exponent = (2.0 * d) / rotary_ndims
             inv_freq = rope_theta ** (-exponent)
-            angle = pos * inv_freq
+            angle = (pos * position_scale) * inv_freq
             table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
     return table
 

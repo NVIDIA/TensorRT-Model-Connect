@@ -37,6 +37,8 @@ struct RuntimeConfig {
     std::string tensor_parallel_mode;
     std::string precision;
     std::string decoder_engine_layout;
+    // Empty unless the bundle names more than one stop token.
+    std::vector<std::int32_t> eos_token_ids;
 };
 
 template <typename T>
@@ -71,7 +73,8 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (!json.is_object())
         throw std::runtime_error("gemma runtime.json must be an object");
-    if (json.size() != 14)
+    const bool multi_eos = json.contains("eos_token_ids");
+    if (json.size() != static_cast<std::size_t>(14 + (multi_eos ? 1 : 0)))
         throw std::runtime_error("gemma runtime.json has an unexpected field set");
 
     RuntimeConfig config{
@@ -98,6 +101,15 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (config.num_key_value_heads % config.tensor_parallel_size != 0)
         throw std::runtime_error("gemma KV heads must be divisible by tensor parallel size");
+    if (multi_eos) {
+        config.eos_token_ids = require_value<std::vector<std::int32_t>>(json, "eos_token_ids");
+        if (config.eos_token_ids.empty())
+            throw std::runtime_error("gemma runtime.json has an empty 'eos_token_ids'");
+        for (const std::int32_t token_id : config.eos_token_ids) {
+            if (token_id < 0 || token_id >= config.vocab_size)
+                throw std::runtime_error("gemma runtime.json has an out-of-range 'eos_token_ids'");
+        }
+    }
     if (config.precision != "fp16" && config.precision != "bf16" && config.precision != "fp32") {
         throw std::runtime_error("gemma runtime.json contains invalid precision");
     }
@@ -210,6 +222,7 @@ ITask* create(const FamilyContext& context) {
     text_config.vocab_size = config.vocab_size;
     text_config.id_bos = config.bos_token_id;
     text_config.id_eos = config.eos_token_id;
+    text_config.id_eos_ids = config.eos_token_ids;
     text_config.chat_template_format =
         gemma_detect_chat_template_format(chat_template(context.reader));
     text_config.prefill_max_length = config.max_cache_length;

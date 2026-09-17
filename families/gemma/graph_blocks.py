@@ -357,3 +357,122 @@ def add_gelu_fc_mlp(
         fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias, dtype=dtype)
 
     return fc2
+
+
+
+def _gemma_raw(config) -> dict:
+    """The decoder's own config fields.
+
+    Gemma 3 at 4B and above nests them under ``text_config`` beside a vision
+    config; the 1B and Gemma 2 state them at the top level. Nested values win,
+    matching how families/gemma/config.py merges them.
+    """
+    raw = getattr(config, "raw", {}) or {}
+    nested = raw.get("text_config")
+    if isinstance(nested, dict):
+        return {**raw, **nested}
+    return raw
+
+
+_GEMMA3_SLIDING_PATTERN = 6
+
+
+def gemma3_attention_schedule(config, num_layers: int) -> dict:
+    """Which layers attend locally, and what rope base each one uses.
+
+    Gemma 3 interleaves local and global attention: with
+    ``sliding_window_pattern: 6``, five layers in six attend only to the last
+    ``sliding_window`` tokens and every sixth attends to everything. The two
+    kinds also use different rope bases - ``rope_local_base_freq`` (10000) for
+    the local layers against ``rope_theta`` (1000000) for the global ones.
+
+    Gemma and Gemma 2 declare no pattern, so every layer comes back global and
+    the caller builds exactly the graph it built before.
+    """
+    raw = _gemma_raw(config)
+    window = raw.get("sliding_window")
+    local_base = raw.get("rope_local_base_freq")
+    # A second rope base is what distinguishes Gemma 3 from Gemma 2 here.
+    # Gemma 2 also interleaves windows but rotates every layer on one base, so
+    # without this key the caller must keep building a single-base graph.
+    if not window or not local_base:
+        return {
+            "is_local": [False] * num_layers,
+            "window": None,
+            "local_theta": float(config.rope_theta),
+        }
+    # An explicit layer_types list is the checkpoint stating the schedule
+    # outright, so it wins over anything derived. gemma-3-270m-it ships one.
+    layer_types = raw.get("layer_types")
+    if isinstance(layer_types, list) and layer_types:
+        if len(layer_types) != num_layers:
+            raise ValueError(
+                f"Gemma layer_types lists {len(layer_types)} entries for "
+                f"{num_layers} layers"
+            )
+        unknown = sorted({str(kind) for kind in layer_types} - {"sliding_attention", "full_attention"})
+        if unknown:
+            raise ValueError(f"Gemma layer_types has unsupported entries: {unknown}")
+        return {
+            "is_local": [str(kind) == "sliding_attention" for kind in layer_types],
+            "window": int(window),
+            "local_theta": float(local_base),
+        }
+    # Otherwise derive it. google/gemma-3-1b-it states sliding_window_pattern;
+    # google/gemma-3-270m-it omits it and relies on the transformers default of
+    # 6. Treating the absent key as "no schedule" would build every layer
+    # global and be wrong without failing.
+    declared = raw.get("sliding_window_pattern")
+    pattern = _GEMMA3_SLIDING_PATTERN if declared is None else int(declared)
+    if pattern < 1:
+        raise ValueError(f"Gemma sliding_window_pattern must be positive, got {pattern}")
+    # transformers: is_sliding = bool((layer_idx + 1) % sliding_window_pattern),
+    # so every pattern-th layer is the global one.
+    return {
+        "is_local": [bool((index + 1) % pattern) for index in range(num_layers)],
+        "window": int(window),
+        "local_theta": float(local_base),
+    }
+
+
+def gemma_attention_scale(config, head_dim: int) -> float:
+    """Gemma scales queries by a declared constant, not always by head_dim.
+
+    ``query_pre_attn_scalar`` matches ``head_dim`` on some widths and not on
+    others, so it has to be read rather than inferred.
+    """
+    raw = _gemma_raw(config)
+    scalar = raw.get("query_pre_attn_scalar")
+    if scalar is None:
+        scalar = head_dim
+    scalar = float(scalar)
+    if scalar <= 0.0:
+        raise ValueError(f"Gemma query_pre_attn_scalar must be positive, got {scalar}")
+    return 1.0 / (scalar**0.5)
+
+
+def gemma_global_rope_position_scale(config) -> float:
+    """Linear rope scaling for the global layers, as a position multiplier.
+
+    Gemma 3 at 4B and above declares ``rope_scaling`` of type ``linear`` with a
+    factor. transformers resolves that per attention type: the sliding layers
+    stay unscaled on ``rope_local_base_freq`` and only the full-attention layers
+    are scaled. A factor of f divides the position by f, so the multiplier is
+    ``1 / f``. Checkpoints without the key, including gemma-3-1b-it, come back
+    1.0 and build the table they built before.
+    """
+    raw = _gemma_raw(config)
+    scaling = raw.get("rope_scaling")
+    if not isinstance(scaling, dict):
+        return 1.0
+    kind = str(scaling.get("rope_type") or scaling.get("type") or "").lower()
+    if kind in ("", "default"):
+        return 1.0
+    if kind != "linear":
+        raise NotImplementedError(
+            f"gemma supports only linear rope scaling, got rope_type={kind!r}"
+        )
+    factor = float(scaling.get("factor", 1.0))
+    if factor <= 0.0:
+        raise ValueError(f"gemma rope_scaling factor must be positive, got {factor}")
+    return 1.0 / factor

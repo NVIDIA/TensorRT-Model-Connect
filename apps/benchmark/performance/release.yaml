@@ -83,6 +83,16 @@ excluded_profiles:
     reason: *qwen35_width_performance_exclusion
   - model: qwen35-4b
     reason: *qwen35_width_performance_exclusion
+  - model: gemma-3-4b
+    reason: &gemma3_performance_exclusion >-
+      Functional and Hugging Face reference-parity qualification is present,
+      but the release-performance workload and receipt were collected only for
+      gemma-2-2b, which exercises the same builder and runtime path.
+  - model: gemma-3-1b
+    reason: >-
+      Functional and Hugging Face reference-parity qualification is present,
+      but the release-performance workload and receipt were collected only for
+      gemma-2-2b, which exercises the same builder and runtime path.
   - model: dpn92-mx-in1k
     reason: >-
       Functional and timm reference-parity qualification is present for every
