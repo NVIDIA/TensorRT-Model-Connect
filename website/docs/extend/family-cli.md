@@ -110,6 +110,24 @@ default invalidates the corresponding cached build.
 
 ## Migrate one family
 
+After the shared CLI change is merged, subsequent command migrations should
+change only `families/<family>/**`. There is no central owner registration or
+per-family exception to add. Keep these contracts together in that change:
+
+- A `cli.json` declaration and its lazy Python handlers. A Python module
+  referenced only by the declaration is a valid entry point; it does not need
+  an artificial import from `model.py` or a test merely to satisfy reachability.
+- For native commands, the owner CMake file builds `trtmc_cli_<family>` with
+  output `libtrtmc_cli_<family>.so` alongside the model DSO and supplies its
+  install rule. Selected-family CI discovers that target from the declaration.
+- Build commands used by Benchmark declare logical `model` and `output`
+  arguments. Their CLI spellings, including positional output, remain owned by
+  the family. Benchmark uses the same declaration for temporary and final
+  output paths, and includes the declaration in its build cache identity.
+- Owner tests preserve existing behavior and test their declared inputs. A
+  source/CPU onboarding rehearsal proves integration mechanics, not checkpoint
+  accuracy, GPU modes or performance; those remain each family's qualification.
+
 1. Declare its actual commands and supported arguments, preserving defaults and
    existing workloads. A task name alone does not imply a command is supported.
 2. Add its lazy Python/native handlers and narrow build request. Keep graphs,

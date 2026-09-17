@@ -79,9 +79,17 @@ def build(*, model: str, output: Path, revision: str | None = None,
 
 
 def prepare_structure(*, model: str, input: Path, output: Path,
-                      revision: str | None = None, cache_dir: Path | None = None) -> int:
+                      revision: str | None = None, cache_dir: Path | None = None,
+                      sampling_steps: int = 200, diffusion_samples: int = 1,
+                      seed: int = 42, affinity_sampling_steps: int = 200,
+                      affinity_diffusion_samples: int = 5) -> int:
     from .request_preparation import prepare_structure_request
 
-    result = prepare_structure_request(resolve_model(model, revision), input, output, cache_dir=cache_dir)
+    result = prepare_structure_request(
+        resolve_model(model, revision), input, output, cache_dir=cache_dir,
+        sampling_steps=sampling_steps, diffusion_samples=diffusion_samples, seed=seed,
+        affinity_sampling_steps=affinity_sampling_steps,
+        affinity_diffusion_samples=affinity_diffusion_samples,
+    )
     print(json.dumps(result, sort_keys=True))
     return 0

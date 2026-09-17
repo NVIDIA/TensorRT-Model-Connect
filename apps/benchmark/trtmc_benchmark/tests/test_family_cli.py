@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -14,8 +15,9 @@ from types import SimpleNamespace
 import pytest
 
 from tensorrt_model_connect import family_cli
-from trtmc_benchmark.builder import _build_command
-from trtmc_benchmark.catalog import ManifestCatalog
+import trtmc_benchmark.builder as benchmark_builder
+from trtmc_benchmark.builder import BundleBuilder, _build_command
+from trtmc_benchmark.catalog import ManifestCatalog, resolve_case
 from trtmc_benchmark.types import BenchmarkError
 
 
@@ -80,6 +82,93 @@ def test_declared_build_uses_owner_names_and_types(
     assert updated == command
     assert family_cli.main(updated[3:]) == 0
     assert received[-1]["tile_tokens"] == 128
+
+
+@pytest.mark.parametrize("output_flags", [["-o", "--output"], ["--artifact"], None])
+def test_declared_build_subprocess_publishes_atomically(
+    owner_manifest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_flags,
+) -> None:
+    owner = family_cli._root() / "example_owner"
+    (owner.parent / "__init__.py").write_text('"""Isolated test families."""\n')
+    (owner / "__init__.py").write_text('"""CPU command fixture."""\n')
+    (owner / "model.py").write_text('''import json
+from pathlib import Path
+
+def build(*, model, output, precision, tile_tokens=96, retained_layers=(), paged=False, fail=False):
+    values = {"model": str(model), "output": str(output), "precision": precision,
+              "tile_tokens": tile_tokens, "retained_layers": list(retained_layers), "paged": paged}
+    Path(output).write_text(json.dumps(values))
+    if fail:
+        raise RuntimeError("requested owner failure after writing temporary output")
+    return 0
+''')
+    declaration = owner / "cli.json"
+    descriptor = json.loads(declaration.read_text())
+    output = descriptor["commands"][0]["arguments"][1]
+    if output_flags is None:
+        output.pop("flags")
+    else:
+        output["flags"] = output_flags
+    descriptor["commands"][0]["arguments"].append({
+        "name": "fail", "type": "bool", "flags": ["--fail"], "action": "store_true", "default": False,
+    })
+    declaration.write_text(json.dumps(descriptor))
+    checkpoint = tmp_path / "snapshots" / ("a" * 40)
+    checkpoint.mkdir(parents=True)
+    manifest = json.loads(owner_manifest.read_text())
+    manifest["hf_id"] = str(checkpoint)
+    manifest["testcases"] = [{"name": "smoke", "prompt": "Hello", "max_new_tokens": 1}]
+    owner_manifest.write_text(json.dumps(manifest))
+    find_spec = benchmark_builder.importlib.util.find_spec
+
+    def fixture_spec(name, *arguments, **keywords):
+        if name == "families.example_owner":
+            return SimpleNamespace(origin=str(owner / "__init__.py"))
+        return find_spec(name, *arguments, **keywords)
+
+    monkeypatch.setattr(benchmark_builder.importlib.util, "find_spec", fixture_spec)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((
+        str(owner.parent.parent), str(Path(family_cli.__file__).resolve().parents[1]),
+    )))
+    checked_outputs = []
+
+    def validate_output(path, _model, _runtime_root):
+        # This fixture tests process execution and publication; native bundle
+        # inspection has independent format/identity coverage.
+        payload = json.loads(path.read_text())
+        assert payload["tile_tokens"] == 96
+        assert payload["retained_layers"] == [2, 7]
+        assert payload["paged"] is True
+        checked_outputs.append(path)
+
+    monkeypatch.setattr(benchmark_builder, "_validate_bundle", validate_output)
+    model = ManifestCatalog().resolve(str(owner_manifest))
+    builder = BundleBuilder(tmp_path / "cache")
+    case = resolve_case(model, builder.provisional_path(model))
+    _, built = builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
+    assert built[0].status == "built"
+    assert checked_outputs[0] != case.bundle_path
+    payload = json.loads(case.bundle_path.read_text())
+    assert Path(payload["output"]) == checked_outputs[0]
+    assert not checked_outputs[0].exists()
+    assert not list(case.bundle_path.parent.glob(".trtmc-bench-*.bundle"))
+    original = case.bundle_path.read_bytes()
+    receipt = case.bundle_path.with_suffix(".bundle.benchmark.json")
+    original_receipt = receipt.read_bytes()
+    _, reused = builder.prepare([case], allow_build=False, rebuild=False, dry_run=False)
+    assert reused[0].status == "reused"
+
+    failed = replace(case, model=replace(model, build_settings={**model.build_settings, "fail": True}))
+    with pytest.raises(BenchmarkError, match="failed with exit code"):
+        builder.prepare([failed], allow_build=True, rebuild=False, dry_run=False)
+    assert case.bundle_path.read_bytes() == original
+    assert receipt.read_bytes() == original_receipt
+    assert "requested owner failure" in (case.bundle_path.parent / "build.stderr.log").read_text()
+    assert not list(case.bundle_path.parent.glob(".trtmc-bench-*.bundle"))
+    with pytest.raises(BenchmarkError, match="no matching immutable build identity"):
+        builder.prepare([failed], allow_build=False, rebuild=False, dry_run=False)
 
 
 @pytest.mark.parametrize("update", [

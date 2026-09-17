@@ -27,7 +27,12 @@
         {"name": "input", "flags": ["--input"], "type": "path", "required": true},
         {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
         {"name": "revision", "flags": ["--revision"], "type": "string"},
-        {"name": "cache_dir", "flags": ["--cache-dir"], "type": "path"}
+        {"name": "cache_dir", "flags": ["--cache-dir"], "type": "path"},
+        {"name": "sampling_steps", "flags": ["--num-steps"], "type": "int", "default": 200, "help": "Structure sampling steps for this request"},
+        {"name": "diffusion_samples", "flags": ["--num-samples"], "type": "int", "default": 1, "help": "Structure diffusion samples for this request"},
+        {"name": "seed", "flags": ["--seed"], "type": "int", "default": 42, "help": "Random seed for this request"},
+        {"name": "affinity_sampling_steps", "flags": ["--affinity-num-steps"], "type": "int", "default": 200, "help": "Affinity sampling steps when requested"},
+        {"name": "affinity_diffusion_samples", "flags": ["--affinity-num-samples"], "type": "int", "default": 5, "help": "Affinity diffusion samples when requested"}
       ]
     }
   ]

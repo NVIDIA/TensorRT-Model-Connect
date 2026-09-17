@@ -209,6 +209,18 @@ def _reachable_family_python(family: Path) -> set[Path]:
         *(family / "tests").rglob("*.py"),
     ]
     pending = [_family_module_name(family, path) for path in root_paths if path.is_file()]
+    declaration = family / "cli.json"
+    if declaration.is_file():
+        from tensorrt_model_connect.family_cli import _validate
+
+        commands = _validate(json.loads(declaration.read_text(encoding="utf-8")))["commands"]
+        for command in commands:
+            if command["executor"] != "python":
+                continue
+            handler_module = command["handler"].split(":", 1)[0]
+            module = f"families.{family.name}.{handler_module}"
+            assert module in modules, f"{declaration}: missing owner handler module {handler_module}"
+            pending.append(module)
     reachable: set[str] = set()
     while pending:
         module = pending.pop()
@@ -224,6 +236,41 @@ def _reachable_family_python(family: Path) -> set[Path]:
             if package in known_modules and package not in reachable:
                 pending.append(package)
     return {modules[module] for module in reachable}
+
+
+def test_cli_declarations_are_family_python_entrypoints(tmp_path: Path) -> None:
+    family = tmp_path / "owner"
+    commands = family / "commands"
+    commands.mkdir(parents=True)
+    for path in (family / "__init__.py", commands / "__init__.py"):
+        path.write_text('"""Owner package."""\n', encoding="utf-8")
+    (family / "model.py").write_text("def build(request, writer): pass\n", encoding="utf-8")
+    (family / "support.py").write_text("def describe(metadata): return None\n", encoding="utf-8")
+    handler = commands / "prepare.py"
+    helper = commands / "helper.py"
+    unused = commands / "unused.py"
+    handler.write_text("from .helper import prepare\n", encoding="utf-8")
+    helper.write_text("def prepare(): return 0\n", encoding="utf-8")
+    unused.write_text("def unused(): pass\n", encoding="utf-8")
+    declaration = family / "cli.json"
+    document = {"version": 1, "commands": [{
+        "name": "prepare", "executor": "python", "handler": "commands.prepare:prepare",
+        "arguments": [],
+    }]}
+    declaration.write_text(json.dumps(document), encoding="utf-8")
+    reachable = _reachable_family_python(family)
+    assert {handler, helper, commands / "__init__.py", family / "__init__.py"} <= reachable
+    assert unused not in reachable
+    declaration.unlink()
+    assert handler not in _reachable_family_python(family)
+    declaration.write_text(json.dumps(document), encoding="utf-8")
+    handler.unlink()
+    try:
+        _reachable_family_python(family)
+    except AssertionError as error:
+        assert "missing owner handler module" in str(error)
+    else:
+        raise AssertionError("a missing declared handler must not be silently ignored")
 
 
 def test_every_family_owns_one_complete_module() -> None:

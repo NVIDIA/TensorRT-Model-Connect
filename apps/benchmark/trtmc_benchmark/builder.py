@@ -63,6 +63,7 @@ class _BuildPlan:
     timeout_s: int
     identity: str | None
     runtime_root: Path | None
+    cases: tuple[ResolvedCase, ...]
 
 
 class BundleBuilder:
@@ -201,7 +202,9 @@ class BundleBuilder:
         if timeout <= 0:
             raise BenchmarkError("TRTMC_BENCH_BUILD_TIMEOUT_S must be positive")
         identity = _build_identity(model, model_dir, command) if explicit is None else None
-        return _BuildPlan(model, model_dir, bundle, command, timeout, identity, cases[0].runtime_root)
+        return _BuildPlan(
+            model, model_dir, bundle, command, timeout, identity, cases[0].runtime_root, tuple(cases)
+        )
 
     def _build(self, plan: _BuildPlan) -> BundlePreparation:
         plan.bundle.parent.mkdir(parents=True, exist_ok=True)
@@ -213,8 +216,7 @@ class BundleBuilder:
         os.close(descriptor)
         temporary = Path(raw_temporary)
         temporary.unlink()
-        command = list(plan.command)
-        command[command.index("-o") + 1] = str(temporary)
+        command = _build_command(plan.model, plan.model_dir, temporary, plan.cases)
         started = time.monotonic()
         try:
             completed = subprocess.run(
