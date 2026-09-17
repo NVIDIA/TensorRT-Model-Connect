@@ -60,6 +60,7 @@ class _BuildPlan:
     command: tuple[str, ...]
     timeout_s: int
     identity: str | None
+    runtime_root: Path | None
 
 
 class BundleBuilder:
@@ -88,10 +89,15 @@ class BundleBuilder:
         dry_run: bool,
     ) -> tuple[tuple[ResolvedCase, ...], tuple[BundlePreparation, ...]]:
         resolved = tuple(cases)
+        explicit_bundles = {
+            case.bundle_path.expanduser().resolve() for case in resolved if case.bundle_is_explicit
+        }
         groups: dict[tuple[Path, Path], list[ResolvedCase]] = {}
         for case in resolved:
             key = (case.model.manifest_path, case.bundle_path.expanduser().resolve())
-            groups.setdefault(key, []).append(case)
+            groups.setdefault(key, []).append(
+                case.with_values(bundle_is_explicit=True) if key[1] in explicit_bundles else case
+            )
 
         replacements: dict[tuple[Path, Path], Path] = {}
         records: list[BundlePreparation] = []
@@ -126,9 +132,15 @@ class BundleBuilder:
         dry_run: bool,
     ) -> tuple[Path, BundlePreparation]:
         model = cases[0].model
-        managed = _is_relative_to(requested, self.cache_root)
+        managed = _is_relative_to(requested, self.cache_root) and not any(
+            case.bundle_is_explicit for case in cases
+        )
         if requested.is_file() and not managed and not rebuild:
-            return requested, BundlePreparation(model.name, "reused", requested)
+            if not dry_run:
+                _validate_bundle(requested, model, cases[0].runtime_root)
+            return requested, BundlePreparation(
+                model.name, "would_reuse" if dry_run else "reused", requested
+            )
         if requested.is_file() and not managed:
             raise BenchmarkError(
                 f"--rebuild cannot overwrite explicit bundle {requested}; "
@@ -141,8 +153,11 @@ class BundleBuilder:
 
         plan = self._plan(model, cases)
         if not rebuild and _matches_receipt(plan):
+            if not dry_run:
+                _validate_bundle(plan.bundle, model, plan.runtime_root)
             return plan.bundle, BundlePreparation(
-                model.name, "reused", plan.bundle, build_identity=plan.identity
+                model.name, "would_reuse" if dry_run else "reused", plan.bundle,
+                build_identity=plan.identity,
             )
         if not allow_build:
             raise BenchmarkError(
@@ -184,7 +199,7 @@ class BundleBuilder:
         if timeout <= 0:
             raise BenchmarkError("TRTMC_BENCH_BUILD_TIMEOUT_S must be positive")
         identity = _build_identity(model, model_dir, command) if explicit is None else None
-        return _BuildPlan(model, model_dir, bundle, command, timeout, identity)
+        return _BuildPlan(model, model_dir, bundle, command, timeout, identity, cases[0].runtime_root)
 
     def _build(self, plan: _BuildPlan) -> BundlePreparation:
         plan.bundle.parent.mkdir(parents=True, exist_ok=True)
@@ -231,6 +246,11 @@ class BundleBuilder:
                 code="bundle_build_failed",
                 artifacts=(("stdout", stdout_log), ("stderr", stderr_log)),
             )
+        try:
+            _validate_bundle(temporary, plan.model, plan.runtime_root)
+        except BenchmarkError:
+            temporary.unlink(missing_ok=True)
+            raise
         os.replace(temporary, plan.bundle)
         _write_receipt(plan)
         return BundlePreparation(
@@ -243,6 +263,34 @@ class BundleBuilder:
             stdout_log=stdout_log,
             stderr_log=stderr_log,
             build_identity=plan.identity,
+        )
+
+
+def _validate_bundle(bundle: Path, model: ModelDescriptor, runtime_root: Path | None) -> None:
+    # Reuse the public native Bundle reader; do not duplicate its file parser in Python.
+    native = runtime_root / "trtmc" if runtime_root is not None else None
+    command = (
+        [str(native)] if native is not None and native.is_file()
+        else [sys.executable, "-m", "tensorrt_model_connect"]
+    )
+    command.extend(("inspect", str(bundle)))
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise BenchmarkError(f"cannot inspect bundle {bundle}: {error}") from error
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise BenchmarkError(f"cannot inspect bundle {bundle}: {detail}")
+    try:
+        info = json.loads(result.stdout)
+        actual = info["family"], info["task"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise BenchmarkError(f"invalid bundle inspection result for {bundle}") from error
+    if actual != (model.family, model.task):
+        raise BenchmarkError(
+            f"bundle identity mismatch for {bundle}: expected family {model.family!r} "
+            f"and Task {model.task!r}, found family {actual[0]!r} and Task {actual[1]!r}; "
+            "rebuild the managed cache with --rebuild, or select a matching explicit bundle"
         )
 
 

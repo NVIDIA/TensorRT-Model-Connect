@@ -72,7 +72,20 @@ def _request(raw: str) -> dict[str, Any]:
         raise ValueError(f"--request-json is not valid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise ValueError("--request-json must contain an object")
-    return value
+    return flatten_config(value)
+
+
+def flatten_config(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose explicit SDK Config to existing reference calls without defaults."""
+    result = dict(request)
+    config = result.pop("config", {})
+    if not isinstance(config, Mapping):
+        raise ValueError("reference request config must be an object")
+    duplicates = sorted(result.keys() & config.keys())
+    if duplicates:
+        raise ValueError("duplicate reference request/config keys: " + ", ".join(duplicates))
+    result.update(config)
+    return result
 
 
 def _dtype(torch_module: Any, precision: str) -> Any:
@@ -153,13 +166,70 @@ def _compile(model: Any, arguments: argparse.Namespace) -> dict[str, Any] | None
 
 
 def _batch_prompt(request: Mapping[str, Any]) -> list[str]:
-    prompt = request.get("prompt")
+    if "token_ids" in request:
+        raise ValueError("this reference text loader does not accept token_ids")
+    if "prompt" in request and "source_text" in request:
+        raise ValueError("reference request must not provide both prompt and source_text")
+    prompt = request.get("source_text", request.get("prompt"))
     if not isinstance(prompt, str):
         raise ValueError("Transformers baseline requires request.prompt")
     batch_size = request.get("batch_size", 1)
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
         raise ValueError("request.batch_size must be a positive integer")
     return [prompt] * batch_size
+
+
+def _translation_controls(tokenizer: Any, request: Mapping[str, Any]) -> dict[str, int]:
+    """Use tokenizer language APIs; fixed-pair models validate their declared pair."""
+    source = request.get("source_language")
+    target = request.get("target_language")
+    for name, value in (("source_language", source), ("target_language", target)):
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ValueError(f"request.{name} must be a nonempty language identifier")
+
+    def token_id(language: str) -> int:
+        lookup = getattr(tokenizer, "get_lang_id", None)
+        if lookup is None:
+            lookup = tokenizer.convert_tokens_to_ids
+        value = lookup(language)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value == getattr(tokenizer, "unk_token_id", None)
+        ):
+            raise ValueError(f"tokenizer does not recognize language {language!r}")
+        return value
+
+    def explicit_id(name: str) -> int | None:
+        value = request.get(name)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < -1:
+            raise ValueError(f"request.{name} must be a nonnegative integer or -1")
+        return None if value == -1 else value
+
+    source_id = explicit_id("source_language_token_id")
+    target_id = explicit_id("forced_bos_token_id")
+    if source_id is not None:
+        if source is not None and token_id(source) != source_id:
+            raise ValueError("source language disagrees with source_language_token_id")
+        source = tokenizer.convert_ids_to_tokens(source_id)
+    if source is not None:
+        if hasattr(tokenizer, "src_lang"):
+            token_id(source)
+            tokenizer.src_lang = source
+        elif source != getattr(tokenizer, "source_lang", None):
+            raise ValueError("reference tokenizer does not support the requested source language")
+    if target is not None:
+        if hasattr(tokenizer, "src_lang"):
+            resolved = token_id(target)
+            if target_id is not None and target_id != resolved:
+                raise ValueError("target language disagrees with forced_bos_token_id")
+            target_id = resolved
+        elif target != getattr(tokenizer, "target_lang", None):
+            raise ValueError("reference tokenizer does not support the requested target language")
+    return {} if target_id is None else {"forced_bos_token_id": target_id}
 
 
 def _encoder_call(
@@ -227,6 +297,7 @@ def _generation_call(
 ) -> tuple[Callable[[], Any], Callable[[Any], dict[str, Any]]]:
     import torch
 
+    request = flatten_config(request)
     prompts = _batch_prompt(request)
     if len(prompts) != 1:
         raise ValueError("the release generation baseline currently requires batch_size=1")
@@ -253,6 +324,13 @@ def _generation_call(
         "use_cache": True,
         "pad_token_id": tokenizer.pad_token_id,
     }
+    translation = _translation_controls(tokenizer, request)
+    if generation_method == "ar-generate" and translation:
+        raise ValueError("ar-generate reference does not accept translation controls")
+    generation.update(translation)
+    for name in ("repetition_penalty", "min_p", "eos_token_id"):
+        if name in request:
+            generation[name] = request[name]
     if generation["do_sample"]:
         generation.update(
             {

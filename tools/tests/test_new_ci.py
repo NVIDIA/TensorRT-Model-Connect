@@ -7,6 +7,7 @@ import inspect
 import io
 import json
 import re
+import shutil
 import subprocess
 import tarfile
 import zipfile
@@ -25,6 +26,7 @@ from tools.ci.package import (
     WheelArchiveValidator,
     WheelPackageManager,
     load_native_libraries,
+    validate_installed_sdk,
 )
 from tools.ci.pipeline import CiPipeline
 from tools.ci.process import CiError
@@ -146,6 +148,9 @@ def test_selective_e2e_calls_family_tests_directly(
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     (runtime / "libtrtmc_core.so").write_text("")
+    (runtime / "libtrtmc_runtime.so").write_text("")
+    (runtime / "libtrtmc_c.so").write_text("")
+    (runtime / "libtrtmc_c.so.1").write_text("")
     (runtime / "libtrtmc_backend_trt.so").write_text("")
     (runtime / "libtrtmc_model_beta.so").write_text("")
     native_build = tmp_path / "native-build"
@@ -218,7 +223,14 @@ def test_selective_e2e_calls_family_tests_directly(
     assert options["updates"]["TRTMC_RUNTIME_ROOT"] != str(runtime)
     assert options["unset"] == ("PYTEST_ADDOPTS",)
     assert context.runtime_snapshots == [
-        ("libtrtmc_backend_trt.so", "libtrtmc_core.so", "libtrtmc_model_beta.so")
+        (
+            "libtrtmc_backend_trt.so",
+            "libtrtmc_c.so",
+            "libtrtmc_c.so.1",
+            "libtrtmc_core.so",
+            "libtrtmc_model_beta.so",
+            "libtrtmc_runtime.so",
+        )
     ]
 
 
@@ -244,6 +256,9 @@ def test_family_with_only_hardware_tests_accepts_exact_empty_cpu_result(
     runtime.mkdir()
     for name in (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
         "libtrtmc_backend_trt.so",
         "libtrtmc_model_beta.so",
     ):
@@ -390,6 +405,57 @@ def test_e2e_rejects_multiple_family_environments(tmp_path: Path) -> None:
         E2ERunner(context)._run(("alpha", "beta"))
 
 
+@pytest.mark.parametrize("missing", (None, "libtrtmc_c.so.1", "libtrtmc_runtime.so"))
+def test_isolated_family_runtime_carries_public_api_only_for_selected_family(
+    tmp_path: Path, missing: str | None
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    required = {
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_alpha.so",
+    }
+    for name in required | {"libtrtmc_model_beta.so"}:
+        if name != missing:
+            (runtime / name).write_text("")
+    runner = E2ERunner(RecordingContext(tmp_path, {}))
+    if missing:
+        with pytest.raises(CiError, match=re.escape(missing)):
+            with runner._isolated_runtime_root(runtime, "alpha"):
+                pytest.fail("incomplete runtime must be rejected")
+    else:
+        with runner._isolated_runtime_root(runtime, "alpha") as isolated:
+            assert {path.name for path in isolated.iterdir()} == required
+            assert all(path.is_file() for path in isolated.iterdir())
+
+
+def test_isolated_family_runtime_preserves_installed_byok(tmp_path: Path) -> None:
+    site_packages = tmp_path / "site-packages"
+    runtime = site_packages / "tensorrt_model_connect/bin"
+    runtime.mkdir(parents=True)
+    expected = {
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_alpha.so",
+        "libtrtmc_byok_tvm_ffi.so",
+    }
+    for name in expected | {"libtrtmc_model_beta.so"}:
+        (runtime / name).write_text("")
+    ffi = site_packages / "tvm_ffi"
+    ffi.mkdir()
+    runner = E2ERunner(RecordingContext(tmp_path, {}))
+    with runner._isolated_runtime_root(runtime, "alpha") as isolated:
+        assert {path.name for path in isolated.iterdir()} == expected
+        assert (isolated.parent.parent / "tvm_ffi").resolve() == ffi
+
+
 def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
     repository = Path(__file__).resolve().parents[2]
     binary = tmp_path / "trtmc"
@@ -398,6 +464,9 @@ def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
     runtime.mkdir()
     for name in (
         "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
         "libtrtmc_backend_trt.so",
         "libtrtmc_model_gpt2.so",
     ):
@@ -444,6 +513,10 @@ def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
     assert "CMakeDeps" not in conanfile
     assert "libtrtmc_model_sana_wm" not in conanfile
     assert '"--print-needed"' in conanfile
+    # Conan's output_dirs block overrides a cache-only CMAKE_INSTALL_LIBDIR.
+    # The SDK library must share the wheel's bin directory with its runtime.
+    assert 'self.cpp.package.libdirs = ["bin"]' in conanfile
+    assert 'cache_variables["CMAKE_INSTALL_LIBDIR"]' not in conanfile
     dockerfile = (repository / "Dockerfile").read_text()
     assert "openmpi-bin" in dockerfile
     assert "nvidia/nccl/lib" in dockerfile
@@ -692,6 +765,48 @@ def test_gpu_free_unit_scope_keeps_family_python_in_physical_jobs(tmp_path: Path
     assert "requirements.txt" not in physical
 
 
+def test_premerge_adds_physical_family_support_tests_without_expanding_runtime_scope(
+    tmp_path: Path,
+) -> None:
+    support_paths = [
+        "families/zeta/tests/test_support.py",
+        "families/alpha/tests/test_support.py",
+    ]
+    excluded_paths = [
+        "families/alpha/tests/test_runtime.py",
+        "families/alpha/tests/test_unknown.py",
+        "families/alpha/tests/gpu/test_support.py",
+        "families/alpha/test_support.py",
+        "other/tests/test_support.py",
+    ]
+    for name in (*support_paths, *excluded_paths):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# Discovery fixture; not a runtime test.\n", encoding="utf-8")
+    # A directory with the matching basename is not a test file.
+    (tmp_path / "families/empty/tests/test_support.py").mkdir(parents=True)
+    context = RecordingContext(tmp_path, {"TRTMC_CORE_BUILD_DIR": str(tmp_path / "core-build")})
+    runner = UnitTestRunner(context)
+    runner.premerge()
+    python_commands = [command for command, _ in context.calls if command[:3] == ["python", "-m", "pytest"]]
+    assert len(python_commands) == 1
+    command = python_commands[0]
+    assert command[9:11] == sorted(support_paths)
+    assert all(name not in command for name in excluded_paths)
+    assert "families/empty/tests/test_support.py" not in command
+    assert "families" not in command
+    assert command[command.index("-m", 3) + 1] == "not gpu and not trt"
+
+    new_path = tmp_path / "families/new_owner/tests/test_support.py"
+    new_path.parent.mkdir(parents=True)
+    new_path.write_text("# A new family is discovered without editing CI lists.\n", encoding="utf-8")
+    runner.premerge()
+    python_commands = [command for command, _ in context.calls if command[:3] == ["python", "-m", "pytest"]]
+    assert len(python_commands) == 2  # Still exactly one pytest invocation per premerge.
+    assert python_commands[1][9:12] == sorted([*support_paths, str(new_path.relative_to(tmp_path))])
+    assert python_commands[1][python_commands[1].index("-m", 3) + 1] == "not gpu and not trt"
+
+
 def test_docker_ensure_builds_the_current_dockerfile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -811,6 +926,7 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
     wheel = tmp_path / "package.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("tensorrt_model_connect/__init__.py", "")
+        archive.writestr("tensorrt_model_connect/__main__.py", "def main(): pass\n")
         archive.writestr("trtmc_benchmark/__init__.py", "")
         archive.writestr("families/__init__.py", "")
         archive.writestr("tensorrt_model_connect/bin/trtmc", "")
@@ -818,11 +934,14 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
         archive.writestr("tensorrt_model_connect/bin/trtmc_dataset_benchmark", "")
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_core.so", "")
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_runtime.so", "")
+        archive.writestr("tensorrt_model_connect/bin/libtrtmc_c.so", "")
+        archive.writestr("tensorrt_model_connect/bin/libtrtmc_c.so.1", "")
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_backend_trt.so", "")
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_byok_tvm_ffi.so", "")
         archive.writestr(
             "package-0.1.dist-info/entry_points.txt",
-            "[console_scripts]\ntrtmc-bench = trtmc_benchmark.cli:main\n",
+            "[console_scripts]\ntrtmc = tensorrt_model_connect.__main__:main\n"
+            "trtmc-bench = trtmc_benchmark.cli:main\n",
         )
         archive.writestr(
             "package-0.1.dist-info/METADATA",
@@ -832,9 +951,11 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             "Provides-Extra: cutedsl\n"
             "Provides-Extra: test\n",
         )
-        archive.writestr("package-0.1.data/scripts/trtmc", "")
-        archive.writestr("package-0.1.data/scripts/libtrtmc_core.so", "")
-        archive.writestr("package-0.1.data/scripts/libtrtmc_runtime.so", "")
+        for name in ("trtmc.h", "trtmc.hpp"):
+            archive.writestr(f"tensorrt_model_connect/include/trtmc/{name}", "")
+        archive.writestr("tensorrt_model_connect/include/trtmc/runtime/span.h", "")
+        for name in ("trtmcConfig.cmake", "trtmcConfigVersion.cmake", "trtmcTargets.cmake"):
+            archive.writestr(f"tensorrt_model_connect/share/cmake/trtmc/{name}", "")
         for family in family_names:
             archive.writestr(
                 f"families/{family}/model.py",
@@ -843,6 +964,50 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path) -> None:
             archive.writestr(f"tensorrt_model_connect/bin/libtrtmc_model_{family}.so", "")
 
     WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+
+    for missing_name, message in (
+        ("tensorrt_model_connect/bin/libtrtmc_c.so.1", "native package is missing"),
+        ("tensorrt_model_connect/include/trtmc/trtmc.hpp", "public SDK is missing"),
+        ("tensorrt_model_connect/share/cmake/trtmc/trtmcTargets.cmake", "public SDK is missing"),
+        ("tensorrt_model_connect/__main__.py", "console launcher is missing"),
+        ("package-0.1.dist-info/entry_points.txt", "console entrypoints are missing"),
+    ):
+        missing_wheel = tmp_path / "missing.whl"
+        with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(missing_wheel, "w") as output:
+            for entry in source.infolist():
+                if entry.filename != missing_name:
+                    output.writestr(entry, source.read(entry.filename))
+        with pytest.raises(CiError, match=message):
+            WheelArchiveValidator(CiContext(tmp_path, {})).validate([missing_wheel])
+
+    for name, payload, message in (
+        ("package-0.1.data/scripts/trtmc", "native", "must not be duplicated"),
+        ("package-0.1.data/scripts/libtrtmc_c.so.1", "library", "must not be duplicated"),
+        ("package-0.1.dist-info/entry_points.txt",
+         "[console_scripts]\ntrtmc-bench = trtmc_benchmark.cli:main\n",
+         "trtmc console entrypoint is missing"),
+        ("package-0.1.dist-info/entry_points.txt",
+         "[console_scripts]\ntrtmc = other_module:main\n"
+         "trtmc-bench = trtmc_benchmark.cli:main\n", "trtmc console entrypoint is missing"),
+    ):
+        invalid = tmp_path / "invalid-entrypoint.whl"
+        with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(invalid, "w") as output:
+            for entry in source.infolist():
+                if entry.filename != name:
+                    output.writestr(entry, source.read(entry.filename))
+            output.writestr(name, payload)
+        with pytest.raises(CiError, match=message):
+            WheelArchiveValidator(CiContext(tmp_path, {})).validate([invalid])
+
+    typed_header = tmp_path / "core/api/include/trtmc/tasks/image.h"
+    typed_header.parent.mkdir(parents=True)
+    typed_header.write_text("/* typed image API */\n")
+    with pytest.raises(CiError, match="public SDK is missing"):
+        WheelArchiveValidator(CiContext(tmp_path, {})).validate([wheel])
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr(
+            "tensorrt_model_connect/include/trtmc/tasks/image.h", typed_header.read_bytes()
+        )
 
     corrupt = tmp_path / "corrupt.whl"
     with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(corrupt, "w") as output:
@@ -895,6 +1060,7 @@ def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> 
 
     compile_library("libtrtmc_core.so", "void core_symbol(void) {}\n")
     compile_library("libtrtmc_runtime.so", "void runtime_symbol(void) {}\n")
+    compile_library("libtrtmc_c.so.1", "void api_symbol(void) {}\n")
     compile_library("libtrtmc_backend_trt.so", "void backend_symbol(void) {}\n")
     compile_library("libtrtmc_byok_tvm_ffi.so", "void byok_symbol(void) {}\n")
     compile_library("libtrtmc_model_alpha.so", "void alpha_symbol(void) {}\n")
@@ -907,3 +1073,111 @@ def test_native_validation_rejects_unresolved_family_symbols(tmp_path: Path) -> 
     )
     with pytest.raises(CiError, match="undefined symbol: missing_symbol"):
         load_native_libraries(tmp_path, ("alpha", "beta"))
+
+
+def test_sdk_package_component_configuration(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    prefix = tmp_path / "installed"
+    config = prefix / "share/cmake/trtmc"
+    config.mkdir(parents=True)
+    (config / "trtmcTargets.cmake").write_text("add_library(trtmc::c INTERFACE IMPORTED)\n")
+    producer = tmp_path / "producer"
+    producer.mkdir()
+    (producer / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.20)\n"
+        "project(package_config LANGUAGES NONE)\n"
+        "include(CMakePackageConfigHelpers)\n"
+        "configure_package_config_file(\n"
+        f'  "{repository / "cmake/trtmcConfig.cmake.in"}"\n'
+        f'  "{config / "trtmcConfig.cmake"}"\n'
+        "  INSTALL_DESTINATION share/cmake/trtmc)\n"
+    )
+    subprocess.run(
+        ["cmake", "-S", str(producer), "-B", str(tmp_path / "producer-build")],
+        check=True, capture_output=True, text=True,
+    )
+    for component in ("", "sdk", "unknown"):
+        consumer = tmp_path / (component or "default")
+        consumer.mkdir()
+        requested = " COMPONENTS " + component if component else ""
+        (consumer / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(package_consumer LANGUAGES NONE)\n"
+            f"find_package(trtmc CONFIG REQUIRED{requested})\n"
+            "if(NOT TARGET trtmc::c)\n"
+            '  message(FATAL_ERROR "public SDK target missing")\n'
+            "endif()\n"
+        )
+        completed = subprocess.run(
+            ["cmake", "-S", str(consumer), "-B", str(consumer / "build"),
+             f"-DCMAKE_PREFIX_PATH={prefix}", "-DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE"],
+            check=False, capture_output=True, text=True,
+        )
+        if component == "unknown":
+            assert completed.returncode != 0
+        else:
+            assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize(
+    "broken", (None, "header", "cuda_dependency", "library", "cpp_wrapper", "cpp_runtime")
+)
+def test_installed_sdk_builds_plain_c_and_cpp_without_cuda(
+    tmp_path: Path, broken: str | None
+) -> None:
+    prefix = tmp_path / "installed"
+    include = prefix / "include/trtmc"
+    config = prefix / "share/cmake/trtmc"
+    include.mkdir(parents=True)
+    config.mkdir(parents=True)
+    (prefix / "bin").mkdir()
+    repository = Path(__file__).resolve().parents[2]
+    shutil.copytree(repository / "core/api/include", prefix / "include", dirs_exist_ok=True)
+    (include / "runtime").mkdir()
+    shutil.copy2(
+        repository / "core/runtime/include/trtmc/runtime/span.h", include / "runtime/span.h"
+    )
+    if broken == "header":
+        (include / "trtmc.hpp").unlink()
+    elif broken == "cpp_wrapper":
+        (include / "trtmc.hpp").write_text("#include <trtmc/trtmc.h>\n")
+    version = "{0, 0}" if broken == "cpp_runtime" else '{"fixture", 7}'
+    library_source = tmp_path / "api.c"
+    library_source.write_text(
+        "#include <trtmc/trtmc.h>\n"
+        f"static trtmc_string_view version(void) {{ return (trtmc_string_view){version}; }}\n"
+        "trtmc_status trtmc_get_api(uint32_t major, uint32_t minor, const trtmc_core_api_v1 **out) {\n"
+        "    static trtmc_core_api_v1 table = {0};\n"
+        "    table.header.major = 1; table.header.minor = 0;\n"
+        "    table.header.byte_size = sizeof(table); table.runtime_version = version;\n"
+        "    (void)major; (void)minor; *out = &table; return TRTMC_OK;\n"
+        "}\n"
+    )
+    if broken != "library":
+        subprocess.run(
+            [
+                "cc",
+                "-shared",
+                "-fPIC",
+                "-I",
+                prefix / "include",
+                library_source,
+                "-Wl,-soname,libtrtmc_c.so.1",
+                "-o",
+                prefix / "bin/libtrtmc_c.so.1",
+            ],
+            check=True,
+        )
+    (config / "trtmcConfig.cmake").write_text(
+        ("find_package(CUDAToolkit REQUIRED)\n" if broken == "cuda_dependency" else "")
+        + 'get_filename_component(_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)\n'
+        "add_library(trtmc::c SHARED IMPORTED)\n"
+        "set_target_properties(trtmc::c PROPERTIES\n"
+        '  IMPORTED_LOCATION "${_prefix}/bin/libtrtmc_c.so.1"\n'
+        '  INTERFACE_INCLUDE_DIRECTORIES "${_prefix}/include")\n'
+    )
+    if broken:
+        with pytest.raises(CiError, match="installed public SDK consumer failed"):
+            validate_installed_sdk(prefix)
+    else:
+        validate_installed_sdk(prefix)

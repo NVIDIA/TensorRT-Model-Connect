@@ -84,6 +84,19 @@ _OPERATIONS = (
         stage_timings=("prefill_ms", "decode_ms"),
     ),
     OperationSpec(
+        name="translate",
+        rate_metrics=(RateMetric("output_tokens", "output_tokens_per_s"),),
+        stage_timings=("prefill_ms", "decode_ms"),
+    ),
+    OperationSpec(
+        name="denoise",
+        rate_metrics=(RateMetric("latent_elements", "latent_elements_per_s"),),
+    ),
+    OperationSpec(
+        name="decode_logits",
+        rate_metrics=(RateMetric("logit_elements", "logit_elements_per_s"),),
+    ),
+    OperationSpec(
         name="generate_image",
         rate_metrics=(RateMetric("generated_images", "images_per_s"),),
         per_item_latency=PerItemLatencyMetric("generated_images", "seconds_per_image_p50"),
@@ -131,6 +144,15 @@ _OPERATIONS = (
         rate_metrics=(RateMetric("classified_images", "images_per_s"),),
     ),
     OperationSpec(
+        name="detect",
+        rate_metrics=(RateMetric("detected_images", "images_per_s"),
+                      RateMetric("detections", "detections_per_s")),
+    ),
+    OperationSpec(
+        name="predict_structure",
+        rate_metrics=(RateMetric("structures", "structures_per_s"),),
+    ),
+    OperationSpec(
         name="extract_features",
         rate_metrics=(RateMetric("processed_images", "images_per_s"),),
     ),
@@ -142,6 +164,20 @@ _OPERATIONS = (
         ),
     ),
     OperationSpec(
+        name="geometry",
+        rate_metrics=(
+            RateMetric("geometry_images", "images_per_s"),
+            RateMetric("geometry_pixels", "geometry_pixels_per_s"),
+        ),
+    ),
+    OperationSpec(
+        name="regress",
+        rate_metrics=(
+            RateMetric("regression_targets", "targets_per_s"),
+            RateMetric("parameter_elements", "parameter_elements_per_s"),
+        ),
+    ),
+    OperationSpec(
         name="rerank",
         rate_metrics=(RateMetric("documents", "documents_per_s"),),
     ),
@@ -150,6 +186,13 @@ _OPERATIONS = (
         rate_metrics=(
             RateMetric("embedding_vectors", "embedding_vectors_per_s"),
             RateMetric("embedding_elements", "embedding_elements_per_s"),
+        ),
+    ),
+    OperationSpec(
+        name="head_scores",
+        rate_metrics=(
+            RateMetric("head_score_tensors", "head_score_tensors_per_s"),
+            RateMetric("head_score_values", "head_score_values_per_s"),
         ),
     ),
     OperationSpec(
@@ -169,6 +212,31 @@ _OPERATIONS = (
     OperationSpec(
         name="control",
         rate_metrics=(RateMetric("action_steps", "action_steps_per_s"),),
+    ),
+    OperationSpec(
+        name="control_queue",
+        rate_metrics=(RateMetric("action_steps", "action_steps_per_s"),),
+    ),
+    OperationSpec(
+        name="speech_dialogue",
+        rate_metrics=(
+            RateMetric("input_audio_seconds", "input_audio_seconds_per_s"),
+            RateMetric("output_audio_seconds", "audio_seconds_per_s"),
+        ),
+    ),
+    OperationSpec(
+        name="track_masks",
+        rate_metrics=(RateMetric("tracked_frames", "frames_per_s"),
+                      RateMetric("mask_elements", "mask_elements_per_s")),
+    ),
+    OperationSpec(
+        name="refine_pose",
+        rate_metrics=(RateMetric("refined_hypotheses", "hypotheses_per_s"),),
+        stage_timings=("refinement_ms", "scoring_ms"),
+    ),
+    OperationSpec(
+        name="track_pose",
+        rate_metrics=(RateMetric("pose_updates", "pose_updates_per_s"),),
     ),
     OperationSpec(
         name="transcribe",

@@ -84,7 +84,22 @@ The checked-in [GB300 qualification record](qualification/gb300-trt11.1-fp32.jso
 
 ## Reset, failures, and limits
 
-Call `IRobotControl::reset()` at every environment or episode reset. Reset discards the queued chunk and resets the TensorRT execution context; the next `act()` call starts a new chunk. Missing observations, wrong shapes, non-finite state values, and image samples outside `[0,1]` fail closed with an input error. Non-finite actions or actions outside the recorded training extrema are surfaced to the caller and are not clipped.
+For SDK-enabled bundles, this executable uses the stateless
+`ImageStateToActionChunk` C++ SDK over the C ABI: one inference, then playback
+of the complete owned chunk. It does not
+consume the family's action queue. For a stateful application, obtain
+`ImageStateActionQueue`, create a session, and call `session.reset()` at every
+environment or episode reset; the next `session.act()` starts a new family-owned
+chunk. Existing integrations keep `IRobotControl::reset()` until that family
+migrates. Missing observations, wrong shapes, non-finite state values, and image
+samples outside `[0,1]` fail closed. Out-of-range actions are surfaced and never clipped.
+
+SDK bundles can omit `--runtime-root` when their family/backend DSOs are beside
+the C SDK library. Existing `robot_control` bundles explicitly select the
+existing application path and still require that argument. SDK failure never
+retries the existing path. The recorded-data shape and output requirements are
+identical on both paths; no numerical or hardware qualification has been added
+by this SDK wiring change.
 
 This qualification covers one simulation-trained ACT checkpoint, one top camera, the exact ALOHA joint ordering above, batch size one, FP32, recorded replay, and `AlohaTransferCube-v0`. It does not cover other sensors, camera calibration, robot geometries, checkpoints, mixed precision, temporal ensembling, dropped observations, networked control, actuator communication, collision avoidance, force/torque limits, emergency stopping, or recovery after physical faults.
 

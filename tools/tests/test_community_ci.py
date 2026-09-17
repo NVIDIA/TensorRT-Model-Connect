@@ -316,8 +316,8 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization() -> None
     }
     assert jobs["provision-and-test"]["permissions"] == {"contents": "read"}
     assert jobs["provision-and-test"]["concurrency"] == {
-        "group": "trtmc-community-gpu",
-        "cancel-in-progress": False,
+        "group": "trtmc-community-gpu-${{ needs.gpu-authorize.outputs.pr_number }}",
+        "cancel-in-progress": True,
     }
     assert jobs["publish"]["needs"] == [
         "authorize",

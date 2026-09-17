@@ -17,11 +17,17 @@
 core/**
 !core/runtime/
 !core/runtime/**
+!core/api/
+!core/api/include/
+!core/api/include/**
+!core/api/runtime/
+!core/api/runtime/**
 
 !apps/
 apps/**
 !apps/cli/
 !apps/cli/**
+!apps/task_runtime.h
 
 !families/
 families/**
@@ -36,6 +42,8 @@ third_party/**
 
 !examples/
 examples/**
+!examples/task_helpers/
+!examples/task_helpers/task_runtime.h
 !examples/models/
 !examples/models/nemotron_voicechat/
 !examples/models/nemotron_voicechat/full_duplex/

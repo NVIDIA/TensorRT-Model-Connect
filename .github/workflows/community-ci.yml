@@ -536,8 +536,11 @@ jobs:
     # separate cleanup job remains eligible if this job times out.
     timeout-minutes: 60
     concurrency:
-      group: trtmc-community-gpu
-      cancel-in-progress: false
+      # Scoped per PR so independent pull requests each lease their own
+      # Brev GPU instance and run in parallel; a new push on the same PR
+      # still cancels that PR's own stale, already-queued or in-flight run.
+      group: trtmc-community-gpu-${{ needs.gpu-authorize.outputs.pr_number }}
+      cancel-in-progress: true
     permissions:
       contents: read
     outputs:

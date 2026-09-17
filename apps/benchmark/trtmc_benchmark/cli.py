@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use public Task request JSON or JSONL instead of the manifest testcase input",
     )
     run.add_argument("--operation")
+    run.add_argument("--task", dest="selected_task", help="Select a Task bound by the model")
     run.add_argument("--set", dest="sets", action="append", default=[], metavar="FIELD=VALUE")
     run.add_argument("--sweep", action="append", default=[], metavar="FIELD=V1,V2")
     run.add_argument("--warmup", type=int)
@@ -245,6 +246,9 @@ def _resolve_cases(
             matched_names.add(display)
             testcase = case_spec.get("testcase")
             operation = case_spec.get("operation", entry.get("operation", arguments.operation))
+            selected_task = case_spec.get("selected_task", entry.get("selected_task", arguments.selected_task))
+            if selected_task is None and ("selected_task" in case_spec or "selected_task" in entry):
+                raise BenchmarkError("selected_task must be a nonempty Task ID")
             if operation is not None and not isinstance(operation, str):
                 raise BenchmarkError("operation must be a string")
             overrides = {
@@ -258,8 +262,11 @@ def _resolve_cases(
                 bundle,
                 case_name=str(testcase) if testcase is not None else None,
                 operation=operation,
+                selected_task=selected_task,
                 overrides=overrides,
-            ).with_values(name=display, runtime_root=runtime_root)
+            ).with_values(
+                name=display, runtime_root=runtime_root, bundle_is_explicit=explicit is not None
+            )
             sweeps = _merge_sweeps(case_spec.get("sweep", {}), cli_sweeps)
             swept = expand_sweeps(base, sweeps)
             if not data_requests:
