@@ -20,6 +20,7 @@ from tools.benchmark_qualification.references import hf_text_generation
 from tools.benchmark_qualification.runtime import (
     RuntimeContext,
     prepare_bundle,
+    reference_python,
     run_command,
     write_model_descriptor,
 )
@@ -273,6 +274,51 @@ def test_internal_subprocesses_can_import_repository_packages(tmp_path: Path) ->
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_family_reference_environment_inherits_parent_venv_packages(
+    tmp_path: Path, monkeypatch
+) -> None:
+    case = select(discover(REPOSITORY), ["internlm2-1.8b"])[0]
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=False,
+        verbose=False,
+    )
+    parent_packages = tmp_path / "parent-venv/site-packages"
+    parent_packages.mkdir(parents=True)
+
+    def complete(command, *_args, **_kwargs):
+        if command[1:3] == ["-m", "venv"]:
+            environment = Path(command[-1])
+            (environment / "bin").mkdir(parents=True)
+            (environment / "bin/python").write_text("", encoding="utf-8")
+            child_packages = environment / (
+                f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+            )
+            child_packages.mkdir(parents=True)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("tools.benchmark_qualification.runtime.run_command", complete)
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(parent_packages)])
+
+    python = reference_python(case, context)
+
+    inherited = python.parents[1] / (
+        f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/"
+        "trtmc-parent-environment.pth"
+    )
+    assert inherited.read_text(encoding="utf-8") == f"{parent_packages.resolve()}\n"
 
 
 def test_bundle_preparation_uses_the_selected_runtime(

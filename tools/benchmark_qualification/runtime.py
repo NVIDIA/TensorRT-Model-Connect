@@ -9,6 +9,7 @@ import hashlib
 import html
 import json
 import os
+import site
 import shutil
 import subprocess
 import sys
@@ -177,6 +178,7 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
         and stamp.is_file()
         and stamp.read_text(encoding="utf-8").strip() == expected
     ):
+        _inherit_parent_site_packages(environment)
         return python
     environment.parent.mkdir(parents=True, exist_ok=True)
     setup_root = context.artifacts / "environment-setup" / case.family
@@ -190,6 +192,7 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     )
     if created.returncode != 0 or not python.is_file():
         raise QualificationError(f"cannot create reference environment; see {setup_root}")
+    _inherit_parent_site_packages(environment)
     installed = run_command(
         [
             str(python),
@@ -209,6 +212,26 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
         raise QualificationError(f"cannot install reference requirements; see {setup_root}")
     stamp.write_text(expected + "\n", encoding="utf-8")
     return python
+
+
+def _inherit_parent_site_packages(environment: Path) -> None:
+    child_packages = sorted(environment.glob("lib/python*/site-packages"))
+    if len(child_packages) != 1:
+        raise QualificationError(
+            f"reference environment has no unambiguous site-packages directory: {environment}"
+        )
+    parent_packages = sorted(
+        {
+            str(Path(value).resolve())
+            for value in site.getsitepackages()
+            if Path(value).is_dir()
+        }
+    )
+    if not parent_packages or any("\n" in value for value in parent_packages):
+        raise QualificationError("cannot resolve parent Python site-packages")
+    (child_packages[0] / "trtmc-parent-environment.pth").write_text(
+        "\n".join(parent_packages) + "\n", encoding="utf-8"
+    )
 
 
 def run_command(
