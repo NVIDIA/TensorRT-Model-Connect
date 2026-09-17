@@ -23,6 +23,68 @@ from .config import (
 )
 
 
+def _dense_modality_change(
+    network, delta_abs, previous_abs, reference, *, trailing_reference=None, target_mask=None
+):
+    # Magnitudes come from the existing BF16 subtraction, then FP32 cast.
+    # Reuse them so the global metric and modality guards share rounding.
+    current = op.slice_rows_like_from_end(
+        network, delta_abs, reference, trailing_reference=trailing_reference
+    )
+    previous = op.slice_rows_like_from_end(
+        network, previous_abs, reference, trailing_reference=trailing_reference
+    )
+    if target_mask is not None:
+        zero = op.constant(network, np.zeros((1, 1), dtype=np.float32))
+        current = network.add_select(target_mask, current, zero).get_output(0)
+        previous = network.add_select(target_mask, previous, zero).get_output(0)
+    numerator = network.add_reduce(current, trt.ReduceOperation.SUM, 3, True).get_output(0)
+    denominator = network.add_reduce(previous, trt.ReduceOperation.SUM, 3, True).get_output(0)
+    epsilon = op.constant(network, np.full((1, 1), 1.0e-8, dtype=np.float32))
+    denominator = network.add_elementwise(
+        denominator, epsilon, trt.ElementWiseOperation.MAX
+    ).get_output(0)
+    return network.add_elementwise(
+        numerator, denominator, trt.ElementWiseOperation.DIV
+    ).get_output(0)
+
+
+def _guard_dense_cache_metric(
+    network, global_metric, delta_abs, previous_abs, video, audio, adaln_indices
+):
+    # Partition before masking: FL2VA vision/text tokens can also use index 0.
+    # Only video rows with target clock/modality index 0 enter this guard;
+    # condition-video rows use index 6 and remain in the unchanged global gate.
+    indices = network.add_shuffle(adaln_indices)
+    indices.reshape_dims = (-1, 1)
+    video_indices = op.slice_rows_like_from_end(network, indices.get_output(0), video)
+    target = network.add_elementwise(
+        video_indices,
+        op.constant(network, np.zeros((1, 1), dtype=np.int32), dtype=np.int32),
+        trt.ElementWiseOperation.EQUAL,
+    ).get_output(0)
+    video_change = _dense_modality_change(
+        network, delta_abs, previous_abs, video, target_mask=target
+    )
+    audio_change = _dense_modality_change(
+        network, delta_abs, previous_abs, audio, trailing_reference=video
+    )
+    metric = global_metric
+    invalid = None
+    for change in (global_metric, video_change, audio_change):
+        metric = network.add_elementwise(metric, change, trt.ElementWiseOperation.MAX).get_output(0)
+        # MAX is not required to preserve NaNs. Do not let any operand hide an
+        # invalid gate; the existing runtime treats infinity as a full refresh.
+        is_nan = network.add_unary(change, trt.UnaryOperation.ISNAN).get_output(0)
+        is_inf = network.add_unary(change, trt.UnaryOperation.ISINF).get_output(0)
+        bad = network.add_elementwise(is_nan, is_inf, trt.ElementWiseOperation.OR).get_output(0)
+        invalid = bad if invalid is None else network.add_elementwise(
+            invalid, bad, trt.ElementWiseOperation.OR
+        ).get_output(0)
+    infinity = op.constant(network, np.full((1, 1), np.inf, dtype=np.float32))
+    return network.add_select(invalid, infinity, metric).get_output(0)
+
+
 def _refiner_checkpoint_keys(profile: MiniMaxH3Config) -> tuple[str, ...]:
     names: list[str] = []
     for index in range(profile.num_refiner_layers):
@@ -639,6 +701,9 @@ def build_dit_head_engine(
     metric = network.add_elementwise(
         numerator, denominator, trt.ElementWiseOperation.DIV
     ).get_output(0)
+    metric = _guard_dense_cache_metric(
+        network, metric, delta_abs, previous_abs, video, audio, adaln_indices
+    )
     metric_shape = network.add_shuffle(metric)
     metric_shape.reshape_dims = (1,)
     cache_metric = metric_shape.get_output(0)
