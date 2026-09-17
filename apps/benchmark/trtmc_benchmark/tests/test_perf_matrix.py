@@ -132,15 +132,15 @@ def test_translation_languages_use_tokenizer_controls_and_preserve_absence() -> 
             return {10: "eng_Latn", 11: "fra_Latn"}[token]
 
     tokenizer = Tokenizer()
-    assert hf_transformers._translation_controls(tokenizer, {}) == {}
+    assert hf_transformers._translation_controls(tokenizer, {}) == ({}, None)
     assert tokenizer.src_lang == "default"
     assert hf_transformers._translation_controls(
         tokenizer, {"source_language": "eng_Latn", "target_language": "fra_Latn"}
-    ) == {"forced_bos_token_id": 11}
+    ) == ({"forced_bos_token_id": 11}, None)
     assert tokenizer.src_lang == "eng_Latn"
     assert hf_transformers._translation_controls(
         tokenizer, {"source_language_token_id": 10, "forced_bos_token_id": 0}
-    ) == {"forced_bos_token_id": 0}
+    ) == ({"forced_bos_token_id": 0}, None)
     with pytest.raises(ValueError, match="disagrees"):
         hf_transformers._translation_controls(
             tokenizer, {"target_language": "fra_Latn", "forced_bos_token_id": 10}
@@ -152,7 +152,7 @@ def test_translation_languages_use_tokenizer_controls_and_preserve_absence() -> 
         hf_transformers._translation_controls(
             fixed, {"source_language": "en", "target_language": "ru"}
         )
-        == {}
+        == ({}, None)
     )
     with pytest.raises(ValueError, match="target language"):
         hf_transformers._translation_controls(fixed, {"target_language": "de"})

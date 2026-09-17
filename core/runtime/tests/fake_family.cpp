@@ -42,6 +42,20 @@ class FakeForecast final : public trtmc::ITimeSeriesForecast {
     std::uint64_t kv_cache_size_bytes_;
 };
 
+class FakeEncoding final : public trtmc::IEncoding {
+  public:
+    trtmc::EmbeddingResult encode(const std::string& text) override {
+        return {{static_cast<float>(text.size()), 1.0F, 2.0F, 3.0F}, 2};
+    }
+};
+
+class FakeEmbedding final : public trtmc::IEmbedding {
+  public:
+    trtmc::EmbeddingResult embed(const std::string& text) override {
+        return {{static_cast<float>(text.size()), 4.0F}, 2};
+    }
+};
+
 } // namespace
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
@@ -55,5 +69,11 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto plan = context.reader.read_section("engine.plan");
     if (std::string(plan.begin(), plan.end()) != "PLAN")
         throw std::runtime_error("unexpected engine plan");
-    return new FakeForecast(context.backend, context.kv_cache_size_bytes);
+    if (context.reader.info().task == trtmc::IEncoding::kTask)
+        return new FakeEncoding();
+    if (context.reader.info().task == trtmc::IEmbedding::kTask)
+        return new FakeEmbedding();
+    if (context.reader.info().task == trtmc::ITimeSeriesForecast::kTask)
+        return new FakeForecast(context.backend, context.kv_cache_size_bytes);
+    throw std::runtime_error("unsupported fake task");
 }

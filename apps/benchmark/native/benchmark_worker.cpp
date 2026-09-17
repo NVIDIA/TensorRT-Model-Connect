@@ -613,10 +613,12 @@ Json run_embedding(trtmc::ITask& task, const Json& request, const Timing& timing
         auto& interface = require_interface<trtmc::IEncoding>(task, "IEncoding");
         invoke = [&interface, prompt]() { return interface.encode(prompt); };
     }
-    return measure(timing, invoke, [](const trtmc::EmbeddingResult& result) {
+    return measure(timing, invoke, [pooled](const trtmc::EmbeddingResult& result) {
         return Json{{"embedding_vectors", 1},
                     {"embedding_elements", result.data.size()},
-                    {"dim", result.dim}};
+                    {"dim", result.dim},
+                    {"values", result.data},
+                    {"feature_kind", pooled ? "pooled" : "token"}};
     });
 }
 

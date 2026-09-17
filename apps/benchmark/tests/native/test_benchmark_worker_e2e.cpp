@@ -11,6 +11,7 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -129,6 +130,34 @@ int main(int argc, char** argv) {
         check(summary.at("windows") == 1, "summary window returned");
         check(summary.at("forecast_elements") == 3, "summary values returned");
         check(summary.at("shape") == Json::array({1, 3}), "summary shape returned");
+
+        for (const auto& [task, operation, expected_values, feature_kind] : {
+                 std::tuple{"encoding", "encode", Json::array({5.0, 1.0, 2.0, 3.0}), "token"},
+                 std::tuple{"embedding", "embed", Json::array({5.0, 4.0}), "pooled"},
+             }) {
+            const auto vector_bundle =
+                runtime_root / (std::string("benchmark_fake_") + task + ".bundle");
+            write_bundle(vector_bundle, task);
+            Json vector_request = request;
+            vector_request["case_name"] = std::string("fake-") + task;
+            vector_request["bundle"] = vector_bundle.string();
+            vector_request["operation"] = operation;
+            vector_request["request"] = {{"prompt", "Hello"}};
+            {
+                std::ofstream request_file(request_path);
+                request_file << vector_request << '\n';
+            }
+            check(std::system(command.c_str()) == 0, "encoder worker process completed");
+            std::ifstream vector_output_file(output_path);
+            Json vector_result;
+            vector_output_file >> vector_result;
+            const auto& vector_summary = vector_result.at("output_summary");
+            check(vector_summary.at("values") == expected_values,
+                  "legacy encoder output retains values for Accuracy comparison");
+            check(vector_summary.at("feature_kind") == feature_kind,
+                  "legacy encoder output identifies token or pooled semantics");
+            std::filesystem::remove(vector_bundle);
+        }
 
         Json sdk = request;
         sdk["runtime_root"] = argv[3];
