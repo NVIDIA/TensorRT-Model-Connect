@@ -3,7 +3,7 @@
   "hf_id": "timm/resnet50.a1_in1k",
   "bundle": "resnet50-a1-in1k.bundle",
   "family": "timm_resnet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

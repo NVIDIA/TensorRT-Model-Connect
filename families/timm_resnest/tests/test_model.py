@@ -137,3 +137,67 @@ def test_read_config_rejects_another_family(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text(json.dumps({"architecture": "resnet50"}), encoding="utf-8")
     with pytest.raises(ValueError, match="unsupported timm ResNeSt model identity"):
         model._read_config(tmp_path)
+
+
+@pytest.mark.parametrize("metadata", [
+    {},
+    {"vocabulary_id": "test:five-classes",
+     "label_names": ["first", "second", "third", "fourth", "fifth"]},
+])
+def test_build_exports_semantic_task_and_complete_class_metadata(tmp_path: Path, monkeypatch, metadata):
+    from tensorrt_model_connect.build import BuildRequest
+    _checkpoint(tmp_path)
+    monkeypatch.setattr(model, "_build_engine",
+                        lambda raw, *_: (b"plan", model._preprocess_config(raw)))
+    build_family = model.build
+    config_path = tmp_path / "config.json"
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw.update(metadata)
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    sections = {}
+
+    class Writer:
+        def set_header(self, **header):
+            sections["header"] = header
+
+        def add_bytes(self, name, value):
+            sections[name] = value
+
+        def add_json(self, name, value):
+            sections[name] = value
+
+    request = BuildRequest(model_dir=tmp_path, output_path=tmp_path / "unused.bundle",
+                           family="timm_resnest", task="image_to_class_scores", precision="fp32")
+    build_family(request, Writer())
+    assert sections["header"]["task"] == "image_to_class_scores"
+    assert sections["engine.plan"] == b"plan"
+    assert sections["runtime.json"]["num_classes"] == 5
+    assert sections["runtime.json"]["vocabulary_id"] == metadata.get("vocabulary_id", "")
+    assert sections["runtime.json"]["labels"] == metadata.get("label_names", [])
+
+
+@pytest.mark.parametrize("labels", [["only one"], ["one", "two", "", "four", "five"], 5])
+def test_build_rejects_incomplete_class_labels(tmp_path: Path, monkeypatch, labels):
+    from tensorrt_model_connect.build import BuildRequest
+    _checkpoint(tmp_path)
+    monkeypatch.setattr(model, "_build_engine",
+                        lambda raw, *_: (b"plan", model._preprocess_config(raw)))
+    build_family = model.build
+    config_path = tmp_path / "config.json"
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["label_names"] = labels
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    request = BuildRequest(model_dir=tmp_path, output_path=tmp_path / "unused.bundle",
+                           family="timm_resnest", task="image_to_class_scores", precision="fp32")
+    with pytest.raises(ValueError, match="label_names must name every class"):
+        build_family(request, object())
+
+
+def test_support_exposes_only_semantic_task():
+    from families.timm_resnest.support import describe
+    from tensorrt_model_connect.model_support import ModelMetadata
+
+    support = describe(ModelMetadata(config={"model_type": "timm_resnest"}, model_index={}))
+    assert support is not None
+    assert support.tasks == ("image_to_class_scores",)
+    assert support.default_task == "image_to_class_scores"

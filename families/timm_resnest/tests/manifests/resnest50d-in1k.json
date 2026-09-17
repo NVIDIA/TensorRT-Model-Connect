@@ -4,7 +4,7 @@
   "hf_revision": "2239b0d822126dee3bc7a5357514de35b8f42092",
   "bundle": "resnest50d-in1k.bundle",
   "family": "timm_resnest",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

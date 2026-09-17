@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-suite/v2
+name: timm-resnet-performance
+entries:
+  - id: timm_resnet.classify
+    family: timm_resnet
+    operation: classify
+    model: resnet50-a1-in1k
+    workload:
+      testcase: resnet50-a1-in1k
+    measurement:
+      warmup: 3
+      iterations: 10
+    equivalence_margin_percent: 5.0
+    baseline:
+      runner: task-reference
+      script: tests/performance_reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+      asset_loading_included: false

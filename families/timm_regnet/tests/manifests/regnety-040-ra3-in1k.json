@@ -4,7 +4,7 @@
   "hf_revision": "a1875159c7b04f3b3189af804642eebba1e2c118",
   "bundle": "regnety-040-ra3-in1k.bundle",
   "family": "timm_regnet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

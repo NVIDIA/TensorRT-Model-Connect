@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-suite/v2
+name: timm-regnet-performance
+entries:
+  - id: timm_regnet.classify
+    family: timm_regnet
+    operation: classify
+    model: regnety-040-ra3-in1k
+    workload:
+      testcase: regnety-040-ra3-in1k
+    measurement:
+      warmup: 3
+      iterations: 10
+    equivalence_margin_percent: 5.0
+    baseline:
+      runner: task-reference
+      script: tests/performance_reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+      asset_loading_included: false

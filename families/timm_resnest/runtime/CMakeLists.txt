@@ -35,6 +35,41 @@ install(TARGETS trtmc_model_timm_resnest
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_timm_resnest_task_contract
+    ${PROJECT_SOURCE_DIR}/families/timm_resnest/tests/cpp/test_task_contract.cpp
+  )
+  target_include_directories(test_timm_resnest_task_contract PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_timm_resnest_task_contract SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_timm_resnest_task_contract PRIVATE
+    trtmc_model_timm_resnest trtmc_core ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_timm_resnest_task_contract PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+  )
+  add_test(NAME timm_resnest_task_contract COMMAND test_timm_resnest_task_contract)
+  set_tests_properties(timm_resnest_task_contract PROPERTIES LABELS "cpu")
+
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_timm_resnest_sdk_${_language}
+      ${PROJECT_SOURCE_DIR}/families/timm_resnest/tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_timm_resnest_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_timm_resnest_sdk_${_language} PRIVATE
+      -Wall -Wextra -Wpedantic -Werror
+    )
+    set_target_properties(test_timm_resnest_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+  add_dependencies(test_timm_resnest_task_contract
+    test_timm_resnest_sdk_c test_timm_resnest_sdk_cpp
+  )
+
   add_executable(test_timm_resnest_image_preprocess
     ${PROJECT_SOURCE_DIR}/families/timm_resnest/tests/cpp/test_image_preprocess_seam.cpp
   )

@@ -22,8 +22,7 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     return bundle.read_section(name);
 }
 
-TimmResnetPreprocessConfig parse_config(const std::vector<char>& data) {
-    const auto json = nlohmann::json::parse(data.begin(), data.end());
+TimmResnetPreprocessConfig parse_config(const nlohmann::json& json) {
     TimmResnetPreprocessConfig config;
     config.input_image_h = json.at("input_image_h").get<std::int32_t>();
     config.input_image_w = json.at("input_image_w").get<std::int32_t>();
@@ -55,7 +54,11 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::invalid_argument("timm_resnet does not support --kv-cache-size");
     const auto& config_data = trtmc::timm_resnet::require_section(context.reader, "runtime.json");
     const auto& plan = trtmc::timm_resnet::require_section(context.reader, "engine.plan");
-    auto config = trtmc::timm_resnet::parse_config(config_data);
+    const auto metadata = nlohmann::json::parse(config_data.begin(), config_data.end());
+    auto config = trtmc::timm_resnet::parse_config(metadata);
     auto engine = trtmc::timm_resnet::load_engine(context.backend, plan);
-    return new trtmc::TimmResnetImageClassificationPipeline(std::move(engine), std::move(config));
+    return new trtmc::TimmResnetImageClassificationPipeline(
+        std::move(engine), std::move(config), metadata.at("num_classes").get<std::int32_t>(),
+        metadata.at("vocabulary_id").get<std::string>(),
+        metadata.at("labels").get<std::vector<std::string>>());
 }
