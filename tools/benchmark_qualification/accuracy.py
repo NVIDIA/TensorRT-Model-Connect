@@ -77,6 +77,13 @@ def _mmlu(
         "generation": dict(candidate_request),
         "samples": selected,
     }
+    experts_implementation = reference.get("experts_implementation")
+    if experts_implementation is not None:
+        if not isinstance(experts_implementation, str) or not experts_implementation:
+            raise QualificationError(
+                "accuracy.reference.experts_implementation must be a non-empty string"
+            )
+        reference_request["experts_implementation"] = experts_implementation
     request_path = output / "reference-request.json"
     reference_path = output / "reference.json"
     _json(request_path, reference_request)
