@@ -61,8 +61,14 @@ def test_opt_uses_validated_profile_and_pre_refactor_performance_length() -> Non
 
 def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> None:
     expected = {
+        "deepseek-v2-lite": 10,
+        "deepseek-v2-tiny": 10,
         "falcon3-1b": 20,
+        "glm-4-9b": 20,
         "granite-3.1-2b": 20,
+        "minitron-4b-depth": 20,
+        "minitron-4b-width": 20,
+        "nemotron-hindi-4b": 20,
         "olmo2-1b": 8,
         "stablelm2-1.6b": 22,
     }
@@ -75,6 +81,11 @@ def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> N
 
     stablelm = select(discover(REPOSITORY), ["stablelm2-1.6b"])[0]
     assert stablelm.candidate["build"]["fp32_layers"] == [23]
+    minitron_width = select(discover(REPOSITORY), ["minitron-4b-width"])[0]
+    assert minitron_width.candidate["build"] == {
+        "max_sequence_length": 131072,
+        "dynamic_kv_cache": True,
+    }
 
 
 def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
