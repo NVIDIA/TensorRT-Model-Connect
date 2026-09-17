@@ -11,6 +11,7 @@ model ID/local snapshot
   -> choose family default task or validate --task
   -> import the selected families.<family>.model
   -> call build(BuildRequest, BundleWriter)
+     or the explicitly requested family build_with_inputs hook
   -> atomically publish format-1 bundle
 ```
 
@@ -33,12 +34,20 @@ sizes, family-owned quantization selection, FP32 layer overrides, direct
 dynamic-KV opt-in, and optional graph transform. Each family must implement or
 explicitly reject every non-default request it receives.
 
+Optional `BuildExecutionInputs` travel separately from `BuildRequest`. Core
+checks descriptor types, unique roles and existing local directories; only
+the selected family interprets variant names and companion compatibility.
+See the [Python Build API](../api/python-builder.md#optional-execution-inputs).
+
 ## Family build
 
 `families/<family>/model.py` exposes a plain `build(request, writer)` function.
 It reads model config and weights, constructs the TensorRT network and engines,
 and writes family-owned named sections. Builder inheritance and shared model
-topology helpers are forbidden.
+topology helpers are forbidden. A family may instead delegate a complete
+network to an installed optimized runtime through a family-owned adapter.
+Model-specific admission, builder mapping, runtime orchestration and validation
+remain in that family; shared dependency provisioning contains no model policy.
 
 The graph-transform callback, when present, receives the live TensorRT network
 immediately before serialization. This is the build-time half of the explicit
