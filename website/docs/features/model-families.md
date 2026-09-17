@@ -100,3 +100,14 @@ by design so a team can implement, validate, change, and revert one family
 without modifying another. Shared code is limited to model-agnostic contracts
 and mechanics described in the
 [Architecture](../architecture/ai-native-horizontal-scaling.md).
+
+### Optional Qwen3.5 Edge execution
+
+The Qwen3.5 family maps the recorded original-source dense 0.8B/2B/4B/9B
+configurations (Instruct and Base) and explicit 4B/9B DFlash pairs to the pinned
+Edge-LLM 0.10.1 SDK on native x86 SM80, FP16, batch one. Historical local
+build/public/direct/HF receipts are documented separately from current-head
+checks. Qwen3 or older, MoE, 27B, quantized sources, and other platforms are not
+qualified by this route. Existing quality gates are unchanged.
+See the [family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_5/EDGE_LLM.md)
+for exact revisions, paired execution, and replay gaps.
