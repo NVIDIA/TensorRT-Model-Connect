@@ -179,6 +179,11 @@ class UnitTestRunner:
                     "test_voicechat_full_duplex_source.py"
                 ),
                 "tools/tests",
+                *(
+                    str(path.relative_to(self.context.repository))
+                    for path in sorted(self.context.repository.glob("families/*/tests/test_support.py"))
+                    if path.is_file()
+                ),
                 "-q",
                 "-x",
                 "-m",

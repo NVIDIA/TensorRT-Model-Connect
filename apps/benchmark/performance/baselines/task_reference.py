@@ -11,6 +11,7 @@ import atexit
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import importlib
 import math
 import os
 from pathlib import Path
@@ -34,6 +35,7 @@ for source_root in (
         sys.path.insert(0, str(source_root))
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract  # noqa: E402
+from apps.benchmark.performance.baselines.hf_transformers import _batch_prompt, flatten_config  # noqa: E402
 
 SYSTEM_PROMPT_QWEN3_OMNI = (
     "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
@@ -57,6 +59,12 @@ MAGPIE_SPEAKER_ENCODER_FILENAME = "pytorch_model.bin"
 MAGPIE_SPEAKER_ENCODER_URL = (
     "https://huggingface.co/Edresson/Speaker_Encoder_H_ASP/resolve/main/pytorch_model.bin"
 )
+# The official offline example default, matching the current native profile.
+VOICECHAT_SYSTEM_PROMPT = (
+    "You are an AI voice assistant developed by NVIDIA. Your name is NVIDIA Voice Chat. "
+    "Answer in a spoken, conversational style rather than a written one. Do not repeat "
+    "the same sentence over and over again. Start the conversation by greeting the user."
+)
 ADAPTERS = (
     "hf-diffusers",
     "hf-qwen3-omni",
@@ -68,23 +76,27 @@ ADAPTERS = (
     "hf-transformers-vlm",
     "nemo-asr",
     "nemo-tts",
+    "nemo-voicechat",
     "pytorch-lerobot-act",
     "pytorch-personaplex",
     "pytorch-timeseries",
     "upstream-elf",
     "upstream-fast-foundation-stereo",
     "upstream-lance",
+    "upstream-moge",
     "upstream-sana-wm",
 )
 PYTORCH_ADAPTERS = {
     "nemo-asr",
     "nemo-tts",
+    "nemo-voicechat",
     "pytorch-lerobot-act",
     "pytorch-personaplex",
     "pytorch-timeseries",
     "upstream-elf",
     "upstream-fast-foundation-stereo",
     "upstream-lance",
+    "upstream-moge",
     "upstream-sana-wm",
 }
 
@@ -108,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True)
     parser.add_argument("--revision")
     parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--selected-task", help="Semantic Task selected independently of bundle identity")
     parser.add_argument("--request-json", required=True)
     parser.add_argument("--adapter-options-json", default="{}")
     parser.add_argument("--timing-contract-json", default="{}")
@@ -119,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup", required=True, type=int)
     parser.add_argument("--iterations", required=True, type=int)
     parser.add_argument("--case-name", required=True)
+    parser.add_argument("--testcase-name", help="Selected manifest testcase, not the performance entry ID")
     parser.add_argument("--output", required=True, type=Path)
     return parser
 
@@ -131,6 +145,15 @@ def _json_object(raw: str, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must contain an object")
     return value
+
+
+def _selected_task(arguments: argparse.Namespace) -> str:
+    selected = getattr(arguments, "selected_task", None)
+    if selected is None:
+        return json.loads(arguments.manifest.read_text(encoding="utf-8"))["task"]
+    if not isinstance(selected, str) or not selected or selected != selected.strip():
+        raise ValueError("selected_task must be a nonempty Task ID without surrounding whitespace")
+    return selected
 
 
 def _reference_checkout(checkout: str, *, repository: str) -> str:
@@ -259,6 +282,95 @@ def _tensor_summary(value: Any) -> dict[str, Any]:
         "shape": shape,
         "element_count": int(value.numel()),
         "finite": bool(value.isfinite().all().item()),
+    }
+
+
+def _forecast_summary(
+    value: Any, task: str, quantile_levels: Sequence[float] = ()
+) -> dict[str, Any]:
+    summary = _tensor_summary(value)
+    if task not in {"series_to_point_forecast", "series_to_quantile_forecast"}:
+        return summary
+    shape = summary["shape"]
+    if len(shape) not in {2, 3} or shape[0] != 1:
+        raise ValueError("forecast reference requires an explicit one-series batch axis")
+    if task == "series_to_point_forecast":
+        horizon, channels = shape[1], shape[2] if len(shape) == 3 else 1
+        summary.update(shape=[horizon, channels], axes=["horizon", "channel"])
+    else:
+        if len(shape) != 3 or len(quantile_levels) != shape[1]:
+            raise ValueError(
+                "quantile forecast reference requires exact checkpoint quantile levels"
+            )
+        horizon = shape[2]
+        summary.update(
+            shape=[shape[1], horizon, 1],
+            axes=["quantile", "horizon", "channel"],
+            quantile_levels=list(quantile_levels),
+        )
+    summary.update(
+        forecast_elements=summary["element_count"], horizon_steps=list(range(1, horizon + 1))
+    )
+    return summary
+
+
+def _regression_values_summary(value: Any) -> dict[str, Any]:
+    summary = _tensor_summary(value)
+    shape = summary["shape"]
+    if len(shape) != 2 or shape[0] != 1 or shape[1] <= 0:
+        raise ValueError("deterministic regression requires one batch with a nonempty target axis")
+    if not summary["finite"]:
+        raise ValueError("deterministic regression target values must be finite")
+    return {"kind": "regression_values", "target_count": shape[1],
+            "regression_targets": shape[1], "parameter_elements": 0,
+            "values": value[0].detach().float().cpu().tolist(), "axes": ["target"],
+            "target_names": [], "target_units": []}
+
+
+def _regression_summary(
+    output: Any, distribution: str, parameter_names: Sequence[str]
+) -> dict[str, Any]:
+    if distribution not in {"normal", "student_t", "negative_binomial"}:
+        raise ValueError("regression reference requires a declared probability distribution")
+    if not isinstance(output, (tuple, list)) or len(output) != len(parameter_names) or not output:
+        raise ValueError("regression reference parameters do not match the declared distribution")
+    # Transformers names distribution parameters loc/df. The public Task
+    # contract names them location/degrees_of_freedom; never infer tuple order.
+    aliases = {"loc": "location", "df": "degrees_of_freedom"}
+    names = [aliases.get(name, name) for name in parameter_names]
+    required = {
+        "normal": {"location", "scale"},
+        "student_t": {"degrees_of_freedom", "location", "scale"},
+        "negative_binomial": {"total_count", "logits"},
+    }[distribution]
+    if len(names) != len(required) or set(names) != required:
+        raise ValueError("regression reference parameter names do not match the declared distribution")
+    parameters = []
+    targets = None
+    for name, value in zip(names, output):
+        shape = tuple(int(size) for size in value.shape)
+        if (
+            len(shape) != 2
+            or shape[0] != 1
+            or shape[1] <= 0
+            or (targets is not None and shape[1] != targets)
+        ):
+            raise ValueError(
+                "regression parameters must each have one batch and the same target axis"
+            )
+        targets = shape[1]
+        if not _tensor_summary(value)["finite"]:
+            raise ValueError("regression reference returned nonfinite parameters")
+        parameters.append({"name": name, "values": value[0].detach().float().cpu().tolist()})
+    return {
+        "distribution": distribution,
+        "target_count": targets,
+        "regression_targets": targets,
+        "parameter_elements": targets * len(parameters),
+        "axes": ["target"],
+        "parameters": parameters,
+        "target_names": [],
+        "target_units": [],
     }
 
 
@@ -735,6 +847,15 @@ def _load_embedding(
     request: Mapping[str, Any],
     _options: Mapping[str, Any],
 ) -> Session:
+    configured = _json_object(getattr(arguments, "timing_contract_json", "{}"), "--timing-contract-json")
+    if not configured:
+        raise ValueError("embedding reference requires explicit --timing-contract-json")
+    declared_timing = timing_contract(runner="task-reference", declared=configured)
+    if declared_timing["asset_loading_included"]:
+        raise ValueError("embedding reference preloads its assets; asset_loading_included must be false")
+    prompts = _batch_prompt(request)
+    if len(prompts) != 1:
+        raise ValueError("embedding reference requires exactly one text input")
     import torch
     from transformers import AutoModel, AutoTokenizer
 
@@ -745,8 +866,7 @@ def _load_embedding(
         .eval()
         .to(device)
     )
-    prompt = str(request.get("prompt", ""))
-    declared_timing = timing_contract(runner="task-reference", family=arguments.family)
+    prompt = prompts[0]
 
     def prepare_inputs() -> Mapping[str, Any]:
         return _to_device(
@@ -784,7 +904,7 @@ def _load_embedding(
         "transformers",
         timing_scope=str(declared_timing["timing_scope"]),
         input_preparation_included=bool(declared_timing["input_preparation_included"]),
-        asset_loading_included=bool(declared_timing["asset_loading_included"]),
+        asset_loading_included=False,
     )
 
 
@@ -892,17 +1012,6 @@ def _diffusion_pipeline(
     import diffusers
 
     model_id = str(options.get("model_id", arguments.model))
-    class_name = {
-        "flux": "Flux2Pipeline" if "FLUX.2" in model_id.upper() else "FluxPipeline",
-        "ltx_video": "LTXPipeline",
-        "pixart": "PixArtSigmaPipeline",
-        "qwen_image": "QwenImagePipeline",
-        "sana_wm": "SanaVideoPipeline",
-        "wan_t2v": "WanPipeline",
-        "wan2_2_ti2v": "WanPipeline",
-        "z_image": "ZImagePipeline",
-    }[arguments.family]
-    pipeline_class = getattr(diffusers, class_name)
     requested_revision = (
         str(options.get("model_revision", getattr(arguments, "revision", None) or "")) or None
     )
@@ -941,7 +1050,7 @@ def _diffusion_pipeline(
             ),
             local_files_only=arguments.local_files_only,
         )
-    return pipeline_class.from_pretrained(
+    return diffusers.DiffusionPipeline.from_pretrained(
         model_source,
         torch_dtype=_torch_dtype(torch_module, arguments.precision),
         **load_options,
@@ -976,30 +1085,38 @@ def _load_diffusers(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     )
-    batch_size = int(request.get("batch_size", 1))
-    prompt = str(request.get("prompt", ""))
-    raw_prompts = request.get("prompts")
-    if raw_prompts is not None:
-        if (
-            not isinstance(raw_prompts, list)
-            or len(raw_prompts) != batch_size
-            or any(not isinstance(value, str) for value in raw_prompts)
-        ):
-            raise ValueError("prompts must contain one string per batch item")
-        prompt_value: str | list[str] = list(raw_prompts)
-    elif batch_size > 1:
-        prompt_value = [prompt] * batch_size
+    if "prompt" in request and "prompts" in request:
+        raise ValueError("reference request must not provide both prompt and prompts")
+    prompt = request.get("prompts", request.get("prompt", ""))
+    if "prompts" in request and not isinstance(prompt, list):
+        raise ValueError("prompts must contain one string per batch item")
+    if isinstance(prompt, list):
+        if not prompt or any(not isinstance(value, str) for value in prompt):
+            raise ValueError("prompt list must contain one string per batch item")
+        count = len(prompt)
     else:
-        prompt_value = prompt
+        if not isinstance(prompt, str):
+            raise ValueError("prompt must be a string or a non-empty list of strings")
+        count = 1
+    batch_size = request.get("batch_size", count)
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    if isinstance(prompt, list):
+        if count != batch_size:
+            raise ValueError("prompt list must contain one string per batch item")
+        prompt_value: str | list[str] = list(prompt)
+    else:
+        prompt_value = [prompt] * batch_size if batch_size > 1 else prompt
     values: dict[str, Any] = {"prompt": prompt_value}
     negative_prompt = str(request.get("negative_prompt", ""))
-    if negative_prompt:
+    if negative_prompt or "negative_prompt" in request or arguments.family == "qwen_image":
         values["negative_prompt"] = negative_prompt
     steps = int(request.get("num_steps", -1))
     if steps > 0:
         values.update({"num_inference_steps": steps, "step": steps})
-    height = int(request.get("height", request.get("video_height", 0)))
-    width = int(request.get("width", request.get("video_width", 0)))
+    manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+    height = int(request.get("height", request.get("video_height", manifest.get("image_height", 0))))
+    width = int(request.get("width", request.get("video_width", manifest.get("image_width", 0))))
     if height > 0:
         values["height"] = height
     if width > 0:
@@ -1007,7 +1124,7 @@ def _load_diffusers(
     num_frames = int(
         request.get(
             "video_num_frames",
-            _task_value(arguments, request, "num_frames", 1),
+            _task_value(arguments, request, "num_frames", manifest.get("video_num_frames", 1)),
         )
     )
     if num_frames > 0:
@@ -1024,19 +1141,41 @@ def _load_diffusers(
         if value is not None:
             values[name] = float(value)
     cfg_scale = float(request.get("cfg_scale", -1.0))
-    if cfg_scale >= 0:
+    if cfg_scale >= 0 and arguments.family != "qwen_image":
         values["cfg_scale"] = cfg_scale
     if bool(request.get("no_refiner", False)):
         values["no_refiner"] = True
     guidance = float(request.get("guidance_scale", -1.0))
-    if guidance >= 0:
+    if arguments.family == "qwen_image":
+        # Native Qwen guidance is true CFG; cfg_scale remains a legacy fallback.
+        true_cfg_scale = guidance if guidance >= 0 else cfg_scale
+        if true_cfg_scale >= 0:
+            values["true_cfg_scale"] = true_cfg_scale
+    elif guidance >= 0:
         values["guidance_scale"] = guidance
-    if arguments.family == "qwen_image" and cfg_scale >= 0:
-        values["true_cfg_scale"] = cfg_scale
     values["output_type"] = "np"
-    image_path = str(request.get("image_path", "") or "")
-    if image_path and ("image" in accepted or accepts_extra):
-        values["image"] = Image.open(_asset_path(arguments, request, "image_path")).convert("RGB")
+    if "image_path" in request and "image_paths" in request:
+        raise ValueError("reference request must not provide both image_path and image_paths")
+    image_path = request.get("image_path", "")
+    if "image_paths" in request:
+        image_paths = request["image_paths"]
+        if (
+            not isinstance(image_paths, list)
+            or len(image_paths) != 1
+            or not isinstance(image_paths[0], str)
+            or not image_paths[0]
+        ):
+            raise ValueError("this reference supports exactly one conditioning image")
+        image_path = image_paths[0]
+    task = getattr(arguments, "selected_task", None) or manifest["task"]
+    if task in {"images_text_to_image_edit", "image_edit"} and not image_path:
+        raise ValueError("image edit reference requires one conditioning image")
+    if image_path:
+        if "image" not in accepted and not accepts_extra:
+            raise ValueError("selected reference pipeline does not accept conditioning image")
+        values["image"] = Image.open(
+            _asset_path(arguments, {"image_path": image_path}, "image_path")
+        ).convert("RGB")
     call_values = {
         name: value for name, value in values.items() if name in accepted or accepts_extra
     }
@@ -1155,6 +1294,16 @@ def _numeric_values(request: Mapping[str, Any], key: str) -> list[float]:
     return [float(value) for value in raw]
 
 
+def _observed_values(request: Mapping[str, Any], count: int) -> list[float]:
+    raw = request.get("observed_mask")
+    if raw is None or raw == []:
+        return [1.0] * count
+    values = _numeric_values(request, "observed_mask")
+    if len(values) != count:
+        raise ValueError("time-series observed_mask must match past_values")
+    return values
+
+
 def _align(values: Sequence[float], length: int, fill: float) -> list[float]:
     result = [fill] * length
     count = min(len(values), length)
@@ -1196,13 +1345,17 @@ def _load_timeseries(
 
     device = torch.device("cuda")
     dtype = _torch_dtype(torch, arguments.precision)
+    task_id = _selected_task(arguments)
     if arguments.family == "chronos_bolt":
         from chronos import ChronosBoltPipeline
 
         chronos_options = _processor_kwargs(arguments)
         chronos_options.update({"device_map": str(device), "dtype": dtype})
         model = ChronosBoltPipeline.from_pretrained(arguments.model, **chronos_options)
-        context = torch.tensor(_numeric_values(request, "past_values"), dtype=dtype, device=device)
+        raw = _numeric_values(request, "past_values")
+        observed = _observed_values(request, len(raw))
+        context = torch.tensor([value if mask > 0 else float("nan")
+                                for value, mask in zip(raw, observed)], dtype=dtype, device=device)
 
         def invoke() -> Mapping[str, Any]:
             with torch.inference_mode():
@@ -1211,7 +1364,8 @@ def _load_timeseries(
                     prediction_length=model.model_prediction_length,
                     limit_prediction_length=True,
                 )
-            return _tensor_summary(value)
+            quantiles = model.model.config.chronos_config["quantiles"]
+            return _forecast_summary(value, task_id, quantiles)
 
         return Session(invoke, "chronos")
 
@@ -1231,8 +1385,8 @@ def _load_timeseries(
         series = torch.tensor(_align(raw, length, 0.0), dtype=dtype, device=device).reshape(
             1, length
         )
-        padding = [1] * length
-        padding[-min(len(raw), length) :] = [0] * min(len(raw), length)
+        observed = _align(_observed_values(request, len(raw)), length, 0.0)
+        padding = [0 if mask > 0 else 1 for mask in observed]
         padding_tensor = torch.tensor(padding, dtype=torch.int32, device=device).reshape(1, length)
         frequency = int(request.get("frequency", 0))
         frequency_tensor = torch.tensor([[frequency]], dtype=torch.long, device=device)
@@ -1249,7 +1403,7 @@ def _load_timeseries(
                 output = model._postprocess_output(
                     decoder.last_hidden_state, (decoder.loc, decoder.scale)
                 )[:, -1, : model.config.horizon_length, 0]
-            return _tensor_summary(output)
+            return _forecast_summary(output, task_id)
 
     else:
         is_mixer = arguments.family == "patchtsmixer"
@@ -1280,14 +1434,7 @@ def _load_timeseries(
         values = torch.tensor(
             _align(raw, length * channels, 0.0), dtype=dtype, device=device
         ).reshape(1, length, channels)
-        raw_mask = request.get("observed_mask")
-        if is_mixer and raw_mask is not None:
-            mask_values = _numeric_values(request, "observed_mask")
-            aligned_mask = _align(mask_values, length * channels, 1.0)
-        elif is_mixer:
-            aligned_mask = [1.0] * (length * channels)
-        else:
-            aligned_mask = _align([1.0] * len(raw), length * channels, 0.0)
+        aligned_mask = _align(_observed_values(request, len(raw)), length * channels, 0.0)
         observed = torch.tensor(
             aligned_mask,
             dtype=dtype,
@@ -1318,9 +1465,14 @@ def _load_timeseries(
                         return_dict=True,
                     )
                     output = getattr(outputs, output_name)
+            if task_id == "series_to_regression_distribution":
+                return _regression_summary(output, config.distribution_output,
+                                           tuple(model.distribution_output.args_dim))
+            if task_id == "series_to_regression_values":
+                return _regression_values_summary(output)
             if isinstance(output, (tuple, list)):
                 output = torch.stack(list(output), dim=-1)
-            return _tensor_summary(output)
+            return _forecast_summary(output, task_id)
 
     return Session(invoke, "transformers")
 
@@ -1574,6 +1726,349 @@ def _load_qwen3_omni(
     return Session(invoke, "transformers")
 
 
+def _load_voicechat(
+    arguments: argparse.Namespace,
+    request: Mapping[str, Any],
+    options: Mapping[str, Any],
+) -> Session:
+    """One loaded official offline pipeline, not a prerecorded or live-session oracle."""
+    import soundfile as sf
+    import torch
+
+    request = flatten_config(request)
+    task = _selected_task(arguments)
+    if arguments.operation == "speech_dialogue":
+        if task != "offline_speech_dialogue":
+            raise ValueError("offline VoiceChat reference cannot qualify live or tool dialogue")
+    elif arguments.operation == "speak":
+        if task not in {
+            "speech_to_speech",
+            "speech_to_speech_response",
+            "speech_session",
+        }:
+            raise ValueError("VoiceChat speak reference requires a speech-response contract")
+    else:
+        raise ValueError("VoiceChat reference supports speak or offline speech_dialogue")
+    if arguments.precision != "fp32":
+        raise ValueError("VoiceChat reference currently matches the fp32 native profile")
+    allowed = {
+        "audio_path",
+        "system_prompt",
+        "seed",
+        "temperature",
+        "top_p",
+        "repetition_penalty",
+        "presence_penalty",
+        "tail_frames",
+        "finish_tail_frames",
+    }
+    if unknown := sorted(request.keys() - allowed):
+        raise ValueError("unsupported offline VoiceChat request fields: " + ", ".join(unknown))
+    for key in ("tail_frames", "finish_tail_frames"):
+        if key in request and (
+            isinstance(request[key], bool) or not isinstance(request[key], int) or request[key] != 0
+        ):
+            raise ValueError("offline VoiceChat reference requires zero explicit tail frames")
+    prompt = request.get("system_prompt", VOICECHAT_SYSTEM_PROMPT)
+    if not isinstance(prompt, str):
+        raise ValueError("VoiceChat system_prompt must be text")
+    # The native empty prompt selects its default, unlike upstream's blank-prompt helper.
+    if not prompt:
+        prompt = VOICECHAT_SYSTEM_PROMPT
+    elif not prompt.strip():
+        raise ValueError("whitespace-only prompts do not have matched native/reference semantics")
+    seed = _request_seed(request, default=0)
+    if seed < 0:
+        raise ValueError("VoiceChat reference seed must be nonnegative")
+    generation = {}
+    for key in ("temperature", "top_p", "repetition_penalty", "presence_penalty"):
+        if key in request:
+            value = request[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(f"VoiceChat {key} must be finite numeric data")
+            generation[key] = value
+    if generation.get("temperature", 0) < 0 or not 0 < generation.get("top_p", 1) <= 1:
+        raise ValueError("VoiceChat temperature/top_p is outside the supported range")
+    if generation.get("repetition_penalty", 1) <= 0:
+        raise ValueError("VoiceChat repetition_penalty must be positive")
+
+    configured_repo = str(options.get("reference_repo", ""))
+    if not configured_repo:
+        raise ValueError("nemo-voicechat requires baseline.adapter_options.reference_repo")
+    reference_repo = Path(_reference_checkout(configured_repo, repository="NeMo Speech"))
+    utility = reference_repo / "nemo/collections/speechlm2/inference/utils/offline_voicechat.py"
+    if not utility.is_file():
+        raise ValueError("VoiceChat reference checkout lacks the official offline utility")
+    sys.path.insert(0, str(reference_repo))
+    upstream = importlib.import_module(
+        "nemo.collections.speechlm2.inference.utils.offline_voicechat"
+    )
+    if Path(upstream.__file__).resolve() != utility.resolve():
+        raise RuntimeError(
+            "VoiceChat imported a different NeMo installation; use the requested checkout first"
+        )
+
+    checkpoint = _cached_snapshot_path(arguments.model, arguments.revision, "config.json")
+    if checkpoint is None:
+        from huggingface_hub import snapshot_download
+
+        checkpoint = Path(
+            snapshot_download(
+                repo_id=arguments.model,
+                revision=arguments.revision,
+                local_files_only=arguments.local_files_only,
+            )
+        )
+    audio_path = _asset_path(arguments, request, "audio_path")
+    info = sf.info(audio_path)
+    # Loading is outside the clock. Reject inputs that would make the official
+    # WAV helper do otherwise-unmeasured resampling/downmixing there.
+    if info.samplerate != 16000 or info.channels != 1 or info.frames <= 0:
+        raise ValueError("matched offline VoiceChat reference requires nonempty 16 kHz mono audio")
+    model = upstream.build_model(str(checkpoint), device="cuda").float()
+    if model.source_sample_rate != 16000 or model.target_sample_rate != 22050:
+        raise ValueError("VoiceChat checkpoint sample rates differ from the matched native profile")
+    _waveform, signal, lengths = upstream.load_wav_16k_mono(str(audio_path), device="cpu")
+
+    def invoke() -> Mapping[str, Any]:
+        _seed_all(torch, seed)
+        # Host-to-device input transfer and prompt preparation belong to the
+        # public operation, while checkpoint loading and WAV decoding do not.
+        input_signal, input_lengths = signal.to("cuda"), lengths.to("cuda")
+        prompt_tokens, prompt_lengths = upstream.encode_system_prompt(model, prompt, device="cuda")
+        result = upstream.run_offline_inference(
+            model,
+            input_signal=input_signal,
+            input_signal_lens=input_lengths,
+            prompt_tokens=prompt_tokens,
+            prompt_token_lens=prompt_lengths,
+            decode_audio=True,
+            input_pad_len=0,
+            **generation,
+        )
+        audio = result.get("audio")
+        audio_len = result.get("audio_len")
+        text = result.get("text")
+        if (
+            audio is None
+            or audio_len is None
+            or len(audio.shape) != 2
+            or audio.shape[0] != 1
+            or tuple(audio_len.shape) != (1,)
+            or not isinstance(text, list)
+            or len(text) != 1
+            or not isinstance(text[0], str)
+        ):
+            raise RuntimeError("VoiceChat returned an invalid one-recording audio/text result")
+        count = audio_len[0].item()
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+            or count > audio.shape[1]
+        ):
+            raise RuntimeError("VoiceChat audio_len does not match the decoded audio")
+        materialized = audio[0, :count].detach().float().cpu()
+        if not bool(materialized.isfinite().all().item()):
+            raise RuntimeError("VoiceChat reference returned nonfinite audio")
+        return {
+            "text": text[0],
+            "audio_samples": count,
+            "num_samples": count,
+            "sample_rate": int(model.target_sample_rate),
+            "channels": 1,
+            "audio_seconds": count / model.target_sample_rate,
+            "input_sample_rate": 16000,
+            "input_channels": 1,
+            "input_samples": int(info.frames),
+            "finite": True,
+            "_audio_f32": materialized.numpy(),
+        }
+
+    return Session(
+        invoke,
+        "nemo-voicechat",
+        timing_scope="task-pipeline-call-wall",
+        input_preparation_included=True,
+        asset_loading_included=False,
+    )
+
+
+def _load_moge(
+    arguments: argparse.Namespace,
+    request: Mapping[str, Any],
+    options: Mapping[str, Any],
+) -> Session:
+    import numpy as np
+    import torch
+    from PIL import Image
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    request = flatten_config(request)
+    if arguments.operation != "geometry" or arguments.precision != "fp32":
+        raise ValueError("MoGe reference requires geometry with the qualified fp32 profile")
+    if unknown := sorted(request.keys() - {"image_path", "num_tokens", "fov_x"}):
+        raise ValueError("unsupported MoGe reference request fields: " + ", ".join(unknown))
+    num_tokens = request.get("num_tokens", options.get("num_tokens"))
+    if isinstance(num_tokens, bool) or not isinstance(num_tokens, int) or num_tokens != 1800:
+        raise ValueError("MoGe reference requires explicit request/options num_tokens=1800")
+    if (
+        "num_tokens" in request
+        and "num_tokens" in options
+        and request["num_tokens"] != options["num_tokens"]
+    ):
+        raise ValueError("MoGe request and adapter num_tokens disagree")
+    inference = {
+        "num_tokens": num_tokens,
+        "use_fp16": False,
+        "force_projection": True,
+        "apply_mask": True,
+    }
+    if "fov_x" in request:
+        fov = request["fov_x"]
+        if (
+            isinstance(fov, bool)
+            or not isinstance(fov, (int, float))
+            or not math.isfinite(fov)
+            or not 0 < fov < 180
+        ):
+            raise ValueError("MoGe fov_x must be a finite angle in degrees between zero and 180")
+        inference["fov_x"] = fov
+    configured_repo = str(options.get("reference_repo", ""))
+    if not configured_repo:
+        raise ValueError("upstream-moge requires baseline.adapter_options.reference_repo")
+    reference_repo = Path(_reference_checkout(configured_repo, repository="microsoft/MoGe"))
+    expected_module = reference_repo / "moge/model/v2.py"
+    if not expected_module.is_file():
+        raise ValueError("MoGe reference checkout does not contain the v2 model")
+    # The upstream checkout supplies its own declared geometry dependencies.
+    sys.path.insert(0, str(reference_repo))
+    upstream = importlib.import_module("moge.model.v2")
+    if Path(upstream.__file__).resolve() != expected_module.resolve():
+        raise RuntimeError("MoGe imported a different installation than the requested checkout")
+    cached = _cached_snapshot_path(arguments.model, arguments.revision, "model.pt")
+    if cached is None:
+        from huggingface_hub import hf_hub_download
+
+        checkpoint_path = Path(
+            hf_hub_download(
+                repo_id=arguments.model,
+                revision=arguments.revision,
+                filename="model.pt",
+                local_files_only=arguments.local_files_only,
+            )
+        )
+    else:
+        checkpoint_path = cached if cached.is_file() else cached / "model.pt"
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True, mmap=True)
+    if set(checkpoint) != {"model_config", "model"}:
+        raise ValueError("MoGe checkpoint has an unexpected top-level contract")
+    model = upstream.MoGeModel(**checkpoint["model_config"])
+    missing, unexpected = model.load_state_dict(checkpoint["model"], strict=False)
+    if missing or unexpected:
+        raise ValueError(f"MoGe state mismatch: missing={missing}, unexpected={unexpected}")
+    del checkpoint
+    model.onnx_compatible_mode = True
+    model.eval().float().to("cuda")
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    image_path = _asset_path(arguments, request, "image_path")
+    with Image.open(image_path) as image:
+        # Match the native caller's cached RGB float HWC input. No resizing or
+        # model normalization is performed here; upstream infer owns those.
+        pixels = np.asarray(image.convert("RGB"), dtype=np.float32).copy() / 255.0
+    height, width = pixels.shape[:2]
+
+    def invoke() -> Mapping[str, Any]:
+        tensor = torch.from_numpy(pixels).permute(2, 0, 1).to("cuda")
+        with sdpa_kernel([SDPBackend.MATH]):
+            output = model.infer(tensor, **inference)
+        if set(output) != {"points", "depth", "mask", "intrinsics"}:
+            raise RuntimeError("MoGe reference must return points, depth, mask and intrinsics")
+        arrays = {name: value.detach().cpu().numpy() for name, value in output.items()}
+        return {
+            "geometry_images": 1,
+            "geometry_pixels": height * width,
+            "height": height,
+            "width": width,
+            "point_shape": [height, width, 3],
+            "num_tokens": num_tokens,
+            "requested_fov_x": request.get("fov_x"),
+            "units": "meters",
+            "camera_axes": ["right", "down", "forward"],
+            "intrinsics_coordinates": "normalized_uv",
+            "_geometry_arrays": arrays,
+        }
+
+    return Session(
+        invoke,
+        "moge-pytorch",
+        timing_scope="task-pipeline-call-wall",
+        input_preparation_included=True,
+        asset_loading_included=False,
+    )
+
+
+def _write_geometry_artifacts(summary: dict[str, Any], output: Path) -> None:
+    """Validate and write complete geometry only after the measurement clock."""
+    import numpy as np
+
+    arrays = summary.pop("_geometry_arrays")
+    height, width = summary["height"], summary["width"]
+    points, depth, mask, intrinsics = (
+        np.asarray(arrays[name]) for name in ("points", "depth", "mask", "intrinsics")
+    )
+    if (
+        points.shape != (height, width, 3)
+        or depth.shape != (height, width)
+        or mask.shape != (height, width)
+        or intrinsics.shape != (3, 3)
+        or not np.isin(mask, (0, 1)).all()
+        or not np.isfinite(intrinsics).all()
+    ):
+        raise RuntimeError("MoGe geometry arrays do not match the original image/calibration")
+    valid = mask.astype(bool, copy=False)
+    if (
+        not np.isfinite(points[valid]).all()
+        or not np.isfinite(depth[valid]).all()
+        or np.any(depth[valid] <= 0)
+        or not np.isposinf(points[~valid]).all()
+        or not np.isposinf(depth[~valid]).all()
+    ):
+        raise RuntimeError(
+            "MoGe geometry must preserve valid metric values and masked positive infinity"
+        )
+    prefix = output.with_suffix(".geometry").resolve()
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    for name, values, suffix, dtype in (
+        ("points_artifact", points, ".points.f32", "<f4"),
+        ("depth_artifact", depth, ".depth.f32", "<f4"),
+        ("valid_mask_artifact", mask, ".mask.u8", "u1"),
+    ):
+        path = Path(str(prefix) + suffix)
+        values.astype(dtype, copy=False).tofile(path)
+        summary[name] = str(path)
+    calibration = {
+        "height": height,
+        "width": width,
+        "normalized": True,
+        "intrinsics": intrinsics.tolist(),
+    }
+    calibration_path = Path(str(prefix) + ".intrinsics.json")
+    calibration_path.write_text(json.dumps(calibration, indent=2) + "\n", encoding="utf-8")
+    summary.update(
+        valid_pixels=int(valid.sum()),
+        normalized_intrinsics=intrinsics.tolist(),
+        intrinsics_artifact=str(calibration_path),
+    )
+
+
+
+
 def _load_personaplex(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
@@ -1775,6 +2270,8 @@ LOADERS: dict[
     "hf-transformers-vlm": _load_vlm,
     "nemo-asr": _load_asr,
     "nemo-tts": _load_tts,
+    "nemo-voicechat": _load_voicechat,
+    "upstream-moge": _load_moge,
     "pytorch-personaplex": _load_personaplex,
     "pytorch-timeseries": _load_timeseries,
     "upstream-fast-foundation-stereo": _load_fast_foundation_stereo,
@@ -1810,7 +2307,7 @@ def _run_elf(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
     options: Mapping[str, Any],
-) -> tuple[list[float], dict[str, Any], str, str, bool]:
+) -> tuple[list[float], dict[str, Any], str, str, bool, bool]:
     reference_repo = str(options.get("reference_repo", ""))
     if not reference_repo:
         raise ValueError("upstream-elf requires baseline.adapter_options.reference_repo")
@@ -1912,6 +2409,7 @@ def _run_elf(
         "elf-pytorch",
         "task-model-call-wall",
         False,
+        False,
     )
 
 
@@ -1919,7 +2417,7 @@ def _run_lance(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
     options: Mapping[str, Any],
-) -> tuple[list[float], dict[str, Any], str, str, bool]:
+) -> tuple[list[float], dict[str, Any], str, str, bool, bool]:
     reference_repo = str(options.get("reference_repo", ""))
     if not reference_repo:
         raise ValueError("upstream-lance requires baseline.adapter_options.reference_repo")
@@ -1991,6 +2489,7 @@ def _run_lance(
         "lance-pytorch",
         "task-pipeline-call-wall",
         True,
+        True,
     )
 
 
@@ -1998,7 +2497,7 @@ def _run_lerobot_act(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
     options: Mapping[str, Any],
-) -> tuple[list[float], dict[str, Any], str, str, bool]:
+) -> tuple[list[float], dict[str, Any], str, str, bool, bool]:
     source_root = str(options.get("source_root", ""))
     if not source_root:
         raise ValueError("LeRobot ACT reference requires adapter_options.source_root")
@@ -2060,6 +2559,7 @@ def _run_lerobot_act(
         str(payload.get("framework", "lerobot-pytorch")),
         "task-pipeline-call-wall",
         True,
+        False,
     )
 
 
@@ -2067,7 +2567,20 @@ def _run_sana_wm(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
     options: Mapping[str, Any],
-) -> tuple[list[float], dict[str, Any], str, str, bool]:
+) -> tuple[list[float], dict[str, Any], str, str, bool, bool]:
+    options = dict(options)
+    testcase_name = getattr(arguments, "testcase_name", None)
+    if testcase_name is not None:
+        manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+        matches = [
+            value for value in manifest.get("testcases", [])
+            if isinstance(value, Mapping) and value.get("name") == testcase_name
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"SANA-WM requires exactly one testcase named {testcase_name!r}")
+        for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift", "no_action_overlay"):
+            if name in matches[0]:
+                options.setdefault(name, matches[0][name])
     reference_repo = str(options.get("reference_repo", ""))
     if not reference_repo:
         raise ValueError("upstream-sana-wm requires baseline.adapter_options.reference_repo")
@@ -2093,6 +2606,11 @@ def _run_sana_wm(
         if not path.is_file():
             raise FileNotFoundError(f"SANA-WM {label} input does not exist: {path}")
 
+    num_frames = (
+        request["num_frames"]
+        if "num_frames" in request
+        else json.loads(arguments.manifest.read_text(encoding="utf-8"))["video_num_frames"]
+    )
     with tempfile.TemporaryDirectory(prefix="trtmc-perf-sana-wm-") as temporary:
         root = Path(temporary)
         output = root / "benchmark.json"
@@ -2114,19 +2632,19 @@ def _run_sana_wm(
             "--intrinsics",
             str(intrinsics),
             "--translation_speed",
-            str(request["translation_speed"]),
+            str(request["translation_speed"] if "translation_speed" in request else options["translation_speed"]),
             "--rotation_speed_deg",
-            str(request["rotation_speed_deg"]),
+            str(request["rotation_speed_deg"] if "rotation_speed_deg" in request else options["rotation_speed_deg"]),
             "--num_frames",
-            str(request["num_frames"]),
+            str(num_frames),
             "--fps",
-            str(request["fps"]),
+            str(request["fps"] if "fps" in request else options["fps"]),
             "--step",
             str(request["num_steps"]),
             "--cfg_scale",
             str(request["cfg_scale"]),
             "--flow_shift",
-            str(request["flow_shift"]),
+            str(request["flow_shift"] if "flow_shift" in request else options["flow_shift"]),
             "--seed",
             str(request["seed"]),
             "--refiner_seed",
@@ -2138,7 +2656,7 @@ def _run_sana_wm(
             "--output",
             str(output),
         ]
-        if request["no_action_overlay"]:
+        if request["no_action_overlay"] if "no_action_overlay" in request else options["no_action_overlay"]:
             command.append("--no_action_overlay")
         completed = subprocess.run(
             command,
@@ -2165,6 +2683,7 @@ def _run_sana_wm(
         "sana-wm-pytorch",
         "task-pipeline-call-wall",
         True,
+        False,
     )
 
 
@@ -2198,30 +2717,20 @@ def run(arguments: argparse.Namespace) -> int:
     expected_mode = "pytorch-eager" if arguments.adapter in PYTORCH_ADAPTERS else "hf-eager"
     if arguments.mode != expected_mode:
         raise ValueError(f"adapter {arguments.adapter} requires mode {expected_mode}")
-    request = _json_object(arguments.request_json, "--request-json")
+    request = flatten_config(_json_object(arguments.request_json, "--request-json"))
     options = _json_object(arguments.adapter_options_json, "--adapter-options-json")
     configured_timing = _json_object(arguments.timing_contract_json, "--timing-contract-json")
-    declared_timing = timing_contract(
-        runner="task-reference",
-        family=arguments.family,
-    )
-    expected_timing = {
-        name: declared_timing[name]
-        for name in (
-            "timing_scope",
-            "input_preparation_included",
-            "asset_loading_included",
-        )
-    }
-    if configured_timing and configured_timing != expected_timing:
-        raise ValueError(
-            f"configured timing contract does not match {arguments.family} reference: "
-            f"configured={configured_timing}, reference={expected_timing}"
-        )
+    fields = ("timing_scope", "input_preparation_included", "asset_loading_included")
+    expected_timing = None
+    if configured_timing:
+        if set(configured_timing) != set(fields):
+            raise ValueError("--timing-contract-json must declare exactly the three reference timing fields")
+        declared = timing_contract(runner="task-reference", declared=configured_timing)
+        expected_timing = {name: declared[name] for name in fields}
     load_started = time.perf_counter()
     load_seconds: float | None = None
     if arguments.adapter == "upstream-elf":
-        samples, output_summary, framework, timing_scope, input_included = _run_elf(
+        samples, output_summary, framework, timing_scope, input_included, asset_included = _run_elf(
             arguments, request, options
         )
     elif arguments.adapter == "upstream-lance":
@@ -2231,6 +2740,7 @@ def run(arguments: argparse.Namespace) -> int:
             framework,
             timing_scope,
             input_included,
+            asset_included,
         ) = _run_lance(arguments, request, options)
     elif arguments.adapter == "pytorch-lerobot-act":
         (
@@ -2239,6 +2749,7 @@ def run(arguments: argparse.Namespace) -> int:
             framework,
             timing_scope,
             input_included,
+            asset_included,
         ) = _run_lerobot_act(arguments, request, options)
     elif arguments.adapter == "upstream-sana-wm":
         (
@@ -2247,6 +2758,7 @@ def run(arguments: argparse.Namespace) -> int:
             framework,
             timing_scope,
             input_included,
+            asset_included,
         ) = _run_sana_wm(arguments, request, options)
     else:
         session = LOADERS[arguments.adapter](arguments, request, options)
@@ -2260,31 +2772,41 @@ def run(arguments: argparse.Namespace) -> int:
             "input_preparation_included": input_included,
             "asset_loading_included": asset_included,
         }
-        if actual_timing != expected_timing:
+        timing_contract(runner="task-reference", declared=actual_timing)
+        if expected_timing is not None and actual_timing != expected_timing:
             raise RuntimeError(
                 f"{arguments.family} reference implementation timing drifted: "
                 f"actual={actual_timing}, declared={expected_timing}"
             )
         samples, output_summary = _measure(session, arguments.warmup, arguments.iterations)
+        if "_geometry_arrays" in output_summary:
+            _write_geometry_artifacts(output_summary, arguments.output)
         disparity = output_summary.pop("_disparity_f32", None)
         if disparity is not None:
             artifact_path = arguments.output.with_suffix(".disparity.f32").resolve()
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
             disparity.tofile(artifact_path)
             output_summary["disparity_artifact"] = str(artifact_path)
+        audio = output_summary.pop("_audio_f32", None)
+        if audio is not None:
+            import soundfile as sf
+            artifact_path = arguments.output.with_suffix(".audio.wav").resolve()
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            sf.write(artifact_path, audio, output_summary["sample_rate"], subtype="FLOAT")
+            output_summary["audio_artifact"] = str(artifact_path)
     if arguments.adapter in {
         "pytorch-lerobot-act",
         "upstream-elf",
         "upstream-lance",
         "upstream-sana-wm",
     }:
-        asset_included = bool(expected_timing["asset_loading_included"])
         actual_timing = {
             "timing_scope": timing_scope,
             "input_preparation_included": input_included,
             "asset_loading_included": asset_included,
         }
-        if actual_timing != expected_timing:
+        timing_contract(runner="task-reference", declared=actual_timing)
+        if expected_timing is not None and actual_timing != expected_timing:
             raise RuntimeError(
                 f"{arguments.family} reference implementation timing drifted: "
                 f"actual={actual_timing}, declared={expected_timing}"

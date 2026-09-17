@@ -98,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--model-name requires the positional bundle")
         if not specs:
             raise ValueError("provide a bundle or at least one --model NAME=PATH")
+        packaged_root = packaged_runtime_root()
+        if args.worker_binary is None and packaged_root is not None:
+            args.worker_binary = packaged_root / "trtmc-server"
         if args.worker_binary is None or not args.worker_binary.is_file():
             raise ValueError("native worker executable is unavailable")
         runtime_root: str | None = None
@@ -107,7 +110,6 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("--runtime-root must be a directory")
             runtime_root = str(root)
         else:
-            packaged_root = packaged_runtime_root()
             if packaged_root is not None:
                 runtime_root = str(packaged_root)
         api_key = args.api_key or os.environ.get("TRTMC_SERVE_TOKEN")
