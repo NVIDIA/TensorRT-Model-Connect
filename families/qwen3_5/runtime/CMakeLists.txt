@@ -28,7 +28,7 @@ target_link_libraries(trtmc_model_qwen3_5 PRIVATE
 )
 target_compile_options(trtmc_model_qwen3_5 PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
-  "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>"
 )
 set_target_properties(trtmc_model_qwen3_5 PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -54,4 +54,27 @@ if(TRTMC_BUILD_TESTS)
     ${TRTMC_CUDART_LIBRARY}
   )
   add_test(NAME ${test_name} COMMAND ${test_name})
+endif()
+
+# Complete-network offload is family-owned and absent from native-only builds.
+if(TARGET EdgeLLM::Core)
+  target_sources(trtmc_model_qwen3_5 PRIVATE
+    edge_llm/adapter.cpp
+    edge_llm/device_link.cu
+  )
+  target_compile_definitions(trtmc_model_qwen3_5 PRIVATE TRTMC_HAS_EDGE_LLM=1)
+  target_link_libraries(trtmc_model_qwen3_5 PRIVATE EdgeLLM::Core)
+  set_target_properties(trtmc_model_qwen3_5 PROPERTIES
+    CUDA_ARCHITECTURES "${EdgeLLM_CUDA_ARCHITECTURE}"
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+  )
+endif()
+
+if(TARGET EdgeLLM::Core)
+  add_custom_command(TARGET trtmc_model_qwen3_5 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:EdgeLLM::Plugin> $<TARGET_FILE_DIR:trtmc_model_qwen3_5>
+    VERBATIM
+  )
 endif()

@@ -1361,74 +1361,134 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _Qwen35Model, *
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one Qwen3.5 hybrid bundle through family-owned code only."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("qwen3_5 does not support dynamic_kv_cache")
+    """Select complete-network offload or preserve the native Qwen3.5 builder."""
+    from .dispatch import build as dispatch_build
 
-    if request.image_height is not None:
-        raise NotImplementedError("qwen3_5 does not support image_height")
+    def _build_native(request: "BuildRequest", writer: "BundleWriter") -> None:
+        """Build one Qwen3.5 hybrid bundle through family-owned code only."""
+        if request.dynamic_kv_cache:
+            raise NotImplementedError("qwen3_5 does not support dynamic_kv_cache")
 
-    if request.image_width is not None:
-        raise NotImplementedError("qwen3_5 does not support image_width")
+        if request.image_height is not None:
+            raise NotImplementedError("qwen3_5 does not support image_height")
 
-    if request.video_num_frames is not None:
-        raise NotImplementedError("qwen3_5 does not support video_num_frames")
+        if request.image_width is not None:
+            raise NotImplementedError("qwen3_5 does not support image_width")
 
-    if request.max_batch_size != 1:
-        raise NotImplementedError("qwen3_5 does not support max_batch_size")
+        if request.video_num_frames is not None:
+            raise NotImplementedError("qwen3_5 does not support video_num_frames")
 
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
+        if request.max_batch_size != 1:
+            raise NotImplementedError("qwen3_5 does not support max_batch_size")
 
-    if request.task != "text_generation":
-        raise ValueError("qwen3_5 supports only task=text_generation")
+        if request.context_parallel_size != 1:
+            raise ValueError("this family does not support context parallelism")
 
-    model_dir = Path(request.model_dir)
-    config = ModelConfig.from_dir(model_dir)
-    if str(config.model_type).lower() not in {"qwen3_5", "qwen3.5"}:
-        raise ValueError(f"Qwen3.5 does not support model_type={config.model_type!r}")
-    precision = str(request.precision).lower()
-    if precision not in {"fp32", "fp16"}:
-        raise ValueError("Qwen3.5 precision must be fp32 or fp16")
-    max_sequence_length = _positive_int(
-        request.max_sequence_length or min(config.max_position_embeddings, 256),
-        "max_sequence_length",
-    )
-    if max_sequence_length > config.max_position_embeddings:
-        raise ValueError("Qwen3.5 max_sequence_length exceeds checkpoint context capacity")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("Qwen3.5 does not expose a tensor-parallel builder")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Qwen3.5 does not support quantized builds")
+        if request.task != "text_generation":
+            raise ValueError("qwen3_5 supports only task=text_generation")
 
-    model = _Qwen35Model()
-    config.raw["_model_dir"] = str(model_dir)
-    config.raw["_fp32_layers"] = list(request.fp32_layers)
-    config.raw["_resolved_build_precision"] = precision
-    weights = model.load_weights(str(model_dir), config)
-    plan = model.build_engine(
-        config,
-        weights,
-        max_sequence_length,
-        precision=precision,
-        verbose=bool(request.verbose),
-        debug_layer_outputs=False,
-    )
+        model_dir = Path(request.model_dir)
+        config = ModelConfig.from_dir(model_dir)
+        if str(config.model_type).lower() not in {"qwen3_5", "qwen3.5"}:
+            raise ValueError(f"Qwen3.5 does not support model_type={config.model_type!r}")
+        precision = str(request.precision).lower()
+        if precision not in {"fp32", "fp16"}:
+            raise ValueError("Qwen3.5 precision must be fp32 or fp16")
+        max_sequence_length = _positive_int(
+            request.max_sequence_length or min(config.max_position_embeddings, 256),
+            "max_sequence_length",
+        )
+        if max_sequence_length > config.max_position_embeddings:
+            raise ValueError("Qwen3.5 max_sequence_length exceeds checkpoint context capacity")
+        if request.tensor_parallel_size != 1:
+            raise NotImplementedError("Qwen3.5 does not expose a tensor-parallel builder")
+        if request.quantization not in {None, "none"}:
+            raise NotImplementedError("Qwen3.5 does not support quantized builds")
 
-    writer.set_header(family="qwen3_5", task=request.task, backend=request.backend)
-    writer.add_bytes("engine.plan", plan)
-    writer.add_json(
-        "runtime.json",
-        _runtime_config(
-            model_dir,
+        model = _Qwen35Model()
+        config.raw["_model_dir"] = str(model_dir)
+        config.raw["_fp32_layers"] = list(request.fp32_layers)
+        config.raw["_resolved_build_precision"] = precision
+        weights = model.load_weights(str(model_dir), config)
+        plan = model.build_engine(
             config,
-            model,
+            weights,
+            max_sequence_length,
             precision=precision,
-            max_cache_length=max_sequence_length,
-            decoder_engine_layout="single",
-        ),
-    )
-    for filename in _BUNDLE_FILES:
-        path = model_dir / filename
-        if path.is_file():
-            writer.add_bytes(filename, path.read_bytes())
+            verbose=bool(request.verbose),
+            debug_layer_outputs=False,
+        )
+
+        writer.set_header(family="qwen3_5", task=request.task, backend=request.backend)
+        writer.add_bytes("engine.plan", plan)
+        writer.add_json(
+            "runtime.json",
+            _runtime_config(
+                model_dir,
+                config,
+                model,
+                precision=precision,
+                max_cache_length=max_sequence_length,
+                decoder_engine_layout="single",
+            ),
+        )
+        for filename in _BUNDLE_FILES:
+            path = model_dir / filename
+            if path.is_file():
+                writer.add_bytes(filename, path.read_bytes())
+
+    dispatch_build(request, writer, _build_native)
+
+
+def build_with_inputs(request, writer, execution) -> None:
+    """Build an explicit Qwen3.5 DFlash pair, never a base-only replacement."""
+    from . import dispatch
+
+    if execution.variant != "dflash" or tuple(x.role for x in execution.checkpoints) != ("draft",):
+        raise ValueError(
+            "Qwen3.5 paired execution requires variant=dflash and one draft checkpoint"
+        )
+    draft_dir = execution.checkpoints[0].model_dir
+    raw = json.loads((request.model_dir / "config.json").read_text())
+    draft = json.loads((draft_dir / "config.json").read_text())
+    if not dispatch.candidate(request, raw):
+        raise ValueError("Qwen3.5 DFlash requires an admitted dense base request")
+    base = raw.get("text_config", raw)
+    if (base.get("hidden_size"), base.get("num_hidden_layers")) not in {(2560, 32), (4096, 32)}:
+        raise ValueError("Qwen3.5 DFlash is qualified only for the recorded 4B/9B base profiles")
+    if not isinstance(draft, dict) or draft.get("architectures") != ["DFlashDraftModel"]:
+        raise ValueError("Expected a DFlashDraftModel companion")
+    for name in ("hidden_size", "vocab_size"):
+        if type(draft.get(name)) is not int or draft[name] != base.get(name):
+            raise ValueError(f"Qwen3.5 DFlash base and draft disagree on {name}")
+    if draft.get("num_target_layers") != base.get("num_hidden_layers"):
+        raise ValueError("Qwen3.5 DFlash target layer count differs from base")
+    config = draft.get("dflash_config")
+    if not isinstance(config, dict) or config.get("block_size") != 16:
+        raise ValueError("Qwen3.5 DFlash currently maps the upstream linear block16 profile")
+    layers = config.get("target_layer_ids")
+    if (
+        not isinstance(layers, list)
+        or not layers
+        or any(type(i) is not int or not 0 <= i < base["num_hidden_layers"] for i in layers)
+        or len(set(layers)) != len(layers)
+    ):
+        raise ValueError("Invalid Qwen3.5 DFlash target layer IDs")
+    mask = config.get("mask_token_id")
+    if type(mask) is not int or not 0 <= mask < base["vocab_size"]:
+        raise ValueError("Invalid Qwen3.5 DFlash mask token")
+    capacity = draft.get("max_position_embeddings")
+    limit = request.max_sequence_length or min(base["max_position_embeddings"], 256)
+    if type(capacity) is not int or not 16 < limit <= capacity:
+        raise ValueError("Requested context exceeds DFlash draft capacity or block minimum")
+    if draft.get("quantization_config") or any(
+        (draft_dir / name).exists()
+        for name in ("hf_quant_config.json", "quantize_config.json", "quant_config.json")
+    ):
+        raise ValueError("This Qwen3.5 DFlash profile requires unquantized draft weights")
+
+    def native_pair(original_request, original_writer):
+        # Preserve the requested variant on fallback; native has no DFlash decoder.
+        raise NotImplementedError("Native Qwen3.5 does not implement the requested DFlash variant")
+
+    dispatch.build(request, writer, native_pair, draft_dir=draft_dir)
