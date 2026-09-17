@@ -44,6 +44,8 @@ find_library(TRTMC_TRT_LIBRARY
   REQUIRED
 )
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/EdgeLLM.cmake")
+
 option(TRTMC_ENABLE_BYOK "Enable the optional TVM-FFI BYOK bridge" ON)
 set(TRTMC_HAS_TVM_FFI OFF)
 if(TRTMC_ENABLE_BYOK)
