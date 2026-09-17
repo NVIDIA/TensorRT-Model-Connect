@@ -3,6 +3,8 @@
 
 name: Community CI
 
+# Community CI GPU promotion v1
+
 run-name: >-
   ${{ (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
 
@@ -244,10 +246,13 @@ jobs:
           SOURCE_SNAPSHOT: ${{ needs.snapshot.outputs.source_snapshot }}
           HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
           STABLE_RUN_ID: ${{ needs.snapshot.outputs.stable_run_id }}
+          CI_ENTRY_BRANCH: ${{ github.ref_name }}
+          AUTOMATIC_GPU: ${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}
           RUN_GPU_SMOKE: ${{ inputs.run_gpu_smoke || false }}
         run: |
           set -euo pipefail
-          if [ "$LANE" = stable ] && [ -n "${STABLE_RUN_ID:-}" ]; then
+          if [ "$LANE" = stable ] && [ -n "${STABLE_RUN_ID:-}" ] \
+            && { [ "${CI_ENTRY_BRANCH:-}" != main ] || [ "${AUTOMATIC_GPU:-false}" != true ]; }; then
             [[ "$STABLE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             echo "run_id=$STABLE_RUN_ID" >> "$GITHUB_OUTPUT"
             echo "ci_ref=main" >> "$GITHUB_OUTPUT"
@@ -378,6 +383,7 @@ jobs:
       base_sha: ${{ steps.snapshot.outputs.base_sha }}
       merge_sha: ${{ steps.snapshot.outputs.merge_sha }}
       enabled: ${{ steps.snapshot.outputs.enabled }}
+      reuse_stable_cpu: ${{ steps.snapshot.outputs.reuse_stable_cpu }}
 
     steps:
       # This job consumes trusted GitHub metadata only. It pins the PR head,
@@ -456,8 +462,20 @@ jobs:
             test "$(jq -er '.tree.sha' <<< "$merge")" = "$approved_tree"
           fi
 
+          reuse_stable_cpu=false
+          if [ "$EVENT_NAME" = pull_request ]; then
+            # Enable the compatibility view only after promotion is in the
+            # trusted base. The promotion PR itself still runs normal CPU CI.
+            base_workflow="$(gh api "/repos/$GITHUB_REPOSITORY/contents/.github/workflows/community-ci.yml?ref=$base_sha" --jq '.content' | base64 --decode)"
+            if grep -Fxq '# Community CI GPU promotion v1' <<< "$base_workflow" \
+              && grep -Fxq '  COMMUNITY_GPU_EXECUTION_ENABLED: "true"' <<< "$base_workflow"; then
+              reuse_stable_cpu=true
+            fi
+          fi
+
           {
             echo "enabled=true"
+            echo "reuse_stable_cpu=$reuse_stable_cpu"
             echo "pr_number=$PR_NUMBER"
             echo "head_sha=$head_sha"
             echo "base_sha=$base_sha"
@@ -470,6 +488,7 @@ jobs:
   source-quality:
     name: Community CPU / Source quality
     needs: authorize
+    if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -498,6 +517,7 @@ jobs:
   docs:
     name: Community CPU / Docs
     needs: authorize
+    if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -533,6 +553,7 @@ jobs:
   ownership-impact:
     name: Community CPU / Ownership and impact
     needs: authorize
+    if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -559,6 +580,7 @@ jobs:
   unit:
     name: Community CPU / Unit / C++ and Python
     needs: authorize
+    if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -589,10 +611,45 @@ jobs:
       - ownership-impact
       - unit
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
+    timeout-minutes: 60
+    permissions:
+      actions: read
     steps:
+      - name: Read the promoted Stable CPU result
+        if: ${{ needs.authorize.outputs.reuse_stable_cpu == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          expected_title="Stable Community CI · PR #$PR_NUMBER · head $HEAD_SHA · merge $MERGE_SHA"
+          # Preserve the legacy PR check consumed by Internal CI, using the
+          # actual CPU result from the trusted main pipeline. No tests repeat.
+          for attempt in $(seq 1 110); do
+            runs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=workflow_dispatch&branch=main&per_page=100")"
+            run_id="$(jq -r --arg title "$expected_title" '
+              [.workflow_runs[]
+               | select(.event == "workflow_dispatch" and .head_branch == "main")
+               | select(.path == ".github/workflows/community-ci.yml" and .display_title == $title)]
+              | max_by(.id) | .id // empty' <<< "$runs")"
+            if [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+              job="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100" \
+                --jq '[.jobs[] | select(.name == "Community CPU / Required")] | last // {}')"
+              if [ "$(jq -r '.status // empty' <<< "$job")" = completed ]; then
+                test "$(jq -r '.conclusion // empty' <<< "$job")" = success
+                echo "Stable CPU result: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+                exit 0
+              fi
+            fi
+            if [ "$attempt" -lt 110 ]; then sleep 30; fi
+          done
+          echo "::error::The promoted Stable CPU result did not arrive."
+          exit 1
+
       - name: Require every public CPU stage
+        if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
         env:
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           DOCS_RESULT: ${{ needs.docs.result }}

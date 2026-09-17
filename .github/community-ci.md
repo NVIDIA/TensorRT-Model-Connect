@@ -104,3 +104,14 @@ prevent allocation. Dev GPU type and CUDA architecture default to L40 and 89.
 This infrastructure PR does not promote the GPU experiment, change required
 checks, retire Internal premerge, or modify Nightly. Those are separate decisions.
 Promotion and a multi-day comparison are unproven until their live runs complete.
+
+## Candidate promotion compatibility
+
+The Dev candidate includes the automatic Stable cutover. After its reviewed
+promotion reaches `main`, the trusted metadata entry dispatches the complete
+Stable CPU-to-GPU pipeline from `main`. The original PR run becomes a read-only
+view of that pipeline's real CPU result, preserving the existing Internal CI
+bridge without running the CPU suite twice. The trusted base's promotion marker
+controls this transition, so a promotion PR still receives ordinary Stable CPU
+tests before it is merged. Dev qualification from `ci/developer` continues to
+reuse the current Stable PR run. The live cutover still requires post-merge proof.

@@ -1220,6 +1220,9 @@ else:
             "HEAD_SHA": "a" * 40,
             "LANE": lane,
             "CI_REF": ref,
+            "CI_ENTRY_BRANCH": "main",
+            "AUTOMATIC_GPU": "true",
+            "STABLE_RUN_ID": "99" if lane == "stable" else "",
             "STATUS_CONTEXT": f"{lane.title()} Community CI",
             "GITHUB_SERVER_URL": "https://github.com",
             "SOURCE_SNAPSHOT": snapshot,
@@ -1449,6 +1452,7 @@ def test_community_executor_keeps_the_captured_snapshot_when_merge_ref_advances(
         values = dict(line.split("=", 1) for line in output.read_text().splitlines())
         assert values == {
             "enabled": "true",
+            "reuse_stable_cpu": "false",
             "pr_number": "17",
             "head_sha": head,
             "base_sha": base,
@@ -1458,14 +1462,19 @@ def test_community_executor_keeps_the_captured_snapshot_when_merge_ref_advances(
         assert not output.exists()
 
 
-def test_stable_pr_cpu_runs_without_a_cutover_or_internal_bridge_change(tmp_path):
+@pytest.mark.parametrize("promoted", [False, True])
+@pytest.mark.parametrize("base_gpu_enabled", [False, True])
+def test_stable_pr_cpu_switches_only_after_promotion_is_in_the_base(
+    tmp_path, promoted, base_gpu_enabled
+):
     head, base, merge = (value * 40 for value in "abc")
     fake = tmp_path / "gh"
     fake.write_text(
-        "#!/usr/bin/env python3\nimport base64,os,sys\n"
+        "#!/usr/bin/env python3\nimport base64,json,os,sys\n"
         "if any('/contents/' in arg for arg in sys.argv):\n"
-        " if os.environ['DISPATCHER']=='api-error': sys.exit(1)\n"
-        " text='# Community CI branch dispatch v1' if os.environ['DISPATCHER']=='true' else 'name: Community CI'\n"
+        " text='# Community CI GPU promotion v1' if os.environ['PROMOTED']=='true' else 'name: Community CI'\n"
+        " text += '\\n  COMMUNITY_GPU_EXECUTION_ENABLED: ' + json.dumps(os.environ['BASE_GPU_ENABLED'])\n"
+        " text += '\\n# A quoted policy example must not enable GPU: COMMUNITY_GPU_EXECUTION_ENABLED: \"true\"'\n"
         " print(base64.b64encode(text.encode()).decode())\n"
         "else: print(os.environ['PULL' if any('/pulls/' in arg for arg in sys.argv) else 'MERGE'])\n"
     )
@@ -1483,6 +1492,8 @@ def test_stable_pr_cpu_runs_without_a_cutover_or_internal_bridge_change(tmp_path
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "EVENT_NAME": "pull_request",
+            "PROMOTED": str(promoted).lower(),
+            "BASE_GPU_ENABLED": str(base_gpu_enabled).lower(),
             "EVENT_HEAD_SHA": head,
             "EVENT_BASE_SHA": base,
             "EVENT_MERGE_SHA": merge,
@@ -1505,6 +1516,7 @@ def test_stable_pr_cpu_runs_without_a_cutover_or_internal_bridge_change(tmp_path
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert values == {
         "enabled": "true",
+        "reuse_stable_cpu": str(promoted and base_gpu_enabled).lower(),
         "pr_number": "17",
         "head_sha": head,
         "base_sha": base,
@@ -1706,3 +1718,87 @@ def test_existing_stable_verdict_is_bound_to_the_selected_head_and_merge(tmp_pat
     else:
         state = "failure" if fault == "conclusion" else "success"
         assert f"state={state}" in (tmp_path / "calls").read_text().splitlines()
+
+
+@pytest.mark.parametrize("cpu_result", ["success", "failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("queued_first", [False, True])
+def test_promoted_cpu_compatibility_uses_the_actual_stable_result(
+    tmp_path, cpu_result, queued_first
+):
+    head, merge = "a" * 40, "b" * 40
+    valid = {
+        "id": 42,
+        "event": "workflow_dispatch",
+        "head_branch": "main",
+        "path": ".github/workflows/community-ci.yml",
+        "display_title": f"Stable Community CI · PR #17 · head {head} · merge {merge}",
+    }
+    runs = [
+        valid,
+        {**valid, "id": 91, "head_branch": "ci/developer"},
+        {**valid, "id": 92, "event": "pull_request"},
+        {**valid, "id": 93, "display_title": valid["display_title"].replace(head, "c" * 40)},
+        {**valid, "id": 94, "display_title": valid["display_title"].replace(merge, "c" * 40)},
+    ]
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n"
+        "assert '--method' not in sys.argv\n"
+        "if any('/workflows/' in a for a in sys.argv): print(os.environ['RUNS'])\n"
+        "else:\n"
+        " assert any('/actions/runs/42/jobs?' in a for a in sys.argv)\n"
+        " counter=Path(os.environ['COUNTER'])\n"
+        " count=int(counter.read_text())+1 if counter.exists() else 1\n"
+        " counter.write_text(str(count))\n"
+        " pending=os.environ['QUEUED_FIRST']=='true' and count==1\n"
+        " print(json.dumps({'status':'in_progress' if pending else 'completed', 'conclusion':None if pending else os.environ['CPU_RESULT']}))\n"
+    )
+    gh.chmod(0o755)
+    sleep = tmp_path / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "required", "Read the promoted Stable CPU result"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "RUNS": json.dumps({"workflow_runs": runs}),
+            "COUNTER": str(tmp_path / "counter"),
+            "QUEUED_FIRST": str(queued_first).lower(),
+            "CPU_RESULT": cpu_result,
+            "PR_NUMBER": "17",
+            "HEAD_SHA": head,
+            "MERGE_SHA": merge,
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is (cpu_result == "success"), result.stderr
+    assert int((tmp_path / "counter").read_text()) == (2 if queued_first else 1)
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    for name in ["source-quality", "docs", "ownership-impact", "unit"]:
+        assert (
+            workflow["jobs"][name]["if"]
+            == "${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}"
+        )
+    assert (
+        workflow["jobs"]["required"]["timeout-minutes"]
+        > workflow["jobs"]["unit"]["timeout-minutes"]
+    )
+    steps = {step["name"]: step for step in workflow["jobs"]["required"]["steps"]}
+    assert (
+        steps["Read the promoted Stable CPU result"]["if"]
+        == "${{ needs.authorize.outputs.reuse_stable_cpu == 'true' }}"
+    )
+    assert (
+        steps["Require every public CPU stage"]["if"]
+        == "${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}"
+    )
