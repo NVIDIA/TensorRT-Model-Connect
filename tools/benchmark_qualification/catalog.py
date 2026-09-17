@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 import yaml
@@ -129,6 +130,12 @@ def _candidate(raw: Any, family: str, path: Path) -> dict[str, Any]:
     trust_remote_code = value.get("trust_remote_code")
     if trust_remote_code is not None and not isinstance(trust_remote_code, bool):
         raise QualificationError(f"{path}: candidate.trust_remote_code must be a boolean")
+    if trust_remote_code and (
+        not isinstance(revision, str) or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None
+    ):
+        raise QualificationError(
+            f"{path}: trusted remote code requires an immutable 40-character revision"
+        )
     build = value.get("build", {})
     if not isinstance(build, Mapping):
         raise QualificationError(f"{path}: candidate.build must be an object")

@@ -197,9 +197,13 @@ def _encoder_embedding_parity(
         raise QualificationError(
             f"embedding vector parity does not support candidate task {task!r}"
         ) from error
-    model_class = str(reference.get("model_class", "auto"))
-    if model_class not in {"auto", "dpr-context-encoder"}:
-        raise QualificationError(f"unsupported encoder reference model class {model_class!r}")
+    model_class = reference.get("model_class", "auto")
+    tokenizer_class = reference.get("tokenizer_class", "auto")
+    if not all(
+        isinstance(value, str) and value
+        for value in (model_class, tokenizer_class)
+    ):
+        raise QualificationError("encoder reference classes must be non-empty strings")
     reference_request = {
         "model": str(case.candidate["checkpoint"]),
         "revision": case.candidate.get("revision"),
@@ -207,6 +211,7 @@ def _encoder_embedding_parity(
         "precision": str(reference.get("precision", "fp32")),
         "mode": mode,
         "model_class": model_class,
+        "tokenizer_class": tokenizer_class,
         "max_length": int(case.candidate.get("build", {}).get("max_sequence_length", 512)),
         "samples": samples,
     }

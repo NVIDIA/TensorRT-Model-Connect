@@ -6,6 +6,7 @@ model: glm-4-9b
 candidate:
   family: glm
   checkpoint: THUDM/glm-4-9b-hf
+  revision: b44e98fcc8df0faba03a48b405356af6b91821e7
   task: text_generation
   precision: fp16
   bundle: glm-4-9b.bundle
