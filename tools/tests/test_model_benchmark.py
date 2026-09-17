@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
@@ -13,6 +15,7 @@ from tools.benchmark_qualification.catalog import discover, load_benchmark, sele
 from tools.benchmark_qualification.datasets import resolve_dataset
 from tools.benchmark_qualification.runtime import (
     RuntimeContext,
+    prepare_bundle,
     run_command,
     write_model_descriptor,
 )
@@ -116,6 +119,52 @@ def test_internal_subprocesses_can_import_repository_packages(tmp_path: Path) ->
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_bundle_preparation_uses_the_selected_runtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    case = next(
+        case
+        for case in select(discover(REPOSITORY), ["gpt2-125m"])
+        if case.kind == "accuracy"
+    )
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    bundle = tmp_path / "gpt2.bundle"
+    bundle.write_bytes(b"bundle")
+    descriptor = tmp_path / "candidate-model.json"
+    descriptor.write_text("{}\n", encoding="utf-8")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=runtime_root,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    captured: list[str] = []
+
+    def complete(command, *_args, **_kwargs):
+        captured.extend(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"bundles": [{"model": case.model, "bundle": str(bundle)}]}),
+            stderr="",
+        )
+
+    monkeypatch.setattr("tools.benchmark_qualification.runtime.run_command", complete)
+
+    assert prepare_bundle(case, context, tmp_path, descriptor) == bundle
+    assert captured[captured.index("--runtime-root") + 1] == str(runtime_root)
 
 
 def test_manual_dataset_path_is_supplied_by_the_internal_invocation(tmp_path: Path) -> None:

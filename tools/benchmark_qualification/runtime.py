@@ -132,6 +132,8 @@ def prepare_bundle(
         str(context.bundle_cache),
         "--prepare-only",
     ]
+    if context.runtime_root is not None:
+        command.extend(("--runtime-root", str(context.runtime_root)))
     for root in context.bundle_roots:
         command.extend(("--bundle-root", str(root)))
     if context.no_build:
