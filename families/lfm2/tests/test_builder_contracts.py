@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,18 @@ from families.lfm2.config import validate_dense_lfm2_config
 
 FAMILY = Path(__file__).resolve().parent.parent
 _MODEL_SOURCE = FAMILY / "model.py"
+
+
+def test_lfm2_1_2b_strict_parity_uses_bf16_end_to_end() -> None:
+    manifest = json.loads(
+        (FAMILY / "tests/manifests/lfm2-1.2b.json").read_text(encoding="utf-8")
+    )
+    case = manifest["testcases"][0]
+
+    assert manifest["precision"] == "bf16"
+    assert manifest["bundle"] == "lfm2-1.2b-bf16.bundle"
+    assert case["reference_precision"] == "bf16"
+    assert case["do_sample"] is False
 
 
 def _config(raw: dict) -> SimpleNamespace:
