@@ -3,7 +3,7 @@
   "hf_id": "timm/inception_v3.tv_in1k",
   "bundle": "inception-v3-tv-in1k.bundle",
   "family": "timm_inception",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

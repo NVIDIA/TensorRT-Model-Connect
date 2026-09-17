@@ -389,8 +389,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_inception_resnet does not support tensor parallelism")
     if request.context_parallel_size != 1:
         raise NotImplementedError("timm_inception_resnet does not support context parallelism")
-    if request.task != "classification":
-        raise ValueError("timm_inception_resnet supports only task=classification")
+    if request.task != "image_to_class_scores":
+        raise ValueError("timm_inception_resnet supports only task=image_to_class_scores")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("timm_inception_resnet does not support quantization")
     if request.fp32_layers:
@@ -404,11 +404,24 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         str(request.precision).lower(),
         bool(request.verbose),
     )
+    # Class identity is checkpoint-owned; an absent vocabulary stays unknown.
+    vocabulary_id = raw.get("vocabulary_id", "")
+    labels = raw.get("label_names", [])
+    if not isinstance(vocabulary_id, str):
+        raise ValueError("timm Inception-ResNet-v2 vocabulary_id must be a string")
+    if not isinstance(labels, list) or (labels and (
+        len(labels) != runtime["num_classes"]
+        or any(not isinstance(label, str) or not label for label in labels)
+    )):
+        raise ValueError("timm Inception-ResNet-v2 label_names must name every class")
     writer.set_header(family="timm_inception_resnet", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json(
         "runtime.json",
         {
+            "num_classes": runtime["num_classes"],
+            "vocabulary_id": vocabulary_id,
+            "labels": labels,
             "input_image_h": runtime["image_height"],
             "input_image_w": runtime["image_width"],
             "crop_pct": runtime["crop_pct"],

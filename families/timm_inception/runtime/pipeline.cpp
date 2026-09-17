@@ -5,8 +5,8 @@
 
 #include "families/timm_inception/runtime/pipeline.h"
 
-#include <algorithm>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -18,24 +18,44 @@ const Tensor& require_logits(const TensorMap& outputs) {
     const auto found = outputs.find("logits");
     if (found == outputs.end())
         throw std::runtime_error("timm Inception engine did not return logits");
-    if (found->second.numel() <= 0)
-        throw std::runtime_error("timm Inception engine returned empty logits");
+    if (found->second.data == nullptr || found->second.dtype != DType::kFloat32 ||
+        found->second.numel() <= 0)
+        throw std::runtime_error("timm Inception engine must return nonempty float32 logits");
     return found->second;
 }
 
 } // namespace
 
 TimmInceptionImageClassificationPipeline::TimmInceptionImageClassificationPipeline(
-    std::unique_ptr<ITrtModule> model, TimmInceptionPreprocessConfig preprocess_config)
-    : model_(std::move(model)), preprocess_config_(std::move(preprocess_config)) {
+    std::unique_ptr<ITrtModule> model, TimmInceptionPreprocessConfig preprocess_config,
+    std::int32_t num_classes, std::string vocabulary_id, std::vector<std::string> labels)
+    : model_(std::move(model)), preprocess_config_(std::move(preprocess_config)),
+      num_classes_(num_classes), vocabulary_id_(std::move(vocabulary_id)),
+      labels_(std::move(labels)) {
     if (!model_ || !model_->ok())
         throw std::runtime_error("TimmInceptionImageClassificationPipeline: invalid model");
+    if (num_classes_ <= 0 ||
+        (!labels_.empty() && labels_.size() != static_cast<std::size_t>(num_classes_)))
+        throw std::runtime_error("timm Inception class metadata does not match its output size");
 }
 
-ClassificationResult TimmInceptionImageClassificationPipeline::classify(const float* pixels,
-                                                                        int32_t height,
-                                                                        int32_t width) {
-    auto pixel_values = preprocess_timm_inception_image(pixels, height, width, preprocess_config_);
+internal::LabelScoresResult
+TimmInceptionImageClassificationPipeline::run(const internal::ImageToClassScoresRequest& request,
+                                              internal::ConfigView config) {
+    if (!config.empty())
+        throw internal::ConfigError("timm Inception has no runtime configuration");
+    const auto& image = request.image;
+    if (image.format != internal::ImageFormat::Float32 || image.channels != 3 ||
+        image.data == nullptr || image.height == 0 || image.width == 0 ||
+        image.height > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
+        image.width > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
+        static_cast<std::uint64_t>(image.height) >
+            std::numeric_limits<std::size_t>::max() / image.width / 3 / sizeof(float) ||
+        image.byte_size != static_cast<std::size_t>(image.height) * image.width * 3 * sizeof(float))
+        throw std::invalid_argument("timm Inception requires contiguous float32 RGB input");
+    auto pixel_values = preprocess_timm_inception_image(
+        static_cast<const float*>(image.data), static_cast<std::int32_t>(image.height),
+        static_cast<std::int32_t>(image.width), preprocess_config_);
 
     Tensor img_t;
     img_t.data = pixel_values.data();
@@ -43,18 +63,19 @@ ClassificationResult TimmInceptionImageClassificationPipeline::classify(const fl
     img_t.dtype = DType::kFloat32;
 
     auto outputs = model_->forward({{"pixel_values", img_t}});
-    ClassificationResult result;
+    internal::LabelScoresResult result;
 
     const auto& logits_tensor = require_logits(outputs);
     const auto n = logits_tensor.numel();
+    if (n != static_cast<std::size_t>(num_classes_))
+        throw std::runtime_error("timm Inception logits do not match its configured class count");
 
-    result.logits.resize(static_cast<std::size_t>(n));
-    std::memcpy(result.logits.data(), logits_tensor.data,
+    result.scores.resize(static_cast<std::size_t>(n));
+    std::memcpy(result.scores.data(), logits_tensor.data,
                 static_cast<std::size_t>(n) * sizeof(float));
-
-    auto best = std::max_element(result.logits.begin(), result.logits.end());
-    result.top_class = static_cast<int32_t>(std::distance(result.logits.begin(), best));
-    result.top_score = (best == result.logits.end()) ? 0.0F : *best;
+    result.kind = internal::ScoreKind::Logit;
+    result.vocabulary_id = vocabulary_id_;
+    result.labels = labels_;
     return result;
 }
 

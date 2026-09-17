@@ -4,7 +4,7 @@
   "hf_revision": "836b07d7d599da247de92f148c7a07fda18afced",
   "bundle": "inception-resnet-v2-tf-in1k.bundle",
   "family": "timm_inception_resnet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

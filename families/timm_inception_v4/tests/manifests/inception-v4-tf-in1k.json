@@ -4,7 +4,7 @@
   "hf_revision": "ad5d294cda312745a9afa433e45d9ccd956a1548",
   "bundle": "inception-v4-tf-in1k.bundle",
   "family": "timm_inception_v4",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

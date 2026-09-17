@@ -22,8 +22,7 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     return bundle.read_section(name);
 }
 
-TimmInceptionResNetPreprocessConfig parse_config(const std::vector<char>& data) {
-    const auto json = nlohmann::json::parse(data.begin(), data.end());
+TimmInceptionResNetPreprocessConfig parse_config(const nlohmann::json& json) {
     TimmInceptionResNetPreprocessConfig config;
     config.input_image_h = json.at("input_image_h").get<std::int32_t>();
     config.input_image_w = json.at("input_image_w").get<std::int32_t>();
@@ -34,7 +33,8 @@ TimmInceptionResNetPreprocessConfig parse_config(const std::vector<char>& data) 
     if (config.input_image_h <= 0 || config.input_image_w <= 0 || config.crop_pct <= 0.0F ||
         config.crop_pct > 1.0F || config.image_mean.size() != 3 || config.image_std.size() != 3 ||
         (config.interpolation != "bilinear" && config.interpolation != "bicubic")) {
-        throw std::runtime_error("timm InceptionResNet runtime.json does not match its contract");
+        throw std::runtime_error(
+            "timm Inception-ResNet-v2 runtime.json does not match its runtime contract");
     }
     return config;
 }
@@ -43,7 +43,7 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
     ModuleCreateOptions options{};
     auto engine = backend.create_module(plan.data(), plan.size(), options);
     if (!engine || !engine->ok())
-        throw std::runtime_error("timm InceptionResNet engine failed to load");
+        throw std::runtime_error("timm Inception-ResNet-v2 engine failed to load");
     return engine;
 }
 
@@ -53,11 +53,14 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("timm_inception_resnet does not support --kv-cache-size");
-    const auto config_data =
+    const auto& config_data =
         trtmc::timm_inception_resnet::require_section(context.reader, "runtime.json");
-    const auto plan = trtmc::timm_inception_resnet::require_section(context.reader, "engine.plan");
-    auto config = trtmc::timm_inception_resnet::parse_config(config_data);
+    const auto& plan = trtmc::timm_inception_resnet::require_section(context.reader, "engine.plan");
+    const auto metadata = nlohmann::json::parse(config_data.begin(), config_data.end());
+    auto config = trtmc::timm_inception_resnet::parse_config(metadata);
     auto engine = trtmc::timm_inception_resnet::load_engine(context.backend, plan);
-    return new trtmc::TimmInceptionResNetImageClassificationPipeline(std::move(engine),
-                                                                     std::move(config));
+    return new trtmc::TimmInceptionResNetImageClassificationPipeline(
+        std::move(engine), std::move(config), metadata.at("num_classes").get<std::int32_t>(),
+        metadata.at("vocabulary_id").get<std::string>(),
+        metadata.at("labels").get<std::vector<std::string>>());
 }
