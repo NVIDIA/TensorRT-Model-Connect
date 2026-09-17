@@ -71,6 +71,7 @@ def infer_kv_attention_size(
     prefix: str = "layer.0",
     num_kv_heads: int,
     head_dim: int,
+    quant_ctx=None,
 ) -> int:
     """Validate and return the compact K/V row width."""
     expected = int(num_kv_heads * head_dim)
@@ -85,6 +86,16 @@ def infer_kv_attention_size(
         actual = int(w_k.shape[1])
         if actual != expected:
             raise ValueError(f"{prefix}.w_k must use compact K/V width {expected}, got {actual}")
+    elif quant_ctx is not None:
+        # w_k wasn't materialized in `weights` because quant_ctx owns it (it is
+        # sourced from the checkpoint's own packed bytes instead) -- validate
+        # against the shape already cached there rather than silently skipping.
+        scales = quant_ctx.profile.scales.get(f"{prefix}.w_k")
+        if scales is not None:
+            actual = int(scales.weight.out_features)
+            if actual != expected:
+                raise ValueError(
+                    f"{prefix}.w_k must use compact K/V width {expected}, got {actual}")
     return expected
 
 
@@ -133,14 +144,14 @@ def add_swiglu_mlp(
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
     _lp = layer_prefix or prefix
 
-    gate = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_gate"], f"{_lp}.w_gate")
-    up = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_up"], f"{_lp}.w_up")
+    gate = matmul(inp, hidden_size, mlp_size, weights.get(f"{prefix}.w_gate"), f"{_lp}.w_gate")
+    up = matmul(inp, hidden_size, mlp_size, weights.get(f"{prefix}.w_up"), f"{_lp}.w_up")
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
     gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
     mlp_out = matmul(
-        gated.get_output(0), mlp_size, hidden_size, weights[f"{prefix}.w_down"], f"{_lp}.w_down"
+        gated.get_output(0), mlp_size, hidden_size, weights.get(f"{prefix}.w_down"), f"{_lp}.w_down"
     )
     return mlp_out

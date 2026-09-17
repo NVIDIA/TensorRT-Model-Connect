@@ -287,10 +287,6 @@ class Qwen38QuantContext:
         )
 
 
-# Backward-compatible alias (old name used during initial NVFP4-only wiring).
-Qwen38NVFP4Context = Qwen38QuantContext
-
-
 def _read_input_scale(readers, hf_prefix: str) -> float | None:
     key = f"{hf_prefix}.input_scale"
     if not _has_tensor(readers, key):
@@ -385,7 +381,9 @@ def _read_fp8_weight_split_q(readers, hf_prefix: str, num_heads: int, head_dim: 
     return q_w, gate_w
 
 
-def calibrate_qwen3_8_nvfp4(model_dir: Path, config, graph_ops) -> Qwen38QuantContext:
+def calibrate_qwen3_8_nvfp4(
+    model_dir: Path, config, graph_ops, *, readers=None,
+) -> Qwen38QuantContext:
     """Build the NVFP4 + FP8 Q/DQ context from the checkpoint's own quantized
     weights and calibrated activation scales.
 
@@ -393,8 +391,13 @@ def calibrate_qwen3_8_nvfp4(model_dir: Path, config, graph_ops) -> Qwen38QuantCo
     export (real packed weights + real activation scales for both schemes),
     so no forward-pass recalibration is needed -- just read the tensors
     straight from the safetensors files.
+
+    `readers` may be a pre-opened `_ReaderCollection` (shared with
+    `Qwen38Model.load_weights()` to avoid indexing the checkpoint's shards
+    twice); if omitted, one is opened here.
     """
-    readers = _open_safetensors(Path(model_dir))
+    if readers is None:
+        readers = _open_safetensors(Path(model_dir))
     num_layers = int(config.num_hidden_layers)
     hidden = int(config.hidden_size)
     mlp_size = int(config.intermediate_size)

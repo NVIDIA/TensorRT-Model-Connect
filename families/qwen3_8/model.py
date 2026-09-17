@@ -126,13 +126,20 @@ def build(request, writer) -> None:
     config.raw["_quantized_build_requested"] = quantized
 
     quant_ctx = None
+    readers = None
     if quantized:
         from . import graph_ops
+        from .checkpoint_mapper import _open_safetensors
         from .quantization import calibrate_qwen3_8_nvfp4
 
-        quant_ctx = calibrate_qwen3_8_nvfp4(model_dir, config, graph_ops)
+        # Share one set of safetensors readers between calibration and
+        # load_weights() so the checkpoint's shard index is only built once.
+        readers = _open_safetensors(model_dir)
+        quant_ctx = calibrate_qwen3_8_nvfp4(model_dir, config, graph_ops, readers=readers)
 
-    weights = model.load_weights(str(model_dir), config, precision=precision)
+    weights = model.load_weights(
+        str(model_dir), config, precision=precision,
+        quant_ctx=quant_ctx, readers=readers)
     plan = model.build_engine(
         config,
         weights,

@@ -152,12 +152,21 @@ def _prepare_runtime_inputs(
     )
 
 
+def _owned(quant_ctx, name: str) -> bool:
+    """True if quant_ctx will source this weight from the checkpoint's own
+    packed bytes at graph-build time, so load_weights() must not materialize
+    a dequantized copy that would never be read."""
+    return quant_ctx is not None and quant_ctx.profile.should_quantize(name)
+
+
 class Qwen38Model:
     def load_weights(
         self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
+        quant_ctx=None, readers=None,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
-        readers = _open_safetensors(model_dir_path)
+        if readers is None:
+            readers = _open_safetensors(model_dir_path)
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -246,20 +255,21 @@ class Qwen38Model:
                     readers, weights, prefix, hf_prefix,
                     hidden, d_inner, conv_dim, d_conv,
                     deltanet_num_heads, deltanet_num_kv_heads,
-                    deltanet_head_dim, precision=precision)
+                    deltanet_head_dim, precision=precision, quant_ctx=quant_ctx)
                 deltanet_count += 1
 
             elif lt == "attention":
                 self._load_attention_weights(
                     readers, weights, prefix, hf_prefix,
                     hidden, attn_size, kv_size,
-                    num_heads, num_kv_heads, head_dim, precision=precision)
+                    num_heads, num_kv_heads, head_dim, precision=precision,
+                    quant_ctx=quant_ctx)
                 attn_count += 1
 
             # SwiGLU MLP (all layer types)
             self._load_mlp_weights(
                 readers, weights, prefix, hf_prefix,
-                hidden, mlp_size, precision=precision)
+                hidden, mlp_size, precision=precision, quant_ctx=quant_ctx)
 
         # Final norm (also uses (1+weight) centering)
         final_norm_key = "model.language_model.norm.weight"
@@ -272,13 +282,14 @@ class Qwen38Model:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         # LM head
-        lm_head_key = "lm_head.weight"
-        if _has_tensor(readers, lm_head_key):
-            weights["w_lm_head"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head", precision)
-        else:
-            weights["w_lm_head"] = _transpose_2d(
-                embedding.copy(), "embedding_tied", precision)
+        if not _owned(quant_ctx, "w_lm_head"):
+            lm_head_key = "lm_head.weight"
+            if _has_tensor(readers, lm_head_key):
+                weights["w_lm_head"] = _transpose_2d(
+                    _load_tensor(readers, lm_head_key), "lm_head", precision)
+            else:
+                weights["w_lm_head"] = _transpose_2d(
+                    embedding, "embedding_tied", precision)
 
         # Metadata for engine builder
         weights["_layer_types"] = layer_types
@@ -301,19 +312,25 @@ class Qwen38Model:
         self, readers, weights, prefix, hf_prefix,
         hidden, d_inner, conv_dim, d_conv,
         num_heads, num_kv_heads, head_dim, *, precision: str = "fp32",
+        quant_ctx=None,
     ):
         """Load DeltaNet (linear attention) layer weights."""
         attn_prefix = f"{hf_prefix}.linear_attn"
 
-        # in_proj_qkv (QKV combined): [conv_dim, hidden] -> transpose
-        in_proj_raw = _load_tensor(readers, f"{attn_prefix}.in_proj_qkv.weight")
-        weights[f"{prefix}.deltanet_in_proj_qkv"] = _transpose_2d(
-            in_proj_raw, "deltanet_in_proj_qkv", precision)
+        # in_proj_qkv (QKV combined): [conv_dim, hidden] -> transpose.
+        # Skip if quant_ctx already owns this weight -- it will be sourced
+        # from the checkpoint's own packed bytes at graph-build time, so a
+        # dequantized copy here would never be read.
+        if not _owned(quant_ctx, f"{prefix}.deltanet_in_proj_qkv"):
+            in_proj_raw = _load_tensor(readers, f"{attn_prefix}.in_proj_qkv.weight")
+            weights[f"{prefix}.deltanet_in_proj_qkv"] = _transpose_2d(
+                in_proj_raw, "deltanet_in_proj_qkv", precision)
 
         # Gate projection (z): [d_inner, hidden] -> transpose
-        z_proj_raw = _load_tensor(readers, f"{attn_prefix}.in_proj_z.weight")
-        weights[f"{prefix}.deltanet_z_proj"] = _transpose_2d(
-            z_proj_raw, "deltanet_z_proj", precision)
+        if not _owned(quant_ctx, f"{prefix}.deltanet_z_proj"):
+            z_proj_raw = _load_tensor(readers, f"{attn_prefix}.in_proj_z.weight")
+            weights[f"{prefix}.deltanet_z_proj"] = _transpose_2d(
+                z_proj_raw, "deltanet_z_proj", precision)
 
         # Decay projection (a): [num_heads, hidden] -> transpose
         a_proj_raw = _load_tensor(readers, f"{attn_prefix}.in_proj_a.weight")
@@ -359,14 +376,16 @@ class Qwen38Model:
                 d_inner, dtype=np.float32)
 
         # Output projection: [hidden, d_inner] -> transpose
-        out_raw = _load_tensor(readers, f"{attn_prefix}.out_proj.weight")
-        weights[f"{prefix}.deltanet_out_proj"] = _transpose_2d(
-            out_raw, "deltanet_out_proj", precision)
+        if not _owned(quant_ctx, f"{prefix}.deltanet_out_proj"):
+            out_raw = _load_tensor(readers, f"{attn_prefix}.out_proj.weight")
+            weights[f"{prefix}.deltanet_out_proj"] = _transpose_2d(
+                out_raw, "deltanet_out_proj", precision)
 
     def _load_attention_weights(
         self, readers, weights, prefix, hf_prefix,
         hidden, attn_size, kv_size,
         num_heads, num_kv_heads, head_dim, *, precision: str = "fp32",
+        quant_ctx=None,
     ):
         """Load full self-attention layer weights."""
         attn_prefix = f"{hf_prefix}.self_attn"
@@ -374,28 +393,33 @@ class Qwen38Model:
         # q_proj: [2*attn_size, hidden] -> split per head into query + gate
         # HF does: q_proj(x).view(B, seq, num_heads, 2*head_dim).chunk(2, dim=-1)
         # This interleaves: for each head, first head_dim dims are query, next are gate
-        q_raw = _load_tensor(readers, f"{attn_prefix}.q_proj.weight")
-        # q_raw: [num_heads * 2 * head_dim, hidden] = [8192, 4096]
-        # Reshape to [num_heads, 2*head_dim, hidden], split, reshape back
-        q_reshaped = q_raw.reshape(num_heads, 2 * head_dim, hidden)
-        q_part = q_reshaped[:, :head_dim, :].reshape(attn_size, hidden)
-        gate_part = q_reshaped[:, head_dim:, :].reshape(attn_size, hidden)
-        weights[f"{prefix}.w_q"] = _transpose_2d(q_part, "q_proj", precision)
-        weights[f"{prefix}.w_gate_attn"] = _transpose_2d(gate_part, "gate_proj", precision)
+        # calibrate_qwen3_8_nvfp4 always registers w_q and w_gate_attn together
+        # (same checkpoint tensor, same input_scale), so checking w_q alone
+        # is sufficient to skip both.
+        if not _owned(quant_ctx, f"{prefix}.w_q"):
+            q_raw = _load_tensor(readers, f"{attn_prefix}.q_proj.weight")
+            # q_raw: [num_heads * 2 * head_dim, hidden] = [8192, 4096]
+            # Reshape to [num_heads, 2*head_dim, hidden], split, reshape back
+            q_reshaped = q_raw.reshape(num_heads, 2 * head_dim, hidden)
+            q_part = q_reshaped[:, :head_dim, :].reshape(attn_size, hidden)
+            gate_part = q_reshaped[:, head_dim:, :].reshape(attn_size, hidden)
+            weights[f"{prefix}.w_q"] = _transpose_2d(q_part, "q_proj", precision)
+            weights[f"{prefix}.w_gate_attn"] = _transpose_2d(gate_part, "gate_proj", precision)
 
         # k_proj: [kv_size, hidden] -> keep compact
-        k_raw = _load_tensor(readers, f"{attn_prefix}.k_proj.weight")
-        k_t = _transpose_2d(k_raw, "k_proj", precision)
-        weights[f"{prefix}.w_k"] = k_t
+        if not _owned(quant_ctx, f"{prefix}.w_k"):
+            k_raw = _load_tensor(readers, f"{attn_prefix}.k_proj.weight")
+            weights[f"{prefix}.w_k"] = _transpose_2d(k_raw, "k_proj", precision)
 
         # v_proj: [kv_size, hidden] -> keep compact
-        v_raw = _load_tensor(readers, f"{attn_prefix}.v_proj.weight")
-        v_t = _transpose_2d(v_raw, "v_proj", precision)
-        weights[f"{prefix}.w_v"] = v_t
+        if not _owned(quant_ctx, f"{prefix}.w_v"):
+            v_raw = _load_tensor(readers, f"{attn_prefix}.v_proj.weight")
+            weights[f"{prefix}.w_v"] = _transpose_2d(v_raw, "v_proj", precision)
 
         # o_proj: [hidden, attn_size] -> transpose
-        o_raw = _load_tensor(readers, f"{attn_prefix}.o_proj.weight")
-        weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj", precision)
+        if not _owned(quant_ctx, f"{prefix}.w_o"):
+            o_raw = _load_tensor(readers, f"{attn_prefix}.o_proj.weight")
+            weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj", precision)
 
         # QK-norm with (1+weight) centering, tiled to num_heads
         q_norm_key = f"{attn_prefix}.q_norm.weight"
@@ -414,6 +438,7 @@ class Qwen38Model:
     def _load_mlp_weights(
         self, readers, weights, prefix, hf_prefix,
         hidden, mlp_size, *, precision: str = "fp32",
+        quant_ctx=None,
     ):
         """Load SwiGLU MLP weights."""
         gate_key = f"{hf_prefix}.mlp.gate_proj.weight"
@@ -421,12 +446,15 @@ class Qwen38Model:
         down_key = f"{hf_prefix}.mlp.down_proj.weight"
 
         if _has_tensor(readers, gate_key):
-            weights[f"{prefix}.w_gate"] = _transpose_2d(
-                _load_tensor(readers, gate_key), "gate_proj", precision)
-            weights[f"{prefix}.w_up"] = _transpose_2d(
-                _load_tensor(readers, up_key), "up_proj", precision)
-            weights[f"{prefix}.w_down"] = _transpose_2d(
-                _load_tensor(readers, down_key), "down_proj", precision)
+            if not _owned(quant_ctx, f"{prefix}.w_gate"):
+                weights[f"{prefix}.w_gate"] = _transpose_2d(
+                    _load_tensor(readers, gate_key), "gate_proj", precision)
+            if not _owned(quant_ctx, f"{prefix}.w_up"):
+                weights[f"{prefix}.w_up"] = _transpose_2d(
+                    _load_tensor(readers, up_key), "up_proj", precision)
+            if not _owned(quant_ctx, f"{prefix}.w_down"):
+                weights[f"{prefix}.w_down"] = _transpose_2d(
+                    _load_tensor(readers, down_key), "down_proj", precision)
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
@@ -472,7 +500,8 @@ class Qwen38Model:
         num_kv_heads = config.num_key_value_heads
         head_dim = attn_size // num_heads
         kv_attention_size = graph_blocks.infer_kv_attention_size(
-            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim,
+            quant_ctx=quant_ctx)
         attention_window = max_cache_length + 1
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -659,7 +688,7 @@ class Qwen38Model:
         # --- LM head ---
         lm_head_matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
         logits = lm_head_matmul(
-            hidden_state, hidden, vocab, weights["w_lm_head"], "w_lm_head")
+            hidden_state, hidden, vocab, weights.get("w_lm_head"), "w_lm_head")
         b_out = np.zeros(vocab, dtype=work_np_dtype)
         logits = graph_ops.add_bias_sum(
             network, logits, vocab, b_out, dtype=work_np_dtype)
@@ -829,12 +858,12 @@ def _add_deltanet_layer(
     # QKV combined: [1, hidden] -> [1, conv_dim]
     qkv = matmul(
         normed, hidden_size, conv_dim,
-        weights[f"{prefix}.deltanet_in_proj_qkv"], f"{prefix}.deltanet_in_proj_qkv")
+        weights.get(f"{prefix}.deltanet_in_proj_qkv"), f"{prefix}.deltanet_in_proj_qkv")
 
     # Gate (z): [1, hidden] -> [1, d_inner]
     z = matmul(
         normed, hidden_size, d_inner,
-        weights[f"{prefix}.deltanet_z_proj"], f"{prefix}.deltanet_z_proj")
+        weights.get(f"{prefix}.deltanet_z_proj"), f"{prefix}.deltanet_z_proj")
 
     # Decay projection (a): [1, hidden] -> [1, num_heads]
     a_raw = graph_ops.add_matmul_rhs_constant(
@@ -1109,7 +1138,7 @@ def _add_deltanet_layer(
     # ===== 11. Output projection + residual =====
     out = matmul(
         gated.get_output(0), d_inner, hidden_size,
-        weights[f"{prefix}.deltanet_out_proj"], f"{prefix}.deltanet_out_proj")
+        weights.get(f"{prefix}.deltanet_out_proj"), f"{prefix}.deltanet_out_proj")
 
     residual = network.add_elementwise(
         hidden, out, trt.ElementWiseOperation.SUM)
@@ -1189,13 +1218,13 @@ def _add_full_attention_layer(
     matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
     q = matmul(
         normed, hidden_size, attn_size,
-        weights[f"{prefix}.w_q"], f"{prefix}.w_q")
+        weights.get(f"{prefix}.w_q"), f"{prefix}.w_q")
     k = matmul(
         normed, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_k"], f"{prefix}.w_k")
+        weights.get(f"{prefix}.w_k"), f"{prefix}.w_k")
     v = matmul(
         normed, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_v"], f"{prefix}.w_v")
+        weights.get(f"{prefix}.w_v"), f"{prefix}.w_v")
 
     # Per-head QK norm
     q_norm = weights.get(f"{prefix}.q_norm")
@@ -1241,12 +1270,17 @@ def _add_full_attention_layer(
         q_seq=1, kv_seq=attention_window,
         mask=mask_4d)
 
-    # Gate: applied BEFORE o_proj (HF order)
-    gate_attn_w = weights.get(f"{prefix}.w_gate_attn")
+    # Gate: applied BEFORE o_proj (HF order). `weights` won't hold this
+    # tensor when quant_ctx already owns it (load_weights() skips
+    # materializing a dequantized copy in that case), so presence must be
+    # checked via quant_ctx too -- otherwise a quantized checkpoint would
+    # silently skip gating instead of applying it.
+    gate_attn_name = f"{prefix}.w_gate_attn"
+    gate_attn_w = weights.get(gate_attn_name)
     attn_out = context_flat
-    if gate_attn_w is not None:
+    if gate_attn_w is not None or _owned(quant_ctx, gate_attn_name):
         gate = matmul(
-            normed, hidden_size, attn_size, gate_attn_w, f"{prefix}.w_gate_attn")
+            normed, hidden_size, attn_size, gate_attn_w, gate_attn_name)
         gate_sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
         gated = network.add_elementwise(
             attn_out, gate_sigmoid.get_output(0),
@@ -1256,7 +1290,7 @@ def _add_full_attention_layer(
     # Output projection (AFTER gate)
     attn_out = matmul(
         attn_out, attn_size, hidden_size,
-        weights[f"{prefix}.w_o"], f"{prefix}.w_o")
+        weights.get(f"{prefix}.w_o"), f"{prefix}.w_o")
 
     # Residual after attention
     residual = network.add_elementwise(
