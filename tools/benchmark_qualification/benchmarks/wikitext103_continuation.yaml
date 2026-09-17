@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: wikitext103-continuation
+  version: pre1093-wikitext103-json
+  sha256: 25580c3a6563a931d1feb5eb84a45056472a0ed22bfdb536b182d96a034af887
+  source:
+    mode: manual
+    path: WikiText103/wikitext103_task_eval.json
+    instructions: https://blog.salesforceairesearch.com/the-wikitext-long-term-dependency-language-modeling-dataset/
+  license: CC BY-SA 4.0
+selection:
+  method: first
+input:
+  adapter: text_generation_json
+metric:
+  name: exact_token_ids

@@ -66,8 +66,10 @@ def test_opt_uses_validated_profile_and_pre_refactor_performance_length() -> Non
 
 def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> None:
     expected = {
+        "codegen-350m": 20,
         "deepseek-v2-lite": 10,
         "deepseek-v2-tiny": 10,
+        "distilgpt2": 12,
         "falcon3-1b": 20,
         "gemma-2-2b": 10,
         "glm-4-9b": 20,
@@ -81,6 +83,7 @@ def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> N
         "phi3-mini": 10,
         "qwen3-0.6b-fp16": 10,
         "stablelm2-1.6b": 22,
+        "starcoder2-3b": 20,
     }
 
     for model, tokens in expected.items():
