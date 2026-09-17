@@ -609,10 +609,19 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     source = path.read_text(encoding="utf-8")
     workflow = yaml.safe_load(source)
     ready = workflow["jobs"]["notify-ready-pr"]
+    merge_ready = workflow["jobs"]["notify-merge-ready-pr"]
     activity = workflow["jobs"]["notify-activity"]
 
-    assert 'workflows: ["Community CI"]' in source
+    events = workflow.get("on", workflow.get(True))
+    assert events["workflow_run"]["workflows"] == [
+        "Community CI",
+        "PR Metadata",
+        "TensorRT-Model-Connect Internal CI Bridge",
+    ]
+    assert "schedule" in events
+    assert "workflow_dispatch" in events
     assert workflow["permissions"] == {}
+    assert "github.event.workflow_run.name == 'Community CI'" in ready["if"]
     assert "github.event.workflow_run.event == 'pull_request'" in ready["if"]
     assert "merge_revision_matches_tested" in source
     assert '[ "$current_base_sha" = "$tested_base_sha" ]' in source
@@ -627,8 +636,20 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     }
     assert activity["permissions"] == {}
     assert ready["timeout-minutes"] == 7
+    assert merge_ready["timeout-minutes"] == 10
+    assert merge_ready["permissions"] == {
+        "checks": "read",
+        "pull-requests": "read",
+        "statuses": "write",
+    }
+    assert merge_ready["concurrency"] == {
+        "group": "slack-merge-ready-alerts",
+        "cancel-in-progress": False,
+    }
     assert activity["timeout-minutes"] == 5
-    assert all("uses" not in step for job in (ready, activity) for step in job["steps"])
+    assert all(
+        "uses" not in step for job in (ready, merge_ready, activity) for step in job["steps"]
+    )
     assert "actions/checkout" not in source
 
     condition = activity["if"]
@@ -673,6 +694,13 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
         assert check in ready_script
     assert "sort_by(.started_at) | last" in ready_script
     assert "External PR ready for maintainer" in ready_script
+    merge_ready_script = merge_ready["steps"][0]["run"]
+    assert "pulls?state=open&base=main" in merge_ready_script
+    assert 'marker="Slack / Merge-ready alert #$number"' in merge_ready_script
+    assert 'and .mergeable_state == "clean"' in merge_ready_script
+    assert "TRTMC Internal CI / Automated premerge gate" in merge_ready_script
+    assert "✅ PASS · PR ready to merge" in merge_ready_script
+    assert "Merge-ready Slack notification delivered" in merge_ready_script
     assert 'if [ -z "$SLACK_WEBHOOK_URL" ]; then' in script
     assert 'gsub("&"; "&amp;")' in script
     assert 'gsub("<"; "&lt;")' in script
