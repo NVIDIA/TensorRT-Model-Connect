@@ -95,8 +95,10 @@ def build(request, writer) -> None:
         raise NotImplementedError("qwen3_8 requires max_batch_size=1")
     if request.tensor_parallel_size != 1 or request.context_parallel_size != 1:
         raise NotImplementedError("qwen3_8 supports only single-device builds")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("qwen3_8 does not expose quantized engine builds")
+    quantized = request.quantization == "nvfp4"
+    if request.quantization not in {None, "none", "nvfp4"}:
+        raise NotImplementedError(
+            f"qwen3_8 does not support quantization={request.quantization!r}")
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
@@ -121,12 +123,22 @@ def build(request, writer) -> None:
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = list(request.fp32_layers)
     config.raw["_resolved_build_precision"] = precision
-    weights = model.load_weights(str(model_dir), config)
+    config.raw["_quantized_build_requested"] = quantized
+
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_qwen3_8_nvfp4
+
+        quant_ctx = calibrate_qwen3_8_nvfp4(model_dir, config, graph_ops)
+
+    weights = model.load_weights(str(model_dir), config, precision=precision)
     plan = model.build_engine(
         config,
         weights,
         max_sequence_length,
         precision=precision,
+        quant_ctx=quant_ctx,
         verbose=bool(request.verbose),
         debug_layer_outputs=False,
     )
