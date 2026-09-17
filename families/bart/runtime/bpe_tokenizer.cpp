@@ -723,6 +723,24 @@ class BpeTokenizer final : public ITokenizer {
         return {best_id, best_len};
     }
 
+    static void strip_added_token_left_space(std::string& text) {
+        const char* begin = text.data();
+        const char* cursor = begin;
+        const char* end = begin + text.size();
+        size_t content_end = 0;
+        while (cursor < end) {
+            const char32_t cp = read_utf8(cursor, end);
+            // AddedToken lstrip uses the Unicode White_Space property.
+            const bool whitespace = (cp >= 0x09 && cp <= 0x0D) || cp == 0x20 || cp == 0x85 ||
+                                    cp == 0xA0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) ||
+                                    cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F ||
+                                    cp == 0x3000;
+            if (!whitespace)
+                content_end = static_cast<size_t>(cursor - begin);
+        }
+        text.resize(content_end);
+    }
+
     std::vector<Segment> split_added_tokens(const std::string& text) const {
         std::vector<Segment> segments;
         if (mAddedTokenPatterns.empty()) {
@@ -733,6 +751,10 @@ class BpeTokenizer final : public ITokenizer {
         while (pos < text.size()) {
             auto [best_id, best_len] = find_longest_added_token(text, pos);
             if (best_id >= 0) {
+                if (mLstripAddedTokenIds.count(best_id) && !segments.empty() &&
+                    segments.back().added_id < 0) {
+                    strip_added_token_left_space(segments.back().text);
+                }
                 segments.push_back({text.substr(pos, best_len), best_id});
                 pos += best_len;
             } else {
@@ -1154,6 +1176,8 @@ class BpeTokenizer final : public ITokenizer {
             // The special flag only controls decode filtering (mSpecialIds) and
             // post_processor BOS/EOS insertion.
             mAddedTokenPatterns.push_back({content, id});
+            if (tok.value("lstrip", false))
+                mLstripAddedTokenIds.insert(id);
         }
         // Sort by length descending for longest-match-first
         std::sort(mAddedTokenPatterns.begin(), mAddedTokenPatterns.end(),
@@ -1522,6 +1546,7 @@ class BpeTokenizer final : public ITokenizer {
 
     // Non-special added tokens: matched before pre-tokenization (longest first)
     std::vector<std::pair<std::string, int32_t>> mAddedTokenPatterns;
+    std::unordered_set<int32_t> mLstripAddedTokenIds;
 
     bool mAddSpecialTokens = false;
     bool mUsePreTokenizer = true;

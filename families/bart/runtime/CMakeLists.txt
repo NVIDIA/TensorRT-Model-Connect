@@ -38,6 +38,15 @@ install(TARGETS trtmc_model_bart
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_bart_added_token_whitespace
+    ${PROJECT_SOURCE_DIR}/families/bart/tests/cpp/test_bart_added_token_whitespace.cpp
+    bpe_tokenizer.cpp
+  )
+  target_include_directories(test_bart_added_token_whitespace PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_bart_added_token_whitespace PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_bart_added_token_whitespace PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME bart_added_token_whitespace COMMAND test_bart_added_token_whitespace)
+
   add_executable(test_bart_runtime_config
     ${PROJECT_SOURCE_DIR}/families/bart/tests/cpp/test_bart_runtime_config.cpp
   )
