@@ -39,7 +39,7 @@ def main() -> int:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        str(request["model"]), dtype=dtypes[precision], **model_options
+        str(request["model"]), **_precision_load_options(dtypes[precision]), **model_options
     ).eval()
     model.to("cuda")
     generation = request.get("generation", {})
@@ -114,6 +114,10 @@ def _model_load_options(request: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("experts_implementation must be a non-empty string")
         options["experts_implementation"] = experts_implementation
     return options
+
+
+def _precision_load_options(dtype: Any) -> dict[str, Any]:
+    return {"torch_dtype": dtype}
 
 
 def _truncate(tokenizer: Any, prompt: str, limit: int, side: str) -> str:
