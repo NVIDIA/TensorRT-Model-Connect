@@ -51,7 +51,6 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--replicas", type=positive, default=1)
     result.add_argument("--host", default="127.0.0.1")
     result.add_argument("--port", type=int, default=8000)
-    result.add_argument("--api-key", help="Bearer token; defaults to TRTMC_SERVE_TOKEN")
     result.add_argument("--runtime-root")
     result.add_argument("--kv-cache-size", type=positive)
     result.add_argument("--runtime-cache")
@@ -112,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if packaged_root is not None:
                 runtime_root = str(packaged_root)
-        api_key = args.api_key or os.environ.get("TRTMC_SERVE_TOKEN")
+        api_key = os.environ.get("TRTMC_SERVE_TOKEN") or None
         registry = ModelRegistry(
             specs,
             worker_binary=args.worker_binary.resolve(),

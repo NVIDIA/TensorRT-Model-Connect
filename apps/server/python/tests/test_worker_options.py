@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from trtmc_server.cli import packaged_runtime_root
+from trtmc_server.cli import packaged_runtime_root, parser
 from trtmc_server.worker import WorkerLoadOptions
 
 
@@ -13,6 +13,12 @@ def test_runtime_root_is_optional_and_override_is_preserved() -> None:
         "--runtime-root",
         "/opt/runtime",
     ]
+
+
+def test_bearer_token_is_not_accepted_on_the_command_line() -> None:
+    command = parser()
+    assert "--api-key" not in command.format_help()
+    assert all("--api-key" not in action.option_strings for action in command._actions)
 
 
 def test_packaged_runtime_root_is_derived_from_control_plane(tmp_path: Path) -> None:
