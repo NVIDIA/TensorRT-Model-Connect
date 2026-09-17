@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Alert on community activity and merge-ready PRs
+name: Slack alerts
 
 on:
   issues:
@@ -291,7 +291,10 @@ jobs:
           merge_ready() {
             jq -e '.state == "open" and .merged == false and .draft == false
               and .base.ref == "main" and .mergeable == true
-              and .mergeable_state == "clean"' >/dev/null <<<"$1"
+              and .mergeable_state == "clean"
+              and .author_association != "OWNER"
+              and .author_association != "MEMBER"
+              and .author_association != "COLLABORATOR"' >/dev/null <<<"$1"
           }
 
           checks_ready() {

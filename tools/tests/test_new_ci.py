@@ -646,6 +646,9 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
         "group": "slack-merge-ready-alerts",
         "cancel-in-progress": False,
     }
+    merge_ready_script = merge_ready["steps"][0]["run"]
+    for trusted in ("OWNER", "MEMBER", "COLLABORATOR"):
+        assert f'.author_association != "{trusted}"' in merge_ready_script
     assert activity["timeout-minutes"] == 5
     assert all(
         "uses" not in step for job in (ready, merge_ready, activity) for step in job["steps"]

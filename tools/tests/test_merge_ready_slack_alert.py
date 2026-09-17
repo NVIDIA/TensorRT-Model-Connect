@@ -34,8 +34,8 @@ def scenario() -> dict:
             "head": {"sha": "a" * 40},
             "base": {"ref": "main", "sha": "b" * 40},
             "title": "A model <test> & <!here>",
-            "user": {"login": "maintainer"},
-            "author_association": "MEMBER",
+            "user": {"login": "contributor"},
+            "author_association": "CONTRIBUTOR",
             "html_url": "https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1190",
         },
         "statuses": [{"id": 10, "context": INTERNAL_GATE, "state": "success"}],
@@ -120,12 +120,8 @@ def run_alert(tmp_path: Path, data: dict, *, dry_run: bool = False) -> subproces
     )
 
 
-@pytest.mark.parametrize("association", ["MEMBER", "CONTRIBUTOR"])
-def test_merge_ready_alert_posts_green_pass_for_internal_and_external_prs(
-    tmp_path: Path, association: str
-) -> None:
+def test_merge_ready_alert_posts_green_pass_for_external_contributor(tmp_path: Path) -> None:
     data = scenario()
-    data["pull"]["author_association"] = association
     result = run_alert(tmp_path, data)
     assert result.returncode == 0, result.stderr
     payload = json.loads((tmp_path / "payloads.jsonl").read_text())
@@ -134,6 +130,17 @@ def test_merge_ready_alert_posts_green_pass_for_internal_and_external_prs(
     assert "<!here>" not in json.dumps(payload)
     assert "Internal CI" in json.dumps(payload)
     assert json.loads((tmp_path / "markers.json").read_text())[0]["state"] == "success"
+
+
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
+def test_repository_members_do_not_receive_merge_ready_alerts(
+    tmp_path: Path, association: str
+) -> None:
+    data = scenario()
+    data["pull"]["author_association"] = association
+    result = run_alert(tmp_path, data)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "payloads.jsonl").exists()
 
 
 @pytest.mark.parametrize("state", ["pending", "failure", "error", "missing"])
