@@ -249,6 +249,20 @@ _BUNDLE_FILES = (
 # this family has, so the prefix let them build a full-attention graph and
 # generate quietly wrong text rather than being refused.
 _GEMMA3_MODEL_TYPES = frozenset({"gemma3", "gemma3_text"})
+# Gemma 3 activations do not fit fp16. Running the reference in fp32 and taking
+# the largest absolute value leaving each decoder layer, against the fp16
+# maximum of 65504:
+#
+#   gemma-3-270m   peak 102956   11 of 18 layers over
+#   gemma-3-1b     peak  61040    0 of 26 layers over (a 7% margin)
+#   gemma-3-4b     peak 298680   29 of 34 layers over
+#
+# The two that overflow emit token 0 repeatedly. The 1B stays inside the range
+# on one prompt by 7%, which is luck rather than headroom, so fp16 is refused
+# for the generation rather than per width. Gemma 2 peaks at 4060 and keeps it.
+_FP16_UNSAFE_MODEL_TYPES = _GEMMA3_MODEL_TYPES
+
+
 _SUPPORTED_MODEL_TYPES = frozenset({"gemma", "gemma2"}) | _GEMMA3_MODEL_TYPES
 
 
@@ -345,6 +359,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     precision = str(request.precision).lower()
     if precision not in {"fp32", "fp16", "bf16"}:
         raise ValueError("Gemma precision must be fp32, fp16, or bf16")
+    if precision == "fp16" and str(config.model_type).lower() in _FP16_UNSAFE_MODEL_TYPES:
+        raise NotImplementedError(
+            f"gemma does not support fp16 for {config.model_type!r}: its activations "
+            "exceed the fp16 range and the engine returns a single repeated token; "
+            "use bf16 or fp32"
+        )
     max_sequence_length = _positive_int(
         request.max_sequence_length or min(config.max_position_embeddings, 256),
         "max_sequence_length",

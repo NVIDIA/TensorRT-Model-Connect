@@ -1,0 +1,22 @@
+{
+  "name": "gemma-3-270m",
+  "hf_id": "google/gemma-3-270m-it",
+  "bundle": "gemma-3-270m.bundle",
+  "family": "gemma",
+  "task": "text_generation",
+  "precision": "bf16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "gemma-3-270m",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer with just the name.",
+      "max_new_tokens": 8,
+      "use_chat_template": true,
+      "enable_thinking": false
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

@@ -96,3 +96,39 @@ def test_the_supported_generations_pass_the_gate(tmp_path: Path) -> None:
         with pytest.raises(Exception) as caught:  # noqa: PT011 - any later failure will do
             _build(directory)
         assert "does not support model_type" not in str(caught.value)
+
+
+def test_gemma3_refuses_fp16(tmp_path: Path) -> None:
+    """Gemma 3 activations exceed the fp16 range, so fp16 is refused.
+
+    Measured on the reference in fp32, largest absolute value leaving a decoder
+    layer against the fp16 maximum of 65504: gemma-3-270m peaks at 102956 and
+    gemma-3-4b at 298680, both of which overflow and make the engine emit token
+    0 repeatedly. gemma-3-1b peaks at 61040, inside the range by 7%, which is
+    luck rather than headroom.
+    """
+    for model_type in ("gemma3", "gemma3_text"):
+        directory = _model_dir(tmp_path / f"fp16-{model_type}", model_type)
+        with pytest.raises(NotImplementedError, match="does not support fp16"):
+            _build_with(directory, precision="fp16")
+
+
+def test_gemma2_keeps_fp16(tmp_path: Path) -> None:
+    """Gemma 2 peaks at 4060, sixteen times inside the fp16 range."""
+    directory = _model_dir(tmp_path / "fp16-gemma2", "gemma2")
+    with pytest.raises(Exception) as caught:  # noqa: PT011 - a later failure is fine
+        _build_with(directory, precision="fp16")
+    assert "does not support fp16" not in str(caught.value)
+
+
+def _build_with(model_dir: Path, *, precision: str) -> None:
+    build_family(
+        BuildRequest(
+            model_dir=model_dir,
+            output_path=model_dir / "out.bundle",
+            family="gemma",
+            task="text_generation",
+            precision=precision,
+        ),
+        writer=None,
+    )

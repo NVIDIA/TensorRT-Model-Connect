@@ -88,6 +88,8 @@ excluded_profiles:
       Functional and Hugging Face reference-parity qualification is present,
       but the release-performance workload and receipt were collected only for
       gemma-2-2b, which exercises the same builder and runtime path.
+  - model: gemma-3-270m
+    reason: *gemma3_performance_exclusion
   - model: gemma-3-1b
     reason: >-
       Functional and Hugging Face reference-parity qualification is present,
