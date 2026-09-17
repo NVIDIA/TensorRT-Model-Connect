@@ -55,6 +55,7 @@ def test_opt_uses_validated_profile_and_pre_refactor_performance_length() -> Non
 
     assert accuracy.candidate["build"]["max_sequence_length"] == 256
     assert accuracy.values["prompt_token_limit"] == 192
+    assert performance.name == "generate-10"
     assert performance.values["request"]["max_new_tokens"] == 10
 
 
