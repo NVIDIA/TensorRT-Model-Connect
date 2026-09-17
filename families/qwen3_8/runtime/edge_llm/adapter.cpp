@@ -166,8 +166,8 @@ class Stream {
 };
 
 /// Delegate the complete DSpark block7 algorithm to the pinned runtime.
-std::unique_ptr<trt_edgellm::rt::LLMInferenceRuntime>
-make_runtime(const Artifacts& artifacts, cudaStream_t stream) {
+std::unique_ptr<trt_edgellm::rt::LLMInferenceRuntime> make_runtime(const Artifacts& artifacts,
+                                                                   cudaStream_t stream) {
     trt_edgellm::rt::SpecDecodeDraftingConfig drafting{};
     drafting.draftingTopK = 1;
     drafting.draftingStep = 1;
@@ -178,8 +178,8 @@ make_runtime(const Artifacts& artifacts, cudaStream_t stream) {
     drafting.dsparkMinProposalLen = 1;
     drafting.dsparkMaxProposalLen = 0;
     return std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>(
-        artifacts.engine(), "", std::unordered_map<std::string, std::string>{}, drafting,
-        stream, trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint(),
+        artifacts.engine(), "", std::unordered_map<std::string, std::string>{}, drafting, stream,
+        trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint(),
         (fs::path(artifacts.checkpoint()) / "draft").string());
 }
 
