@@ -1660,6 +1660,36 @@ def test_embedding_reference_measures_the_declared_timing_contract(
     assert calls == calls_after_summary
 
 
+@pytest.mark.parametrize(("compiled", "expected_invocations"), [(False, 2), (True, 3)])
+def test_zero_warmup_keeps_compilation_outside_timed_samples(
+    monkeypatch, compiled, expected_invocations
+) -> None:
+    invocations = 0
+    compile_evidence = {"compiled_graph_count": 0} if compiled else None
+
+    def invoke():
+        nonlocal invocations
+        invocations += 1
+        if compile_evidence is not None and invocations == 1:
+            compile_evidence["compiled_graph_count"] = 1
+        return {"value": invocations}
+
+    monkeypatch.setattr(task_reference, "_synchronize", lambda: None)
+    samples, output = task_reference._measure(
+        task_reference.Session(
+            invoke=invoke,
+            framework="test",
+            compile_evidence=compile_evidence,
+        ),
+        warmup=0,
+        iterations=2,
+    )
+
+    assert len(samples) == 2
+    assert invocations == expected_invocations
+    assert output == {"value": expected_invocations}
+
+
 def test_check_resolves_selected_entry_with_one_runtime_root(tmp_path: Path, capsys) -> None:
     environment_path, _ = _environment(tmp_path)
     assert (
