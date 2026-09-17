@@ -3,6 +3,8 @@
 
 """Family-owned model and task support for gpt2."""
 
+# CI live-fire payload: parallel Community GPU lease verification (see #1313).
+
 from tensorrt_model_connect.model_support import family_support
 
 
