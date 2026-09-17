@@ -197,6 +197,9 @@ def test_hf_accuracy_reference_uses_requested_expert_implementation(monkeypatch)
         "local_files_only": True,
         "trust_remote_code": True,
     }
+    assert hf_text_generation._precision_load_options("fp16") == {
+        "torch_dtype": "fp16"
+    }
 
 
 def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
