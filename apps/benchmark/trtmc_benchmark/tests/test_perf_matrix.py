@@ -1449,16 +1449,83 @@ def test_release_suite_expands_profiles_and_covers_ready_catalog() -> None:
         "family",
         "expected_scope",
         "input_preparation_included",
+        "mode",
         "calls_after_load",
         "calls_after_invoke",
+        "calls_after_summary",
+        "compiled",
     ),
     [
-        ("bert", "task-pipeline-call-wall", True, [], ["tokenize", "model"]),
-        ("eagle_vlm", "task-model-call-wall", False, ["tokenize"], ["tokenize", "model"]),
-        ("bert", "task-model-call-wall", False, ["tokenize"], ["tokenize", "model"]),
-        ("eagle_vlm", "task-pipeline-call-wall", True, [], ["tokenize", "model"]),
-        ("renamed_embedding", "task-model-call-wall", False, ["tokenize"], ["tokenize", "model"]),
-        ("renamed_embedding", "task-pipeline-call-wall", True, [], ["tokenize", "model"]),
+        (
+            "bert",
+            "task-pipeline-call-wall",
+            True,
+            "hf-eager",
+            [],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "bert",
+            "task-pipeline-call-wall",
+            True,
+            "torch-compile",
+            ["compile"],
+            ["compile", "tokenize", "model", "materialize"],
+            ["compile", "tokenize", "model", "materialize", "validate"],
+            True,
+        ),
+        (
+            "eagle_vlm",
+            "task-model-call-wall",
+            False,
+            "hf-eager",
+            ["tokenize"],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "bert",
+            "task-model-call-wall",
+            False,
+            "hf-eager",
+            ["tokenize"],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "eagle_vlm",
+            "task-pipeline-call-wall",
+            True,
+            "hf-eager",
+            [],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "renamed_embedding",
+            "task-model-call-wall",
+            False,
+            "hf-eager",
+            ["tokenize"],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "renamed_embedding",
+            "task-pipeline-call-wall",
+            True,
+            "hf-eager",
+            [],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
     ],
 )
 def test_embedding_reference_measures_the_declared_timing_contract(
@@ -1466,8 +1533,11 @@ def test_embedding_reference_measures_the_declared_timing_contract(
     family,
     expected_scope,
     input_preparation_included,
+    mode,
     calls_after_load,
     calls_after_invoke,
+    calls_after_summary,
+    compiled,
 ) -> None:
     calls: list[str] = []
 
@@ -1476,6 +1546,10 @@ def test_embedding_reference_measures_the_declared_timing_contract(
         dtype = "fp32"
 
         def to(self, *_args, **_kwargs):
+            return self
+
+        def detach(self):
+            calls.append("materialize")
             return self
 
         def unsqueeze(self, _dimension):
@@ -1491,6 +1565,7 @@ def test_embedding_reference_measures_the_declared_timing_contract(
             return 2
 
         def isfinite(self):
+            calls.append("validate")
             return self
 
         def all(self):
@@ -1546,9 +1621,16 @@ def test_embedding_reference_measures_the_declared_timing_contract(
     fake_transformers.AutoTokenizer = FakeTokenizer
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    compile_evidence = {"compiled_graph_count": 0}
+    monkeypatch.setattr(
+        task_reference,
+        "_compile_forward",
+        lambda _model: calls.append("compile") or compile_evidence,
+    )
     arguments = SimpleNamespace(
         family=family,
         model="sentence-transformers/all-MiniLM-L6-v2",
+        mode=mode,
         precision="fp32",
         revision="model-revision",
         trust_remote_code=False,
@@ -1570,8 +1652,12 @@ def test_embedding_reference_measures_the_declared_timing_contract(
     assert session.timing_scope == expected_scope
     assert session.input_preparation_included is input_preparation_included
     assert session.asset_loading_included is False
-    assert session.invoke()["embedding_vectors"] == 1
+    assert (session.compile_evidence is compile_evidence) is compiled
+    vector = session.invoke()
     assert calls == calls_after_invoke
+    assert session.summarize is not None
+    assert session.summarize(vector)["embedding_vectors"] == 1
+    assert calls == calls_after_summary
 
 
 def test_check_resolves_selected_entry_with_one_runtime_root(tmp_path: Path, capsys) -> None:
