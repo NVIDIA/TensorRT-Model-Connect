@@ -54,3 +54,11 @@ def test_runtime_keeps_checkpoint_prompt_and_builder_policies() -> None:
         source = path.read_text(encoding="utf-8")
         assert "builder_optimization_level = 3" in source
         assert "builder_optimization_level = 1" not in source
+
+    # Edge has native scalar prefill even when the optimized head80 SSD is absent.
+    from families.nemotron_h.dispatch import EDGE_DISPATCH, platform_matches
+
+    for sm in (80, 120):
+        assert platform_matches({"mamba_head_dim": 80}, {"sm": sm})
+        assert ("linux", "x86_64", sm, "fp16") in EDGE_DISPATCH
+    assert ("linux", "x86_64", 80, "nvfp4") not in EDGE_DISPATCH
