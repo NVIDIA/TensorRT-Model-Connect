@@ -32,7 +32,7 @@ model = _TimmDensenetModel()
 )
 def test_support_matches_densenet_variants(model_type: str) -> None:
     metadata = ModelMetadata(config={"model_type": model_type}, model_index={})
-    assert describe(metadata).tasks == ("classification",)
+    assert describe(metadata).tasks == ("image_to_class_scores",)
 
 
 @pytest.mark.parametrize("model_type", ["resnet50", "vgg16", "efficientnet_b0", ""])
@@ -157,3 +157,57 @@ def test_build_engine_rejects_quantized_context(tmp_path: Path):
 
     with pytest.raises(NotImplementedError, match="quantized"):
         model.build_engine(cfg, weights, 0, quant_ctx=object())
+
+
+@pytest.mark.parametrize("known_identity", [False, True])
+def test_class_metadata_preserves_known_and_unknown_identity(tmp_path: Path, known_identity):
+    _write_tiny_densenet(tmp_path)
+    config = ModelConfig.from_dir(tmp_path)
+    raw = config.raw
+    if known_identity:
+        raw.update(vocabulary_id="test:five-classes", label_names=["one", "two", "three", "four", "five"])
+    metadata = model.get_bundle_config_overrides(config)
+    assert metadata["num_classes"] == 5
+    assert metadata["vocabulary_id"] == raw.get("vocabulary_id", "")
+    assert metadata["labels"] == raw.get("label_names", [])
+
+
+@pytest.mark.parametrize("labels", [["only one"], ["one", "two", "", "four", "five"], 5])
+def test_class_metadata_rejects_incomplete_labels(tmp_path: Path, labels):
+    _write_tiny_densenet(tmp_path)
+    config = ModelConfig.from_dir(tmp_path)
+    raw = config.raw
+    raw["label_names"] = labels
+    with pytest.raises(ValueError, match="label_names"):
+        model.get_bundle_config_overrides(config)
+
+
+def test_builder_publishes_the_semantic_task_and_class_metadata(tmp_path: Path, monkeypatch):
+    from tensorrt_model_connect import BuildRequest
+    from families.timm_densenet.model import build as build_family
+
+    _write_tiny_densenet(tmp_path)
+    monkeypatch.setattr(_TimmDensenetModel, "build_engine", lambda *args, **kwargs: b"plan")
+    sections = {}
+
+    class Writer:
+        def set_header(self, **header):
+            sections["header"] = header
+
+        def add_bytes(self, name, value):
+            sections[name] = value
+
+        def add_json(self, name, value):
+            sections[name] = value
+
+    request = BuildRequest(
+        model_dir=tmp_path, output_path=tmp_path / "unused.bundle",
+        family="timm_densenet", task="image_to_class_scores",
+        precision="fp32", max_sequence_length=1,
+    )
+    build_family(request, Writer())
+    assert sections["header"]["task"] == "image_to_class_scores"
+    assert sections["engine.plan"] == b"plan"
+    assert sections["runtime.json"]["num_classes"] == 5
+    assert sections["runtime.json"]["vocabulary_id"] == ""
+    assert sections["runtime.json"]["labels"] == []

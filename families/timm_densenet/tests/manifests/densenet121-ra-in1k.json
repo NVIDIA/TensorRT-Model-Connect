@@ -3,7 +3,7 @@
   "hf_id": "timm/densenet121.ra_in1k",
   "bundle": "densenet121-ra-in1k.bundle",
   "family": "timm_densenet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

@@ -4,7 +4,7 @@
   "hf_revision": "e524c2ee5d5a9412f802ce38ff895aba07b30910",
   "bundle": "ghostnet-100-in1k.bundle",
   "family": "timm_ghostnet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

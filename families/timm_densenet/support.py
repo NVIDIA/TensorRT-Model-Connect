@@ -9,6 +9,6 @@ from tensorrt_model_connect.model_support import family_support
 describe = family_support(
     model_types=("timm_densenet", "densenet121", "densenet161", "densenet169", "densenet201"),
     architectures=("densenet121", "densenet161", "densenet169", "densenet201"),
-    tasks=("classification",),
-    default_task="classification",
+    tasks=("image_to_class_scores",),
+    default_task="image_to_class_scores",
 )

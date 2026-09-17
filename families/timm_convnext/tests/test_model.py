@@ -134,3 +134,54 @@ def test_read_config_rejects_another_family(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text(json.dumps({"architecture": "repvgg_a2"}), encoding="utf-8")
     with pytest.raises(ValueError, match="unsupported timm ConvNeXt model identity"):
         model._read_config(tmp_path)
+
+
+@pytest.mark.parametrize("known_identity", [False, True])
+def test_class_metadata_preserves_known_and_unknown_identity(tmp_path: Path, known_identity):
+    _checkpoint(tmp_path)
+    raw = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    if known_identity:
+        raw.update(vocabulary_id="test:five-classes", label_names=["one", "two", "three", "four", "five"])
+    metadata = model._preprocess_config(raw)
+    assert metadata["num_classes"] == 5
+    assert metadata["vocabulary_id"] == raw.get("vocabulary_id", "")
+    assert metadata["labels"] == raw.get("label_names", [])
+
+
+@pytest.mark.parametrize("labels", [["only one"], ["one", "two", "", "four", "five"], 5])
+def test_class_metadata_rejects_incomplete_labels(tmp_path: Path, labels):
+    _checkpoint(tmp_path)
+    raw = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    raw["label_names"] = labels
+    with pytest.raises(ValueError, match="label_names"):
+        model._preprocess_config(raw)
+
+
+def test_builder_publishes_the_semantic_task_and_class_metadata(tmp_path: Path, monkeypatch):
+    from tensorrt_model_connect import BuildRequest
+
+    _checkpoint(tmp_path)
+    monkeypatch.setattr(model, "_build_engine", lambda raw, *args: (b"plan", model._preprocess_config(raw)))
+    sections = {}
+
+    class Writer:
+        def set_header(self, **header):
+            sections["header"] = header
+
+        def add_bytes(self, name, value):
+            sections[name] = value
+
+        def add_json(self, name, value):
+            sections[name] = value
+
+    request = BuildRequest(
+        model_dir=tmp_path, output_path=tmp_path / "unused.bundle",
+        family="timm_convnext", task="image_to_class_scores",
+        precision="fp32", max_sequence_length=1,
+    )
+    model.build(request, Writer())
+    assert sections["header"]["task"] == "image_to_class_scores"
+    assert sections["engine.plan"] == b"plan"
+    assert sections["runtime.json"]["num_classes"] == 5
+    assert sections["runtime.json"]["vocabulary_id"] == ""
+    assert sections["runtime.json"]["labels"] == []

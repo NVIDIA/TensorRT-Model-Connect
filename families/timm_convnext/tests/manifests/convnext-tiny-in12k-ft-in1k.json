@@ -4,7 +4,7 @@
   "hf_revision": "aa096f03029c7f0ec052013f64c819b34f8ad790",
   "bundle": "convnext-tiny-in12k-ft-in1k.bundle",
   "family": "timm_convnext",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {
