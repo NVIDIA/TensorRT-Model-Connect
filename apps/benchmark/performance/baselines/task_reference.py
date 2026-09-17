@@ -105,12 +105,13 @@ PYTORCH_ADAPTERS = {
 class Session:
     """One loaded reference model and its repeatable timed operation."""
 
-    invoke: Callable[[], Mapping[str, Any]]
+    invoke: Callable[[], Any]
     framework: str
     timing_scope: str = "task-model-call-wall"
     input_preparation_included: bool = False
     asset_loading_included: bool = False
     compile_evidence: dict[str, Any] | None = None
+    summarize: Callable[[Any], Mapping[str, Any]] | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -884,6 +885,9 @@ def _load_embedding(
         .eval()
         .to(device)
     )
+    compile_evidence = (
+        _compile_forward(model) if arguments.mode == "torch-compile" else None
+    )
     prompt = prompts[0]
 
     def prepare_inputs() -> Mapping[str, Any]:
@@ -896,7 +900,7 @@ def _load_embedding(
     if not declared_timing["input_preparation_included"]:
         prepared_inputs = prepare_inputs()
 
-    def invoke() -> Mapping[str, Any]:
+    def invoke() -> Any:
         inputs = prepare_inputs() if prepared_inputs is None else prepared_inputs
         with torch.inference_mode():
             outputs = model(**inputs, output_hidden_states=True)
@@ -907,6 +911,9 @@ def _load_embedding(
         mask = mask.unsqueeze(-1).to(hidden.dtype)
         vector = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
         vector = torch.nn.functional.normalize(vector, p=2, dim=-1)
+        return vector.detach().to("cpu", dtype=torch.float32)
+
+    def summarize(vector: Any) -> Mapping[str, Any]:
         summary = _tensor_summary(vector)
         summary.update(
             {
@@ -923,6 +930,8 @@ def _load_embedding(
         timing_scope=str(declared_timing["timing_scope"]),
         input_preparation_included=bool(declared_timing["input_preparation_included"]),
         asset_loading_included=False,
+        compile_evidence=compile_evidence,
+        summarize=summarize,
     )
 
 
@@ -2342,7 +2351,7 @@ def _compile_forward(model: Any) -> dict[str, Any]:
 
 
 def _measure(session: Session, warmup: int, iterations: int) -> tuple[list[float], dict[str, Any]]:
-    output: Mapping[str, Any] = {}
+    output: Any = {}
     for _ in range(warmup):
         output = session.invoke()
         _synchronize()
@@ -2363,7 +2372,8 @@ def _measure(session: Session, warmup: int, iterations: int) -> tuple[list[float
         and int(session.compile_evidence["compiled_graph_count"]) != compiled_graphs
     ):
         raise RuntimeError("model compilation occurred inside timed samples")
-    return samples, dict(output)
+    summary = session.summarize(output) if session.summarize is not None else output
+    return samples, dict(summary)
 
 
 def _run_elf(
@@ -2780,6 +2790,8 @@ def run(arguments: argparse.Namespace) -> int:
     expected_mode = "pytorch-eager" if arguments.adapter in PYTORCH_ADAPTERS else "hf-eager"
     supported_modes = {expected_mode}
     if arguments.adapter == "pytorch-timeseries" and arguments.family == "chronos_bolt":
+        supported_modes.add("torch-compile")
+    if arguments.adapter == "hf-transformers-embedding":
         supported_modes.add("torch-compile")
     if arguments.mode not in supported_modes:
         raise ValueError(
