@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: flores200-en-fr-riva
+  version: pre1093-flores200-en-fr-riva-json
+  sha256: a797a331fa208a48f6a168c3172e741795c92f70655726f20d8065665bd00534
+  source:
+    mode: manual
+    path: FLORES200_en_fr/flores200_en_fr_task_eval.json
+    instructions: https://github.com/facebookresearch/flores
+  license: CC BY-SA 4.0
+selection:
+  method: first
+input:
+  adapter: text_generation_json
+metric:
+  name: exact_token_ids

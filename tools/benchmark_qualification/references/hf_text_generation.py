@@ -10,7 +10,7 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 def main() -> int:
@@ -21,7 +21,7 @@ def main() -> int:
     request = json.loads(arguments.request.read_text(encoding="utf-8"))
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
 
     if not torch.cuda.is_available():
         raise RuntimeError("the HF Accuracy reference requires CUDA")
@@ -38,13 +38,16 @@ def main() -> int:
     tokenizer = AutoTokenizer.from_pretrained(str(request["model"]), **tokenizer_options)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
+    task = str(request.get("task", "causal-lm"))
+    model_type = _model_class(task, AutoModelForCausalLM, AutoModelForSeq2SeqLM)
+    model = model_type.from_pretrained(
         str(request["model"]), **_precision_load_options(dtypes[precision]), **model_options
     ).eval()
     model.to("cuda")
     generation = request.get("generation", {})
     if not isinstance(generation, Mapping):
         raise ValueError("generation must be an object")
+    translation = _translation_controls(tokenizer, generation)
     results = []
     with torch.inference_mode():
         for sample in request["samples"]:
@@ -63,6 +66,7 @@ def main() -> int:
                 "pad_token_id": tokenizer.eos_token_id,
                 "eos_token_id": tokenizer.eos_token_id,
                 "repetition_penalty": float(generation.get("repetition_penalty", 1.0)),
+                **translation,
             }
             if options["do_sample"]:
                 options.update(
@@ -74,8 +78,16 @@ def main() -> int:
                 if seed >= 0:
                     torch.manual_seed(seed)
             generated = model.generate(**encoded, **options)
-            prompt_length = int(encoded["input_ids"].shape[-1])
+            prompt_length = 0 if task == "seq2seq-lm" else int(encoded["input_ids"].shape[-1])
             token_ids = generated[0, prompt_length:].detach().cpu().tolist()
+            if task == "seq2seq-lm":
+                generation_config = getattr(model, "generation_config", model.config)
+                token_ids = _normalize_seq2seq_tokens(
+                    token_ids,
+                    getattr(generation_config, "decoder_start_token_id", None),
+                    getattr(generation_config, "eos_token_id", None),
+                    str(request.get("output_token_policy", "new-tokens")),
+                )
             results.append(
                 {
                     "sample_id": str(sample["sample_id"]),
@@ -88,7 +100,9 @@ def main() -> int:
         "schema_version": "trtmc.accuracy-reference/v1",
         "model": request["model"],
         "revision": getattr(model.config, "_commit_hash", None) or request.get("revision"),
+        "task": task,
         "precision": precision,
+        "output_token_policy": str(request.get("output_token_policy", "new-tokens")),
         "samples": results,
     }
     arguments.output.write_text(
@@ -114,6 +128,95 @@ def _model_load_options(request: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("experts_implementation must be a non-empty string")
         options["experts_implementation"] = experts_implementation
     return options
+
+
+def _model_class(task: str, causal: Any, seq2seq: Any) -> Any:
+    if task == "causal-lm":
+        return causal
+    if task == "seq2seq-lm":
+        return seq2seq
+    raise ValueError(f"unsupported reference task {task!r}")
+
+
+def _translation_controls(tokenizer: Any, request: Mapping[str, Any]) -> dict[str, int]:
+    source = request.get("source_language")
+    target = request.get("target_language")
+    for name, value in (("source_language", source), ("target_language", target)):
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ValueError(f"generation.{name} must be a nonempty language identifier")
+
+    def token_id(language: str) -> int:
+        lookup = getattr(tokenizer, "get_lang_id", None)
+        if lookup is None:
+            lookup = tokenizer.convert_tokens_to_ids
+        value = lookup(language)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or value == getattr(tokenizer, "unk_token_id", None)
+        ):
+            raise ValueError(f"tokenizer does not recognize language {language!r}")
+        return value
+
+    def explicit_id(name: str) -> int | None:
+        value = request.get(name)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < -1:
+            raise ValueError(f"generation.{name} must be a nonnegative integer or -1")
+        return None if value == -1 else value
+
+    source_id = explicit_id("source_language_token_id")
+    target_id = explicit_id("forced_bos_token_id")
+    if source_id is not None:
+        if source is not None and token_id(source) != source_id:
+            raise ValueError("source language disagrees with source_language_token_id")
+        source = tokenizer.convert_ids_to_tokens(source_id)
+    if source is not None:
+        if hasattr(tokenizer, "src_lang"):
+            token_id(source)
+            tokenizer.src_lang = source
+        elif source != getattr(tokenizer, "source_lang", None):
+            raise ValueError("reference tokenizer does not support the requested source language")
+    if target is not None:
+        if hasattr(tokenizer, "src_lang"):
+            resolved = token_id(target)
+            if target_id is not None and target_id != resolved:
+                raise ValueError("target language disagrees with forced_bos_token_id")
+            target_id = resolved
+        elif target != getattr(tokenizer, "target_lang", None):
+            raise ValueError("reference tokenizer does not support the requested target language")
+    return {} if target_id is None else {"forced_bos_token_id": target_id}
+
+
+def _normalize_seq2seq_tokens(
+    token_ids: Sequence[int],
+    decoder_start_token_id: int | None,
+    eos_token_id: int | Sequence[int] | None,
+    policy: str,
+) -> list[int]:
+    if policy not in {"new-tokens", "strip-start", "strip-start-and-eos"}:
+        raise ValueError(f"unsupported output token policy {policy!r}")
+    normalized = [int(value) for value in token_ids]
+    if policy == "new-tokens":
+        return normalized
+    if (
+        normalized
+        and decoder_start_token_id is not None
+        and normalized[0] == int(decoder_start_token_id)
+    ):
+        normalized.pop(0)
+    if policy != "strip-start-and-eos" or not normalized or eos_token_id is None:
+        return normalized
+    eos_ids = (
+        {int(eos_token_id)}
+        if isinstance(eos_token_id, int)
+        else {int(value) for value in eos_token_id}
+    )
+    if normalized[-1] in eos_ids:
+        normalized.pop()
+    return normalized
 
 
 def _precision_load_options(dtype: Any) -> dict[str, Any]:
