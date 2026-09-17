@@ -36,3 +36,14 @@ set_target_properties(trtmc_model_roberta PROPERTIES
 install(TARGETS trtmc_model_roberta
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_roberta_added_token_whitespace
+    ${PROJECT_SOURCE_DIR}/families/roberta/tests/cpp/test_roberta_added_token_whitespace.cpp
+    bpe_tokenizer.cpp
+  )
+  target_include_directories(test_roberta_added_token_whitespace PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_roberta_added_token_whitespace PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_roberta_added_token_whitespace PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME roberta_added_token_whitespace COMMAND test_roberta_added_token_whitespace)
+endif()
