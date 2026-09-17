@@ -75,5 +75,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         return new FakeEmbedding();
     if (context.reader.info().task == trtmc::ITimeSeriesForecast::kTask)
         return new FakeForecast(context.backend, context.kv_cache_size_bytes);
+    if (context.reader.info().task == trtmc::ITextGeneration::kTask) {
+        // Deliberately violate the factory contract for the loader's mismatch test.
+        return new FakeForecast(context.backend, context.kv_cache_size_bytes);
+    }
     throw std::runtime_error("unsupported fake task");
 }
