@@ -7,12 +7,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
-import os
 from pathlib import Path
-
-from .app import ServerConfig, create_app
-from .registry import ModelRegistry, ModelSpec
-from .worker import WorkerLoadOptions
 
 
 def packaged_runtime_root(control_plane_file: Path = Path(__file__)) -> Path | None:
@@ -65,19 +60,31 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def model_assignment(value: str, replicas: int) -> ModelSpec:
+def model_assignment(value: str, replicas: int) -> tuple[str, Path, int]:
     name, separator, path = value.partition("=")
     if not separator or not name or not path:
         raise ValueError("--model must use NAME=PATH")
     bundle = Path(path).expanduser().resolve()
     if not bundle.is_file():
         raise ValueError(f"bundle for model {name!r} does not exist")
-    return ModelSpec(name, bundle, replicas)
+    return name, bundle, replicas
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    command = parser()
+    args = command.parse_args(argv)
     try:
+        try:
+            import uvicorn
+
+            from .app import ServerConfig, create_app
+            from .registry import ModelRegistry, ModelSpec
+            from .worker import WorkerLoadOptions
+        except ImportError:
+            command.error(
+                "optional serving dependencies are unavailable; install "
+                "'tensorrt-model-connect[serve]'"
+            )
         host = ipaddress.ip_address(args.host)
         if not host.is_loopback:
             raise ValueError("--host must be a loopback IP address")
@@ -85,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--port must be between 0 and 65535")
         if args.startup_timeout <= 0 or args.request_timeout <= 0:
             raise ValueError("worker timeouts must be positive")
-        specs = [model_assignment(value, args.replicas) for value in args.model]
+        specs = [ModelSpec(*model_assignment(value, args.replicas)) for value in args.model]
         if args.bundle:
             if not args.model_name:
                 raise ValueError("--model-name is required with the positional bundle")
@@ -111,7 +118,6 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if packaged_root is not None:
                 runtime_root = str(packaged_root)
-        api_key = os.environ.get("TRTMC_SERVE_TOKEN") or None
         registry = ModelRegistry(
             specs,
             worker_binary=args.worker_binary.resolve(),
@@ -127,14 +133,11 @@ def main(argv: list[str] | None = None) -> int:
         app = create_app(
             registry,
             ServerConfig(
-                api_key=api_key,
                 max_body_bytes=args.max_body_bytes,
                 max_prompt_bytes=args.max_prompt_bytes,
                 max_generation_tokens=args.max_new_tokens,
             ),
         )
-        import uvicorn
-
         uvicorn_config = uvicorn.Config(
             app,
             host=str(host),
@@ -146,5 +149,5 @@ def main(argv: list[str] | None = None) -> int:
         server.run()
         return 0 if server.started else 1
     except (OSError, ValueError) as error:
-        parser().error(str(error))
+        command.error(str(error))
     return 2

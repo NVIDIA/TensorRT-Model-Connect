@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .errors import WorkerProtocolError, WorkerRemoteError
+from .errors import WorkerProtocolError, WorkerRemoteError, WorkerRequestTooLargeError
 from .schemas import ChatCompletionRequest, GenerationRequest
 
 
@@ -50,6 +50,8 @@ def extract_result(result: Any) -> tuple[str, int, dict[str, float]]:
 
 
 def public_worker_error(error: Exception) -> str:
+    if isinstance(error, WorkerRequestTooLargeError):
+        return "request exceeds the native worker transport limit"
     if isinstance(error, WorkerRemoteError):
         details = error.details
         if isinstance(details, Mapping) and details.get("type") == "invalid_request_error":

@@ -68,13 +68,17 @@ int main() {
                              "\"use_chat_template\":true,\"enable_thinking\":false}}\n"
                              "{\"id\":\"bad\",\"op\":\"generate\",\"prompt\":\"x\","
                              "\"config\":{\"unknown\":1}}\n"
+                             "{\"id\":\"fractional\",\"op\":\"generate\",\"prompt\":\"x\","
+                             "\"config\":{\"max_new_tokens\":1.5}}\n"
+                             "{\"id\":\"overflow\",\"op\":\"generate\",\"prompt\":\"x\","
+                             "\"config\":{\"seed\":4294967296}}\n"
                              "{\"id\":\"stop\",\"op\":\"shutdown\"}\n");
     std::ostringstream output;
 
     check(trtmc::server::run_text_worker(task, input, output) == 0, "worker exits cleanly");
     const auto messages = records(output.str());
-    check(messages.size() == 4, "worker emits ready and three responses");
-    if (messages.size() != 4)
+    check(messages.size() == 6, "worker emits ready and five responses");
+    if (messages.size() != 6)
         return 1;
     check(messages.at(0)["event"] == "ready", "worker advertises readiness");
     check(messages.at(0)["protocol_version"] == 1, "worker protocol is versioned");
@@ -91,7 +95,15 @@ int main() {
           "invalid config is rejected");
     check(messages.at(2)["error"]["type"] == "invalid_request_error",
           "protocol error remains client visible");
-    check(messages.at(3)["result"]["status"] == "shutting_down", "shutdown is acknowledged");
+    check(messages.at(3)["id"] == "fractional" && messages.at(3)["ok"] == false,
+          "fractional integral config is rejected");
+    check(messages.at(3)["error"]["message"] == "config.max_new_tokens must be an integer",
+          "fractional integral error is explicit");
+    check(messages.at(4)["id"] == "overflow" && messages.at(4)["ok"] == false,
+          "out-of-range integral config is rejected");
+    check(messages.at(4)["error"]["message"] == "config.seed is out of range",
+          "integral range error is explicit");
+    check(messages.at(5)["result"]["status"] == "shutting_down", "shutdown is acknowledged");
 
     ThrowingText throwing;
     std::istringstream failing_input("{\"id\":\"failure\",\"op\":\"generate\",\"prompt\":\"x\"}\n");

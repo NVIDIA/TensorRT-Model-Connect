@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import time
@@ -24,6 +23,7 @@ from .errors import (
     ModelNotFoundError,
     WorkerCrashedError,
     WorkerProtocolError,
+    WorkerRequestTooLargeError,
     WorkerRemoteError,
     WorkerSaturatedError,
     WorkerTimeoutError,
@@ -42,12 +42,10 @@ class ServerConfig:
     def __init__(
         self,
         *,
-        api_key: str | None,
         max_body_bytes: int,
         max_prompt_bytes: int,
         max_generation_tokens: int,
     ) -> None:
-        self.api_key = api_key
         self.max_body_bytes = max_body_bytes
         self.max_prompt_bytes = max_prompt_bytes
         self.max_generation_tokens = max_generation_tokens
@@ -163,20 +161,6 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
                     response = error_response(
                         400, "invalid_request", "invalid Content-Length header"
                     )
-                    return response
-            if config.api_key is not None and request.url.path != "/health/live":
-                authorization = request.headers.get("authorization", "")
-                scheme, separator, token = authorization.partition(" ")
-                valid = (
-                    bool(separator)
-                    and scheme.lower() == "bearer"
-                    and hmac.compare_digest(token.encode(), config.api_key.encode())
-                )
-                if not valid:
-                    response = error_response(
-                        401, "invalid_api_key", "missing or invalid bearer token"
-                    )
-                    response.headers["WWW-Authenticate"] = "Bearer"
                     return response
             response = await call_next(request)
             return response
@@ -352,6 +336,19 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             )
             return error_response(
                 status, error.code, public_worker_error(error), request_id=request_id
+            )
+        except WorkerRequestTooLargeError as error:
+            metrics.finish(
+                route,
+                413,
+                queue_seconds=queue_seconds,
+                inference_seconds=time.monotonic() - inference_started,
+            )
+            return error_response(
+                413,
+                error.code,
+                public_worker_error(error),
+                request_id=request_id,
             )
         except WorkerProtocolError as error:
             metrics.finish(

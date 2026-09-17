@@ -11,26 +11,38 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from trtmc_server.app import ServerConfig, create_app
-from trtmc_server.errors import ModelNotFoundError, WorkerSaturatedError
+from trtmc_server.errors import (
+    ModelNotFoundError,
+    WorkerRequestTooLargeError,
+    WorkerSaturatedError,
+)
 
 
 class FakeSession:
-    def __init__(self, requests: list[tuple[str, dict[str, Any]]]) -> None:
+    def __init__(
+        self,
+        requests: list[tuple[str, dict[str, Any]]],
+        request_error: Exception | None,
+    ) -> None:
         self.requests = requests
+        self.request_error = request_error
         self.closed = False
 
     def submit(self, operation: str, payload: dict[str, Any]) -> Future[Any]:
         self.requests.append((operation, payload))
         result: Future[Any] = Future()
-        result.set_result(
-            {
-                "text": "Paris",
-                "completion_tokens": 1,
-                "setup_ms": 1.0,
-                "prefill_ms": 2.0,
-                "decode_ms": 3.0,
-            }
-        )
+        if self.request_error is not None:
+            result.set_exception(self.request_error)
+        else:
+            result.set_result(
+                {
+                    "text": "Paris",
+                    "completion_tokens": 1,
+                    "setup_ms": 1.0,
+                    "prefill_ms": 2.0,
+                    "decode_ms": 3.0,
+                }
+            )
         return result
 
     def close(self) -> None:
@@ -42,6 +54,7 @@ class FakeRegistry:
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self.started = False
         self.saturated = False
+        self.request_error: Exception | None = None
 
     def start(self) -> None:
         self.started = True
@@ -81,16 +94,13 @@ class FakeRegistry:
             raise ModelNotFoundError(model)
         if self.saturated:
             raise WorkerSaturatedError("busy")
-        return FakeSession(self.requests)
+        return FakeSession(self.requests, self.request_error)
 
 
-def make_client(
-    registry: FakeRegistry, *, api_key: str | None = None
-) -> TestClient:
+def make_client(registry: FakeRegistry) -> TestClient:
     app = create_app(
         registry,  # type: ignore[arg-type]
         ServerConfig(
-            api_key=api_key,
             max_body_bytes=4096,
             max_prompt_bytes=1024,
             max_generation_tokens=64,
@@ -143,15 +153,13 @@ def test_completion_and_chat_keep_model_semantics_in_worker(caplog: Any) -> None
     assert "Capital?" not in json.dumps(request_logs)
 
 
-def test_validation_overload_auth_and_metrics_are_explicit() -> None:
+def test_validation_overload_and_metrics_are_explicit() -> None:
     registry = FakeRegistry()
-    with make_client(registry, api_key="secret") as client:
+    with make_client(registry) as client:
         assert client.get("/health/live").status_code == 200
-        assert client.get("/health/ready").status_code == 401
-        headers = {"Authorization": "Bearer secret"}
+        assert client.get("/health/ready").status_code == 200
         unknown = client.post(
             "/v1/completions",
-            headers=headers,
             json={"model": "test/model", "prompt": "x", "unknown": True},
         )
         assert unknown.status_code == 400
@@ -159,14 +167,13 @@ def test_validation_overload_auth_and_metrics_are_explicit() -> None:
 
         missing = client.post(
             "/v1/completions",
-            headers=headers,
             json={"model": "missing/model", "prompt": "x"},
         )
         assert missing.status_code == 404
 
         oversized = client.post(
             "/v1/completions",
-            headers={**headers, "Content-Length": "5000"},
+            headers={"Content-Length": "5000"},
             content=b"{}",
         )
         assert oversized.status_code == 413
@@ -174,11 +181,27 @@ def test_validation_overload_auth_and_metrics_are_explicit() -> None:
         registry.saturated = True
         busy = client.post(
             "/v1/completions",
-            headers=headers,
             json={"model": "test/model", "prompt": "x"},
         )
         assert busy.status_code == 429
         assert busy.headers["retry-after"] == "1"
-        metrics = client.get("/metrics", headers=headers)
+        metrics = client.get("/metrics")
         assert metrics.status_code == 200
         assert 'route="/v1/completions",status="429"' in metrics.text
+
+
+def test_worker_request_too_large_returns_413_and_finishes_metrics() -> None:
+    registry = FakeRegistry()
+    registry.request_error = WorkerRequestTooLargeError("private serialized size")
+    with make_client(registry) as client:
+        response = client.post(
+            "/v1/completions",
+            json={"model": "test/model", "prompt": "x"},
+        )
+        assert response.status_code == 413
+        assert response.json()["error"]["code"] == "request_too_large"
+        assert "private serialized size" not in response.text
+
+        metrics = client.get("/metrics")
+        assert 'route="/v1/completions",status="413"' in metrics.text
+        assert "trtmc_server_active_requests 0" in metrics.text

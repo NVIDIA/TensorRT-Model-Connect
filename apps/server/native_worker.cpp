@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace trtmc::server {
@@ -33,8 +34,26 @@ class ProtocolError final : public std::runtime_error {
 template <typename T>
 void assign(const Json& config, const char* name, T& destination) {
     const auto value = config.find(name);
-    if (value != config.end())
-        destination = value->get<T>();
+    if (value == config.end())
+        return;
+    if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+        if (!value->is_number_integer())
+            throw ProtocolError(std::string("config.") + name + " must be an integer");
+        bool in_range = false;
+        if (value->is_number_unsigned()) {
+            const auto number = value->get<Json::number_unsigned_t>();
+            in_range =
+                number <= static_cast<Json::number_unsigned_t>(std::numeric_limits<T>::max());
+        } else {
+            const auto number = value->get<Json::number_integer_t>();
+            in_range =
+                number >= static_cast<Json::number_integer_t>(std::numeric_limits<T>::min()) &&
+                number <= static_cast<Json::number_integer_t>(std::numeric_limits<T>::max());
+        }
+        if (!in_range)
+            throw ProtocolError(std::string("config.") + name + " is out of range");
+    }
+    destination = value->get<T>();
 }
 
 void validate_fields(const Json& object, std::initializer_list<const char*> allowed) {

@@ -66,10 +66,9 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-The server accepts only loopback IP bind addresses. Authentication is optional
-for local evaluation. Set `TRTMC_SERVE_TOKEN` to require a bearer token. The
-server does not accept bearer tokens as command-line arguments because process
-command lines can be visible to other local users.
+The MVP has no built-in authentication and accepts only loopback IP bind
+addresses. If remote access is needed later, place it behind an authenticated
+TLS reverse proxy; do not expose the server directly.
 
 ## Serve several text models
 
