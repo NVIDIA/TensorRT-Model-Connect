@@ -179,7 +179,9 @@ def _batch_prompt(request: Mapping[str, Any]) -> list[str]:
     return [prompt] * batch_size
 
 
-def _translation_controls(tokenizer: Any, request: Mapping[str, Any]) -> dict[str, int]:
+def _translation_controls(
+    tokenizer: Any, request: Mapping[str, Any]
+) -> tuple[dict[str, int], int | None]:
     """Use tokenizer language APIs; fixed-pair models validate their declared pair."""
     source = request.get("source_language")
     target = request.get("target_language")
@@ -211,6 +213,7 @@ def _translation_controls(tokenizer: Any, request: Mapping[str, Any]) -> dict[st
 
     source_id = explicit_id("source_language_token_id")
     target_id = explicit_id("forced_bos_token_id")
+    manual_source_id = None
     if source_id is not None:
         if source is not None and token_id(source) != source_id:
             raise ValueError("source language disagrees with source_language_token_id")
@@ -219,7 +222,11 @@ def _translation_controls(tokenizer: Any, request: Mapping[str, Any]) -> dict[st
         if hasattr(tokenizer, "src_lang"):
             token_id(source)
             tokenizer.src_lang = source
-        elif source != getattr(tokenizer, "source_lang", None):
+        elif source == getattr(tokenizer, "source_lang", None):
+            pass
+        elif source_id is not None and token_id(source) == source_id:
+            manual_source_id = source_id
+        else:
             raise ValueError("reference tokenizer does not support the requested source language")
     if target is not None:
         if hasattr(tokenizer, "src_lang"):
@@ -227,9 +234,39 @@ def _translation_controls(tokenizer: Any, request: Mapping[str, Any]) -> dict[st
             if target_id is not None and target_id != resolved:
                 raise ValueError("target language disagrees with forced_bos_token_id")
             target_id = resolved
-        elif target != getattr(tokenizer, "target_lang", None):
+        elif target == getattr(tokenizer, "target_lang", None):
+            pass
+        elif target_id is not None and token_id(target) == target_id:
+            pass
+        else:
             raise ValueError("reference tokenizer does not support the requested target language")
-    return {} if target_id is None else {"forced_bos_token_id": target_id}
+    controls = {} if target_id is None else {"forced_bos_token_id": target_id}
+    return controls, manual_source_id
+
+
+def _apply_source_language(
+    encoded: Mapping[str, Any], source_token_id: int | None, tokenizer: Any
+) -> None:
+    if source_token_id is None:
+        return
+    input_ids = encoded.get("input_ids")
+    if input_ids is None or getattr(input_ids, "ndim", None) != 2:
+        raise ValueError("tokenized translation input must contain rank-2 input_ids")
+    attention_mask = encoded.get("attention_mask")
+    for row in range(int(input_ids.shape[0])):
+        if attention_mask is None:
+            index = int(input_ids.shape[1]) - 1
+        else:
+            positions = attention_mask[row].nonzero(as_tuple=False)
+            if int(positions.numel()) == 0:
+                raise ValueError("tokenized translation input cannot be empty")
+            index = int(positions[-1].item())
+        current = int(input_ids[row, index].item())
+        if current == source_token_id:
+            continue
+        if current != getattr(tokenizer, "unk_token_id", None):
+            raise ValueError("generic translation tokenizer did not emit a language placeholder")
+        input_ids[row, index] = source_token_id
 
 
 def _encoder_call(
@@ -324,7 +361,7 @@ def _generation_call(
         "use_cache": True,
         "pad_token_id": tokenizer.pad_token_id,
     }
-    translation = _translation_controls(tokenizer, request)
+    translation, source_language_token_id = _translation_controls(tokenizer, request)
     if generation_method == "ar-generate" and translation:
         raise ValueError("ar-generate reference does not accept translation controls")
     generation.update(translation)
@@ -345,6 +382,7 @@ def _generation_call(
 
     def invoke() -> dict[str, Any]:
         encoded = encode_prompt()
+        _apply_source_language(encoded, source_language_token_id, tokenizer)
         gpu_inputs = {name: value.to("cuda") for name, value in encoded.items()}
         with (
             torch.inference_mode(),

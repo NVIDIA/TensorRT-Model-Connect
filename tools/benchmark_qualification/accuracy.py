@@ -34,6 +34,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
     metric_name = metric.get("name") if isinstance(metric, Mapping) else None
     if metric_name == "exact_token_ids":
         result = _text_generation_parity(case, context, dataset, output)
+    elif metric_name == "embedding_vector_parity":
+        result = _encoder_embedding_parity(case, context, dataset, output)
     elif metric_name == "forecast_tensor_parity":
         result = _etth1(case, context, definition, dataset, output)
     else:
@@ -167,6 +169,342 @@ def _text_generation_parity(
         "gate": {"min_pass_rate": minimum_rate, "allowed_failures": allowed_failures},
         "samples": rows,
     }
+
+
+def _encoder_embedding_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    prompt_prefix = configured.get("prompt_prefix", "")
+    if not isinstance(prompt_prefix, str):
+        raise QualificationError("accuracy.prompt_prefix must be a string")
+    samples = _sts_samples(dataset.path, sample_limit, prompt_prefix)
+    reference = configured.get("reference", {})
+    gates = configured.get("gate", {})
+    if not isinstance(reference, Mapping) or not isinstance(gates, Mapping):
+        raise QualificationError("encoder Accuracy reference and gate must be objects")
+    task = str(case.candidate["task"])
+    try:
+        mode, operation = {
+            "encoding": ("cls", "encode"),
+            "embedding": ("embedding", "embed"),
+        }[task]
+    except KeyError as error:
+        raise QualificationError(
+            f"embedding vector parity does not support candidate task {task!r}"
+        ) from error
+    model_class = str(reference.get("model_class", "auto"))
+    if model_class not in {"auto", "dpr-context-encoder"}:
+        raise QualificationError(f"unsupported encoder reference model class {model_class!r}")
+    reference_request = {
+        "model": str(case.candidate["checkpoint"]),
+        "revision": case.candidate.get("revision"),
+        "trust_remote_code": bool(case.candidate.get("trust_remote_code", False)),
+        "precision": str(reference.get("precision", "fp32")),
+        "mode": mode,
+        "model_class": model_class,
+        "max_length": int(case.candidate.get("build", {}).get("max_sequence_length", 512)),
+        "samples": samples,
+    }
+    request_path = output / "reference-request.json"
+    reference_path = output / "reference.json"
+    output.mkdir(parents=True, exist_ok=True)
+    _json(request_path, reference_request)
+    runner = context.repository / "tools/benchmark_qualification/references/hf_encoder.py"
+    completed = run_command(
+        [
+            str(reference_python(case, context)),
+            str(runner),
+            "--request",
+            str(request_path),
+            "--output",
+            str(reference_path),
+        ],
+        output,
+        "reference",
+        timeout=3600,
+        verbose=context.verbose,
+    )
+    if completed.returncode != 0:
+        raise QualificationError(f"HF encoder Accuracy reference failed; see {output}")
+    reference_samples = json.loads(reference_path.read_text(encoding="utf-8")).get("samples")
+    if not isinstance(reference_samples, list) or len(reference_samples) != len(samples):
+        raise QualificationError("HF encoder Accuracy reference returned an invalid sample set")
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {"prompt": sample["prompt"]},
+        }
+        for sample in samples
+    ]
+    candidate, bundle = _candidate_outputs(
+        case, context, output, operation, candidate_requests
+    )
+    compared = _compare_encoder_embeddings(reference_samples, candidate, gates)
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": compared["status"],
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": compared["metrics"],
+        "gate": compared["gate"],
+        "samples": compared["samples"],
+        "pairs": compared["pairs"],
+    }
+
+
+def _sts_samples(path: Path, count: int, prefix: str) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as stream:
+        for dataset_index, line in enumerate(stream):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise QualificationError(
+                    f"STSBenchmark row {dataset_index} is not valid JSON"
+                ) from error
+            if not isinstance(row, Mapping):
+                raise QualificationError(f"STSBenchmark row {dataset_index} must be an object")
+            sentence1 = row.get("sentence1")
+            sentence2 = row.get("sentence2")
+            if not all(isinstance(value, str) and value.strip() for value in (sentence1, sentence2)):
+                raise QualificationError(
+                    f"STSBenchmark row {dataset_index} must contain two sentences"
+                )
+            try:
+                score = float(row["score"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise QualificationError(
+                    f"STSBenchmark row {dataset_index} has an invalid score"
+                ) from error
+            if not math.isfinite(score):
+                raise QualificationError(
+                    f"STSBenchmark row {dataset_index} has a non-finite score"
+                )
+            pair_id = f"stsbenchmark-{dataset_index:06d}"
+            for suffix, side, sentence in (
+                ("a", "sentence1", sentence1),
+                ("b", "sentence2", sentence2),
+            ):
+                pairs.append(
+                    {
+                        "sample_id": f"{pair_id}-{suffix}",
+                        "pair_id": pair_id,
+                        "pair_side": side,
+                        "score": score,
+                        "prompt": prefix + str(sentence).strip(),
+                    }
+                )
+            if len(pairs) == count * 2:
+                break
+    if len(pairs) != count * 2:
+        raise QualificationError(
+            f"STSBenchmark contains {len(pairs) // 2} usable pairs; {count} required"
+        )
+    return pairs
+
+
+def _compare_encoder_embeddings(
+    reference: Sequence[Mapping[str, Any]],
+    candidate: Sequence[Mapping[str, Any]],
+    gates: Mapping[str, Any],
+) -> dict[str, Any]:
+    if len(reference) != len(candidate) or not reference:
+        raise QualificationError("encoder reference and candidate sample counts differ")
+    minimum_cosine = float(gates.get("min_vector_cosine", 0.999))
+    minimum_rate = float(gates.get("min_vector_pass_rate", 1.0))
+    maximum_pair_delta = float(gates.get("max_pair_cosine_abs_delta", 0.02))
+    if not -1.0 <= minimum_cosine <= 1.0:
+        raise QualificationError("min_vector_cosine must be in [-1, 1]")
+    if not 0.0 <= minimum_rate <= 1.0:
+        raise QualificationError("min_vector_pass_rate must be in [0, 1]")
+    if maximum_pair_delta < 0.0 or not math.isfinite(maximum_pair_delta):
+        raise QualificationError("max_pair_cosine_abs_delta must be finite and nonnegative")
+
+    sample_rows: list[dict[str, Any]] = []
+    vector_cosines: list[float] = []
+    reference_pairs: dict[str, dict[str, tuple[Mapping[str, Any], list[float]]]] = {}
+    candidate_pairs: dict[str, dict[str, list[float]]] = {}
+    for index, (expected, actual) in enumerate(zip(reference, candidate, strict=True)):
+        expected_id = str(expected.get("sample_id", index))
+        vector = expected.get("vector")
+        if not isinstance(vector, list):
+            raise QualificationError(f"HF encoder sample {expected_id!r} has no vector")
+        reference_vector = _finite_vector(vector, f"HF encoder sample {expected_id!r}")
+        candidate_vector = _candidate_vector(actual, expected_id)
+        cosine = _vector_cosine(reference_vector, candidate_vector)
+        pair_id = str(expected.get("pair_id", ""))
+        pair_side = str(expected.get("pair_side", ""))
+        if not pair_id or pair_side not in {"sentence1", "sentence2"}:
+            raise QualificationError(f"HF encoder sample {expected_id!r} has invalid pair metadata")
+        reference_pairs.setdefault(pair_id, {})[pair_side] = (expected, reference_vector)
+        candidate_pairs.setdefault(pair_id, {})[pair_side] = candidate_vector
+        vector_cosines.append(cosine)
+        sample_rows.append(
+            {
+                "sample_id": expected_id,
+                "pair_id": pair_id,
+                "pair_side": pair_side,
+                "vector_dim": len(reference_vector),
+                "vector_cosine": cosine,
+                "passed": cosine >= minimum_cosine,
+            }
+        )
+
+    pair_rows: list[dict[str, Any]] = []
+    pair_deltas: list[float] = []
+    scores: list[float] = []
+    reference_similarities: list[float] = []
+    candidate_similarities: list[float] = []
+    for pair_id, expected in reference_pairs.items():
+        actual = candidate_pairs.get(pair_id, {})
+        if set(expected) != {"sentence1", "sentence2"} or set(actual) != {
+            "sentence1",
+            "sentence2",
+        }:
+            raise QualificationError(f"encoder pair {pair_id!r} is incomplete")
+        reference_similarity = _vector_cosine(
+            expected["sentence1"][1], expected["sentence2"][1]
+        )
+        candidate_similarity = _vector_cosine(actual["sentence1"], actual["sentence2"])
+        delta = abs(candidate_similarity - reference_similarity)
+        score = float(expected["sentence1"][0]["score"])
+        pair_deltas.append(delta)
+        scores.append(score)
+        reference_similarities.append(reference_similarity)
+        candidate_similarities.append(candidate_similarity)
+        pair_rows.append(
+            {
+                "pair_id": pair_id,
+                "score": score,
+                "hf_cosine": reference_similarity,
+                "candidate_cosine": candidate_similarity,
+                "cosine_abs_delta": delta,
+                "passed": delta <= maximum_pair_delta,
+            }
+        )
+
+    passed_vectors = sum(value >= minimum_cosine for value in vector_cosines)
+    pass_rate = passed_vectors / len(vector_cosines)
+    max_pair_delta = max(pair_deltas)
+    status = (
+        "passed"
+        if pass_rate >= minimum_rate and max_pair_delta <= maximum_pair_delta
+        else "failed"
+    )
+    return {
+        "status": status,
+        "metrics": {
+            "samples": len(vector_cosines),
+            "pairs": len(pair_rows),
+            "passed_vectors": passed_vectors,
+            "vector_pass_rate": pass_rate,
+            "mean_vector_cosine": math.fsum(vector_cosines) / len(vector_cosines),
+            "min_vector_cosine": min(vector_cosines),
+            "mean_pair_cosine_abs_delta": math.fsum(pair_deltas) / len(pair_deltas),
+            "max_pair_cosine_abs_delta": max_pair_delta,
+            "hf_sts_spearman": _spearman(scores, reference_similarities),
+            "candidate_sts_spearman": _spearman(scores, candidate_similarities),
+        },
+        "gate": {
+            "min_vector_cosine": minimum_cosine,
+            "min_vector_pass_rate": minimum_rate,
+            "max_pair_cosine_abs_delta": maximum_pair_delta,
+        },
+        "samples": sample_rows,
+        "pairs": pair_rows,
+    }
+
+
+def _candidate_vector(summary: Mapping[str, Any], sample_id: str) -> list[float]:
+    values = summary.get("values")
+    if not isinstance(values, list):
+        raise QualificationError(f"TRTMC encoder sample {sample_id!r} has no vector values")
+    vector = _finite_vector(values, f"TRTMC encoder sample {sample_id!r}")
+    dim = summary.get("dim")
+    if isinstance(dim, bool) or not isinstance(dim, int) or dim < 1:
+        dim = len(vector)
+    if summary.get("feature_kind") == "token":
+        if len(vector) < dim:
+            raise QualificationError(f"TRTMC encoder sample {sample_id!r} is shorter than dim")
+        vector = vector[:dim]
+    elif len(vector) != dim:
+        raise QualificationError(
+            f"TRTMC encoder sample {sample_id!r} has {len(vector)} values for dim {dim}"
+        )
+    return vector
+
+
+def _finite_vector(values: Sequence[Any], label: str) -> list[float]:
+    try:
+        vector = [float(value) for value in values]
+    except (TypeError, ValueError) as error:
+        raise QualificationError(f"{label} contains a non-numeric value") from error
+    if not vector or any(not math.isfinite(value) for value in vector):
+        raise QualificationError(f"{label} must be non-empty and finite")
+    return vector
+
+
+def _vector_cosine(left: Sequence[float], right: Sequence[float]) -> float:
+    if len(left) != len(right) or not left:
+        raise QualificationError(
+            f"encoder vector dimensions differ: {len(left)} != {len(right)}"
+        )
+    left_norm = math.sqrt(math.fsum(value * value for value in left))
+    right_norm = math.sqrt(math.fsum(value * value for value in right))
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        raise QualificationError("encoder vector must have a nonzero norm")
+    cosine = math.fsum(a * b for a, b in zip(left, right, strict=True)) / (
+        left_norm * right_norm
+    )
+    return max(-1.0, min(1.0, cosine))
+
+
+def _spearman(left: Sequence[float], right: Sequence[float]) -> float | None:
+    if len(left) != len(right) or len(left) < 2:
+        return None
+    return _pearson(_ranks(left), _ranks(right))
+
+
+def _ranks(values: Sequence[float]) -> list[float]:
+    indexed = sorted(enumerate(values), key=lambda item: item[1])
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(indexed):
+        end = start + 1
+        while end < len(indexed) and indexed[end][1] == indexed[start][1]:
+            end += 1
+        rank = (start + end - 1) / 2.0
+        for position in range(start, end):
+            ranks[indexed[position][0]] = rank
+        start = end
+    return ranks
+
+
+def _pearson(left: Sequence[float], right: Sequence[float]) -> float | None:
+    left_mean = math.fsum(left) / len(left)
+    right_mean = math.fsum(right) / len(right)
+    centered_left = [value - left_mean for value in left]
+    centered_right = [value - right_mean for value in right]
+    denominator = math.sqrt(
+        math.fsum(value * value for value in centered_left)
+        * math.fsum(value * value for value in centered_right)
+    )
+    if denominator <= 0.0:
+        return None
+    return math.fsum(
+        a * b for a, b in zip(centered_left, centered_right, strict=True)
+    ) / denominator
 
 
 def _etth1(

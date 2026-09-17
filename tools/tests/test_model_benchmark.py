@@ -12,6 +12,7 @@ import sys
 
 import pytest
 
+from apps.benchmark.performance.baselines import hf_transformers
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
 from tools.benchmark_qualification import accuracy as qualification_accuracy
 from tools.benchmark_qualification.catalog import (
@@ -21,7 +22,7 @@ from tools.benchmark_qualification.catalog import (
     select,
 )
 from tools.benchmark_qualification.datasets import Dataset, resolve_dataset
-from tools.benchmark_qualification.references import hf_text_generation
+from tools.benchmark_qualification.references import hf_encoder, hf_text_generation
 from tools.benchmark_qualification.runtime import (
     RuntimeContext,
     prepare_bundle,
@@ -56,6 +57,77 @@ def test_one_model_file_owns_multiple_cases_without_testcase_indirection() -> No
         assert "testcase" not in case.values
         assert "testcase" not in str(case.values)
         assert case.candidate["checkpoint"] == "openai-community/gpt2"
+
+
+def test_bert_benchmark_uses_shared_sts_accuracy_and_encoder_performance() -> None:
+    cases = select(discover(REPOSITORY), ["bert-base-uncased"])
+
+    assert {case.kind for case in cases} == {"accuracy", "performance"}
+    accuracy = next(case for case in cases if case.kind == "accuracy")
+    performance = next(case for case in cases if case.kind == "performance")
+    assert accuracy.benchmark == "stsbenchmark_embedding_parity"
+    assert accuracy.values["samples"] == 50
+    assert accuracy.values["gate"] == {
+        "min_vector_cosine": 0.999,
+        "min_vector_pass_rate": 1.0,
+        "max_pair_cosine_abs_delta": 0.02,
+    }
+    assert load_benchmark(REPOSITORY, accuracy)["metric"]["name"] == (
+        "embedding_vector_parity"
+    )
+    assert performance.benchmark == "encoder_performance"
+    assert performance.values["operation"] == "encode"
+    assert performance.values["reference"]["mode"] == "torch-compile"
+    assert performance.values["reference"]["fallback"] == "hf-eager"
+
+
+@pytest.mark.parametrize(
+    ("model", "family", "task", "precision", "minimum_cosine"),
+    [
+        ("albert-base", "albert", "encoding", "fp16", 0.99),
+        ("all-minilm-l6-v2", "bert", "embedding", "fp16", 0.999),
+        ("all-mpnet-base-v2", "mpnet", "encoding", "fp16", 0.999),
+        ("deberta-base", "deberta", "encoding", "fp16", 0.999),
+        ("distilbert-base-uncased", "distilbert", "encoding", "fp16", 0.999),
+        ("dpr-ctx-encoder", "dpr", "encoding", "fp16", 0.99),
+        ("modernbert-base", "modernbert", "encoding", "fp32", 0.995),
+        ("roberta-base", "roberta", "encoding", "fp16", 0.999),
+    ],
+)
+def test_restored_encoder_profiles_are_family_local(
+    model: str,
+    family: str,
+    task: str,
+    precision: str,
+    minimum_cosine: float,
+) -> None:
+    cases = select(discover(REPOSITORY), [model])
+
+    assert {case.kind for case in cases} == {"accuracy", "performance"}
+    assert all(case.family == family for case in cases)
+    assert all(case.source.parent == REPOSITORY / "families" / family / "tests/benchmark" for case in cases)
+    accuracy = next(case for case in cases if case.kind == "accuracy")
+    performance = next(case for case in cases if case.kind == "performance")
+    assert accuracy.candidate["task"] == task
+    assert accuracy.candidate["precision"] == precision
+    assert accuracy.values["gate"]["min_vector_cosine"] == minimum_cosine
+    assert accuracy.values["gate"]["min_vector_pass_rate"] == 1.0
+    assert accuracy.values["gate"]["max_pair_cosine_abs_delta"] == 0.02
+    if model == "dpr-ctx-encoder":
+        assert accuracy.values["reference"]["model_class"] == "dpr-context-encoder"
+    assert performance.benchmark == (
+        "embedding_performance" if task == "embedding" else "encoder_performance"
+    )
+    assert performance.values["operation"] == ("embed" if task == "embedding" else "encode")
+    if task == "embedding":
+        assert performance.values["reference"] == {
+            "runner": "task-reference",
+            "adapter": "hf-transformers-embedding",
+            "mode": "hf-eager",
+            "reference_backend": "hf_transformers",
+            "precision": "fp32",
+            "output_contract": "embedding-shape",
+        }
 
 
 def test_opt_uses_validated_profile_and_pre_refactor_performance_length() -> None:
@@ -354,7 +426,7 @@ def test_hf_accuracy_reference_applies_explicit_translation_languages() -> None:
             return {256047: "eng_Latn", 256057: "fra_Latn"}[value]
 
     tokenizer = Tokenizer()
-    controls = hf_text_generation._translation_controls(
+    controls, source_token_id = hf_text_generation._translation_controls(
         tokenizer,
         {
             "source_language": "eng_Latn",
@@ -366,6 +438,44 @@ def test_hf_accuracy_reference_applies_explicit_translation_languages() -> None:
 
     assert tokenizer.src_lang == "eng_Latn"
     assert controls == {"forced_bos_token_id": 256057}
+    assert source_token_id is None
+
+
+@pytest.mark.parametrize("runner", [hf_text_generation, hf_transformers])
+def test_hf_translation_supports_transformers5_generic_nllb_tokenizer(runner) -> None:
+    import torch
+
+    class GenericNllbTokenizer:
+        unk_token_id = 3
+
+        @staticmethod
+        def convert_tokens_to_ids(value: str) -> int:
+            return {"eng_Latn": 256047, "fra_Latn": 256057}.get(value, 3)
+
+        @staticmethod
+        def convert_ids_to_tokens(value: int) -> str:
+            return {256047: "eng_Latn", 256057: "fra_Latn"}[value]
+
+    tokenizer = GenericNllbTokenizer()
+    controls, source_token_id = runner._translation_controls(
+        tokenizer,
+        {
+            "source_language": "eng_Latn",
+            "source_language_token_id": 256047,
+            "target_language": "fra_Latn",
+            "forced_bos_token_id": 256057,
+        },
+    )
+    encoded = {
+        "input_ids": torch.tensor([[17, 2, 3]]),
+        "attention_mask": torch.tensor([[1, 1, 1]]),
+    }
+
+    runner._apply_source_language(encoded, source_token_id, tokenizer)
+
+    assert controls == {"forced_bos_token_id": 256057}
+    assert source_token_id == 256047
+    assert encoded["input_ids"].tolist() == [[17, 2, 256047]]
 
 
 def test_hf_accuracy_reference_normalizes_seq2seq_control_tokens() -> None:
@@ -381,6 +491,204 @@ def test_hf_accuracy_reference_normalizes_seq2seq_control_tokens() -> None:
         eos_token_id=1,
         policy="strip-start",
     ) == [17, 1]
+
+
+def test_sts_samples_expand_pairs_with_family_owned_prompt_prefix(tmp_path: Path) -> None:
+    dataset = tmp_path / "sts.jsonl"
+    dataset.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "genre": "captions",
+                        "score": 2.5,
+                        "sentence1": "A girl is styling her hair.",
+                        "sentence2": "A girl is brushing her hair.",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "genre": "news",
+                        "score": 4.0,
+                        "sentence1": "One sentence.",
+                        "sentence2": "Another sentence.",
+                    }
+                ),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert qualification_accuracy._sts_samples(dataset, 1, "query: ") == [
+        {
+            "sample_id": "stsbenchmark-000000-a",
+            "pair_id": "stsbenchmark-000000",
+            "pair_side": "sentence1",
+            "score": 2.5,
+            "prompt": "query: A girl is styling her hair.",
+        },
+        {
+            "sample_id": "stsbenchmark-000000-b",
+            "pair_id": "stsbenchmark-000000",
+            "pair_side": "sentence2",
+            "score": 2.5,
+            "prompt": "query: A girl is brushing her hair.",
+        },
+    ]
+
+
+def test_encoder_embedding_comparison_restores_pre_refactor_gates() -> None:
+    reference = [
+        {
+            "sample_id": "pair-a",
+            "pair_id": "pair",
+            "pair_side": "sentence1",
+            "score": 5.0,
+            "vector": [1.0, 0.0],
+        },
+        {
+            "sample_id": "pair-b",
+            "pair_id": "pair",
+            "pair_side": "sentence2",
+            "score": 5.0,
+            "vector": [0.8, 0.6],
+        },
+    ]
+    candidate = [{"values": [1.0, 0.0]}, {"values": [0.8, 0.6]}]
+
+    result = qualification_accuracy._compare_encoder_embeddings(
+        reference,
+        candidate,
+        {
+            "min_vector_cosine": 0.999,
+            "min_vector_pass_rate": 1.0,
+            "max_pair_cosine_abs_delta": 0.02,
+        },
+    )
+
+    assert result["status"] == "passed"
+    assert result["metrics"]["vector_pass_rate"] == 1.0
+    assert result["metrics"]["max_pair_cosine_abs_delta"] == pytest.approx(0.0)
+    assert result["metrics"]["hf_sts_spearman"] is None
+    assert result["metrics"]["candidate_sts_spearman"] is None
+
+
+@pytest.mark.parametrize(
+    ("task", "expected_mode", "expected_operation"),
+    [("encoding", "cls", "encode"), ("embedding", "embedding", "embed")],
+)
+def test_encoder_accuracy_uses_task_semantics_without_model_specific_runner(
+    tmp_path: Path,
+    monkeypatch,
+    task: str,
+    expected_mode: str,
+    expected_operation: str,
+) -> None:
+    dataset_path = tmp_path / "sts.jsonl"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "genre": "captions",
+                "score": 3.0,
+                "sentence1": "Sentence one.",
+                "sentence2": "Sentence two.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    case = QualificationCase(
+        kind="accuracy",
+        model="encoder-model",
+        family="encoder",
+        name="stsbenchmark-parity",
+        benchmark="stsbenchmark_embedding_parity",
+        candidate={
+            "family": "encoder",
+            "checkpoint": "org/model",
+            "task": task,
+            "precision": "fp16",
+            "build": {"max_sequence_length": 128},
+        },
+        values={
+            "samples": 1,
+            "reference": {"precision": "fp32"},
+            "gate": {
+                "min_vector_cosine": 0.999,
+                "min_vector_pass_rate": 1.0,
+                "max_pair_cosine_abs_delta": 0.02,
+            },
+        },
+        source=tmp_path / "encoder.yaml",
+        reference_requirements=None,
+    )
+    dataset = Dataset("stsbenchmark-test", dataset_path, "provided", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    captured_reference: dict[str, object] = {}
+    captured_candidate: dict[str, object] = {}
+
+    def reference(command, *_args, **_kwargs):
+        request = Path(command[command.index("--request") + 1])
+        output = Path(command[command.index("--output") + 1])
+        captured_reference.update(json.loads(request.read_text(encoding="utf-8")))
+        samples = captured_reference["samples"]
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {**sample, "vector": [1.0, float(index)]}
+                        for index, sample in enumerate(samples)
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def candidate(_case, _context, _output, operation, requests):
+        captured_candidate.update({"operation": operation, "requests": requests})
+        return (
+            [{"values": [1.0, float(index)]} for index, _request in enumerate(requests)],
+            tmp_path / "encoder.bundle",
+        )
+
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", reference)
+    monkeypatch.setattr(qualification_accuracy, "_candidate_outputs", candidate)
+
+    result = qualification_accuracy._encoder_embedding_parity(
+        case, context, dataset, tmp_path / "output"
+    )
+
+    assert result["status"] == "passed"
+    assert captured_reference["mode"] == expected_mode
+    assert captured_candidate["operation"] == expected_operation
+    assert [request["request"] for request in captured_candidate["requests"]] == [
+        {"prompt": "Sentence one."},
+        {"prompt": "Sentence two."},
+    ]
+
+
+def test_hf_encoder_rejects_unknown_vector_mode() -> None:
+    with pytest.raises(ValueError, match="unsupported encoder vector mode"):
+        hf_encoder._vector_mode("mean")
 
 
 def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
