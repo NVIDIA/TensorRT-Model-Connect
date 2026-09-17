@@ -32,11 +32,18 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     request = configured.get("request")
     baseline = configured.get("reference")
     measurement = configured.get("measurement")
-    if not all(isinstance(value, Mapping) for value in (request, baseline, measurement)):
-        raise QualificationError("Performance request, reference, and measurement must be objects")
+    reference_timing = definition.get("reference_timing")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (request, baseline, measurement, reference_timing)
+    ):
+        raise QualificationError(
+            "Performance request, reference, measurement, and reference timing must be objects"
+        )
     assert isinstance(request, Mapping)
     assert isinstance(baseline, Mapping)
     assert isinstance(measurement, Mapping)
+    assert isinstance(reference_timing, Mapping)
     descriptor = write_model_descriptor(case, output, request)
     entry_id = f"qualification.{case.family}.{case.name}"
     suite = {
@@ -57,7 +64,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
                     "warmup": int(measurement.get("warmup", 5)),
                     "iterations": int(measurement.get("iterations", 10)),
                 },
-                "baseline": dict(baseline),
+                "baseline": {**dict(baseline), **dict(reference_timing)},
                 "equivalence_margin_percent": float(
                     configured.get("equivalence_margin_percent", 5.0)
                 ),

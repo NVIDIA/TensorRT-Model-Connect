@@ -4,11 +4,18 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
+import sys
 
+from apps.benchmark.performance.baselines.timing_contracts import timing_contract
 from tools.benchmark_qualification.catalog import discover, load_benchmark, select
 from tools.benchmark_qualification.datasets import resolve_dataset
-from tools.benchmark_qualification.runtime import RuntimeContext, write_model_descriptor
+from tools.benchmark_qualification.runtime import (
+    RuntimeContext,
+    run_command,
+    write_model_descriptor,
+)
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -48,6 +55,23 @@ def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
             assert definition["metric"]["name"]
 
 
+def test_shared_performance_definitions_own_complete_reference_timing() -> None:
+    for case in discover(REPOSITORY):
+        if case.kind != "performance":
+            continue
+        definition = load_benchmark(REPOSITORY, case)
+        declared = definition["reference_timing"]
+
+        assert set(declared) == {
+            "timing_scope",
+            "input_preparation_included",
+            "asset_loading_included",
+        }
+        assert timing_contract(
+            runner=str(case.values["reference"]["runner"]), declared=declared
+        )
+
+
 def test_internal_automation_is_separate_from_the_installed_benchmark() -> None:
     old_application = REPOSITORY / "apps/benchmark/qualification"
     assert list(old_application.rglob("*.py")) == []
@@ -75,6 +99,23 @@ def test_candidate_descriptor_is_generated_from_public_build_inputs(tmp_path: Pa
     assert '"task": "text_generation"' in value
     assert '"max_sequence_length": 1024' in value
     assert "tests/manifests" not in value
+
+
+def test_internal_subprocesses_can_import_repository_packages(tmp_path: Path) -> None:
+    completed = run_command(
+        [
+            sys.executable,
+            "-c",
+            "import tensorrt_model_connect; import trtmc_benchmark",
+        ],
+        tmp_path,
+        "repository-imports",
+        timeout=30,
+        verbose=False,
+        env={"PATH": os.environ["PATH"]},
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_manual_dataset_path_is_supplied_by_the_internal_invocation(tmp_path: Path) -> None:

@@ -19,6 +19,9 @@ from typing import Any, Mapping, Sequence
 from .catalog import QualificationCase, QualificationError
 
 
+REPOSITORY = Path(__file__).resolve().parents[2]
+
+
 @dataclass(frozen=True)
 class RuntimeContext:
     repository: Path
@@ -217,11 +220,19 @@ def run_command(
     output.mkdir(parents=True, exist_ok=True)
     if verbose:
         print("+ " + " ".join(command), flush=True)
+    environment = dict(os.environ if env is None else env)
+    sources = (
+        str(REPOSITORY / "core/builder"),
+        str(REPOSITORY / "apps/benchmark"),
+        str(REPOSITORY),
+    )
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join((*sources, existing) if existing else sources)
     try:
         completed = subprocess.run(
             list(command),
             cwd=output,
-            env=dict(env) if env is not None else None,
+            env=environment,
             capture_output=True,
             text=True,
             timeout=timeout,
