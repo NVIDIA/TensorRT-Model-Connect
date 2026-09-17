@@ -56,7 +56,10 @@ Or use the OpenAI Python client:
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused")
+client = OpenAI(
+    base_url="http://127.0.0.1:8000/v1",
+    api_key="EMPTY",  # Required by openai-python; ignored by this local server.
+)
 response = client.chat.completions.create(
     model="Qwen/Qwen3-0.6B",
     messages=[{"role": "user", "content": "Say hello in five words."}],
@@ -66,9 +69,9 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-The MVP has no built-in authentication and accepts only loopback IP bind
-addresses. If remote access is needed later, place it behind an authenticated
-TLS reverse proxy; do not expose the server directly.
+The MVP has no built-in authentication and is intended for trusted local
+evaluation or an isolated deployment. If remote access is needed later, place
+it behind an authenticated TLS reverse proxy; do not expose the server directly.
 
 ## Serve several text models
 
