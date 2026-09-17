@@ -128,7 +128,13 @@ def test_completion_and_chat_keep_model_semantics_in_worker(caplog: Any) -> None
                 "model": "test/model",
                 "messages": [
                     {"role": "system", "content": "Be brief"},
-                    {"role": "user", "content": "Capital?"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Cap"},
+                            {"type": "text", "text": "ital?"},
+                        ],
+                    },
                 ],
                 "max_completion_tokens": 8,
             },
@@ -138,6 +144,7 @@ def test_completion_and_chat_keep_model_semantics_in_worker(caplog: Any) -> None
         assert config["use_chat_template"] is True
         assert config["system_prompt"] == "Be brief"
         assert config["max_new_tokens"] == 8
+        assert registry.requests[-1][1]["prompt"] == "Capital?"
 
     request_logs = [
         json.loads(record.message)
@@ -151,6 +158,86 @@ def test_completion_and_chat_keep_model_semantics_in_worker(caplog: Any) -> None
     assert completion_log["status"] == 200
     assert completion_log["duration_seconds"] >= 0
     assert "Capital?" not in json.dumps(request_logs)
+
+
+def test_streaming_chat_uses_openai_sse_shape() -> None:
+    registry = FakeRegistry()
+    with make_client(registry) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test/model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Capital?"}],
+                    }
+                ],
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = [event for event in response.text.split("\n\n") if event]
+    assert events[-1] == "data: [DONE]"
+    chunks = [json.loads(event.removeprefix("data: ")) for event in events[:-1]]
+    assert chunks[0]["object"] == "chat.completion.chunk"
+    assert chunks[0]["choices"][0]["delta"] == {
+        "role": "assistant",
+        "content": "Paris",
+    }
+    assert chunks[1]["choices"][0]["delta"] == {}
+    assert chunks[1]["choices"][0]["finish_reason"] is None
+    assert chunks[2]["choices"] == []
+    assert chunks[2]["usage"]["completion_tokens"] == 1
+    assert registry.requests[-1][1]["prompt"] == "Capital?"
+
+
+def test_streaming_completion_and_stream_options_validation() -> None:
+    registry = FakeRegistry()
+    with make_client(registry) as client:
+        streamed = client.post(
+            "/v1/completions",
+            json={"model": "test/model", "prompt": "Capital?", "stream": True},
+        )
+        invalid = client.post(
+            "/v1/completions",
+            json={
+                "model": "test/model",
+                "prompt": "Capital?",
+                "stream_options": {"include_usage": True},
+            },
+        )
+
+    assert streamed.status_code == 200
+    assert '"object":"text_completion"' in streamed.text
+    assert '"text":"Paris"' in streamed.text
+    assert streamed.text.endswith("data: [DONE]\n\n")
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["param"] == "stream_options"
+
+
+def test_chat_rejects_non_text_content_blocks() -> None:
+    registry = FakeRegistry()
+    with make_client(registry) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "test/model",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "image_url", "image_url": {"url": "file:///tmp/x"}}],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] in {"str", "type", "text"}
+    assert registry.requests == []
 
 
 def test_validation_overload_and_metrics_are_explicit() -> None:

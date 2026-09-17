@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .errors import WorkerProtocolError, WorkerRemoteError, WorkerRequestTooLargeError
-from .schemas import ChatCompletionRequest, GenerationRequest
+from .schemas import ChatCompletionRequest, GenerationRequest, TextContentPart
 
 
 def generation_config(request: GenerationRequest, max_tokens: int) -> dict[str, Any]:
@@ -24,14 +24,20 @@ def generation_config(request: GenerationRequest, max_tokens: int) -> dict[str, 
 def chat_prompt(request: ChatCompletionRequest) -> tuple[str, str]:
     messages = request.messages
     if len(messages) == 1 and messages[0].role == "user":
-        return messages[0].content, ""
+        return _message_text(messages[0].content), ""
     if (
         len(messages) == 2
         and messages[0].role == "system"
         and messages[1].role == "user"
     ):
-        return messages[1].content, messages[0].content
+        return _message_text(messages[1].content), _message_text(messages[0].content)
     raise ValueError("messages must be one user message with an optional preceding system message")
+
+
+def _message_text(content: str | list[TextContentPart]) -> str:
+    if isinstance(content, str):
+        return content
+    return "".join(part.text for part in content)
 
 
 def extract_result(result: Any) -> tuple[str, int, dict[str, float]]:

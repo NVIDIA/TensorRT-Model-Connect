@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .errors import (
@@ -125,6 +125,84 @@ def error_response(
             }
         },
         headers=headers,
+    )
+
+
+def _sse_data(payload: dict[str, Any] | str) -> bytes:
+    data = payload if isinstance(payload, str) else json.dumps(payload, separators=(",", ":"))
+    return f"data: {data}\n\n".encode("utf-8")
+
+
+def _streaming_completion_response(
+    *,
+    response_id: str,
+    created: int,
+    model: str,
+    text: str,
+    completion_tokens: int,
+    chat: bool,
+    include_usage: bool,
+    request_id: str,
+) -> StreamingResponse:
+    if chat:
+        object_name = "chat.completion.chunk"
+        content_choice: dict[str, Any] = {
+            "index": 0,
+            "delta": {"role": "assistant", "content": text},
+            "logprobs": None,
+            "finish_reason": None,
+        }
+        terminal_choice: dict[str, Any] = {
+            "index": 0,
+            "delta": {},
+            "logprobs": None,
+            "finish_reason": None,
+        }
+    else:
+        object_name = "text_completion"
+        content_choice = {
+            "index": 0,
+            "text": text,
+            "logprobs": None,
+            "finish_reason": None,
+        }
+        terminal_choice = {
+            "index": 0,
+            "text": "",
+            "logprobs": None,
+            "finish_reason": None,
+        }
+
+    def chunk(choices: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "id": response_id,
+            "object": object_name,
+            "created": created,
+            "model": model,
+            "choices": choices,
+        }
+
+    async def events() -> AsyncIterator[bytes]:
+        yield _sse_data(chunk([content_choice]))
+        yield _sse_data(chunk([terminal_choice]))
+        if include_usage:
+            usage_chunk = chunk([])
+            usage_chunk["usage"] = {
+                "prompt_tokens": 0,
+                "completion_tokens": completion_tokens,
+                "total_tokens": completion_tokens,
+            }
+            yield _sse_data(usage_chunk)
+        yield _sse_data("[DONE]")
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Request-ID": request_id,
+        },
     )
 
 
@@ -238,10 +316,13 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         if request.n != 1:
             metrics.reject(route, 400)
             return error_response(400, "unsupported_parameter", "n must be 1", param="n")
-        if request.stream:
+        if request.stream_options is not None and not request.stream:
             metrics.reject(route, 400)
             return error_response(
-                400, "streaming_not_supported", "streaming is not available", param="stream"
+                400,
+                "invalid_request",
+                "stream_options requires stream=true",
+                param="stream_options",
             )
         if request.stop is not None:
             metrics.reject(route, 400)
@@ -386,11 +467,25 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             }
             object_name = "text_completion"
             response_id = f"cmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        if request.stream:
+            return _streaming_completion_response(
+                response_id=response_id,
+                created=created,
+                model=request.model,
+                text=text,
+                completion_tokens=completion_tokens,
+                chat=chat,
+                include_usage=(
+                    request.stream_options is not None and request.stream_options.include_usage
+                ),
+                request_id=request_id,
+            )
         return JSONResponse(
             content={
                 "id": response_id,
                 "object": object_name,
-                "created": int(time.time()),
+                "created": created,
                 "model": request.model,
                 "choices": [choice],
                 "usage": {

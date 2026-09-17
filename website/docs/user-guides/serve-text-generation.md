@@ -3,7 +3,7 @@ title: Serve Text Generation
 description: Expose text-generation bundles through the local hybrid server.
 ---
 
-`trtmc-server` exposes a deliberately small, non-streaming subset of the
+`trtmc-server` exposes a deliberately small subset of the
 OpenAI Completions and Chat Completions protocols. It is a local evaluation
 server, not a production or distributed serving system.
 
@@ -96,18 +96,58 @@ support that placement.
 | Route | Supported behavior |
 | --- | --- |
 | `POST /v1/completions` | One string `prompt`; `model` is required. |
-| `POST /v1/chat/completions` | One text `user` message and optional preceding `system` message. |
+| `POST /v1/chat/completions` | One text `user` message and optional preceding `system` message; content may be a string or text-only content blocks. |
 | `GET /v1/models` | Configured text models. |
 | `GET /health/live` | Control-plane process liveness. |
 | `GET /health/ready` | Worker readiness and admission state. |
 | `GET /metrics` | Prometheus text metrics for admission and inference. |
 
 Generation accepts `temperature`, `top_p`, `min_p`, `top_k`, `seed`,
-`enable_thinking`, `n`, and `stream`. Completions accept `max_tokens`;
+`enable_thinking`, `n`, `stream`, and `stream_options.include_usage`.
+Completions accept `max_tokens`;
 chat accepts either `max_tokens` or `max_completion_tokens`. The MVP
-requires `n=1` and `stream=false`. It rejects unknown fields, prompt arrays,
-multi-turn chat, structured content, stop sequences, tools, log probabilities,
-and streaming instead of silently ignoring them.
+requires `n=1`. It rejects unknown fields, prompt arrays, non-text content
+blocks, multi-turn chat, stop sequences, tools, and log probabilities instead
+of silently ignoring them.
+
+Streaming responses use the OpenAI-compatible server-sent event framing and
+terminate with `data: [DONE]`. The native text task currently returns a complete
+generation, so the MVP buffers inference before emitting the content chunk;
+streaming provides client compatibility but does not yet reduce time to first
+token. Incremental token delivery requires a future extension to the family and
+runtime text-generation contract.
+
+For example, a Pi custom provider can use the local endpoint without an
+authentication header:
+
+```json
+{
+  "providers": {
+    "trtmc": {
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "EMPTY",
+      "authHeader": false,
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "supportsFinishReason": false,
+        "maxTokensField": "max_tokens"
+      },
+      "models": [{"id": "Qwen/Qwen3-0.6B"}]
+    }
+  }
+}
+```
+
+Pi sends text-only content blocks and consumes the buffered SSE response. Run
+Pi with `--no-tools`; tool definitions and tool-result messages remain outside
+the MVP protocol.
+
+```bash
+pi --provider trtmc --model Qwen/Qwen3-0.6B --no-tools
+```
 
 Model-specific chat templates, tokenization, sampling, stopping, engine
 composition, and validation remain inside the family selected by the bundle.

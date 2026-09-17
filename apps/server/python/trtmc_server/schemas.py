@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -14,9 +14,18 @@ class StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class TextContentPart(StrictRequest):
+    type: Literal["text"]
+    text: str
+
+
 class ChatMessage(StrictRequest):
     role: str
-    content: str
+    content: str | list[TextContentPart]
+
+
+class StreamOptions(StrictRequest):
+    include_usage: bool = False
 
 
 class GenerationRequest(StrictRequest):
@@ -30,6 +39,7 @@ class GenerationRequest(StrictRequest):
     enable_thinking: bool | None = None
     n: int = Field(default=1, ge=1)
     stream: bool = False
+    stream_options: StreamOptions | None = None
     stop: Any | None = None
 
 
