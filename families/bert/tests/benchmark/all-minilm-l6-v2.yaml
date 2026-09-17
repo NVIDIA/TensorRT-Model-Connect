@@ -35,7 +35,9 @@ performance:
     reference:
       runner: task-reference
       adapter: hf-transformers-embedding
-      mode: hf-eager
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
       reference_backend: hf_transformers
       precision: fp32
       output_contract: embedding-shape
