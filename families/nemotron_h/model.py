@@ -993,55 +993,82 @@ def _runtime_config(
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one Nemotron-H bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("nemotron_h does not support dynamic_kv_cache")
+    """Dispatch complete offload or execute the unchanged native implementation."""
+    from .dispatch import build as dispatch_build
 
-    if request.image_height is not None:
-        raise NotImplementedError("nemotron_h does not support image_height")
+    def _build_native(request: "BuildRequest", writer: "BundleWriter") -> None:
+        """Build one Nemotron-H bundle."""
+        if request.dynamic_kv_cache:
+            raise NotImplementedError("nemotron_h does not support dynamic_kv_cache")
 
-    if request.image_width is not None:
-        raise NotImplementedError("nemotron_h does not support image_width")
+        if request.image_height is not None:
+            raise NotImplementedError("nemotron_h does not support image_height")
 
-    if request.video_num_frames is not None:
-        raise NotImplementedError("nemotron_h does not support video_num_frames")
+        if request.image_width is not None:
+            raise NotImplementedError("nemotron_h does not support image_width")
 
-    if request.max_batch_size != 1:
-        raise NotImplementedError("nemotron_h does not support max_batch_size")
+        if request.video_num_frames is not None:
+            raise NotImplementedError("nemotron_h does not support video_num_frames")
 
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
+        if request.max_batch_size != 1:
+            raise NotImplementedError("nemotron_h does not support max_batch_size")
 
-    if request.task != "text_generation":
-        raise ValueError("nemotron_h supports only task=text_generation")
+        if request.context_parallel_size != 1:
+            raise ValueError("this family does not support context parallelism")
 
-    model_dir = Path(request.model_dir)
-    config = ModelConfig.from_dir(model_dir)
-    if str(config.model_type).lower() not in {"nemotron_h", "nemotron_hybrid"}:
-        raise ValueError(f"Nemotron-H does not support model_type={config.model_type!r}")
-    precision = str(request.precision).lower()
-    if precision not in {"fp32", "fp16", "bf16"}:
-        raise ValueError("Nemotron-H precision must be fp32, fp16, or bf16")
-    max_sequence_length = _positive_int(
-        request.max_sequence_length or min(config.max_position_embeddings, 256),
-        "max_sequence_length",
-    )
-    if max_sequence_length > config.max_position_embeddings:
-        raise ValueError("Nemotron-H max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Nemotron-H has no qualified family-owned quantized build")
-    if request.fp32_layers:
-        raise NotImplementedError("Nemotron-H does not expose mixed-precision layers")
-    parallel = ParallelConfig(
-        tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
-    )
-    parallel.validate()
-    model = _NemotronHModel()
-    config.raw["_model_dir"] = str(model_dir)
-    weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="nemotron_h", task=request.task, backend=request.backend)
-    if parallel.enabled:
-        for rank in range(parallel.tp_size):
+        if request.task != "text_generation":
+            raise ValueError("nemotron_h supports only task=text_generation")
+
+        model_dir = Path(request.model_dir)
+        config = ModelConfig.from_dir(model_dir)
+        if str(config.model_type).lower() not in {"nemotron_h", "nemotron_hybrid"}:
+            raise ValueError(f"Nemotron-H does not support model_type={config.model_type!r}")
+        precision = str(request.precision).lower()
+        if precision not in {"fp32", "fp16", "bf16"}:
+            raise ValueError("Nemotron-H precision must be fp32, fp16, or bf16")
+        max_sequence_length = _positive_int(
+            request.max_sequence_length or min(config.max_position_embeddings, 256),
+            "max_sequence_length",
+        )
+        if max_sequence_length > config.max_position_embeddings:
+            raise ValueError("Nemotron-H max_sequence_length exceeds checkpoint context capacity")
+        if request.quantization not in {None, "none"}:
+            raise NotImplementedError("Nemotron-H has no qualified family-owned quantized build")
+        # Native weight loading does not apply packed-source quantization scales.
+        # Auto/none controls cannot reinterpret an already quantized checkpoint.
+        if config.raw.get("quantization_config") is not None or any(
+            (model_dir / name).exists()
+            for name in ("hf_quant_config.json", "quantize_config.json", "quant_config.json")
+        ):
+            raise NotImplementedError(
+                "Nemotron-H native fallback cannot load a quantized checkpoint; "
+                "use the Edge builder on a supported platform"
+            )
+        if request.fp32_layers:
+            raise NotImplementedError("Nemotron-H does not expose mixed-precision layers")
+        parallel = ParallelConfig(
+            tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
+        )
+        parallel.validate()
+        model = _NemotronHModel()
+        config.raw["_model_dir"] = str(model_dir)
+        weights = model.load_weights(str(model_dir), config)
+        writer.set_header(family="nemotron_h", task=request.task, backend=request.backend)
+        if parallel.enabled:
+            for rank in range(parallel.tp_size):
+                plan = model.build_engine(
+                    config,
+                    weights,
+                    max_sequence_length,
+                    precision=precision,
+                    quant_ctx=None,
+                    verbose=bool(request.verbose),
+                    debug_layer_outputs=False,
+                    parallel_config=parallel.for_rank(rank),
+                )
+                writer.add_bytes(f"engine.rank{rank}.plan", plan)
+            layout = "dual_profile"
+        else:
             plan = model.build_engine(
                 config,
                 weights,
@@ -1050,37 +1077,35 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 quant_ctx=None,
                 verbose=bool(request.verbose),
                 debug_layer_outputs=False,
-                parallel_config=parallel.for_rank(rank),
+                parallel_config=parallel,
             )
-            writer.add_bytes(f"engine.rank{rank}.plan", plan)
-        layout = "dual_profile"
-    else:
-        plan = model.build_engine(
-            config,
-            weights,
-            max_sequence_length,
-            precision=precision,
-            quant_ctx=None,
-            verbose=bool(request.verbose),
-            debug_layer_outputs=False,
-            parallel_config=parallel,
+            writer.add_bytes("engine.plan", plan)
+            layout = "single"
+        writer.add_json(
+            "runtime.json",
+            _runtime_config(
+                model_dir,
+                config,
+                model,
+                precision=precision,
+                max_cache_length=max_sequence_length,
+                decoder_engine_layout=layout,
+                tensor_parallel_size=parallel.tp_size,
+                tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
+            ),
         )
-        writer.add_bytes("engine.plan", plan)
-        layout = "single"
-    writer.add_json(
-        "runtime.json",
-        _runtime_config(
-            model_dir,
-            config,
-            model,
-            precision=precision,
-            max_cache_length=max_sequence_length,
-            decoder_engine_layout=layout,
-            tensor_parallel_size=parallel.tp_size,
-            tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
-        ),
-    )
-    for filename in _BUNDLE_FILES:
-        path = model_dir / filename
-        if path.is_file():
-            writer.add_bytes(filename, path.read_bytes())
+        for filename in _BUNDLE_FILES:
+            path = model_dir / filename
+            if path.is_file():
+                writer.add_bytes(filename, path.read_bytes())
+
+    dispatch_build(request, writer, _build_native)
+
+
+def build_with_inputs(request, writer, execution) -> None:
+    """Keep the complete DFlash pair owned by the family ONNX adapter."""
+    if execution.variant != "dflash" or tuple(x.role for x in execution.checkpoints) != ("draft",):
+        raise ValueError("Nemotron-H paired execution requires variant=dflash and one draft")
+    from .dispatch import build_dflash
+
+    build_dflash(request, writer, execution.checkpoints[0].model_dir)

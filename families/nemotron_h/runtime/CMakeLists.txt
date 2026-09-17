@@ -57,3 +57,16 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME ${test_name} COMMAND ${test_name})
 endif()
+
+if(TARGET EdgeLLM::Core)
+  target_sources(trtmc_model_nemotron_h PRIVATE edge_llm/adapter.cpp edge_llm/device_link.cu)
+  target_compile_definitions(trtmc_model_nemotron_h PRIVATE TRTMC_HAS_EDGE_LLM=1)
+  target_link_libraries(trtmc_model_nemotron_h PRIVATE EdgeLLM::Core nlohmann_json::nlohmann_json)
+  set_target_properties(trtmc_model_nemotron_h PROPERTIES
+    CUDA_ARCHITECTURES "${EdgeLLM_CUDA_ARCHITECTURE}"
+    CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+  add_custom_command(TARGET trtmc_model_nemotron_h POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:EdgeLLM::Plugin> $<TARGET_FILE_DIR:trtmc_model_nemotron_h>
+    VERBATIM)
+endif()
