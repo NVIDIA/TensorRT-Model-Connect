@@ -109,6 +109,6 @@ def _resolve_model(model: str, revision: str | None) -> Path:
         snapshot_download(
             repo_id=model,
             revision=revision,
-            ignore_patterns=["flax_model.msgpack", "tf_model.h5"],
+            ignore_patterns=["*flax_model*", "*tf_model*"],
         )
     )

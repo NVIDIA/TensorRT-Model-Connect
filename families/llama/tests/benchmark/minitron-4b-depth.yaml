@@ -6,6 +6,7 @@ model: minitron-4b-depth
 candidate:
   family: llama
   checkpoint: nvidia/Llama-3.1-Minitron-4B-Depth-Base
+  revision: 47f17b2c73bbd07a4b643a0382970704d389f737
   task: text_generation
   precision: fp16
   bundle: minitron-4b-depth.bundle

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,9 +18,9 @@ from apps.benchmark.performance.baselines.timing_contracts import timing_contrac
 from tools.benchmark_qualification import accuracy as qualification_accuracy
 from tools.benchmark_qualification.catalog import (
     QualificationCase,
+    QualificationError,
     discover,
     load_benchmark,
-    select,
 )
 from tools.benchmark_qualification.datasets import Dataset, resolve_dataset
 from tools.benchmark_qualification.references import hf_encoder, hf_text_generation
@@ -35,224 +36,130 @@ from tools.benchmark_qualification.runtime import (
 REPOSITORY = Path(__file__).resolve().parents[2]
 
 
-def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
+def test_family_configs_auto_discover_without_a_central_model_registry() -> None:
     cases = discover(REPOSITORY)
-    kinds_by_model: dict[str, set[str]] = {}
+    assert cases
+    assert len({case.id for case in cases}) == len(cases)
     for case in cases:
-        kinds_by_model.setdefault(case.model, set()).add(case.kind)
-
-    assert {
-        "albert-base",
-        "all-minilm-l6-v2",
-        "all-mpnet-base-v2",
-        "bert-base-uncased",
-        "bloom-560m",
-        "chronos-bolt-tiny-official",
-        "codegen-350m",
-        "deepseek-v2-lite",
-        "deepseek-v2-tiny",
-        "deberta-base",
-        "distilgpt2",
-        "distilbert-base-uncased",
-        "dpr-ctx-encoder",
-        "falcon-rw-1b",
-        "falcon3-1b",
-        "gemma-2-2b",
-        "glm-4-9b",
-        "gpt-neo-125m",
-        "gpt2-125m",
-        "granite-3.1-2b",
-        "internlm2-1.8b",
-        "mamba-130m",
-        "marian-en-ru",
-        "minitron-4b-depth",
-        "minitron-4b-width",
-        "mistral-7b",
-        "mixtral-stories-15m",
-        "modernbert-base",
-        "nemotron-hindi-4b",
-        "nllb-200-distilled-600m",
-        "olmo-1b",
-        "olmo2-1b",
-        "opt-125m",
-        "phi3-mini",
-        "pythia-70m",
-        "qwen3-0.6b-fp16",
-        "rwkv-169m",
-        "riva-translate-4b",
-        "roberta-base",
-        "stablelm2-1.6b",
-        "starcoder2-3b",
-        "t5-small",
-        "xglm-564m",
-    } <= set(kinds_by_model)
-    assert all(kinds == {"accuracy", "performance"} for kinds in kinds_by_model.values())
-    assert not any("l0" in case.model.lower() for case in cases)
+        relative = case.source.relative_to(REPOSITORY / "families")
+        assert relative.parts[0] == case.family
+        assert relative.parts[1:3] == ("tests", "benchmark")
+        assert case.kind in {"accuracy", "performance"}
 
 
-def test_one_model_file_owns_multiple_cases_without_testcase_indirection() -> None:
-    cases = select(discover(REPOSITORY), ["gpt2-125m"])
+def test_l0_configs_outside_the_benchmark_folder_are_not_discovered(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "families/example/tests/l0/example.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        "schema_version: trtmc.qualification/v1\n"
+        "model: example\n"
+        "candidate:\n"
+        "  family: example\n"
+        "  checkpoint: example/model\n"
+        "  task: text_generation\n"
+        "  precision: fp16\n"
+        "accuracy: []\n"
+        "performance: []\n",
+        encoding="utf-8",
+    )
+
+    assert discover(tmp_path) == ()
+
+
+@pytest.mark.parametrize("revision", [None, "main", "abc1234"])
+def test_trusted_remote_code_requires_an_immutable_revision(
+    tmp_path: Path, revision: str | None
+) -> None:
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    revision_line = "" if revision is None else f"  revision: {revision}\n"
+    profile.write_text(
+        "schema_version: trtmc.qualification/v1\n"
+        "model: example\n"
+        "candidate:\n"
+        "  family: example\n"
+        "  checkpoint: example/model\n"
+        f"{revision_line}"
+        "  task: text_generation\n"
+        "  precision: fp16\n"
+        "  trust_remote_code: true\n"
+        "accuracy: []\n"
+        "performance: []\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QualificationError, match="immutable 40-character revision"):
+        discover(tmp_path)
+
+
+def test_one_model_file_owns_multiple_cases_without_testcase_indirection(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "families/example/tests/benchmark/example-model.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        "schema_version: trtmc.qualification/v1\n"
+        "model: example-model\n"
+        "candidate:\n"
+        "  family: example\n"
+        "  checkpoint: example/model\n"
+        "  task: text_generation\n"
+        "  precision: fp16\n"
+        "accuracy:\n"
+        "  - name: continuation\n"
+        "    benchmark: example_accuracy\n"
+        "performance:\n"
+        "  - name: generate\n"
+        "    benchmark: example_performance\n"
+        "    operation: generate\n",
+        encoding="utf-8",
+    )
+
+    cases = discover(tmp_path)
 
     assert {case.kind for case in cases} == {"accuracy", "performance"}
-    assert {case.name for case in cases} == {"mmlu-continuation", "generate-64"}
+    assert {case.name for case in cases} == {"continuation", "generate"}
     for case in cases:
         assert case.source.parent.name == "benchmark"
         assert "testcase" not in case.values
         assert "testcase" not in str(case.values)
-        assert case.candidate["checkpoint"] == "openai-community/gpt2"
+        assert case.candidate["checkpoint"] == "example/model"
 
 
-def test_bert_benchmark_uses_shared_sts_accuracy_and_encoder_performance() -> None:
-    cases = select(discover(REPOSITORY), ["bert-base-uncased"])
-
-    assert {case.kind for case in cases} == {"accuracy", "performance"}
-    accuracy = next(case for case in cases if case.kind == "accuracy")
-    performance = next(case for case in cases if case.kind == "performance")
-    assert accuracy.benchmark == "stsbenchmark_embedding_parity"
-    assert accuracy.values["samples"] == 50
-    assert accuracy.values["gate"] == {
-        "min_vector_cosine": 0.999,
-        "min_vector_pass_rate": 1.0,
-        "max_pair_cosine_abs_delta": 0.02,
-    }
-    assert load_benchmark(REPOSITORY, accuracy)["metric"]["name"] == (
-        "embedding_vector_parity"
-    )
-    assert performance.benchmark == "encoder_performance"
-    assert performance.values["operation"] == "encode"
-    assert performance.values["reference"]["mode"] == "torch-compile"
-    assert performance.values["reference"]["fallback"] == "hf-eager"
-
-
-@pytest.mark.parametrize(
-    ("model", "family", "task", "precision", "minimum_cosine"),
-    [
-        ("albert-base", "albert", "encoding", "fp16", 0.99),
-        ("all-minilm-l6-v2", "bert", "embedding", "fp16", 0.999),
-        ("all-mpnet-base-v2", "mpnet", "encoding", "fp16", 0.999),
-        ("deberta-base", "deberta", "encoding", "fp16", 0.999),
-        ("distilbert-base-uncased", "distilbert", "encoding", "fp16", 0.999),
-        ("dpr-ctx-encoder", "dpr", "encoding", "fp16", 0.99),
-        ("modernbert-base", "modernbert", "encoding", "fp32", 0.995),
-        ("roberta-base", "roberta", "encoding", "fp16", 0.999),
-    ],
-)
-def test_restored_encoder_profiles_are_family_local(
-    model: str,
-    family: str,
-    task: str,
-    precision: str,
-    minimum_cosine: float,
-) -> None:
-    cases = select(discover(REPOSITORY), [model])
-
-    assert {case.kind for case in cases} == {"accuracy", "performance"}
-    assert all(case.family == family for case in cases)
-    assert all(case.source.parent == REPOSITORY / "families" / family / "tests/benchmark" for case in cases)
-    accuracy = next(case for case in cases if case.kind == "accuracy")
-    performance = next(case for case in cases if case.kind == "performance")
-    assert accuracy.candidate["task"] == task
-    assert accuracy.candidate["precision"] == precision
-    assert accuracy.values["gate"]["min_vector_cosine"] == minimum_cosine
-    assert accuracy.values["gate"]["min_vector_pass_rate"] == 1.0
-    assert accuracy.values["gate"]["max_pair_cosine_abs_delta"] == 0.02
-    if model == "dpr-ctx-encoder":
-        assert accuracy.values["reference"]["model_class"] == "dpr-context-encoder"
-    assert performance.benchmark == (
-        "embedding_performance" if task == "embedding" else "encoder_performance"
-    )
-    assert performance.values["operation"] == ("embed" if task == "embedding" else "encode")
-    if task == "embedding":
-        assert performance.values["reference"] == {
-            "runner": "task-reference",
-            "adapter": "hf-transformers-embedding",
-            "mode": "hf-eager",
-            "reference_backend": "hf_transformers",
-            "precision": "fp32",
-            "output_contract": "embedding-shape",
-        }
-
-
-def test_opt_uses_validated_profile_and_pre_refactor_performance_length() -> None:
-    cases = select(discover(REPOSITORY), ["opt-125m"])
-    accuracy = next(case for case in cases if case.kind == "accuracy")
-    performance = next(case for case in cases if case.kind == "performance")
-
-    assert accuracy.candidate["build"]["max_sequence_length"] == 256
-    assert accuracy.values["prompt_token_limit"] == 192
-    assert performance.name == "generate-10"
-    assert performance.values["request"]["max_new_tokens"] == 10
-
-
-def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> None:
-    expected = {
-        "codegen-350m": 20,
-        "deepseek-v2-lite": 10,
-        "deepseek-v2-tiny": 10,
-        "distilgpt2": 12,
-        "falcon3-1b": 20,
-        "gemma-2-2b": 10,
-        "glm-4-9b": 20,
-        "granite-3.1-2b": 20,
-        "internlm2-1.8b": 20,
-        "marian-en-ru": 20,
-        "minitron-4b-depth": 20,
-        "minitron-4b-width": 20,
-        "mistral-7b": 10,
-        "nemotron-hindi-4b": 20,
-        "nllb-200-distilled-600m": 20,
-        "olmo2-1b": 8,
-        "phi3-mini": 10,
-        "qwen3-0.6b-fp16": 10,
-        "stablelm2-1.6b": 22,
-        "starcoder2-3b": 20,
-        "riva-translate-4b": 20,
-        "t5-small": 20,
-    }
-
-    for model, tokens in expected.items():
-        cases = select(discover(REPOSITORY), [model])
-        performance = next(case for case in cases if case.kind == "performance")
-        assert performance.name == f"generate-{tokens}"
-        assert performance.values["request"]["max_new_tokens"] == tokens
-
-    stablelm = select(discover(REPOSITORY), ["stablelm2-1.6b"])[0]
-    assert stablelm.candidate["build"]["fp32_layers"] == [23]
-    minitron_width = select(discover(REPOSITORY), ["minitron-4b-width"])[0]
-    assert minitron_width.candidate["build"] == {
-        "max_sequence_length": 131072,
-        "dynamic_kv_cache": True,
-    }
-    minitron_depth_cases = select(discover(REPOSITORY), ["minitron-4b-depth"])
-    minitron_depth = next(case for case in minitron_depth_cases if case.kind == "accuracy")
-    assert minitron_depth.candidate["build"]["max_sequence_length"] == (
-        minitron_depth.values["prompt_token_limit"]
-        + minitron_depth.values["request"]["max_new_tokens"]
-        + 1
-    )
-    internlm = select(discover(REPOSITORY), ["internlm2-1.8b"])[0]
-    assert internlm.reference_requirements == (
-        REPOSITORY / "families/internlm/requirements.txt"
-    ).resolve()
-
-
-@pytest.mark.parametrize(
-    ("model", "expected_options"),
-    [
-        ("deepseek-v2-tiny", {"experts_implementation": "batched_mm"}),
-        ("internlm2-1.8b", {"trust_remote_code": True}),
-    ],
-)
-def test_mmlu_forwards_reference_model_load_options(
+def test_accuracy_forwards_declared_reference_model_load_options(
     tmp_path: Path,
     monkeypatch,
-    model: str,
-    expected_options: dict[str, object],
 ) -> None:
-    case = next(
-        case
-        for case in select(discover(REPOSITORY), [model])
-        if case.kind == "accuracy"
+    case = QualificationCase(
+        kind="accuracy",
+        model="example-model",
+        family="example",
+        name="continuation",
+        benchmark="mmlu_continuation",
+        candidate={
+            "family": "example",
+            "checkpoint": "example/model",
+            "revision": "a" * 40,
+            "task": "text_generation",
+            "precision": "fp16",
+            "trust_remote_code": True,
+            "build": {"max_sequence_length": 16},
+        },
+        values={
+            "samples": 1,
+            "prompt_token_limit": 8,
+            "truncation_side": "left",
+            "reference": {
+                "precision": "fp16",
+                "experts_implementation": "batched_mm",
+            },
+            "request": {"max_new_tokens": 1, "temperature": 0.0},
+            "gate": {"min_pass_rate": 1.0, "allowed_failures": 0},
+        },
+        source=tmp_path / "example.yaml",
+        reference_requirements=None,
     )
     dataset_path = tmp_path / "mmlu.json"
     dataset_path.write_text(
@@ -307,7 +214,9 @@ def test_mmlu_forwards_reference_model_load_options(
     result = qualification_accuracy.run_accuracy(case, context)
 
     assert result["status"] == "passed"
-    assert {name: captured[name] for name in expected_options} == expected_options
+    assert captured["revision"] == "a" * 40
+    assert captured["trust_remote_code"] is True
+    assert captured["experts_implementation"] == "batched_mm"
 
 
 def test_hf_accuracy_reference_uses_requested_expert_implementation(monkeypatch) -> None:
@@ -734,6 +643,35 @@ def test_hf_encoder_rejects_unknown_vector_mode() -> None:
         hf_encoder._vector_mode("mean")
 
 
+def test_hf_encoder_resolves_family_declared_transformers_classes() -> None:
+    auto_model = object()
+    auto_tokenizer = object()
+    custom_model = object()
+    custom_tokenizer = object()
+    transformers = SimpleNamespace(
+        AutoModel=auto_model,
+        AutoTokenizer=auto_tokenizer,
+        CustomEncoder=custom_model,
+        CustomTokenizer=custom_tokenizer,
+    )
+
+    assert hf_encoder._reference_classes(transformers, "auto", "auto") == (
+        auto_model,
+        auto_tokenizer,
+    )
+    assert hf_encoder._reference_classes(
+        transformers,
+        "transformers.CustomEncoder",
+        "transformers.CustomTokenizer",
+    ) == (custom_model, custom_tokenizer)
+    with pytest.raises(ValueError, match="unsupported Transformers class"):
+        hf_encoder._reference_classes(
+            transformers,
+            "dpr-context-encoder",
+            "transformers.CustomTokenizer",
+        )
+
+
 def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
     for case in discover(REPOSITORY):
         definition = load_benchmark(REPOSITORY, case)
@@ -779,19 +717,35 @@ def test_internal_automation_is_separate_from_the_installed_benchmark() -> None:
 
 
 def test_candidate_descriptor_is_generated_from_public_build_inputs(tmp_path: Path) -> None:
-    case = select(discover(REPOSITORY), ["gpt2-125m"])[0]
+    case = QualificationCase(
+        kind="accuracy",
+        model="example-model",
+        family="example",
+        name="continuation",
+        benchmark="example_accuracy",
+        candidate={
+            "family": "example",
+            "checkpoint": "example/model",
+            "revision": "a" * 40,
+            "task": "text_generation",
+            "precision": "fp16",
+            "trust_remote_code": True,
+            "build": {"max_sequence_length": 1024},
+        },
+        values={},
+        source=tmp_path / "example.yaml",
+        reference_requirements=None,
+    )
 
     descriptor = write_model_descriptor(case, tmp_path, {"prompt": "hello"})
-    value = descriptor.read_text(encoding="utf-8")
+    value = json.loads(descriptor.read_text(encoding="utf-8"))
 
-    assert '"hf_id": "openai-community/gpt2"' in value
-    assert '"task": "text_generation"' in value
-    assert '"max_sequence_length": 1024' in value
-    assert "tests/manifests" not in value
-
-    internlm = select(discover(REPOSITORY), ["internlm2-1.8b"])[0]
-    descriptor = write_model_descriptor(internlm, tmp_path, {"prompt": "hello"})
-    assert json.loads(descriptor.read_text(encoding="utf-8"))["trust_remote_code"] is True
+    assert value["hf_id"] == "example/model"
+    assert value["hf_revision"] == "a" * 40
+    assert value["task"] == "text_generation"
+    assert value["max_sequence_length"] == 1024
+    assert value["trust_remote_code"] is True
+    assert "tests/manifests" not in descriptor.read_text(encoding="utf-8")
 
 
 def test_internal_subprocesses_can_import_repository_packages(tmp_path: Path) -> None:
@@ -814,7 +768,25 @@ def test_internal_subprocesses_can_import_repository_packages(tmp_path: Path) ->
 def test_family_reference_environment_inherits_parent_venv_packages(
     tmp_path: Path, monkeypatch
 ) -> None:
-    case = select(discover(REPOSITORY), ["internlm2-1.8b"])[0]
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("transformers==4.46.3\n", encoding="utf-8")
+    case = QualificationCase(
+        kind="accuracy",
+        model="custom-environment-model",
+        family="example",
+        name="continuation",
+        benchmark="mmlu_continuation",
+        candidate={
+            "family": "example",
+            "checkpoint": "example/model",
+            "task": "text_generation",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={},
+        source=tmp_path / "example.yaml",
+        reference_requirements=requirements,
+    )
     context = RuntimeContext(
         repository=REPOSITORY,
         artifacts=tmp_path / "artifacts",
@@ -859,14 +831,27 @@ def test_family_reference_environment_inherits_parent_venv_packages(
 def test_bundle_preparation_uses_the_selected_runtime(
     tmp_path: Path, monkeypatch
 ) -> None:
-    case = next(
-        case
-        for case in select(discover(REPOSITORY), ["gpt2-125m"])
-        if case.kind == "accuracy"
+    case = QualificationCase(
+        kind="accuracy",
+        model="example-model",
+        family="example",
+        name="continuation",
+        benchmark="example_accuracy",
+        candidate={
+            "family": "example",
+            "checkpoint": "example/model",
+            "task": "text_generation",
+            "precision": "fp16",
+            "bundle": "example.bundle",
+            "build": {"max_sequence_length": 16},
+        },
+        values={},
+        source=tmp_path / "example.yaml",
+        reference_requirements=None,
     )
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
-    bundle = tmp_path / "gpt2.bundle"
+    bundle = tmp_path / "example.bundle"
     bundle.write_bytes(b"bundle")
     descriptor = tmp_path / "candidate-model.json"
     descriptor.write_text("{}\n", encoding="utf-8")

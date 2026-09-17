@@ -31,7 +31,9 @@ def main() -> int:
         raise ValueError(f"unsupported reference precision {precision!r}")
     mode = _vector_mode(str(request.get("mode", "cls")))
     model_class, tokenizer_class = _reference_classes(
-        transformers, str(request.get("model_class", "auto"))
+        transformers,
+        str(request.get("model_class", "auto")),
+        str(request.get("tokenizer_class", "auto")),
     )
     load_options = _model_load_options(request)
     tokenizer_options = {
@@ -108,15 +110,23 @@ def _vector_mode(value: str) -> str:
     return value
 
 
-def _reference_classes(transformers_module: Any, value: str) -> tuple[Any, Any]:
-    if value == "auto":
-        return transformers_module.AutoModel, transformers_module.AutoTokenizer
-    if value == "dpr-context-encoder":
-        return (
-            transformers_module.DPRContextEncoder,
-            transformers_module.DPRContextEncoderTokenizerFast,
-        )
-    raise ValueError(f"unsupported encoder reference model class {value!r}")
+def _reference_classes(
+    transformers_module: Any, model: str, tokenizer: str
+) -> tuple[Any, Any]:
+    return (
+        _transformers_class(transformers_module, model, "AutoModel"),
+        _transformers_class(transformers_module, tokenizer, "AutoTokenizer"),
+    )
+
+
+def _transformers_class(module: Any, value: str, automatic: str) -> Any:
+    name = automatic if value == "auto" else value.removeprefix("transformers.")
+    if value != "auto" and (not value.startswith("transformers.") or not name.isidentifier()):
+        raise ValueError(f"unsupported Transformers class {value!r}")
+    resolved = getattr(module, name, None)
+    if resolved is None:
+        raise ValueError(f"unsupported Transformers class {value!r}")
+    return resolved
 
 
 def _model_load_options(request: Mapping[str, Any]) -> dict[str, Any]:

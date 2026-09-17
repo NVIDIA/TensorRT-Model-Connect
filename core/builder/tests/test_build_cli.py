@@ -259,7 +259,7 @@ def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_pat
         {
             "repo_id": "openai-community/gpt2",
             "revision": "revision-1",
-            "ignore_patterns": ["flax_model.msgpack", "tf_model.h5"],
+            "ignore_patterns": ["*flax_model*", "*tf_model*"],
         }
     ]
 
