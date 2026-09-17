@@ -675,6 +675,7 @@ if(TRTMC_BUILD_TESTS)
   add_library(trtmc_api_test_backend SHARED core/runtime/tests/fake_backend.cpp)
   target_include_directories(trtmc_api_test_backend PRIVATE
     ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${_trtmc_generated_include_dir}
   )
   target_link_libraries(trtmc_api_test_backend PRIVATE CUDA::cudart)
   set_target_properties(trtmc_api_test_backend PROPERTIES
@@ -848,6 +849,7 @@ if(TRTMC_BUILD_TESTS)
     )
     target_include_directories(trtmc_control_test_backend_${_trtmc_backend} PRIVATE
       ${PROJECT_SOURCE_DIR}/core/runtime/include
+      ${_trtmc_generated_include_dir}
     )
     target_compile_definitions(trtmc_control_test_backend_${_trtmc_backend} PRIVATE
       TRTMC_FAKE_BACKEND_NAME="${_trtmc_backend}"
@@ -871,6 +873,10 @@ if(TRTMC_BUILD_TESTS)
   )
 
   add_library(trtmc_control_test_byok SHARED core/api/tests/fake_byok.cpp)
+  target_include_directories(trtmc_control_test_byok PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${_trtmc_generated_include_dir}
+  )
   set_target_properties(trtmc_control_test_byok PROPERTIES
     OUTPUT_NAME trtmc_byok_tvm_ffi
     LIBRARY_OUTPUT_DIRECTORY "${_trtmc_control_test_root}"
@@ -878,6 +884,10 @@ if(TRTMC_BUILD_TESTS)
   add_library(trtmc_control_test_bad_byok SHARED core/runtime/tests/fake_backend.cpp)
   target_include_directories(trtmc_control_test_bad_byok PRIVATE
     ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${_trtmc_generated_include_dir}
+  )
+  target_compile_definitions(trtmc_control_test_bad_byok PRIVATE
+    TRTMC_FAKE_RUNTIME_EXTENSION=1
   )
   target_link_libraries(trtmc_control_test_bad_byok PRIVATE CUDA::cudart)
   set_target_properties(trtmc_control_test_bad_byok PROPERTIES
