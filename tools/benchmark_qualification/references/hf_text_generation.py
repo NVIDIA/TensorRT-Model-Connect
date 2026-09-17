@@ -29,16 +29,17 @@ def main() -> int:
     dtypes = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
     if precision not in dtypes:
         raise ValueError(f"unsupported reference precision {precision!r}")
-    common: dict[str, Any] = {
-        "local_files_only": os.environ.get("TRTMC_QUALIFICATION_LOCAL_FILES_ONLY") == "1"
+    model_options = _model_load_options(request)
+    tokenizer_options = {
+        name: model_options[name]
+        for name in ("local_files_only", "revision")
+        if name in model_options
     }
-    if request.get("revision"):
-        common["revision"] = request["revision"]
-    tokenizer = AutoTokenizer.from_pretrained(str(request["model"]), **common)
+    tokenizer = AutoTokenizer.from_pretrained(str(request["model"]), **tokenizer_options)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        str(request["model"]), dtype=dtypes[precision], **common
+        str(request["model"]), dtype=dtypes[precision], **model_options
     ).eval()
     model.to("cuda")
     generation = request.get("generation", {})
@@ -94,6 +95,20 @@ def main() -> int:
         json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return 0
+
+
+def _model_load_options(request: Mapping[str, Any]) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "local_files_only": os.environ.get("TRTMC_QUALIFICATION_LOCAL_FILES_ONLY") == "1"
+    }
+    if request.get("revision"):
+        options["revision"] = request["revision"]
+    experts_implementation = request.get("experts_implementation")
+    if experts_implementation is not None:
+        if not isinstance(experts_implementation, str) or not experts_implementation:
+            raise ValueError("experts_implementation must be a non-empty string")
+        options["experts_implementation"] = experts_implementation
+    return options
 
 
 def _truncate(tokenizer: Any, prompt: str, limit: int, side: str) -> str:

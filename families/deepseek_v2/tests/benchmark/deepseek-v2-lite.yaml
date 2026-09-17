@@ -20,6 +20,7 @@ accuracy:
     truncation_side: left
     reference:
       precision: fp16
+      experts_implementation: batched_mm
     request: &greedy-generation
       max_new_tokens: 64
       temperature: 0.0

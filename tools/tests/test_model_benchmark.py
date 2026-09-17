@@ -11,8 +11,10 @@ import subprocess
 import sys
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
+from tools.benchmark_qualification import accuracy as qualification_accuracy
 from tools.benchmark_qualification.catalog import discover, load_benchmark, select
-from tools.benchmark_qualification.datasets import resolve_dataset
+from tools.benchmark_qualification.datasets import Dataset, resolve_dataset
+from tools.benchmark_qualification.references import hf_text_generation
 from tools.benchmark_qualification.runtime import (
     RuntimeContext,
     prepare_bundle,
@@ -107,6 +109,80 @@ def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> N
     assert minitron_width.candidate["build"] == {
         "max_sequence_length": 131072,
         "dynamic_kv_cache": True,
+    }
+
+
+def test_mmlu_forwards_reference_model_load_options(tmp_path: Path, monkeypatch) -> None:
+    case = next(
+        case
+        for case in select(discover(REPOSITORY), ["deepseek-v2-tiny"])
+        if case.kind == "accuracy"
+    )
+    dataset_path = tmp_path / "mmlu.json"
+    dataset_path.write_text(
+        json.dumps({"requests": [{"id": "sample", "prompt": "Question"}]}),
+        encoding="utf-8",
+    )
+    dataset = Dataset("mmlu-five-shot", dataset_path, "provided", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    captured: dict[str, object] = {}
+
+    def reference(command, *_args, **_kwargs):
+        request = Path(command[command.index("--request") + 1])
+        output = Path(command[command.index("--output") + 1])
+        captured.update(json.loads(request.read_text(encoding="utf-8")))
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {"sample_id": "sample", "prompt": "Question", "token_ids": [1]}
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", reference)
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_candidate_outputs",
+        lambda *_args: ([{"token_ids": [1]}], tmp_path / "model.bundle"),
+    )
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert captured["experts_implementation"] == "batched_mm"
+
+
+def test_hf_accuracy_reference_uses_requested_expert_implementation(monkeypatch) -> None:
+    monkeypatch.setenv("TRTMC_QUALIFICATION_LOCAL_FILES_ONLY", "1")
+
+    assert hf_text_generation._model_load_options(
+        {"revision": "revision", "experts_implementation": "batched_mm"}
+    ) == {
+        "revision": "revision",
+        "local_files_only": True,
+        "experts_implementation": "batched_mm",
     }
 
 
