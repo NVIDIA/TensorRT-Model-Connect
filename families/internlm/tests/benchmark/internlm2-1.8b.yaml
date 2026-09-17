@@ -8,6 +8,7 @@ candidate:
   checkpoint: internlm/internlm2-math-plus-1_8b
   task: text_generation
   precision: fp16
+  trust_remote_code: true
   bundle: internlm2-1.8b.bundle
   build:
     max_sequence_length: 257
