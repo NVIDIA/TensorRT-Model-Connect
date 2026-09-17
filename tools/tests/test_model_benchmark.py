@@ -26,7 +26,6 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 
 def test_family_configs_auto_discover_without_a_central_model_registry() -> None:
     cases = discover(REPOSITORY)
-
     assert cases
     assert len({case.id for case in cases}) == len(cases)
     for case in cases:
