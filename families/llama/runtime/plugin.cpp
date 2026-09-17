@@ -9,6 +9,9 @@
 #include "families/llama/runtime/plugin_helpers.h"
 #include "families/llama/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
+#ifdef TRTMC_HAS_EDGE_LLM
+#include "families/llama/runtime/edge_llm/adapter.h"
+#endif
 
 #include <algorithm>
 #include <cstdint>
@@ -217,6 +220,16 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
 } // namespace
 
 ITask* create(const FamilyContext& context) {
+    if (context.reader.find_section("edge_llm.json")) {
+        if (context.kv_cache_size_bytes != 0)
+            throw std::invalid_argument("Llama Edge does not support --kv-cache-size overrides");
+#ifdef TRTMC_HAS_EDGE_LLM
+        return edge_llm::create(context.reader);
+#else
+        throw std::runtime_error("Llama Edge bundle requires -DTRTMC_ENABLE_EDGELLM=ON; rebuild "
+                                 "and install Model Connect");
+#endif
+    }
     const RuntimeConfig config = parse_runtime_config(context.reader);
     if (context.kv_cache_size_bytes != 0 && !config.dynamic_kv_cache) {
         throw std::invalid_argument(

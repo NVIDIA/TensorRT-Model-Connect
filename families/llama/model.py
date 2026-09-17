@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import dispatch
 from .build_routing import native_kv_architecture_capability, native_kv_build_capability
 from .checkpoint_mapper import WeightDict, load_standard_weights
 from .config import ModelConfig
@@ -157,123 +158,175 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one dense Llama bundle through family-owned code only."""
-    if request.image_height is not None:
-        raise NotImplementedError("llama does not support image_height")
+    """Select complete-network offload or preserve the native Llama builder."""
 
-    if request.image_width is not None:
-        raise NotImplementedError("llama does not support image_width")
+    def _build_native(request: "BuildRequest", writer: "BundleWriter") -> None:
+        """Build one dense Llama bundle through family-owned code only."""
+        if request.image_height is not None:
+            raise NotImplementedError("llama does not support image_height")
 
-    if request.video_num_frames is not None:
-        raise NotImplementedError("llama does not support video_num_frames")
+        if request.image_width is not None:
+            raise NotImplementedError("llama does not support image_width")
 
-    if request.max_batch_size != 1:
-        raise NotImplementedError("llama does not support max_batch_size")
+        if request.video_num_frames is not None:
+            raise NotImplementedError("llama does not support video_num_frames")
 
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
+        if request.max_batch_size != 1:
+            raise NotImplementedError("llama does not support max_batch_size")
 
-    if request.task != "text_generation":
-        raise ValueError("llama supports only task=text_generation")
+        if request.context_parallel_size != 1:
+            raise ValueError("this family does not support context parallelism")
 
-    model_dir = Path(request.model_dir)
-    config = ModelConfig.from_dir(model_dir)
-    if not str(config.model_type).lower().startswith("llama"):
-        raise ValueError(f"Llama does not support model_type={config.model_type!r}")
-    precision = str(request.precision).lower()
-    if precision not in {"fp32", "fp16", "bf16"}:
-        raise ValueError("Llama precision must be fp32, fp16, or bf16")
-    architecture = native_kv_architecture_capability(config)
-    default_length = (
-        config.max_position_embeddings
-        if architecture.eligible
-        else min(config.max_position_embeddings, 256)
-    )
-    max_sequence_length = _positive_int(
-        request.max_sequence_length or default_length,
-        "max_sequence_length",
-    )
-    if max_sequence_length > config.max_position_embeddings:
-        raise ValueError("Llama max_sequence_length exceeds checkpoint context capacity")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("Llama does not expose a tensor-parallel builder")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Llama has no qualified family-owned quantized build")
+        if request.task != "text_generation":
+            raise ValueError("llama supports only task=text_generation")
 
-    config.raw["_model_dir"] = str(model_dir)
-    config.raw["_fp32_layers"] = list(request.fp32_layers)
-    config.raw["_resolved_build_precision"] = precision
-    config.raw["dynamic_kv_cache"] = request.dynamic_kv_cache
-    weights = load_standard_weights(
-        str(model_dir),
-        config,
-        precision=precision,
-        fp32_layers=request.fp32_layers,
-    )
+        model_dir = Path(request.model_dir)
+        config = ModelConfig.from_dir(model_dir)
+        if not str(config.model_type).lower().startswith("llama"):
+            raise ValueError(f"Llama does not support model_type={config.model_type!r}")
+        precision = str(request.precision).lower()
+        if precision not in {"fp32", "fp16", "bf16"}:
+            raise ValueError("Llama precision must be fp32, fp16, or bf16")
+        architecture = native_kv_architecture_capability(config)
+        default_length = (
+            config.max_position_embeddings
+            if architecture.eligible
+            else min(config.max_position_embeddings, 256)
+        )
+        max_sequence_length = _positive_int(
+            request.max_sequence_length or default_length,
+            "max_sequence_length",
+        )
+        if max_sequence_length > config.max_position_embeddings:
+            raise ValueError("Llama max_sequence_length exceeds checkpoint context capacity")
+        if request.tensor_parallel_size != 1:
+            raise NotImplementedError("Llama does not expose a tensor-parallel builder")
+        if request.quantization not in {None, "none"}:
+            raise NotImplementedError("Llama has no qualified family-owned quantized build")
 
-    writer.set_header(family="llama", task=request.task, backend=request.backend)
-    if request.dynamic_kv_cache:
-        if request.fp32_layers:
-            raise NotImplementedError(
-                "runtime-sized Llama KV cache does not support FP32 layer overrides"
+        config.raw["_model_dir"] = str(model_dir)
+        config.raw["_fp32_layers"] = list(request.fp32_layers)
+        config.raw["_resolved_build_precision"] = precision
+        config.raw["dynamic_kv_cache"] = request.dynamic_kv_cache
+        weights = load_standard_weights(
+            str(model_dir),
+            config,
+            precision=precision,
+            fp32_layers=request.fp32_layers,
+        )
+
+        writer.set_header(family="llama", task=request.task, backend=request.backend)
+        if request.dynamic_kv_cache:
+            if request.fp32_layers:
+                raise NotImplementedError(
+                    "runtime-sized Llama KV cache does not support FP32 layer overrides"
+                )
+            config.raw["_decoder_engine_role"] = "dual_profile"
+            plan = _build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                verbose=bool(request.verbose),
             )
-        config.raw["_decoder_engine_role"] = "dual_profile"
-        plan = _build_engine(
-            config,
-            weights,
-            max_sequence_length,
-            precision=precision,
-            verbose=bool(request.verbose),
-        )
-        writer.add_bytes("engine.plan", plan)
-        layout = "dual_profile"
-    elif request.fp32_layers:
-        config.raw["_decoder_engine_role"] = "dual_profile"
-        plan = _build_engine(
-            config,
-            weights,
-            max_sequence_length,
-            precision=precision,
-            verbose=bool(request.verbose),
-        )
-        writer.add_bytes("engine.plan", plan)
-        layout = "dual_profile"
-    else:
-        config.raw["_decoder_engine_role"] = "prefill"
-        prefill = _build_engine(
-            config,
-            weights,
-            max_sequence_length,
-            precision=precision,
-            verbose=bool(request.verbose),
-        )
-        config.raw["_decoder_engine_role"] = "decode"
-        decode = _build_engine(
-            config,
-            weights,
-            max_sequence_length,
-            precision=precision,
-            verbose=bool(request.verbose),
-        )
-        writer.add_bytes("engine.plan", decode)
-        writer.add_bytes("prefill.plan", prefill)
-        layout = "split"
-    config.raw.pop("_decoder_engine_role", None)
+            writer.add_bytes("engine.plan", plan)
+            layout = "dual_profile"
+        elif request.fp32_layers:
+            config.raw["_decoder_engine_role"] = "dual_profile"
+            plan = _build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                verbose=bool(request.verbose),
+            )
+            writer.add_bytes("engine.plan", plan)
+            layout = "dual_profile"
+        else:
+            config.raw["_decoder_engine_role"] = "prefill"
+            prefill = _build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                verbose=bool(request.verbose),
+            )
+            config.raw["_decoder_engine_role"] = "decode"
+            decode = _build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                verbose=bool(request.verbose),
+            )
+            writer.add_bytes("engine.plan", decode)
+            writer.add_bytes("prefill.plan", prefill)
+            layout = "split"
+        config.raw.pop("_decoder_engine_role", None)
 
-    runtime_config = _runtime_config(
-        model_dir,
-        config,
-        precision=precision,
-        max_cache_length=max_sequence_length,
-        decoder_engine_layout=layout,
-    )
-    if request.dynamic_kv_cache:
-        runtime_config["dynamic_kv_cache"] = True
-    writer.add_json("runtime.json", runtime_config)
-    for filename in _BUNDLE_FILES:
-        path = model_dir / filename
-        if path.is_file():
-            writer.add_bytes(filename, path.read_bytes())
-    template = _chat_template(model_dir)
-    if template is not None:
-        writer.add_bytes("chat_template.jinja", template)
+        runtime_config = _runtime_config(
+            model_dir,
+            config,
+            precision=precision,
+            max_cache_length=max_sequence_length,
+            decoder_engine_layout=layout,
+        )
+        if request.dynamic_kv_cache:
+            runtime_config["dynamic_kv_cache"] = True
+        writer.add_json("runtime.json", runtime_config)
+        for filename in _BUNDLE_FILES:
+            path = model_dir / filename
+            if path.is_file():
+                writer.add_bytes(filename, path.read_bytes())
+        template = _chat_template(model_dir)
+        if template is not None:
+            writer.add_bytes("chat_template.jinja", template)
+
+    dispatch.build(request, writer, _build_native)
+
+
+def build_with_inputs(request, writer, execution) -> None:
+    """Build an explicitly paired Llama EAGLE3 deployment without dropping its draft."""
+    if execution.variant != "eagle3" or tuple(x.role for x in execution.checkpoints) != ("draft",):
+        raise ValueError("Llama paired execution requires variant=eagle3 and one draft checkpoint")
+    draft_dir = execution.checkpoints[0].model_dir
+    base = json.loads((request.model_dir / "config.json").read_text())
+    draft = json.loads((draft_dir / "config.json").read_text())
+    if not dispatch.candidate(request, base):
+        raise ValueError("Llama EAGLE3 requires an admitted dense base request")
+    expected = {
+        "model_type": "llama",
+        "architectures": ["LlamaForCausalLM"],
+        "num_hidden_layers": 1,
+        "draft_vocab_size": 32000,
+    }
+    if not isinstance(draft, dict) or any(draft.get(k) != v for k, v in expected.items()):
+        raise ValueError("Unsupported Llama EAGLE3 draft configuration")
+    for name in (
+        "hidden_size",
+        "intermediate_size",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "vocab_size",
+    ):
+        if draft.get(name) != base.get(name):
+            raise ValueError(f"Llama EAGLE3 base and draft disagree on {name}")
+    if base.get("num_hidden_layers") != 32 or base.get("hidden_size") != 4096:
+        raise ValueError("This Llama EAGLE3 draft requires its 8B base geometry")
+    if any(
+        dispatch.edge_llm.checkpoint_weight_format(path, config) != "fp16"
+        for path, config in ((request.model_dir, base), (draft_dir, draft))
+    ):
+        raise ValueError("This Llama EAGLE3 pair requires original FP16 checkpoints")
+    draft_capacity = draft.get("max_position_embeddings")
+    if type(draft_capacity) is not int or draft_capacity <= 0:
+        raise ValueError("Invalid Llama EAGLE3 draft context capacity")
+    limit = request.max_sequence_length
+    if limit is not None and limit > draft_capacity:
+        raise ValueError("Requested context exceeds Llama EAGLE3 draft capacity")
+
+    def native_pair(original_request, original_writer):
+        # Never turn a failed explicit pair into an ordinary base-only bundle.
+        raise ValueError("Native Llama does not implement the requested EAGLE3 execution variant")
+
+    dispatch.build(request, writer, native_pair, draft_dir=draft_dir)
