@@ -71,6 +71,7 @@ def _mmlu(
     reference_request = {
         "model": str(case.candidate["checkpoint"]),
         "revision": case.candidate.get("revision"),
+        "trust_remote_code": bool(case.candidate.get("trust_remote_code", False)),
         "precision": str(reference.get("precision", "fp32")),
         "prompt_token_limit": int(configured.get("prompt_token_limit", 192)),
         "truncation_side": str(configured.get("truncation_side", "left")),

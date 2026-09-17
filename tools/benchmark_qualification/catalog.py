@@ -126,6 +126,9 @@ def _candidate(raw: Any, family: str, path: Path) -> dict[str, Any]:
     revision = value.get("revision")
     if revision is not None and not isinstance(revision, str):
         raise QualificationError(f"{path}: candidate.revision must be a string")
+    trust_remote_code = value.get("trust_remote_code")
+    if trust_remote_code is not None and not isinstance(trust_remote_code, bool):
+        raise QualificationError(f"{path}: candidate.trust_remote_code must be a boolean")
     build = value.get("build", {})
     if not isinstance(build, Mapping):
         raise QualificationError(f"{path}: candidate.build must be an object")
