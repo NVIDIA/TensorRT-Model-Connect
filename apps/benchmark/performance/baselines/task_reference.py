@@ -2352,7 +2352,8 @@ def _compile_forward(model: Any) -> dict[str, Any]:
 
 def _measure(session: Session, warmup: int, iterations: int) -> tuple[list[float], dict[str, Any]]:
     output: Any = {}
-    for _ in range(warmup):
+    untimed_iterations = max(warmup, int(session.compile_evidence is not None))
+    for _ in range(untimed_iterations):
         output = session.invoke()
         _synchronize()
     compiled_graphs = None
