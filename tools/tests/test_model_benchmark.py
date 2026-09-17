@@ -34,14 +34,18 @@ def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
         "bloom-560m",
         "chronos-bolt-tiny-official",
         "falcon-rw-1b",
+        "falcon3-1b",
         "gpt-neo-125m",
         "gpt2-125m",
+        "granite-3.1-2b",
         "mamba-130m",
         "mixtral-stories-15m",
         "olmo-1b",
+        "olmo2-1b",
         "opt-125m",
         "pythia-70m",
         "rwkv-169m",
+        "stablelm2-1.6b",
         "xglm-564m",
     } <= set(kinds_by_model)
     assert all(kinds == {"accuracy", "performance"} for kinds in kinds_by_model.values())
@@ -69,6 +73,24 @@ def test_opt_uses_validated_profile_and_pre_refactor_performance_length() -> Non
     assert accuracy.values["prompt_token_limit"] == 192
     assert performance.name == "generate-10"
     assert performance.values["request"]["max_new_tokens"] == 10
+
+
+def test_restored_text_profiles_preserve_pre_refactor_performance_lengths() -> None:
+    expected = {
+        "falcon3-1b": 20,
+        "granite-3.1-2b": 20,
+        "olmo2-1b": 8,
+        "stablelm2-1.6b": 22,
+    }
+
+    for model, tokens in expected.items():
+        cases = select(discover(REPOSITORY), [model])
+        performance = next(case for case in cases if case.kind == "performance")
+        assert performance.name == f"generate-{tokens}"
+        assert performance.values["request"]["max_new_tokens"] == tokens
+
+    stablelm = select(discover(REPOSITORY), ["stablelm2-1.6b"])[0]
+    assert stablelm.candidate["build"]["fp32_layers"] == [23]
 
 
 def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
