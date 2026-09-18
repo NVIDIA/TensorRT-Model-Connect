@@ -11,3 +11,5 @@ describe = family_support(
     tasks=("text_generation",),
     default_task="text_generation",
 )
+
+# CI live-fire payload: parallel Community GPU lease verification retest (see #1313, #1314).
