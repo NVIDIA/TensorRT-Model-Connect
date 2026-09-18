@@ -113,7 +113,21 @@ def _text_generation_parity(
     request_path = output / "reference-request.json"
     reference_path = output / "reference.json"
     _json(request_path, reference_request)
-    runner = context.repository / "tools/benchmark_qualification/references/hf_text_generation.py"
+    runner_value = reference.get("command")
+    if runner_value is None:
+        runner = (
+            context.repository
+            / "tools/benchmark_qualification/references/hf_text_generation.py"
+        )
+    else:
+        if not isinstance(runner_value, str) or not runner_value:
+            raise QualificationError("text-generation reference.command must be a string")
+        runner = (case.source.parent / runner_value).resolve()
+        family_root = case.source.parents[2].resolve()
+        if family_root not in runner.parents or not runner.is_file():
+            raise QualificationError(
+                f"text-generation reference runner is not family-owned: {runner}"
+            )
     completed = run_command(
         [
             str(reference_python(case, context)),

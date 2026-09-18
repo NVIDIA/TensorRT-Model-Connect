@@ -134,6 +134,10 @@ def test_accuracy_forwards_declared_reference_model_load_options(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    runner = profile.parent / "reference.py"
+    runner.write_text("# family reference\n", encoding="utf-8")
     case = QualificationCase(
         kind="accuracy",
         model="example-model",
@@ -154,13 +158,14 @@ def test_accuracy_forwards_declared_reference_model_load_options(
             "prompt_token_limit": 8,
             "truncation_side": "left",
             "reference": {
+                "command": "reference.py",
                 "precision": "fp16",
                 "experts_implementation": "batched_mm",
             },
             "request": {"max_new_tokens": 1, "temperature": 0.0},
             "gate": {"min_pass_rate": 1.0, "allowed_failures": 0},
         },
-        source=tmp_path / "example.yaml",
+        source=profile,
         reference_requirements=None,
     )
     dataset_path = tmp_path / "mmlu.json"
@@ -185,8 +190,10 @@ def test_accuracy_forwards_declared_reference_model_load_options(
         verbose=False,
     )
     captured: dict[str, object] = {}
+    captured_command: list[str] = []
 
     def reference(command, *_args, **_kwargs):
+        captured_command.extend(command)
         request = Path(command[command.index("--request") + 1])
         output = Path(command[command.index("--output") + 1])
         captured.update(json.loads(request.read_text(encoding="utf-8")))
@@ -215,6 +222,7 @@ def test_accuracy_forwards_declared_reference_model_load_options(
     assert captured["revision"] == "a" * 40
     assert captured["trust_remote_code"] is True
     assert captured["experts_implementation"] == "batched_mm"
+    assert runner in [Path(argument) for argument in captured_command]
 
 
 def test_hf_accuracy_reference_uses_requested_expert_implementation(monkeypatch) -> None:
