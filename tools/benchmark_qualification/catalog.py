@@ -30,6 +30,7 @@ class QualificationCase:
     values: Mapping[str, Any]
     source: Path
     reference_requirements: Path | None
+    reference_build_isolation: bool = True
     environment_hook: Path | None = None
 
     @property
@@ -52,7 +53,9 @@ def discover(repository: Path) -> tuple[QualificationCase, ...]:
         if path.stem != model:
             raise QualificationError(f"{path}: file name must match model {model!r}")
         candidate = _candidate(raw.get("candidate"), family, path)
-        requirements = _requirements(raw.get("reference_environment"), path)
+        reference_environment = raw.get("reference_environment")
+        requirements = _requirements(reference_environment, path)
+        build_isolation = _build_isolation(reference_environment, path)
         hook_path = path.parent / "prepare_environment.py"
         environment_hook = hook_path.resolve() if hook_path.is_file() else None
         for kind in ("accuracy", "performance"):
@@ -74,6 +77,7 @@ def discover(repository: Path) -> tuple[QualificationCase, ...]:
                     values=dict(value),
                     source=path.resolve(),
                     reference_requirements=requirements,
+                    reference_build_isolation=build_isolation,
                     environment_hook=environment_hook,
                 )
                 if case.id in seen:
@@ -161,6 +165,19 @@ def _requirements(raw: Any, path: Path) -> Path | None:
     if not result.is_file():
         raise QualificationError(f"{path}: reference requirements do not exist: {result}")
     return result
+
+
+def _build_isolation(raw: Any, path: Path) -> bool:
+    if raw is None:
+        return True
+    if not isinstance(raw, Mapping):
+        raise QualificationError(f"{path}: reference_environment must be an object")
+    value = raw.get("build_isolation", True)
+    if not isinstance(value, bool):
+        raise QualificationError(
+            f"{path}: reference_environment.build_isolation must be a boolean"
+        )
+    return value
 
 
 def _yaml_object(path: Path, label: str) -> dict[str, Any]:

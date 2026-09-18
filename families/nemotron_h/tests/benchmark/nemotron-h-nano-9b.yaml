@@ -16,6 +16,7 @@ candidate:
 
 reference_environment:
   requirements: ../../requirements.txt
+  build_isolation: false
 
 accuracy:
   - name: mmlu-continuation
