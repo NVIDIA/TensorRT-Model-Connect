@@ -37,6 +37,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _text_generation_parity(case, context, dataset, output)
     elif metric_name == "embedding_vector_parity":
         result = _encoder_embedding_parity(case, context, dataset, output)
+    elif metric_name == "reranking_score_parity":
+        result = _reranking_score_parity(case, context, dataset, output)
     elif metric_name == "forecast_tensor_parity":
         result = _etth1(case, context, definition, dataset, output)
     elif metric_name == "image_classification_top1_parity":
@@ -293,6 +295,169 @@ def _encoder_embedding_parity(
         "samples": compared["samples"],
         "pairs": compared["pairs"],
     }
+
+
+def _reranking_score_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    samples = _sts_reranking_samples(dataset.path, sample_limit)
+    reference = configured.get("reference", {})
+    gate = configured.get("gate", {})
+    if not isinstance(reference, Mapping) or not isinstance(gate, Mapping):
+        raise QualificationError("reranking reference and gate must be objects")
+    runner_value = reference.get("command")
+    if not isinstance(runner_value, str) or not runner_value:
+        raise QualificationError("reranking reference.command must be set")
+    runner = (case.source.parent / runner_value).resolve()
+    family_root = case.source.parents[2].resolve()
+    if family_root not in runner.parents or not runner.is_file():
+        raise QualificationError(f"reranking reference runner is not family-owned: {runner}")
+    request_path = output / "reference-request.json"
+    reference_path = output / "reference.json"
+    _json(
+        request_path,
+        {
+            "model": str(case.candidate["checkpoint"]),
+            "revision": case.candidate.get("revision"),
+            "precision": str(reference.get("precision", "fp32")),
+            "samples": samples,
+        },
+    )
+    completed = run_command(
+        [
+            str(reference_python(case, context)),
+            str(runner),
+            "--request",
+            str(request_path),
+            "--output",
+            str(reference_path),
+        ],
+        output,
+        "reference",
+        timeout=3600,
+        verbose=context.verbose,
+    )
+    if completed.returncode != 0:
+        raise QualificationError(f"reranking Accuracy reference failed; see {output}")
+    expected = json.loads(reference_path.read_text(encoding="utf-8")).get("samples")
+    if not isinstance(expected, list) or len(expected) != len(samples):
+        raise QualificationError("reranking reference returned an invalid sample set")
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {"query": sample["query"], "documents": sample["documents"]},
+        }
+        for sample in samples
+    ]
+    actual, bundle = _candidate_outputs(case, context, output, "rerank", candidate_requests)
+    maximum_error = float(gate.get("max_score_abs_error", 0.05))
+    minimum_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if maximum_error < 0.0 or not math.isfinite(maximum_error):
+        raise QualificationError("max_score_abs_error must be finite and nonnegative")
+    if not 0.0 <= minimum_rate <= 1.0:
+        raise QualificationError("min_sample_pass_rate must be in [0, 1]")
+
+    rows = []
+    for sample, candidate_sample, reference_sample in zip(samples, actual, expected, strict=True):
+        candidate_scores = _reranking_scores(candidate_sample, "candidate")
+        reference_scores = _reranking_scores(reference_sample, "reference")
+        if len(candidate_scores) != len(reference_scores) or len(reference_scores) < 2:
+            raise QualificationError("reranking reference and candidate score counts differ")
+        errors = [
+            abs(left - right)
+            for left, right in zip(candidate_scores, reference_scores, strict=True)
+        ]
+        candidate_order = _reranking_order(candidate_scores)
+        reference_order = _reranking_order(reference_scores)
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "passed": max(errors) <= maximum_error and candidate_order == reference_order,
+                "max_score_abs_error": max(errors),
+                "candidate_order": candidate_order,
+                "reference_order": reference_order,
+            }
+        )
+    pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    passed = pass_rate >= minimum_rate
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": pass_rate,
+            "max_score_abs_error": max(row["max_score_abs_error"] for row in rows),
+        },
+        "gate": {
+            "max_score_abs_error": maximum_error,
+            "min_sample_pass_rate": minimum_rate,
+        },
+        "samples": rows,
+    }
+
+
+def _reranking_scores(summary: Mapping[str, Any], label: str) -> list[float]:
+    values = summary.get("scores")
+    if not isinstance(values, list) or not values:
+        raise QualificationError(f"{label} reranking output has no scores")
+    scores = [float(value) for value in values]
+    if not all(math.isfinite(value) for value in scores):
+        raise QualificationError(f"{label} reranking output has non-finite scores")
+    return scores
+
+
+def _reranking_order(scores: Sequence[float]) -> list[int]:
+    return sorted(range(len(scores)), key=lambda index: (-scores[index], index))
+
+
+def _sts_reranking_samples(path: Path, count: int) -> list[dict[str, Any]]:
+    pairs = []
+    with path.open(encoding="utf-8") as stream:
+        for dataset_index, line in enumerate(stream):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise QualificationError(
+                    f"STSBenchmark row {dataset_index} is not valid JSON"
+                ) from error
+            if not isinstance(row, Mapping):
+                raise QualificationError(f"STSBenchmark row {dataset_index} must be an object")
+            sentence1 = row.get("sentence1")
+            sentence2 = row.get("sentence2")
+            if not all(
+                isinstance(value, str) and value.strip() for value in (sentence1, sentence2)
+            ):
+                raise QualificationError(
+                    f"STSBenchmark row {dataset_index} must contain two sentences"
+                )
+            pairs.append((str(sentence1).strip(), str(sentence2).strip()))
+            if len(pairs) == count * 2:
+                break
+    if len(pairs) != count * 2:
+        raise QualificationError(
+            f"STSBenchmark contains {len(pairs)} usable rows; {count * 2} required"
+        )
+    return [
+        {
+            "sample_id": f"stsbenchmark-rerank-{index:06d}",
+            "query": pairs[index * 2][0],
+            "documents": [pairs[index * 2][1], pairs[index * 2 + 1][1]],
+        }
+        for index in range(count)
+    ]
 
 
 def _sts_samples(path: Path, count: int, prefix: str) -> list[dict[str, Any]]:
