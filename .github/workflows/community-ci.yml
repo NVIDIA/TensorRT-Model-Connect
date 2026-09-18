@@ -27,7 +27,7 @@ on:
         default: false
         type: boolean
       ci_lane:
-        description: CI implementation role (filled automatically)
+        description: Select dev for a manual Dev-only run; stable follows the dual-run switch
         required: false
         type: choice
         default: stable
@@ -48,7 +48,7 @@ env:
   COMMUNITY_GPU_EXECUTION_ENABLED: "false"
 
 concurrency:
-  group: community-ci-${{ inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || github.ref_name == 'main' && 'start-main' || 'start-dev' }}-${{ github.event.pull_request.number || inputs.pr_number }}
+  group: community-ci-${{ inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || (github.event_name == 'workflow_dispatch' && inputs.ci_lane == 'dev') && 'start-dev' || 'start-main' }}-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
@@ -56,6 +56,7 @@ jobs:
     name: Capture the Community CI snapshot
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.ref == 'refs/heads/main' &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == ''))
     runs-on: ubuntu-24.04
@@ -76,11 +77,14 @@ jobs:
         id: lanes
         env:
           DUAL_RUN: ${{ vars.TRTMC_COMMUNITY_CI_DUAL_RUN }}
-          CI_BRANCH: ${{ github.ref_name }}
+          CI_ENTRY_REF: ${{ github.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_LANE: ${{ inputs.ci_lane }}
         run: |
           set -euo pipefail
+          test "$CI_ENTRY_REF" = refs/heads/main
           lanes='["stable"]'
-          if [ "$CI_BRANCH" != main ]; then
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$REQUESTED_LANE" = dev ]; then
             lanes='["dev"]'
           elif [ "$DUAL_RUN" = true ]; then
             lanes='["stable","dev"]'
@@ -102,7 +106,7 @@ jobs:
 
       - name: Find the existing Stable PR snapshot
         id: stable
-        if: ${{ github.event_name == 'pull_request_target' || github.ref_name != 'main' }}
+        if: ${{ github.event_name == 'pull_request_target' || inputs.ci_lane == 'dev' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
@@ -191,7 +195,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
-          STATUS_CONTEXT: ${{ github.ref == 'refs/heads/main' && 'Stable Community CI' || 'Dev Community CI' }}
+          STATUS_CONTEXT: ${{ steps.lanes.outputs.lanes == '["dev"]' && 'Dev Community CI' || 'Stable Community CI' }}
         run: |
           set -euo pipefail
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 0
@@ -204,7 +208,7 @@ jobs:
   dispatch:
     name: Start ${{ matrix.lane }} Community CI
     needs: snapshot
-    if: ${{ needs.snapshot.result == 'success' }}
+    if: ${{ needs.snapshot.result == 'success' && github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
       matrix:
@@ -229,12 +233,12 @@ jobs:
           CI_ENTRY_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
+          if [ "$CI_ENTRY_REF" != refs/heads/main ]; then
+            echo "::error::Community CI coordination must run from main."
+            exit 1
+          fi
           case "$LANE" in
             stable)
-              if [ "$CI_ENTRY_REF" != refs/heads/main ]; then
-                echo "::error::Only the main coordinator may publish Stable results."
-                exit 1
-              fi
               test "$STATUS_CONTEXT" = 'Stable Community CI'
               ;;
             dev) test "$STATUS_CONTEXT" = 'Dev Community CI' ;;
@@ -259,7 +263,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.snapshot.outputs.pr_number }}
-          CI_REF: ${{ matrix.lane == 'stable' && 'main' || github.ref_name != 'main' && github.ref_name || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}
+          CI_REF: ${{ matrix.lane == 'stable' && 'main' || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}
           LANE: ${{ matrix.lane }}
           SOURCE_SNAPSHOT: ${{ needs.snapshot.outputs.source_snapshot }}
           HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
@@ -267,6 +271,10 @@ jobs:
           RUN_GPU_SMOKE: ${{ inputs.run_gpu_smoke || false }}
         run: |
           set -euo pipefail
+          case "$LANE:$CI_REF" in
+            stable:main|dev:main|dev:ci/developer) ;;
+            *) echo "::error::The CI implementation must use an approved main or ci/developer branch."; exit 1 ;;
+          esac
           if [ "$LANE" = stable ] && [ -n "${STABLE_RUN_ID:-}" ]; then
             [[ "$STABLE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             echo "run_id=$STABLE_RUN_ID" >> "$GITHUB_OUTPUT"

@@ -58,14 +58,18 @@ The switch is captured once per request. Turning it off stops Dev on subsequent
 requests; work already started finishes normally. A Dev branch selection alone
 does not enable automatic dual running. Dev must not be a required merge check.
 
-For manual qualification, select **Actions > Community CI > Run workflow** and
-enter a PR number. Selecting `ci/developer` runs Dev against the existing Stable
-PR snapshot and publishes only the Dev result, regardless of the dual-run switch.
-Selecting `main` manually starts Stable and, when enabled, Dev. Keep the internal
-snapshot, lane, and request inputs at their defaults. Manual starts require
+For manual qualification, select **Actions > Community CI > Run workflow**,
+keep the workflow branch set to `main`, and enter a PR number. Select `ci_lane=dev`
+to run Dev only against the existing Stable PR snapshot, regardless of the
+dual-run switch. The default `ci_lane=stable` starts Stable and, when enabled, Dev.
+Keep the internal snapshot and request inputs empty. Manual starts require
 maintain or admin access. `run_gpu_smoke` retains the existing manual GPU opt-in.
 
-Only the coordinator on `refs/heads/main` may publish `Stable Community CI`.
+Coordination and status publication run only from `refs/heads/main`. Dev's
+implementation ref is data selected by `TRTMC_COMMUNITY_CI_DEV_REF`, not the
+workflow ref used to start the coordinator. Direct Dev-branch starts without the
+internal snapshot do not run coordination jobs. Only the main coordinator
+publishes `Stable Community CI`.
 A Dev-only start cannot replace a failed or pending Stable result with the
 successful CPU compatibility check retained for Internal CI. Apply this publisher
 guard to the Dev branch before promoting its GPU implementation to `main`.
@@ -86,8 +90,9 @@ timm ViT, Whisper, and directly changed or added families. Docs-only changes
 skip GPU. Missing public assets fail visibly rather than count as coverage.
 
 The existing `gpu-ci-dispatch` environment permits `main` and protected
-`ci/developer`. Only administrators may update the latter. Additional CI refs
-need protection and environment approval. Dev uses a disposable Brev instance,
+`ci/developer`. Only administrators may update the latter. The dispatcher accepts
+only `main` and `ci/developer`; additional refs need an explicit allowlist update,
+protection, and environment approval. Dev uses a disposable Brev instance,
 with cleanup in the job and an independent cleanup job. Per-PR and per-lane
 concurrency keeps independent PRs parallel; shared provider quota can still
 prevent allocation. Dev GPU type and CUDA architecture default to L40 and 89.

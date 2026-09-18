@@ -1090,7 +1090,7 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     step = next(step for step in dispatch["steps"] if step.get("id") == "execution")
     assert (
         step["env"]["CI_REF"]
-        == "${{ matrix.lane == 'stable' && 'main' || github.ref_name != 'main' && github.ref_name || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}"
+        == "${{ matrix.lane == 'stable' && 'main' || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}"
     )
     assert "sleep" not in step["run"]
     gpu = executor["jobs"]["provision-and-test"]
@@ -1113,7 +1113,10 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
         ('["stable","dev"]', ["stable"]),
     ],
 )
-def test_community_dual_run_switch_controls_job_allocation(tmp_path, dual_run, expected_lanes):
+@pytest.mark.parametrize("event_name", ["pull_request_target", "workflow_dispatch"])
+def test_community_dual_run_switch_controls_job_allocation(
+    tmp_path, dual_run, expected_lanes, event_name
+):
     control = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     snapshot = control["jobs"]["snapshot"]
     selector = next(step for step in snapshot["steps"] if step.get("id") == "lanes")
@@ -1126,7 +1129,14 @@ def test_community_dual_run_switch_controls_job_allocation(tmp_path, dual_run, e
     output = tmp_path / "output"
     result = subprocess.run(
         ["bash", "-c", selector["run"]],
-        env={**os.environ, "DUAL_RUN": dual_run, "CI_BRANCH": "main", "GITHUB_OUTPUT": str(output)},
+        env={
+            **os.environ,
+            "DUAL_RUN": dual_run,
+            "CI_ENTRY_REF": "refs/heads/main",
+            "EVENT_NAME": event_name,
+            "REQUESTED_LANE": "stable" if event_name == "workflow_dispatch" else "",
+            "GITHUB_OUTPUT": str(output),
+        },
         capture_output=True,
         text=True,
     )
@@ -1558,7 +1568,7 @@ def test_failed_snapshot_reports_only_a_validated_head(tmp_path, head):
 
 
 @pytest.mark.parametrize("dual_run", ["", "false", "true"])
-def test_manual_dev_branch_never_allocates_a_stable_publisher(tmp_path, dual_run):
+def test_main_manual_dev_request_never_allocates_a_stable_publisher(tmp_path, dual_run):
     output = tmp_path / "output"
     result = subprocess.run(
         [
@@ -1571,7 +1581,9 @@ def test_manual_dev_branch_never_allocates_a_stable_publisher(tmp_path, dual_run
         env={
             **os.environ,
             "DUAL_RUN": dual_run,
-            "CI_BRANCH": "ci/developer",
+            "CI_ENTRY_REF": "refs/heads/main",
+            "EVENT_NAME": "workflow_dispatch",
+            "REQUESTED_LANE": "dev",
             "GITHUB_OUTPUT": str(output),
         },
         capture_output=True,
@@ -1653,6 +1665,7 @@ def test_stable_pairing_does_not_dispatch_or_repeat_the_existing_pipeline(tmp_pa
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "LANE": "stable",
+            "CI_REF": "main",
             "STABLE_RUN_ID": "42",
             "GITHUB_OUTPUT": str(tmp_path / "output"),
         },
@@ -1784,7 +1797,9 @@ else:
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "CI_BRANCH": "ci/developer",
         "CI_ENTRY_BRANCH": "ci/developer",
-        "CI_ENTRY_REF": "refs/heads/ci/developer",
+        "CI_ENTRY_REF": "refs/heads/main",
+        "EVENT_NAME": "workflow_dispatch",
+        "REQUESTED_LANE": "dev",
         "DUAL_RUN": "true",
         "AUTOMATIC_GPU": "true",
         "STABLE_RUN_ID": "42",
@@ -1850,7 +1865,7 @@ else:
     [
         ("stable", "refs/heads/main", "Stable Community CI", True),
         ("dev", "refs/heads/main", "Dev Community CI", True),
-        ("dev", "refs/heads/ci/developer", "Dev Community CI", True),
+        ("dev", "refs/heads/ci/developer", "Dev Community CI", False),
         ("stable", "refs/heads/ci/developer", "Stable Community CI", False),
         ("stable", "refs/tags/main", "Stable Community CI", False),
         ("stable", "refs/pull/17/merge", "Stable Community CI", False),
@@ -1891,5 +1906,67 @@ def test_publisher_authorization_precedes_all_status_writes(
     assert "steps.publisher.outputs.authorized == 'true'" in steps[-1]["if"]
     reporter = workflow["jobs"]["snapshot"]["steps"][-1]
     assert reporter["env"]["STATUS_CONTEXT"] == (
-        "${{ github.ref == 'refs/heads/main' && 'Stable Community CI' || 'Dev Community CI' }}"
+        "${{ steps.lanes.outputs.lanes == '[\"dev\"]' && 'Dev Community CI' || 'Stable Community CI' }}"
     )
+
+
+@pytest.mark.parametrize("entry_ref", ["refs/heads/ci/developer", "refs/tags/main"])
+def test_non_main_coordinator_is_rejected_before_selecting_lanes(tmp_path, entry_ref):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    for name in ("snapshot", "dispatch"):
+        assert "github.ref == 'refs/heads/main'" in workflow["jobs"][name]["if"]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "snapshot", "Select the Community CI branches"
+            ),
+        ],
+        env={
+            **os.environ,
+            "CI_ENTRY_REF": entry_ref,
+            "EVENT_NAME": "workflow_dispatch",
+            "REQUESTED_LANE": "dev",
+            "DUAL_RUN": "true",
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "output").exists()
+    assert "inputs.ci_lane == 'dev'" in workflow["concurrency"]["group"]
+
+
+@pytest.mark.parametrize(
+    "lane,ref", [("dev", "unprotected"), ("dev", "refs/tags/main"), ("stable", "ci/developer")]
+)
+def test_dispatch_rejects_unapproved_implementation_refs(tmp_path, lane, ref):
+    gh = tmp_path / "gh"
+    gh.write_text('#!/bin/sh\ntouch "$CALLS"\nexit 99\n')
+    gh.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "dispatch", "Dispatch the selected Community CI implementation"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "LANE": lane,
+            "CI_REF": ref,
+            "STABLE_RUN_ID": "42",
+            "CALLS": str(tmp_path / "calls"),
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "approved" in result.stdout
+    assert not (tmp_path / "calls").exists()
+    assert not (tmp_path / "output").exists()
