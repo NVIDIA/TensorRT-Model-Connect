@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one gpt_neox TensorRT bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "Hugging Face model ID or local snapshot"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "task", "flags": ["--task"], "type": "string", "choices": ["text_generation"], "default": "text_generation"},
+        {"name": "precision", "flags": ["--precision"], "type": "string", "choices": ["fp16", "bf16", "fp32"], "default": "fp32"},
+        {"name": "backend", "flags": ["--backend"], "type": "string", "choices": ["trt", "trt_rtx"], "default": "trt"},
+        {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int"},
+        {"name": "tensor_parallel_size", "flags": ["--tensor-parallel-size"], "type": "int", "choices": [1, 2, 4, 8], "default": 1},
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+      ]
+    },
+    {
+      "name": "generate",
+      "help": "Generate text with a gpt_neox bundle",
+      "executor": "native",
+      "handler": "generate",
+      "arguments": [
+        {"name": "bundle", "type": "path", "help": "gpt_neox bundle path"},
+        {"name": "prompt", "flags": ["--prompt"], "type": "string", "required": true},
+        {"name": "max_new_tokens", "flags": ["--max-new-tokens"], "type": "int", "default": 128},
+        {"name": "temperature", "flags": ["--temperature"], "type": "float", "default": 1.0},
+        {"name": "top_k", "flags": ["--top-k"], "type": "int", "default": 1},
+        {"name": "top_p", "flags": ["--top-p"], "type": "float", "default": 1.0},
+        {"name": "min_p", "flags": ["--min-p"], "type": "float", "default": 0.0},
+        {"name": "seed", "flags": ["--seed"], "type": "int", "default": -1},
+        {"name": "repetition_penalty", "flags": ["--repetition-penalty"], "type": "float", "default": 1.0},
+        {"name": "use_chat_template", "flags": ["--use-chat-template"], "type": "bool", "default": false},
+        {"name": "enable_thinking", "flags": ["--enable-thinking"], "type": "bool", "default": true},
+        {"name": "generation_mode", "flags": ["--generation-mode"], "type": "string", "default": "auto"},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path"},
+        {"name": "runtime_cache", "flags": ["--runtime-cache"], "type": "path"},
+        {"name": "cuda_graphs", "flags": ["--cuda-graphs"], "type": "bool", "action": "store_true", "default": false}
+      ]
+    }
+  ]
+}
