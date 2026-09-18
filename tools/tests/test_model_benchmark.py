@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from apps.benchmark.performance.baselines import hf_transformers
+from apps.benchmark.performance.baselines import hf_transformers, task_reference
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
 from tools.benchmark_qualification import accuracy as qualification_accuracy
 from tools.benchmark_qualification import performance as qualification_performance
@@ -237,6 +237,156 @@ def test_hf_accuracy_reference_uses_requested_expert_implementation(monkeypatch)
     assert hf_text_generation._precision_load_options("fp16") == {
         "torch_dtype": "fp16"
     }
+
+
+def test_image_classification_accuracy_compares_top1_and_gold_accuracy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "Imagenette"
+    image_root = dataset_root / "images"
+    image_root.mkdir(parents=True)
+    for name in ("a.jpeg", "b.jpeg"):
+        (image_root / name).write_bytes(b"fixture")
+    dataset_path = dataset_root / "manifest.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "requests": [
+                    {"id": "a", "image": "images/a.jpeg", "label": 1},
+                    {"id": "b", "image": "images/b.jpeg", "label": 3},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "families/timm_example/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    case = QualificationCase(
+        kind="accuracy",
+        model="example",
+        family="timm_example",
+        name="imagenette-parity",
+        benchmark="imagenette_classification",
+        candidate={
+            "family": "timm_example",
+            "checkpoint": "timm/example",
+            "task": "classification",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={
+            "samples": 2,
+            "reference": {"precision": "fp32", "batch_size": 2},
+            "gate": {
+                "min_top1_agreement": 1.0,
+                "max_top1_accuracy_drop_from_hf": 0.0,
+            },
+        },
+        source=profile,
+        reference_requirements=None,
+    )
+    dataset = Dataset("imagenette-validation", dataset_path, "provided", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    captured: dict[str, object] = {}
+
+    def reference(command, *_args, **_kwargs):
+        request = Path(command[command.index("--request") + 1])
+        output = Path(command[command.index("--output") + 1])
+        captured.update(json.loads(request.read_text(encoding="utf-8")))
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {"sample_id": "a", "top_class": 1},
+                        {"sample_id": "b", "top_class": 2},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "image_classification_top1_parity"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", reference)
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_candidate_outputs",
+        lambda *_args: (
+            [{"top_class": 1}, {"top_class": 2}],
+            tmp_path / "example.bundle",
+        ),
+    )
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert result["metrics"] == {
+        "samples": 2,
+        "top1_agreement": 1.0,
+        "reference_top1_accuracy": 0.5,
+        "candidate_top1_accuracy": 0.5,
+        "top1_accuracy_drop_from_hf": 0.0,
+    }
+    assert captured["batch_size"] == 2
+    assert captured["samples"][0]["image_path"] == str(image_root / "a.jpeg")
+
+
+def test_performance_resolves_profile_owned_relative_assets(tmp_path: Path) -> None:
+    profile = tmp_path / "families/timm_example/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    image = profile.parent.parent / "data/test.jpeg"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"fixture")
+    case = QualificationCase(
+        kind="performance",
+        model="example",
+        family="timm_example",
+        name="classify",
+        benchmark="image_classification_performance",
+        candidate={
+            "family": "timm_example",
+            "checkpoint": "timm/example",
+            "task": "classification",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={},
+        source=profile,
+        reference_requirements=None,
+    )
+
+    resolved = qualification_performance._resolve_family_assets(
+        case, {"image_path": "../data/test.jpeg", "batch_size": 1}
+    )
+
+    assert resolved == {"image_path": str(image.resolve()), "batch_size": 1}
+
+
+def test_timm_classification_uses_a_generic_task_reference_adapter() -> None:
+    assert "timm-classification" in task_reference.ADAPTERS
+    assert task_reference.LOADERS["timm-classification"] is task_reference._load_vision
 
 
 def test_accuracy_forwards_seq2seq_reference_contract_and_nested_dataset_input(
