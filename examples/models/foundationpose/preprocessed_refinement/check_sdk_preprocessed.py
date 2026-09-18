@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -73,7 +74,7 @@ def main() -> None:
             / "libtrtmc_model_perception_fixture.so",
         }.items():
             assert source.is_file(), source
-            (layout / name).symlink_to(source)
+            shutil.copy2(source, layout / name)
         environment = dict(os.environ)
         environment["LD_LIBRARY_PATH"] = str(layout) + (
             ":" + environment["LD_LIBRARY_PATH"] if environment.get("LD_LIBRARY_PATH") else ""

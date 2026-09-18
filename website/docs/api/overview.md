@@ -25,14 +25,13 @@ The build and runtime entry points are intentionally separate. The Python
 builder resolves exactly one `families/<family>/support.py`, imports only that
 family's `model.py`, and writes a bundle. The native loader reads the bundle's
 `family`, `task`, and `backend`, then loads exactly one family DSO and one
-backend DSO from the directory containing the loaded `libtrtmc_runtime`, or
-from an explicit runtime-root override.
+backend DSO from one selected runtime root.
 
 ```text
 Hugging Face model ID or local snapshot
   -> python -m tensorrt_model_connect build
   -> model.bundle
-  -> trtmc::Model::load() or trtmc TASK
+  -> trtmc::Model::load() or trtmc TASK with CLI discovery
   -> task-specific output
 ```
 
@@ -41,3 +40,7 @@ other commands replace that process with the packaged native executable. There
 is no resident Python inference wrapper. The SDK defaults to its installed
 library directory, with an explicit runtime-root override when needed; it does
 not retry arbitrary backends or family implementations after a failed call.
+
+There is no Python runtime wrapper, central model registry, runtime-strategy
+switch, sibling-family probe, or load-time fallback. CLI discovery selects one
+root before the Runtime Loader performs an exact load.

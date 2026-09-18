@@ -64,6 +64,8 @@ class ImageBoxesModel final : public IModel, public IImageToBoxes {
 };
 } // namespace
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("image_boxes_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     return new ImageBoxesModel(context.reader.info().task);
 }

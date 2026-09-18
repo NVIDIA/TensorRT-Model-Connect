@@ -11,6 +11,8 @@
 #include "task_runtime.h"
 #include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
+#include "trtmc/runtime/plugin_abi.h"
+#include "trtmc/runtime/runtime_root.h"
 #include "trtmc/stream.hpp"
 #include "trtmc/text.hpp"
 
@@ -27,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -161,10 +164,63 @@ bool is_byok_option(const std::string& option) {
     return option == "--byok-library" || option == "--byok-function" || option == "--byok-name";
 }
 
+void append_candidate(std::vector<fs::path>& candidates, std::set<std::string>& seen,
+                      const fs::path& candidate) {
+    if (candidate.empty())
+        return;
+    std::error_code error;
+    fs::path absolute = fs::absolute(candidate, error);
+    if (error)
+        return;
+    fs::path normalized = fs::weakly_canonical(absolute, error);
+    if (error)
+        normalized = absolute.lexically_normal();
+    const std::string key = normalized.string();
+    if (seen.insert(key).second)
+        candidates.push_back(std::move(normalized));
+}
+
+void append_path_list(std::vector<fs::path>& candidates, std::set<std::string>& seen,
+                      const std::string& paths) {
+    std::size_t begin = 0;
+    while (begin <= paths.size()) {
+        const std::size_t end = paths.find(':', begin);
+        const std::string path =
+            paths.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        if (!path.empty())
+            append_candidate(candidates, seen, path);
+        if (end == std::string::npos)
+            break;
+        begin = end + 1;
+    }
+}
+
+RuntimeRootSearchContext runtime_root_search_context() {
+    RuntimeRootSearchContext context;
+    context.loaded_runtime_root = loaded_runtime_root();
+    if (const char* value = std::getenv("TRTMC_RUNTIME_PATH"))
+        context.runtime_path = value;
+    return context;
+}
+
 void load_byok_extension(const Command& command) {
     trtmc::load_byok_kernel(command.options.at("--byok-library"),
                             command.options.at("--byok-function"),
                             command.options.at("--byok-name"), command.runtime_root);
+}
+
+void require_matching_product_build() {
+    const std::string expected = trtmc::kPluginBuildId;
+    const auto require_module = [&](const char* module, const char* actual) {
+        if (actual == nullptr || expected != actual) {
+            throw std::runtime_error(
+                "TRTMC product build mismatch: CLI requires '" + expected + "' but active " +
+                module + " reports '" +
+                (actual != nullptr ? std::string(actual) : std::string("<null>")) + "'");
+        }
+    };
+    require_module("Runtime", trtmc_runtime_build_id());
+    require_module("Core", trtmc_core_build_id());
 }
 
 std::string take_value(int argc, char** argv, int& index, const std::string& option) {
@@ -727,6 +783,35 @@ int dispatch_run(const Command& command, ITask& task, std::ostream& output) {
 } // namespace detail
 
 using namespace detail;
+
+std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& explicit_root,
+                                 bool require_byok, const RuntimeRootSearchContext& context,
+                                 const RuntimeRootMatcher& matches) {
+    if (!explicit_root.empty())
+        return explicit_root;
+    if (!matches)
+        throw std::logic_error("runtime-root discovery requires a candidate matcher");
+
+    std::vector<fs::path> candidates;
+    std::set<std::string> seen;
+    append_candidate(candidates, seen, context.loaded_runtime_root);
+    append_path_list(candidates, seen, context.runtime_path);
+
+    std::vector<fs::path> searched;
+    for (const auto& candidate : candidates) {
+        searched.push_back(candidate);
+        if (matches(bundle, candidate, require_byok))
+            return candidate.string();
+    }
+
+    std::ostringstream message;
+    message << "Unable to discover a complete TRTMC runtime for bundle '" << bundle.family << "/"
+            << bundle.backend << "'. Searched:";
+    for (const auto& candidate : searched)
+        message << " " << candidate.string();
+    message << ". Pass --runtime-root DIR or add a directory to TRTMC_RUNTIME_PATH.";
+    throw std::runtime_error(message.str());
+}
 
 Command parse_args(int argc, char** argv) {
     if (argc < 2)
@@ -1629,12 +1714,15 @@ void print_usage(std::ostream& output) {
               "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
               "Task SDK options: [--task TASK_ID] [--set NAME=VALUE]...\n"
               "Task SDK families default to the installed runtime directory.\n"
-              "Existing bundle modes still require an explicit --runtime-root.\n";
+              "Existing bundle runtime discovery: the active Runtime directory, then\n"
+              "TRTMC_RUNTIME_PATH.\n"
+              "The current directory is not searched; use TRTMC_RUNTIME_PATH=. explicitly.\n"
+              "--runtime-root selects one exact root without fallback.\n";
 }
 
 int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
     try {
-        const Command command = parse_args(argc, argv);
+        Command command = parse_args(argc, argv);
         if (command.kind == CommandKind::kHelp) {
             print_usage(output);
             return EXIT_SUCCESS;
@@ -1643,6 +1731,7 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
             output << "trtmc " << TRTMC_VERSION_STRING << '\n';
             return EXIT_SUCCESS;
         }
+        require_matching_product_build();
         if (command.kind == CommandKind::kInspect) {
             const auto bundle = trtmc::Bundle::open(command.bundle).info();
             nlohmann::json sections = nlohmann::json::object();
@@ -1663,17 +1752,31 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
                 throw std::invalid_argument(
                     "--byok-library, --byok-function, and --byok-name must be used together");
             }
-            load_byok_extension(command);
         }
-        const auto primary_task = trtmc::Bundle::open(command.bundle).info().task;
-        if (!app::uses_existing_task_runtime(primary_task)) {
+        const BundleInfo bundle = InspectBundle(command.bundle);
+        if (!app::uses_existing_task_runtime(bundle.task)) {
+            if (has_byok_library)
+                load_byok_extension(command);
             const LoadOptions options{command.runtime_root, command.kv_cache_size_bytes,
                                       command.runtime_cache_path, command.cuda_graphs};
             const auto model = Model::load(command.bundle, options);
             return dispatch(command, model, output);
         }
-        if (command.runtime_root.empty())
-            throw std::invalid_argument("--runtime-root is required for an existing bundle mode");
+        const bool discover_runtime = command.runtime_root.empty();
+        if (discover_runtime) {
+            command.runtime_root =
+                resolve_runtime_root(bundle, {}, has_byok_library, runtime_root_search_context(),
+                                     [](const BundleInfo& candidate_bundle,
+                                        const fs::path& candidate, bool require_byok) {
+                                         return runtime_root_contains_bundle(
+                                             candidate_bundle, candidate.string(), require_byok);
+                                     });
+            error << "Using TRTMC runtime: " << command.runtime_root << '\n';
+        }
+        if (has_byok_library)
+            load_byok_kernel_from_runtime(
+                command.runtime_root, command.options.at("--byok-library"),
+                command.options.at("--byok-function"), command.options.at("--byok-name"));
         std::unique_ptr<ITask> task =
             load_task(command.bundle, command.runtime_root, command.kv_cache_size_bytes,
                       command.runtime_cache_path, command.cuda_graphs);

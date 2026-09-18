@@ -126,6 +126,8 @@ class FixtureModel final : public IModel, public ITextContinuation {
 
 } // namespace
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("api_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "api_fixture")
         throw std::runtime_error("unexpected API fixture family");

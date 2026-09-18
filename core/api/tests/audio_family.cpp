@@ -498,6 +498,8 @@ class DeclaredHistoryOnly final : public IModel {
 };
 } // namespace
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("audio_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "audio_fixture")
         throw std::invalid_argument("unexpected audio fixture family");

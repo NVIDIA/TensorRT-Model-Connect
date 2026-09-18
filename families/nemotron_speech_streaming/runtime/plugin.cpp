@@ -70,6 +70,8 @@ RnntConfig parse_config(const nlohmann::json& json) {
 } // namespace
 } // namespace trtmc::nemotron_streaming_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("nemotron_speech_streaming")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("nemotron_speech_streaming does not support --kv-cache-size");

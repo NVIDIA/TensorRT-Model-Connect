@@ -119,6 +119,8 @@ ITask* create(const FamilyContext& context) {
 
 } // namespace trtmc::mamba
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("mamba")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("mamba does not support --kv-cache-size");

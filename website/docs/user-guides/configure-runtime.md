@@ -18,7 +18,6 @@ configs. Family-only state remains in family sections and implementation code.
 
 ```bash
 trtmc run model.bundle \
-  --runtime-root /opt/trtmc/lib \
   --kv-cache-size 4GiB \
   --prompt "Hello" \
   --temperature 0

@@ -82,6 +82,8 @@ ITask* create(const FamilyContext& context) {
 
 } // namespace trtmc::lerobot_act
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("lerobot_act")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("lerobot_act does not support --kv-cache-size");

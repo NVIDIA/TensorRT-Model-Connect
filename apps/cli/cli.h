@@ -9,6 +9,8 @@
 #include "trtmc/task.h"
 
 #include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <iosfwd>
 #include <string>
 #include <unordered_map>
@@ -68,7 +70,18 @@ struct Command {
     std::vector<std::pair<std::string, std::string>> config_entries{};
 };
 
+struct RuntimeRootSearchContext {
+    std::filesystem::path loaded_runtime_root;
+    std::string runtime_path;
+};
+
+using RuntimeRootMatcher =
+    std::function<bool(const BundleInfo&, const std::filesystem::path&, bool require_byok)>;
+
 Command parse_args(int argc, char** argv);
+std::string resolve_runtime_root(const BundleInfo& bundle, const std::string& explicit_root,
+                                 bool require_byok, const RuntimeRootSearchContext& context,
+                                 const RuntimeRootMatcher& matches);
 int dispatch(const Command& command, ITask& task, std::ostream& output);
 int dispatch(const Command& command, const Model& model, std::ostream& output);
 void print_usage(std::ostream& output);

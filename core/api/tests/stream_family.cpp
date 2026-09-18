@@ -552,6 +552,8 @@ extern "C" int trtmc_test_stream_waiting_readers() {
 extern "C" void trtmc_test_stream_allocation_hook(AllocationHook hook) {
     allocation_hook.store(hook);
 }
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("stream_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "stream_fixture")
         throw std::runtime_error("wrong stream fixture family");

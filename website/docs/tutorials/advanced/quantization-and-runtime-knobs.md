@@ -49,7 +49,6 @@ Every execution command requires the installed runtime directory:
 
 ```bash
 trtmc run qwen.bundle \
-  --runtime-root /opt/trtmc/lib \
   --runtime-cache /tmp/trtmc-cache \
   --cuda-graphs \
   --kv-cache-size 4096 \
