@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: multilingual-e5-small
+candidate:
+  family: bert
+  checkpoint: intfloat/multilingual-e5-small
+  revision: 614241f622f53c4eeff9890bdc4f31cfecc418b3
+  task: embedding
+  precision: fp16
+  bundle: multilingual-e5-small.bundle
+  build:
+    max_sequence_length: 512
+
+accuracy:
+  - name: stsbenchmark-parity
+    benchmark: stsbenchmark_embedding_parity
+    samples: 50
+    reference:
+      precision: fp32
+    gate:
+      min_vector_cosine: 0.999
+      min_vector_pass_rate: 1.0
+      max_pair_cosine_abs_delta: 0.02
+
+performance:
+  - name: embed
+    benchmark: embedding_performance
+    operation: embed
+    request:
+      prompt: "query: What is artificial intelligence?"
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      adapter: hf-transformers-embedding
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      reference_backend: hf_transformers
+      precision: fp32
+      output_contract: embedding-shape
