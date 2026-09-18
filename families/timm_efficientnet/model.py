@@ -37,8 +37,10 @@ from .weights import (
 from .config import ModelConfig
 
 
+from .cli import BuildRequest, coerce_request
+
+
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 _BN_EPS = 1e-5  # PyTorch default; the tf_efficientnet_* ports use 1e-3 instead.
@@ -450,29 +452,7 @@ _QUALIFIED_ARCHITECTURES = {
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm EfficientNet image-classification bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("timm_efficientnet does not support dynamic_kv_cache")
-
-    if request.image_height is not None:
-        raise NotImplementedError("timm_efficientnet does not support image_height")
-    if request.image_width is not None:
-        raise NotImplementedError("timm_efficientnet does not support image_width")
-    if request.video_num_frames is not None:
-        raise NotImplementedError("timm_efficientnet does not support video_num_frames")
-    if request.max_batch_size != 1:
-        raise NotImplementedError("timm_efficientnet does not support max_batch_size")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("timm_efficientnet does not support tensor parallelism")
-    if request.context_parallel_size != 1:
-        raise NotImplementedError("timm_efficientnet does not support context parallelism")
-    if request.task != "image_to_class_scores":
-        raise ValueError("timm_efficientnet supports only task=image_to_class_scores")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_efficientnet does not support quantization")
-    if request.fp32_layers:
-        raise NotImplementedError("timm_efficientnet does not support mixed-precision layers")
-    if request.max_sequence_length not in {None, 1}:
-        raise NotImplementedError("timm_efficientnet supports only max_sequence_length=1")
+    request = coerce_request(request)
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)

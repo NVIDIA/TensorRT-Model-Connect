@@ -17,8 +17,8 @@ Build a new bundle with this family version; the old `classification` bundle
 mode is not retained. The existing CLI command remains simple:
 
 ```sh
-trtmc build timm/efficientnet_b0.ra_in1k -o efficientnet.bundle
-trtmc classify efficientnet.bundle --image photo.jpg
+trtmc timm_efficientnet build timm/efficientnet_b0.ra_in1k -o efficientnet.bundle
+trtmc timm_efficientnet classify efficientnet.bundle --image photo.jpg
 ```
 
 ## Validation

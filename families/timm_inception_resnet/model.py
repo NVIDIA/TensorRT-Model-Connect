@@ -24,8 +24,10 @@ from . import graph
 from .checkpoint import Checkpoint
 
 
+from .cli import BuildRequest, coerce_request
+
+
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -57,7 +59,6 @@ _GROUP_SCALE = {"repeat": 0.17, "repeat_1": 0.10, "repeat_2": 0.20}
 
 # The trailing standalone block adds its branch unscaled and does not activate.
 _FINAL_BLOCK_SCALE = 1.0
-
 
 
 def _read_config(model_dir: Path) -> dict[str, Any]:
@@ -364,38 +365,12 @@ def _build_engine(
     return bytes(plan), config
 
 
-def _positive_int(value: object, name: str) -> int:
-    if isinstance(value, bool):
-        raise ValueError(f"{name} must be a positive integer")
-    result = int(value)
-    if result < 1:
-        raise ValueError(f"{name} must be a positive integer")
-    return result
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm Inception-ResNet-v2 image-classification bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("timm_inception_resnet does not support dynamic_kv_cache")
-    if request.image_height is not None:
-        raise NotImplementedError("timm_inception_resnet does not support image_height")
-    if request.image_width is not None:
-        raise NotImplementedError("timm_inception_resnet does not support image_width")
-    if request.video_num_frames is not None:
-        raise NotImplementedError("timm_inception_resnet does not support video_num_frames")
-    if request.max_batch_size != 1:
-        raise NotImplementedError("timm_inception_resnet does not support max_batch_size")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("timm_inception_resnet does not support tensor parallelism")
-    if request.context_parallel_size != 1:
-        raise NotImplementedError("timm_inception_resnet does not support context parallelism")
-    if request.task != "image_to_class_scores":
-        raise ValueError("timm_inception_resnet supports only task=image_to_class_scores")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_inception_resnet does not support quantization")
-    if request.fp32_layers:
-        raise NotImplementedError("timm_inception_resnet does not support mixed-precision layers")
-    _positive_int(request.max_sequence_length or 1, "max_sequence_length")
+    request = coerce_request(request)
+
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)
     plan, runtime = _build_engine(

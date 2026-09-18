@@ -17,8 +17,8 @@ Build a new bundle with this family version; the old `classification` bundle
 mode is not retained. The existing CLI command remains simple:
 
 ```sh
-trtmc build timm/ghostnet_100.in1k -o timm_ghostnet.bundle
-trtmc classify timm_ghostnet.bundle --image photo.jpg
+trtmc timm_ghostnet build timm/ghostnet_100.in1k -o timm_ghostnet.bundle
+trtmc timm_ghostnet classify timm_ghostnet.bundle --image photo.jpg
 ```
 
 ## Validation
