@@ -103,10 +103,25 @@ def _text_generation_parity(
     source_language_placement = reference.get("source_language_placement")
     if source_language_placement is not None:
         reference_generation["source_language_placement"] = source_language_placement
+    reference_model = reference.get("model", case.candidate["checkpoint"])
+    if not isinstance(reference_model, str) or not reference_model:
+        raise QualificationError("accuracy.reference.model must be a non-empty string")
+    reference_revision = reference.get("revision")
+    if reference_revision is None and reference_model == case.candidate["checkpoint"]:
+        reference_revision = case.candidate.get("revision")
+    if reference_revision is not None and (
+        not isinstance(reference_revision, str) or not reference_revision
+    ):
+        raise QualificationError("accuracy.reference.revision must be a non-empty string")
+    trust_remote_code = reference.get(
+        "trust_remote_code", case.candidate.get("trust_remote_code", False)
+    )
+    if not isinstance(trust_remote_code, bool):
+        raise QualificationError("accuracy.reference.trust_remote_code must be a boolean")
     reference_request = {
-        "model": str(case.candidate["checkpoint"]),
-        "revision": case.candidate.get("revision"),
-        "trust_remote_code": bool(case.candidate.get("trust_remote_code", False)),
+        "model": reference_model,
+        "revision": reference_revision,
+        "trust_remote_code": trust_remote_code,
         "precision": str(reference.get("precision", "fp32")),
         "task": reference_task,
         "output_token_policy": output_token_policy,

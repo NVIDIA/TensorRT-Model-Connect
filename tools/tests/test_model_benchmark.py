@@ -159,6 +159,9 @@ def test_accuracy_forwards_declared_reference_model_load_options(
             "truncation_side": "left",
             "reference": {
                 "command": "reference.py",
+                "model": "example/reference-model",
+                "revision": "b" * 40,
+                "trust_remote_code": False,
                 "precision": "fp16",
                 "experts_implementation": "batched_mm",
             },
@@ -219,8 +222,9 @@ def test_accuracy_forwards_declared_reference_model_load_options(
     result = qualification_accuracy.run_accuracy(case, context)
 
     assert result["status"] == "passed"
-    assert captured["revision"] == "a" * 40
-    assert captured["trust_remote_code"] is True
+    assert captured["model"] == "example/reference-model"
+    assert captured["revision"] == "b" * 40
+    assert captured["trust_remote_code"] is False
     assert captured["experts_implementation"] == "batched_mm"
     assert runner in [Path(argument) for argument in captured_command]
 

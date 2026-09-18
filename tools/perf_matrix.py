@@ -839,6 +839,24 @@ def _baseline_mode(baseline: Mapping[str, Any]) -> str:
     return str(baseline.get("mode", "reference" if "script" in baseline else "torch-compile"))
 
 
+def _baseline_model(entry: ResolvedEntry, environment: Environment) -> str:
+    configured = entry.spec["baseline"].get("model")
+    if configured is None:
+        configured = _adapter_options(entry, environment).get("model_id", entry.model.hf_id)
+    if not isinstance(configured, str) or not configured:
+        raise PerfMatrixError(f"entry {entry.spec['id']} baseline model must be non-empty")
+    return configured
+
+
+def _baseline_revision(entry: ResolvedEntry, model: str) -> str | None:
+    configured = entry.spec["baseline"].get("revision")
+    if configured is None and model == entry.model.hf_id:
+        configured = entry.model.hf_revision or None
+    if configured is not None and (not isinstance(configured, str) or not configured):
+        raise PerfMatrixError(f"entry {entry.spec['id']} baseline revision must be non-empty")
+    return configured
+
+
 def baseline_command(entry: ResolvedEntry, environment: Environment, output: Path) -> list[str]:
     return _baseline_command(entry, environment, output)
 
@@ -858,9 +876,10 @@ def _baseline_command(
     if source_placement is not None:
         request_value["source_language_placement"] = source_placement
     request = json.dumps(request_value, ensure_ascii=True, separators=(",", ":"))
+    model = _baseline_model(entry, environment)
     common = [
         "--model",
-        str(_adapter_options(entry, environment).get("model_id", entry.model.hf_id)),
+        model,
         "--request-json",
         request,
         "--precision",
@@ -933,7 +952,7 @@ def _baseline_command(
             arguments.extend(("--testcase-name", entry.case.testcase_name))
         if "script" in baseline or entry.case.selected_task is not None:
             arguments.extend(("--selected-task", _effective_task(entry)))
-    revision = entry.model.hf_revision
+    revision = _baseline_revision(entry, model)
     if revision:
         arguments.extend(("--revision", revision))
     if bool(entry.manifest.get("trust_remote_code", False)):
@@ -949,7 +968,7 @@ def _validate_script_result(
     expected = {
         "schema_version": "trtmc.perf-baseline/v1",
         "status": "completed",
-        "model": str(_adapter_options(entry, environment).get("model_id", entry.model.hf_id)),
+        "model": _baseline_model(entry, environment),
         "family": entry.model.family,
         "operation": str(entry.spec["operation"]),
         "case_name": str(entry.spec["id"]),
