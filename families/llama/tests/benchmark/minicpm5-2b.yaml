@@ -11,7 +11,10 @@ candidate:
   precision: fp16
   bundle: minicpm5-2b.bundle
   build:
-    max_sequence_length: 257
+    # The native MiniCPM tokenizer can expand a 192-token HF-truncated MMLU
+    # prompt to 200 tokens. Preserve the 64-token request with family-owned
+    # cache headroom instead of shortening the benchmark input.
+    max_sequence_length: 320
 
 accuracy:
   - name: mmlu-continuation
