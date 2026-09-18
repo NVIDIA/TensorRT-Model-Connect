@@ -3246,6 +3246,39 @@ def test_prompted_mask_contract_matches_binary_semantics() -> None:
     assert perf._output_contract(entry, candidate, reference)[0] is False
 
 
+def test_instance_mask_contract_checks_masks_boxes_and_scores() -> None:
+    entry = SimpleNamespace(
+        spec={
+            "baseline": {
+                "output_contract": "instance-mask-parity",
+                "min_mask_iou": 0.7,
+                "min_box_iou": 0.9,
+                "max_score_abs_error": 0.05,
+            }
+        }
+    )
+    value = {
+        "num_masks": 1,
+        "height": 2,
+        "width": 2,
+        "mask_kind": "binary",
+        "masks": [1, 0, 0, 1],
+        "iou_scores": [0.9],
+        "boxes": [[0.0, 0.0, 2.0, 2.0]],
+        "box_coordinates": "original_image_pixels_xyxy",
+    }
+    candidate = {"output_summary": value}
+    reference = {"output_summary": dict(value)}
+
+    matched, reason, evidence = perf._output_contract(entry, candidate, reference)
+
+    assert matched is True
+    assert reason == ""
+    assert evidence["minimum_mask_iou"] == evidence["minimum_box_iou"] == 1.0
+    reference["output_summary"]["iou_scores"] = [0.7]
+    assert perf._output_contract(entry, candidate, reference)[0] is False
+
+
 def test_vision_language_text_contract_allows_small_normalized_differences() -> None:
     entry = SimpleNamespace(
         spec={

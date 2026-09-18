@@ -519,6 +519,23 @@ def test_prompted_segmentation_masks_match_independent_of_order() -> None:
     assert qualification_accuracy._match_masks(candidate, reference) == [1.0, 1.0]
 
 
+def test_text_prompted_instances_match_masks_boxes_and_scores() -> None:
+    summary = {
+        "num_masks": 1,
+        "height": 2,
+        "width": 2,
+        "mask_kind": "binary",
+        "masks": [1, 0, 0, 1],
+        "iou_scores": [0.9],
+        "boxes": [[0.0, 0.0, 2.0, 2.0]],
+        "box_coordinates": "original_image_pixels_xyxy",
+    }
+    parsed = qualification_accuracy._instance_masks(summary, "test")
+    matches = qualification_accuracy._match_instances(parsed, parsed)
+
+    assert matches == [{"mask_iou": 1.0, "box_iou": 1.0, "score_abs_error": 0.0}]
+
+
 def test_vision_language_text_distance_is_normalized() -> None:
     left = qualification_accuracy._normalized_answer("  Red\ncar ")
     right = qualification_accuracy._normalized_answer("red car")
