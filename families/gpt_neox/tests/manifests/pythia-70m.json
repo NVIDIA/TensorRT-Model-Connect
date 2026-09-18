@@ -3,7 +3,7 @@
   "hf_id": "EleutherAI/pythia-70m",
   "bundle": "pythia-70m.bundle",
   "family": "gpt_neox",
-  "task": "text_generation",
+  "task": "text_continuation",
   "precision": "fp32",
   "trust_remote_code": false,
   "testcases": [

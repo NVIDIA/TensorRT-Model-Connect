@@ -3,7 +3,7 @@
   "hf_id": "bigscience/bloom-560m",
   "bundle": "bloom-560m-tp4.bundle",
   "family": "bloom",
-  "task": "text_generation",
+  "task": "text_continuation",
   "trust_remote_code": false,
   "testcases": [
     {

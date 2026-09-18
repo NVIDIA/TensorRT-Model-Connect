@@ -3,7 +3,7 @@
   "hf_id": "openai-community/gpt2",
   "bundle": "gpt2-125m.bundle",
   "family": "gpt2",
-  "task": "text_generation",
+  "task": "text_continuation",
   "precision": "fp32",
   "trust_remote_code": false,
   "testcases": [

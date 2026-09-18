@@ -3,7 +3,7 @@
   "hf_id": "EleutherAI/gpt-neo-125m",
   "bundle": "gpt-neo-125m-tp4.bundle",
   "family": "gpt_neo",
-  "task": "text_generation",
+  "task": "text_continuation",
   "trust_remote_code": false,
   "testcases": [
     {
