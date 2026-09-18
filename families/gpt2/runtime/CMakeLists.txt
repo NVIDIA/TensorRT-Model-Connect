@@ -37,6 +37,28 @@ install(TARGETS trtmc_model_gpt2
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_gpt2_task_config
+    ${PROJECT_SOURCE_DIR}/families/gpt2/tests/cpp/test_task_config.cpp
+  )
+  target_include_directories(test_gpt2_task_config PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_compile_options(test_gpt2_task_config PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME gpt2_task_config COMMAND test_gpt2_task_config)
+  set_tests_properties(gpt2_task_config PROPERTIES LABELS "cpu")
+
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_gpt2_sdk_${_language}
+      ${PROJECT_SOURCE_DIR}/families/gpt2/tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_gpt2_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_gpt2_sdk_${_language} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    set_target_properties(test_gpt2_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+  add_dependencies(test_gpt2_task_config test_gpt2_sdk_c test_gpt2_sdk_cpp)
+
   add_executable(test_gpt2_parallel_kv_contract
     ${PROJECT_SOURCE_DIR}/families/gpt2/tests/cpp/test_parallel_kv_contract.cpp
   )

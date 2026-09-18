@@ -3,7 +3,7 @@
   "hf_id": "allenai/OLMo-1B-hf",
   "bundle": "olmo-1b-tp4.bundle",
   "family": "olmo",
-  "task": "text_generation",
+  "task": "text_continuation",
   "trust_remote_code": false,
   "testcases": [
     {

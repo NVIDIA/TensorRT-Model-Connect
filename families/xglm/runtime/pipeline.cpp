@@ -95,11 +95,25 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
     return ids;
 }
 
-TextResult XglmTextGenerationPipeline::generate(const std::string& prompt,
-                                                const TextGenerationConfig& cfg) {
-
-    auto input_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
-    int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
+TextResult XglmTextGenerationPipeline::run(const internal::TextContinuationRequest& request,
+                                           internal::ConfigView supplied) {
+    const auto cfg = xglm::parse_text_config(supplied);
+    std::vector<std::int32_t> input_ids;
+    if (const auto* prompt = std::get_if<std::string_view>(&request.prefix)) {
+        input_ids = encode_prompt(*tokenizer_, config_, std::string(*prompt), cfg);
+    } else {
+        const auto ids = std::get<Span<const std::int32_t>>(request.prefix);
+        if (!ids.empty()) {
+            if (!ids.data())
+                throw std::invalid_argument("token input has no storage");
+            input_ids.assign(ids.begin(), ids.end());
+        }
+    }
+    if (input_ids.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
+        std::any_of(input_ids.begin(), input_ids.end(),
+                    [&](auto id) { return id < 0 || id >= config_.vocab_size; }))
+        throw std::invalid_argument("prefix token IDs are outside the checkpoint vocabulary");
+    int32_t max_new = cfg.max_new_tokens;
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
 
     auto sp = xglm_sampling_params_from_config(cfg, eos);
