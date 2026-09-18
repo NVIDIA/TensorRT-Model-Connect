@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from array import array
 import hashlib
 import json
 import os
@@ -2106,3 +2107,169 @@ def test_public_dataset_download_is_pinned_and_cached(tmp_path: Path, monkeypatc
     assert resolved.path == tmp_path / "cache/public/public.jsonl"
     assert resolved.path.read_bytes() == payload
     assert resolve_dataset(definition, context).path == resolved.path
+
+
+def test_family_dataset_stays_with_its_discovered_model_profile(tmp_path: Path) -> None:
+    profile = tmp_path / "families/stereo/tests/benchmark/stereo.yaml"
+    dataset = tmp_path / "families/stereo/tests/data/pairs.json"
+    profile.parent.mkdir(parents=True)
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text('{"requests": []}\n', encoding="utf-8")
+    digest = hashlib.sha256(dataset.read_bytes()).hexdigest()
+    context = RuntimeContext(
+        repository=tmp_path,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "cache",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    definition = {
+        "dataset": {
+            "id": "family-pairs",
+            "sha256": digest,
+            "source": {"mode": "family", "path": "../data/pairs.json"},
+        }
+    }
+
+    resolved = resolve_dataset(definition, context, profile)
+
+    assert resolved.path == dataset
+    assert resolved.receipt()["source_mode"] == "family"
+    definition["dataset"]["source"]["path"] = "../../../../outside.json"
+    with pytest.raises(QualificationError, match="inside its family"):
+        resolve_dataset(definition, context, profile)
+
+
+def test_stereo_accuracy_compares_complete_disparity_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile = tmp_path / "families/stereo/tests/benchmark/stereo.yaml"
+    reference_script = profile.parent / "reference.py"
+    reference_script.parent.mkdir(parents=True)
+    reference_script.write_text("# family reference\n", encoding="utf-8")
+    data = tmp_path / "data"
+    data.mkdir()
+    for name in ("left.png", "right.png"):
+        (data / name).write_bytes(b"fixture")
+    dataset_path = data / "pairs.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "requests": [
+                    {
+                        "id": "pair",
+                        "left_image": "left.png",
+                        "right_image": "right.png",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = Dataset("stereo", dataset_path, "provided", "digest")
+    case = QualificationCase(
+        kind="accuracy",
+        model="stereo-model",
+        family="stereo",
+        name="parity",
+        benchmark="stereo_disparity_parity",
+        candidate={
+            "family": "stereo",
+            "checkpoint": "example/stereo",
+            "task": "stereo_disparity",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={
+            "samples": 1,
+            "request": {"height": 1, "width": 2},
+            "reference": {"command": "reference.py", "precision": "fp16"},
+            "gate": {
+                "min_cosine": 0.99,
+                "max_mean_abs_error": 0.2,
+                "max_bad_2px_fraction": 0.0,
+                "min_sample_pass_rate": 1.0,
+            },
+        },
+        source=profile,
+        reference_requirements=None,
+    )
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data-root",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    reference_artifact = tmp_path / "reference.f32"
+    reference_artifact.write_bytes(array("f", [1.0, 2.0]).tobytes())
+    candidate_artifact = tmp_path / "candidate.f32"
+    candidate_artifact.write_bytes(array("f", [1.1, 2.1]).tobytes())
+
+    def run_reference(command, *_args, **_kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {
+                            "sample_id": "pair",
+                            "height": 1,
+                            "width": 2,
+                            "element_count": 2,
+                            "disparity_artifact": str(reference_artifact),
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "stereo_disparity_parity"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", run_reference)
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_candidate_outputs",
+        lambda *_args: (
+            [
+                {
+                    "height": 1,
+                    "width": 2,
+                    "element_count": 2,
+                    "disparity_artifact": str(candidate_artifact),
+                }
+            ],
+            tmp_path / "stereo.bundle",
+        ),
+    )
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert result["metrics"]["sample_pass_rate"] == 1.0
+    assert result["metrics"]["max_mean_abs_error"] == pytest.approx(0.1)

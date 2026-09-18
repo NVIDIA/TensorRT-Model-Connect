@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from array import array
 import csv
 from itertools import permutations
 import json
@@ -32,7 +33,7 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
     output = context.case_artifacts(case)
     output.mkdir(parents=True, exist_ok=True)
     definition = load_benchmark(context.repository, case)
-    dataset = resolve_dataset(definition, context)
+    dataset = resolve_dataset(definition, context, case.source)
     metric = definition.get("metric")
     metric_name = metric.get("name") if isinstance(metric, Mapping) else None
     if metric_name == "exact_token_ids":
@@ -63,10 +64,226 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _ocr_text_parity(case, context, dataset, output)
     elif metric_name == "localization_text_parity":
         result = _localization_text_parity(case, context, dataset, output)
+    elif metric_name == "stereo_disparity_parity":
+        result = _stereo_disparity_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
     return result
+
+
+def _stereo_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(dataset.path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise QualificationError("stereo dataset is not valid JSON") from error
+    requests = payload.get("requests") if isinstance(payload, Mapping) else None
+    if not isinstance(requests, list) or len(requests) < sample_limit:
+        raise QualificationError(f"stereo dataset requires at least {sample_limit} requests")
+    root = dataset.path.parent.resolve()
+    selected = []
+    for index, request in enumerate(requests[:sample_limit]):
+        if not isinstance(request, Mapping):
+            raise QualificationError(f"stereo request {index} must be an object")
+        sample = {"sample_id": str(request.get("id") or f"sample-{index}")}
+        for source, target in (
+            ("left_image", "left_image_path"),
+            ("right_image", "right_image_path"),
+        ):
+            relative = request.get(source)
+            if not isinstance(relative, str) or not relative:
+                raise QualificationError(f"stereo request {index} has no {source}")
+            image = (root / relative).resolve()
+            if not image.is_relative_to(root) or not image.is_file():
+                raise QualificationError(
+                    f"stereo request {index} {source} is unavailable: {image}"
+                )
+            sample[target] = str(image)
+        selected.append(sample)
+    return selected
+
+
+def _disparity_values(value: Mapping[str, Any], label: str) -> list[float]:
+    height = value.get("height")
+    width = value.get("width")
+    count = value.get("element_count", value.get("disparity_pixels"))
+    artifact = value.get("disparity_artifact")
+    if (
+        isinstance(height, bool)
+        or not isinstance(height, int)
+        or height < 1
+        or isinstance(width, bool)
+        or not isinstance(width, int)
+        or width < 1
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count != height * width
+        or not isinstance(artifact, str)
+    ):
+        raise QualificationError(f"{label} disparity output is incomplete")
+    try:
+        payload = Path(artifact).read_bytes()
+    except OSError as error:
+        raise QualificationError(f"{label} disparity artifact is unavailable") from error
+    if len(payload) != count * 4:
+        raise QualificationError(f"{label} disparity artifact has the wrong size")
+    values = array("f")
+    values.frombytes(payload)
+    if len(values) != count:
+        raise QualificationError(f"{label} disparity artifact has the wrong element count")
+    return list(values)
+
+
+def _stereo_disparity_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _stereo_samples(dataset, sample_limit)
+    request = configured.get("request", {})
+    reference = configured.get("reference", {})
+    if not isinstance(request, Mapping) or not isinstance(reference, Mapping):
+        raise QualificationError("stereo Accuracy request and reference must be objects")
+    command = reference.get("command")
+    if not isinstance(command, str) or not command:
+        raise QualificationError("stereo Accuracy reference.command must be set")
+    runner = (case.source.parent / command).resolve()
+    family_root = case.source.parents[2].resolve()
+    if not runner.is_relative_to(family_root) or not runner.is_file():
+        raise QualificationError(f"stereo reference runner is not family-owned: {runner}")
+    reference_request = {
+        "model": str(case.candidate["checkpoint"]),
+        "revision": case.candidate.get("revision"),
+        "precision": str(reference.get("precision", "fp16")),
+        "request": dict(request),
+        "samples": selected,
+    }
+    request_path = output / "reference-request.json"
+    reference_path = output / "reference.json"
+    _json(request_path, reference_request)
+    completed = run_command(
+        [
+            str(reference_python(case, context)),
+            str(runner),
+            "--request",
+            str(request_path),
+            "--output",
+            str(reference_path),
+        ],
+        output,
+        "reference",
+        timeout=7200,
+        verbose=context.verbose,
+    )
+    if completed.returncode != 0:
+        raise QualificationError(f"stereo Accuracy reference failed; see {output}")
+    try:
+        expected = json.loads(reference_path.read_text(encoding="utf-8")).get("samples")
+    except (OSError, json.JSONDecodeError) as error:
+        raise QualificationError("stereo Accuracy reference returned unreadable output") from error
+    if not isinstance(expected, list) or len(expected) != len(selected):
+        raise QualificationError("stereo Accuracy reference returned an invalid sample set")
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {
+                **dict(request),
+                "left_image_path": sample["left_image_path"],
+                "right_image_path": sample["right_image_path"],
+            },
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(
+        case, context, output, "disparity", candidate_requests
+    )
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("stereo Accuracy gate must be an object")
+    minimum_cosine = float(gate.get("min_cosine", 0.999))
+    maximum_mean_error = float(gate.get("max_mean_abs_error", 0.5))
+    maximum_bad_fraction = float(gate.get("max_bad_2px_fraction", 0.03))
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not 0.0 <= minimum_cosine <= 1.0 or not 0.0 <= minimum_sample_rate <= 1.0:
+        raise QualificationError("stereo cosine and pass-rate gates must be in [0, 1]")
+    if (
+        not math.isfinite(maximum_mean_error)
+        or maximum_mean_error < 0.0
+        or not 0.0 <= maximum_bad_fraction <= 1.0
+    ):
+        raise QualificationError("stereo error gates are invalid")
+
+    rows = []
+    for sample, candidate_sample, reference_sample in zip(
+        selected, actual, expected, strict=True
+    ):
+        candidate_values = _disparity_values(candidate_sample, "candidate")
+        reference_values = _disparity_values(reference_sample, "reference")
+        if len(candidate_values) != len(reference_values):
+            raise QualificationError("candidate and reference disparity shapes differ")
+        candidate_valid = all(math.isfinite(value) and value >= 0.0 for value in candidate_values)
+        reference_valid = all(math.isfinite(value) and value >= 0.0 for value in reference_values)
+        dot = math.fsum(
+            left * right
+            for left, right in zip(candidate_values, reference_values, strict=True)
+        )
+        candidate_norm = math.sqrt(math.fsum(value * value for value in candidate_values))
+        reference_norm = math.sqrt(math.fsum(value * value for value in reference_values))
+        cosine = (
+            dot / (candidate_norm * reference_norm)
+            if candidate_norm and reference_norm
+            else 0.0
+        )
+        differences = [
+            abs(left - right)
+            for left, right in zip(candidate_values, reference_values, strict=True)
+        ]
+        mean_error = math.fsum(differences) / len(differences)
+        bad_fraction = sum(value > 2.0 for value in differences) / len(differences)
+        passed = (
+            candidate_valid
+            and reference_valid
+            and cosine >= minimum_cosine
+            and mean_error <= maximum_mean_error
+            and bad_fraction <= maximum_bad_fraction
+        )
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "passed": passed,
+                "cosine": cosine,
+                "mean_abs_error": mean_error,
+                "bad_2px_fraction": bad_fraction,
+            }
+        )
+    pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if pass_rate >= minimum_sample_rate else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": pass_rate,
+            "min_cosine": min(row["cosine"] for row in rows),
+            "max_mean_abs_error": max(row["mean_abs_error"] for row in rows),
+            "max_bad_2px_fraction": max(row["bad_2px_fraction"] for row in rows),
+        },
+        "gate": {
+            "min_cosine": minimum_cosine,
+            "max_mean_abs_error": maximum_mean_error,
+            "max_bad_2px_fraction": maximum_bad_fraction,
+            "min_sample_pass_rate": minimum_sample_rate,
+        },
+        "samples": rows,
+    }
 
 
 def _text_generation_parity(
