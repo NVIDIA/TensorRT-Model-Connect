@@ -10,7 +10,7 @@ candidate:
   precision: fp16
   bundle: tinyllama-1.1b.bundle
   build:
-    max_sequence_length: 257
+    max_sequence_length: 258
 
 accuracy:
   - name: mmlu-continuation
