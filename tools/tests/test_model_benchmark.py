@@ -520,6 +520,14 @@ def test_prompted_segmentation_masks_match_independent_of_order() -> None:
     assert qualification_accuracy._match_masks(candidate, reference) == [1.0, 1.0]
 
 
+def test_vision_language_text_distance_is_normalized() -> None:
+    left = qualification_accuracy._normalized_answer("  Red\ncar ")
+    right = qualification_accuracy._normalized_answer("red car")
+
+    assert qualification_accuracy._normalized_edit_distance(left, right) == 0.0
+    assert qualification_accuracy._normalized_edit_distance(left, "blue car") > 0.15
+
+
 def test_semantic_segmentation_accuracy_compares_pixel_and_class_iou(
     tmp_path: Path, monkeypatch
 ) -> None:
