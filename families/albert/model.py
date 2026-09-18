@@ -16,6 +16,8 @@ ALBERT (A Lite BERT) uses:
 
 from __future__ import annotations
 
+from .cli import BuildRequest, coerce_request
+
 from typing import TYPE_CHECKING
 
 from pathlib import Path
@@ -41,7 +43,6 @@ def _load_ln(readers, prefix):
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -256,24 +257,7 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("albert does not support dynamic_kv_cache")
-
-    if request.image_height is not None:
-        raise NotImplementedError("albert does not support image_height")
-
-    if request.image_width is not None:
-        raise NotImplementedError("albert does not support image_width")
-
-    if request.video_num_frames is not None:
-        raise NotImplementedError("albert does not support video_num_frames")
-
-    if request.max_batch_size != 1:
-        raise NotImplementedError("albert does not support max_batch_size")
-
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
-
+    request = coerce_request(request)
     if request.task not in {"encoding", "embedding", "reranking"}:
         raise ValueError("albert task must be encoding, embedding, or reranking")
     model_dir = Path(request.model_dir)
@@ -289,10 +273,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("ALBERT max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("ALBERT has no family-owned quantized build")
-    if request.fp32_layers:
-        raise NotImplementedError("ALBERT does not expose mixed-precision layers")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
