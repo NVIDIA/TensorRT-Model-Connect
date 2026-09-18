@@ -10,7 +10,7 @@ candidate:
   precision: fp16
   bundle: tinyllama-1.1b.bundle
   build:
-    max_sequence_length: 256
+    max_sequence_length: 257
 
 accuracy:
   - name: mmlu-continuation
@@ -28,7 +28,7 @@ accuracy:
       min_p: 0.0
       seed: -1
       repetition_penalty: 1.0
-      use_chat_template: true
+      use_chat_template: false
       enable_thinking: false
       do_sample: false
     gate:
@@ -43,6 +43,7 @@ performance:
       <<: *greedy-generation
       prompt: What is the capital of France? Answer in one word.
       max_new_tokens: 10
+      use_chat_template: true
     measurement:
       warmup: 5
       iterations: 10
