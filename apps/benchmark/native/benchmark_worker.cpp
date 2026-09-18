@@ -475,7 +475,8 @@ Json run_segment(trtmc::ITask& task, const Json& request, const Timing& timing) 
                         {"num_masks", 1},
                         {"height", result.height},
                         {"width", result.width},
-                        {"mask_pixels", result.mask.size()}};
+                        {"mask_pixels", result.mask.size()},
+                        {"mask", result.mask}};
         });
 }
 

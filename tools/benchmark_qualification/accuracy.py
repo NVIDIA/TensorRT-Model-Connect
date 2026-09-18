@@ -18,6 +18,7 @@ from .catalog import QualificationCase, QualificationError, load_benchmark
 from .datasets import Dataset, resolve_dataset
 from .runtime import (
     RuntimeContext,
+    benchmark_executable,
     prepare_bundle,
     reference_python,
     require_candidate,
@@ -855,7 +856,7 @@ def _candidate_outputs(
     _json(data_path, list(requests))
     candidate_output = output / "candidate-run"
     command = [
-        str(context.trtmc_bench),
+        str(benchmark_executable(case, context)),
         "run",
         "--model",
         str(descriptor),

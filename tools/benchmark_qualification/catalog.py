@@ -30,6 +30,7 @@ class QualificationCase:
     values: Mapping[str, Any]
     source: Path
     reference_requirements: Path | None
+    environment_hook: Path | None = None
 
     @property
     def id(self) -> str:
@@ -52,6 +53,8 @@ def discover(repository: Path) -> tuple[QualificationCase, ...]:
             raise QualificationError(f"{path}: file name must match model {model!r}")
         candidate = _candidate(raw.get("candidate"), family, path)
         requirements = _requirements(raw.get("reference_environment"), path)
+        hook_path = path.parent / "prepare_environment.py"
+        environment_hook = hook_path.resolve() if hook_path.is_file() else None
         for kind in ("accuracy", "performance"):
             configured = raw.get(kind, [])
             if not isinstance(configured, list):
@@ -71,6 +74,7 @@ def discover(repository: Path) -> tuple[QualificationCase, ...]:
                     values=dict(value),
                     source=path.resolve(),
                     reference_requirements=requirements,
+                    environment_hook=environment_hook,
                 )
                 if case.id in seen:
                     raise QualificationError(f"duplicate qualification case {case.id!r}")
