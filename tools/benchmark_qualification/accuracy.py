@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+from itertools import permutations
 import json
 import math
 import random
@@ -59,6 +60,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _vision_language_text_parity(case, context, dataset, output)
     elif metric_name == "ocr_text_parity":
         result = _ocr_text_parity(case, context, dataset, output)
+    elif metric_name == "localization_text_parity":
+        result = _localization_text_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
@@ -1702,6 +1705,154 @@ def _ocr_text_parity(
         },
         "gate": {
             "max_normalized_edit_distance": maximum_distance,
+            "min_sample_pass_rate": minimum_sample_rate,
+        },
+        "samples": rows,
+    }
+
+
+_LOCALIZATION_GROUP = re.compile(r"<(box|point)>(.*?)</\1>", re.DOTALL)
+
+
+def _localization_values(text: str) -> tuple[str, tuple[tuple[float, ...], ...]]:
+    if "<ref>" not in text or "</ref>" not in text:
+        raise QualificationError("localization output omitted its reference tag")
+    groups = _LOCALIZATION_GROUP.findall(text)
+    if not groups:
+        raise QualificationError("localization output omitted box or point coordinates")
+    kind = groups[0][0]
+    values = []
+    for current, raw in groups:
+        coordinates = tuple(float(value) for value in re.findall(r"-?\d+(?:\.\d+)?", raw))
+        expected_size = 4 if current == "box" else 2
+        if current != kind or len(coordinates) != expected_size:
+            raise QualificationError("localization output mixes coordinate kinds or ranks")
+        if not all(math.isfinite(value) and 0.0 <= value <= 1000.0 for value in coordinates):
+            raise QualificationError("localization coordinates must be finite values in [0, 1000]")
+        if current == "box" and (
+            coordinates[2] <= coordinates[0] or coordinates[3] <= coordinates[1]
+        ):
+            raise QualificationError("localization box coordinates are not ordered xyxy")
+        values.append(coordinates)
+    return kind, tuple(values)
+
+
+def _localization_alignment(
+    candidate: tuple[tuple[float, ...], ...],
+    reference: tuple[tuple[float, ...], ...],
+    kind: str,
+) -> float:
+    if len(candidate) != len(reference):
+        return 0.0 if kind == "box" else math.inf
+    if kind == "box":
+        return max(
+            min(_box_iou(left, right) for left, right in zip(candidate, ordering, strict=True))
+            for ordering in permutations(reference)
+        )
+    return min(
+        max(math.dist(left, right) for left, right in zip(candidate, ordering, strict=True))
+        for ordering in permutations(reference)
+    )
+
+
+def _localization_text_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _image_parity_samples(dataset, sample_limit, "localization")
+    if any("label_name" not in sample for sample in selected):
+        raise QualificationError("localization dataset samples require label_name")
+    expected = _family_image_reference(case, context, output, selected)
+    request = configured.get("request", {})
+    if not isinstance(request, Mapping):
+        raise QualificationError("localization request must be an object")
+    prompt_template = request.get("prompt_template")
+    if not isinstance(prompt_template, str) or "{label}" not in prompt_template:
+        raise QualificationError("localization request.prompt_template must contain {label}")
+    controls = {name: value for name, value in request.items() if name != "prompt_template"}
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {
+                **controls,
+                "image_path": sample["image_path"],
+                "prompt": prompt_template.format(label=sample["label_name"]),
+            },
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(case, context, output, "generate", candidate_requests)
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("localization gate must be an object")
+    minimum_box_iou = float(gate.get("min_localization_box_iou", 0.9))
+    maximum_point_distance = float(gate.get("max_localization_point_distance", 10.0))
+    maximum_text_distance = float(gate.get("max_normalized_edit_distance", 0.5))
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not all(
+        0.0 <= value <= 1.0
+        for value in (minimum_box_iou, maximum_text_distance, minimum_sample_rate)
+    ) or maximum_point_distance < 0.0 or not math.isfinite(maximum_point_distance):
+        raise QualificationError("localization gates are outside their valid ranges")
+
+    rows = []
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
+        candidate_text = _normalized_answer(candidate_sample.get("text"))
+        reference_text = _normalized_answer(reference_sample.get("text"))
+        reference_kind, reference_values = _localization_values(reference_text)
+        try:
+            candidate_kind, candidate_values = _localization_values(candidate_text)
+        except QualificationError:
+            candidate_kind = "invalid"
+            candidate_values = ()
+        same_contract = candidate_kind == reference_kind and bool(candidate_values)
+        alignment = (
+            _localization_alignment(candidate_values, reference_values, candidate_kind)
+            if same_contract
+            else 0.0
+        )
+        text_distance = _normalized_edit_distance(candidate_text, reference_text)
+        localization_passed = (
+            alignment >= minimum_box_iou
+            if candidate_kind == "box"
+            else alignment <= maximum_point_distance if candidate_kind == "point" else False
+        )
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "passed": localization_passed and text_distance <= maximum_text_distance,
+                "kind": candidate_kind,
+                "candidate_count": len(candidate_values),
+                "reference_count": len(reference_values),
+                "localization_alignment": alignment,
+                "normalized_edit_distance": text_distance,
+                "candidate_text": candidate_text,
+                "reference_text": reference_text,
+            }
+        )
+    sample_pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if sample_pass_rate >= minimum_sample_rate else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": sample_pass_rate,
+            "max_normalized_edit_distance": max(row["normalized_edit_distance"] for row in rows),
+        },
+        "gate": {
+            "min_localization_box_iou": minimum_box_iou,
+            "max_localization_point_distance": maximum_point_distance,
+            "max_normalized_edit_distance": maximum_text_distance,
             "min_sample_pass_rate": minimum_sample_rate,
         },
         "samples": rows,
