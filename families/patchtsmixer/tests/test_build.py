@@ -20,7 +20,7 @@ def _request(tmp_path, tensor_parallel_size: int):
         video_num_frames=None,
         max_batch_size=1,
         context_parallel_size=1,
-        task="time_series_forecast",
+        task="series_to_point_forecast",
         precision="fp32",
         max_sequence_length=None,
         tensor_parallel_size=tensor_parallel_size,
@@ -43,6 +43,7 @@ def test_build_replicates_one_plan_into_rank_sections(
     builds = []
     sections = {}
     runtime = {}
+    header = {}
     monkeypatch.setattr(model, "_read_config", lambda _path: dict(config))
     monkeypatch.setattr(model, "infer_patchtsmixer_task_kind", lambda _config: "forecast")
     monkeypatch.setattr(model, "_require_supported", lambda _config, _task: None)
@@ -54,7 +55,7 @@ def test_build_replicates_one_plan_into_rank_sections(
 
     monkeypatch.setattr(model, "_build_patchtsmixer_network", build_plan)
     writer = SimpleNamespace(
-        set_header=lambda **_header: None,
+        set_header=lambda **fields: header.update(fields),
         add_bytes=lambda name, data: sections.update({name: data}),
         add_json=lambda name, data: runtime.update({name: data}),
     )
@@ -68,9 +69,19 @@ def test_build_replicates_one_plan_into_rank_sections(
         else {f"engine.rank{rank}.plan": b"plan" for rank in range(tensor_parallel_size)}
     )
     assert sections == expected_sections
+    assert header == {
+        "family": "patchtsmixer", "task": "series_to_point_forecast", "backend": "trt"
+    }
     assert runtime["runtime.json"]["tensor_parallel_size"] == tensor_parallel_size
 
 
 def test_build_rejects_unsupported_tensor_parallel_size(tmp_path) -> None:
     with pytest.raises(ValueError, match="1, 2, 4, or 8"):
         model.build(_request(tmp_path, 3), SimpleNamespace())
+
+
+def test_build_rejects_the_removed_legacy_task(tmp_path) -> None:
+    request = _request(tmp_path, 1)
+    request.task = "time_series_forecast"
+    with pytest.raises(ValueError, match="supports only series_to_point_forecast"):
+        model.build(request, SimpleNamespace())
