@@ -359,6 +359,19 @@ def test_legacy_image_task_accepts_canonical_image_path(sdk_assets: Path) -> Non
     }
 
 
+def test_legacy_reranking_accepts_canonical_query_and_documents(sdk_assets: Path) -> None:
+    result = resolve_task_case(
+        "reranking",
+        {"query": "question", "documents": ["second", "first"]},
+        sdk_assets,
+    )
+
+    assert result.request == {
+        "query": "question",
+        "documents": ["second", "first"],
+    }
+
+
 def test_structure_input_keeps_document_bytes_and_source_path_opaque(tmp_path: Path) -> None:
     document = tmp_path / "prepared.bytes"
     document.write_bytes(b"B2RQ\0\x7f")
