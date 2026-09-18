@@ -922,8 +922,8 @@ jobs:
         run: |
           set -euo pipefail
           brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
-          # The runner belongs to the chosen CI commit; models and manifests
-          # come from the untouched PR snapshot. Mount the runner separately.
+          # The host coordinator and container entrypoint belong to the chosen
+          # CI commit. Neither imports contributor code outside the container.
           [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
           brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py"
           # A freshly created instance's SSH session may not have its Docker
@@ -931,27 +931,22 @@ jobs:
           # and failed on docker.sock, so do not depend on propagation timing.
           brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements"
 
-          # The isolated runner builds the native binary, TensorRT backend,
-          # selected family DSOs, and configured CTest tree. It then stages
-          # checkpoint revisions and uses E2ERunner's explicit premerge case
-          # selection plus JUnit validation, which rejects skips and omissions.
-          # The top-level CPU suite already completed in this pipeline. This
-          # instance builds the runtime and uses the existing family E2E contract.
+          # Each selected family gets a fresh container on this one VM. The
+          # coordinator waits for its removal before starting the next family,
+          # and aggregates failures after all families have been attempted.
+          # Repository credentials are not forwarded to contributor code.
           echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
           python3 -m tools.brev_exec \
             --instance "$INSTANCE_NAME" \
             --log /tmp/gpu-ci-output.log \
             --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            -- sudo docker run --rm --gpus all --shm-size 16g \
-            -v /tmp/model_connect:/src -w /src \
-            -v /tmp/community_gpu_ci.py:/opt/community_gpu_ci.py:ro \
-            -e PYTHONPATH=/src \
-            -e "TRTMC_GPU_SCOPE=$SCOPE" \
-            -e "TRTMC_GPU_FAMILIES=$FAMILIES" \
-            -e "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
-            -e "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
-            -e "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
-            trtmc-quickstart-gpu python3.12 /opt/community_gpu_ci.py
+            -- sudo env \
+            "TRTMC_GPU_SCOPE=$SCOPE" \
+            "TRTMC_GPU_FAMILIES=$FAMILIES" \
+            "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
+            "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
+            python3 -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion

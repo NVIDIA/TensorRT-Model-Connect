@@ -805,7 +805,7 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
     assert steps["Reserve a GPU instance"]["id"] == "reserve"
     test_step = steps["Build the GPU image and validate the exact PR merge"]
     assert "sudo docker build -f Dockerfile.dev.x86-gpu" in test_step["run"]
-    assert "sudo docker run --rm --gpus all" in test_step["run"]
+    assert "python3 -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect" in test_step["run"]
     result = steps["Record the step conclusion"]
     assert result["id"] == "result"
     assert result["if"] == "always()"
@@ -1085,9 +1085,7 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert "HF_TOKEN" not in json.dumps(test)
     assert "git show $CI_SHA:tools/community_gpu_ci.py" in test["run"]
     assert "git fetch --depth 2 origin $MERGE_SHA" in test["run"]
-    assert "-v /tmp/community_gpu_ci.py:/opt/community_gpu_ci.py:ro" in test["run"]
-    assert "-e PYTHONPATH=/src" in test["run"]
-    assert "python3.12 /opt/community_gpu_ci.py" in test["run"]
+    assert "python3 -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect" in test["run"]
     assert gpu["environment"]["name"] == "gpu-ci-dispatch"
     assert gpu["concurrency"]["cancel-in-progress"] is True
 
