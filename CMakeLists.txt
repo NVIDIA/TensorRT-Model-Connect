@@ -390,7 +390,7 @@ if(TRTMC_BUILD_SERVER)
     PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include
   )
   target_link_libraries(trtmc_server
-    PUBLIC trtmc_runtime
+    PUBLIC trtmc_runtime trtmc_c
     PRIVATE
       nlohmann_json::nlohmann_json
   )
@@ -663,6 +663,24 @@ if(TRTMC_BUILD_TESTS)
   endforeach()
 
   add_dependencies(test_sdk_cli trtmc_api_test_text_family trtmc_api_test_stream_family)
+
+  if(TRTMC_BUILD_SERVER)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_executable(test_server_sdk_worker apps/server/tests/test_sdk_worker.cpp)
+    target_link_libraries(test_server_sdk_worker PRIVATE
+      trtmc_server trtmc_c nlohmann_json::nlohmann_json)
+    target_compile_options(test_server_sdk_worker PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_dependencies(test_server_sdk_worker trtmc-server trtmc_api_test_backend
+      trtmc_api_test_family trtmc_api_test_text_family)
+    add_test(NAME server_sdk_worker
+      COMMAND test_server_sdk_worker "${_trtmc_api_test_runtime_root}")
+    add_test(NAME server_sdk_worker_process
+      COMMAND "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/apps/server/tests/test_sdk_worker_process.py"
+        --binary "$<TARGET_FILE:trtmc-server>"
+        --runtime-root "${_trtmc_api_test_runtime_root}")
+    set_tests_properties(server_sdk_worker server_sdk_worker_process PROPERTIES LABELS "cpu;e2e")
+  endif()
 
   add_executable(test_sdk_features_cli apps/cli/tests/test_sdk_features_cli.cpp)
   target_link_libraries(test_sdk_features_cli PRIVATE trtmc_cli trtmc_c nlohmann_json::nlohmann_json)
