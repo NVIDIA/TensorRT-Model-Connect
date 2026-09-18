@@ -51,6 +51,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _prompted_segmentation_parity(case, context, dataset, output)
     elif metric_name == "semantic_segmentation_parity":
         result = _semantic_segmentation_parity(case, context, dataset, output)
+    elif metric_name == "vision_language_text_parity":
+        result = _vision_language_text_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
@@ -1117,6 +1119,97 @@ def _prompted_segmentation_parity(
         "gate": {
             "min_mask_iou": minimum_iou,
             "min_mask_match_rate": minimum_match_rate,
+            "min_sample_pass_rate": minimum_sample_rate,
+        },
+        "samples": rows,
+    }
+
+
+def _normalized_answer(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split()).strip(".,!?;:'\"")
+
+
+def _normalized_edit_distance(left: str, right: str) -> float:
+    if left == right:
+        return 0.0
+    if not left or not right:
+        return 1.0
+    previous = list(range(len(right) + 1))
+    for row, left_character in enumerate(left, start=1):
+        current = [row]
+        for column, right_character in enumerate(right, start=1):
+            current.append(
+                min(
+                    current[column - 1] + 1,
+                    previous[column] + 1,
+                    previous[column - 1] + (left_character != right_character),
+                )
+            )
+        previous = current
+    return previous[-1] / max(len(left), len(right))
+
+
+def _vision_language_text_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _image_parity_samples(dataset, sample_limit, "vision-language")
+    expected = _family_image_reference(case, context, output, selected)
+    request = configured.get("request", {})
+    if not isinstance(request, Mapping):
+        raise QualificationError("vision-language request must be an object")
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {**dict(request), "image_path": sample["image_path"]},
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(case, context, output, "generate", candidate_requests)
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("vision-language gate must be an object")
+    maximum_distance = float(gate.get("max_normalized_edit_distance", 0.15))
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not 0.0 <= maximum_distance <= 1.0 or not 0.0 <= minimum_sample_rate <= 1.0:
+        raise QualificationError("vision-language gates must be in [0, 1]")
+
+    rows = []
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
+        candidate_text = _normalized_answer(candidate_sample.get("text"))
+        reference_text = _normalized_answer(reference_sample.get("text"))
+        distance = _normalized_edit_distance(candidate_text, reference_text)
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "passed": bool(candidate_text) and distance <= maximum_distance,
+                "candidate_text": candidate_text,
+                "reference_text": reference_text,
+                "normalized_edit_distance": distance,
+            }
+        )
+    sample_pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    passed = sample_pass_rate >= minimum_sample_rate
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": sample_pass_rate,
+            "max_normalized_edit_distance": max(row["normalized_edit_distance"] for row in rows),
+        },
+        "gate": {
+            "max_normalized_edit_distance": maximum_distance,
             "min_sample_pass_rate": minimum_sample_rate,
         },
         "samples": rows,

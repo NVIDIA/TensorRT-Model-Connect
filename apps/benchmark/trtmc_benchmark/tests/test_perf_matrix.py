@@ -3244,3 +3244,23 @@ def test_prompted_mask_contract_matches_binary_semantics() -> None:
     assert evidence == {"masks": 1, "minimum_mask_iou": 1.0, "required_mask_iou": 0.7}
     reference["output_summary"]["masks"] = [0, 1, 1, 0]
     assert perf._output_contract(entry, candidate, reference)[0] is False
+
+
+def test_vision_language_text_contract_allows_small_normalized_differences() -> None:
+    entry = SimpleNamespace(
+        spec={
+            "baseline": {
+                "output_contract": "vision-language-text",
+                "max_normalized_edit_distance": 0.15,
+            }
+        }
+    )
+    candidate = {"output_summary": {"text": "Red."}}
+    reference = {"output_summary": {"text": "red"}}
+
+    matched, _, evidence = perf._output_contract(entry, candidate, reference)
+
+    assert matched is True
+    assert evidence["normalized_edit_distance"] <= 0.15
+    candidate["output_summary"]["text"] = "blue"
+    assert perf._output_contract(entry, candidate, reference)[0] is False

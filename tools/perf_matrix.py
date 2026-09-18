@@ -90,6 +90,7 @@ OUTPUT_CONTRACTS = {
     "robot-action-shape",
     "segmentation-shape",
     "transcription-text",
+    "vision-language-text",
 }
 REFERENCE_INPUTS = {
     "pytorch-lerobot-act": (("source_root", "lerobot_repo"),),
@@ -1319,6 +1320,19 @@ def _output_contract(
         return (
             distance <= limit,
             "OCR text distance exceeds the contract",
+            {
+                "normalized_edit_distance": distance,
+                "maximum": limit,
+            },
+        )
+    if contract == "vision-language-text":
+        left_text = _normalized_text(left.get("text")).strip(".,!?;:'\"")
+        right_text = _normalized_text(right.get("text")).strip(".,!?;:'\"")
+        distance = _text_distance(left_text, right_text)
+        limit = float(entry.spec["baseline"].get("max_normalized_edit_distance", 0.15))
+        return (
+            bool(left_text) and distance <= limit,
+            "vision-language text distance exceeds the contract",
             {
                 "normalized_edit_distance": distance,
                 "maximum": limit,
