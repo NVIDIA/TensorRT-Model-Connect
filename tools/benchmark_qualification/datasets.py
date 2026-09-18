@@ -33,7 +33,11 @@ class Dataset:
         }
 
 
-def resolve_dataset(definition: Mapping[str, Any], context: RuntimeContext) -> Dataset:
+def resolve_dataset(
+    definition: Mapping[str, Any],
+    context: RuntimeContext,
+    profile: Path | None = None,
+) -> Dataset:
     configured = definition.get("dataset")
     if not isinstance(configured, Mapping):
         raise QualificationError("Accuracy benchmark requires a dataset object")
@@ -62,9 +66,21 @@ def resolve_dataset(definition: Mapping[str, Any], context: RuntimeContext) -> D
             raise QualificationError(f"downloadable dataset {dataset_id!r} requires dataset.sha256")
         path = _download_dataset(dataset_id, source, context.data_root)
         resolved_mode = "download"
+    elif mode == "family":
+        relative = source.get("path")
+        if profile is None:
+            raise QualificationError(f"family dataset {dataset_id!r} requires its model profile")
+        if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
+            raise QualificationError("family dataset source.path must be relative")
+        family_root = profile.parents[2].resolve()
+        path = (profile.parent / relative).resolve()
+        if not path.is_relative_to(family_root):
+            raise QualificationError("family dataset source.path must stay inside its family")
+        resolved_mode = "family"
     else:
         raise QualificationError(
-            f"dataset {dataset_id!r} has unsupported source mode {mode!r}; use manual or download"
+            f"dataset {dataset_id!r} has unsupported source mode {mode!r}; "
+            "use manual, download, or family"
         )
     if not path.is_file():
         if mode == "manual":

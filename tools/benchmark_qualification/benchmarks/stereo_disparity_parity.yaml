@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: stereo-office-pair
+  version: family-office-pair-v1
+  sha256: ec5cac38fb583e821b7e19498d04eccd7bf22cb70718fa0d051090d6cdf1e893
+  source:
+    mode: family
+    path: ../data/benchmark_stereo.json
+  license: Apache-2.0
+selection:
+  method: first
+input:
+  adapter: stereo_image_paths
+metric:
+  name: stereo_disparity_parity
