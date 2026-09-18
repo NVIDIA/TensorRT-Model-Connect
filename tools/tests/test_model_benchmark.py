@@ -666,6 +666,32 @@ def test_ocr_accuracy_uses_dataset_questions_and_reports_gold_matches(
     assert captured_candidate[1]["request"]["prompt"] == "Which application?"
 
 
+def test_localization_accuracy_matches_unordered_boxes_and_points() -> None:
+    first_kind, first_boxes = qualification_accuracy._localization_values(
+        "<ref>cars</ref><box><10><20><100><200></box><box><300><400><500><600></box>"
+    )
+    second_kind, second_boxes = qualification_accuracy._localization_values(
+        "<ref>cars</ref><box><300><400><500><600></box><box><10><20><100><200></box>"
+    )
+    first_point_kind, first_points = qualification_accuracy._localization_values(
+        "<ref>cars</ref><point><100><200></point>"
+    )
+    second_point_kind, second_points = qualification_accuracy._localization_values(
+        "<ref>cars</ref><point><106><208></point>"
+    )
+
+    assert first_kind == second_kind == "box"
+    assert qualification_accuracy._localization_alignment(
+        first_boxes, second_boxes, "box"
+    ) == 1.0
+    assert first_point_kind == second_point_kind == "point"
+    assert qualification_accuracy._localization_alignment(
+        first_points, second_points, "point"
+    ) == 10.0
+    with pytest.raises(QualificationError, match="reference tag"):
+        qualification_accuracy._localization_values("<box><10><20><100><200></box>")
+
+
 def test_reranking_order_is_stable_and_score_validation_is_strict() -> None:
     assert qualification_accuracy._reranking_order([0.7, 0.2, 0.7]) == [0, 2, 1]
     assert qualification_accuracy._reranking_scores({"scores": [0.7, -0.2]}, "test") == [
