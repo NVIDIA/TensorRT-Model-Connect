@@ -12,6 +12,13 @@ import os
 from pathlib import Path
 
 
+def prediction_model_class(transformers):
+    model_class = transformers.PatchTSMixerForPrediction
+    if not hasattr(model_class, "all_tied_weights_keys"):
+        model_class.all_tied_weights_keys = {}
+    return model_class
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", required=True, type=Path)
@@ -32,8 +39,9 @@ def main() -> int:
     if request.get("revision"):
         options["revision"] = request["revision"]
     config = transformers.AutoConfig.from_pretrained(str(request["model"]), **options)
+    model_class = prediction_model_class(transformers)
     model = (
-        transformers.PatchTSMixerForPrediction.from_pretrained(
+        model_class.from_pretrained(
             str(request["model"]), torch_dtype=torch.float32, **options
         )
         .eval()
