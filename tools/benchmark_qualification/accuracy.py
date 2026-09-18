@@ -51,6 +51,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _object_detection_parity(case, context, dataset, output)
     elif metric_name == "prompted_segmentation_parity":
         result = _prompted_segmentation_parity(case, context, dataset, output)
+    elif metric_name == "text_prompted_instance_segmentation_parity":
+        result = _text_prompted_instance_segmentation_parity(case, context, dataset, output)
     elif metric_name == "semantic_segmentation_parity":
         result = _semantic_segmentation_parity(case, context, dataset, output)
     elif metric_name == "vision_language_text_parity":
@@ -900,12 +902,14 @@ def _image_parity_samples(dataset: Dataset, sample_limit: int, task: str) -> lis
         image = (root / relative).resolve()
         if root not in image.parents or not image.is_file():
             raise QualificationError(f"{task} request {index} image is unavailable: {image}")
-        selected.append(
-            {
-                "sample_id": str(request.get("id") or f"sample-{index}"),
-                "image_path": str(image),
-            }
-        )
+        sample = {
+            "sample_id": str(request.get("id") or f"sample-{index}"),
+            "image_path": str(image),
+        }
+        label_name = request.get("label_name")
+        if isinstance(label_name, str) and label_name.strip():
+            sample["label_name"] = label_name.strip()
+        selected.append(sample)
     return selected
 
 
@@ -1284,6 +1288,175 @@ def _prompted_segmentation_parity(
         "gate": {
             "min_mask_iou": minimum_iou,
             "min_mask_match_rate": minimum_match_rate,
+            "min_sample_pass_rate": minimum_sample_rate,
+        },
+        "samples": rows,
+    }
+
+
+def _instance_masks(
+    value: Mapping[str, Any], label: str
+) -> tuple[int, int, list[list[bool]], list[float], list[list[float]]]:
+    height, width, masks = _binary_masks(value, label)
+    scores = value.get("iou_scores")
+    boxes = value.get("boxes")
+    if (
+        not isinstance(scores, list)
+        or len(scores) != len(masks)
+        or not isinstance(boxes, list)
+        or len(boxes) != len(masks)
+        or value.get("box_coordinates") != "original_image_pixels_xyxy"
+    ):
+        raise QualificationError(f"{label} instance output is incomplete")
+    numeric_scores = [float(score) for score in scores]
+    numeric_boxes = []
+    for box in boxes:
+        if not isinstance(box, list) or len(box) != 4:
+            raise QualificationError(f"{label} instance box is invalid")
+        numeric_boxes.append([float(coordinate) for coordinate in box])
+    if not all(
+        math.isfinite(number)
+        for number in (*numeric_scores, *(value for box in numeric_boxes for value in box))
+    ):
+        raise QualificationError(f"{label} instance scores or boxes are not finite")
+    return height, width, masks, numeric_scores, numeric_boxes
+
+
+def _match_instances(
+    candidate: tuple[int, int, list[list[bool]], list[float], list[list[float]]],
+    reference: tuple[int, int, list[list[bool]], list[float], list[list[float]]],
+) -> list[dict[str, float]]:
+    if candidate[:2] != reference[:2]:
+        return []
+    matched_reference: set[int] = set()
+    matches = []
+    for index, mask in enumerate(candidate[2]):
+        choices = [
+            (_mask_iou(mask, expected), expected_index)
+            for expected_index, expected in enumerate(reference[2])
+            if expected_index not in matched_reference
+        ]
+        if not choices:
+            continue
+        mask_iou, expected_index = max(choices)
+        matched_reference.add(expected_index)
+        matches.append(
+            {
+                "mask_iou": mask_iou,
+                "box_iou": _box_iou(candidate[4][index], reference[4][expected_index]),
+                "score_abs_error": abs(candidate[3][index] - reference[3][expected_index]),
+            }
+        )
+    return matches
+
+
+def _text_prompted_instance_segmentation_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _image_parity_samples(dataset, sample_limit, "text-prompted-segmentation")
+    if any(not sample.get("label_name") for sample in selected):
+        raise QualificationError("text-prompted segmentation samples require label_name")
+    expected = _family_image_reference(case, context, output, selected)
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {
+                "image_path": sample["image_path"],
+                "prompt": sample["label_name"],
+            },
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(
+        case, context, output, "segment_prompted", candidate_requests
+    )
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("text-prompted segmentation gate must be an object")
+    minimum_mask_iou = float(gate.get("min_mask_iou", 0.7))
+    minimum_match_rate = float(gate.get("min_mask_match_rate", 1.0))
+    minimum_box_iou = float(gate.get("min_box_iou", 0.9))
+    maximum_score_error = float(gate.get("max_score_abs_error", 0.05))
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not all(
+        0.0 <= value <= 1.0
+        for value in (
+            minimum_mask_iou,
+            minimum_match_rate,
+            minimum_box_iou,
+            maximum_score_error,
+            minimum_sample_rate,
+        )
+    ):
+        raise QualificationError("text-prompted segmentation gates must be in [0, 1]")
+
+    rows = []
+    total_matches = total_masks = 0
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
+        candidate = _instance_masks(candidate_sample, "candidate")
+        reference = _instance_masks(reference_sample, "reference")
+        matches = _match_instances(candidate, reference)
+        denominator = max(len(candidate[2]), len(reference[2]), 1)
+        match_rate = len(matches) / denominator
+        minimum_sample_mask_iou = min(
+            (match["mask_iou"] for match in matches), default=0.0
+        )
+        minimum_sample_box_iou = min(
+            (match["box_iou"] for match in matches), default=0.0
+        )
+        maximum_sample_score_error = max(
+            (match["score_abs_error"] for match in matches), default=1.0
+        )
+        passed = (
+            match_rate >= minimum_match_rate
+            and minimum_sample_mask_iou >= minimum_mask_iou
+            and minimum_sample_box_iou >= minimum_box_iou
+            and maximum_sample_score_error <= maximum_score_error
+        )
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "prompt": sample["label_name"],
+                "passed": passed,
+                "candidate_masks": len(candidate[2]),
+                "reference_masks": len(reference[2]),
+                "mask_match_rate": match_rate,
+                "min_mask_iou": minimum_sample_mask_iou,
+                "min_box_iou": minimum_sample_box_iou,
+                "max_score_abs_error": maximum_sample_score_error,
+            }
+        )
+        total_matches += len(matches)
+        total_masks += denominator
+    sample_pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    passed = sample_pass_rate >= minimum_sample_rate
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": sample_pass_rate,
+            "mask_match_rate": total_matches / total_masks,
+            "min_mask_iou": min(row["min_mask_iou"] for row in rows),
+            "min_box_iou": min(row["min_box_iou"] for row in rows),
+            "max_score_abs_error": max(row["max_score_abs_error"] for row in rows),
+        },
+        "gate": {
+            "min_mask_iou": minimum_mask_iou,
+            "min_mask_match_rate": minimum_match_rate,
+            "min_box_iou": minimum_box_iou,
+            "max_score_abs_error": maximum_score_error,
             "min_sample_pass_rate": minimum_sample_rate,
         },
         "samples": rows,

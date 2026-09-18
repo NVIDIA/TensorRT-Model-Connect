@@ -77,6 +77,7 @@ OUTPUT_CONTRACTS = {
     "regression-values",
     "generated-token-count",
     "image-features-shape",
+    "instance-mask-parity",
     "localization",
     "media-shape",
     "metric-geometry-shape",
@@ -1382,6 +1383,8 @@ def _output_contract(
         return matched, "segmentation output shape differs" if not matched else "", None
     if contract == "prompted-mask-parity":
         return _prompted_mask_parity(entry, left, right)
+    if contract == "instance-mask-parity":
+        return _instance_mask_parity(entry, left, right)
     if contract == "detection-parity":
         return _detection_parity(entry, left, right)
     if contract == "classification-top-class":
@@ -2127,6 +2130,98 @@ def _prompted_mask_parity(
     }
     if minimum_iou < required_iou:
         return False, "prompted mask IoU is below the contract", evidence
+    return True, "", evidence
+
+
+def _instance_mask_values(
+    summary: Mapping[str, Any],
+) -> tuple[int, int, list[list[bool]], list[float], list[list[float]]] | None:
+    masks = _prompted_mask_values(summary)
+    if masks is None:
+        return None
+    scores = summary.get("iou_scores")
+    boxes = summary.get("boxes")
+    if (
+        not isinstance(scores, list)
+        or len(scores) != len(masks[2])
+        or not isinstance(boxes, list)
+        or len(boxes) != len(masks[2])
+        or summary.get("box_coordinates") != "original_image_pixels_xyxy"
+    ):
+        return None
+    try:
+        numeric_scores = [float(score) for score in scores]
+        numeric_boxes = [
+            [float(coordinate) for coordinate in box]
+            for box in boxes
+            if isinstance(box, list) and len(box) == 4
+        ]
+    except (TypeError, ValueError):
+        return None
+    if len(numeric_boxes) != len(boxes) or not all(
+        math.isfinite(number)
+        for number in (*numeric_scores, *(value for box in numeric_boxes for value in box))
+    ):
+        return None
+    return *masks, numeric_scores, numeric_boxes
+
+
+def _instance_mask_parity(
+    entry: ResolvedEntry,
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> tuple[bool, str, dict[str, Any] | None]:
+    candidate = _instance_mask_values(left)
+    reference = _instance_mask_values(right)
+    if candidate is None or reference is None:
+        return False, "instance mask output is invalid", None
+    if candidate[:2] != reference[:2] or len(candidate[2]) != len(reference[2]):
+        return (
+            False,
+            "instance mask shape or count differs",
+            {
+                "candidate_shape": [len(candidate[2]), *candidate[:2]],
+                "reference_shape": [len(reference[2]), *reference[:2]],
+            },
+        )
+    matched_reference: set[int] = set()
+    matches = []
+    for index, mask in enumerate(candidate[2]):
+        choices = [
+            (_binary_mask_iou(mask, expected), expected_index)
+            for expected_index, expected in enumerate(reference[2])
+            if expected_index not in matched_reference
+        ]
+        mask_iou, expected_index = max(choices)
+        matched_reference.add(expected_index)
+        matches.append(
+            (
+                mask_iou,
+                _box_iou(candidate[4][index], reference[4][expected_index]),
+                abs(candidate[3][index] - reference[3][expected_index]),
+            )
+        )
+    minimum_mask_iou = min(match[0] for match in matches)
+    minimum_box_iou = min(match[1] for match in matches)
+    maximum_score_error = max(match[2] for match in matches)
+    required_mask_iou = float(entry.spec["baseline"].get("min_mask_iou", 0.7))
+    required_box_iou = float(entry.spec["baseline"].get("min_box_iou", 0.9))
+    allowed_score_error = float(entry.spec["baseline"].get("max_score_abs_error", 0.05))
+    evidence = {
+        "instances": len(matches),
+        "minimum_mask_iou": minimum_mask_iou,
+        "required_mask_iou": required_mask_iou,
+        "minimum_box_iou": minimum_box_iou,
+        "required_box_iou": required_box_iou,
+        "maximum_score_abs_error": maximum_score_error,
+        "allowed_score_abs_error": allowed_score_error,
+    }
+    if minimum_mask_iou < required_mask_iou:
+        return False, "instance mask IoU is below the contract", evidence
+    if minimum_box_iou < required_box_iou:
+        return False, "instance box IoU is below the contract", evidence
+    if maximum_score_error > allowed_score_error:
+        return False, "instance score error exceeds the contract", evidence
     return True, "", evidence
 
 
