@@ -11,3 +11,5 @@ describe = family_support(
     tasks=("embedding", "encoding", "reranking"),
     default_task="encoding",
 )
+
+# Trivial comment-only change: live-fire test payload to reproduce Community GPU CI ResourceExhausted quota issue (retest of closed #1260).
