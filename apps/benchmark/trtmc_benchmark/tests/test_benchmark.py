@@ -350,6 +350,15 @@ def test_image_only_detection_has_no_text_or_postprocessing_defaults(sdk_assets:
     assert metrics["images_per_s"] == 50.0 and metrics["detections_per_s"] == 0.0
 
 
+def test_legacy_image_task_accepts_canonical_image_path(sdk_assets: Path) -> None:
+    result = resolve_task_case("object_detection", {"image_path": "image.ppm"}, sdk_assets)
+
+    assert result.request == {
+        "image_path": str(sdk_assets / "image.ppm"),
+        "batch_size": 1,
+    }
+
+
 def test_structure_input_keeps_document_bytes_and_source_path_opaque(tmp_path: Path) -> None:
     document = tmp_path / "prepared.bytes"
     document.write_bytes(b"B2RQ\0\x7f")

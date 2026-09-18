@@ -988,7 +988,7 @@ def _prompt(case: Mapping[str, Any], root: Path) -> str:
 
 
 def _image_path(case: Mapping[str, Any], root: Path) -> str:
-    return _required_asset(case, ("test_image", "image"), root, "image")
+    return _required_asset(case, ("image_path", "test_image", "image"), root, "image")
 
 
 def _audio_path(case: Mapping[str, Any], root: Path) -> str:
