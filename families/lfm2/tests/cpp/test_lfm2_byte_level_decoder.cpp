@@ -107,6 +107,10 @@ class FilteringTokenizer final : public trtmc::ITokenizer {
                 result += byte_level_encode(" café");
             else if (id == 2)
                 result += byte_level_encode(" 中文");
+            else if (id == 3)
+                result += byte_level_encode(std::string{"\xE2", 1});
+            else if (id == 4)
+                result += byte_level_encode(std::string{"\xE2\x80", 2});
             // 99 is a special token and is deliberately filtered by the inner
             // tokenizer before the family decode correction runs.
         }
@@ -169,6 +173,10 @@ void test_wrapper_preserves_special_token_contract() {
     auto wrapped = trtmc::lfm2_wrap_byte_level_decoder(std::make_unique<FilteringTokenizer>());
     check(wrapped->decode({99, 1, 99, 2, 99}) == " café 中文",
           "wrapper keeps inner special-token filtering and fixes ordinary text");
+    check(wrapped->decode({3}) == "\xEF\xBF\xBD",
+          "wrapper replaces a truncated generated UTF-8 sequence");
+    check(wrapped->decode({4}) == "\xEF\xBF\xBD",
+          "wrapper replaces one incomplete UTF-8 suffix once");
     check(wrapped->encode("abc") == std::vector<int32_t>{3}, "wrapper delegates encoding");
     check(wrapped->id_for_token("special") == 99 && wrapped->token_for_id(99) == "<special>",
           "wrapper delegates token identity helpers");

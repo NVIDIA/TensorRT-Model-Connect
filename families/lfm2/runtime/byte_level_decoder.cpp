@@ -87,6 +87,38 @@ Utf8Unit decode_utf8_unit(std::string_view text, std::size_t offset) {
     return {first, 1, false};
 }
 
+std::string replace_invalid_utf8(std::string_view text) {
+    static constexpr std::string_view replacement{"\xEF\xBF\xBD", 3};
+    std::string result;
+    result.reserve(text.size());
+    for (std::size_t offset = 0; offset < text.size();) {
+        const auto lead = static_cast<unsigned char>(text[offset]);
+        if (lead < 0x80U) {
+            result.push_back(text[offset++]);
+            continue;
+        }
+
+        const std::size_t size = utf8_sequence_size(lead);
+        if (size == 0) {
+            result.append(replacement);
+            ++offset;
+            continue;
+        }
+        if (offset + size > text.size()) {
+            result.append(replacement);
+            break;
+        }
+        if (!is_valid_utf8_sequence(text, offset, size, lead)) {
+            result.append(replacement);
+            ++offset;
+            continue;
+        }
+        result.append(text.data() + offset, size);
+        offset += size;
+    }
+    return result;
+}
+
 const std::unordered_map<char32_t, unsigned char>& gpt2_unicode_to_byte() {
     static const auto table = [] {
         std::array<bool, 256> direct{};
@@ -123,7 +155,11 @@ class Lfm2ByteLevelDecoderTokenizer final : public ITokenizer {
         return inner_->encode(text);
     }
     std::string decode(const std::vector<int32_t>& ids) const override {
-        return lfm2_decode_gpt2_byte_level(inner_->decode(ids));
+        // Generation may stop after a token that contains only the leading byte
+        // of a UTF-8 scalar. Match the user-facing tokenizer contract by
+        // replacing that incomplete byte sequence instead of leaking invalid
+        // text into JSON and other public APIs.
+        return replace_invalid_utf8(lfm2_decode_gpt2_byte_level(inner_->decode(ids)));
     }
     int32_t id_for_token(std::string_view token) const override {
         return inner_->id_for_token(token);
