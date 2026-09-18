@@ -47,6 +47,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _image_feature_knn_parity(case, context, dataset, output)
     elif metric_name == "object_detection_parity":
         result = _object_detection_parity(case, context, dataset, output)
+    elif metric_name == "prompted_segmentation_parity":
+        result = _prompted_segmentation_parity(case, context, dataset, output)
     elif metric_name == "semantic_segmentation_parity":
         result = _semantic_segmentation_parity(case, context, dataset, output)
     else:
@@ -973,6 +975,152 @@ def _semantic_mask(value: Mapping[str, Any], label: str) -> tuple[int, int, list
     if any(isinstance(item, bool) or not isinstance(item, int) for item in mask):
         raise QualificationError(f"{label} semantic-segmentation mask is not integral")
     return height, width, mask
+
+
+def _binary_masks(value: Mapping[str, Any], label: str) -> tuple[int, int, list[list[bool]]]:
+    height = value.get("height")
+    width = value.get("width")
+    count = value.get("num_masks")
+    masks = value.get("masks")
+    kind = value.get("mask_kind", "logits")
+    if (
+        isinstance(height, bool)
+        or not isinstance(height, int)
+        or height < 1
+        or isinstance(width, bool)
+        or not isinstance(width, int)
+        or width < 1
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 1
+        or not isinstance(masks, list)
+        or len(masks) != count * height * width
+        or kind not in {"logits", "probability", "binary"}
+    ):
+        raise QualificationError(f"{label} prompted-segmentation output is invalid")
+    try:
+        numeric = [float(value) for value in masks]
+    except (TypeError, ValueError) as error:
+        raise QualificationError(
+            f"{label} prompted-segmentation masks are not numeric"
+        ) from error
+    if not all(math.isfinite(value) for value in numeric):
+        raise QualificationError(f"{label} prompted-segmentation masks are not finite")
+    threshold = 0.0 if kind == "logits" else 0.5
+    area = height * width
+    return height, width, [
+        [value > threshold for value in numeric[index : index + area]]
+        for index in range(0, len(numeric), area)
+    ]
+
+
+def _mask_iou(left: Sequence[bool], right: Sequence[bool]) -> float:
+    intersection = sum(a and b for a, b in zip(left, right, strict=True))
+    union = sum(a or b for a, b in zip(left, right, strict=True))
+    return intersection / union if union else 1.0
+
+
+def _match_masks(candidate: Sequence[Sequence[bool]], reference: Sequence[Sequence[bool]]) -> list[float]:
+    matched_reference: set[int] = set()
+    matches = []
+    for mask in candidate:
+        choices = [
+            (_mask_iou(mask, expected), index)
+            for index, expected in enumerate(reference)
+            if index not in matched_reference
+        ]
+        if not choices:
+            continue
+        iou, index = max(choices)
+        matched_reference.add(index)
+        matches.append(iou)
+    return matches
+
+
+def _prompted_segmentation_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _image_parity_samples(dataset, sample_limit, "prompted-segmentation")
+    expected = _family_image_reference(case, context, output, selected)
+    request = configured.get("request", {})
+    if not isinstance(request, Mapping):
+        raise QualificationError("prompted-segmentation request must be an object")
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {**dict(request), "image_path": sample["image_path"]},
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(
+        case, context, output, "segment_prompted", candidate_requests
+    )
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("prompted-segmentation gate must be an object")
+    minimum_iou = float(gate.get("min_mask_iou", 0.7))
+    minimum_match_rate = float(gate.get("min_mask_match_rate", 1.0))
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not all(
+        0.0 <= value <= 1.0 for value in (minimum_iou, minimum_match_rate, minimum_sample_rate)
+    ):
+        raise QualificationError("prompted-segmentation gates must be in [0, 1]")
+
+    rows = []
+    total_matches = total_masks = 0
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
+        left_height, left_width, left = _binary_masks(candidate_sample, "candidate")
+        right_height, right_width, right = _binary_masks(reference_sample, "reference")
+        matches = (
+            _match_masks(left, right)
+            if (left_height, left_width) == (right_height, right_width)
+            else []
+        )
+        denominator = max(len(left), len(right), 1)
+        match_rate = len(matches) / denominator
+        minimum_sample_iou = min(matches, default=0.0)
+        passed = match_rate >= minimum_match_rate and minimum_sample_iou >= minimum_iou
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "passed": passed,
+                "candidate_masks": len(left),
+                "reference_masks": len(right),
+                "mask_match_rate": match_rate,
+                "min_mask_iou": minimum_sample_iou,
+            }
+        )
+        total_matches += len(matches)
+        total_masks += denominator
+    sample_pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    passed = sample_pass_rate >= minimum_sample_rate
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": sample_pass_rate,
+            "mask_match_rate": total_matches / total_masks,
+            "min_mask_iou": min(row["min_mask_iou"] for row in rows),
+        },
+        "gate": {
+            "min_mask_iou": minimum_iou,
+            "min_mask_match_rate": minimum_match_rate,
+            "min_sample_pass_rate": minimum_sample_rate,
+        },
+        "samples": rows,
+    }
 
 
 def _semantic_segmentation_parity(

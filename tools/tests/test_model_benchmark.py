@@ -497,6 +497,28 @@ def test_object_detection_accuracy_matches_classes_boxes_and_scores(
     assert result["metrics"]["min_box_iou"] >= 0.9
 
 
+def test_prompted_segmentation_masks_match_independent_of_order() -> None:
+    first = {
+        "num_masks": 2,
+        "height": 2,
+        "width": 2,
+        "mask_kind": "logits",
+        "masks": [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
+    }
+    second = {
+        "num_masks": 2,
+        "height": 2,
+        "width": 2,
+        "mask_kind": "binary",
+        "masks": [0, 1, 1, 0, 1, 0, 0, 1],
+    }
+
+    _, _, candidate = qualification_accuracy._binary_masks(first, "candidate")
+    _, _, reference = qualification_accuracy._binary_masks(second, "reference")
+
+    assert qualification_accuracy._match_masks(candidate, reference) == [1.0, 1.0]
+
+
 def test_semantic_segmentation_accuracy_compares_pixel_and_class_iou(
     tmp_path: Path, monkeypatch
 ) -> None:
