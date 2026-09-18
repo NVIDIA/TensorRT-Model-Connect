@@ -29,6 +29,13 @@ def _workflow_step_script(workflow_name: str, job_name: str, step_name: str) -> 
     )
 
 
+def _action_step_script(action_name: str, step_name: str) -> str:
+    action = yaml.safe_load(
+        (REPO_ROOT / ".github" / "actions" / action_name / "action.yml").read_text(encoding="utf-8")
+    )
+    return next(step["run"] for step in action["runs"]["steps"] if step["name"] == step_name)
+
+
 def test_pre_commit_config_installs_only_lightweight_commit_hooks() -> None:
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     assert "default_install_hook_types" not in config
@@ -196,7 +203,11 @@ def test_public_source_quality_enforces_legal_compliance(
 
 def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
-    assert set(workflow[True]) == {"pull_request", "pull_request_target", "workflow_dispatch"}
+    controller = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/community-ci-controller.yml").read_text()
+    )
+    assert set(workflow[True]) == {"pull_request", "workflow_dispatch"}
+    assert set(controller[True]) == {"pull_request_target"}
     assert workflow[True]["workflow_dispatch"]["inputs"]["ci_lane"]["options"] == [
         "stable",
         "dev",
@@ -204,7 +215,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
     assert "Stable" in workflow["run-name"] and "Dev" in workflow["run-name"]
     assert workflow["permissions"] == {}
     assert "paths" not in workflow[True]["pull_request"]
-    assert "paths" not in workflow[True]["pull_request_target"]
+    assert "paths" not in controller[True]["pull_request_target"]
     jobs = workflow["jobs"]
     authorization = jobs["authorize"]["steps"][0]["run"]
     assert 'stable) test "$CI_REF" = refs/heads/main' in authorization
@@ -271,7 +282,7 @@ def test_community_authorize_pins_the_exact_merge_and_uses_its_base_parent(tmp_p
             "bash",
             "-c",
             _workflow_step_script(
-                "community-ci.yml", "snapshot", "Capture the exact pull-request snapshot"
+                "community-ci-controller.yml", "snapshot", "Capture the exact pull-request snapshot"
             ),
         ],
         env={
@@ -1068,31 +1079,42 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
 
 
 def test_community_premerge_has_independent_lanes_and_public_only_execution():
-    control = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    control = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/community-ci-controller.yml").read_text()
+    )
     executor = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
-    dispatch = control["jobs"]["dispatch"]
-    assert dispatch["strategy"] == {
-        "fail-fast": False,
-        "matrix": {"lane": "${{ fromJSON(needs.snapshot.outputs.lanes) }}"},
-    }
-    assert "matrix.lane" in dispatch["concurrency"]["group"]
-    assert "inputs.source_snapshot == ''" in control["jobs"]["snapshot"]["if"]
-    assert set(control[True]) == {"pull_request", "pull_request_target", "workflow_dispatch"}
+    stable = control["jobs"]["stable"]
+    dev = control["jobs"]["dev"]
+    assert set(control[True]) == {"pull_request_target"}
+    assert set(executor[True]) == {"pull_request", "workflow_dispatch"}
     assert not (REPO_ROOT / ".github/workflows/community-premerge.yml").exists()
-    assert "needs.snapshot.result == 'success'" in dispatch["if"]
-    assert dispatch["permissions"] == {"actions": "write", "statuses": "write"}
-    assert (
-        dispatch["continue-on-error"]
-        == "${{ matrix.lane == 'dev' && contains(fromJSON(needs.snapshot.outputs.lanes), 'stable') }}"
+    assert stable["needs"] == "snapshot"
+    assert dev["needs"] == "snapshot"
+    assert "needs.snapshot.result == 'success'" in stable["if"]
+    assert "'stable'" in stable["if"]
+    assert "needs.snapshot.result == 'success'" in dev["if"]
+    assert "'dev'" in dev["if"]
+    expected_permissions = {"actions": "write", "contents": "read", "statuses": "write"}
+    assert stable["permissions"] == expected_permissions
+    assert dev["permissions"] == expected_permissions
+    assert dev["continue-on-error"] == (
+        "${{ contains(fromJSON(needs.snapshot.outputs.lanes), 'stable') }}"
     )
     assert "actions/checkout" not in json.dumps(control["jobs"]["snapshot"])
-    assert "actions/checkout" not in json.dumps(dispatch)
-    step = next(step for step in dispatch["steps"] if step.get("id") == "execution")
-    assert (
-        step["env"]["CI_REF"]
-        == "${{ matrix.lane == 'stable' && 'main' || github.ref_name != 'main' && github.ref_name || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}"
+    for job, lane in ((stable, "stable"), (dev, "dev")):
+        checkout, track = job["steps"]
+        assert checkout["with"] == {
+            "ref": "${{ github.workflow_sha }}",
+            "persist-credentials": False,
+        }
+        assert track["uses"] == "./.github/actions/community-ci-dispatch"
+        assert track["with"]["lane"] == lane
+    assert stable["steps"][1]["with"]["ci-ref"] == "main"
+    assert dev["steps"][1]["with"]["ci-ref"] == ("${{ vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}")
+    dispatch_script = _action_step_script(
+        "community-ci-dispatch", "Dispatch the selected Community CI implementation"
     )
-    assert "sleep" not in step["run"]
+    assert "sleep" not in dispatch_script
     gpu = executor["jobs"]["provision-and-test"]
     test = next(step for step in gpu["steps"] if step.get("id") == "test")
     # Stable retains the existing manual GPU implementation. Dev carries the
@@ -1114,26 +1136,27 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     ],
 )
 def test_community_dual_run_switch_controls_job_allocation(tmp_path, dual_run, expected_lanes):
-    control = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    control = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/community-ci-controller.yml").read_text()
+    )
     snapshot = control["jobs"]["snapshot"]
     selector = next(step for step in snapshot["steps"] if step.get("id") == "lanes")
     assert selector["env"]["DUAL_RUN"] == "${{ vars.TRTMC_COMMUNITY_CI_DUAL_RUN }}"
     assert snapshot["outputs"]["lanes"] == "${{ steps.lanes.outputs.lanes }}"
-    assert control["jobs"]["dispatch"]["strategy"]["matrix"]["lane"] == (
-        "${{ fromJSON(needs.snapshot.outputs.lanes) }}"
-    )
+    assert "'stable'" in control["jobs"]["stable"]["if"]
+    assert "'dev'" in control["jobs"]["dev"]["if"]
 
     output = tmp_path / "output"
     result = subprocess.run(
         ["bash", "-c", selector["run"]],
-        env={**os.environ, "DUAL_RUN": dual_run, "CI_BRANCH": "main", "GITHUB_OUTPUT": str(output)},
+        env={**os.environ, "DUAL_RUN": dual_run, "GITHUB_OUTPUT": str(output)},
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    # This output is the actual job matrix. With the switch off there is no
-    # dev job to publish a status, request credentials, or provision a VM.
+    # These lanes directly select the explicit Stable and Dev jobs. With the
+    # switch off Dev cannot publish a status, request credentials, or run.
     assert json.loads(values["lanes"]) == expected_lanes
 
 
@@ -1151,7 +1174,7 @@ def test_community_trigger_rejects_stale_or_invalid_pr_metadata(tmp_path, fault)
             "bash",
             "-c",
             _workflow_step_script(
-                "community-ci.yml", "snapshot", "Capture the exact pull-request snapshot"
+                "community-ci-controller.yml", "snapshot", "Capture the exact pull-request snapshot"
             ),
         ],
         env={
@@ -1217,10 +1240,8 @@ else:
         [
             "bash",
             "-c",
-            _workflow_step_script(
-                "community-ci.yml",
-                "dispatch",
-                "Dispatch the selected Community CI implementation",
+            _action_step_script(
+                "community-ci-dispatch", "Dispatch the selected Community CI implementation"
             ),
         ],
         env={
@@ -1293,8 +1314,8 @@ def test_only_complete_pipeline_publishes_stable_and_dev_results(
         [
             "bash",
             "-c",
-            _workflow_step_script(
-                "community-ci.yml", "dispatch", "Publish the complete workflow conclusion"
+            _action_step_script(
+                "community-ci-dispatch", "Publish the complete workflow conclusion"
             ),
         ],
         env={
@@ -1310,6 +1331,7 @@ def test_only_complete_pipeline_publishes_stable_and_dev_results(
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_REPOSITORY": "example/source",
             "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
             "CALLS": str(tmp_path / "calls"),
             "COUNTER": str(tmp_path / "counter"),
             "QUEUED_FIRST": str(queued_first).lower(),
@@ -1331,7 +1353,7 @@ def test_only_complete_pipeline_publishes_stable_and_dev_results(
         capture_output=True,
         text=True,
     )
-    assert (result.returncode == 0) is (expected == "success"), result.stderr
+    assert (result.returncode == 0) is (expected is not None), result.stderr
     if expected is None:
         assert not (tmp_path / "calls").exists()
     else:
@@ -1371,7 +1393,7 @@ print(json.dumps(data))
             "bash",
             "-c",
             _workflow_step_script(
-                "community-ci.yml", "snapshot", "Capture the exact pull-request snapshot"
+                "community-ci-controller.yml", "snapshot", "Capture the exact pull-request snapshot"
             ),
         ],
         env={
@@ -1532,7 +1554,9 @@ def test_failed_snapshot_reports_only_a_validated_head(tmp_path, head):
         [
             "bash",
             "-c",
-            _workflow_step_script("community-ci.yml", "snapshot", "Report a failed snapshot"),
+            _workflow_step_script(
+                "community-ci-controller.yml", "snapshot", "Report a failed snapshot"
+            ),
         ],
         env={
             **os.environ,
@@ -1558,27 +1582,26 @@ def test_failed_snapshot_reports_only_a_validated_head(tmp_path, head):
 
 
 @pytest.mark.parametrize("dual_run", ["", "false", "true"])
-def test_manual_dev_branch_obeys_the_comparison_switch(tmp_path, dual_run):
+def test_controller_lane_selection_obeys_the_comparison_switch(tmp_path, dual_run):
     output = tmp_path / "output"
     result = subprocess.run(
         [
             "bash",
             "-c",
             _workflow_step_script(
-                "community-ci.yml", "snapshot", "Select the Community CI branches"
+                "community-ci-controller.yml", "snapshot", "Select the Community CI branches"
             ),
         ],
         env={
             **os.environ,
             "DUAL_RUN": dual_run,
-            "CI_BRANCH": "ci/developer",
             "GITHUB_OUTPUT": str(output),
         },
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    expected = '["stable","dev"]' if dual_run == "true" else '["dev"]'
+    expected = '["stable","dev"]' if dual_run == "true" else '["stable"]'
     assert output.read_text() == f"lanes={expected}\n"
 
 
@@ -1614,7 +1637,7 @@ def test_pairing_selects_only_the_existing_stable_pr_run(tmp_path, available):
             "bash",
             "-c",
             _workflow_step_script(
-                "community-ci.yml", "snapshot", "Find the existing Stable PR snapshot"
+                "community-ci-controller.yml", "snapshot", "Find the existing Stable PR snapshot"
             ),
         ],
         env={
@@ -1646,8 +1669,8 @@ def test_stable_pairing_does_not_dispatch_or_repeat_the_existing_pipeline(tmp_pa
         [
             "bash",
             "-c",
-            _workflow_step_script(
-                "community-ci.yml", "dispatch", "Dispatch the selected Community CI implementation"
+            _action_step_script(
+                "community-ci-dispatch", "Dispatch the selected Community CI implementation"
             ),
         ],
         env={
@@ -1686,8 +1709,8 @@ def test_existing_stable_verdict_is_bound_to_the_selected_head_and_merge(tmp_pat
         [
             "bash",
             "-c",
-            _workflow_step_script(
-                "community-ci.yml", "dispatch", "Publish the complete workflow conclusion"
+            _action_step_script(
+                "community-ci-dispatch", "Publish the complete workflow conclusion"
             ),
         ],
         env={
@@ -1706,11 +1729,12 @@ def test_existing_stable_verdict_is_bound_to_the_selected_head_and_merge(tmp_pat
             "STATUS_CONTEXT": "Stable Community CI",
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
         },
         capture_output=True,
         text=True,
     )
-    assert (result.returncode == 0) is (fault == ""), result.stderr
+    assert (result.returncode == 0) is (fault in {"", "conclusion"}), result.stderr
     if fault in {"head", "merge", "event"}:
         assert not (tmp_path / "calls").exists()
     else:

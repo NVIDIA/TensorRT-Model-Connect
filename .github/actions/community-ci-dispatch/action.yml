@@ -1,0 +1,191 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Track a Community CI lane
+description: Dispatch or reuse one Community CI run and publish its exact result.
+
+inputs:
+  token:
+    description: GitHub token used to dispatch, inspect, and publish the run.
+    required: true
+  lane:
+    description: Stable or Dev execution lane.
+    required: true
+  ci-ref:
+    description: Branch containing the selected Community CI implementation.
+    required: true
+  pr-number:
+    description: Pull request number.
+    required: true
+  head-sha:
+    description: Frozen pull request head SHA.
+    required: true
+  source-snapshot:
+    description: Frozen pull request source snapshot.
+    required: true
+  stable-run-id:
+    description: Existing Stable pull_request run to reuse when available.
+    required: false
+    default: ""
+  run-gpu-smoke:
+    description: Whether a manual request enabled the GPU smoke test.
+    required: false
+    default: "false"
+  status-context:
+    description: Commit status context for this lane.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Mark the selected CI pending
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        STATUS_CONTEXT: ${{ inputs.status-context }}
+      run: |
+        set -euo pipefail
+        gh api --silent --method POST \
+          "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+          -f state=pending -f context="$STATUS_CONTEXT" \
+          -f description="Community CI is starting" \
+          -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+    - name: Dispatch the selected Community CI implementation
+      id: execution
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        CI_REF: ${{ inputs.ci-ref }}
+        LANE: ${{ inputs.lane }}
+        SOURCE_SNAPSHOT: ${{ inputs.source-snapshot }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        STABLE_RUN_ID: ${{ inputs.stable-run-id }}
+        RUN_GPU_SMOKE: ${{ inputs.run-gpu-smoke }}
+        STATUS_CONTEXT: ${{ inputs.status-context }}
+      run: |
+        set -euo pipefail
+        if [ "$LANE" = stable ] && [ -n "${STABLE_RUN_ID:-}" ]; then
+          [[ "$STABLE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          echo "run_id=$STABLE_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "ci_ref=main" >> "$GITHUB_OUTPUT"
+          echo "existing_stable=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        umask 077
+        dispatch_nonce="$(openssl rand -hex 16)"
+        [[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]
+        payload="$RUNNER_TEMP/community-ci-${LANE}-dispatch.json"
+        trap 'rm -f "$payload"' EXIT
+        jq -n \
+          --arg pr_number "$PR_NUMBER" \
+          --arg ref "$CI_REF" \
+          --arg lane "$LANE" \
+          --arg snapshot "$SOURCE_SNAPSHOT" \
+          --arg dispatch_nonce "$dispatch_nonce" \
+          --argjson run_gpu_smoke "${RUN_GPU_SMOKE:-false}" \
+          '{
+            ref: $ref,
+            return_run_details: true,
+            inputs: {
+              pr_number: $pr_number,
+              ci_lane: $lane,
+              source_snapshot: $snapshot,
+              request_id: $dispatch_nonce,
+              run_gpu_smoke: $run_gpu_smoke
+            }
+          }' > "$payload"
+        dispatched="$(gh api --method POST \
+          -H 'X-GitHub-Api-Version: 2026-03-10' \
+          "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/dispatches" \
+          --input "$payload")"
+        run_id="$(jq -er '.workflow_run_id' <<< "$dispatched")"
+        [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+        echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+        echo "ci_ref=$CI_REF" >> "$GITHUB_OUTPUT"
+        gh api --silent --method POST \
+          "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+          -f state=pending -f context="$STATUS_CONTEXT" \
+          -f description="Community CI is running" \
+          -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+
+    - name: Publish the complete workflow conclusion
+      id: verdict
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PIPELINE_RUN_ID: ${{ steps.execution.outputs.run_id }}
+        EXISTING_STABLE: ${{ steps.execution.outputs.existing_stable }}
+        CI_BRANCH: ${{ steps.execution.outputs.ci_ref }}
+        LANE: ${{ inputs.lane }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        SOURCE_SNAPSHOT: ${{ inputs.source-snapshot }}
+        STATUS_CONTEXT: ${{ inputs.status-context }}
+      run: |
+        set -euo pipefail
+        [[ "$PIPELINE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+        role=Stable
+        if [ "$LANE" = dev ]; then role=Dev; else test "$CI_BRANCH" = main; fi
+        merge_sha="$(jq -er '.merge_sha' <<< "$SOURCE_SNAPSHOT")"
+        expected_title="$role Community CI · PR #$PR_NUMBER · head $HEAD_SHA · merge $merge_sha"
+        if [ "${EXISTING_STABLE:-}" = true ]; then
+          test "$LANE" = stable
+          expected_title="PR #$PR_NUMBER · community CI · head $HEAD_SHA · merge $merge_sha"
+        fi
+        deadline=$((SECONDS + 18000))
+        while [ "$SECONDS" -lt "$deadline" ]; do
+          run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID")"
+          if [ "$(jq -r '.status' <<< "$run")" = completed ]; then
+            if ! jq -e --arg title "$expected_title" --arg branch "$CI_BRANCH" \
+              --arg head "$HEAD_SHA" --arg existing "${EXISTING_STABLE:-false}" \
+              '.path == ".github/workflows/community-ci.yml" and .display_title == $title
+               and (if $existing == "true" then .event == "pull_request" and .head_sha == $head
+                    else .event == "workflow_dispatch" and .head_branch == $branch end)' \
+              <<< "$run" > /dev/null; then
+              echo "::error::Completed Community CI does not match the requested branch and snapshot."
+              jq '{path,event,head_branch,display_title,status}' <<< "$run"
+              exit 1
+            fi
+            state=failure
+            if [ "$(jq -r '.conclusion' <<< "$run")" = success ]; then state=success; fi
+            gh api --silent --method POST \
+              "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+              -f state="$state" -f context="$STATUS_CONTEXT" \
+              -f description="Complete Community CI: $state" \
+              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID"
+            echo "reported=true" >> "$GITHUB_OUTPUT"
+            icon='❌'
+            if [ "$state" = success ]; then icon='✅'; fi
+            printf '### %s Community CI\n\n%s `%s` · [execution run](%s/%s/actions/runs/%s)\n' \
+              "$role" "$icon" "$state" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" \
+              "$PIPELINE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+            # The executor and its commit status own the validation verdict.
+            # This coordinator fails only when it cannot establish or publish it.
+            if [ "$state" != success ]; then
+              echo "::warning::$role Community CI failed; the lane result links to run $PIPELINE_RUN_ID."
+            fi
+            exit 0
+          fi
+          sleep 30
+        done
+        echo "::error::Community CI did not complete within five hours."
+        exit 1
+
+    - name: Report a failed CI request
+      if: ${{ failure() && steps.verdict.outputs.reported != 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        STATUS_CONTEXT: ${{ inputs.status-context }}
+      run: |
+        set -euo pipefail
+        gh api --silent --method POST \
+          "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+          -f state=failure -f context="$STATUS_CONTEXT" \
+          -f description="Community CI could not complete" \
+          -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
