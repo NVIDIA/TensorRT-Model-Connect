@@ -192,11 +192,7 @@ def test_accuracy_forwards_declared_reference_model_load_options(
         captured.update(json.loads(request.read_text(encoding="utf-8")))
         output.write_text(
             json.dumps(
-                {
-                    "samples": [
-                        {"sample_id": "sample", "prompt": "Question", "token_ids": [1]}
-                    ]
-                }
+                {"samples": [{"sample_id": "sample", "prompt": "Question", "token_ids": [1]}]}
             ),
             encoding="utf-8",
         )
@@ -235,9 +231,7 @@ def test_hf_accuracy_reference_uses_requested_expert_implementation(monkeypatch)
         "local_files_only": True,
         "trust_remote_code": True,
     }
-    assert hf_text_generation._precision_load_options("fp16") == {
-        "torch_dtype": "fp16"
-    }
+    assert hf_text_generation._precision_load_options("fp16") == {"torch_dtype": "fp16"}
 
 
 def test_image_classification_accuracy_compares_top1_and_gold_accuracy(
@@ -385,6 +379,149 @@ def test_performance_resolves_profile_owned_relative_assets(tmp_path: Path) -> N
     assert resolved == {"image_path": str(image.resolve()), "batch_size": 1}
 
 
+def test_image_feature_accuracy_compares_vectors_and_knn_utility(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "beans"
+    (dataset_root / "images/train").mkdir(parents=True)
+    (dataset_root / "images/test").mkdir(parents=True)
+    (dataset_root / "queries").mkdir()
+    for split in ("train", "test"):
+        for index in range(2):
+            (dataset_root / f"images/{split}/{index}.jpg").write_bytes(b"fixture")
+    (dataset_root / "bank.json").write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {"image": "images/train/0.jpg", "label": 0, "source_index": 0},
+                    {"image": "images/train/1.jpg", "label": 1, "source_index": 1},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (dataset_root / "queries/test.json").write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {"image": "../images/test/0.jpg", "label": 0, "source_index": 0},
+                    {"image": "../images/test/1.jpg", "label": 1, "source_index": 1},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset_path = dataset_root / "dataset.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "requests": [
+                    {
+                        "inputs": {
+                            "bank_manifest": "bank.json",
+                            "query_manifest": "queries/test.json",
+                        }
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "families/dinov3/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    runner = profile.parent / "reference.py"
+    runner.write_text("# family reference\n", encoding="utf-8")
+    case = QualificationCase(
+        kind="accuracy",
+        model="example",
+        family="dinov3",
+        name="beans-knn-parity",
+        benchmark="beans_image_feature_knn",
+        candidate={
+            "family": "dinov3",
+            "checkpoint": "facebook/example",
+            "task": "image_features",
+            "precision": "fp16",
+            "build": {"max_sequence_length": 1},
+        },
+        values={
+            "bank_samples_per_class": 1,
+            "query_samples_per_class": 1,
+            "knn_k": 1,
+            "knn_temperature": 0.07,
+            "reference": {"command": "reference.py", "precision": "fp32"},
+            "gate": {
+                "min_pooler_cosine": 0.999,
+                "min_vector_pass_rate": 1.0,
+                "min_knn_top1_agreement": 1.0,
+                "max_knn_accuracy_drop_from_hf": 0.0,
+            },
+        },
+        source=profile,
+        reference_requirements=None,
+    )
+    dataset = Dataset("dinov3-beans-knn-v1", dataset_path, "provided", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    vectors = [[1.0, 0.0], [0.0, 1.0], [0.9, 0.1], [0.1, 0.9]]
+
+    def reference(command, *_args, **_kwargs):
+        request = Path(command[command.index("--request") + 1])
+        output = Path(command[command.index("--output") + 1])
+        samples = json.loads(request.read_text(encoding="utf-8"))["samples"]
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {"sample_id": sample["sample_id"], "pooler_output": vector}
+                        for sample, vector in zip(samples, vectors, strict=True)
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "image_feature_knn_parity"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", reference)
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_candidate_outputs",
+        lambda *_args: (
+            [{"pooler_output": vector} for vector in vectors],
+            tmp_path / "example.bundle",
+        ),
+    )
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert result["metrics"]["vector_pass_rate"] == 1.0
+    assert result["metrics"]["knn_top1_agreement"] == 1.0
+    assert result["metrics"]["candidate_knn_top1_accuracy"] == 1.0
+
+
 def test_timm_classification_uses_a_generic_task_reference_adapter() -> None:
     assert "timm-classification" in task_reference.ADAPTERS
     assert task_reference.LOADERS["timm-classification"] is task_reference._load_vision
@@ -395,9 +532,7 @@ def test_chat_asr_uses_the_generic_asr_reference_loader() -> None:
     assert task_reference.LOADERS["hf-chat-asr"] is task_reference._load_asr
 
 
-def test_speech_accuracy_reports_reference_and_labeled_wer(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_speech_accuracy_reports_reference_and_labeled_wer(tmp_path: Path, monkeypatch) -> None:
     data_root = tmp_path / "datasets"
     audio_root = data_root / "speech/audio"
     audio_root.mkdir(parents=True)
@@ -639,9 +774,7 @@ def test_accuracy_forwards_seq2seq_reference_contract_and_nested_dataset_input(
     assert result["status"] == "passed"
     assert captured_reference["task"] == "seq2seq-lm"
     assert captured_reference["output_token_policy"] == "strip-start-and-eos"
-    assert captured_reference["generation"]["source_language_placement"] == (
-        "replace-final-unk"
-    )
+    assert captured_reference["generation"]["source_language_placement"] == ("replace-final-unk")
     assert captured_reference["samples"] == [
         {"sample_id": "translation-0", "prompt": "The house is wonderful."}
     ]
@@ -1130,9 +1263,7 @@ def test_shared_performance_definitions_own_complete_reference_timing() -> None:
             "input_preparation_included",
             "asset_loading_included",
         }
-        assert timing_contract(
-            runner=str(case.values["reference"]["runner"]), declared=declared
-        )
+        assert timing_contract(runner=str(case.values["reference"]["runner"]), declared=declared)
 
 
 def test_internal_automation_is_separate_from_the_installed_benchmark() -> None:
@@ -1264,9 +1395,7 @@ def test_family_reference_environment_inherits_parent_venv_packages(
     assert inherited.read_text(encoding="utf-8") == f"{parent_packages.resolve()}\n"
 
 
-def test_bundle_preparation_uses_the_selected_runtime(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_bundle_preparation_uses_the_selected_runtime(tmp_path: Path, monkeypatch) -> None:
     case = QualificationCase(
         kind="accuracy",
         model="example-model",
