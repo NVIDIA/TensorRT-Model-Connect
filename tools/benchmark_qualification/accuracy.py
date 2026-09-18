@@ -9,6 +9,7 @@ import csv
 import json
 import math
 import random
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -40,6 +41,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _etth1(case, context, definition, dataset, output)
     elif metric_name == "image_classification_top1_parity":
         result = _image_classification_parity(case, context, dataset, output)
+    elif metric_name == "speech_transcription_wer_parity":
+        result = _speech_transcription_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
@@ -856,6 +859,219 @@ def _image_classification_parity(
         },
         "samples": rows,
     }
+
+
+def _speech_transcription_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    payload = json.loads(dataset.path.read_text(encoding="utf-8"))
+    requests = payload.get("requests") if isinstance(payload, Mapping) else None
+    if not isinstance(requests, list) or len(requests) < sample_limit:
+        raise QualificationError(f"speech dataset requires at least {sample_limit} requests")
+
+    selected = []
+    data_root = context.data_root.resolve()
+    for index, request in enumerate(requests[:sample_limit]):
+        if not isinstance(request, Mapping):
+            raise QualificationError(f"speech request {index} must be an object")
+        audio_value = _speech_audio(request)
+        audio = (data_root / audio_value).resolve()
+        if data_root not in audio.parents or not audio.is_file():
+            fallback = (dataset.path.parent / audio_value).resolve()
+            if data_root not in fallback.parents or not fallback.is_file():
+                raise QualificationError(f"speech request {index} audio is unavailable: {audio}")
+            audio = fallback
+        gold = request.get("reference")
+        if not isinstance(gold, str) or not gold.strip():
+            raise QualificationError(f"speech request {index} has no reference transcript")
+        selected.append(
+            {
+                "sample_id": str(request.get("id") or f"sample-{index}"),
+                "audio_path": str(audio),
+                "gold_text": gold,
+            }
+        )
+
+    reference = configured.get("reference")
+    candidate_request = configured.get("request", {})
+    if not isinstance(reference, Mapping) or not isinstance(candidate_request, Mapping):
+        raise QualificationError("speech Accuracy reference and request must be objects")
+    runner_value = reference.get("command")
+    if not isinstance(runner_value, str) or not runner_value:
+        raise QualificationError("speech Accuracy reference.command must be set")
+    runner = (case.source.parent / runner_value).resolve()
+    family_root = case.source.parents[2].resolve()
+    if family_root not in runner.parents or not runner.is_file():
+        raise QualificationError(f"speech reference runner is not family-owned: {runner}")
+    reference_request = {
+        "model": str(case.candidate["checkpoint"]),
+        "revision": case.candidate.get("revision"),
+        "precision": str(reference.get("precision", "fp32")),
+        "max_new_tokens": int(candidate_request.get("max_new_tokens", 128)),
+        "language": candidate_request.get("language"),
+        "samples": selected,
+    }
+    request_path = output / "reference-request.json"
+    reference_path = output / "reference.json"
+    _json(request_path, reference_request)
+    completed = run_command(
+        [
+            str(reference_python(case, context)),
+            str(runner),
+            "--request",
+            str(request_path),
+            "--output",
+            str(reference_path),
+        ],
+        output,
+        "reference",
+        timeout=7200,
+        verbose=context.verbose,
+    )
+    if completed.returncode != 0:
+        raise QualificationError(f"speech Accuracy reference failed; see {output}")
+    expected = json.loads(reference_path.read_text(encoding="utf-8")).get("samples")
+    if not isinstance(expected, list) or len(expected) != len(selected):
+        raise QualificationError("speech reference returned an invalid sample set")
+
+    candidate_requests = []
+    for sample in expected:
+        if not isinstance(sample, Mapping):
+            raise QualificationError("speech reference sample must be an object")
+        audio_path = sample.get("audio_path")
+        if not isinstance(audio_path, str) or not Path(audio_path).is_file():
+            raise QualificationError("speech reference did not produce candidate WAV audio")
+        candidate_requests.append(
+            {
+                "sample_id": str(sample.get("sample_id", "")),
+                "request": {**dict(candidate_request), "audio_path": audio_path},
+            }
+        )
+    actual, bundle = _candidate_outputs(
+        case, context, output, "transcribe", candidate_requests
+    )
+
+    rows = []
+    gold_reference_counts = [0, 0]
+    gold_candidate_counts = [0, 0]
+    parity_counts = [0, 0]
+    for source, reference_sample, candidate_sample in zip(
+        selected, expected, actual, strict=True
+    ):
+        reference_text = reference_sample.get("text")
+        candidate_text = candidate_sample.get("text")
+        if not isinstance(reference_text, str) or not reference_text.strip():
+            raise QualificationError("speech reference returned an empty transcript")
+        if not isinstance(candidate_text, str):
+            raise QualificationError("speech candidate omitted its transcript")
+        reference_gold = _word_error_counts(source["gold_text"], reference_text)
+        candidate_gold = _word_error_counts(source["gold_text"], candidate_text)
+        candidate_reference = _word_error_counts(reference_text, candidate_text)
+        for totals, counts in (
+            (gold_reference_counts, reference_gold),
+            (gold_candidate_counts, candidate_gold),
+            (parity_counts, candidate_reference),
+        ):
+            totals[0] += counts[0]
+            totals[1] += counts[1]
+        rows.append(
+            {
+                "sample_id": source["sample_id"],
+                "reference_text": reference_text,
+                "candidate_text": candidate_text,
+                "gold_text": source["gold_text"],
+                "reference_wer": _rate(reference_gold),
+                "candidate_wer": _rate(candidate_gold),
+                "wer_to_reference": _rate(candidate_reference),
+            }
+        )
+
+    reference_wer = _rate(gold_reference_counts)
+    candidate_wer = _rate(gold_candidate_counts)
+    parity_wer = _rate(parity_counts)
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("speech Accuracy gate must be an object")
+    parity_limit = float(gate.get("max_wer_to_reference", 0.1))
+    increase_limit = float(gate.get("max_wer_increase_from_reference", 0.02))
+    if any(not math.isfinite(value) or value < 0.0 for value in (parity_limit, increase_limit)):
+        raise QualificationError("speech WER gates must be finite and nonnegative")
+    increase = candidate_wer - reference_wer
+    passed = parity_wer <= parity_limit and increase <= increase_limit
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "reference_wer": reference_wer,
+            "candidate_wer": candidate_wer,
+            "wer_increase_from_reference": increase,
+            "wer_to_reference": parity_wer,
+        },
+        "gate": {
+            "max_wer_to_reference": parity_limit,
+            "max_wer_increase_from_reference": increase_limit,
+        },
+        "samples": rows,
+    }
+
+
+def _speech_audio(request: Mapping[str, Any]) -> str:
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        raise QualificationError("speech request has no messages")
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, Mapping) and item.get("type") == "audio":
+                audio = item.get("audio")
+                if isinstance(audio, str) and audio:
+                    return audio
+    raise QualificationError("speech request has no audio content")
+
+
+def _word_error_counts(reference: str, hypothesis: str) -> list[int]:
+    def words(value: str) -> list[str]:
+        return [
+            normalized
+            for word in value.split()
+            if (normalized := re.sub(r"^[^\w]+|[^\w]+$", "", word).casefold())
+        ]
+
+    left = words(reference)
+    right = words(hypothesis)
+    previous = list(range(len(right) + 1))
+    for row, left_word in enumerate(left, start=1):
+        current = [row]
+        for column, right_word in enumerate(right, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[column] + 1,
+                    previous[column - 1] + (left_word != right_word),
+                )
+            )
+        previous = current
+    return [previous[-1], len(left)]
+
+
+def _rate(counts: Sequence[int]) -> float:
+    return float(counts[0]) / max(int(counts[1]), 1)
 
 
 def _etth1_windows(

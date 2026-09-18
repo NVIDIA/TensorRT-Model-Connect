@@ -67,6 +67,7 @@ VOICECHAT_SYSTEM_PROMPT = (
 )
 ADAPTERS = (
     "hf-diffusers",
+    "hf-chat-asr",
     "hf-qwen3-omni",
     "hf-transformers-asr",
     "hf-transformers-embedding",
@@ -550,7 +551,49 @@ def _load_asr(
     max_new_tokens = int(request.get("max_new_tokens", 100))
     device = torch.device("cuda")
 
-    if arguments.family in {"canary", "nemotron_speech_streaming"}:
+    if arguments.adapter == "hf-chat-asr":
+        from transformers import AutoModel, AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(arguments.model, **_processor_kwargs(arguments))
+        model = (
+            AutoModel.from_pretrained(arguments.model, **_load_kwargs(arguments, torch))
+            .eval()
+            .to(device)
+        )
+        conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio": audio},
+                    {"type": "text", "text": "Please transcribe this audio into text"},
+                ],
+            }
+        ]
+        inputs = processor.apply_chat_template(
+            conversation,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+            sampling_rate=target_rate,
+        ).to(model.device)
+        prompt_tokens = int(inputs["input_ids"].shape[1])
+
+        def invoke() -> Mapping[str, Any]:
+            with torch.inference_mode():
+                generated = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                )
+            token_ids = [int(token) for token in generated[0, prompt_tokens:].cpu().tolist()]
+            return {
+                "text": processor.tokenizer.decode(token_ids, skip_special_tokens=True).strip(),
+                "token_ids": token_ids,
+                "output_tokens": len(token_ids),
+            }
+
+    elif arguments.family in {"canary", "nemotron_speech_streaming"}:
         model = _load_nemo_asr_reference_model(arguments, device=device).eval().to(device)
         _disable_nemo_asr_cuda_graphs(model)
         reference_dtype = _torch_dtype(torch, arguments.precision)
@@ -2296,6 +2339,7 @@ LOADERS: dict[
     str, Callable[[argparse.Namespace, Mapping[str, Any], Mapping[str, Any]], Session]
 ] = {
     "hf-diffusers": _load_diffusers,
+    "hf-chat-asr": _load_asr,
     "hf-qwen3-omni": _load_qwen3_omni,
     "hf-transformers-asr": _load_asr,
     "hf-transformers-embedding": _load_embedding,

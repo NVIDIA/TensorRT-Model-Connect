@@ -390,6 +390,144 @@ def test_timm_classification_uses_a_generic_task_reference_adapter() -> None:
     assert task_reference.LOADERS["timm-classification"] is task_reference._load_vision
 
 
+def test_chat_asr_uses_the_generic_asr_reference_loader() -> None:
+    assert "hf-chat-asr" in task_reference.ADAPTERS
+    assert task_reference.LOADERS["hf-chat-asr"] is task_reference._load_asr
+
+
+def test_speech_accuracy_reports_reference_and_labeled_wer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data_root = tmp_path / "datasets"
+    audio_root = data_root / "speech/audio"
+    audio_root.mkdir(parents=True)
+    for name in ("a.flac", "b.flac"):
+        (audio_root / name).write_bytes(b"fixture")
+    dataset_path = data_root / "speech/dataset.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "requests": [
+                    {
+                        "id": "a",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "audio", "audio": "speech/audio/a.flac"}],
+                            }
+                        ],
+                        "reference": "hello world",
+                    },
+                    {
+                        "id": "b",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "audio", "audio": "speech/audio/b.flac"}],
+                            }
+                        ],
+                        "reference": "one two",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    runner = profile.parent / "reference.py"
+    runner.write_text("# family reference\n", encoding="utf-8")
+    case = QualificationCase(
+        kind="accuracy",
+        model="example",
+        family="example",
+        name="librispeech-wer",
+        benchmark="librispeech_transcription",
+        candidate={
+            "family": "example",
+            "checkpoint": "org/example",
+            "task": "transcription",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={
+            "samples": 2,
+            "request": {"max_new_tokens": 32},
+            "reference": {"command": "reference.py", "precision": "fp32"},
+            "gate": {
+                "max_wer_to_reference": 0.3,
+                "max_wer_increase_from_reference": 0.3,
+            },
+        },
+        source=profile,
+        reference_requirements=None,
+    )
+    dataset = Dataset("speech", dataset_path, "provided", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=data_root,
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+
+    def reference(command, *_args, **_kwargs):
+        output = Path(command[command.index("--output") + 1])
+        wavs = [tmp_path / "a.wav", tmp_path / "b.wav"]
+        for wav in wavs:
+            wav.write_bytes(b"fixture")
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {"sample_id": "a", "text": "hello world", "audio_path": str(wavs[0])},
+                        {"sample_id": "b", "text": "one two", "audio_path": str(wavs[1])},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "speech_transcription_wer_parity"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", reference)
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_candidate_outputs",
+        lambda *_args: (
+            [{"text": "hello world"}, {"text": "one three"}],
+            tmp_path / "example.bundle",
+        ),
+    )
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert result["metrics"] == {
+        "samples": 2,
+        "reference_wer": 0.0,
+        "candidate_wer": 0.25,
+        "wer_increase_from_reference": 0.25,
+        "wer_to_reference": 0.25,
+    }
+
+
 def test_accuracy_forwards_seq2seq_reference_contract_and_nested_dataset_input(
     tmp_path: Path, monkeypatch
 ) -> None:
