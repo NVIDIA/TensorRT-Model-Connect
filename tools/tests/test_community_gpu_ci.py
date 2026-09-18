@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -14,7 +15,8 @@ from types import SimpleNamespace
 import pytest
 
 from tools import community_gpu_ci
-from tools.ci.process import CiError
+from tools.community_gpu_ci import CommunityGpuError as CiError
+from tools.ci import context as ci_context, e2e as ci_e2e
 
 
 def _family(repository: Path, name: str, manifests: list[dict[str, object]]) -> Path:
@@ -121,9 +123,9 @@ def test_family_plan_rejects_missing_or_duplicate_premerge_cases(
         community_gpu_ci.family_plan(tmp_path, "alpha")
 
 
-@pytest.mark.parametrize("missing", [None, "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1"])
-def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, missing: str | None) -> None:
-    """The E2E runtime tree contains core, backend, and the selected family DSO."""
+@pytest.mark.parametrize("with_byok", [False, True])
+def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, with_byok: bool) -> None:
+    """The staged native tree must satisfy the real E2E runtime consumer."""
     build = tmp_path / "build"
     build.mkdir()
     plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
@@ -136,51 +138,38 @@ def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, missin
         "libtrtmc_model_alpha.so",
     )
     for name in required:
-        if name != missing:
-            (build / name).write_bytes(b"native")
+        (build / name).write_bytes(b"native")
 
-    if missing:
-        with pytest.raises(CiError, match=missing):
-            community_gpu_ci._runtime_root(build, plan)
-        return
-
+    if with_byok:
+        (build / "libtrtmc_byok_tvm_ffi.so").write_bytes(b"native")
     runtime = community_gpu_ci._runtime_root(build, plan)
+    runner = ci_e2e.E2ERunner(ci_context.CiContext(tmp_path, {}))
+    with runner._isolated_runtime_root(runtime, plan.family) as isolated:
+        for name in required:
+            assert (isolated / name).resolve() == (build / name).resolve()
+        assert (isolated / "libtrtmc_byok_tvm_ffi.so").is_file() is with_byok
 
-    assert all((runtime / name).is_symlink() for name in required)
 
-
-@pytest.mark.parametrize("state", ["python", "native", "missing_declaration", "missing_adapter"])
-def test_runtime_root_preserves_only_selected_family_cli(tmp_path: Path, state: str) -> None:
+@pytest.mark.parametrize("missing", ["libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1"])
+def test_runtime_root_rejects_missing_public_runtime_libraries(
+    tmp_path: Path, missing: str
+) -> None:
+    """Incomplete public runtime artifacts cannot reach family E2E execution."""
     build = tmp_path / "build"
     build.mkdir()
-    plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
     for name in (
-        "libtrtmc_core.so", "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1",
-        "libtrtmc_backend_trt.so", "libtrtmc_model_alpha.so", "libtrtmc_cli_beta.so",
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_alpha.so",
     ):
-        (build / name).write_bytes(b"native")
-    source = tmp_path / "families/alpha/cli.json"
-    source.parent.mkdir(parents=True)
-    executor = "native" if state in {"native", "missing_adapter"} else "python"
-    source.write_text(json.dumps({"version": 1, "commands": [{"executor": executor}]}))
-    if state == "native":
-        (build / "libtrtmc_cli_alpha.so").write_bytes(b"adapter")
-    for family in ("alpha", "beta"):
-        if family == "alpha" and state == "missing_declaration":
-            continue
-        declaration = build / "families" / family / "cli.json"
-        declaration.parent.mkdir(parents=True)
-        declaration.write_bytes(source.read_bytes())
-    if state.startswith("missing_"):
-        message = "no CLI declaration for alpha" if state == "missing_declaration" else "libtrtmc_cli_alpha.so"
-        with pytest.raises(CiError, match=message):
-            community_gpu_ci._runtime_root(build, plan, tmp_path)
-        return
-    runtime = community_gpu_ci._runtime_root(build, plan, tmp_path)
-    assert (runtime / "families/alpha/cli.json").read_bytes() == source.read_bytes()
-    assert not (runtime / "families/beta").exists()
-    assert (runtime / "libtrtmc_cli_alpha.so").is_file() == (state == "native")
-    assert not (runtime / "libtrtmc_cli_beta.so").exists()
+        if name != missing:
+            (build / name).write_bytes(b"native")
+    plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
+    with pytest.raises(CiError, match="native Community GPU build is missing"):
+        community_gpu_ci._runtime_root(build, plan)
 
 
 def test_checkpoint_staging_verifies_the_resolved_revision(
@@ -226,11 +215,9 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
         community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
 
 
-@pytest.mark.parametrize("executor", [None, "python", "native"])
 def test_gpu_run_builds_native_contract_before_family_e2e(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    executor: str | None,
 ) -> None:
     """The entrypoint supplies every native path required by E2ERunner."""
     _family(
@@ -238,13 +225,6 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         "alpha",
         [{"family": "alpha", "testcases": [{"name": "alpha-smoke", "premerge": True}]}],
     )
-    if executor is not None:
-        (tmp_path / "families/alpha/cli.json").write_text(
-            json.dumps({"version": 1, "commands": [{"executor": executor}]})
-        )
-    other = tmp_path / "families/beta/cli.json"
-    other.parent.mkdir()
-    other.write_text('{"version":1,"commands":[{"executor":"native"}]}')
     build = Path("/tmp") / f"{tmp_path.name}-native-build"
     commands: list[list[str]] = []
     e2e_calls: list[tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]] = []
@@ -269,14 +249,14 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         def _run(self, families: tuple[str, ...], testcases: tuple[str, ...]) -> None:
             e2e_calls.append((self.context.env, families, testcases))
 
-    monkeypatch.setattr(community_gpu_ci, "CiContext", FakeContext)
-    monkeypatch.setattr(community_gpu_ci, "E2ERunner", FakeE2ERunner)
+    monkeypatch.setattr(ci_context, "CiContext", FakeContext)
+    monkeypatch.setattr(ci_e2e, "E2ERunner", FakeE2ERunner)
     monkeypatch.setattr(community_gpu_ci, "_install_family_requirements", lambda *_args: None)
     monkeypatch.setattr(community_gpu_ci, "_stage_checkpoints", lambda *_args: None)
     monkeypatch.setattr(
         community_gpu_ci,
         "_runtime_root",
-        lambda native_build, _plans, _repository: native_build / "runtime",
+        lambda native_build, _plans: native_build / "runtime",
     )
 
     community_gpu_ci.run(
@@ -288,16 +268,16 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
             "TRTMC_GPU_ADDED_FAMILIES": "[]",
             "TRTMC_NATIVE_BUILD_DIR": str(build),
         },
+        "alpha",
     )
 
     assert any(command[:2] == ["cmake", "-S"] for command in commands)
     native_builds = [command for command in commands if command[:2] == ["cmake", "--build"]]
     assert "trtmc" in native_builds[0]
     assert "trtmc_backend_trt" in native_builds[0]
-    expected_targets = ["trtmc_model_alpha"]
-    if executor == "native":
-        expected_targets.append("trtmc_cli_alpha")
-    assert native_builds[1][native_builds[1].index("--target") + 1:] == expected_targets
+    assert "trtmc_runtime" in native_builds[0]
+    assert "trtmc_c" in native_builds[0]
+    assert native_builds[1][-1] == "trtmc_model_alpha"
     assert len(e2e_calls) == 1
     runtime, families, testcases = e2e_calls[0]
     assert families == ("alpha",)
@@ -308,78 +288,175 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     assert runtime["HF_HUB_OFFLINE"] == "1"
 
 
-def test_gpu_run_continues_after_one_family_fails(
+@pytest.mark.parametrize("failed_family", [None, "alpha"])
+def test_containers_are_sequential_and_failures_do_not_skip_families(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failed_family: str | None,
 ) -> None:
-    """One family failure is aggregated only after every selected family ran."""
-    for family in ("alpha", "beta"):
-        _family(
-            tmp_path,
-            family,
-            [
-                {
-                    "family": family,
-                    "testcases": [{"name": f"{family}-smoke", "premerge": True}],
-                }
-            ],
-        )
-    build = Path("/tmp") / f"{tmp_path.name}-isolated-native-build"
-    commands: list[list[str]] = []
-    e2e_calls: list[str] = []
+    """Each execution is removed before the next family starts, including failures."""
+    events = []
+    image = "sha256:" + "a" * 64
 
-    class FakeContext:
-        def __init__(self, repository: Path, env: dict[str, str]):
-            self.repository = repository
-            self.env = env
+    def docker(command, **kwargs):
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
+        if command[:2] == ["docker", "run"]:
+            family = command[-1]
+            assert command[-2] == "--family"
+            assert image in command
+            assert "--rm" in command
+            assert f"{tmp_path}:/src:ro" in command
+            assert f"{Path(community_gpu_ci.__file__).resolve()}:/opt/community_gpu_ci.py:ro" in command
+            assert "PYTHONPATH=/src" in command
+            assert command[-4:] == ["python3.12", "/opt/community_gpu_ci.py", "--family", family]
+            assert not any("HF_TOKEN" in value or "docker.sock" in value for value in command)
+            events.append(("start", family, command[command.index("--name") + 1]))
+            return subprocess.CompletedProcess(command, 17 if family == failed_family else 0)
+        assert command[:3] == ["docker", "rm", "--force"]
+        assert command[-1] == events[-1][2]
+        events.append(("remove", events[-1][1], command[-1]))
+        return subprocess.CompletedProcess(command, 0)
 
-        def run(self, command, **_kwargs) -> subprocess.CompletedProcess[str]:
-            commands.append([str(argument) for argument in command])
-            return subprocess.CompletedProcess(command, 0)
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": '["alpha","beta","gamma"]',
+        "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta","gamma"]',
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        "HF_TOKEN": "must-not-be-forwarded",
+    }
+    if failed_family:
+        with pytest.raises(CiError, match="alpha: container exited 17"):
+            community_gpu_ci.run_containers(tmp_path, env, "test-image")
+    else:
+        community_gpu_ci.run_containers(tmp_path, env, "test-image")
+    assert [(kind, family) for kind, family, _ in events] == [
+        (kind, family) for family in ("alpha", "beta", "gamma") for kind in ("start", "remove")
+    ]
+    assert len({name for kind, _, name in events if kind == "start"}) == 3
 
-    class FakeE2ERunner:
-        def __init__(self, context: FakeContext):
-            self.context = context
 
-        def _run(self, families: tuple[str, ...], _testcases: tuple[str, ...]) -> None:
-            family = families[0]
-            e2e_calls.append(family)
-            if family == "alpha":
-                raise CiError("alpha exploded")
-
-    monkeypatch.setattr(community_gpu_ci, "CiContext", FakeContext)
-    monkeypatch.setattr(community_gpu_ci, "E2ERunner", FakeE2ERunner)
-    monkeypatch.setattr(community_gpu_ci, "_install_family_requirements", lambda *_args: None)
-    monkeypatch.setattr(community_gpu_ci, "_stage_checkpoints", lambda *_args: None)
-    monkeypatch.setattr(
-        community_gpu_ci,
-        "_runtime_root",
-        lambda native_build, plan, _repository: native_build / plan.family / "runtime",
+def test_dependency_build_uses_the_family_container_environment(tmp_path: Path) -> None:
+    """Native package build hooks can import the base image's existing torch."""
+    root = _family(tmp_path, "alpha", [])
+    (root / "requirements.txt").write_text("example==1.0\n")
+    calls = []
+    context = SimpleNamespace(
+        repository=tmp_path, run=lambda command, **kwargs: calls.append(command)
     )
+    community_gpu_ci._install_family_requirements(
+        context, (community_gpu_ci.FamilyPlan("alpha", (), ()),)
+    )
+    assert len(calls) == 1
+    assert "--no-build-isolation" in calls[0]
+    assert calls[0][-1] == root / "requirements.txt"
 
-    with pytest.raises(CiError, match="alpha: alpha exploded"):
-        community_gpu_ci.run(
+
+@pytest.mark.parametrize("already_removed", [False, True])
+def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch, already_removed):
+    """Only confirmed absence may ignore a failed explicit container removal."""
+    started = []
+
+    def docker(command, **kwargs):
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
+        if command[:2] == ["docker", "run"]:
+            started.append(command[-1])
+            return subprocess.CompletedProcess(command, 0)
+        error = f"No such container: {command[-1]}" if already_removed else "daemon unavailable"
+        return subprocess.CompletedProcess(command, 1, stderr=error)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": '["alpha","beta"]',
+        "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta"]',
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+    }
+    if already_removed:
+        community_gpu_ci.run_containers(tmp_path, env, "image")
+        assert started == ["alpha", "beta"]
+    else:
+        with pytest.raises(CiError, match="Cannot remove.*daemon unavailable"):
+            community_gpu_ci.run_containers(tmp_path, env, "image")
+        assert started == ["alpha"]
+
+
+def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
+    """An untrusted tools package cannot execute in the VM coordinator."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    sentinel = tmp_path / "imported"
+    (tools / "__init__.py").write_text(
+        f"from pathlib import Path; Path({str(sentinel)!r}).touch(); raise RuntimeError('untrusted')\n"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(
+        '#!/bin/sh\nif [ "$1" = image ]; then printf "sha256:%s\\n" ' + "a" * 64 + "; fi\n"
+    )
+    docker.chmod(0o755)
+    result = subprocess.run(
+        [sys.executable, community_gpu_ci.__file__, "--containers", "--repository", str(tmp_path)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "PYTHONPATH": str(tmp_path),
+            "TRTMC_GPU_SCOPE": "families",
+            "TRTMC_GPU_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not sentinel.exists()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("TRTMC_COMMUNITY_CONTAINER_TEST_IMAGE"),
+    reason="requires an explicitly selected local Docker image",
+)
+def test_real_containers_do_not_share_family_state(tmp_path: Path, monkeypatch) -> None:
+    """A failed family cannot contaminate later families' packages, builds, or cache."""
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import pathlib, sys, sysconfig\n"
+        "family = sys.argv[-1]\n"
+        "paths = [pathlib.Path(sysconfig.get_paths()['purelib']) / 'trtmc_isolation_probe.py', "
+        "pathlib.Path('/tmp/trtmc-community-gpu-build/probe'), "
+        "pathlib.Path('/tmp/trtmc-community-huggingface/probe')]\n"
+        "for path in paths:\n"
+        "    assert not path.exists(), f'{family} inherited {path}'\n"
+        "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    path.write_text(family)\n"
+        "assert not pathlib.Path('/src/should-not-exist').exists()\n"
+        "try:\n"
+        "    pathlib.Path('/src/should-not-exist').touch()\n"
+        "except OSError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('Source mount is writable')\n"
+        "print(f'{family}: fresh Python environment, build, cache, and read-only source', flush=True)\n"
+        "sys.exit(17 if family == 'bert' else 0)\n"
+    )
+    monkeypatch.setattr(community_gpu_ci, "__file__", str(probe))
+    with pytest.raises(CiError) as error:
+        community_gpu_ci.run_containers(
             tmp_path,
             {
-                "TRTMC_GPU_SCOPE": "families",
-                "TRTMC_GPU_FAMILIES": '["alpha","beta"]',
-                "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta"]',
+                "TRTMC_GPU_SCOPE": "all",
+                "TRTMC_GPU_FAMILIES": "[]",
+                "TRTMC_GPU_DIRECT_FAMILIES": "[]",
                 "TRTMC_GPU_ADDED_FAMILIES": "[]",
-                "TRTMC_NATIVE_BUILD_DIR": str(build),
             },
+            os.environ["TRTMC_COMMUNITY_CONTAINER_TEST_IMAGE"],
         )
-
-    assert e2e_calls == ["alpha", "beta"]
-    family_builds = [
-        command
-        for command in commands
-        if command[:2] == ["cmake", "--build"]
-        and any(argument.startswith("trtmc_model_") for argument in command)
-    ]
-    assert [command[-1] for command in family_builds] == [
-        "trtmc_model_alpha",
-        "trtmc_model_beta",
-    ]
+    assert str(error.value) == "Community GPU family failures: bert: container exited 17"
 
 
 def test_brev_wrapper_caches_application_failure_without_retry(tmp_path: Path) -> None:

@@ -819,7 +819,7 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
     assert steps["Reserve a GPU instance"]["id"] == "reserve"
     test_step = steps["Build the GPU image, check out the exact PR merge, and run the smoke test"]
     assert "sudo docker build -f Dockerfile.dev.x86-gpu" in test_step["run"]
-    assert "sudo docker run --rm --gpus all" in test_step["run"]
+    assert "python3 -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect" in test_step["run"]
     result = steps["Record the step conclusion"]
     assert result["id"] == "result"
     assert result["if"] == "always()"
@@ -1095,9 +1095,10 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert "sleep" not in step["run"]
     gpu = executor["jobs"]["provision-and-test"]
     test = next(step for step in gpu["steps"] if step.get("id") == "test")
-    # Stable retains the existing manual GPU implementation. Dev carries the
-    # automatic public-only GPU experiment as a separate branch commit.
-    assert test["env"]["HF_TOKEN"] == "${{ secrets.HF_TOKEN }}"
+    assert "HF_TOKEN" not in json.dumps(test)
+    assert "git show $CI_SHA:tools/community_gpu_ci.py" in test["run"]
+    assert "git fetch --depth 2 origin $MERGE_SHA" in test["run"]
+    assert "python3 -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect" in test["run"]
     assert gpu["environment"]["name"] == "gpu-ci-dispatch"
     assert gpu["concurrency"]["cancel-in-progress"] is True
 

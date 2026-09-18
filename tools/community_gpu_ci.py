@@ -6,20 +6,25 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import importlib.util
 import os
 import re
+import subprocess
 import sys
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from tools.ci.context import CiContext
-from tools.ci.e2e import E2ERunner
-from tools.ci.package import native_cli_library
-from tools.ci.process import CiError
+if TYPE_CHECKING:
+    from tools.ci.context import CiContext
+
+
+class CommunityGpuError(RuntimeError):
+    """A selected family or its container did not satisfy the GPU contract."""
 
 
 FAMILY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -40,13 +45,13 @@ def _family_list(raw: str, label: str) -> tuple[str, ...]:
     try:
         values = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise CiError(f"{label} is not valid JSON: {error}") from error
+        raise CommunityGpuError(f"{label} is not valid JSON: {error}") from error
     if not isinstance(values, list) or not all(
         isinstance(value, str) and FAMILY_PATTERN.fullmatch(value) for value in values
     ):
-        raise CiError(f"{label} must be a JSON list of valid family names")
+        raise CommunityGpuError(f"{label} must be a JSON list of valid family names")
     if values != sorted(set(values)):
-        raise CiError(f"{label} must be sorted and unique")
+        raise CommunityGpuError(f"{label} must be sorted and unique")
     return tuple(values)
 
 
@@ -61,27 +66,27 @@ def selected_families(
     direct = _family_list(direct_families, "TRTMC_GPU_DIRECT_FAMILIES")
     added = _family_list(added_families, "TRTMC_GPU_ADDED_FAMILIES")
     if set(selected) & set(added):
-        raise CiError("added families overlap the trusted family inventory")
+        raise CommunityGpuError("added families overlap the trusted family inventory")
     if not set(direct) <= set(selected):
-        raise CiError("direct families must belong to the trusted family inventory")
+        raise CommunityGpuError("direct families must belong to the trusted family inventory")
     if scope == "all":
         return tuple(sorted(set(SHARED_SMOKE_FAMILIES) | set(direct) | set(added)))
     if scope == "families":
         if not selected or direct != selected or added:
-            raise CiError("family scope requires existing families only")
+            raise CommunityGpuError("family scope requires existing families only")
         return selected
-    raise CiError(f"GPU execution received non-GPU scope: {scope!r}")
+    raise CommunityGpuError(f"GPU execution received non-GPU scope: {scope!r}")
 
 
 def family_plan(repository: Path, family: str) -> FamilyPlan:
     """Read one family's manifests and select every explicitly premerge case."""
     if not FAMILY_PATTERN.fullmatch(family):
-        raise CiError(f"invalid family name: {family!r}")
+        raise CommunityGpuError(f"invalid family name: {family!r}")
     root = repository / "families" / family
     required = (root / "model.py", root / "tests/test_e2e.py", root / "tests/manifests")
     missing = [str(path.relative_to(repository)) for path in required if not path.exists()]
     if missing:
-        raise CiError(f"{family} GPU plan is missing: " + ", ".join(missing))
+        raise CommunityGpuError(f"{family} GPU plan is missing: " + ", ".join(missing))
 
     cases: list[str] = []
     checkpoints: set[tuple[str, str | None]] = set()
@@ -113,15 +118,17 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
                 checkpoints.add((repo_id, revision))
             cases.extend(selected_cases)
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise CiError(f"invalid GPU manifest {path}: {error}") from error
+            raise CommunityGpuError(f"invalid GPU manifest {path}: {error}") from error
 
     if not manifests:
-        raise CiError(f"{family} has no E2E manifests")
+        raise CommunityGpuError(f"{family} has no E2E manifests")
     if not cases:
-        raise CiError(f"{family} has no E2E testcase marked premerge")
+        raise CommunityGpuError(f"{family} has no E2E testcase marked premerge")
     duplicates = sorted(name for name, count in Counter(cases).items() if count > 1)
     if duplicates:
-        raise CiError(f"{family} has duplicate premerge E2E cases: " + ", ".join(duplicates))
+        raise CommunityGpuError(
+            f"{family} has duplicate premerge E2E cases: " + ", ".join(duplicates)
+        )
     return FamilyPlan(
         family=family,
         testcases=tuple(sorted(cases)),
@@ -140,7 +147,9 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
     ):
         resolved = api.model_info(repo_id, revision=requested_revision).sha
         if not isinstance(resolved, str) or not re.fullmatch(r"[0-9a-f]{40}", resolved):
-            raise CiError(f"Hugging Face did not resolve an immutable revision for {repo_id}")
+            raise CommunityGpuError(
+                f"Hugging Face did not resolve an immutable revision for {repo_id}"
+            )
         snapshot = Path(
             snapshot_download(
                 repo_id=repo_id,
@@ -149,12 +158,12 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
             )
         )
         if snapshot.name != resolved:
-            raise CiError(
+            raise CommunityGpuError(
                 f"checkpoint revision changed while staging {repo_id}: "
                 f"resolved={resolved}, downloaded={snapshot.name}"
             )
         if not (snapshot / "config.json").is_file():
-            raise CiError(f"staged checkpoint has no config.json: {repo_id}@{resolved}")
+            raise CommunityGpuError(f"staged checkpoint has no config.json: {repo_id}@{resolved}")
         print(f"Staged checkpoint {repo_id}@{resolved}")
 
 
@@ -170,6 +179,7 @@ def _install_family_requirements(context: CiContext, plans: tuple[FamilyPlan, ..
                     "pip",
                     "install",
                     "--disable-pip-version-check",
+                    "--no-build-isolation",
                     "--requirement",
                     requirements,
                 ],
@@ -177,7 +187,7 @@ def _install_family_requirements(context: CiContext, plans: tuple[FamilyPlan, ..
             )
 
 
-def _runtime_root(build: Path, plan: FamilyPlan, repository: Path | None = None) -> Path:
+def _runtime_root(build: Path, plan: FamilyPlan) -> Path:
     """Create one family-local runtime tree expected by E2ERunner."""
     runtime = build.parent / f"trtmc-community-runtime-{plan.family}/tensorrt_model_connect/bin"
     runtime.mkdir(parents=True)
@@ -192,26 +202,15 @@ def _runtime_root(build: Path, plan: FamilyPlan, repository: Path | None = None)
     for name in names:
         source = build / name
         if not source.is_file():
-            raise CiError(f"native Community GPU build is missing {source}")
+            raise CommunityGpuError(f"native Community GPU build is missing {source}")
         (runtime / name).symlink_to(source.resolve())
-    declaration = build / "families" / plan.family / "cli.json"
-    if (
-        repository is not None
-        and (repository / "families" / plan.family / "cli.json").is_file()
-        and not declaration.is_file()
-    ):
-        raise CiError(f"native Community GPU build has no CLI declaration for {plan.family}")
-    if declaration.is_file():
-        destination = runtime / "families" / plan.family / "cli.json"
-        destination.parent.mkdir(parents=True)
-        destination.symlink_to(declaration.resolve())
-        if library := native_cli_library(declaration):
-            if not (build / library).is_file():
-                raise CiError(f"native Community GPU build is missing {library}")
-            (runtime / library).symlink_to((build / library).resolve())
+
+    byok = build / "libtrtmc_byok_tvm_ffi.so"
+    if byok.is_file():
+        (runtime / byok.name).symlink_to(byok.resolve())
 
     site_packages = runtime.parent.parent
-    for package_name in ("tensorrt_libs", "torch"):
+    for package_name in ("tensorrt_libs", "torch", "tvm_ffi"):
         specification = importlib.util.find_spec(package_name)
         if specification is None or not specification.submodule_search_locations:
             continue
@@ -220,34 +219,21 @@ def _runtime_root(build: Path, plan: FamilyPlan, repository: Path | None = None)
     return runtime
 
 
-def run(repository: Path, env: dict[str, str]) -> None:
-    """Build native contracts, stage checkpoints, and execute selected E2E cases."""
-    repository = repository.resolve()
-    selected = selected_families(
-        env.get("TRTMC_GPU_SCOPE", ""),
-        env.get("TRTMC_GPU_FAMILIES", ""),
-        env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
-        env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
-    )
-    failures: list[tuple[str, str]] = []
-    plans: list[FamilyPlan] = []
-    for family in selected:
-        try:
-            plans.append(family_plan(repository, family))
-        except (CiError, OSError, ValueError) as error:
-            failures.append((family, str(error)))
-            print(
-                f"Community GPU family failed during planning: {family}: {error}", file=sys.stderr
-            )
-    if not plans:
-        details = "; ".join(f"{family}: {error}" for family, error in failures)
-        raise CiError(f"Community GPU family failures: {details}")
+def run(repository: Path, env: dict[str, str], family: str) -> None:
+    """Build and validate exactly one family inside its fresh container."""
+    from tools.ci.context import CiContext
+    from tools.ci.e2e import E2ERunner
 
+    repository = repository.resolve()
+    plan = family_plan(repository, family)
     build_env = {
         **env,
         "CMAKE_CUDA_ARCHITECTURES": env.get("CMAKE_CUDA_ARCHITECTURES", "89"),
     }
     context = CiContext(repository, build_env)
+    print(f"Running Community GPU E2E: {family} ({', '.join(plan.testcases)})", flush=True)
+    # Install before configuring native targets so they use this family's ABI.
+    _install_family_requirements(context, (plan,))
     context.run(
         [
             sys.executable,
@@ -259,9 +245,9 @@ def run(repository: Path, env: dict[str, str]) -> None:
 
     build = Path(env.get("TRTMC_NATIVE_BUILD_DIR", "/tmp/trtmc-community-gpu-build"))
     if not build.is_absolute() or Path("/tmp") not in build.parents:
-        raise CiError(f"Community GPU build directory must be inside /tmp: {build}")
+        raise CommunityGpuError(f"Community GPU build directory must be inside /tmp: {build}")
     if build.exists():
-        raise CiError(f"Community GPU build directory already exists: {build}")
+        raise CommunityGpuError(f"Community GPU build directory already exists: {build}")
     context.run(
         [
             "cmake",
@@ -285,6 +271,8 @@ def run(repository: Path, env: dict[str, str]) -> None:
             "8",
             "--target",
             "trtmc",
+            "trtmc_runtime",
+            "trtmc_c",
             "trtmc_backend_trt",
         ],
         limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
@@ -294,64 +282,144 @@ def run(repository: Path, env: dict[str, str]) -> None:
         **env,
         "HF_HOME": env.get("HF_HOME", "/tmp/trtmc-community-huggingface"),
     }
-    for plan in plans:
-        print(f"Running Community GPU E2E: {plan.family} ({', '.join(plan.testcases)})")
+    context.run(
+        [
+            "cmake",
+            "--build",
+            build,
+            "--parallel",
+            "8",
+            "--target",
+            f"trtmc_model_{plan.family}",
+        ],
+        limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
+    )
+    runtime_root = _runtime_root(build, plan)
+    _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
+    runtime_env = {
+        **checkpoint_env,
+        "CMAKE_CUDA_ARCHITECTURES": build_env["CMAKE_CUDA_ARCHITECTURES"],
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "PYTHONPATH": ":".join(
+            (
+                str(repository / "core/builder"),
+                str(repository / "apps/benchmark"),
+                str(repository),
+            )
+        ),
+        "TRTMC_BINARY": str(build / "trtmc"),
+        "TRTMC_RUNTIME_ROOT": str(runtime_root),
+        "TRTMC_NATIVE_BUILD_DIR": str(build),
+        "TRTMC_E2E_TIMEOUT": env.get("TRTMC_E2E_TIMEOUT", "40m"),
+    }
+    E2ERunner(CiContext(repository, runtime_env))._run(
+        (plan.family,),
+        plan.testcases,
+    )
+    print(f"Community GPU family passed: {plan.family}", flush=True)
+
+
+def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
+    """Run selected families sequentially without importing contributor code on the VM."""
+    repository = repository.resolve(strict=True)
+    selected = selected_families(
+        env.get("TRTMC_GPU_SCOPE", ""),
+        env.get("TRTMC_GPU_FAMILIES", ""),
+        env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
+        env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
+    )
+    inspected = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    image_id = inspected.stdout.strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise CommunityGpuError("Docker did not resolve an immutable GPU image ID")
+    runner = Path(__file__).resolve()
+    run_id = uuid.uuid4().hex
+    failures = []
+    for family in selected:
+        name = f"trtmc-community-{run_id}-{family}"
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--name",
+            name,
+            "--gpus",
+            "all",
+            "--shm-size",
+            "16g",
+            "--volume",
+            f"{repository}:/src:ro",
+            "--volume",
+            f"{runner}:/opt/community_gpu_ci.py:ro",
+            "--workdir",
+            "/src",
+            "--env",
+            "PYTHONPATH=/src",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "--env",
+            "PYTHONUNBUFFERED=1",
+            "--env",
+            f"CMAKE_CUDA_ARCHITECTURES={env.get('CMAKE_CUDA_ARCHITECTURES', '89')}",
+            image_id,
+            "python3.12",
+            "/opt/community_gpu_ci.py",
+            "--family",
+            family,
+        ]
+        print(f"Starting isolated Community GPU container: {family}", flush=True)
         try:
-            _install_family_requirements(context, (plan,))
-            targets = [f"trtmc_model_{plan.family}"]
-            declaration = repository / "families" / plan.family / "cli.json"
-            if declaration.is_file() and native_cli_library(declaration) is not None:
-                targets.append(f"trtmc_cli_{plan.family}")
-            context.run(
-                [
-                    "cmake",
-                    "--build",
-                    build,
-                    "--parallel",
-                    "8",
-                    "--target",
-                    *targets,
-                ],
-                limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
+            result = subprocess.run(command, check=False)
+            if result.returncode:
+                failures.append(f"{family}: container exited {result.returncode}")
+            print(
+                f"Community GPU container finished: {family} (exit {result.returncode})", flush=True
             )
-            runtime_root = _runtime_root(build, plan, repository)
-            _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
-            runtime_env = {
-                **checkpoint_env,
-                "CMAKE_CUDA_ARCHITECTURES": build_env["CMAKE_CUDA_ARCHITECTURES"],
-                "HF_HUB_OFFLINE": "1",
-                "TRANSFORMERS_OFFLINE": "1",
-                "PYTHONPATH": ":".join(
-                    (
-                        str(repository / "core/builder"),
-                        str(repository / "apps/benchmark"),
-                        str(repository),
-                    )
-                ),
-                "TRTMC_BINARY": str(build / "trtmc"),
-                "TRTMC_RUNTIME_ROOT": str(runtime_root),
-                "TRTMC_NATIVE_BUILD_DIR": str(build),
-                "TRTMC_E2E_TIMEOUT": env.get("TRTMC_E2E_TIMEOUT", "40m"),
-            }
-            E2ERunner(CiContext(repository, runtime_env))._run(
-                (plan.family,),
-                plan.testcases,
+        finally:
+            # Also remove containers left by an interrupted Docker client.
+            cleanup = subprocess.run(
+                ["docker", "rm", "--force", name],
+                check=False,
+                capture_output=True,
+                text=True,
             )
-            print(f"Community GPU family passed: {plan.family}")
-        except (CiError, OSError, ValueError) as error:
-            failures.append((plan.family, str(error)))
-            print(f"Community GPU family failed: {plan.family}: {error}", file=sys.stderr)
+            # --rm normally removed it already. Other errors may leave a live
+            # workload behind, so do not admit the next family in that case.
+            if cleanup.returncode and f"No such container: {name}" not in cleanup.stderr:
+                raise CommunityGpuError(
+                    f"Cannot remove Community GPU container {name}: {cleanup.stderr.strip()}"
+                )
     if failures:
-        details = "; ".join(f"{family}: {error}" for family, error in failures)
-        raise CiError(f"Community GPU family failures: {details}")
+        raise CommunityGpuError("Community GPU family failures: " + "; ".join(failures))
 
 
 def main() -> int:
-    """Run the environment-driven Community GPU entrypoint."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--containers", action="store_true")
+    mode.add_argument("--family")
+    parser.add_argument("--repository", type=Path, default=Path.cwd())
+    parser.add_argument("--image", default="trtmc-quickstart-gpu")
+    args = parser.parse_args()
     try:
-        run(Path.cwd(), dict(os.environ))
-    except (CiError, OSError, ValueError) as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        if args.containers:
+            run_containers(args.repository, dict(os.environ), args.image)
+        else:
+            # Source imports happen only inside the selected family's container.
+            from tools.ci.process import CiError
+
+            try:
+                run(args.repository, dict(os.environ), args.family)
+            except CiError as error:
+                raise CommunityGpuError(str(error)) from error
+    except (CommunityGpuError, OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"ERROR: {error}", file=sys.stderr, flush=True)
         return 1
     return 0
 

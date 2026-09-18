@@ -89,6 +89,32 @@ test criteria remain owned by the source under test. The GPU runner selects
 timm ViT, Whisper, and directly changed or added families. Docs-only changes
 skip GPU. Missing public assets fail visibly rather than count as coverage.
 
+### Sequential family containers
+
+One GPU execution reserves one Brev VM and builds one base image. The coordinator
+then starts a fresh container for each selected family, waits for it to finish,
+removes it, and starts the next family. Shared smoke coverage remains BERT, GPT-2,
+Qwen, timm ViT, and Whisper; directly changed or added families remain selected.
+Failures are collected after every selected family has been attempted.
+
+Each container owns its Python dependencies, native build, runtime directory,
+temporary files, and checkpoint cache. The PR source and selected CI runner are
+mounted read-only. Dependencies are installed before native configuration with
+`--no-build-isolation`, so native package build hooks can use the image's PyTorch.
+This pip option does not share environments between family containers. Repository
+credentials and the Docker socket are not mounted into the test containers.
+
+Develop and qualify GPU runner changes on `ci/developer`. A PR for this change
+must target `ci/developer`, so merging it updates the implementation selected by
+the Dev lane. After qualification, promote the reviewed Dev implementation to
+`main` in a separate PR. Keep the Stable lane unchanged during development and
+apply the main-only publisher guard from #1341 before promotion.
+
+Container isolation addresses dependency and writable-state contamination. It
+does not grant access to gated checkpoints, stage undeclared secondary assets,
+repair family bundles or numerical mismatches, or establish the cause of a lost
+Brev SSH connection. Those failures must remain visible during qualification.
+
 The existing `gpu-ci-dispatch` environment permits `main` and protected
 `ci/developer`. Only administrators may update the latter. The dispatcher accepts
 only `main` and `ci/developer`; additional refs need an explicit allowlist update,

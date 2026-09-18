@@ -926,7 +926,7 @@ jobs:
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
           brev create "$instance_name" -g L40 --timeout 600
 
-      - name: Build the GPU image, check out the exact PR merge, and run the smoke test
+      - name: Build the GPU image and validate the exact PR merge
         id: test
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
@@ -936,39 +936,36 @@ jobs:
           DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
           ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
           SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          CUDA_ARCHITECTURES: ${{ vars.TRTMC_COMMUNITY_CUDA_ARCHITECTURES || '89' }}
+          CI_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin refs/pull/$PR_NUMBER/merge && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
+          brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
+          # The host coordinator and container entrypoint belong to the chosen
+          # CI commit. Neither imports contributor code outside the container.
+          [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py"
           # A freshly created instance's SSH session may not have its Docker
           # group membership yet. The first live GPU run reached this point
           # and failed on docker.sock, so do not depend on propagation timing.
           brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements"
 
-          # The isolated runner builds the native binary, TensorRT backend,
-          # selected family DSOs, and configured CTest tree. It then stages
-          # checkpoint revisions and uses E2ERunner's explicit premerge case
-          # selection plus JUnit validation, which rejects skips and omissions.
-          # HF_TOKEN: some premerge checkpoints (e.g. sam3) are gated and
-          # fail to download without authorization. huggingface_hub reads
-          # HF_TOKEN from the environment automatically (verified directly
-          # against huggingface_hub.get_token()); no code change is needed
-          # in tools.community_gpu_ci to consume it. GitHub Actions masks
-          # the secret value everywhere it appears, including here.
+          # Each selected family gets a fresh container on this one VM. The
+          # coordinator waits for its removal before starting the next family,
+          # and aggregates failures after all families have been attempted.
+          # Repository credentials are not forwarded to contributor code.
           echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
           python3 -m tools.brev_exec \
             --instance "$INSTANCE_NAME" \
             --log /tmp/gpu-ci-output.log \
             --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            -- sudo docker run --rm --gpus all --shm-size 16g \
-            -v /tmp/model_connect:/src -w /src \
-            -e "TRTMC_GPU_SCOPE=$SCOPE" \
-            -e "TRTMC_GPU_FAMILIES=$FAMILIES" \
-            -e "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
-            -e "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
-            -e "HF_TOKEN=$HF_TOKEN" \
-            -e CMAKE_CUDA_ARCHITECTURES=89 \
-            trtmc-quickstart-gpu python3.12 -m tools.community_gpu_ci
+            -- sudo env \
+            "TRTMC_GPU_SCOPE=$SCOPE" \
+            "TRTMC_GPU_FAMILIES=$FAMILIES" \
+            "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
+            "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
+            python3 -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
