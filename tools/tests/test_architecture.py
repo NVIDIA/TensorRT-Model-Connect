@@ -524,6 +524,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
             "tools/benchmark_qualification/benchmarks/image_features_performance.yaml",
             "tools/benchmark_qualification/benchmarks/imagenette_classification.yaml",
             "tools/benchmark_qualification/benchmarks/imagenette_detection_parity.yaml",
+            "tools/benchmark_qualification/benchmarks/imagenette_prompted_segmentation_parity.yaml",
             "tools/benchmark_qualification/benchmarks/imagenette_segmentation_parity.yaml",
             "tools/benchmark_qualification/benchmarks/librispeech_transcription.yaml",
             "tools/benchmark_qualification/benchmarks/mmlu_continuation.yaml",

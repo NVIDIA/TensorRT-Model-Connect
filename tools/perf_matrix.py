@@ -85,6 +85,7 @@ OUTPUT_CONTRACTS = {
     "ocr-text",
     "offline-speech-shape",
     "pose-refinement-shape",
+    "prompted-mask-parity",
     "reranking-order",
     "robot-action-shape",
     "segmentation-shape",
@@ -1365,6 +1366,8 @@ def _output_contract(
         right_shape = tuple(right.get(name) for name in ("num_masks", "height", "width"))
         matched = None not in left_shape and left_shape == right_shape
         return matched, "segmentation output shape differs" if not matched else "", None
+    if contract == "prompted-mask-parity":
+        return _prompted_mask_parity(entry, left, right)
     if contract == "detection-parity":
         return _detection_parity(entry, left, right)
     if contract == "classification-top-class":
@@ -2028,6 +2031,89 @@ def _detection_values(summary: Mapping[str, Any]) -> list[dict[str, Any]] | None
             {"box": coordinates, "score": confidence, "class_id": class_id}
         )
     return detections
+
+
+def _prompted_mask_values(
+    summary: Mapping[str, Any],
+) -> tuple[int, int, list[list[bool]]] | None:
+    height = summary.get("height")
+    width = summary.get("width")
+    count = summary.get("num_masks")
+    masks = summary.get("masks")
+    kind = summary.get("mask_kind", "logits")
+    if (
+        isinstance(height, bool)
+        or not isinstance(height, int)
+        or height < 1
+        or isinstance(width, bool)
+        or not isinstance(width, int)
+        or width < 1
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 1
+        or not isinstance(masks, list)
+        or len(masks) != count * height * width
+        or kind not in {"logits", "probability", "binary"}
+    ):
+        return None
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in masks):
+        return None
+    numeric = [float(value) for value in masks]
+    if not all(math.isfinite(value) for value in numeric):
+        return None
+    threshold = 0.0 if kind == "logits" else 0.5
+    area = height * width
+    return height, width, [
+        [value > threshold for value in numeric[index : index + area]]
+        for index in range(0, len(numeric), area)
+    ]
+
+
+def _binary_mask_iou(left: Sequence[bool], right: Sequence[bool]) -> float:
+    intersection = sum(a and b for a, b in zip(left, right, strict=True))
+    union = sum(a or b for a, b in zip(left, right, strict=True))
+    return intersection / union if union else 1.0
+
+
+def _prompted_mask_parity(
+    entry: ResolvedEntry,
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> tuple[bool, str, dict[str, Any] | None]:
+    candidate = _prompted_mask_values(left)
+    reference = _prompted_mask_values(right)
+    if candidate is None or reference is None:
+        return False, "prompted mask output is invalid", None
+    if candidate[:2] != reference[:2] or len(candidate[2]) != len(reference[2]):
+        return (
+            False,
+            "prompted mask shape or count differs",
+            {
+                "candidate_shape": [len(candidate[2]), *candidate[:2]],
+                "reference_shape": [len(reference[2]), *reference[:2]],
+            },
+        )
+    matched_reference: set[int] = set()
+    matches = []
+    for mask in candidate[2]:
+        choices = [
+            (_binary_mask_iou(mask, expected), index)
+            for index, expected in enumerate(reference[2])
+            if index not in matched_reference
+        ]
+        iou, index = max(choices)
+        matched_reference.add(index)
+        matches.append(iou)
+    minimum_iou = min(matches)
+    required_iou = float(entry.spec["baseline"].get("min_mask_iou", 0.7))
+    evidence = {
+        "masks": len(matches),
+        "minimum_mask_iou": minimum_iou,
+        "required_mask_iou": required_iou,
+    }
+    if minimum_iou < required_iou:
+        return False, "prompted mask IoU is below the contract", evidence
+    return True, "", evidence
 
 
 def _detection_parity(

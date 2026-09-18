@@ -3212,3 +3212,35 @@ def test_detection_output_contract_matches_by_class_and_iou() -> None:
     assert evidence["minimum_box_iou"] >= 0.9
     reference["output_summary"]["class_ids"] = [8]
     assert perf._output_contract(entry, candidate, reference)[0] is False
+
+
+def test_prompted_mask_contract_matches_binary_semantics() -> None:
+    entry = SimpleNamespace(
+        spec={"baseline": {"output_contract": "prompted-mask-parity", "min_mask_iou": 0.7}}
+    )
+    candidate = {
+        "output_summary": {
+            "num_masks": 1,
+            "height": 2,
+            "width": 2,
+            "mask_kind": "logits",
+            "masks": [2.0, -1.0, -1.0, 3.0],
+        }
+    }
+    reference = {
+        "output_summary": {
+            "num_masks": 1,
+            "height": 2,
+            "width": 2,
+            "mask_kind": "binary",
+            "masks": [1, 0, 0, 1],
+        }
+    }
+
+    matched, reason, evidence = perf._output_contract(entry, candidate, reference)
+
+    assert matched is True
+    assert reason == ""
+    assert evidence == {"masks": 1, "minimum_mask_iou": 1.0, "required_mask_iou": 0.7}
+    reference["output_summary"]["masks"] = [0, 1, 1, 0]
+    assert perf._output_contract(entry, candidate, reference)[0] is False
