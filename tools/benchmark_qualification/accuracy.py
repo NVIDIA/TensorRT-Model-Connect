@@ -78,6 +78,10 @@ def _text_generation_parity(
         raise QualificationError(
             f"unsupported Accuracy output token policy {output_token_policy!r}"
         )
+    reference_generation = dict(candidate_request)
+    source_language_placement = reference.get("source_language_placement")
+    if source_language_placement is not None:
+        reference_generation["source_language_placement"] = source_language_placement
     reference_request = {
         "model": str(case.candidate["checkpoint"]),
         "revision": case.candidate.get("revision"),
@@ -87,7 +91,7 @@ def _text_generation_parity(
         "output_token_policy": output_token_policy,
         "prompt_token_limit": int(configured.get("prompt_token_limit", 192)),
         "truncation_side": str(configured.get("truncation_side", "left")),
-        "generation": dict(candidate_request),
+        "generation": reference_generation,
         "samples": selected,
     }
     experts_implementation = reference.get("experts_implementation")
