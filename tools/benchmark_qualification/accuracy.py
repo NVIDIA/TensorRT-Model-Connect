@@ -57,6 +57,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _semantic_segmentation_parity(case, context, dataset, output)
     elif metric_name == "vision_language_text_parity":
         result = _vision_language_text_parity(case, context, dataset, output)
+    elif metric_name == "ocr_text_parity":
+        result = _ocr_text_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
@@ -1560,6 +1562,143 @@ def _vision_language_text_parity(
             "samples": len(rows),
             "sample_pass_rate": sample_pass_rate,
             "max_normalized_edit_distance": max(row["normalized_edit_distance"] for row in rows),
+        },
+        "gate": {
+            "max_normalized_edit_distance": maximum_distance,
+            "min_sample_pass_rate": minimum_sample_rate,
+        },
+        "samples": rows,
+    }
+
+
+def _ocr_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(dataset.path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise QualificationError("OCR dataset is not valid JSON") from error
+    samples = payload.get("samples") if isinstance(payload, Mapping) else None
+    if not isinstance(samples, list) or len(samples) < sample_limit:
+        raise QualificationError(f"OCR dataset requires at least {sample_limit} samples")
+    root = dataset.path.parent.resolve()
+    selected = []
+    for index, sample in enumerate(samples[:sample_limit]):
+        if not isinstance(sample, Mapping):
+            raise QualificationError(f"OCR sample {index} must be an object")
+        media = sample.get("media")
+        image_value = None
+        if isinstance(media, list):
+            for item in media:
+                if isinstance(item, Mapping) and item.get("type") == "image":
+                    image_value = item.get("path")
+                    break
+        prompt = sample.get("question")
+        answer = sample.get("answer")
+        if not isinstance(image_value, str) or not image_value:
+            raise QualificationError(f"OCR sample {index} has no image")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise QualificationError(f"OCR sample {index} has no question")
+        if not isinstance(answer, Mapping):
+            raise QualificationError(f"OCR sample {index} has no answer")
+        aliases = answer.get("aliases", [])
+        primary = answer.get("primary")
+        if not isinstance(aliases, list) or not all(
+            isinstance(value, str) and value.strip() for value in aliases
+        ):
+            raise QualificationError(f"OCR sample {index} has invalid answer aliases")
+        answers = [str(value).strip() for value in aliases]
+        if isinstance(primary, str) and primary.strip() and primary.strip() not in answers:
+            answers.insert(0, primary.strip())
+        if not answers:
+            raise QualificationError(f"OCR sample {index} has no usable answer")
+        image = (root / image_value).resolve()
+        if root not in image.parents or not image.is_file():
+            raise QualificationError(f"OCR sample {index} image is unavailable: {image}")
+        selected.append(
+            {
+                "sample_id": str(sample.get("id") or f"sample-{index}"),
+                "image_path": str(image),
+                "prompt": prompt.strip(),
+                "answers": answers,
+            }
+        )
+    return selected
+
+
+def _ocr_gold_match(text: str, answers: Sequence[str]) -> bool:
+    normalized = _normalized_answer(text).strip(".,!?;:'\"")
+    return any(
+        normalized == _normalized_answer(answer).strip(".,!?;:'\"")
+        for answer in answers
+    )
+
+
+def _ocr_text_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _ocr_samples(dataset, sample_limit)
+    expected = _family_image_reference(case, context, output, selected)
+    request = configured.get("request", {})
+    if not isinstance(request, Mapping):
+        raise QualificationError("OCR request must be an object")
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {
+                **dict(request),
+                "image_path": sample["image_path"],
+                "prompt": sample["prompt"],
+            },
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(case, context, output, "generate", candidate_requests)
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("OCR gate must be an object")
+    maximum_distance = float(gate.get("max_normalized_edit_distance", 0.5))
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not 0.0 <= maximum_distance <= 1.0 or not 0.0 <= minimum_sample_rate <= 1.0:
+        raise QualificationError("OCR gates must be in [0, 1]")
+
+    rows = []
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
+        candidate_text = _normalized_answer(candidate_sample.get("text"))
+        reference_text = _normalized_answer(reference_sample.get("text"))
+        distance = _normalized_edit_distance(candidate_text, reference_text)
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "passed": bool(candidate_text) and distance <= maximum_distance,
+                "candidate_text": candidate_text,
+                "reference_text": reference_text,
+                "normalized_edit_distance": distance,
+                "candidate_gold_match": _ocr_gold_match(candidate_text, sample["answers"]),
+                "reference_gold_match": _ocr_gold_match(reference_text, sample["answers"]),
+            }
+        )
+    sample_pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    candidate_gold_rate = sum(bool(row["candidate_gold_match"]) for row in rows) / len(rows)
+    reference_gold_rate = sum(bool(row["reference_gold_match"]) for row in rows) / len(rows)
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if sample_pass_rate >= minimum_sample_rate else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": sample_pass_rate,
+            "max_normalized_edit_distance": max(row["normalized_edit_distance"] for row in rows),
+            "candidate_normalized_gold_match_rate": candidate_gold_rate,
+            "reference_normalized_gold_match_rate": reference_gold_rate,
         },
         "gate": {
             "max_normalized_edit_distance": maximum_distance,
