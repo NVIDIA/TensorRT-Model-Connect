@@ -4,7 +4,7 @@
   "hf_revision": "23f3482ee9acc4f51a2668a7cdf255fbd9420417",
   "bundle": "seresnet50-a1-in1k.bundle",
   "family": "timm_seresnet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

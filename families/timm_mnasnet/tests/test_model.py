@@ -187,7 +187,7 @@ def test_build_rejects_unqualified_semnasnet_variant(tmp_path: Path):
         model_dir=tmp_path,
         output_path=tmp_path / "unused.bundle",
         family="timm_mnasnet",
-        task="classification",
+        task="image_to_class_scores",
         precision="fp16",
         max_sequence_length=1,
     )
@@ -201,10 +201,55 @@ def test_build_rejects_quantization(tmp_path: Path):
         model_dir=tmp_path,
         output_path=tmp_path / "unused.bundle",
         family="timm_mnasnet",
-        task="classification",
+        task="image_to_class_scores",
         precision="fp16",
         quantization="fp8",
     )
 
     with pytest.raises(NotImplementedError, match="quantization"):
+        build_family(request, object())
+
+
+@pytest.mark.parametrize("metadata", [
+    {},
+    {"vocabulary_id": "fixture:five", "label_names": ["a", "b", "c", "d", "e"]},
+])
+def test_build_exports_task_and_checkpoint_metadata(tmp_path, monkeypatch, metadata):
+    _write_tiny_mnasnet(tmp_path)
+    raw = json.loads((tmp_path / "config.json").read_text())
+    raw.update(metadata)
+    (tmp_path / "config.json").write_text(json.dumps(raw))
+    monkeypatch.setattr(_TimmMnasnetModel, "build_engine", lambda *args, **kwargs: b"plan")
+    sections = {}
+
+    class Writer:
+        def set_header(self, **value):
+            sections["header"] = value
+
+        def add_bytes(self, name, value):
+            sections[name] = value
+
+        def add_json(self, name, value):
+            sections[name] = value
+
+    request = BuildRequest(model_dir=tmp_path, output_path=tmp_path / "model.bundle",
+                           family="timm_mnasnet", task="image_to_class_scores", precision="fp32")
+    build_family(request, Writer())
+    assert sections["header"]["task"] == "image_to_class_scores"
+    assert sections["engine.plan"] == b"plan"
+    assert sections["runtime.json"]["num_classes"] == 5
+    assert sections["runtime.json"]["labels"] == metadata.get("label_names", [])
+    assert sections["runtime.json"]["vocabulary_id"] == metadata.get("vocabulary_id", "")
+
+
+@pytest.mark.parametrize("labels", [["only-one"], ["a", "b", "", "d", "e"], 5])
+def test_build_rejects_incomplete_class_labels(tmp_path, monkeypatch, labels):
+    _write_tiny_mnasnet(tmp_path)
+    raw = json.loads((tmp_path / "config.json").read_text())
+    raw["label_names"] = labels
+    (tmp_path / "config.json").write_text(json.dumps(raw))
+    monkeypatch.setattr(_TimmMnasnetModel, "build_engine", lambda *args, **kwargs: b"plan")
+    request = BuildRequest(model_dir=tmp_path, output_path=tmp_path / "model.bundle",
+                           family="timm_mnasnet", task="image_to_class_scores", precision="fp32")
+    with pytest.raises(ValueError, match="label_names must name every class"):
         build_family(request, object())
