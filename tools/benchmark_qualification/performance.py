@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import sys
 from typing import Any, Mapping
 
@@ -75,6 +76,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     assert isinstance(baseline, Mapping)
     assert isinstance(measurement, Mapping)
     assert isinstance(reference_timing, Mapping)
+    request = _resolve_family_assets(case, request)
     descriptor = write_model_descriptor(case, output, request)
     entry_id = f"qualification.{case.family}.{case.name}"
     suite = {
@@ -217,3 +219,23 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
         result["error"] = error
     write_result(output, result)
     return result
+
+
+def _resolve_family_assets(
+    case: QualificationCase, request: Mapping[str, Any]
+) -> dict[str, Any]:
+    resolved = dict(request)
+    family_root = case.source.parents[2].resolve()
+    for key, value in request.items():
+        if not key.endswith("_path") or not isinstance(value, str):
+            continue
+        path = Path(value)
+        if path.is_absolute():
+            continue
+        path = (case.source.parent / path).resolve()
+        if family_root not in path.parents or not path.is_file():
+            raise QualificationError(
+                f"Performance request asset {key!r} is unavailable inside {family_root}: {path}"
+            )
+        resolved[key] = str(path)
+    return resolved

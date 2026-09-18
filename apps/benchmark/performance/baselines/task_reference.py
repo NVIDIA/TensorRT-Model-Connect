@@ -80,6 +80,7 @@ ADAPTERS = (
     "pytorch-lerobot-act",
     "pytorch-personaplex",
     "pytorch-timeseries",
+    "timm-classification",
     "upstream-elf",
     "upstream-fast-foundation-stereo",
     "upstream-lance",
@@ -1522,7 +1523,7 @@ def _load_vision(
     kwargs = _load_kwargs(arguments, torch)
     processor_kwargs = _processor_kwargs(arguments)
 
-    if arguments.family in {
+    if arguments.adapter == "timm-classification" or arguments.family in {
         "timm_densenet",
         "timm_efficientnet",
         "timm_inception",
@@ -1537,7 +1538,10 @@ def _load_vision(
         import timm
         from timm.data import create_transform, resolve_model_data_config
 
-        model = timm.create_model(f"hf-hub:{arguments.model}", pretrained=True)
+        model_id = arguments.model
+        if arguments.revision:
+            model_id += "@" + arguments.revision
+        model = timm.create_model(f"hf-hub:{model_id}", pretrained=True)
         dtype = _torch_dtype(torch, arguments.precision)
         model = model.eval().to(device=device, dtype=dtype)
         transform = create_transform(**resolve_model_data_config(model), is_training=False)
@@ -1684,7 +1688,8 @@ def _load_vision(
                 "width": width,
             }
 
-    return Session(invoke, "transformers")
+    framework = "timm" if arguments.adapter == "timm-classification" else "transformers"
+    return Session(invoke, framework)
 
 
 def _qwen3_omni_chat_inputs(processor: Any, conversation: Sequence[Mapping[str, Any]]) -> Any:
@@ -2304,6 +2309,7 @@ LOADERS: dict[
     "upstream-moge": _load_moge,
     "pytorch-personaplex": _load_personaplex,
     "pytorch-timeseries": _load_timeseries,
+    "timm-classification": _load_vision,
     "upstream-fast-foundation-stereo": _load_fast_foundation_stereo,
 }
 

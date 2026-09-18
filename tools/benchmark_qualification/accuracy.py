@@ -38,6 +38,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _encoder_embedding_parity(case, context, dataset, output)
     elif metric_name == "forecast_tensor_parity":
         result = _etth1(case, context, definition, dataset, output)
+    elif metric_name == "image_classification_top1_parity":
+        result = _image_classification_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
@@ -699,6 +701,161 @@ def _candidate_outputs(
             raise QualificationError("trtmc-bench omitted an Accuracy output")
         outputs.append(dict(summary))
     return outputs, bundle
+
+
+def _image_classification_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    try:
+        payload = json.loads(dataset.path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise QualificationError("image-classification dataset is not valid JSON") from error
+    requests = payload.get("requests") if isinstance(payload, Mapping) else None
+    if not isinstance(requests, list) or len(requests) < sample_limit:
+        raise QualificationError(
+            f"image-classification dataset requires at least {sample_limit} requests"
+        )
+
+    selected: list[dict[str, Any]] = []
+    dataset_root = dataset.path.parent.resolve()
+    for index, request in enumerate(requests[:sample_limit]):
+        if not isinstance(request, Mapping):
+            raise QualificationError(f"image-classification request {index} must be an object")
+        relative = request.get("image")
+        label = request.get("label")
+        if not isinstance(relative, str) or not relative:
+            raise QualificationError(f"image-classification request {index} has no image")
+        if isinstance(label, bool) or not isinstance(label, int) or label < 0:
+            raise QualificationError(f"image-classification request {index} has no valid label")
+        image = (dataset_root / relative).resolve()
+        if dataset_root not in image.parents or not image.is_file():
+            raise QualificationError(
+                f"image-classification request {index} image is unavailable: {image}"
+            )
+        selected.append(
+            {
+                "sample_id": str(request.get("id") or f"sample-{index}"),
+                "image_path": str(image),
+                "label": label,
+            }
+        )
+
+    reference = configured.get("reference", {})
+    if not isinstance(reference, Mapping):
+        raise QualificationError("image-classification reference must be an object")
+    reference_request = {
+        "model": str(case.candidate["checkpoint"]),
+        "revision": case.candidate.get("revision"),
+        "precision": str(reference.get("precision", "fp32")),
+        "batch_size": int(reference.get("batch_size", 16)),
+        "samples": selected,
+    }
+    request_path = output / "reference-request.json"
+    reference_path = output / "reference.json"
+    _json(request_path, reference_request)
+    runner = (
+        context.repository
+        / "tools/benchmark_qualification/references/timm_image_classification.py"
+    )
+    completed = run_command(
+        [
+            str(reference_python(case, context)),
+            str(runner),
+            "--request",
+            str(request_path),
+            "--output",
+            str(reference_path),
+        ],
+        output,
+        "reference",
+        timeout=3600,
+        verbose=context.verbose,
+    )
+    if completed.returncode != 0:
+        raise QualificationError(f"TIMM Accuracy reference failed; see {output}")
+    reference_payload = json.loads(reference_path.read_text(encoding="utf-8"))
+    expected = reference_payload.get("samples")
+    if not isinstance(expected, list) or len(expected) != len(selected):
+        raise QualificationError("TIMM Accuracy reference returned an invalid sample set")
+
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {"image_path": sample["image_path"]},
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(
+        case, context, output, "classify", candidate_requests
+    )
+    rows = []
+    for sample, reference_sample, candidate_sample in zip(
+        selected, expected, actual, strict=True
+    ):
+        reference_class = reference_sample.get("top_class")
+        candidate_class = candidate_sample.get("top_class")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in (reference_class, candidate_class)
+        ):
+            raise QualificationError("classification output omitted an integer top_class")
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "label": sample["label"],
+                "reference_top_class": reference_class,
+                "candidate_top_class": candidate_class,
+                "reference_correct": reference_class == sample["label"],
+                "candidate_correct": candidate_class == sample["label"],
+                "passed": candidate_class == reference_class,
+            }
+        )
+
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("image-classification gate must be an object")
+    minimum_agreement = float(gate.get("min_top1_agreement", 0.98))
+    maximum_drop = float(gate.get("max_top1_accuracy_drop_from_hf", 0.01))
+    if not 0.0 <= minimum_agreement <= 1.0:
+        raise QualificationError("min_top1_agreement must be in [0, 1]")
+    if maximum_drop < 0.0 or not math.isfinite(maximum_drop):
+        raise QualificationError(
+            "max_top1_accuracy_drop_from_hf must be finite and nonnegative"
+        )
+    agreement = sum(row["passed"] for row in rows) / len(rows)
+    reference_accuracy = sum(row["reference_correct"] for row in rows) / len(rows)
+    candidate_accuracy = sum(row["candidate_correct"] for row in rows) / len(rows)
+    passed = (
+        agreement >= minimum_agreement
+        and candidate_accuracy >= reference_accuracy - maximum_drop
+    )
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "top1_agreement": agreement,
+            "reference_top1_accuracy": reference_accuracy,
+            "candidate_top1_accuracy": candidate_accuracy,
+            "top1_accuracy_drop_from_hf": reference_accuracy - candidate_accuracy,
+        },
+        "gate": {
+            "min_top1_agreement": minimum_agreement,
+            "max_top1_accuracy_drop_from_hf": maximum_drop,
+        },
+        "samples": rows,
+    }
 
 
 def _etth1_windows(
