@@ -3178,3 +3178,37 @@ def test_output_contracts_are_closed_and_semantic(tmp_path: Path) -> None:
     )
     with pytest.raises(perf.PerfMatrixError, match="unsupported output contract"):
         perf._contract_name(bad)
+
+
+def test_detection_output_contract_matches_by_class_and_iou() -> None:
+    entry = SimpleNamespace(
+        spec={
+            "baseline": {
+                "output_contract": "detection-parity",
+                "min_box_iou": 0.9,
+                "max_score_abs_error": 0.05,
+            }
+        }
+    )
+    candidate = {
+        "output_summary": {
+            "boxes": [10.0, 10.0, 50.0, 50.0],
+            "scores": [0.91],
+            "class_ids": [7],
+        }
+    }
+    reference = {
+        "output_summary": {
+            "boxes": [[10.5, 10.0, 50.0, 50.0]],
+            "scores": [0.9],
+            "class_ids": [7],
+        }
+    }
+
+    matched, reason, evidence = perf._output_contract(entry, candidate, reference)
+
+    assert matched is True
+    assert reason == ""
+    assert evidence["minimum_box_iou"] >= 0.9
+    reference["output_summary"]["class_ids"] = [8]
+    assert perf._output_contract(entry, candidate, reference)[0] is False

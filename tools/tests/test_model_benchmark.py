@@ -386,6 +386,220 @@ def test_performance_resolves_profile_owned_relative_assets(tmp_path: Path) -> N
     assert resolved == {"image_path": str(image.resolve()), "batch_size": 1}
 
 
+def test_object_detection_accuracy_matches_classes_boxes_and_scores(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "Imagenette"
+    dataset_root.mkdir()
+    image = dataset_root / "image.jpeg"
+    image.write_bytes(b"fixture")
+    dataset_path = dataset_root / "manifest.json"
+    dataset_path.write_text(
+        json.dumps({"requests": [{"id": "image", "image": "image.jpeg"}]}),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "families/detr/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    runner = profile.parent / "reference.py"
+    runner.write_text("# family reference\n", encoding="utf-8")
+    case = QualificationCase(
+        kind="accuracy",
+        model="example",
+        family="detr",
+        name="detection-parity",
+        benchmark="imagenette_detection_parity",
+        candidate={
+            "family": "detr",
+            "checkpoint": "facebook/example",
+            "task": "object_detection",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={
+            "samples": 1,
+            "request": {"score_threshold": 0.5},
+            "reference": {"command": "reference.py", "precision": "fp32"},
+            "gate": {
+                "min_box_iou": 0.9,
+                "max_score_abs_error": 0.05,
+                "min_detection_match_rate": 1.0,
+                "min_sample_pass_rate": 1.0,
+            },
+        },
+        source=profile,
+        reference_requirements=None,
+    )
+    dataset = Dataset("imagenette-validation", dataset_path, "provided", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+
+    def reference(command, *_args, **_kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {
+                            "sample_id": "image",
+                            "boxes": [[10.0, 20.0, 50.0, 70.0]],
+                            "scores": [0.9],
+                            "class_ids": [3],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "object_detection_parity"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", reference)
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_candidate_outputs",
+        lambda *_args: (
+            [
+                {
+                    "boxes": [10.5, 20.0, 50.0, 70.0],
+                    "scores": [0.89],
+                    "class_ids": [3],
+                }
+            ],
+            tmp_path / "example.bundle",
+        ),
+    )
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert result["metrics"]["detection_match_rate"] == 1.0
+    assert result["metrics"]["min_box_iou"] >= 0.9
+
+
+def test_semantic_segmentation_accuracy_compares_pixel_and_class_iou(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "Imagenette"
+    dataset_root.mkdir()
+    image = dataset_root / "image.jpeg"
+    image.write_bytes(b"fixture")
+    dataset_path = dataset_root / "manifest.json"
+    dataset_path.write_text(
+        json.dumps({"requests": [{"id": "image", "image": "image.jpeg"}]}),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "families/segformer/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    runner = profile.parent / "reference.py"
+    runner.write_text("# family reference\n", encoding="utf-8")
+    case = QualificationCase(
+        kind="accuracy",
+        model="example",
+        family="segformer",
+        name="segmentation-parity",
+        benchmark="imagenette_segmentation_parity",
+        candidate={
+            "family": "segformer",
+            "checkpoint": "nvidia/example",
+            "task": "segmentation",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={
+            "samples": 1,
+            "reference": {"command": "reference.py", "precision": "fp32"},
+            "gate": {
+                "min_pixel_accuracy": 0.75,
+                "min_mean_iou": 0.58,
+                "min_sample_pass_rate": 1.0,
+            },
+        },
+        source=profile,
+        reference_requirements=None,
+    )
+    dataset = Dataset("imagenette-validation", dataset_path, "provided", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+
+    def reference(command, *_args, **_kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {
+                            "sample_id": "image",
+                            "height": 2,
+                            "width": 2,
+                            "mask": [0, 0, 1, 1],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "semantic_segmentation_parity"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", reference)
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_candidate_outputs",
+        lambda *_args: (
+            [{"height": 2, "width": 2, "mask": [0, 0, 1, 0]}],
+            tmp_path / "example.bundle",
+        ),
+    )
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert result["metrics"]["mean_pixel_accuracy"] == 0.75
+    assert result["metrics"]["mean_iou"] >= 0.58
+
+
 def test_image_feature_accuracy_compares_vectors_and_knn_utility(
     tmp_path: Path, monkeypatch
 ) -> None:

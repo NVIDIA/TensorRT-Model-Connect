@@ -45,6 +45,10 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _speech_transcription_parity(case, context, dataset, output)
     elif metric_name == "image_feature_knn_parity":
         result = _image_feature_knn_parity(case, context, dataset, output)
+    elif metric_name == "object_detection_parity":
+        result = _object_detection_parity(case, context, dataset, output)
+    elif metric_name == "semantic_segmentation_parity":
+        result = _semantic_segmentation_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
@@ -116,8 +120,7 @@ def _text_generation_parity(
     runner_value = reference.get("command")
     if runner_value is None:
         runner = (
-            context.repository
-            / "tools/benchmark_qualification/references/hf_text_generation.py"
+            context.repository / "tools/benchmark_qualification/references/hf_text_generation.py"
         )
     else:
         if not isinstance(runner_value, str) or not runner_value:
@@ -709,6 +712,350 @@ def _candidate_outputs(
             raise QualificationError("trtmc-bench omitted an Accuracy output")
         outputs.append(dict(summary))
     return outputs, bundle
+
+
+def _image_parity_samples(dataset: Dataset, sample_limit: int, task: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(dataset.path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise QualificationError(f"{task} dataset is not valid JSON") from error
+    requests = payload.get("requests") if isinstance(payload, Mapping) else None
+    if not isinstance(requests, list) or len(requests) < sample_limit:
+        raise QualificationError(f"{task} dataset requires at least {sample_limit} requests")
+    root = dataset.path.parent.resolve()
+    selected = []
+    for index, request in enumerate(requests[:sample_limit]):
+        relative = request.get("image") if isinstance(request, Mapping) else None
+        if not isinstance(relative, str) or not relative:
+            raise QualificationError(f"{task} request {index} has no image")
+        image = (root / relative).resolve()
+        if root not in image.parents or not image.is_file():
+            raise QualificationError(f"{task} request {index} image is unavailable: {image}")
+        selected.append(
+            {
+                "sample_id": str(request.get("id") or f"sample-{index}"),
+                "image_path": str(image),
+            }
+        )
+    return selected
+
+
+def _family_image_reference(
+    case: QualificationCase,
+    context: RuntimeContext,
+    output: Path,
+    selected: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    reference = case.values.get("reference")
+    if not isinstance(reference, Mapping):
+        raise QualificationError("image Accuracy reference must be an object")
+    runner_value = reference.get("command")
+    if not isinstance(runner_value, str) or not runner_value:
+        raise QualificationError("image Accuracy reference.command must be set")
+    runner = (case.source.parent / runner_value).resolve()
+    family_root = case.source.parents[2].resolve()
+    if family_root not in runner.parents or not runner.is_file():
+        raise QualificationError(f"image reference runner is not family-owned: {runner}")
+    request = case.values.get("request", {})
+    if not isinstance(request, Mapping):
+        raise QualificationError("image Accuracy request must be an object")
+    reference_request = {
+        "model": str(case.candidate["checkpoint"]),
+        "revision": case.candidate.get("revision"),
+        "precision": str(reference.get("precision", "fp32")),
+        "request": dict(request),
+        "samples": list(selected),
+    }
+    request_path = output / "reference-request.json"
+    reference_path = output / "reference.json"
+    _json(request_path, reference_request)
+    completed = run_command(
+        [
+            str(reference_python(case, context)),
+            str(runner),
+            "--request",
+            str(request_path),
+            "--output",
+            str(reference_path),
+        ],
+        output,
+        "reference",
+        timeout=7200,
+        verbose=context.verbose,
+    )
+    if completed.returncode != 0:
+        raise QualificationError(f"image Accuracy reference failed; see {output}")
+    expected = json.loads(reference_path.read_text(encoding="utf-8")).get("samples")
+    if not isinstance(expected, list) or len(expected) != len(selected):
+        raise QualificationError("image Accuracy reference returned an invalid sample set")
+    return expected
+
+
+def _box_iou(left: Sequence[float], right: Sequence[float]) -> float:
+    intersection_width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+    intersection_height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    intersection = intersection_width * intersection_height
+    left_area = max(0.0, left[2] - left[0]) * max(0.0, left[3] - left[1])
+    right_area = max(0.0, right[2] - right[0]) * max(0.0, right[3] - right[1])
+    union = left_area + right_area - intersection
+    return intersection / union if union > 0.0 else 0.0
+
+
+def _detections(value: Mapping[str, Any], label: str) -> list[dict[str, Any]]:
+    boxes = value.get("boxes")
+    scores = value.get("scores")
+    classes = value.get("class_ids", value.get("classes"))
+    if not isinstance(boxes, list) or not isinstance(scores, list) or not isinstance(classes, list):
+        raise QualificationError(f"{label} detection output is incomplete")
+    if boxes and isinstance(boxes[0], list):
+        rows = boxes
+    else:
+        if len(boxes) % 4:
+            raise QualificationError(f"{label} detection boxes are not xyxy rows")
+        rows = [boxes[index : index + 4] for index in range(0, len(boxes), 4)]
+    if len(rows) != len(scores) or len(rows) != len(classes):
+        raise QualificationError(f"{label} detection arrays have different lengths")
+    detections = []
+    for index, (box, score, class_id) in enumerate(zip(rows, scores, classes, strict=True)):
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or isinstance(class_id, bool)
+            or not isinstance(class_id, int)
+        ):
+            raise QualificationError(f"{label} detection {index} is invalid")
+        numeric_box = [float(coordinate) for coordinate in box]
+        numeric_score = float(score)
+        if not all(math.isfinite(value) for value in (*numeric_box, numeric_score)):
+            raise QualificationError(f"{label} detection {index} is not finite")
+        detections.append({"box": numeric_box, "score": numeric_score, "class_id": class_id})
+    return detections
+
+
+def _match_detections(
+    candidate: Sequence[Mapping[str, Any]], reference: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    matched_reference: set[int] = set()
+    matches = []
+    for detection in sorted(candidate, key=lambda item: -float(item["score"])):
+        choices = [
+            (_box_iou(detection["box"], expected["box"]), index)
+            for index, expected in enumerate(reference)
+            if index not in matched_reference
+            and int(detection["class_id"]) == int(expected["class_id"])
+        ]
+        if not choices:
+            continue
+        iou, index = max(choices)
+        matched_reference.add(index)
+        matches.append(
+            {
+                "class_id": int(detection["class_id"]),
+                "iou": iou,
+                "score_abs_error": abs(
+                    float(detection["score"]) - float(reference[index]["score"])
+                ),
+            }
+        )
+    return matches
+
+
+def _object_detection_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _image_parity_samples(dataset, sample_limit, "object-detection")
+    expected = _family_image_reference(case, context, output, selected)
+    request = configured.get("request", {})
+    if not isinstance(request, Mapping):
+        raise QualificationError("object-detection request must be an object")
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {**dict(request), "image_path": sample["image_path"]},
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(case, context, output, "detect", candidate_requests)
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("object-detection gate must be an object")
+    minimum_iou = float(gate.get("min_box_iou", 0.5))
+    maximum_score_error = float(gate.get("max_score_abs_error", 0.05))
+    minimum_match_rate = float(gate.get("min_detection_match_rate", 1.0))
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not all(
+        0.0 <= value <= 1.0 for value in (minimum_iou, minimum_match_rate, minimum_sample_rate)
+    ):
+        raise QualificationError("object-detection rates and IoU must be in [0, 1]")
+    if maximum_score_error < 0.0 or not math.isfinite(maximum_score_error):
+        raise QualificationError("max_score_abs_error must be finite and nonnegative")
+
+    rows = []
+    total_matches = total_detections = 0
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
+        candidate_detections = _detections(candidate_sample, "candidate")
+        reference_detections = _detections(reference_sample, "reference")
+        matches = _match_detections(candidate_detections, reference_detections)
+        denominator = max(len(candidate_detections), len(reference_detections), 1)
+        match_rate = len(matches) / denominator
+        minimum_sample_iou = min((match["iou"] for match in matches), default=1.0)
+        maximum_sample_score_error = max(
+            (match["score_abs_error"] for match in matches), default=0.0
+        )
+        passed = (
+            match_rate >= minimum_match_rate
+            and minimum_sample_iou >= minimum_iou
+            and maximum_sample_score_error <= maximum_score_error
+        )
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "passed": passed,
+                "candidate_detections": len(candidate_detections),
+                "reference_detections": len(reference_detections),
+                "matched_detections": len(matches),
+                "detection_match_rate": match_rate,
+                "min_box_iou": minimum_sample_iou,
+                "max_score_abs_error": maximum_sample_score_error,
+            }
+        )
+        total_matches += len(matches)
+        total_detections += denominator
+    sample_pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    detection_match_rate = total_matches / total_detections
+    passed = sample_pass_rate >= minimum_sample_rate
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": sample_pass_rate,
+            "detection_match_rate": detection_match_rate,
+            "min_box_iou": min(row["min_box_iou"] for row in rows),
+            "max_score_abs_error": max(row["max_score_abs_error"] for row in rows),
+        },
+        "gate": {
+            "min_box_iou": minimum_iou,
+            "max_score_abs_error": maximum_score_error,
+            "min_detection_match_rate": minimum_match_rate,
+            "min_sample_pass_rate": minimum_sample_rate,
+        },
+        "samples": rows,
+    }
+
+
+def _semantic_mask(value: Mapping[str, Any], label: str) -> tuple[int, int, list[int]]:
+    height = value.get("height")
+    width = value.get("width")
+    mask = value.get("mask")
+    if (
+        isinstance(height, bool)
+        or not isinstance(height, int)
+        or height < 1
+        or isinstance(width, bool)
+        or not isinstance(width, int)
+        or width < 1
+        or not isinstance(mask, list)
+        or len(mask) != height * width
+    ):
+        raise QualificationError(f"{label} semantic-segmentation output is invalid")
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in mask):
+        raise QualificationError(f"{label} semantic-segmentation mask is not integral")
+    return height, width, mask
+
+
+def _semantic_segmentation_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _image_parity_samples(dataset, sample_limit, "semantic-segmentation")
+    expected = _family_image_reference(case, context, output, selected)
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {"image_path": sample["image_path"]},
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(case, context, output, "segment", candidate_requests)
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("semantic-segmentation gate must be an object")
+    minimum_pixel_accuracy = float(gate.get("min_pixel_accuracy", 0.99))
+    minimum_mean_iou = float(gate.get("min_mean_iou", 0.94))
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not all(
+        0.0 <= value <= 1.0
+        for value in (minimum_pixel_accuracy, minimum_mean_iou, minimum_sample_rate)
+    ):
+        raise QualificationError("semantic-segmentation gates must be in [0, 1]")
+
+    rows = []
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
+        left_height, left_width, left = _semantic_mask(candidate_sample, "candidate")
+        right_height, right_width, right = _semantic_mask(reference_sample, "reference")
+        if (left_height, left_width) != (right_height, right_width):
+            pixel_accuracy = mean_iou = 0.0
+        else:
+            pixel_accuracy = sum(a == b for a, b in zip(left, right, strict=True)) / len(left)
+            class_ious = []
+            for class_id in sorted(set(left) | set(right)):
+                intersection = sum(a == class_id and b == class_id for a, b in zip(left, right))
+                union = sum(a == class_id or b == class_id for a, b in zip(left, right))
+                if union:
+                    class_ious.append(intersection / union)
+            mean_iou = math.fsum(class_ious) / len(class_ious) if class_ious else 0.0
+        rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "passed": pixel_accuracy >= minimum_pixel_accuracy and mean_iou >= minimum_mean_iou,
+                "pixel_accuracy": pixel_accuracy,
+                "mean_iou": mean_iou,
+                "candidate_shape": [left_height, left_width],
+                "reference_shape": [right_height, right_width],
+            }
+        )
+    sample_pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    passed = sample_pass_rate >= minimum_sample_rate
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": sample_pass_rate,
+            "mean_pixel_accuracy": math.fsum(row["pixel_accuracy"] for row in rows) / len(rows),
+            "mean_iou": math.fsum(row["mean_iou"] for row in rows) / len(rows),
+            "min_pixel_accuracy": min(row["pixel_accuracy"] for row in rows),
+            "min_mean_iou": min(row["mean_iou"] for row in rows),
+        },
+        "gate": {
+            "min_pixel_accuracy": minimum_pixel_accuracy,
+            "min_mean_iou": minimum_mean_iou,
+            "min_sample_pass_rate": minimum_sample_rate,
+        },
+        "samples": rows,
+    }
 
 
 def _image_classification_parity(
