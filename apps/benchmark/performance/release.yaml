@@ -90,6 +90,8 @@ excluded_profiles:
       gemma-2-2b, which exercises the same builder and runtime path.
   - model: gemma-3-270m
     reason: *gemma3_performance_exclusion
+  - model: gemma-3-12b
+    reason: *gemma3_performance_exclusion
   - model: gemma-3-1b
     reason: >-
       Functional and Hugging Face reference-parity qualification is present,

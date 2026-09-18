@@ -387,6 +387,20 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.fp32_layers:
         raise NotImplementedError("Gemma does not expose mixed-precision layer selection")
 
+    _raw = graph_blocks._gemma_raw(config)
+    print("[GEMMA-DIAG] model_type=%r hidden=%s layers=%s heads=%s kv_heads=%s head_dim=%s"
+          % (config.model_type, config.hidden_size, config.num_hidden_layers,
+             config.num_attention_heads, config.num_key_value_heads, config.head_dim), flush=True)
+    print("[GEMMA-DIAG] sliding_window=%r pattern=%r layer_types=%r rope_theta=%r local=%r"
+          % (_raw.get("sliding_window"), _raw.get("sliding_window_pattern"),
+             (len(_raw["layer_types"]) if isinstance(_raw.get("layer_types"), list) else None),
+             _raw.get("rope_theta"), _raw.get("rope_local_base_freq")), flush=True)
+    print("[GEMMA-DIAG] qpas=%r act=%r eps=%r vocab=%r rope_scaling=%r max_pos=%r"
+          % (_raw.get("query_pre_attn_scalar"), _raw.get("hidden_activation") or _raw.get("hidden_act"),
+             _raw.get("rms_norm_eps"), _raw.get("vocab_size"), _raw.get("rope_scaling"),
+             _raw.get("max_position_embeddings")), flush=True)
+    print("[GEMMA-DIAG] raw_keys=%r" % (sorted(_raw.keys()),), flush=True)
+
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
