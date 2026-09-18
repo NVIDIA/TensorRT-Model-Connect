@@ -200,6 +200,7 @@ def test_translation_and_config_reach_reference_generate(monkeypatch) -> None:
 
     class Model:
         config = SimpleNamespace(decoder_start_token_id=0, eos_token_id=3)
+        generation_config = SimpleNamespace(num_beams=4)
 
         def generate(self, **kwargs):
             captured.update(kwargs)
@@ -228,8 +229,36 @@ def test_translation_and_config_reach_reference_generate(monkeypatch) -> None:
     assert captured["input_ids"].tolist() == [[10, 17]]
     assert captured["forced_bos_token_id"] == 11
     assert captured["max_new_tokens"] == 5 and captured["do_sample"] is False
+    assert captured["num_beams"] == 1
     assert captured["repetition_penalty"] == 1.1
     assert output["token_ids"] == [8]
+
+
+def test_reference_only_source_language_placement_reaches_hf_runner(
+    tmp_path: Path,
+) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    original = next(row for row in entries if row["id"] == "m2m_100.generate")
+    spec = {
+        **original,
+        "baseline": {
+            **original["baseline"],
+            "source_language_placement": "replace-final-unk",
+        },
+    }
+    entry = perf.resolve_entries([spec], environment)[0]
+
+    command = perf.baseline_command(entry, environment, tmp_path / "reference.json")
+    request = json.loads(command[command.index("--request-json") + 1])
+
+    assert request["source_language_placement"] == "replace-final-unk"
+    assert not any(
+        "source_language_placement" in argument
+        for argument in perf.candidate_command(
+            entry, environment, tmp_path / "candidate", no_build=True
+        )
+    )
 
 
 @pytest.mark.parametrize(

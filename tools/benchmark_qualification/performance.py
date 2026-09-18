@@ -23,6 +23,37 @@ from .runtime import (
 )
 
 
+_COMPLETED_COMPARISONS = frozenset({"green", "yellow", "red"})
+
+
+def _qualification_status(
+    process_returncode: int,
+    matrix: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> tuple[str, str | None]:
+    row_error = row.get("error")
+    if isinstance(row_error, str) and row_error:
+        return "error", row_error
+    row_status = row.get("status")
+    matrix_status = matrix.get("status")
+    if row_status == "contract-mismatch":
+        return "failed", None
+    if (
+        row_status in _COMPLETED_COMPARISONS
+        and matrix_status == "completed"
+        and process_returncode == 0
+    ):
+        return "passed", None
+    comparison = row.get("comparison")
+    reason = comparison.get("reason") if isinstance(comparison, Mapping) else None
+    if not isinstance(reason, str) or not reason:
+        reason = (
+            f"Performance matrix ended with row status {row_status!r}, "
+            f"matrix status {matrix_status!r}, and exit code {process_returncode}"
+        )
+    return "error", reason
+
+
 def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[str, Any]:
     output = context.case_artifacts(case)
     output.mkdir(parents=True, exist_ok=True)
@@ -149,16 +180,28 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     if not run_directories:
         raise QualificationError(f"Performance produced no result; see {output}")
     run_directory = run_directories[-1]
-    matrix = json.loads((run_directory / "results.json").read_text(encoding="utf-8"))
+    try:
+        matrix = json.loads((run_directory / "results.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise QualificationError(
+            f"Performance produced an unreadable result; see {run_directory}"
+        ) from error
+    if not isinstance(matrix, Mapping):
+        raise QualificationError(f"Performance produced an invalid result; see {run_directory}")
     rows = matrix.get("rows")
-    row = rows[0] if isinstance(rows, list) and len(rows) == 1 else {}
-    passed = completed.returncode == 0 and matrix.get("status") == "completed"
-    comparison = row.get("comparison", {}) if isinstance(row, Mapping) else {}
+    row = (
+        rows[0]
+        if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], Mapping)
+        else {}
+    )
+    status, error = _qualification_status(completed.returncode, matrix, row)
+    comparison_value = row.get("comparison")
+    comparison = comparison_value if isinstance(comparison_value, Mapping) else {}
     result = {
         "schema_version": "trtmc.qualification-result/v1",
         "case": case.id,
         "kind": "performance",
-        "status": "passed" if passed else "failed",
+        "status": status,
         "model": case.model,
         "benchmark": case.benchmark,
         "matrix_run": str(run_directory),
@@ -170,5 +213,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
         },
         "reference_attempts": row.get("reference_attempts", []) if isinstance(row, Mapping) else [],
     }
+    if error is not None:
+        result["error"] = error
     write_result(output, result)
     return result

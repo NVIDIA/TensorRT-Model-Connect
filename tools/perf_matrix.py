@@ -374,6 +374,15 @@ def _validate_entry(entry: Mapping[str, Any]) -> None:
     fallback = baseline.get("fallback")
     if fallback is not None and (not isinstance(fallback, str) or not fallback):
         raise PerfMatrixError(f"entry {entry['id']} baseline.fallback must be a mode")
+    source_placement = baseline.get("source_language_placement")
+    if source_placement is not None and (
+        baseline["runner"] != "hf-transformers"
+        or source_placement != "replace-final-unk"
+    ):
+        raise PerfMatrixError(
+            f"entry {entry['id']} baseline.source_language_placement must be "
+            "replace-final-unk on an hf-transformers reference"
+        )
     if not isinstance(measurement, Mapping):
         raise PerfMatrixError(f"entry {entry['id']} requires measurement")
     warmup = measurement.get("warmup")
@@ -840,7 +849,11 @@ def _baseline_command(
     baseline = entry.spec["baseline"]
     runner = str(baseline["runner"])
     selected_mode = str(mode or _baseline_mode(baseline))
-    request = json.dumps(flatten_config(entry.case.request), ensure_ascii=True, separators=(",", ":"))
+    request_value = flatten_config(entry.case.request)
+    source_placement = baseline.get("source_language_placement")
+    if source_placement is not None:
+        request_value["source_language_placement"] = source_placement
+    request = json.dumps(request_value, ensure_ascii=True, separators=(",", ":"))
     common = [
         "--model",
         str(_adapter_options(entry, environment).get("model_id", entry.model.hf_id)),

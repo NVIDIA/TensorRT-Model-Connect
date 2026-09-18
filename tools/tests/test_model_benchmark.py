@@ -16,6 +16,7 @@ import pytest
 from apps.benchmark.performance.baselines import hf_transformers
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
 from tools.benchmark_qualification import accuracy as qualification_accuracy
+from tools.benchmark_qualification import performance as qualification_performance
 from tools.benchmark_qualification.catalog import (
     QualificationCase,
     QualificationError,
@@ -275,6 +276,7 @@ def test_accuracy_forwards_seq2seq_reference_contract_and_nested_dataset_input(
                 "precision": "fp16",
                 "task": "seq2seq-lm",
                 "output_token_policy": "strip-start-and-eos",
+                "source_language_placement": "replace-final-unk",
             },
             "request": {
                 "max_new_tokens": 128,
@@ -348,6 +350,9 @@ def test_accuracy_forwards_seq2seq_reference_contract_and_nested_dataset_input(
     assert result["status"] == "passed"
     assert captured_reference["task"] == "seq2seq-lm"
     assert captured_reference["output_token_policy"] == "strip-start-and-eos"
+    assert captured_reference["generation"]["source_language_placement"] == (
+        "replace-final-unk"
+    )
     assert captured_reference["samples"] == [
         {"sample_id": "translation-0", "prompt": "The house is wonderful."}
     ]
@@ -409,13 +414,20 @@ def test_hf_translation_supports_transformers5_generic_nllb_tokenizer(runner) ->
             return {256047: "eng_Latn", 256057: "fra_Latn"}[value]
 
     tokenizer = GenericNllbTokenizer()
+    request = {
+        "source_language": "eng_Latn",
+        "source_language_token_id": 256047,
+        "target_language": "fra_Latn",
+        "forced_bos_token_id": 256057,
+    }
+    with pytest.raises(ValueError, match="source_language_placement"):
+        runner._translation_controls(tokenizer, request)
+
     controls, source_token_id = runner._translation_controls(
         tokenizer,
         {
-            "source_language": "eng_Latn",
-            "source_language_token_id": 256047,
-            "target_language": "fra_Latn",
-            "forced_bos_token_id": 256057,
+            **request,
+            "source_language_placement": "replace-final-unk",
         },
     )
     encoded = {
@@ -428,6 +440,141 @@ def test_hf_translation_supports_transformers5_generic_nllb_tokenizer(runner) ->
     assert controls == {"forced_bos_token_id": 256057}
     assert source_token_id == 256047
     assert encoded["input_ids"].tolist() == [[17, 2, 256047]]
+
+
+def test_nllb_profile_owns_its_reference_source_language_placement() -> None:
+    cases = [case for case in discover(REPOSITORY) if case.model == "nllb-200-distilled-600m"]
+
+    assert {case.kind for case in cases} == {"accuracy", "performance"}
+    assert all(
+        case.values["reference"]["source_language_placement"] == "replace-final-unk"
+        for case in cases
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "expected_status", "expected_error"),
+    [
+        (
+            {
+                "status": "contract-mismatch",
+                "comparison": {"reason": "generated token ids differ"},
+                "reference_attempts": [],
+            },
+            "failed",
+            None,
+        ),
+        (
+            {"status": "white", "error": "candidate command failed"},
+            "error",
+            "candidate command failed",
+        ),
+        (
+            {
+                "status": "white",
+                "error": "reference command and configured fallback failed",
+                "reference_attempts": [
+                    {
+                        "mode": "torch-compile",
+                        "exit_code": 1,
+                        "fallback_reason": "reference command failed",
+                    }
+                ],
+            },
+            "error",
+            "reference command and configured fallback failed",
+        ),
+    ],
+)
+def test_performance_distinguishes_model_contract_failures_from_execution_errors(
+    tmp_path: Path,
+    monkeypatch,
+    row: dict[str, object],
+    expected_status: str,
+    expected_error: str | None,
+) -> None:
+    case = QualificationCase(
+        kind="performance",
+        model="example-model",
+        family="example",
+        name="generate",
+        benchmark="text_generation_performance",
+        candidate={
+            "family": "example",
+            "checkpoint": "example/model",
+            "task": "text_generation",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={
+            "operation": "generate",
+            "request": {"prompt": "Hello", "max_new_tokens": 1},
+            "measurement": {"warmup": 1, "iterations": 10},
+            "reference": {
+                "runner": "hf-transformers",
+                "mode": "hf-eager",
+                "precision": "fp32",
+                "output_contract": "exact-token-ids",
+            },
+        },
+        source=tmp_path / "example.yaml",
+        reference_requirements=None,
+    )
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=tmp_path / "runtime",
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=tmp_path / "worker",
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    definition = {
+        "reference_timing": {
+            "timing_scope": "public_operation_call_wall",
+            "input_preparation_included": True,
+            "asset_loading_included": False,
+        },
+        "stability": {
+            "samples": 10,
+            "max_half_median_change_percent": 5.0,
+            "median_band_percent": 5.0,
+            "minimum_samples_within_band": 8,
+            "retries": 1,
+        },
+    }
+
+    def run_matrix(command, *_args, **_kwargs):
+        run_directory = context.case_artifacts(case) / "matrix/run"
+        run_directory.mkdir(parents=True)
+        matrix_row = {"id": "qualification.example.generate", **row}
+        (run_directory / "results.json").write_text(
+            json.dumps({"status": "failed", "rows": [matrix_row]}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(qualification_performance, "load_benchmark", lambda *_: definition)
+    monkeypatch.setattr(
+        qualification_performance,
+        "require_candidate",
+        lambda *_: (context.worker, context.runtime_root),
+    )
+    monkeypatch.setattr(
+        qualification_performance, "reference_python", lambda *_: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_performance, "run_command", run_matrix)
+
+    result = qualification_performance.run_performance(case, context)
+
+    assert result["status"] == expected_status
+    assert result.get("error") == expected_error
 
 
 def test_hf_accuracy_reference_normalizes_seq2seq_control_tokens() -> None:
