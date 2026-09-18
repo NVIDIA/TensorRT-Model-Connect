@@ -408,8 +408,11 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return {"prompt": _prompt(case, root), "batch_size": 1}
     if task == "reranking":
         inputs = _inputs(case)
-        query = inputs.get("query", inputs.get("prompt", case.get("prompt")))
-        documents = inputs.get("documents")
+        query = inputs.get(
+            "query",
+            inputs.get("prompt", case.get("query", case.get("prompt"))),
+        )
+        documents = inputs.get("documents", case.get("documents"))
         if not isinstance(query, str) or not query:
             raise BenchmarkError("reranking testcase requires inputs.prompt or inputs.query")
         if not isinstance(documents, list) or not documents:
