@@ -115,6 +115,47 @@ def test_resolve_family_requires_exactly_one_match(monkeypatch) -> None:
         resolve_family(metadata)
 
 
+def test_exact_file_marker_outranks_a_broad_model_type(monkeypatch) -> None:
+    metadata = ModelMetadata({"model_type": "shared"}, {}, ("owner.marker",))
+    directories = [Path("broad"), Path("exact")]
+    modules = {
+        "families.broad.support": SimpleNamespace(
+            describe=family_support(
+                model_types=("shared",),
+                tasks=("generation",),
+                default_task="generation",
+            )
+        ),
+        "families.exact.support": SimpleNamespace(
+            describe=family_support(
+                required_files=("owner.marker",),
+                tasks=("generation",),
+                default_task="generation",
+            )
+        ),
+    }
+
+    support_module = importlib.import_module("tensorrt_model_connect.model_support")
+    monkeypatch.setattr(support_module, "_family_directories", lambda: directories)
+    monkeypatch.setattr(importlib, "import_module", lambda name: modules[name])
+
+    assert resolve_family(metadata) == (
+        "exact",
+        FamilySupport(("generation",), "generation"),
+    )
+
+
+def test_s1_marker_has_one_owner() -> None:
+    family, _ = resolve_family(
+        ModelMetadata(
+            {"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]},
+            {},
+            ("banner.jpg", "config.json"),
+        )
+    )
+    assert family == "s1_mini"
+
+
 @pytest.mark.parametrize(
     ("model_type", "expected_family"),
     [
