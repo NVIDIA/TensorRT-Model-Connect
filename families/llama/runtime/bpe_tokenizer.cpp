@@ -15,6 +15,7 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -75,6 +76,54 @@ inline std::string utf32_to_utf8(char32_t cp) {
         r.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
     }
     return r;
+}
+
+std::string replace_invalid_utf8(const std::string& text) {
+    static constexpr std::string_view replacement = "\xef\xbf\xbd";
+    std::string result;
+    result.reserve(text.size());
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const auto lead = static_cast<unsigned char>(text[pos]);
+        if (lead < 0x80) {
+            result.push_back(text[pos++]);
+            continue;
+        }
+
+        std::size_t length = 0;
+        if (lead >= 0xC2 && lead <= 0xDF)
+            length = 2;
+        else if (lead >= 0xE0 && lead <= 0xEF)
+            length = 3;
+        else if (lead >= 0xF0 && lead <= 0xF4)
+            length = 4;
+        else {
+            result.append(replacement);
+            ++pos;
+            continue;
+        }
+
+        if (pos + length > text.size()) {
+            result.append(replacement);
+            break;
+        }
+        const auto second = static_cast<unsigned char>(text[pos + 1]);
+        bool valid = (second & 0xC0) == 0x80;
+        if (length >= 3)
+            valid = valid && (static_cast<unsigned char>(text[pos + 2]) & 0xC0) == 0x80;
+        if (length == 4)
+            valid = valid && (static_cast<unsigned char>(text[pos + 3]) & 0xC0) == 0x80;
+        valid = valid && !(lead == 0xE0 && second < 0xA0) && !(lead == 0xED && second >= 0xA0) &&
+                !(lead == 0xF0 && second < 0x90) && !(lead == 0xF4 && second >= 0x90);
+        if (!valid) {
+            result.append(replacement);
+            ++pos;
+            continue;
+        }
+        result.append(text, pos, length);
+        pos += length;
+    }
+    return result;
 }
 
 // Read one UTF-8 codepoint from raw bytes, advance ptr. Returns 0xFFFD on error.
@@ -1009,7 +1058,7 @@ class BpeTokenizer final : public ITokenizer {
                 result.append(text, start, pos - start);
             }
         }
-        return result;
+        return replace_invalid_utf8(result);
     }
 
     // Generic pre-tokenizer used when no GPT-2 pattern is declared.

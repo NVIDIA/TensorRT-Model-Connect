@@ -58,6 +58,18 @@ std::string tokenizer_json() {
     })";
 }
 
+std::string byte_level_tokenizer_json() {
+    return R"({
+      "model": {
+        "type": "BPE",
+        "unk_token": "<unk>",
+        "vocab": {"<unk>": 0, "\u00e2": 1, "\u012b": 2, "\u00a5": 3},
+        "merges": []
+      },
+      "decoder": {"type": "ByteLevel"}
+    })";
+}
+
 std::filesystem::path write_tokenizer_bundle(std::string_view tokenizer) {
     char path[] = "/tmp/trtmc_llama_plugin_helpers_XXXXXX";
     const int descriptor = mkstemp(path);
@@ -103,11 +115,21 @@ void test_exact_special_frame_respects_add_special_false() {
               "exact post-processor frame respects add_special_tokens=false");
 }
 
+void test_byte_level_decode_replaces_incomplete_utf8() {
+    const std::string json = byte_level_tokenizer_json();
+    const auto tokenizer = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
+    check(tokenizer->decode({1, 2}) == "\xef\xbf\xbd",
+          "byte-level decode replaces an incomplete UTF-8 suffix");
+    check(tokenizer->decode({1, 2, 3}) == "\xe2\x89\xa5",
+          "byte-level decode preserves a complete UTF-8 sequence");
+}
+
 } // namespace
 
 int main() {
     test_exact_special_frame_uses_bundle_tokenizer();
     test_exact_special_frame_respects_add_special_false();
+    test_byte_level_decode_replaces_incomplete_utf8();
     if (failures != 0)
         std::cerr << failures << " Llama plugin-helper test(s) failed\n";
     return failures;
