@@ -383,12 +383,18 @@ def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
             )
         finally:
             # Also remove containers left by an interrupted Docker client.
-            subprocess.run(
+            cleanup = subprocess.run(
                 ["docker", "rm", "--force", name],
                 check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
             )
+            # --rm normally removed it already. Other errors may leave a live
+            # workload behind, so do not admit the next family in that case.
+            if cleanup.returncode and f"No such container: {name}" not in cleanup.stderr:
+                raise CommunityGpuError(
+                    f"Cannot remove Community GPU container {name}: {cleanup.stderr.strip()}"
+                )
     if failures:
         raise CommunityGpuError("Community GPU family failures: " + "; ".join(failures))
 

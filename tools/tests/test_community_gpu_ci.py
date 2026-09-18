@@ -143,7 +143,7 @@ def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, with_b
     if with_byok:
         (build / "libtrtmc_byok_tvm_ffi.so").write_bytes(b"native")
     runtime = community_gpu_ci._runtime_root(build, plan)
-    runner = community_gpu_ci.E2ERunner(community_gpu_ci.CiContext(tmp_path, {}))
+    runner = ci_e2e.E2ERunner(ci_context.CiContext(tmp_path, {}))
     with runner._isolated_runtime_root(runtime, plan.family) as isolated:
         for name in required:
             assert (isolated / name).resolve() == (build / name).resolve()
@@ -307,6 +307,9 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
             assert image in command
             assert "--rm" in command
             assert f"{tmp_path}:/src:ro" in command
+            assert f"{Path(community_gpu_ci.__file__).resolve()}:/opt/community_gpu_ci.py:ro" in command
+            assert "PYTHONPATH=/src" in command
+            assert command[-4:] == ["python3.12", "/opt/community_gpu_ci.py", "--family", family]
             assert not any("HF_TOKEN" in value or "docker.sock" in value for value in command)
             events.append(("start", family, command[command.index("--name") + 1]))
             return subprocess.CompletedProcess(command, 17 if family == failed_family else 0)
@@ -348,6 +351,36 @@ def test_dependency_build_uses_the_family_container_environment(tmp_path: Path) 
     assert len(calls) == 1
     assert "--no-build-isolation" in calls[0]
     assert calls[0][-1] == root / "requirements.txt"
+
+
+@pytest.mark.parametrize("already_removed", [False, True])
+def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch, already_removed):
+    """Only confirmed absence may ignore a failed explicit container removal."""
+    started = []
+
+    def docker(command, **kwargs):
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
+        if command[:2] == ["docker", "run"]:
+            started.append(command[-1])
+            return subprocess.CompletedProcess(command, 0)
+        error = f"No such container: {command[-1]}" if already_removed else "daemon unavailable"
+        return subprocess.CompletedProcess(command, 1, stderr=error)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": '["alpha","beta"]',
+        "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta"]',
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+    }
+    if already_removed:
+        community_gpu_ci.run_containers(tmp_path, env, "image")
+        assert started == ["alpha", "beta"]
+    else:
+        with pytest.raises(CiError, match="Cannot remove.*daemon unavailable"):
+            community_gpu_ci.run_containers(tmp_path, env, "image")
+        assert started == ["alpha"]
 
 
 def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
