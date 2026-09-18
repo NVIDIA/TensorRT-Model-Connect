@@ -1238,6 +1238,7 @@ def test_native_loader_and_preprocessing_stay_out_of_shared_core() -> None:
 
 
 def test_applications_own_default_runtime_root_selection() -> None:
+    cmake = (REPO / "CMakeLists.txt").read_text(encoding="utf-8")
     header = (REPO / "core/runtime/include/trtmc/runtime/family_loader.h").read_text(
         encoding="utf-8"
     )
@@ -1246,6 +1247,7 @@ def test_applications_own_default_runtime_root_selection() -> None:
 
     assert "const std::string& runtime_root = {}" not in header
     assert 'throw std::invalid_argument("runtime_root must be explicit and non-empty")' in loader
+    assert "Copying fake runtime DSOs beside libtrtmc_runtime" not in cmake
     assert "if (runtime_root.empty())" in server
     assert "runtime_root = trtmc::loaded_runtime_root();" in server
 

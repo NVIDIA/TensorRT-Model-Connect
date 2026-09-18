@@ -643,15 +643,6 @@ if(TRTMC_BUILD_TESTS)
     trtmc_test_core_incompatible
     trtmc_test_family_fake
   )
-  add_custom_command(TARGET test_family_loader POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      $<TARGET_FILE:trtmc_test_backend_fake>
-      $<TARGET_FILE_DIR:trtmc_runtime>
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      $<TARGET_FILE:trtmc_test_family_fake>
-      $<TARGET_FILE_DIR:trtmc_runtime>
-    COMMENT "Copying fake runtime DSOs beside libtrtmc_runtime for automatic-root testing"
-  )
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
   add_test(NAME family_loader_incompatible_core
     COMMAND ${CMAKE_COMMAND} -E env
