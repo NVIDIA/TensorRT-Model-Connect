@@ -46,6 +46,8 @@ def test_family_configs_auto_discover_without_a_central_model_registry() -> None
         assert relative.parts[0] == case.family
         assert relative.parts[1:3] == ("tests", "benchmark")
         assert case.kind in {"accuracy", "performance"}
+    nemotron_h = [case for case in cases if case.model == "nemotron-h-nano-9b"]
+    assert nemotron_h and all(not case.reference_build_isolation for case in nemotron_h)
 
 
 def test_l0_configs_outside_the_benchmark_folder_are_not_discovered(
@@ -933,6 +935,7 @@ def test_family_reference_environment_inherits_parent_venv_packages(
         values={},
         source=tmp_path / "example.yaml",
         reference_requirements=requirements,
+        reference_build_isolation=False,
     )
     context = RuntimeContext(
         repository=REPOSITORY,
@@ -951,8 +954,10 @@ def test_family_reference_environment_inherits_parent_venv_packages(
     )
     parent_packages = tmp_path / "parent-venv/site-packages"
     parent_packages.mkdir(parents=True)
+    commands = []
 
     def complete(command, *_args, **_kwargs):
+        commands.append(command)
         if command[1:3] == ["-m", "venv"]:
             environment = Path(command[-1])
             (environment / "bin").mkdir(parents=True)
@@ -973,6 +978,8 @@ def test_family_reference_environment_inherits_parent_venv_packages(
         "trtmc-parent-environment.pth"
     )
     assert inherited.read_text(encoding="utf-8") == f"{parent_packages.resolve()}\n"
+    pip_command = next(command for command in commands if command[1:3] == ["-m", "pip"])
+    assert "--no-build-isolation" in pip_command
 
 
 def test_bundle_preparation_uses_the_selected_runtime(

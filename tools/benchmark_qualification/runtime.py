@@ -169,6 +169,7 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     digest = hashlib.sha256()
     digest.update(requirements.read_bytes())
     digest.update(sys.version.encode())
+    digest.update(f"build-isolation={case.reference_build_isolation}".encode())
     environment = context.environment_root / f"{case.family}-{digest.hexdigest()[:12]}"
     python = environment / "bin/python"
     stamp = environment / ".qualification-requirements.sha256"
@@ -193,16 +194,18 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     if created.returncode != 0 or not python.is_file():
         raise QualificationError(f"cannot create reference environment; see {setup_root}")
     _inherit_parent_site_packages(environment)
+    install_command = [
+        str(python),
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+    ]
+    if not case.reference_build_isolation:
+        install_command.append("--no-build-isolation")
+    install_command.extend(("-r", str(requirements)))
     installed = run_command(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "-r",
-            str(requirements),
-        ],
+        install_command,
         setup_root,
         "pip",
         timeout=1800,
