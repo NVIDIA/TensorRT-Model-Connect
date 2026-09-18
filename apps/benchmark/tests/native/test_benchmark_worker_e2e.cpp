@@ -159,6 +159,32 @@ int main(int argc, char** argv) {
             std::filesystem::remove(vector_bundle);
         }
 
+        const auto legacy_image = runtime_root / "benchmark_legacy_segment.ppm";
+        {
+            std::ofstream image(legacy_image, std::ios::binary);
+            image << "P6\n2 1\n255\n";
+            image.write("ABCDEF", 6);
+        }
+        const auto segment_bundle = runtime_root / "benchmark_fake_segmentation.bundle";
+        write_bundle(segment_bundle, "segmentation");
+        Json segment_request = request;
+        segment_request["case_name"] = "fake-segmentation";
+        segment_request["bundle"] = segment_bundle.string();
+        segment_request["operation"] = "segment";
+        segment_request["request"] = {{"image_path", legacy_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << segment_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "segmentation worker process completed");
+        std::ifstream segment_output_file(output_path);
+        Json segment_result;
+        segment_output_file >> segment_result;
+        check(segment_result.at("output_summary").at("mask") == Json::array({7, 7}),
+              "legacy segmentation retains labels for Accuracy comparison");
+        std::filesystem::remove(segment_bundle);
+        std::filesystem::remove(legacy_image);
+
         Json sdk = request;
         sdk["runtime_root"] = argv[3];
         sdk["operation"] = "generate";

@@ -27,6 +27,7 @@ from tools.benchmark_qualification.datasets import Dataset, resolve_dataset
 from tools.benchmark_qualification.references import hf_encoder, hf_text_generation
 from tools.benchmark_qualification.runtime import (
     RuntimeContext,
+    benchmark_executable,
     prepare_bundle,
     reference_python,
     run_command,
@@ -128,6 +129,31 @@ def test_one_model_file_owns_multiple_cases_without_testcase_indirection(
         assert "testcase" not in case.values
         assert "testcase" not in str(case.values)
         assert case.candidate["checkpoint"] == "example/model"
+
+
+def test_family_environment_hook_is_discovered_with_the_model_profiles(tmp_path: Path) -> None:
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        "schema_version: trtmc.qualification/v1\n"
+        "model: example\n"
+        "candidate:\n"
+        "  family: example\n"
+        "  checkpoint: example/model\n"
+        "  task: text_generation\n"
+        "  precision: fp16\n"
+        "accuracy:\n"
+        "  - name: continuation\n"
+        "    benchmark: example_accuracy\n"
+        "performance: []\n",
+        encoding="utf-8",
+    )
+    hook = profile.parent / "prepare_environment.py"
+    hook.write_text("# family hook\n", encoding="utf-8")
+
+    (case,) = discover(tmp_path)
+
+    assert case.environment_hook == hook.resolve()
 
 
 def test_accuracy_forwards_declared_reference_model_load_options(
@@ -1820,6 +1846,122 @@ def test_family_reference_environment_inherits_parent_venv_packages(
         "trtmc-parent-environment.pth"
     )
     assert inherited.read_text(encoding="utf-8") == f"{parent_packages.resolve()}\n"
+
+
+def test_family_environment_hook_runs_after_requirements_install(
+    tmp_path: Path, monkeypatch
+) -> None:
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("example==1\n", encoding="utf-8")
+    hook = tmp_path / "prepare_environment.py"
+    hook.write_text("# family hook\n", encoding="utf-8")
+    case = QualificationCase(
+        kind="accuracy",
+        model="custom-environment-model",
+        family="example",
+        name="continuation",
+        benchmark="mmlu_continuation",
+        candidate={
+            "family": "example",
+            "checkpoint": "example/model",
+            "task": "text_generation",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={},
+        source=tmp_path / "example.yaml",
+        reference_requirements=requirements,
+        environment_hook=hook,
+    )
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=False,
+        verbose=False,
+    )
+    commands: list[list[str]] = []
+    parent_packages = tmp_path / "parent/site-packages"
+    parent_packages.mkdir(parents=True)
+
+    def complete(command, *_args, **_kwargs):
+        commands.append(list(command))
+        if command[1:3] == ["-m", "venv"]:
+            environment = Path(command[-1])
+            (environment / "bin").mkdir(parents=True)
+            (environment / "bin/python").write_text("", encoding="utf-8")
+            child = environment / (
+                f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+            )
+            child.mkdir(parents=True)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("tools.benchmark_qualification.runtime.run_command", complete)
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(parent_packages)])
+
+    python = reference_python(case, context)
+
+    assert commands[-1] == [str(python), str(hook)]
+
+
+def test_benchmark_launcher_uses_the_family_python(tmp_path: Path, monkeypatch) -> None:
+    python = tmp_path / "family env/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    bench = tmp_path / "user tools/trtmc-bench"
+    bench.parent.mkdir(parents=True)
+    bench.write_text("", encoding="utf-8")
+    case = QualificationCase(
+        kind="performance",
+        model="example",
+        family="example",
+        name="generate",
+        benchmark="text_generation_performance",
+        candidate={
+            "family": "example",
+            "checkpoint": "example/model",
+            "task": "text_generation",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={},
+        source=tmp_path / "example.yaml",
+        reference_requirements=None,
+    )
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=bench,
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=False,
+        verbose=False,
+    )
+    monkeypatch.setattr(
+        "tools.benchmark_qualification.runtime.reference_python", lambda *_args: python
+    )
+
+    launcher = benchmark_executable(case, context)
+
+    assert os.access(launcher, os.X_OK)
+    assert launcher.read_text(encoding="utf-8") == (
+        "#!/bin/sh\n"
+        f"exec '{python}' '{bench}' \"$@\"\n"
+    )
 
 
 def test_bundle_preparation_uses_the_selected_runtime(tmp_path: Path, monkeypatch) -> None:

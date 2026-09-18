@@ -9,6 +9,7 @@ import hashlib
 import html
 import json
 import os
+import shlex
 import site
 import shutil
 import subprocess
@@ -126,7 +127,7 @@ def prepare_bundle(
     descriptor: Path,
 ) -> Path:
     command = [
-        str(context.trtmc_bench),
+        str(benchmark_executable(case, context)),
         "run",
         "--model",
         str(descriptor),
@@ -167,8 +168,11 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     if requirements is None:
         return Path(os.path.abspath(sys.executable))
     digest = hashlib.sha256()
+    digest.update(b"qualification-family-environment-v1\0")
     digest.update(requirements.read_bytes())
     digest.update(sys.version.encode())
+    if case.environment_hook is not None:
+        digest.update(case.environment_hook.read_bytes())
     environment = context.environment_root / f"{case.family}-{digest.hexdigest()[:12]}"
     python = environment / "bin/python"
     stamp = environment / ".qualification-requirements.sha256"
@@ -210,8 +214,36 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     )
     if installed.returncode != 0:
         raise QualificationError(f"cannot install reference requirements; see {setup_root}")
+    if case.environment_hook is not None:
+        prepared = run_command(
+            [str(python), str(case.environment_hook)],
+            setup_root,
+            "prepare",
+            timeout=1800,
+            verbose=context.verbose,
+        )
+        if prepared.returncode != 0:
+            raise QualificationError(f"cannot prepare family environment; see {setup_root}")
     stamp.write_text(expected + "\n", encoding="utf-8")
     return python
+
+
+def benchmark_executable(case: QualificationCase, context: RuntimeContext) -> Path:
+    """Run user-facing benchmark and bundle build with the family Python environment."""
+    python = reference_python(case, context)
+    digest = hashlib.sha256(f"{python.resolve()}\0{context.trtmc_bench}".encode()).hexdigest()[:12]
+    launcher = context.environment_root / "launchers" / f"{case.family}-{digest}"
+    contents = (
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(str(python))} {shlex.quote(str(context.trtmc_bench))} \"$@\"\n"
+    )
+    if not launcher.is_file() or launcher.read_text(encoding="utf-8") != contents:
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        temporary = launcher.with_name(f".{launcher.name}.{os.getpid()}.tmp")
+        temporary.write_text(contents, encoding="utf-8")
+        temporary.chmod(0o755)
+        os.replace(temporary, launcher)
+    return launcher
 
 
 def _inherit_parent_site_packages(environment: Path) -> None:

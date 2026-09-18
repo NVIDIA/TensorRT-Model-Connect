@@ -56,6 +56,15 @@ class FakeEmbedding final : public trtmc::IEmbedding {
     }
 };
 
+class FakeSegmentation final : public trtmc::ISegmentation {
+  public:
+    trtmc::SegmentResult segment(const float*, std::int32_t height,
+                                 std::int32_t width) override {
+        return {std::vector<std::int32_t>(static_cast<std::size_t>(height) * width, 7), height,
+                width};
+    }
+};
+
 } // namespace
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
@@ -73,6 +82,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         return new FakeEncoding();
     if (context.reader.info().task == trtmc::IEmbedding::kTask)
         return new FakeEmbedding();
+    if (context.reader.info().task == trtmc::ISegmentation::kTask)
+        return new FakeSegmentation();
     if (context.reader.info().task == trtmc::ITimeSeriesForecast::kTask)
         return new FakeForecast(context.backend, context.kv_cache_size_bytes);
     if (context.reader.info().task == trtmc::ITextGeneration::kTask) {

@@ -12,7 +12,7 @@ candidate:
   bundle: detr-resnet-50.bundle
   build:
     max_sequence_length: 1
-    image_height: 796
+    image_height: 1333
     image_width: 1333
 
 reference_environment:

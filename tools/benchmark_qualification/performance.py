@@ -16,6 +16,7 @@ import yaml
 from .catalog import QualificationCase, QualificationError, load_benchmark
 from .runtime import (
     RuntimeContext,
+    benchmark_executable,
     reference_python,
     require_candidate,
     run_command,
@@ -128,7 +129,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
         "schema_version": "trtmc.perf-environment/v2",
         "name": "qualification",
         "tools": {
-            "trtmc_bench": str(context.trtmc_bench),
+            "trtmc_bench": str(benchmark_executable(case, context)),
             "trtmc_worker": str(worker),
             "hf_transformers_runner": str(
                 context.repository / "apps/benchmark/performance/baselines/hf_transformers.py"
