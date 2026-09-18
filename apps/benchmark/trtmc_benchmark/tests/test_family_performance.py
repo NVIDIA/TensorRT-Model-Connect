@@ -761,6 +761,27 @@ def test_existing_adapter_command_keeps_existing_arguments(repository):
     assert command[command.index("--manifest") + 1] == str(entry.model.manifest_path)
 
 
+def test_hf_reference_can_use_an_independent_pinned_model(repository):
+    entry = _resolved(repository)
+    baseline = {
+        key: value for key, value in entry.spec["baseline"].items() if key != "script"
+    }
+    baseline.update(
+        runner="hf-transformers",
+        model="fixture/reference",
+        revision="b" * 40,
+    )
+    entry = replace(entry, spec={**entry.spec, "baseline": baseline})
+
+    environment = SimpleNamespace(
+        **vars(repository.environment), reference_python=Path(sys.executable)
+    )
+    command = perf.baseline_command(entry, environment, repository.root / "out.json")
+
+    assert command[command.index("--model") + 1] == "fixture/reference"
+    assert command[command.index("--revision") + 1] == "b" * 40
+
+
 @pytest.mark.parametrize("failure", [None, "process", "identity"])
 def test_execute_entry_validates_actual_script_process(repository, tmp_path, monkeypatch, failure):
     entry = _resolved(repository)
