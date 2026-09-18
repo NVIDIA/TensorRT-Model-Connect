@@ -1622,6 +1622,12 @@ def _load_vision(
                 "detections": int(results["scores"].shape[0]),
                 "image_height": height,
                 "image_width": width,
+                "boxes": results["boxes"].float().cpu().reshape(-1).tolist(),
+                "scores": results["scores"].float().cpu().tolist(),
+                "class_ids": results["labels"].cpu().tolist(),
+                "shape": [int(results["scores"].shape[0]), 4],
+                "coordinates": "xyxy",
+                "units": "pixels",
             }
 
     elif arguments.family == "dinov3":
@@ -1660,9 +1666,15 @@ def _load_vision(
 
         def invoke() -> Mapping[str, Any]:
             with torch.inference_mode():
-                logits = model(**inputs).logits
-            masks = logits.argmax(dim=1)
-            return {"mask_count": int(masks.shape[0]), **_tensor_summary(masks)}
+                outputs = model(**inputs)
+            mask = processor.post_process_semantic_segmentation(
+                outputs, target_sizes=[(height, width)]
+            )[0]
+            return {
+                "num_masks": 1,
+                "height": int(mask.shape[0]),
+                "width": int(mask.shape[1]),
+            }
 
     elif arguments.family == "sam3":
         processor = _load_sam3_processor(transformers, arguments.model, processor_kwargs)

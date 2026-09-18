@@ -65,6 +65,7 @@ HF_CACHE_ENVIRONMENT_NAMES = (
 OUTPUT_CONTRACTS = {
     "audio-shape",
     "classification-top-class",
+    "detection-parity",
     "disparity-parity",
     "embedding-shape",
     "exact-text",
@@ -1364,6 +1365,8 @@ def _output_contract(
         right_shape = tuple(right.get(name) for name in ("num_masks", "height", "width"))
         matched = None not in left_shape and left_shape == right_shape
         return matched, "segmentation output shape differs" if not matched else "", None
+    if contract == "detection-parity":
+        return _detection_parity(entry, left, right)
     if contract == "classification-top-class":
         left_class = left.get("top_class")
         right_class = right.get("top_class")
@@ -1989,6 +1992,94 @@ def _localization_contract(
     limit = float(entry.spec["baseline"]["max_normalized_edit_distance"])
     evidence.update(normalized_edit_distance=distance, maximum_text_distance=limit)
     return distance <= limit, "localization text distance exceeds the contract", evidence
+
+
+def _detection_values(summary: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    boxes = summary.get("boxes")
+    scores = summary.get("scores")
+    classes = summary.get("class_ids", summary.get("classes"))
+    if not isinstance(boxes, list) or not isinstance(scores, list) or not isinstance(classes, list):
+        return None
+    if boxes and isinstance(boxes[0], list):
+        rows = boxes
+    else:
+        if len(boxes) % 4:
+            return None
+        rows = [boxes[index : index + 4] for index in range(0, len(boxes), 4)]
+    if len(rows) != len(scores) or len(rows) != len(classes):
+        return None
+    detections = []
+    for box, score, class_id in zip(rows, scores, classes, strict=True):
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or isinstance(class_id, bool)
+            or not isinstance(class_id, int)
+        ):
+            return None
+        try:
+            coordinates = tuple(float(value) for value in box)
+            confidence = float(score)
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in (*coordinates, confidence)):
+            return None
+        detections.append(
+            {"box": coordinates, "score": confidence, "class_id": class_id}
+        )
+    return detections
+
+
+def _detection_parity(
+    entry: ResolvedEntry,
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> tuple[bool, str, dict[str, Any] | None]:
+    candidate = _detection_values(left)
+    reference = _detection_values(right)
+    if candidate is None or reference is None:
+        return False, "detection output is invalid", None
+    if len(candidate) != len(reference):
+        return (
+            False,
+            "detection count differs",
+            {"candidate_count": len(candidate), "reference_count": len(reference)},
+        )
+    matched_reference: set[int] = set()
+    matches = []
+    for detection in sorted(candidate, key=lambda item: -float(item["score"])):
+        choices = [
+            (_box_iou(detection["box"], expected["box"]), index)
+            for index, expected in enumerate(reference)
+            if index not in matched_reference
+            and int(detection["class_id"]) == int(expected["class_id"])
+        ]
+        if not choices:
+            return False, "detection classes differ", None
+        iou, index = max(choices)
+        matched_reference.add(index)
+        matches.append(
+            (
+                iou,
+                abs(float(detection["score"]) - float(reference[index]["score"])),
+            )
+        )
+    minimum_iou = min((match[0] for match in matches), default=1.0)
+    maximum_score_error = max((match[1] for match in matches), default=0.0)
+    required_iou = float(entry.spec["baseline"].get("min_box_iou", 0.5))
+    allowed_score_error = float(entry.spec["baseline"].get("max_score_abs_error", 0.05))
+    evidence = {
+        "detections": len(matches),
+        "minimum_box_iou": minimum_iou,
+        "required_box_iou": required_iou,
+        "maximum_score_abs_error": maximum_score_error,
+        "allowed_score_abs_error": allowed_score_error,
+    }
+    if minimum_iou < required_iou:
+        return False, "detection box IoU is below the contract", evidence
+    if maximum_score_error > allowed_score_error:
+        return False, "detection score error exceeds the contract", evidence
+    return True, "", evidence
 
 
 def _box_iou(left: tuple[float, ...], right: tuple[float, ...]) -> float:
