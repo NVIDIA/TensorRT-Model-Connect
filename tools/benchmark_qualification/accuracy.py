@@ -43,6 +43,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _image_classification_parity(case, context, dataset, output)
     elif metric_name == "speech_transcription_wer_parity":
         result = _speech_transcription_parity(case, context, dataset, output)
+    elif metric_name == "image_feature_knn_parity":
+        result = _image_feature_knn_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
@@ -67,7 +69,9 @@ def _text_generation_parity(
             raise QualificationError(f"text-generation request {index} must be an object")
         selected.append(
             {
-                "sample_id": str(request.get("id") or request.get("sample_id") or f"sample-{index}"),
+                "sample_id": str(
+                    request.get("id") or request.get("sample_id") or f"sample-{index}"
+                ),
                 "prompt": _prompt(request),
             }
         )
@@ -208,10 +212,7 @@ def _encoder_embedding_parity(
         ) from error
     model_class = reference.get("model_class", "auto")
     tokenizer_class = reference.get("tokenizer_class", "auto")
-    if not all(
-        isinstance(value, str) and value
-        for value in (model_class, tokenizer_class)
-    ):
+    if not all(isinstance(value, str) and value for value in (model_class, tokenizer_class)):
         raise QualificationError("encoder reference classes must be non-empty strings")
     reference_request = {
         "model": str(case.candidate["checkpoint"]),
@@ -255,9 +256,7 @@ def _encoder_embedding_parity(
         }
         for sample in samples
     ]
-    candidate, bundle = _candidate_outputs(
-        case, context, output, operation, candidate_requests
-    )
+    candidate, bundle = _candidate_outputs(case, context, output, operation, candidate_requests)
     compared = _compare_encoder_embeddings(reference_samples, candidate, gates)
     return {
         "schema_version": "trtmc.qualification-result/v1",
@@ -291,7 +290,9 @@ def _sts_samples(path: Path, count: int, prefix: str) -> list[dict[str, Any]]:
                 raise QualificationError(f"STSBenchmark row {dataset_index} must be an object")
             sentence1 = row.get("sentence1")
             sentence2 = row.get("sentence2")
-            if not all(isinstance(value, str) and value.strip() for value in (sentence1, sentence2)):
+            if not all(
+                isinstance(value, str) and value.strip() for value in (sentence1, sentence2)
+            ):
                 raise QualificationError(
                     f"STSBenchmark row {dataset_index} must contain two sentences"
                 )
@@ -302,9 +303,7 @@ def _sts_samples(path: Path, count: int, prefix: str) -> list[dict[str, Any]]:
                     f"STSBenchmark row {dataset_index} has an invalid score"
                 ) from error
             if not math.isfinite(score):
-                raise QualificationError(
-                    f"STSBenchmark row {dataset_index} has a non-finite score"
-                )
+                raise QualificationError(f"STSBenchmark row {dataset_index} has a non-finite score")
             pair_id = f"stsbenchmark-{dataset_index:06d}"
             for suffix, side, sentence in (
                 ("a", "sentence1", sentence1),
@@ -387,9 +386,7 @@ def _compare_encoder_embeddings(
             "sentence2",
         }:
             raise QualificationError(f"encoder pair {pair_id!r} is incomplete")
-        reference_similarity = _vector_cosine(
-            expected["sentence1"][1], expected["sentence2"][1]
-        )
+        reference_similarity = _vector_cosine(expected["sentence1"][1], expected["sentence2"][1])
         candidate_similarity = _vector_cosine(actual["sentence1"], actual["sentence2"])
         delta = abs(candidate_similarity - reference_similarity)
         score = float(expected["sentence1"][0]["score"])
@@ -412,9 +409,7 @@ def _compare_encoder_embeddings(
     pass_rate = passed_vectors / len(vector_cosines)
     max_pair_delta = max(pair_deltas)
     status = (
-        "passed"
-        if pass_rate >= minimum_rate and max_pair_delta <= maximum_pair_delta
-        else "failed"
+        "passed" if pass_rate >= minimum_rate and max_pair_delta <= maximum_pair_delta else "failed"
     )
     return {
         "status": status,
@@ -471,16 +466,12 @@ def _finite_vector(values: Sequence[Any], label: str) -> list[float]:
 
 def _vector_cosine(left: Sequence[float], right: Sequence[float]) -> float:
     if len(left) != len(right) or not left:
-        raise QualificationError(
-            f"encoder vector dimensions differ: {len(left)} != {len(right)}"
-        )
+        raise QualificationError(f"encoder vector dimensions differ: {len(left)} != {len(right)}")
     left_norm = math.sqrt(math.fsum(value * value for value in left))
     right_norm = math.sqrt(math.fsum(value * value for value in right))
     if left_norm <= 0.0 or right_norm <= 0.0:
         raise QualificationError("encoder vector must have a nonzero norm")
-    cosine = math.fsum(a * b for a, b in zip(left, right, strict=True)) / (
-        left_norm * right_norm
-    )
+    cosine = math.fsum(a * b for a, b in zip(left, right, strict=True)) / (left_norm * right_norm)
     return max(-1.0, min(1.0, cosine))
 
 
@@ -516,9 +507,9 @@ def _pearson(left: Sequence[float], right: Sequence[float]) -> float | None:
     )
     if denominator <= 0.0:
         return None
-    return math.fsum(
-        a * b for a, b in zip(centered_left, centered_right, strict=True)
-    ) / denominator
+    return (
+        math.fsum(a * b for a, b in zip(centered_left, centered_right, strict=True)) / denominator
+    )
 
 
 def _etth1(
@@ -762,8 +753,7 @@ def _image_classification_parity(
     reference_path = output / "reference.json"
     _json(request_path, reference_request)
     runner = (
-        context.repository
-        / "tools/benchmark_qualification/references/timm_image_classification.py"
+        context.repository / "tools/benchmark_qualification/references/timm_image_classification.py"
     )
     completed = run_command(
         [
@@ -793,13 +783,9 @@ def _image_classification_parity(
         }
         for sample in selected
     ]
-    actual, bundle = _candidate_outputs(
-        case, context, output, "classify", candidate_requests
-    )
+    actual, bundle = _candidate_outputs(case, context, output, "classify", candidate_requests)
     rows = []
-    for sample, reference_sample, candidate_sample in zip(
-        selected, expected, actual, strict=True
-    ):
+    for sample, reference_sample, candidate_sample in zip(selected, expected, actual, strict=True):
         reference_class = reference_sample.get("top_class")
         candidate_class = candidate_sample.get("top_class")
         if any(
@@ -827,15 +813,12 @@ def _image_classification_parity(
     if not 0.0 <= minimum_agreement <= 1.0:
         raise QualificationError("min_top1_agreement must be in [0, 1]")
     if maximum_drop < 0.0 or not math.isfinite(maximum_drop):
-        raise QualificationError(
-            "max_top1_accuracy_drop_from_hf must be finite and nonnegative"
-        )
+        raise QualificationError("max_top1_accuracy_drop_from_hf must be finite and nonnegative")
     agreement = sum(row["passed"] for row in rows) / len(rows)
     reference_accuracy = sum(row["reference_correct"] for row in rows) / len(rows)
     candidate_accuracy = sum(row["candidate_correct"] for row in rows) / len(rows)
     passed = (
-        agreement >= minimum_agreement
-        and candidate_accuracy >= reference_accuracy - maximum_drop
+        agreement >= minimum_agreement and candidate_accuracy >= reference_accuracy - maximum_drop
     )
     return {
         "schema_version": "trtmc.qualification-result/v1",
@@ -952,17 +935,13 @@ def _speech_transcription_parity(
                 "request": {**dict(candidate_request), "audio_path": audio_path},
             }
         )
-    actual, bundle = _candidate_outputs(
-        case, context, output, "transcribe", candidate_requests
-    )
+    actual, bundle = _candidate_outputs(case, context, output, "transcribe", candidate_requests)
 
     rows = []
     gold_reference_counts = [0, 0]
     gold_candidate_counts = [0, 0]
     parity_counts = [0, 0]
-    for source, reference_sample, candidate_sample in zip(
-        selected, expected, actual, strict=True
-    ):
+    for source, reference_sample, candidate_sample in zip(selected, expected, actual, strict=True):
         reference_text = reference_sample.get("text")
         candidate_text = candidate_sample.get("text")
         if not isinstance(reference_text, str) or not reference_text.strip():
@@ -1025,6 +1004,282 @@ def _speech_transcription_parity(
         },
         "samples": rows,
     }
+
+
+def _image_feature_knn_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    bank_per_class = _positive_int(
+        configured.get("bank_samples_per_class"), "accuracy.bank_samples_per_class"
+    )
+    query_per_class = _positive_int(
+        configured.get("query_samples_per_class"), "accuracy.query_samples_per_class"
+    )
+    bank, queries = _image_feature_samples(dataset.path, bank_per_class, query_per_class)
+    samples = [*bank, *queries]
+
+    reference = configured.get("reference")
+    if not isinstance(reference, Mapping):
+        raise QualificationError("image-feature Accuracy reference must be an object")
+    runner_value = reference.get("command")
+    if not isinstance(runner_value, str) or not runner_value:
+        raise QualificationError("image-feature Accuracy reference.command must be set")
+    runner = (case.source.parent / runner_value).resolve()
+    family_root = case.source.parents[2].resolve()
+    if family_root not in runner.parents or not runner.is_file():
+        raise QualificationError(f"image-feature reference runner is not family-owned: {runner}")
+    reference_request = {
+        "model": str(case.candidate["checkpoint"]),
+        "revision": case.candidate.get("revision"),
+        "precision": str(reference.get("precision", "fp32")),
+        "batch_size": int(reference.get("batch_size", 16)),
+        "samples": samples,
+    }
+    request_path = output / "reference-request.json"
+    reference_path = output / "reference.json"
+    _json(request_path, reference_request)
+    completed = run_command(
+        [
+            str(reference_python(case, context)),
+            str(runner),
+            "--request",
+            str(request_path),
+            "--output",
+            str(reference_path),
+        ],
+        output,
+        "reference",
+        timeout=7200,
+        verbose=context.verbose,
+    )
+    if completed.returncode != 0:
+        raise QualificationError(f"image-feature Accuracy reference failed; see {output}")
+    expected = json.loads(reference_path.read_text(encoding="utf-8")).get("samples")
+    if not isinstance(expected, list) or len(expected) != len(samples):
+        raise QualificationError("image-feature reference returned an invalid sample set")
+
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {"image_path": sample["image_path"]},
+        }
+        for sample in samples
+    ]
+    actual, bundle = _candidate_outputs(
+        case, context, output, "extract_features", candidate_requests
+    )
+    reference_vectors = [
+        _finite_vector(sample.get("pooler_output", []), "HF image feature") for sample in expected
+    ]
+    candidate_vectors = [
+        _finite_vector(sample.get("pooler_output", []), "TRTMC image feature") for sample in actual
+    ]
+    if any(len(left) != len(right) for left, right in zip(reference_vectors, candidate_vectors)):
+        raise QualificationError("image-feature reference and candidate dimensions differ")
+
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("image-feature Accuracy gate must be an object")
+    minimum_cosine = float(gate.get("min_pooler_cosine", 0.999))
+    minimum_rate = float(gate.get("min_vector_pass_rate", 1.0))
+    minimum_agreement = float(gate.get("min_knn_top1_agreement", 0.98))
+    maximum_drop = float(gate.get("max_knn_accuracy_drop_from_hf", 0.02))
+    if not -1.0 <= minimum_cosine <= 1.0:
+        raise QualificationError("min_pooler_cosine must be in [-1, 1]")
+    if not 0.0 <= minimum_rate <= 1.0 or not 0.0 <= minimum_agreement <= 1.0:
+        raise QualificationError("image-feature pass rates must be in [0, 1]")
+    if maximum_drop < 0.0 or not math.isfinite(maximum_drop):
+        raise QualificationError("max_knn_accuracy_drop_from_hf must be finite and nonnegative")
+
+    vector_rows = []
+    cosines = []
+    for sample, left, right in zip(samples, reference_vectors, candidate_vectors, strict=True):
+        cosine = _vector_cosine(left, right)
+        cosines.append(cosine)
+        vector_rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "split": sample["split"],
+                "label": sample["label"],
+                "pooler_cosine": cosine,
+                "passed": cosine >= minimum_cosine,
+            }
+        )
+
+    bank_count = len(bank)
+    knn_k = min(_positive_int(configured.get("knn_k", 10), "accuracy.knn_k"), bank_count)
+    temperature = float(configured.get("knn_temperature", 0.07))
+    if not math.isfinite(temperature) or temperature <= 0.0:
+        raise QualificationError("accuracy.knn_temperature must be finite and positive")
+    labels = [sample["label"] for sample in bank]
+    reference_predictions = _knn_predictions(
+        reference_vectors[:bank_count], labels, reference_vectors[bank_count:], knn_k, temperature
+    )
+    candidate_predictions = _knn_predictions(
+        candidate_vectors[:bank_count], labels, candidate_vectors[bank_count:], knn_k, temperature
+    )
+    query_rows = []
+    for sample, expected_label, candidate_label in zip(
+        queries, reference_predictions, candidate_predictions, strict=True
+    ):
+        query_rows.append(
+            {
+                "sample_id": sample["sample_id"],
+                "label": sample["label"],
+                "reference_top1": expected_label,
+                "candidate_top1": candidate_label,
+                "reference_correct": expected_label == sample["label"],
+                "candidate_correct": candidate_label == sample["label"],
+                "passed": candidate_label == expected_label,
+            }
+        )
+    vector_pass_rate = sum(row["passed"] for row in vector_rows) / len(vector_rows)
+    agreement = sum(row["passed"] for row in query_rows) / len(query_rows)
+    reference_accuracy = sum(row["reference_correct"] for row in query_rows) / len(query_rows)
+    candidate_accuracy = sum(row["candidate_correct"] for row in query_rows) / len(query_rows)
+    accuracy_drop = reference_accuracy - candidate_accuracy
+    passed = (
+        vector_pass_rate >= minimum_rate
+        and agreement >= minimum_agreement
+        and accuracy_drop <= maximum_drop
+    )
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "bank_samples": bank_count,
+            "query_samples": len(queries),
+            "vector_pass_rate": vector_pass_rate,
+            "mean_pooler_cosine": math.fsum(cosines) / len(cosines),
+            "min_pooler_cosine": min(cosines),
+            "knn_top1_agreement": agreement,
+            "reference_knn_top1_accuracy": reference_accuracy,
+            "candidate_knn_top1_accuracy": candidate_accuracy,
+            "knn_accuracy_drop_from_hf": accuracy_drop,
+        },
+        "gate": {
+            "min_pooler_cosine": minimum_cosine,
+            "min_vector_pass_rate": minimum_rate,
+            "min_knn_top1_agreement": minimum_agreement,
+            "max_knn_accuracy_drop_from_hf": maximum_drop,
+        },
+        "samples": vector_rows,
+        "queries": query_rows,
+    }
+
+
+def _image_feature_samples(
+    dataset_path: Path, bank_per_class: int, query_per_class: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    payload = json.loads(dataset_path.read_text(encoding="utf-8"))
+    requests = payload.get("requests") if isinstance(payload, Mapping) else None
+    if not isinstance(requests, list) or not requests:
+        raise QualificationError("image-feature dataset must contain requests")
+    root = dataset_path.parent.resolve()
+    bank_path: Path | None = None
+    query_paths: list[Path] = []
+    for request in requests:
+        inputs = request.get("inputs") if isinstance(request, Mapping) else None
+        if not isinstance(inputs, Mapping):
+            raise QualificationError("image-feature dataset request must contain inputs")
+        configured_bank = _dataset_child(root, inputs.get("bank_manifest"), "bank manifest")
+        if bank_path is not None and bank_path != configured_bank:
+            raise QualificationError("image-feature dataset requests use different banks")
+        bank_path = configured_bank
+        query_paths.append(_dataset_child(root, inputs.get("query_manifest"), "query manifest"))
+    assert bank_path is not None
+    bank = _labeled_image_manifest(bank_path, root, "bank")
+    queries = [
+        sample
+        for query_path in query_paths
+        for sample in _labeled_image_manifest(query_path, root, "query")
+    ]
+    return (
+        _take_per_class(bank, bank_per_class, "bank"),
+        _take_per_class(queries, query_per_class, "query"),
+    )
+
+
+def _dataset_child(root: Path, value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise QualificationError(f"image-feature dataset omitted its {label}")
+    path = (root / value).resolve()
+    if root not in path.parents or not path.is_file():
+        raise QualificationError(f"image-feature {label} is unavailable: {path}")
+    return path
+
+
+def _labeled_image_manifest(path: Path, root: Path, split: str) -> list[dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    samples = payload.get("samples") if isinstance(payload, Mapping) else None
+    if not isinstance(samples, list) or not samples:
+        raise QualificationError(f"image-feature {split} manifest has no samples")
+    result = []
+    for index, sample in enumerate(samples):
+        relative = sample.get("image") if isinstance(sample, Mapping) else None
+        label = sample.get("label") if isinstance(sample, Mapping) else None
+        if not isinstance(relative, str) or isinstance(label, bool) or not isinstance(label, int):
+            raise QualificationError(f"image-feature {split} sample {index} is invalid")
+        image = (path.parent / relative).resolve()
+        if root not in image.parents or not image.is_file():
+            raise QualificationError(f"image-feature {split} image is unavailable: {image}")
+        result.append(
+            {
+                "sample_id": f"{split}-{int(sample.get('source_index', index)):06d}",
+                "image_path": str(image),
+                "label": label,
+                "split": split,
+            }
+        )
+    return result
+
+
+def _take_per_class(
+    samples: Sequence[Mapping[str, Any]], count: int, split: str
+) -> list[dict[str, Any]]:
+    classes = sorted({int(sample["label"]) for sample in samples})
+    selected = []
+    for label in classes:
+        matches = [dict(sample) for sample in samples if sample["label"] == label][:count]
+        if len(matches) != count:
+            raise QualificationError(
+                f"image-feature {split} class {label} has {len(matches)} samples; {count} required"
+            )
+        selected.extend(matches)
+    return selected
+
+
+def _knn_predictions(
+    bank: Sequence[Sequence[float]],
+    labels: Sequence[int],
+    queries: Sequence[Sequence[float]],
+    k: int,
+    temperature: float,
+) -> list[int]:
+    predictions = []
+    for query in queries:
+        neighbors = sorted(
+            (
+                (_vector_cosine(query, vector), label)
+                for vector, label in zip(bank, labels, strict=True)
+            ),
+            reverse=True,
+        )[:k]
+        scores: dict[int, float] = {}
+        for similarity, label in neighbors:
+            scores[label] = scores.get(label, 0.0) + math.exp(similarity / temperature)
+        predictions.append(max(scores, key=lambda label: (scores[label], -label)))
+    return predictions
 
 
 def _speech_audio(request: Mapping[str, Any]) -> str:
