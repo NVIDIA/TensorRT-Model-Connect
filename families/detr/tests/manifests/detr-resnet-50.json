@@ -16,6 +16,5 @@
       "score_threshold": 0.5
     }
   ],
-  "tensor_parallel_size": 1,
-  "max_sequence_length": 1
+  "tensor_parallel_size": 1
 }
