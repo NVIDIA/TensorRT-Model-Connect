@@ -712,7 +712,7 @@ def test_fp8_text_gate_uses_prefix_fallback_and_expected_answer_or() -> None:
 
 
 def test_native_kv_semantic_case_reaches_the_third_prefill_chunk() -> None:
-    _, case = _CASES["qwen3-0.6b-bf16-native-kv-three-chunk-parity"]
+    _, case = _CASES["qwen3-0.6b-bf16-native-kv-two-chunk-parity"]
     prompt_tokens = int(case["expected_prompt_tokens"])
     chunk_limit = int(case["expected_prefill_chunk_limit"])
 

@@ -26,7 +26,7 @@
       "top_k": 1
     },
     {
-      "name": "qwen3-0.6b-bf16-native-kv-three-chunk-parity",
+      "name": "qwen3-0.6b-bf16-native-kv-two-chunk-parity",
       "premerge": true,
       "reference_precision": "bf16",
       "prompt_repeat": {
