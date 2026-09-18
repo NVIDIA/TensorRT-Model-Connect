@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one timm_nfnet bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "Model ID or local checkpoint directory"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "task", "flags": ["--task"], "type": "string", "choices": ["classification"], "default": "classification"},
+        {"name": "precision", "flags": ["--precision"], "type": "string", "choices": ["fp16", "fp32"], "default": "fp32"},
+        {"name": "backend", "flags": ["--backend"], "type": "string", "choices": ["trt", "trt_rtx"], "default": "trt"},
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+      ]
+    },
+    {
+      "name": "classify",
+      "help": "Classify an image with a timm_nfnet bundle",
+      "executor": "native",
+      "handler": "classify",
+      "arguments": [
+        {"name": "bundle", "type": "path"},
+        {"name": "image", "flags": ["--image"], "type": "path", "required": true},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path", "help": "Override the installed runtime directory"},
+        {"name": "runtime_cache", "flags": ["--runtime-cache"], "type": "path", "help": "TensorRT-RTX runtime cache"},
+        {"name": "cuda_graphs", "flags": ["--cuda-graphs"], "type": "bool", "action": "store_true", "help": "TensorRT-RTX CUDA graph capture"}
+      ]
+    }
+  ]
+}
