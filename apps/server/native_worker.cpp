@@ -5,7 +5,12 @@
 
 #include "server/native_worker.h"
 
+#include "config.h"
+#include "task_runtime.h"
+#include "trtmc/control.hpp"
+#include "trtmc/runtime/family_loader.h"
 #include "trtmc/task.h"
+#include "trtmc/text.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -130,17 +135,53 @@ Json request_id(const Json& request) {
     return *id;
 }
 
-} // namespace
+Config parse_sdk_config(const Json& request, const std::vector<ConfigField>& fields) {
+    Config result;
+    const auto found = request.find("config");
+    if (found == request.end())
+        return result;
+    if (!found->is_object())
+        throw ProtocolError("config must be an object");
+    for (auto entry = found->begin(); entry != found->end(); ++entry) {
+        const auto field = std::find_if(fields.begin(), fields.end(),
+                                        [&](const auto& item) { return item.name == entry.key(); });
+        if (field == fields.end())
+            throw ProtocolError("config." + entry.key() + " is unsupported");
+        if (field->kind == ConfigKind::String && !entry->is_string())
+            throw ProtocolError("config." + entry.key() + " must be a string");
+        try {
+            const auto value =
+                field->kind == ConfigKind::String ? entry->get<std::string>() : entry->dump();
+            result.add(entry.key(), app::parse_config_value(value, *field));
+        } catch (const std::invalid_argument& error) {
+            throw ProtocolError(error.what());
+        }
+    }
+    return result;
+}
 
-int run_text_worker(ITask& task, std::istream& input, std::ostream& output) {
-    auto* text = dynamic_cast<ITextGeneration*>(&task);
-    if (text == nullptr)
-        throw std::invalid_argument("bundle task does not implement text generation");
+std::int64_t default_token_limit(const std::vector<ConfigField>& fields) {
+    for (const auto& field : fields) {
+        if (field.name == "max_new_tokens" && field.kind == ConfigKind::I64 &&
+            field.default_value) {
+            const auto value = field.default_value->get<std::int64_t>();
+            if (value > 0)
+                return value;
+        }
+    }
+    // Existing HTTP safety default for a family-derived limit. This does not
+    // insert a default into the Config passed to the Task.
+    return 128;
+}
 
+template <class Generate>
+int run_protocol(std::int64_t default_tokens, Generate&& generate, std::istream& input,
+                 std::ostream& output) {
     if (!write_json(output, {{"event", "ready"},
                              {"protocol_version", 1},
-                             {"capabilities", Json::array({ITextGeneration::kTask})},
-                             {"default_max_new_tokens", text->default_max_new_tokens()}}))
+                             // This names the private protocol operation, not a Task ABI.
+                             {"capabilities", Json::array({"text_generation"})},
+                             {"default_max_new_tokens", default_tokens}}))
         return 2;
 
     std::vector<char> buffer(kMaxLineBytes + 2U);
@@ -180,16 +221,7 @@ int run_text_worker(ITask& task, std::istream& input, std::ostream& output) {
                 shutdown = true;
             } else if (operation == "generate") {
                 const auto prompt = string_field(request, "prompt", true);
-                const auto result =
-                    text->generate(prompt, parse_config(request, text->default_max_new_tokens()));
-                response = {{"id", id},
-                            {"ok", true},
-                            {"result",
-                             {{"text", result.text},
-                              {"completion_tokens", result.token_ids.size()},
-                              {"setup_ms", result.setup_ms},
-                              {"prefill_ms", result.prefill_ms},
-                              {"decode_ms", result.decode_ms}}}};
+                response = {{"id", id}, {"ok", true}, {"result", generate(prompt, request)}};
             } else {
                 throw ProtocolError("unknown operation: " + operation);
             }
@@ -212,6 +244,83 @@ int run_text_worker(ITask& task, std::istream& input, std::ostream& output) {
             return 0;
     }
     return input.bad() ? 2 : 0;
+}
+
+template <class Task, class Request>
+int run_sdk_worker(const Task& task, Request&& make_request, std::istream& input,
+                   std::ostream& output) {
+    const auto fields = task.config_fields();
+    return run_protocol(
+        default_token_limit(fields),
+        [&](const std::string& prompt, const Json& request) {
+            const auto config = parse_sdk_config(request, fields);
+            try {
+                const auto result = task.run(make_request(prompt), config);
+                return Json{{"text", std::string(result.text())},
+                            {"completion_tokens", result.token_ids().size()},
+                            {"setup_ms", result.setup_ms()},
+                            {"prefill_ms", result.prefill_ms()},
+                            {"decode_ms", result.decode_ms()}};
+            } catch (const Error& error) {
+                if (error.code() == TRTMC_INVALID_ARGUMENT ||
+                    error.code() == TRTMC_INVALID_CONFIG) {
+                    // Family errors may contain implementation details. Keep
+                    // client mistakes recoverable without publishing those details.
+                    throw ProtocolError("generation request is invalid for this model");
+                }
+                throw;
+            }
+        },
+        input, output);
+}
+
+} // namespace
+
+int run_text_worker(ITask& task, std::istream& input, std::ostream& output) {
+    auto* text = dynamic_cast<ITextGeneration*>(&task);
+    if (text == nullptr)
+        throw std::invalid_argument("bundle task does not implement text generation");
+    return run_protocol(
+        text->default_max_new_tokens(),
+        [&](const std::string& prompt, const Json& request) {
+            const auto result =
+                text->generate(prompt, parse_config(request, text->default_max_new_tokens()));
+            return Json{{"text", result.text},
+                        {"completion_tokens", result.token_ids.size()},
+                        {"setup_ms", result.setup_ms},
+                        {"prefill_ms", result.prefill_ms},
+                        {"decode_ms", result.decode_ms}};
+        },
+        input, output);
+}
+
+int run_text_worker(const Model& model, std::istream& input, std::ostream& output) {
+    const auto primary = model.info().bundle_task;
+    if (primary == ConditionalTextGeneration::kTask)
+        return run_sdk_worker(
+            model.task<ConditionalTextGeneration>(),
+            [](const std::string& prompt) { return ConditionalTextGenerationRequest{prompt}; },
+            input, output);
+    if (primary == TextTranslation::kTask)
+        return run_sdk_worker(
+            model.task<TextTranslation>(),
+            [](const std::string& prompt) { return TextTranslationRequest{prompt}; }, input,
+            output);
+    return run_sdk_worker(
+        model.task<TextContinuation>(),
+        [](const std::string& prompt) { return TextContinuationRequest{prompt}; }, input, output);
+}
+
+int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std::istream& input,
+                      std::ostream& output) {
+    const auto primary = Bundle::open(bundle).info().task;
+    if (app::uses_existing_task_runtime(primary)) {
+        auto task = load_task(bundle, options.runtime_root, options.kv_cache_size_bytes,
+                              options.runtime_cache_path, options.cuda_graphs);
+        return run_text_worker(*task, input, output);
+    }
+    const auto model = Model::load(bundle, options);
+    return run_text_worker(model, input, output);
 }
 
 } // namespace trtmc::server

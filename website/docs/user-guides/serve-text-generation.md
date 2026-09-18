@@ -151,8 +151,26 @@ pi --provider trtmc --model Qwen/Qwen3-0.6B --no-tools
 
 Model-specific chat templates, tokenization, sampling, stopping, engine
 composition, and validation remain inside the family selected by the bundle.
-The server only validates the transport envelope and asks the native worker to
-call `ITextGeneration::generate`.
+For migrated bundles, the native worker calls the public header-only C++ Task
+wrapper over the stable C ABI. It uses `TextContinuation`, or the primary
+`ConditionalTextGeneration` / `TextTranslation` contract for those bundles.
+Translation uses the family's bundled language defaults; this HTTP protocol
+does not add source/target-language parameters.
+
+The worker reads the Task's declared Config fields and forwards only supplied
+values, leaving omitted sampling defaults with the family. A positive declared
+`max_new_tokens` default informs the existing HTTP token cap; otherwise the
+server retains its 128-token safety default. Unknown fields, wrong types and
+family-rejected settings return request errors without retiring the worker.
+An HTTP parameter being recognized does not mean every family supports it:
+chat templates, system prompts and sampling options must be supported by the
+selected Task.
+
+Not-yet-migrated bundle modes keep their existing `ITextGeneration` call path.
+The worker reuses the application's bundle-mode selector before loading; a
+failed SDK load or invocation never retries an older interface. This selection
+is removed with the existing application paths after all families migrate.
+Neither path changes the private readiness or JSONL response protocol.
 
 Responses report completion token counts supplied by the family result. Prompt
 token counts remain zero because the generic Task result does not expose them.

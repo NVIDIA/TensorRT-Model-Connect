@@ -4,7 +4,7 @@
  */
 
 #include "server/native_worker.h"
-#include "trtmc/runtime/family_loader.h"
+#include "trtmc/core.hpp"
 
 #include <array>
 #include <cerrno>
@@ -63,8 +63,8 @@ int worker_main(int argc, char** argv) {
         else
             throw std::invalid_argument("unknown _serve-worker option: " + option);
     }
-    auto task = trtmc::load_task(bundle, runtime_root, kv_cache_size, runtime_cache, cuda_graphs);
-    return trtmc::server::run_text_worker(*task, std::cin, std::cout);
+    const trtmc::LoadOptions options{runtime_root, kv_cache_size, runtime_cache, cuda_graphs};
+    return trtmc::server::run_bundle_worker(bundle, options, std::cin, std::cout);
 }
 
 std::filesystem::path executable_path() {
