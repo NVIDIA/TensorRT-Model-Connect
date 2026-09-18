@@ -22,6 +22,7 @@ accuracy:
       precision: fp16
       task: seq2seq-lm
       output_token_policy: strip-start-and-eos
+      source_language_placement: replace-final-unk
     request: &greedy-translation
       max_new_tokens: 128
       temperature: 0.0
@@ -59,5 +60,6 @@ performance:
       fallback: hf-eager
       compile_scope: model.forward
       output_token_policy: strip-start-and-eos
+      source_language_placement: replace-final-unk
       precision: fp16
       output_contract: exact-token-ids

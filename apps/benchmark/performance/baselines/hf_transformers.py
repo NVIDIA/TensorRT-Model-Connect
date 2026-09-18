@@ -185,9 +185,14 @@ def _translation_controls(
     """Use tokenizer language APIs; fixed-pair models validate their declared pair."""
     source = request.get("source_language")
     target = request.get("target_language")
+    source_placement = request.get("source_language_placement")
     for name, value in (("source_language", source), ("target_language", target)):
         if value is not None and (not isinstance(value, str) or not value):
             raise ValueError(f"request.{name} must be a nonempty language identifier")
+    if source_placement is not None and source_placement != "replace-final-unk":
+        raise ValueError(
+            "request.source_language_placement must be replace-final-unk when set"
+        )
 
     def token_id(language: str) -> int:
         lookup = getattr(tokenizer, "get_lang_id", None)
@@ -213,6 +218,10 @@ def _translation_controls(
 
     source_id = explicit_id("source_language_token_id")
     target_id = explicit_id("forced_bos_token_id")
+    if source_placement is not None and source_id is None:
+        raise ValueError(
+            "request.source_language_placement requires source_language_token_id"
+        )
     manual_source_id = None
     if source_id is not None:
         if source is not None and token_id(source) != source_id:
@@ -225,6 +234,11 @@ def _translation_controls(
         elif source == getattr(tokenizer, "source_lang", None):
             pass
         elif source_id is not None and token_id(source) == source_id:
+            if source_placement != "replace-final-unk":
+                raise ValueError(
+                    "generic translation tokenizer requires explicit "
+                    "source_language_placement=replace-final-unk"
+                )
             manual_source_id = source_id
         else:
             raise ValueError("reference tokenizer does not support the requested source language")
@@ -358,6 +372,7 @@ def _generation_call(
     generation: dict[str, Any] = {
         "do_sample": float(request.get("temperature", 0.0)) > 0.0,
         "max_new_tokens": max_new_tokens,
+        "num_beams": 1,
         "use_cache": True,
         "pad_token_id": tokenizer.pad_token_id,
     }
