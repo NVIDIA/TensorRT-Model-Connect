@@ -1237,6 +1237,19 @@ def test_native_loader_and_preprocessing_stay_out_of_shared_core() -> None:
     assert resize_sources
 
 
+def test_applications_own_default_runtime_root_selection() -> None:
+    header = (REPO / "core/runtime/include/trtmc/runtime/family_loader.h").read_text(
+        encoding="utf-8"
+    )
+    loader = (REPO / "core/runtime/loader/family_loader.cpp").read_text(encoding="utf-8")
+    server = (REPO / "apps/server/main.cpp").read_text(encoding="utf-8")
+
+    assert "const std::string& runtime_root = {}" not in header
+    assert 'throw std::invalid_argument("runtime_root must be explicit and non-empty")' in loader
+    assert "if (runtime_root.empty())" in server
+    assert "runtime_root = trtmc::loaded_runtime_root();" in server
+
+
 def test_rtx_backend_is_an_explicit_optional_dso() -> None:
     cmake = (REPO / "CMakeLists.txt").read_text(encoding="utf-8")
     assert 'option(TRTMC_BUILD_BACKEND_RTX "Build TensorRT-RTX backend DSO" OFF)' in cmake
