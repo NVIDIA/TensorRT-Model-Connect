@@ -527,6 +527,16 @@ def test_vision_language_text_distance_is_normalized() -> None:
     assert qualification_accuracy._normalized_edit_distance(left, "blue car") > 0.15
 
 
+def test_reranking_order_is_stable_and_score_validation_is_strict() -> None:
+    assert qualification_accuracy._reranking_order([0.7, 0.2, 0.7]) == [0, 2, 1]
+    assert qualification_accuracy._reranking_scores({"scores": [0.7, -0.2]}, "test") == [
+        0.7,
+        -0.2,
+    ]
+    with pytest.raises(QualificationError, match="non-finite"):
+        qualification_accuracy._reranking_scores({"scores": [float("nan")]}, "test")
+
+
 def test_semantic_segmentation_accuracy_compares_pixel_and_class_iou(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: nemotron-rerank-vl-1b-v2
+candidate:
+  family: eagle_vlm
+  checkpoint: nvidia/llama-nemotron-rerank-vl-1b-v2
+  revision: 9e95da054312436dfc703319dd2b793a3bee2465
+  task: reranking
+  precision: fp16
+  trust_remote_code: true
+  bundle: nemotron-rerank-vl-1b-v2.bundle
+  build:
+    max_sequence_length: 685
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: stsbenchmark-reranking-parity
+    benchmark: stsbenchmark_reranking_parity
+    samples: 10
+    reference:
+      command: reranking_reference.py
+      precision: fp32
+    gate:
+      max_score_abs_error: 0.05
+      min_sample_pass_rate: 0.9
+
+performance:
+  - name: rerank
+    benchmark: reranking_performance
+    operation: rerank
+    request:
+      query: 0-dimensional biomaterials show inductive properties.
+      documents:
+        - Nanotechnologies provide new ways to manipulate and track stem cells.
+        - Depression is associated with immune dysregulation.
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      adapter: hf-transformers-reranking
+      mode: hf-eager
+      reference_backend: hf_transformers
+      precision: fp16
+      output_contract: reranking-order
