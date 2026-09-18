@@ -805,7 +805,7 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
     assert steps["Reserve a GPU instance"]["id"] == "reserve"
     test_step = steps["Build the GPU image and validate the exact PR merge"]
     assert "sudo docker build -f Dockerfile.dev.x86-gpu" in test_step["run"]
-    assert "sudo docker run --rm --gpus all" in test_step["run"]
+    assert "python3 -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect" in test_step["run"]
     result = steps["Record the step conclusion"]
     assert result["id"] == "result"
     assert result["if"] == "always()"
