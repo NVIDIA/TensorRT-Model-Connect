@@ -549,6 +549,124 @@ def test_vision_language_text_distance_is_normalized() -> None:
     assert qualification_accuracy._normalized_edit_distance(left, "blue car") > 0.15
 
 
+def test_ocr_accuracy_uses_dataset_questions_and_reports_gold_matches(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "OCRBench_v2/unified"
+    image_root = dataset_root / "images"
+    image_root.mkdir(parents=True)
+    for name in ("a.jpg", "b.jpg"):
+        (image_root / name).write_bytes(b"fixture")
+    dataset_path = dataset_root / "dataset.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "id": "a",
+                        "question": "What is the setting?",
+                        "media": [{"type": "image", "path": "images/a.jpg"}],
+                        "answer": {"primary": "enabled", "aliases": ["enabled", "on"]},
+                    },
+                    {
+                        "id": "b",
+                        "question": "Which application?",
+                        "media": [{"type": "image", "path": "images/b.jpg"}],
+                        "answer": {"primary": "Facebook", "aliases": ["Facebook"]},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "families/deepseek_ocr/tests/benchmark/deepseek-ocr.yaml"
+    profile.parent.mkdir(parents=True)
+    runner = profile.parent / "reference.py"
+    runner.write_text("# family reference\n", encoding="utf-8")
+    case = QualificationCase(
+        kind="accuracy",
+        model="deepseek-ocr",
+        family="deepseek_ocr",
+        name="ocrbench-v2-parity",
+        benchmark="ocrbench_v2_parity",
+        candidate={
+            "family": "deepseek_ocr",
+            "checkpoint": "deepseek-ai/DeepSeek-OCR-2",
+            "revision": "a" * 40,
+            "task": "vision_language_generation",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={
+            "samples": 2,
+            "request": {"max_new_tokens": 16},
+            "reference": {"command": "reference.py", "precision": "bf16"},
+            "gate": {"max_normalized_edit_distance": 0.1, "min_sample_pass_rate": 1.0},
+        },
+        source=profile,
+        reference_requirements=None,
+    )
+    dataset = Dataset("ocrbench-v2", dataset_path, "provided", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path,
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    captured_reference: dict[str, object] = {}
+    captured_candidate: list[dict[str, object]] = []
+
+    def reference(command, *_args, **_kwargs):
+        request = Path(command[command.index("--request") + 1])
+        output = Path(command[command.index("--output") + 1])
+        captured_reference.update(json.loads(request.read_text(encoding="utf-8")))
+        output.write_text(
+            json.dumps(
+                {
+                    "samples": [
+                        {"sample_id": "a", "text": "enabled"},
+                        {"sample_id": "b", "text": "Facebook"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def candidate(_case, _context, _output, _operation, requests):
+        captured_candidate.extend(requests)
+        return ([{"text": "enabled"}, {"text": "facebook"}], tmp_path / "model.bundle")
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "ocr_text_parity"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
+    )
+    monkeypatch.setattr(qualification_accuracy, "run_command", reference)
+    monkeypatch.setattr(qualification_accuracy, "_candidate_outputs", candidate)
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert result["metrics"]["candidate_normalized_gold_match_rate"] == 1.0
+    assert result["metrics"]["reference_normalized_gold_match_rate"] == 1.0
+    assert captured_reference["samples"][0]["prompt"] == "What is the setting?"
+    assert captured_candidate[1]["request"]["prompt"] == "Which application?"
+
+
 def test_reranking_order_is_stable_and_score_validation_is_strict() -> None:
     assert qualification_accuracy._reranking_order([0.7, 0.2, 0.7]) == [0, 2, 1]
     assert qualification_accuracy._reranking_scores({"scores": [0.7, -0.2]}, "test") == [
