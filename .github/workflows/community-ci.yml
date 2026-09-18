@@ -80,10 +80,10 @@ jobs:
         run: |
           set -euo pipefail
           lanes='["stable"]'
-          if [ "$DUAL_RUN" = true ]; then
-            lanes='["stable","dev"]'
-          elif [ "$CI_BRANCH" != main ]; then
+          if [ "$CI_BRANCH" != main ]; then
             lanes='["dev"]'
+          elif [ "$DUAL_RUN" = true ]; then
+            lanes='["stable","dev"]'
           fi
           echo "lanes=$lanes" >> "$GITHUB_OUTPUT"
 
@@ -191,7 +191,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
-          STATUS_CONTEXT: ${{ github.ref_name == 'main' && 'Stable Community CI' || 'Dev Community CI' }}
+          STATUS_CONTEXT: ${{ github.ref == 'refs/heads/main' && 'Stable Community CI' || 'Dev Community CI' }}
         run: |
           set -euo pipefail
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 0
@@ -222,6 +222,26 @@ jobs:
     env:
       STATUS_CONTEXT: ${{ matrix.lane == 'stable' && 'Stable Community CI' || 'Dev Community CI' }}
     steps:
+      - name: Authorize the result publisher
+        id: publisher
+        env:
+          LANE: ${{ matrix.lane }}
+          CI_ENTRY_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          case "$LANE" in
+            stable)
+              if [ "$CI_ENTRY_REF" != refs/heads/main ]; then
+                echo "::error::Only the main coordinator may publish Stable results."
+                exit 1
+              fi
+              test "$STATUS_CONTEXT" = 'Stable Community CI'
+              ;;
+            dev) test "$STATUS_CONTEXT" = 'Dev Community CI' ;;
+            *) echo "::error::Unknown Community CI publisher."; exit 1 ;;
+          esac
+          echo "authorized=true" >> "$GITHUB_OUTPUT"
+
       - name: Mark the selected CI pending
         env:
           GH_TOKEN: ${{ github.token }}
@@ -349,7 +369,7 @@ jobs:
           exit 1
 
       - name: Report a failed CI request
-        if: ${{ failure() && steps.verdict.outputs.reported != 'true' }}
+        if: ${{ failure() && steps.publisher.outputs.authorized == 'true' && steps.verdict.outputs.reported != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}

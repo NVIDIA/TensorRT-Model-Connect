@@ -60,10 +60,15 @@ does not enable automatic dual running. Dev must not be a required merge check.
 
 For manual qualification, select **Actions > Community CI > Run workflow** and
 enter a PR number. Selecting `ci/developer` runs Dev against the existing Stable
-PR snapshot; with dual running enabled it also publishes the paired Stable result.
+PR snapshot and publishes only the Dev result, regardless of the dual-run switch.
 Selecting `main` manually starts Stable and, when enabled, Dev. Keep the internal
 snapshot, lane, and request inputs at their defaults. Manual starts require
 maintain or admin access. `run_gpu_smoke` retains the existing manual GPU opt-in.
+
+Only the coordinator on `refs/heads/main` may publish `Stable Community CI`.
+A Dev-only start cannot replace a failed or pending Stable result with the
+successful CPU compatibility check retained for Internal CI. Apply this publisher
+guard to the Dev branch before promoting its GPU implementation to `main`.
 
 ## Dev GPU experiment
 
