@@ -56,6 +56,26 @@ class FakeEmbedding final : public trtmc::IEmbedding {
     }
 };
 
+class FakeImageGeneration final : public trtmc::IImageGeneration,
+                                  public trtmc::IImageBatchGeneration {
+  public:
+    const char* task() const noexcept override { return trtmc::IImageGeneration::kTask; }
+
+    trtmc::ImageResult generate_image(const std::string&,
+                                      const trtmc::ImageGenerationConfig&) override {
+        return {{0.25F, 0.5F, 0.75F}, 1, 1, 3, 1};
+    }
+
+    std::vector<trtmc::ImageResult>
+    generate_image_batch(const std::vector<std::string>& prompts, const std::vector<std::uint32_t>&,
+                         const trtmc::ImageGenerationConfig& config) override {
+        std::vector<trtmc::ImageResult> results;
+        for (const auto& prompt : prompts)
+            results.push_back(generate_image(prompt, config));
+        return results;
+    }
+};
+
 class FakeSegmentation final : public trtmc::ISegmentation {
   public:
     trtmc::SegmentResult segment(const float*, std::int32_t height, std::int32_t width) override {
@@ -126,6 +146,8 @@ trtmc::ITask* create_fake_task(const trtmc::FamilyContext& context) {
         return new FakeEncoding();
     if (context.reader.info().task == trtmc::IEmbedding::kTask)
         return new FakeEmbedding();
+    if (context.reader.info().task == trtmc::IImageGeneration::kTask)
+        return new FakeImageGeneration();
     if (context.reader.info().task == trtmc::ITimeSeriesForecast::kTask)
         return new FakeForecast(context.backend, context.kv_cache_size_bytes);
     if (context.reader.info().task == trtmc::ITextGeneration::kTask) {

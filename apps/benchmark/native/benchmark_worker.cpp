@@ -278,18 +278,20 @@ Json image_observation(const std::vector<trtmc::ImageResult>& results) {
 
 Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& timing) {
     const auto config = image_config(request);
-    const std::string prompt =
-        request.at("prompt").is_array() ? "" : request.at("prompt").get<std::string>();
+    const bool batch_request = request.at("prompt").is_array();
+    const std::string prompt = batch_request ? "" : request.at("prompt").get<std::string>();
     std::function<std::vector<trtmc::ImageResult>()> invoke;
     std::optional<Image> cached;
 
-    if (auto* batch = dynamic_cast<trtmc::IImageBatchGeneration*>(&task)) {
+    if (batch_request) {
+        auto& batch =
+            require_interface<trtmc::IImageBatchGeneration>(task, "IImageBatchGeneration");
         const auto prompts = request.at("prompt").get<std::vector<std::string>>();
         auto seeds = optional_value<std::vector<std::uint32_t>>(request, "seeds", {});
         if (seeds.empty())
             seeds.assign(prompts.size(), static_cast<std::uint32_t>(std::max(config.seed, 0)));
-        invoke = [batch, prompts, seeds, config]() {
-            return batch->generate_image_batch(prompts, seeds, config);
+        invoke = [&batch, prompts, seeds, config]() {
+            return batch.generate_image_batch(prompts, seeds, config);
         };
     } else if (auto* edit = dynamic_cast<trtmc::IImageEditing*>(&task)) {
         const std::string path = request.at("image_path").get<std::string>();
