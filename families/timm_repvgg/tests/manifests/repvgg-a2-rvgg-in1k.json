@@ -4,7 +4,7 @@
   "hf_revision": "87d4d383cb45031cb9fa2fc8ddca73fd6649240f",
   "bundle": "repvgg-a2-rvgg-in1k.bundle",
   "family": "timm_repvgg",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {
