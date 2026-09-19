@@ -283,6 +283,33 @@ def test_geometry_shape_does_not_filter_invalid_infinity_or_add_depth_accuracy_r
     assert struct.unpack("<2f", originals["depth_artifact"])[1] == float("inf")
 
 
+def test_geometry_parity_compares_complete_numerical_artifacts(tmp_path):
+    left = _geometry(tmp_path / "candidate")
+    right = _geometry(tmp_path / "reference")
+    entry = _entry("geometry")
+    entry.spec["baseline"].update(
+        output_contract="metric-geometry-parity",
+        mask_iou=0.999,
+        depth_absrel_mean=0.005,
+        depth_rel_l2=0.02,
+        points_rel_l2=0.02,
+        points_cosine=0.99999,
+        intrinsics_max_relative_error=0.002,
+        point_depth_consistency=0.00001,
+    )
+
+    matched, reason, evidence = perf._output_contract(
+        entry, {"output_summary": left}, {"output_summary": right}
+    )
+
+    assert matched is True and reason == ""
+    assert evidence["numerical_parity_checked"] is True
+    Path(right["depth_artifact"]).write_bytes(struct.pack("<2f", 6, float("inf")))
+    assert perf._output_contract(
+        entry, {"output_summary": left}, {"output_summary": right}
+    )[0] is False
+
+
 def test_optional_reference_calibration_artifact_is_not_silently_ignored(tmp_path):
     left = _geometry(tmp_path / "candidate")
     right = _geometry(tmp_path / "reference")

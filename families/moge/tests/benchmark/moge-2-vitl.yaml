@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: moge-2-vitl
+candidate:
+  family: moge
+  checkpoint: Ruicheng/moge-2-vitl
+  revision: 39c4d5e957afe587e04eec59dc2bcc3be5ecd968
+  task: monocular_geometry
+  precision: fp32
+  bundle: moge-2-vitl.bundle
+  build:
+    tensor_parallel_size: 1
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: metric-geometry-parity
+    benchmark: metric_geometry_parity
+    samples: 1
+    request: &geometry-request
+      num_tokens: 1800
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      mask_iou: 0.999
+      depth_absrel_mean: 0.005
+      depth_rel_l2: 0.02
+      points_rel_l2: 0.02
+      points_cosine: 0.99999
+      intrinsics_max_relative_error: 0.002
+      point_depth_consistency: 0.00001
+      min_sample_pass_rate: 1.0
+
+performance:
+  - name: geometry
+    benchmark: metric_geometry_performance
+    operation: geometry
+    request:
+      <<: *geometry-request
+      image_path: ../data/test_img.jpeg
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: pytorch-eager
+      reference_backend: official_pytorch
+      precision: fp32
+      output_contract: metric-geometry-parity
+      mask_iou: 0.999
+      depth_absrel_mean: 0.005
+      depth_rel_l2: 0.02
+      points_rel_l2: 0.02
+      points_cosine: 0.99999
+      intrinsics_max_relative_error: 0.002
+      point_depth_consistency: 0.00001

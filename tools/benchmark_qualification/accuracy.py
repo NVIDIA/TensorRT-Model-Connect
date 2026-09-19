@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from trtmc_benchmark.artifact_metrics import metric_geometry_metrics, metric_geometry_passes
+
 from .catalog import QualificationCase, QualificationError, load_benchmark
 from .datasets import Dataset, resolve_dataset
 from .runtime import (
@@ -66,10 +68,77 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _localization_text_parity(case, context, dataset, output)
     elif metric_name == "stereo_disparity_parity":
         result = _stereo_disparity_parity(case, context, dataset, output)
+    elif metric_name == "metric_geometry_parity":
+        result = _metric_geometry_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
     return result
+
+
+def _metric_geometry_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _image_parity_samples(dataset, sample_limit, "metric-geometry")
+    expected = _family_image_reference(case, context, output, selected)
+    request = configured.get("request", {})
+    if not isinstance(request, Mapping):
+        raise QualificationError("metric-geometry request must be an object")
+    candidate_requests = [
+        {
+            "sample_id": sample["sample_id"],
+            "request": {**dict(request), "image_path": sample["image_path"]},
+        }
+        for sample in selected
+    ]
+    actual, bundle = _candidate_outputs(case, context, output, "geometry", candidate_requests)
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("metric-geometry gate must be an object")
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not 0.0 <= minimum_sample_rate <= 1.0:
+        raise QualificationError("metric-geometry min_sample_pass_rate must be in [0, 1]")
+    thresholds = {key: value for key, value in gate.items() if key != "min_sample_pass_rate"}
+    rows = []
+    for sample, candidate_sample, reference_sample in zip(
+        selected, actual, expected, strict=True
+    ):
+        try:
+            metrics = metric_geometry_metrics(candidate_sample, reference_sample)
+            passed = metric_geometry_passes(metrics, thresholds)
+        except (OSError, ValueError) as error:
+            raise QualificationError(
+                f"metric-geometry sample {sample['sample_id']} is invalid: {error}"
+            ) from error
+        rows.append({"sample_id": sample["sample_id"], "passed": passed, **metrics})
+    pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    metric_names = tuple(thresholds)
+    aggregate = {
+        name: (
+            min(float(row[name]) for row in rows)
+            if name in {"mask_iou", "points_cosine"}
+            else max(float(row[name]) for row in rows)
+        )
+        for name in metric_names
+    }
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if pass_rate >= minimum_sample_rate else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {"samples": len(rows), "sample_pass_rate": pass_rate, **aggregate},
+        "gate": dict(gate),
+        "samples": rows,
+    }
 
 
 def _stereo_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]:
