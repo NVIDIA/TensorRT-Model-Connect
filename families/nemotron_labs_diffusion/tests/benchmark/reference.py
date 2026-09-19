@@ -38,6 +38,22 @@ def _inputs(tokenizer: Any, prompt: str, generation: dict[str, Any]) -> Any:
     return tokenizer(rendered, return_tensors="pt", add_special_tokens=False)
 
 
+def _truncate(tokenizer: Any, prompt: str, limit: int, side: str) -> str:
+    if limit < 1 or side not in {"left", "right"}:
+        raise ValueError("prompt token limit and truncation side are invalid")
+    token_ids = [int(value) for value in tokenizer.encode(prompt, add_special_tokens=False)]
+    if len(token_ids) <= limit:
+        return prompt
+    selected = token_ids[-limit:] if side == "left" else token_ids[:limit]
+    return str(
+        tokenizer.decode(
+            selected,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     request = json.loads(arguments.request.read_text(encoding="utf-8"))
@@ -45,8 +61,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     generation = request.get("generation")
     if not isinstance(samples, list) or not samples or not isinstance(generation, dict):
         raise ValueError("reference request must contain samples and generation")
-    if generation.get("generation_mode", "ar") != "ar":
-        raise ValueError("this qualification reference supports generation_mode=ar")
+    mode = generation.get("text_generation_mode", generation.get("generation_mode", "ar"))
+    if mode != "ar":
+        raise ValueError("this qualification reference supports text_generation_mode=ar")
 
     import torch
     from transformers import AutoModel, AutoTokenizer
@@ -64,9 +81,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         **options,
     ).eval().to("cuda")
     max_new_tokens = int(generation.get("max_new_tokens", 20))
+    prompt_token_limit = int(request.get("prompt_token_limit", 192))
+    truncation_side = str(request.get("truncation_side", "left"))
     results = []
     for sample in samples:
-        encoded = _inputs(tokenizer, str(sample["prompt"]), generation)
+        prompt = _truncate(
+            tokenizer,
+            str(sample["prompt"]),
+            prompt_token_limit,
+            truncation_side,
+        )
+        encoded = _inputs(tokenizer, prompt, generation)
         input_ids = encoded["input_ids"].to(model.device)
         with torch.inference_mode():
             generated = model.ar_generate(
@@ -81,7 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         results.append(
             {
                 "sample_id": str(sample["sample_id"]),
-                "prompt": str(sample["prompt"]),
+                "prompt": prompt,
                 "token_ids": token_ids,
                 "text": tokenizer.decode(token_ids, skip_special_tokens=True),
             }

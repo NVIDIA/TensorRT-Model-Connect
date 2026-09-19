@@ -132,6 +132,9 @@ def _candidate(raw: Any, family: str, path: Path) -> dict[str, Any]:
         )
     for field in ("checkpoint", "task", "precision"):
         _string(value.get(field), f"candidate.{field}", path)
+    selected_task = value.get("selected_task")
+    if selected_task is not None:
+        _string(selected_task, "candidate.selected_task", path)
     revision = value.get("revision")
     if revision is not None and not isinstance(revision, str):
         raise QualificationError(f"{path}: candidate.revision must be a string")

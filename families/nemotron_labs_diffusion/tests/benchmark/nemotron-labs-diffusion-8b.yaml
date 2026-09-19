@@ -37,7 +37,7 @@ accuracy:
       use_chat_template: true
       enable_thinking: false
       do_sample: false
-      generation_mode: ar
+      text_generation_mode: ar
     gate:
       min_pass_rate: 0.9
       allowed_failures: 1

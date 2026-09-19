@@ -1873,6 +1873,89 @@ def test_candidate_descriptor_is_generated_from_public_build_inputs(tmp_path: Pa
     assert "tests/manifests" not in descriptor.read_text(encoding="utf-8")
 
 
+def test_candidate_descriptor_preserves_family_selected_task(tmp_path: Path) -> None:
+    case = QualificationCase(
+        kind="performance",
+        model="geometry-model",
+        family="geometry",
+        name="geometry",
+        benchmark="geometry_performance",
+        candidate={
+            "family": "geometry",
+            "checkpoint": "example/geometry",
+            "task": "legacy_geometry",
+            "selected_task": "image_to_metric_geometry",
+            "precision": "fp32",
+            "build": {},
+        },
+        values={},
+        source=tmp_path / "geometry.yaml",
+        reference_requirements=None,
+    )
+
+    descriptor = write_model_descriptor(case, tmp_path, {"image_path": "/data/image.png"})
+    testcase = json.loads(descriptor.read_text(encoding="utf-8"))["testcases"][0]
+
+    assert testcase["selected_task"] == "image_to_metric_geometry"
+    assert testcase["image_path"] == "/data/image.png"
+
+
+@pytest.mark.parametrize(
+    ("task", "public_request", "expected_inputs", "expected_controls"),
+    [
+        (
+            "stereo_disparity",
+            {
+                "left_image_path": "/data/left.png",
+                "right_image_path": "/data/right.png",
+                "height": 700,
+                "width": 700,
+            },
+            {"left_image": "/data/left.png", "right_image": "/data/right.png"},
+            {"height": 700, "width": 700},
+        ),
+        (
+            "robot_control",
+            {"image_path": "/data/observation.png", "state_path": "/data/state.f32"},
+            {"image": "/data/observation.png", "state": "/data/state.f32"},
+            {},
+        ),
+    ],
+)
+def test_candidate_descriptor_uses_manifest_input_contract(
+    tmp_path: Path,
+    task: str,
+    public_request: dict[str, object],
+    expected_inputs: dict[str, str],
+    expected_controls: dict[str, object],
+) -> None:
+    case = QualificationCase(
+        kind="performance",
+        model="example-model",
+        family="example",
+        name="case",
+        benchmark="example_performance",
+        candidate={
+            "family": "example",
+            "checkpoint": "example/model",
+            "task": task,
+            "precision": "fp16",
+            "build": {},
+        },
+        values={},
+        source=tmp_path / "example.yaml",
+        reference_requirements=None,
+    )
+
+    descriptor = write_model_descriptor(case, tmp_path, public_request)
+    testcase = json.loads(descriptor.read_text(encoding="utf-8"))["testcases"][0]
+
+    assert testcase["inputs"] == expected_inputs
+    for name, value in expected_controls.items():
+        assert testcase[name] == value
+    assert not (set(public_request) & set(testcase["inputs"]))
+
+
 def test_internal_subprocesses_can_import_repository_packages(tmp_path: Path) -> None:
     completed = run_command(
         [
