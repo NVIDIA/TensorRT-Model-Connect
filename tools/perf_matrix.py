@@ -40,6 +40,10 @@ for source in (REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE):
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract  # noqa: E402
 from apps.benchmark.performance.baselines.hf_transformers import flatten_config  # noqa: E402
+from trtmc_benchmark.artifact_metrics import (  # noqa: E402
+    metric_geometry_metrics,
+    metric_geometry_passes,
+)
 from trtmc_benchmark.catalog import ManifestCatalog, resolve_case, selected_task_for_case  # noqa: E402
 from trtmc_benchmark.task_adapters import default_operation  # noqa: E402
 from trtmc_benchmark.types import BenchmarkError  # noqa: E402
@@ -81,6 +85,7 @@ OUTPUT_CONTRACTS = {
     "localization",
     "media-shape",
     "metric-geometry-shape",
+    "metric-geometry-parity",
     "molecular-structure-shape",
     "normalized-text",
     "ocr-text",
@@ -1360,6 +1365,22 @@ def _output_contract(
         )
     if contract == "localization":
         return _localization_contract(entry, left, right)
+    if contract == "metric-geometry-parity":
+        try:
+            metrics = metric_geometry_metrics(left, right)
+            passed = metric_geometry_passes(metrics, entry.spec["baseline"])
+        except (OSError, ValueError) as error:
+            return (
+                False,
+                f"metric-geometry parity could not be evaluated: {error}",
+                {"contract": contract, "numerical_parity_checked": True},
+            )
+        evidence = {
+            "contract": contract,
+            "numerical_parity_checked": True,
+            **metrics,
+        }
+        return passed, "metric-geometry parity is outside the contract" if not passed else "", evidence
     if contract in {"metric-geometry-shape", "molecular-structure-shape", "pose-refinement-shape"}:
         signature = {
             "metric-geometry-shape": _metric_geometry_signature,

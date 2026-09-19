@@ -2273,3 +2273,126 @@ def test_stereo_accuracy_compares_complete_disparity_artifacts(
     assert result["status"] == "passed"
     assert result["metrics"]["sample_pass_rate"] == 1.0
     assert result["metrics"]["max_mean_abs_error"] == pytest.approx(0.1)
+
+
+def test_metric_geometry_accuracy_compares_complete_task_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    profile = tmp_path / "families/moge/tests/benchmark/moge.yaml"
+    profile.parent.mkdir(parents=True)
+    image = tmp_path / "data/image.jpeg"
+    image.parent.mkdir()
+    image.write_bytes(b"fixture")
+    dataset_path = image.parent / "dataset.json"
+    dataset_path.write_text(
+        json.dumps({"requests": [{"id": "image", "image": "image.jpeg"}]}),
+        encoding="utf-8",
+    )
+    dataset = Dataset("geometry", dataset_path, "provided", "digest")
+
+    def geometry(root: Path) -> dict[str, object]:
+        root.mkdir()
+        (root / "points.f32").write_bytes(
+            array("f", [1.0, 2.0, 3.0, float("inf"), float("inf"), float("inf")]).tobytes()
+        )
+        (root / "depth.f32").write_bytes(array("f", [3.0, float("inf")]).tobytes())
+        (root / "mask.u8").write_bytes(bytes((1, 0)))
+        return {
+            "geometry_images": 1,
+            "geometry_pixels": 2,
+            "height": 1,
+            "width": 2,
+            "point_shape": [1, 2, 3],
+            "valid_pixels": 1,
+            "normalized_intrinsics": [
+                [1.0, 0.0, 0.5],
+                [0.0, 1.0, 0.5],
+                [0.0, 0.0, 1.0],
+            ],
+            "units": "meters",
+            "camera_axes": ["right", "down", "forward"],
+            "intrinsics_coordinates": "normalized_uv",
+            "points_artifact": str(root / "points.f32"),
+            "depth_artifact": str(root / "depth.f32"),
+            "valid_mask_artifact": str(root / "mask.u8"),
+        }
+
+    candidate = geometry(tmp_path / "candidate")
+    reference = geometry(tmp_path / "reference")
+    thresholds = {
+        "mask_iou": 0.999,
+        "depth_absrel_mean": 0.005,
+        "depth_rel_l2": 0.02,
+        "points_rel_l2": 0.02,
+        "points_cosine": 0.99999,
+        "intrinsics_max_relative_error": 0.002,
+        "point_depth_consistency": 0.00001,
+        "min_sample_pass_rate": 1.0,
+    }
+    case = QualificationCase(
+        kind="accuracy",
+        model="moge",
+        family="moge",
+        name="geometry",
+        benchmark="metric_geometry_parity",
+        candidate={
+            "family": "moge",
+            "checkpoint": "example/moge",
+            "task": "monocular_geometry",
+            "precision": "fp32",
+            "build": {},
+        },
+        values={
+            "samples": 1,
+            "request": {"num_tokens": 1800},
+            "reference": {"command": "reference.py", "precision": "fp32"},
+            "gate": thresholds,
+        },
+        source=profile,
+        reference_requirements=None,
+    )
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data-root",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "metric_geometry_parity"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy, "_family_image_reference", lambda *_args: [reference]
+    )
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_candidate_outputs",
+        lambda *_args: ([candidate], tmp_path / "moge.bundle"),
+    )
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert result["metrics"]["samples"] == 1
+    assert result["metrics"]["sample_pass_rate"] == 1.0
+    assert result["metrics"]["mask_iou"] == 1.0
+    assert result["metrics"]["points_cosine"] == pytest.approx(1.0)
+    for name in (
+        "depth_absrel_mean",
+        "depth_rel_l2",
+        "points_rel_l2",
+        "intrinsics_max_relative_error",
+        "point_depth_consistency",
+    ):
+        assert result["metrics"][name] == 0.0
