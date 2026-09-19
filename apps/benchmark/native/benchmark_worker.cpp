@@ -265,6 +265,7 @@ Json image_observation(const std::vector<trtmc::ImageResult>& results) {
     Json value = {{"generated_images", results.size()},
                   {"batch_size", results.size()},
                   {"generated_frames", frames},
+                  {"media_count", frames},
                   {"output_elements", pixels}};
     if (!results.empty()) {
         value["height"] = results.front().height;
@@ -274,6 +275,35 @@ Json image_observation(const std::vector<trtmc::ImageResult>& results) {
         value["media_type"] = results.front().num_frames > 1 ? "video" : "image";
     }
     return value;
+}
+
+auto legacy_image_artifact_writer(std::string prefix) {
+    return [prefix = std::move(prefix),
+            iteration = std::uint64_t{0}](const std::vector<trtmc::ImageResult>& results) mutable {
+        ++iteration;
+        Json paths = Json::array();
+        std::size_t artifact_index = 0;
+        for (const auto& result : results) {
+            if (result.height <= 0 || result.width <= 0 || result.channels <= 0 ||
+                result.num_frames <= 0)
+                throw std::runtime_error("generated media has invalid dimensions");
+            const auto frame_elements =
+                static_cast<std::uint64_t>(result.height) * result.width * result.channels;
+            const auto expected = frame_elements * static_cast<std::uint64_t>(result.num_frames);
+            if (expected != result.pixels.size())
+                throw std::runtime_error("generated media has inconsistent pixel storage");
+            for (int frame = 0; frame < result.num_frames; ++frame) {
+                const auto path = prefix + "." + std::to_string(iteration) + "." +
+                                  std::to_string(artifact_index++) + ".png";
+                const auto offset = static_cast<std::size_t>(frame_elements) * frame;
+                trtmc::cli::io::save_png(
+                    path, {result.pixels.data() + offset, static_cast<std::size_t>(frame_elements)},
+                    result.width, result.height, result.channels);
+                paths.push_back(std::filesystem::path(path).filename().string());
+            }
+        }
+        return paths;
+    };
 }
 
 Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& timing) {
@@ -333,7 +363,15 @@ Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& t
             return std::vector<trtmc::ImageResult>{image.generate_image(prompt, config)};
         };
     }
-    return measure(timing, invoke, image_observation);
+    auto write_images =
+        legacy_image_artifact_writer(request.at("_artifact_prefix").get<std::string>());
+    return measure(timing, invoke, [&](const auto& results) {
+        auto output = image_observation(results);
+        output[output.value("media_type", "image") == "video" ? "frame_artifacts"
+                                                              : "image_artifacts"] =
+            write_images(results);
+        return output;
+    });
 }
 
 Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& timing) {
@@ -344,9 +382,15 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
         optional_value<std::int32_t>(request, "talker_max_new_tokens", 0);
     config.seed = optional_value<std::int32_t>(request, "seed", -1);
     const std::string prompt = request.at("prompt").get<std::string>();
+    auto write_audio = [prefix = request.at("_artifact_prefix").get<std::string>(),
+                        iteration = std::uint64_t{0}](const trtmc::AudioResult& result) mutable {
+        const auto path = prefix + "." + std::to_string(++iteration) + ".wav";
+        trtmc::cli::io::write_wav(result, path);
+        return std::filesystem::path(path).filename().string();
+    };
     return measure(
         timing, [&]() { return interface.generate_audio(prompt, config); },
-        [](const trtmc::AudioResult& result) {
+        [&](const trtmc::AudioResult& result) {
             const double seconds =
                 result.sample_rate > 0
                     ? static_cast<double>(result.samples.size()) / result.sample_rate
@@ -354,7 +398,8 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
             return Json{{"output_samples", result.samples.size()},
                         {"num_samples", result.samples.size()},
                         {"output_audio_seconds", seconds},
-                        {"sample_rate", result.sample_rate}};
+                        {"sample_rate", result.sample_rate},
+                        {"audio_artifact", write_audio(result)}};
         });
 }
 
@@ -368,6 +413,12 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
     config.max_new_tokens = optional_value<std::int32_t>(request, "max_new_tokens", 50);
     config.seed = optional_value<std::int32_t>(request, "seed", -1);
     config.tail_frames = optional_value<std::int32_t>(request, "tail_frames", 0);
+    auto write_audio = [prefix = request.at("_artifact_prefix").get<std::string>(),
+                        iteration = std::uint64_t{0}](const trtmc::AudioResult& result) mutable {
+        const auto path = prefix + "." + std::to_string(++iteration) + ".wav";
+        trtmc::cli::io::write_wav(result, path);
+        return std::filesystem::path(path).filename().string();
+    };
     return measure(
         timing,
         [&]() {
@@ -381,7 +432,7 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
                                 audio.sample_rate),
                 static_cast<double>(audio.samples.size()) / audio.sample_rate};
         },
-        [](const auto& value) {
+        [&](const auto& value) {
             const auto& result = value.first;
             return Json{{"input_audio_seconds", value.second},
                         {"output_audio_seconds",
@@ -390,7 +441,8 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
                              : 0.0},
                         {"output_samples", result.samples.size()},
                         {"num_samples", result.samples.size()},
-                        {"sample_rate", result.sample_rate}};
+                        {"sample_rate", result.sample_rate},
+                        {"audio_artifact", write_audio(result)}};
         });
 }
 
