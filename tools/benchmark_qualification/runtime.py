@@ -23,6 +23,16 @@ from .catalog import QualificationCase, QualificationError
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 
+# Public benchmark requests use Task API field names. These legacy manifest
+# tasks still describe their primary assets under ``inputs`` with shorter names.
+_MANIFEST_INPUT_FIELDS = {
+    "robot_control": {"image_path": "image", "state_path": "state"},
+    "stereo_disparity": {
+        "left_image_path": "left_image",
+        "right_image_path": "right_image",
+    },
+}
+
 
 @dataclass(frozen=True)
 class RuntimeContext:
@@ -101,8 +111,15 @@ def write_model_descriptor(
     testcase: dict[str, Any] = {"name": case.name}
     if task == "time_series_forecast":
         testcase["inputs"] = dict(request)
+    elif task in _MANIFEST_INPUT_FIELDS:
+        testcase.update(request)
+        fields = _MANIFEST_INPUT_FIELDS[task]
+        testcase["inputs"] = {target: testcase.pop(source) for source, target in fields.items()}
     else:
         testcase.update(request)
+    selected_task = candidate.get("selected_task")
+    if selected_task is not None:
+        testcase["selected_task"] = str(selected_task)
     value = {
         "name": case.model,
         "hf_id": str(candidate["checkpoint"]),
