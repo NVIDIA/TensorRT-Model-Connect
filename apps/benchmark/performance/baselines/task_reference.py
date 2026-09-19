@@ -67,6 +67,7 @@ VOICECHAT_SYSTEM_PROMPT = (
 )
 ADAPTERS = (
     "hf-diffusers",
+    "hf-diffusers-modular",
     "hf-chat-asr",
     "hf-qwen3-omni",
     "hf-transformers-asr",
@@ -124,7 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True)
     parser.add_argument("--revision")
     parser.add_argument("--manifest", required=True, type=Path)
-    parser.add_argument("--selected-task", help="Semantic Task selected independently of bundle identity")
+    parser.add_argument(
+        "--selected-task", help="Semantic Task selected independently of bundle identity"
+    )
     parser.add_argument("--request-json", required=True)
     parser.add_argument("--adapter-options-json", default="{}")
     parser.add_argument("--timing-contract-json", default="{}")
@@ -138,7 +141,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup", required=True, type=int)
     parser.add_argument("--iterations", required=True, type=int)
     parser.add_argument("--case-name", required=True)
-    parser.add_argument("--testcase-name", help="Selected manifest testcase, not the performance entry ID")
+    parser.add_argument(
+        "--testcase-name", help="Selected manifest testcase, not the performance entry ID"
+    )
     parser.add_argument("--output", required=True, type=Path)
     return parser
 
@@ -342,10 +347,16 @@ def _regression_values_summary(value: Any) -> dict[str, Any]:
         raise ValueError("deterministic regression requires one batch with a nonempty target axis")
     if not summary["finite"]:
         raise ValueError("deterministic regression target values must be finite")
-    return {"kind": "regression_values", "target_count": shape[1],
-            "regression_targets": shape[1], "parameter_elements": 0,
-            "values": value[0].detach().float().cpu().tolist(), "axes": ["target"],
-            "target_names": [], "target_units": []}
+    return {
+        "kind": "regression_values",
+        "target_count": shape[1],
+        "regression_targets": shape[1],
+        "parameter_elements": 0,
+        "values": value[0].detach().float().cpu().tolist(),
+        "axes": ["target"],
+        "target_names": [],
+        "target_units": [],
+    }
 
 
 def _regression_summary(
@@ -365,7 +376,9 @@ def _regression_summary(
         "negative_binomial": {"total_count", "logits"},
     }[distribution]
     if len(names) != len(required) or set(names) != required:
-        raise ValueError("regression reference parameter names do not match the declared distribution")
+        raise ValueError(
+            "regression reference parameter names do not match the declared distribution"
+        )
     parameters = []
     targets = None
     for name, value in zip(names, output):
@@ -458,7 +471,11 @@ def _load_tts(
             with torch.inference_mode():
                 audio, length = model.do_tts(transcript=prompt, language="en", use_cfg=True)
             sample_count = int(length.item()) if length.numel() else int(audio.numel())
-            return {"audio_samples": sample_count, "sample_rate": 22_050}
+            return {
+                "audio_samples": sample_count,
+                "sample_rate": 22_050,
+                "_audio_f32": audio.detach().float().cpu().reshape(-1)[:sample_count].numpy(),
+            }
 
     else:
         from transformers import AutoProcessor, BarkModel
@@ -483,6 +500,7 @@ def _load_tts(
             return {
                 "audio_samples": int(audio.numel()),
                 "sample_rate": int(model.generation_config.sample_rate),
+                "_audio_f32": audio.detach().float().cpu().reshape(-1).numpy(),
             }
 
     if arguments.family == "magpie_tts":
@@ -910,12 +928,16 @@ def _load_embedding(
     request: Mapping[str, Any],
     _options: Mapping[str, Any],
 ) -> Session:
-    configured = _json_object(getattr(arguments, "timing_contract_json", "{}"), "--timing-contract-json")
+    configured = _json_object(
+        getattr(arguments, "timing_contract_json", "{}"), "--timing-contract-json"
+    )
     if not configured:
         raise ValueError("embedding reference requires explicit --timing-contract-json")
     declared_timing = timing_contract(runner="task-reference", declared=configured)
     if declared_timing["asset_loading_included"]:
-        raise ValueError("embedding reference preloads its assets; asset_loading_included must be false")
+        raise ValueError(
+            "embedding reference preloads its assets; asset_loading_included must be false"
+        )
     prompts = _batch_prompt(request)
     if len(prompts) != 1:
         raise ValueError("embedding reference requires exactly one text input")
@@ -929,9 +951,7 @@ def _load_embedding(
         .eval()
         .to(device)
     )
-    compile_evidence = (
-        _compile_forward(model) if arguments.mode == "torch-compile" else None
-    )
+    compile_evidence = _compile_forward(model) if arguments.mode == "torch-compile" else None
     prompt = prompts[0]
 
     def prepare_inputs() -> Mapping[str, Any]:
@@ -1186,7 +1206,9 @@ def _load_diffusers(
     if steps > 0:
         values.update({"num_inference_steps": steps, "step": steps})
     manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
-    height = int(request.get("height", request.get("video_height", manifest.get("image_height", 0))))
+    height = int(
+        request.get("height", request.get("video_height", manifest.get("image_height", 0)))
+    )
     width = int(request.get("width", request.get("video_width", manifest.get("image_width", 0))))
     if height > 0:
         values["height"] = height
@@ -1288,11 +1310,74 @@ def _load_diffusers(
         if media is None:
             media = getattr(result, "frames", None)
         media_type = str(request.get("media_type", "image"))
-        return _media_summary(media, media_type)
+        return {**_media_summary(media, media_type), "_media": media}
 
     return Session(
         invoke,
         "diffusers",
+        timing_scope="task-pipeline-call-wall",
+        input_preparation_included=True,
+    )
+
+
+def _load_modular_diffusers(
+    arguments: argparse.Namespace,
+    request: Mapping[str, Any],
+    options: Mapping[str, Any],
+) -> Session:
+    """Run a ModularPipeline whose workflow is declared by the family profile."""
+    import torch
+    from diffusers import ModularPipeline
+
+    workflow = str(options.get("workflow", ""))
+    output_name = str(options.get("output", "videos"))
+    if not workflow or not output_name:
+        raise ValueError("modular Diffusers requires adapter_options.workflow and output")
+    load_options = {
+        "workflow": workflow,
+        "local_files_only": arguments.local_files_only,
+    }
+    if arguments.revision:
+        load_options["revision"] = arguments.revision
+    pipeline = ModularPipeline.from_pretrained(arguments.model, **load_options)
+    pipeline.load_components(
+        dtype=_torch_dtype(torch, arguments.precision),
+        pretrained_model_name_or_path=arguments.model,
+        local_files_only=arguments.local_files_only,
+    )
+    pipeline = pipeline.to("cuda")
+    manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+    seed = int(request.get("seed", 42))
+    generator = torch.Generator().manual_seed(seed)
+    values: dict[str, Any] = {
+        "prompt": str(request.get("prompt", "")),
+        "height": int(request.get("height", manifest.get("image_height", 0))),
+        "width": int(request.get("width", manifest.get("image_width", 0))),
+        "num_inference_steps": int(request.get("num_steps", 0)),
+        "generator": generator,
+        "output": output_name,
+        "output_type": "np",
+    }
+    frames = int(request.get("video_num_frames", manifest.get("video_num_frames", 1)))
+    if frames > 1:
+        values["num_frames"] = frames
+    for source, target in (
+        ("negative_prompt", "negative_prompt"),
+        ("guidance_scale", "guidance_scale"),
+        ("cfg_scale", "cfg_scale"),
+    ):
+        if source in request:
+            values[target] = request[source]
+
+    def invoke() -> Mapping[str, Any]:
+        generator.manual_seed(seed)
+        media = pipeline(**values)
+        media_type = "video" if frames > 1 else "image"
+        return {**_media_summary(media, media_type), "_media": media}
+
+    return Session(
+        invoke,
+        "diffusers-modular",
         timing_scope="task-pipeline-call-wall",
         input_preparation_included=True,
     )
@@ -1356,6 +1441,58 @@ def _media_summary(media: Any, media_type: str) -> dict[str, Any]:
     except (TypeError, ValueError):
         pass
     return summary
+
+
+def _media_items(media: Any, media_type: str) -> list[Any]:
+    """Return image items, or frames from the first generated video."""
+    import numpy as np
+
+    if media_type == "video":
+        if isinstance(media, np.ndarray):
+            values = media[0] if media.ndim == 5 else media
+        else:
+            values = media[0] if isinstance(media, (list, tuple)) and media else media
+    else:
+        values = media
+    if isinstance(values, np.ndarray):
+        if values.ndim == 3:
+            return [values]
+        return [values[index] for index in range(len(values))]
+    if isinstance(values, (list, tuple)):
+        return list(values)
+    return [values]
+
+
+def _write_media_artifacts(summary: dict[str, Any], output: Path) -> None:
+    """Materialize deterministic sample frames after reference timing completes."""
+    import numpy as np
+    from PIL import Image
+
+    media = summary.pop("_media")
+    items = _media_items(media, str(summary.get("media_type", "image")))
+    declared = int(summary.get("media_count", 0))
+    if declared != len(items) or declared < 1:
+        raise RuntimeError("reference media count differs from its materialized output")
+    indices = sorted({0, declared // 2, declared - 1})
+    directory = output.with_suffix(".media").resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    artifacts = []
+    for index in indices:
+        item = items[index]
+        values = np.asarray(item)
+        scale = 255.0 if np.issubdtype(values.dtype, np.floating) else 1.0
+        image = (
+            item
+            if isinstance(item, Image.Image)
+            else Image.fromarray(np.clip(values * scale, 0, 255).astype(np.uint8))
+        )
+        path = directory / f"{index:06d}.png"
+        image.convert("RGB").save(path)
+        artifacts.append(str(path))
+    summary["artifact_indices"] = indices
+    summary["frame_artifacts" if summary.get("media_type") == "video" else "image_artifacts"] = (
+        artifacts
+    )
 
 
 def _numeric_values(request: Mapping[str, Any], key: str) -> list[float]:
@@ -1428,8 +1565,11 @@ def _load_timeseries(
             compile_evidence = _compile_forward(model.model)
         raw = _numeric_values(request, "past_values")
         observed = _observed_values(request, len(raw))
-        context = torch.tensor([value if mask > 0 else float("nan")
-                                for value, mask in zip(raw, observed)], dtype=dtype, device=device)
+        context = torch.tensor(
+            [value if mask > 0 else float("nan") for value, mask in zip(raw, observed)],
+            dtype=dtype,
+            device=device,
+        )
 
         def invoke() -> Mapping[str, Any]:
             with torch.inference_mode():
@@ -1540,8 +1680,9 @@ def _load_timeseries(
                     )
                     output = getattr(outputs, output_name)
             if task_id == "series_to_regression_distribution":
-                return _regression_summary(output, config.distribution_output,
-                                           tuple(model.distribution_output.args_dim))
+                return _regression_summary(
+                    output, config.distribution_output, tuple(model.distribution_output.args_dim)
+                )
             if task_id == "series_to_regression_values":
                 return _regression_values_summary(output)
             if isinstance(output, (tuple, list)):
@@ -2157,8 +2298,6 @@ def _write_geometry_artifacts(summary: dict[str, Any], output: Path) -> None:
     )
 
 
-
-
 def _load_personaplex(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
@@ -2222,6 +2361,21 @@ def _load_personaplex(
         other_mimi.reset_streaming()
         generator.reset_streaming()
         generated_frames = 0
+        decoded_chunks = []
+
+        def summary() -> Mapping[str, Any]:
+            audio = (
+                torch.cat(decoded_chunks, dim=-1).detach().float().cpu().reshape(-1).numpy()
+                if decoded_chunks
+                else torch.empty(0, dtype=torch.float32).numpy()
+            )
+            return {
+                "audio_frames": generated_frames,
+                "audio_samples": int(audio.size),
+                "sample_rate": mimi.sample_rate,
+                "_audio_f32": audio,
+            }
+
         with torch.inference_mode():
             for encoded in encode_from_sphn(
                 mimi,
@@ -2232,20 +2386,12 @@ def _load_personaplex(
                     tokens = generator.step(encoded[:, :, index : index + 1])
                     if tokens is None:
                         continue
-                    mimi.decode(tokens[:, 1:9])
+                    decoded_chunks.append(mimi.decode(tokens[:, 1:9]))
                     other_mimi.decode(tokens[:, 1:9])
                     generated_frames += 1
                     if generated_frames >= max_frames:
-                        return {
-                            "audio_frames": generated_frames,
-                            "audio_samples": generated_frames * frame_size,
-                            "sample_rate": mimi.sample_rate,
-                        }
-        return {
-            "audio_frames": generated_frames,
-            "audio_samples": generated_frames * frame_size,
-            "sample_rate": mimi.sample_rate,
-        }
+                        return summary()
+        return summary()
 
     return Session(
         invoke,
@@ -2351,6 +2497,7 @@ LOADERS: dict[
     str, Callable[[argparse.Namespace, Mapping[str, Any], Mapping[str, Any]], Session]
 ] = {
     "hf-diffusers": _load_diffusers,
+    "hf-diffusers-modular": _load_modular_diffusers,
     "hf-chat-asr": _load_asr,
     "hf-qwen3-omni": _load_qwen3_omni,
     "hf-transformers-asr": _load_asr,
@@ -2709,12 +2856,19 @@ def _run_sana_wm(
     if testcase_name is not None:
         manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
         matches = [
-            value for value in manifest.get("testcases", [])
+            value
+            for value in manifest.get("testcases", [])
             if isinstance(value, Mapping) and value.get("name") == testcase_name
         ]
         if len(matches) != 1:
             raise ValueError(f"SANA-WM requires exactly one testcase named {testcase_name!r}")
-        for name in ("translation_speed", "rotation_speed_deg", "fps", "flow_shift", "no_action_overlay"):
+        for name in (
+            "translation_speed",
+            "rotation_speed_deg",
+            "fps",
+            "flow_shift",
+            "no_action_overlay",
+        ):
             if name in matches[0]:
                 options.setdefault(name, matches[0][name])
     reference_repo = str(options.get("reference_repo", ""))
@@ -2737,7 +2891,9 @@ def _run_sana_wm(
     action = request.get("action")
     if not isinstance(action, str) or not action:
         raise ValueError("SANA-WM request requires a non-empty action")
-    intrinsics = model_input(options.get("intrinsics", "assets/demo_0_intrinsics.npy"))
+    intrinsics = model_input(
+        options.get("intrinsics_path", options.get("intrinsics", "assets/demo_0_intrinsics.npy"))
+    )
     for label, path in (("image", image), ("intrinsics", intrinsics)):
         if not path.is_file():
             raise FileNotFoundError(f"SANA-WM {label} input does not exist: {path}")
@@ -2768,9 +2924,17 @@ def _run_sana_wm(
             "--intrinsics",
             str(intrinsics),
             "--translation_speed",
-            str(request["translation_speed"] if "translation_speed" in request else options["translation_speed"]),
+            str(
+                request["translation_speed"]
+                if "translation_speed" in request
+                else options["translation_speed"]
+            ),
             "--rotation_speed_deg",
-            str(request["rotation_speed_deg"] if "rotation_speed_deg" in request else options["rotation_speed_deg"]),
+            str(
+                request["rotation_speed_deg"]
+                if "rotation_speed_deg" in request
+                else options["rotation_speed_deg"]
+            ),
             "--num_frames",
             str(num_frames),
             "--fps",
@@ -2792,7 +2956,11 @@ def _run_sana_wm(
             "--output",
             str(output),
         ]
-        if request["no_action_overlay"] if "no_action_overlay" in request else options["no_action_overlay"]:
+        if (
+            request["no_action_overlay"]
+            if "no_action_overlay" in request
+            else options["no_action_overlay"]
+        ):
             command.append("--no_action_overlay")
         completed = subprocess.run(
             command,
@@ -2807,6 +2975,19 @@ def _run_sana_wm(
                 f"rc={completed.returncode}: {completed.stderr[-4000:]}"
             )
         payload = json.loads(output.read_text(encoding="utf-8"))
+        summary = dict(payload.get("output_summary", {}))
+        source_artifacts = summary.get("frame_artifacts", [])
+        if source_artifacts:
+            destination = arguments.output.with_suffix(".media").resolve()
+            destination.mkdir(parents=True, exist_ok=True)
+            copied = []
+            for source_value in source_artifacts:
+                source = Path(str(source_value))
+                target = destination / source.name
+                shutil.copyfile(source, target)
+                copied.append(str(target))
+            summary["frame_artifacts"] = copied
+            payload["output_summary"] = summary
     samples = [float(value) for value in payload.get("samples_ms", [])]
     if len(samples) != arguments.iterations:
         raise RuntimeError(
@@ -2857,9 +3038,7 @@ def run(arguments: argparse.Namespace) -> int:
     if arguments.adapter == "hf-transformers-embedding":
         supported_modes.add("torch-compile")
     if arguments.mode not in supported_modes:
-        raise ValueError(
-            f"adapter {arguments.adapter} requires one of {sorted(supported_modes)}"
-        )
+        raise ValueError(f"adapter {arguments.adapter} requires one of {sorted(supported_modes)}")
     request = flatten_config(_json_object(arguments.request_json, "--request-json"))
     options = _json_object(arguments.adapter_options_json, "--adapter-options-json")
     configured_timing = _json_object(arguments.timing_contract_json, "--timing-contract-json")
@@ -2867,7 +3046,9 @@ def run(arguments: argparse.Namespace) -> int:
     expected_timing = None
     if configured_timing:
         if set(configured_timing) != set(fields):
-            raise ValueError("--timing-contract-json must declare exactly the three reference timing fields")
+            raise ValueError(
+                "--timing-contract-json must declare exactly the three reference timing fields"
+            )
         declared = timing_contract(runner="task-reference", declared=configured_timing)
         expected_timing = {name: declared[name] for name in fields}
     load_started = time.perf_counter()
@@ -2924,6 +3105,8 @@ def run(arguments: argparse.Namespace) -> int:
                 f"actual={actual_timing}, declared={expected_timing}"
             )
         samples, output_summary = _measure(session, arguments.warmup, arguments.iterations)
+        if "_media" in output_summary:
+            _write_media_artifacts(output_summary, arguments.output)
         if "_geometry_arrays" in output_summary:
             _write_geometry_artifacts(output_summary, arguments.output)
         disparity = output_summary.pop("_disparity_f32", None)
@@ -2935,6 +3118,7 @@ def run(arguments: argparse.Namespace) -> int:
         audio = output_summary.pop("_audio_f32", None)
         if audio is not None:
             import soundfile as sf
+
             artifact_path = arguments.output.with_suffix(".audio.wav").resolve()
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
             sf.write(artifact_path, audio, output_summary["sample_rate"], subtype="FLOAT")

@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+kind: performance
+reference_timing:
+  timing_scope: task-pipeline-call-wall
+  input_preparation_included: true
+  asset_loading_included: false
+stability:
+  samples: 10
+  max_half_median_change_percent: 5.0
+  median_band_percent: 5.0
+  minimum_samples_within_band: 8
+  retries: 1

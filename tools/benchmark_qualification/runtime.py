@@ -264,14 +264,27 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     return python
 
 
+def reference_environment_paths(case: QualificationCase, context: RuntimeContext) -> dict[str, str]:
+    """Resolve family-declared reference inputs below its isolated environment."""
+    if not case.reference_paths:
+        return {}
+    environment = reference_python(case, context).parent.parent.resolve()
+    result = {}
+    for name, relative in case.reference_paths.items():
+        path = (environment / relative).resolve()
+        if not path.is_relative_to(environment) or not path.exists():
+            raise QualificationError(f"prepared reference path {name!r} is unavailable: {path}")
+        result[name] = str(path)
+    return result
+
+
 def benchmark_executable(case: QualificationCase, context: RuntimeContext) -> Path:
     """Run user-facing benchmark and bundle build with the family Python environment."""
     python = reference_python(case, context)
     digest = hashlib.sha256(f"{python.resolve()}\0{context.trtmc_bench}".encode()).hexdigest()[:12]
     launcher = context.environment_root / "launchers" / f"{case.family}-{digest}"
     contents = (
-        "#!/bin/sh\n"
-        f"exec {shlex.quote(str(python))} {shlex.quote(str(context.trtmc_bench))} \"$@\"\n"
+        f'#!/bin/sh\nexec {shlex.quote(str(python))} {shlex.quote(str(context.trtmc_bench))} "$@"\n'
     )
     if not launcher.is_file() or launcher.read_text(encoding="utf-8") != contents:
         launcher.parent.mkdir(parents=True, exist_ok=True)
@@ -289,11 +302,7 @@ def _inherit_parent_site_packages(environment: Path) -> None:
             f"reference environment has no unambiguous site-packages directory: {environment}"
         )
     parent_packages = sorted(
-        {
-            str(Path(value).resolve())
-            for value in site.getsitepackages()
-            if Path(value).is_dir()
-        }
+        {str(Path(value).resolve()) for value in site.getsitepackages() if Path(value).is_dir()}
     )
     if not parent_packages or any("\n" in value for value in parent_packages):
         raise QualificationError("cannot resolve parent Python site-packages")

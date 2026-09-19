@@ -10,6 +10,170 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
+def generated_media_metrics(
+    candidate: Mapping[str, Any], reference: Mapping[str, Any]
+) -> dict[str, float]:
+    """Compare deterministic generated image/video artifacts without family semantics."""
+    import numpy as np
+    from PIL import Image
+
+    actual, actual_count, actual_indices = _media_artifacts(candidate, "candidate")
+    expected, expected_count, expected_indices = _media_artifacts(reference, "reference")
+    if actual_count != expected_count:
+        raise ValueError("candidate and reference media counts differ")
+    common_indices = sorted(set(actual_indices) & set(expected_indices))
+    required_indices = sorted({0, actual_count // 2, actual_count - 1})
+    if not set(required_indices).issubset(common_indices):
+        raise ValueError("candidate and reference media do not retain the required frames")
+    actual_by_index = dict(zip(actual_indices, actual, strict=True))
+    expected_by_index = dict(zip(expected_indices, expected, strict=True))
+    psnr_values = []
+    ssim_values = []
+    for index in required_indices:
+        left_path, right_path = actual_by_index[index], expected_by_index[index]
+        left = np.asarray(Image.open(left_path).convert("RGB"), dtype=np.float64)
+        right = np.asarray(Image.open(right_path).convert("RGB"), dtype=np.float64)
+        if left.shape != right.shape:
+            raise ValueError("candidate and reference media dimensions differ")
+        delta = left - right
+        mse = float(np.mean(delta * delta))
+        psnr_values.append(100.0 if mse == 0.0 else 20.0 * math.log10(255.0 / math.sqrt(mse)))
+        left_mean, right_mean = float(left.mean()), float(right.mean())
+        left_var, right_var = float(left.var()), float(right.var())
+        covariance = float(np.mean((left - left_mean) * (right - right_mean)))
+        c1, c2 = (0.01 * 255.0) ** 2, (0.03 * 255.0) ** 2
+        numerator = (2.0 * left_mean * right_mean + c1) * (2.0 * covariance + c2)
+        denominator = (left_mean**2 + right_mean**2 + c1) * (left_var + right_var + c2)
+        ssim_values.append(numerator / denominator)
+    return {
+        "media_count": float(actual_count),
+        "compared_frames": float(len(required_indices)),
+        "min_psnr": min(psnr_values),
+        "min_ssim": min(ssim_values),
+    }
+
+
+def generated_media_passes(metrics: Mapping[str, float], thresholds: Mapping[str, Any]) -> bool:
+    minimum_psnr = _finite_threshold(thresholds, "min_psnr")
+    minimum_ssim = _finite_threshold(thresholds, "min_ssim")
+    return metrics["min_psnr"] >= minimum_psnr and metrics["min_ssim"] >= minimum_ssim
+
+
+def generated_audio_metrics(
+    candidate: Mapping[str, Any], reference: Mapping[str, Any]
+) -> dict[str, float]:
+    """Compare complete generated waveforms using stable signal-level metrics."""
+    import numpy as np
+
+    actual, actual_rate = _read_wav(
+        _artifact_path(candidate.get("audio_artifact"), "candidate audio"), np
+    )
+    expected, expected_rate = _read_wav(
+        _artifact_path(reference.get("audio_artifact"), "reference audio"), np
+    )
+    if actual_rate <= 0 or expected_rate <= 0 or actual.size == 0 or expected.size == 0:
+        raise ValueError("candidate and reference audio must be non-empty")
+    actual = actual.astype(np.float64, copy=False)
+    expected = expected.astype(np.float64, copy=False)
+    if not np.isfinite(actual).all() or not np.isfinite(expected).all():
+        raise ValueError("candidate and reference audio must be finite")
+    duration_ratio = (actual.size / actual_rate) / (expected.size / expected_rate)
+    actual_rms = float(np.sqrt(np.mean(actual * actual)))
+    expected_rms = float(np.sqrt(np.mean(expected * expected)))
+    rms_ratio = actual_rms / max(expected_rms, 1.0e-12)
+    length = min(actual.size, expected.size)
+    # Compare a bounded aligned prefix; generation duration is gated separately.
+    fft_size = min(length, 262144)
+    window = np.hanning(fft_size)
+    left = np.log1p(np.abs(np.fft.rfft(actual[:fft_size] * window)))
+    right = np.log1p(np.abs(np.fft.rfft(expected[:fft_size] * window)))
+    log_spectral_distance = float(np.sqrt(np.mean((left - right) ** 2)))
+    return {
+        "duration_ratio": float(duration_ratio),
+        "rms_ratio": float(rms_ratio),
+        "log_spectral_distance": log_spectral_distance,
+    }
+
+
+def generated_audio_passes(metrics: Mapping[str, float], thresholds: Mapping[str, Any]) -> bool:
+    return (
+        metrics["duration_ratio"] >= _finite_threshold(thresholds, "min_duration_ratio")
+        and metrics["duration_ratio"] <= _finite_threshold(thresholds, "max_duration_ratio")
+        and metrics["rms_ratio"] >= _finite_threshold(thresholds, "min_rms_ratio")
+        and metrics["rms_ratio"] <= _finite_threshold(thresholds, "max_rms_ratio")
+        and metrics["log_spectral_distance"]
+        <= _finite_threshold(thresholds, "max_log_spectral_distance")
+    )
+
+
+def _media_artifacts(summary: Mapping[str, Any], label: str) -> tuple[list[Path], int, list[int]]:
+    values = summary.get("frame_artifacts", summary.get("image_artifacts"))
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"{label} media artifacts are missing")
+    paths = [_artifact_path(value, f"{label} media artifact") for value in values]
+    declared_value = summary.get(
+        "media_count", summary.get("num_frames", summary.get("generated_frames"))
+    )
+    declared = _integer(declared_value, f"{label} media_count", minimum=1)
+    configured_indices = summary.get("artifact_indices")
+    indices = list(range(len(paths))) if configured_indices is None else configured_indices
+    if (
+        not isinstance(indices, list)
+        or len(indices) != len(paths)
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in indices)
+        or sorted(set(indices)) != indices
+        or indices[0] < 0
+        or indices[-1] >= declared
+    ):
+        raise ValueError(f"{label} media artifact indices are invalid")
+    return paths, declared, indices
+
+
+def _read_wav(path: Path, np):
+    import struct
+
+    payload = path.read_bytes()
+    if len(payload) < 12 or payload[:4] != b"RIFF" or payload[8:12] != b"WAVE":
+        raise ValueError("audio artifact must be a RIFF/WAVE file")
+    chunks = {}
+    offset = 12
+    while offset + 8 <= len(payload):
+        name = payload[offset : offset + 4]
+        size = int.from_bytes(payload[offset + 4 : offset + 8], "little")
+        start, end = offset + 8, offset + 8 + size
+        if end > len(payload):
+            raise ValueError("audio artifact contains a truncated WAV chunk")
+        if name in {b"fmt ", b"data"}:
+            chunks[name] = payload[start:end]
+        offset = end + (size & 1)
+    if len(chunks.get(b"fmt ", b"")) < 16 or b"data" not in chunks:
+        raise ValueError("audio artifact has no complete format and data chunks")
+    kind, channels, rate, _, alignment, bits = struct.unpack_from("<HHIIHH", chunks[b"fmt "])
+    if channels < 1 or rate < 1 or alignment != channels * (bits // 8):
+        raise ValueError("audio artifact has an invalid WAV format")
+    dtype = {(3, 32): "<f4", (1, 16): "<i2", (1, 32): "<i4"}.get((kind, bits))
+    if dtype is None:
+        raise ValueError("audio artifact must use Float32, PCM16, or PCM32 samples")
+    values = np.frombuffer(chunks[b"data"], dtype=dtype)
+    if values.size == 0 or values.size % channels:
+        raise ValueError("audio artifact contains no complete frames")
+    values = values.reshape(-1, channels).astype(np.float64)
+    if kind == 1:
+        values /= float(1 << (bits - 1))
+    return values.mean(axis=1), rate
+
+
+def _finite_threshold(thresholds: Mapping[str, Any], name: str) -> float:
+    value = thresholds.get(name)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise ValueError(f"threshold {name} must be finite")
+    return float(value)
+
+
 def metric_geometry_metrics(
     candidate: Mapping[str, Any], reference: Mapping[str, Any]
 ) -> dict[str, float]:
@@ -36,8 +200,7 @@ def metric_geometry_metrics(
     ref_points_valid = ref_points[common].astype(np.float64)
     point_delta = actual_points_valid - ref_points_valid
     cosine_denominator = np.maximum(
-        np.linalg.norm(actual_points_valid, axis=-1)
-        * np.linalg.norm(ref_points_valid, axis=-1),
+        np.linalg.norm(actual_points_valid, axis=-1) * np.linalg.norm(ref_points_valid, axis=-1),
         1.0e-12,
     )
     ref_intrinsics64 = ref_intrinsics.astype(np.float64)
@@ -49,18 +212,13 @@ def metric_geometry_metrics(
             np.mean(np.abs(depth_delta) / np.maximum(np.abs(ref_depth_valid), 1.0e-12))
         ),
         "depth_rel_l2": float(
-            np.linalg.norm(depth_delta)
-            / max(float(np.linalg.norm(ref_depth_valid)), 1.0e-12)
+            np.linalg.norm(depth_delta) / max(float(np.linalg.norm(ref_depth_valid)), 1.0e-12)
         ),
         "points_rel_l2": float(
-            np.linalg.norm(point_delta)
-            / max(float(np.linalg.norm(ref_points_valid)), 1.0e-12)
+            np.linalg.norm(point_delta) / max(float(np.linalg.norm(ref_points_valid)), 1.0e-12)
         ),
         "points_cosine": float(
-            np.mean(
-                np.sum(actual_points_valid * ref_points_valid, axis=-1)
-                / cosine_denominator
-            )
+            np.mean(np.sum(actual_points_valid * ref_points_valid, axis=-1) / cosine_denominator)
         ),
         "intrinsics_max_relative_error": float(
             np.max(np.abs(intrinsics_delta[nonzero]) / np.abs(ref_intrinsics64[nonzero]))
@@ -74,9 +232,7 @@ def metric_geometry_metrics(
     return metrics
 
 
-def metric_geometry_passes(
-    metrics: Mapping[str, float], thresholds: Mapping[str, Any]
-) -> bool:
+def metric_geometry_passes(metrics: Mapping[str, float], thresholds: Mapping[str, Any]) -> bool:
     """Apply the public metric-geometry threshold vocabulary."""
     required = {
         "mask_iou",
@@ -123,9 +279,7 @@ def robot_action_metrics(
     return metrics
 
 
-def robot_action_passes(
-    metrics: Mapping[str, float], thresholds: Mapping[str, Any]
-) -> bool:
+def robot_action_passes(metrics: Mapping[str, float], thresholds: Mapping[str, Any]) -> bool:
     """Apply the public robot-action threshold vocabulary."""
     required = {
         "action_max_abs_error",
