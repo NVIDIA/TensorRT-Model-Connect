@@ -35,7 +35,7 @@ accuracy:
 
 performance:
   - name: generate
-    benchmark: vision_language_performance
+    benchmark: vision_language_pipeline_performance
     operation: generate
     request:
       image_path: ../data/orc_test_img.jpeg

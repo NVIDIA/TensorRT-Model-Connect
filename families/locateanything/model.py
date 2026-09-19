@@ -338,15 +338,11 @@ def _detect_layer_prefix(readers) -> str:
 def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
     """Resolve this family's exact native-tokenizer framing."""
 
-    from transformers import AutoTokenizer
+    from tokenizers import Tokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        str(model_dir),
-        trust_remote_code=True,
-        use_fast=True,
-    )
-    default_ids = list(tokenizer.encode("hello"))
-    plain_ids = list(tokenizer.encode("hello", add_special_tokens=False))
+    tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+    default_ids = list(tokenizer.encode("hello").ids)
+    plain_ids = list(tokenizer.encode("hello", add_special_tokens=False).ids)
     if default_ids == plain_ids:
         prefix_ids, suffix_ids = [], []
     elif not plain_ids:
