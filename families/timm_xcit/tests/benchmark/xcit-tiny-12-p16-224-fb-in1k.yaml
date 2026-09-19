@@ -7,7 +7,7 @@ candidate:
   family: timm_xcit
   checkpoint: timm/xcit_tiny_12_p16_224.fb_in1k
   revision: 060449891838eaf301bdb3673e3daaf58e0370de
-  task: classification
+  task: image_to_class_scores
   precision: fp16
   bundle: xcit-tiny-12-p16-224-fb-in1k.bundle
   build:

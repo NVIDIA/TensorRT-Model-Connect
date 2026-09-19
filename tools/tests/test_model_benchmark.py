@@ -53,6 +53,21 @@ def test_family_configs_auto_discover_without_a_central_model_registry() -> None
     assert nemotron_h and all(not case.reference_build_isolation for case in nemotron_h)
 
 
+def test_timm_qualification_profiles_use_the_family_build_task() -> None:
+    cases = discover(REPOSITORY)
+    profiles = {
+        case.model: case
+        for case in cases
+        if case.kind == "accuracy" and case.family.startswith("timm_")
+    }
+
+    assert profiles
+    for model, case in profiles.items():
+        manifest = case.source.parent.parent / "manifests" / f"{model}.json"
+        declared = json.loads(manifest.read_text(encoding="utf-8"))
+        assert case.candidate["task"] == declared["task"], model
+
+
 def test_l0_configs_outside_the_benchmark_folder_are_not_discovered(
     tmp_path: Path,
 ) -> None:

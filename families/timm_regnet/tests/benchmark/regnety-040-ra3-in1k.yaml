@@ -7,7 +7,7 @@ candidate:
   family: timm_regnet
   checkpoint: timm/regnety_040.ra3_in1k
   revision: a1875159c7b04f3b3189af804642eebba1e2c118
-  task: classification
+  task: image_to_class_scores
   precision: fp16
   bundle: regnety-040-ra3-in1k.bundle
   build:

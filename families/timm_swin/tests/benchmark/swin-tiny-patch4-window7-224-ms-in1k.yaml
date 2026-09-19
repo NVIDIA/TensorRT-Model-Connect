@@ -7,7 +7,7 @@ candidate:
   family: timm_swin
   checkpoint: timm/swin_tiny_patch4_window7_224.ms_in1k
   revision: 4cc3a7275b50b53a7bec45f32c236ebe64227cff
-  task: classification
+  task: image_to_class_scores
   precision: fp16
   bundle: swin-tiny-patch4-window7-224-ms-in1k.bundle
   build:
