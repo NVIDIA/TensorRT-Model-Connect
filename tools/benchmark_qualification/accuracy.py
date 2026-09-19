@@ -1236,7 +1236,7 @@ def _candidate_outputs(
     first_request = requests[0].get("request")
     if not isinstance(first_request, Mapping):
         raise QualificationError("Accuracy candidate request must be an object")
-    descriptor = write_model_descriptor(case, output, first_request)
+    descriptor = write_model_descriptor(case, output, first_request, context=context)
     bundle = prepare_bundle(case, context, output, descriptor)
     data_path = output / "candidate-inputs.json"
     _json(data_path, list(requests))

@@ -6,8 +6,10 @@ from tensorrt_model_connect.model_support import ModelMetadata
 from families.fast_foundation_stereo.support import describe
 
 
-def test_official_checkpoint_without_hugging_face_config_is_supported() -> None:
-    support = describe(ModelMetadata({}, {}, ("model_best_bp2_serialize.pth",)))
+def test_prepared_official_model_without_hugging_face_config_is_supported() -> None:
+    support = describe(
+        ModelMetadata({}, {}, ("weights/23-36-37/model_best_bp2_serialize.pth",))
+    )
 
     assert support is not None
     assert support.default_task == "stereo_disparity"
