@@ -16,6 +16,7 @@ import pytest
 
 from apps.benchmark.performance.baselines import hf_transformers, task_reference
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
+from families.personaplex.tests.benchmark import prepare_environment as personaplex_environment
 from tools.benchmark_qualification import accuracy as qualification_accuracy
 from tools.benchmark_qualification import performance as qualification_performance
 from tools.benchmark_qualification.catalog import (
@@ -55,12 +56,23 @@ def test_family_configs_auto_discover_without_a_central_model_registry() -> None
     assert lance and all(not case.reference_build_isolation for case in lance)
 
 
-def test_personaplex_reference_environment_installs_official_audio_dependency() -> None:
-    requirements = (
-        REPOSITORY / "families/personaplex/requirements.txt"
-    ).read_text(encoding="utf-8")
+def test_personaplex_reference_environment_installs_official_audio_dependency(
+    monkeypatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(personaplex_environment, "package_version", lambda _name: "0.1.3")
+    monkeypatch.setattr(
+        personaplex_environment.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
 
-    assert "sphn==0.1.4" in requirements.splitlines()
+    personaplex_environment._install_sphn()
+
+    command, kwargs = calls[0]
+    assert command[-1] == "sphn==0.1.4"
+    assert kwargs["check"] is True
+    assert kwargs["env"]["CMAKE_POLICY_VERSION_MINIMUM"] == "3.5"
 
 
 def test_timm_qualification_profiles_use_the_family_build_task() -> None:
@@ -2123,10 +2135,12 @@ def test_family_reference_environment_inherits_parent_venv_packages(
     parent_packages.mkdir(parents=True)
     commands = []
     environments = []
+    timeouts = []
 
     def complete(command, *_args, **_kwargs):
         commands.append(command)
         environments.append(_kwargs.get("env"))
+        timeouts.append(_kwargs.get("timeout"))
         if command[1:3] == ["-m", "venv"]:
             environment = Path(command[-1])
             (environment / "bin").mkdir(parents=True)
@@ -2151,6 +2165,7 @@ def test_family_reference_environment_inherits_parent_venv_packages(
     assert "--no-build-isolation" in pip_command
     pip_index = commands.index(pip_command)
     assert environments[pip_index]["MAX_JOBS"] == "4"
+    assert timeouts[pip_index] == 7200
 
 
 def test_family_environment_hook_runs_after_requirements_install(

@@ -250,7 +250,9 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
         install_command,
         setup_root,
         "pip",
-        timeout=1800,
+        # Native reference dependencies such as FlashAttention can take more
+        # than 30 minutes to build on aarch64 even with bounded parallelism.
+        timeout=7200,
         verbose=context.verbose,
         env=install_environment,
     )

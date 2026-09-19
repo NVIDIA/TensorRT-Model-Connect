@@ -3,6 +3,8 @@
 
 """Prepare the pinned family-owned PersonaPlex reference checkout."""
 
+from importlib.metadata import PackageNotFoundError, version as package_version
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,9 +13,36 @@ import tempfile
 
 REPOSITORY = "https://github.com/NVIDIA/personaplex.git"
 REVISION = "3428dfd95309a7f3c84fd93259ded0f810d1ff91"
+SPHN_VERSION = "0.1.4"
+
+
+def _install_sphn() -> None:
+    try:
+        installed = package_version("sphn")
+    except PackageNotFoundError:
+        installed = None
+    if installed == SPHN_VERSION:
+        return
+    environment = dict(os.environ)
+    # sphn vendors an older Opus CMake project. CMake 4 requires its legacy
+    # policy floor to be selected explicitly when building on aarch64.
+    environment.setdefault("CMAKE_POLICY_VERSION_MINIMUM", "3.5")
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            f"sphn=={SPHN_VERSION}",
+        ],
+        check=True,
+        env=environment,
+    )
 
 
 def main() -> None:
+    _install_sphn()
     parent = Path(sys.prefix) / "trtmc-reference"
     destination = parent / "personaplex"
     if (destination / "moshi").is_dir():
