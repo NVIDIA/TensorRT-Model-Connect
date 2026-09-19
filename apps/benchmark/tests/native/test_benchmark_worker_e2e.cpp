@@ -230,6 +230,41 @@ int main(int argc, char** argv) {
                   prompted.at("box_coordinates") == "original_image_pixels_xyxy",
               "legacy prompted segmentation retains masks, scores and boxes for comparison");
         std::filesystem::remove(prompted_bundle);
+
+        const auto geometry_bundle = runtime_root / "benchmark_fake_geometry.bundle";
+        write_bundle(geometry_bundle, "monocular_geometry");
+        Json geometry_request = request;
+        geometry_request["case_name"] = "fake-monocular-geometry";
+        geometry_request["bundle"] = geometry_bundle.string();
+        geometry_request["operation"] = "geometry";
+        geometry_request["request"] = {{"image_path", legacy_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << geometry_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "monocular geometry worker process completed");
+        std::ifstream geometry_output_file(output_path);
+        Json geometry_result;
+        geometry_output_file >> geometry_result;
+        const auto& geometry = geometry_result.at("output_summary");
+        check(geometry_result.at("task") == "monocular_geometry" &&
+                  geometry_result.at("selected_task") == "monocular_geometry" &&
+                  geometry.at("geometry_pixels") == 2 &&
+                  geometry.at("point_shape") == Json::array({1, 2, 3}) &&
+                  geometry.at("valid_pixels") == 1 &&
+                  geometry.at("normalized_intrinsics") ==
+                      Json::array({{1.0, 0.0, 0.5}, {0.0, 1.0, 0.5}, {0.0, 0.0, 1.0}}) &&
+                  std::filesystem::file_size(geometry.at("points_artifact").get<std::string>()) ==
+                      6 * sizeof(float) &&
+                  std::filesystem::file_size(geometry.at("depth_artifact").get<std::string>()) ==
+                      2 * sizeof(float) &&
+                  std::filesystem::file_size(
+                      geometry.at("valid_mask_artifact").get<std::string>()) == 2,
+              "legacy monocular geometry retains complete metric artifacts");
+        std::filesystem::remove(geometry.at("points_artifact").get<std::string>());
+        std::filesystem::remove(geometry.at("depth_artifact").get<std::string>());
+        std::filesystem::remove(geometry.at("valid_mask_artifact").get<std::string>());
+        std::filesystem::remove(geometry_bundle);
         std::filesystem::remove(legacy_image);
 
         Json sdk = request;

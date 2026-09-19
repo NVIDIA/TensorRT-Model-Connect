@@ -340,6 +340,13 @@ def test_metric_geometry_has_an_image_input_and_preserves_optional_config(sdk_as
     }
 
 
+def test_legacy_monocular_geometry_uses_the_same_public_request(sdk_assets: Path) -> None:
+    result = resolve_task_case("monocular_geometry", {"image": "image.ppm"}, sdk_assets)
+
+    assert result.operation == "geometry"
+    assert result.request == {"image_path": str(sdk_assets / "image.ppm")}
+
+
 def test_image_only_detection_has_no_text_or_postprocessing_defaults(sdk_assets: Path) -> None:
     result = resolve_task_case("image_to_boxes", {"image": "image.ppm", "config": {"score": 0.0}}, sdk_assets)
     assert result.operation == "detect"
