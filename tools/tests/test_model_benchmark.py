@@ -55,6 +55,14 @@ def test_family_configs_auto_discover_without_a_central_model_registry() -> None
     assert lance and all(not case.reference_build_isolation for case in lance)
 
 
+def test_personaplex_reference_environment_installs_official_audio_dependency() -> None:
+    requirements = (
+        REPOSITORY / "families/personaplex/requirements.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "sphn==0.1.4" in requirements.splitlines()
+
+
 def test_timm_qualification_profiles_use_the_family_build_task() -> None:
     cases = discover(REPOSITORY)
     profiles = {
