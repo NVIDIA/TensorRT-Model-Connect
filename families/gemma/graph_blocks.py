@@ -374,6 +374,7 @@ def _gemma_raw(config) -> dict:
     return raw
 
 
+_GEMMA3_MODEL_TYPES = frozenset({"gemma3", "gemma3_text"})
 _GEMMA3_SLIDING_PATTERN = 6
 
 
@@ -395,6 +396,20 @@ def gemma3_attention_schedule(config, num_layers: int) -> dict:
     # A second rope base is what distinguishes Gemma 3 from Gemma 2 here.
     # Gemma 2 also interleaves windows but rotates every layer on one base, so
     # without this key the caller must keep building a single-base graph.
+    #
+    # For Gemma 3 that fallback is never right: it silently rebuilds all layers
+    # as global attention on one base, which builds cleanly and generates
+    # fluent, wrong text. google/gemma-3-12b-it states neither key and relies on
+    # the transformers defaults, so refuse rather than guess - the model layer
+    # is responsible for filling these in before the graph is built.
+    if str(getattr(config, "model_type", "")).lower() in _GEMMA3_MODEL_TYPES and not (
+        window and local_base
+    ):
+        raise ValueError(
+            "Gemma 3 needs both sliding_window and rope_local_base_freq to place "
+            f"local attention; got sliding_window={window!r} "
+            f"rope_local_base_freq={local_base!r}"
+        )
     if not window or not local_base:
         return {
             "is_local": [False] * num_layers,

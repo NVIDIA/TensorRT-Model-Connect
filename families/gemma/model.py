@@ -57,12 +57,31 @@ def _decoder_prefix(readers) -> str:
 # mirror of the same weights states both, which is why local runs passed and
 # internal CI did not. rms_norm_eps is listed because this family would
 # otherwise fall back to 1e-5 where Gemma 3 uses 1e-6 - wrong, and silently so.
+# What Gemma3TextConfig fills in when the checkpoint stays silent. Google's own
+# configs state geometry and nothing else, so every value here is load-bearing;
+# the mirrors that write them out explicitly are why this went unnoticed.
+#
+# `rope_theta` and `rope_local_base_freq` come from that class's rope_parameters:
+#   sliding_attention -> {"rope_type": "default", "rope_theta": 10000.0}
+#   full_attention    -> {"rope_type": "linear",  "rope_theta": 1000000.0}
 _GEMMA3_CONFIG_DEFAULTS = {
     "hidden_activation": "gelu_pytorch_tanh",
     "rms_norm_eps": 1e-6,
     "max_position_embeddings": 131072,
     "head_dim": 256,
+    "query_pre_attn_scalar": 256,
+    "rope_theta": 1000000.0,
+    "rope_local_base_freq": 10000.0,
+    "sliding_window_pattern": 6,
 }
+
+# Defaults that belong in config.raw rather than on the config object, because
+# graph_blocks reads them back through _gemma_raw.
+_GEMMA3_RAW_DEFAULTS = (
+    "query_pre_attn_scalar",
+    "rope_local_base_freq",
+    "sliding_window_pattern",
+)
 
 
 def _apply_gemma3_config_defaults(config: ModelConfig, readers, model_prefix: str) -> None:
@@ -81,6 +100,17 @@ def _apply_gemma3_config_defaults(config: ModelConfig, readers, model_prefix: st
         config.rms_norm_eps = _GEMMA3_CONFIG_DEFAULTS["rms_norm_eps"]
     if raw.get("max_position_embeddings") is None:
         config.max_position_embeddings = _GEMMA3_CONFIG_DEFAULTS["max_position_embeddings"]
+    if raw.get("rope_theta") is None:
+        # Gemma 3's global layers use 1e6. The parser's own fallback is 1e4,
+        # which is the *local* base, so staying silent here rebuilds every
+        # global layer on the wrong rope table.
+        config.rope_theta = _GEMMA3_CONFIG_DEFAULTS["rope_theta"]
+    for key in _GEMMA3_RAW_DEFAULTS:
+        # Written into raw, not onto the config: gemma3_attention_schedule and
+        # gemma_attention_scale read these back through _gemma_raw. A nested
+        # text_config still wins, because _gemma_raw overlays it last.
+        if raw.get(key) is None:
+            config.raw[key] = _GEMMA3_CONFIG_DEFAULTS[key]
     if raw.get("head_dim") is None:
         # head_dim is a derived property; _head_dim is the stated override it
         # reads first. Without it the property falls back to

@@ -81,10 +81,22 @@ def test_a_checkpoint_without_a_second_rope_base_stays_global() -> None:
 
     It declares sliding_window but no rope_local_base_freq, so no second rope
     table may be built for it.
+
+    This case previously passed a `gemma3_text` config, which made it assert
+    that a Gemma 3 checkpoint missing its local rope base quietly becomes an
+    all-global model. That is the shape of google/gemma-3-12b-it, and the
+    resulting engine built cleanly and generated fluent, wrong text. The
+    model_type below is the one the docstring always described.
     """
-    schedule = gemma3_attention_schedule(_config(sliding_window=4096), 26)
+    schedule = gemma3_attention_schedule(_config(model_type="gemma2", sliding_window=4096), 26)
     assert schedule["is_local"] == [False] * 26
     assert schedule["window"] is None
+
+
+def test_gemma3_without_a_second_rope_base_is_refused() -> None:
+    """The same inputs under a Gemma 3 model_type must not be guessed at."""
+    with pytest.raises(ValueError, match="rope_local_base_freq"):
+        gemma3_attention_schedule(_config(sliding_window=4096), 26)
 
 
 def test_an_absent_pattern_falls_back_to_the_gemma3_default() -> None:
