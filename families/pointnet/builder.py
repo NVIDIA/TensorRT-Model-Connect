@@ -126,6 +126,7 @@ def build_pointnet_engine(model_dir: Path, config: ModelConfig, precision: str,
             Path(tmp.name).unlink(missing_ok=True)
 
     config_trt = builder.create_builder_config()
+    config_trt.builder_optimization_level = 1
     config_trt.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     profile = builder.create_optimization_profile()
     profile.set_shape(_INPUT_NAME, (1, config.input_dim, 1),
