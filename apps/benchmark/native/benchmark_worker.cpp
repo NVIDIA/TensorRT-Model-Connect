@@ -465,6 +465,75 @@ Json run_transcribe(trtmc::ITask& task, const Json& request, const Timing& timin
         });
 }
 
+template <class T>
+void write_binary_artifact(const std::string& path, const T* values, std::uint64_t count) {
+    if (count > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) / sizeof(T))
+        throw std::runtime_error("binary artifact is too large");
+    std::ofstream output(path, std::ios::binary);
+    output.exceptions(std::ios::badbit | std::ios::failbit);
+    output.write(reinterpret_cast<const char*>(values),
+                 static_cast<std::streamsize>(count * sizeof(T)));
+    output.close();
+}
+
+Json run_geometry(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& interface = require_interface<trtmc::IMonocularGeometry>(task, "IMonocularGeometry");
+    const auto path = request.at("image_path").get<std::string>();
+    std::optional<Image> cached;
+    if (!timing.asset_loading_included)
+        cached = read_image(path);
+    auto invoke = [&]() {
+        std::optional<Image> loaded;
+        if (!cached)
+            loaded = read_image(path);
+        const auto& image = cached ? *cached : *loaded;
+        return interface.estimate_geometry(image.pixels.data(), image.height, image.width);
+    };
+    std::optional<trtmc::GeometryResult> last;
+    for (int index = 0; index < timing.warmup; ++index)
+        last = invoke();
+    Json observations = Json::array();
+    for (int index = 0; index < timing.iterations; ++index) {
+        last.reset();
+        const auto started = Clock::now();
+        auto result = invoke();
+        const auto wall_ms = elapsed_ms(started);
+        last.emplace(std::move(result));
+        observations.push_back({{"runtime_e2e_wall_ms", wall_ms},
+                                {"geometry_images", 1},
+                                {"geometry_pixels", last->depth.size()}});
+    }
+    if (last->height <= 0 || last->width <= 0)
+        throw std::runtime_error("monocular geometry returned invalid dimensions");
+    const auto pixels = static_cast<std::size_t>(last->height) * last->width;
+    if (last->points.size() != pixels * 3 || last->depth.size() != pixels ||
+        last->mask.size() != pixels)
+        throw std::runtime_error("monocular geometry returned inconsistent output shapes");
+    const auto prefix = request.at("_artifact_prefix").get<std::string>();
+    write_binary_artifact(prefix + ".points.f32", last->points.data(), last->points.size());
+    write_binary_artifact(prefix + ".depth.f32", last->depth.data(), last->depth.size());
+    write_binary_artifact(prefix + ".mask.u8", last->mask.data(), last->mask.size());
+    Json intrinsics = Json::array();
+    for (int row = 0; row < 3; ++row)
+        intrinsics.push_back({last->intrinsics[row * 3], last->intrinsics[row * 3 + 1],
+                              last->intrinsics[row * 3 + 2]});
+    return {{"observations", std::move(observations)},
+            {"output_summary",
+             {{"geometry_images", 1},
+              {"geometry_pixels", pixels},
+              {"height", last->height},
+              {"width", last->width},
+              {"point_shape", {last->height, last->width, 3}},
+              {"valid_pixels", std::count(last->mask.begin(), last->mask.end(), std::uint8_t{1})},
+              {"normalized_intrinsics", std::move(intrinsics)},
+              {"units", "meters"},
+              {"camera_axes", {"right", "down", "forward"}},
+              {"intrinsics_coordinates", "normalized_uv"},
+              {"points_artifact", prefix + ".points.f32"},
+              {"depth_artifact", prefix + ".depth.f32"},
+              {"valid_mask_artifact", prefix + ".mask.u8"}}}};
+}
+
 Json run_segment(trtmc::ITask& task, const Json& request, const Timing& timing) {
     auto& interface = require_interface<trtmc::ISegmentation>(task, "ISegmentation");
     const Image image = read_image(request.at("image_path").get<std::string>());
@@ -2894,17 +2963,6 @@ Json run_track_pose(const trtmc::Model& model, const Json& request, const Timing
         });
 }
 
-template <class T>
-void write_binary_artifact(const std::string& path, const T* values, std::uint64_t count) {
-    if (count > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) / sizeof(T))
-        throw std::runtime_error("binary artifact is too large");
-    std::ofstream output(path, std::ios::binary);
-    output.exceptions(std::ios::badbit | std::ios::failbit);
-    output.write(reinterpret_cast<const char*>(values),
-                 static_cast<std::streamsize>(count * sizeof(T)));
-    output.close();
-}
-
 Json run_geometry(const trtmc::Model& model, const Json& request, const Timing& timing,
                   const std::string& task_id) {
     const auto task = task_for_operation<trtmc::ImageToMetricGeometry>(model, task_id);
@@ -3796,6 +3854,7 @@ Json execute(const Json& request, const std::string& output_path) {
             {"classify", run_classify},
             {"detect", run_detect},
             {"extract_features", run_extract_features},
+            {"geometry", run_geometry},
             {"disparity", run_disparity},
             {"rerank", run_rerank},
             {"encode", run_encode},

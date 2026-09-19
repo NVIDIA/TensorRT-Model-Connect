@@ -8,7 +8,6 @@ candidate:
   checkpoint: Ruicheng/moge-2-vitl
   revision: 39c4d5e957afe587e04eec59dc2bcc3be5ecd968
   task: monocular_geometry
-  selected_task: image_to_metric_geometry
   precision: fp32
   bundle: moge-2-vitl.bundle
   build:

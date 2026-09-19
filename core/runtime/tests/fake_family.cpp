@@ -76,6 +76,21 @@ class FakeObjectDetection final : public trtmc::IObjectDetection {
     }
 };
 
+class FakeMonocularGeometry final : public trtmc::IMonocularGeometry {
+  public:
+    trtmc::GeometryResult estimate_geometry(const float*, std::int32_t height,
+                                            std::int32_t width) override {
+        trtmc::GeometryResult result;
+        result.points = {1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F};
+        result.depth = {3.0F, 6.0F};
+        result.mask = {1, 0};
+        result.intrinsics = {1.0F, 0.0F, 0.5F, 0.0F, 1.0F, 0.5F, 0.0F, 0.0F, 1.0F};
+        result.height = height;
+        result.width = width;
+        return result;
+    }
+};
+
 class FakePointPromptedSegmentation final : public trtmc::IPointPromptedSegmentation {
   public:
     trtmc::PromptedSegmentationResult segment_prompted(const float*, std::int32_t height,
@@ -97,6 +112,8 @@ trtmc::ITask* create_fake_perception_task(const trtmc::FamilyContext& context) {
         return new FakeSegmentation();
     if (context.reader.info().task == trtmc::IObjectDetection::kTask)
         return new FakeObjectDetection();
+    if (context.reader.info().task == trtmc::IMonocularGeometry::kTask)
+        return new FakeMonocularGeometry();
     if (context.reader.info().task == trtmc::IPointPromptedSegmentation::kTask)
         return new FakePointPromptedSegmentation();
     return nullptr;
