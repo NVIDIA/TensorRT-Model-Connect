@@ -178,7 +178,33 @@ int main(int argc, char** argv) {
         check(image_result.at("status") == "completed" &&
                   image_result.at("output_summary").at("generated_images") == 1,
               "single image generation returns one result");
+        const auto image_artifacts = image_result.at("output_summary").at("image_artifacts");
+        check(image_artifacts.size() == 1 &&
+                  std::filesystem::is_regular_file(runtime_root / image_artifacts.at(0)),
+              "legacy image generation retains the actual PNG outside timed execution");
         std::filesystem::remove(image_bundle);
+
+        const auto audio_bundle = runtime_root / "benchmark_fake_audio_generation.bundle";
+        write_bundle(audio_bundle, "audio_generation");
+        Json audio_request = request;
+        audio_request["case_name"] = "fake-audio-generation";
+        audio_request["bundle"] = audio_bundle.string();
+        audio_request["operation"] = "generate_audio";
+        audio_request["request"] = {{"prompt", "Hello"}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << audio_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "legacy audio worker process completed");
+        std::ifstream audio_output_file(output_path);
+        Json audio_result;
+        audio_output_file >> audio_result;
+        const auto audio_artifact =
+            audio_result.at("output_summary").at("audio_artifact").get<std::string>();
+        check(audio_result.at("status") == "completed" &&
+                  std::filesystem::is_regular_file(runtime_root / audio_artifact),
+              "legacy audio generation retains the actual WAV outside timed execution");
+        std::filesystem::remove(audio_bundle);
 
         const auto legacy_image = runtime_root / "benchmark_legacy_segment.ppm";
         {

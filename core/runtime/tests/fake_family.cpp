@@ -76,6 +76,14 @@ class FakeImageGeneration final : public trtmc::IImageGeneration,
     }
 };
 
+class FakeAudioGeneration final : public trtmc::IAudioGeneration {
+  public:
+    trtmc::AudioResult generate_audio(const std::string&,
+                                      const trtmc::AudioGenerationConfig&) override {
+        return {{0.25F, -0.5F, 0.75F, -1.0F}, 4, 8000};
+    }
+};
+
 class FakeSegmentation final : public trtmc::ISegmentation {
   public:
     trtmc::SegmentResult segment(const float*, std::int32_t height, std::int32_t width) override {
@@ -148,6 +156,8 @@ trtmc::ITask* create_fake_task(const trtmc::FamilyContext& context) {
         return new FakeEmbedding();
     if (context.reader.info().task == trtmc::IImageGeneration::kTask)
         return new FakeImageGeneration();
+    if (context.reader.info().task == trtmc::IAudioGeneration::kTask)
+        return new FakeAudioGeneration();
     if (context.reader.info().task == trtmc::ITimeSeriesForecast::kTask)
         return new FakeForecast(context.backend, context.kv_cache_size_bytes);
     if (context.reader.info().task == trtmc::ITextGeneration::kTask) {
