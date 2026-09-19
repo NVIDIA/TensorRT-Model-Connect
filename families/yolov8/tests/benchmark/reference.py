@@ -130,13 +130,13 @@ def _detect(
 
     with torch.inference_mode():
         raw = model(pixels)
-    raw = raw[0] if isinstance(raw, (list, tuple)) else raw
-    kept = non_max_suppression(
-        raw,
-        conf_thres=threshold,
-        iou_thres=0.7,
-        max_det=300,
-    )[0]
+        raw = raw[0] if isinstance(raw, (list, tuple)) else raw
+        kept = non_max_suppression(
+            raw,
+            conf_thres=threshold,
+            iou_thres=0.7,
+            max_det=300,
+        )[0]
     rows = kept.detach().float().cpu().tolist()
     scale = float(geometry["scale"])
     pad_x = int(geometry["pad_x"])
