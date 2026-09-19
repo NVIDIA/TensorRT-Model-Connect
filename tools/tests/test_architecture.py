@@ -547,6 +547,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
                 "tools/benchmark_qualification/benchmarks/stereo_disparity_performance.yaml",
             "tools/benchmark_qualification/benchmarks/text_generation_performance.yaml",
             "tools/benchmark_qualification/benchmarks/text_prompted_segmentation_performance.yaml",
+            "tools/benchmark_qualification/benchmarks/vision_language_pipeline_performance.yaml",
             "tools/benchmark_qualification/benchmarks/vision_language_performance.yaml",
             "tools/benchmark_qualification/benchmarks/semantic_segmentation_performance.yaml",
         "tools/benchmark_qualification/benchmarks/time_series_performance.yaml",
