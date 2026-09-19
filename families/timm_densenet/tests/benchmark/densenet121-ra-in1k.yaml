@@ -6,7 +6,7 @@ model: densenet121-ra-in1k
 candidate:
   family: timm_densenet
   checkpoint: timm/densenet121.ra_in1k
-  task: classification
+  task: image_to_class_scores
   precision: fp16
   bundle: densenet121-ra-in1k.bundle
   build:

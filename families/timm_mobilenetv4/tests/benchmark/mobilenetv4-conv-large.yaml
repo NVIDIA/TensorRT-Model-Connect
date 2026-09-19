@@ -6,7 +6,7 @@ model: mobilenetv4-conv-large
 candidate:
   family: timm_mobilenetv4
   checkpoint: timm/mobilenetv4_conv_large.e500_r256_in1k
-  task: classification
+  task: image_to_class_scores
   precision: fp16
   bundle: mobilenetv4-conv-large.bundle
   build:
