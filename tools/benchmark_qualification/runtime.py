@@ -104,7 +104,11 @@ def require_candidate(context: RuntimeContext) -> tuple[Path, Path]:
 
 
 def write_model_descriptor(
-    case: QualificationCase, output: Path, request: Mapping[str, Any]
+    case: QualificationCase,
+    output: Path,
+    request: Mapping[str, Any],
+    *,
+    context: RuntimeContext | None = None,
 ) -> Path:
     candidate = case.candidate
     task = str(candidate["task"])
@@ -120,9 +124,21 @@ def write_model_descriptor(
     selected_task = candidate.get("selected_task")
     if selected_task is not None:
         testcase["selected_task"] = str(selected_task)
+    checkpoint = str(candidate["checkpoint"])
+    configured_directory = candidate.get("model_directory")
+    if configured_directory is not None:
+        if context is None:
+            raise QualificationError("candidate.model_directory requires a runtime context")
+        environment = reference_python(case, context).parent.parent.resolve()
+        model_directory = (environment / str(configured_directory)).resolve()
+        if not model_directory.is_relative_to(environment) or not model_directory.is_dir():
+            raise QualificationError(
+                f"prepared candidate model directory is unavailable: {model_directory}"
+            )
+        checkpoint = str(model_directory)
     value = {
         "name": case.model,
-        "hf_id": str(candidate["checkpoint"]),
+        "hf_id": checkpoint,
         "hf_revision": str(candidate.get("revision", "")),
         "bundle": str(candidate.get("bundle", f"{case.model}.bundle")),
         "family": case.family,

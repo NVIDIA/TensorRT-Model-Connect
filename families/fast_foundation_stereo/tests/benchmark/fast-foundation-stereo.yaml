@@ -7,6 +7,7 @@ candidate:
   family: fast_foundation_stereo
   checkpoint: nvidia/c-fast-foundationstereo
   revision: 9b446878c81ddb27593036767b29b2859d46103e
+  model_directory: trtmc-reference/Fast-FoundationStereo
   task: stereo_disparity
   precision: fp16
   bundle: fast-foundation-stereo.bundle

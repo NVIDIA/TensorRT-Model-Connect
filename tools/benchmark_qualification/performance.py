@@ -78,7 +78,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     assert isinstance(measurement, Mapping)
     assert isinstance(reference_timing, Mapping)
     request = _resolve_family_assets(case, request)
-    descriptor = write_model_descriptor(case, output, request)
+    descriptor = write_model_descriptor(case, output, request, context=context)
     entry_id = f"qualification.{case.family}.{case.name}"
     suite = {
         "schema_version": "trtmc.perf-suite/v2",

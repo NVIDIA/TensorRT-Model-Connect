@@ -135,6 +135,13 @@ def _candidate(raw: Any, family: str, path: Path) -> dict[str, Any]:
     selected_task = value.get("selected_task")
     if selected_task is not None:
         _string(selected_task, "candidate.selected_task", path)
+    model_directory = value.get("model_directory")
+    if model_directory is not None:
+        configured = Path(_string(model_directory, "candidate.model_directory", path))
+        if configured.is_absolute() or ".." in configured.parts:
+            raise QualificationError(
+                f"{path}: candidate.model_directory must stay inside the family environment"
+            )
     revision = value.get("revision")
     if revision is not None and not isinstance(revision, str):
         raise QualificationError(f"{path}: candidate.revision must be a string")

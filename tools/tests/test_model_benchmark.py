@@ -114,6 +114,30 @@ def test_trusted_remote_code_requires_an_immutable_revision(
         discover(tmp_path)
 
 
+@pytest.mark.parametrize("model_directory", ["/tmp/model", "../model"])
+def test_candidate_model_directory_must_stay_in_the_family_environment(
+    tmp_path: Path, model_directory: str
+) -> None:
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        "schema_version: trtmc.qualification/v1\n"
+        "model: example\n"
+        "candidate:\n"
+        "  family: example\n"
+        "  checkpoint: example/model\n"
+        f"  model_directory: {model_directory}\n"
+        "  task: classification\n"
+        "  precision: fp16\n"
+        "accuracy: []\n"
+        "performance: []\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QualificationError, match="must stay inside the family environment"):
+        discover(tmp_path)
+
+
 def test_one_model_file_owns_multiple_cases_without_testcase_indirection(
     tmp_path: Path,
 ) -> None:
@@ -1912,6 +1936,61 @@ def test_candidate_descriptor_preserves_family_selected_task(tmp_path: Path) -> 
 
     assert testcase["selected_task"] == "image_to_metric_geometry"
     assert testcase["image_path"] == "/data/image.png"
+
+
+def test_candidate_descriptor_uses_family_environment_model_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    environment = tmp_path / "family-environment"
+    python = environment / "bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    model_directory = environment / "prepared/model"
+    model_directory.mkdir(parents=True)
+    case = QualificationCase(
+        kind="accuracy",
+        model="source-model",
+        family="source_family",
+        name="parity",
+        benchmark="source_parity",
+        candidate={
+            "family": "source_family",
+            "checkpoint": "example/source-model",
+            "model_directory": "prepared/model",
+            "task": "classification",
+            "precision": "fp16",
+            "build": {},
+        },
+        values={},
+        source=tmp_path / "source-model.yaml",
+        reference_requirements=None,
+    )
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=False,
+        verbose=False,
+    )
+    monkeypatch.setattr(
+        "tools.benchmark_qualification.runtime.reference_python", lambda *_args: python
+    )
+
+    descriptor = write_model_descriptor(
+        case, tmp_path, {"image_path": "/data/image.png"}, context=context
+    )
+
+    assert json.loads(descriptor.read_text(encoding="utf-8"))["hf_id"] == str(
+        model_directory.resolve()
+    )
 
 
 @pytest.mark.parametrize(
