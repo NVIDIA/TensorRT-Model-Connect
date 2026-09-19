@@ -1,0 +1,59 @@
+{
+  "name": "hstu-movielens20m-ranking-seeded-bf16",
+  "family": "hstu",
+  "task": "recommendation",
+  "bundle": "hstu-movielens20m-ranking-seeded-bf16.bundle",
+  "precision": "bf16",
+  "max_batch_size": 2,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "hstu-movielens20m-ranking-seeded-bf16",
+      "premerge": true,
+      "config_overrides": {
+        "hidden_size": 128,
+        "num_heads": 4,
+        "head_dim": 128,
+        "num_layers": 1,
+        "max_sequence_length": 441,
+        "position_buckets": 8192,
+        "scaling_seqlen": 441,
+        "prediction_head": [
+          512,
+          10
+        ],
+        "embedding_tables": [
+          {
+            "name": "item",
+            "role": "item",
+            "num_embeddings": 24
+          },
+          {
+            "name": "action",
+            "role": "action",
+            "num_embeddings": 10
+          },
+          {
+            "name": "context",
+            "role": "context",
+            "num_embeddings": 6
+          }
+        ]
+      },
+      "fixture": {
+        "history_lengths": [
+          200,
+          137
+        ],
+        "candidate_lengths": [
+          20,
+          11
+        ],
+        "context_counts": [
+          1,
+          1
+        ]
+      }
+    }
+  ]
+}

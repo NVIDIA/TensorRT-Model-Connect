@@ -61,8 +61,9 @@ bool rtx_options_throw(const std::filesystem::path& bundle, const std::string& r
 }
 
 void check_rtx_options(const std::filesystem::path& runtime_root,
-                       const std::string& expected_cache_path, bool expected_cuda_graphs) {
-    const auto library_path = runtime_root / "libtrtmc_backend_trt_rtx.so";
+                       const std::string& expected_cache_path, bool expected_cuda_graphs,
+                       const std::string& backend = "trt_rtx") {
+    const auto library_path = runtime_root / ("libtrtmc_backend_" + backend + ".so");
     void* handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     check(handle != nullptr, "fake RTX backend remains loaded");
     if (handle == nullptr)
@@ -130,6 +131,17 @@ int main(int argc, char** argv) {
     if (rtx_forecast != nullptr)
         (void)rtx_forecast->forecast({values, mask});
     check_rtx_options(runtime_root, expected_cache_path, true);
+
+    const auto trt_bundle = runtime_root / "fake-trt.bundle";
+    write_bundle(trt_bundle, "fake", "time_series_forecast", "trt");
+    auto trt_task = trtmc::load_task(trt_bundle.string(), runtime_root.string(), 0, "", true);
+    auto* trt_forecast = dynamic_cast<trtmc::ITimeSeriesForecast*>(trt_task.get());
+    check(trt_forecast != nullptr, "standard TRT graph option reaches family creation");
+    if (trt_forecast != nullptr)
+        (void)trt_forecast->forecast({values, mask});
+    check_rtx_options(runtime_root, "", true, "trt");
+    check(rtx_options_throw(trt_bundle, runtime_root.string()),
+          "standard TRT still rejects RTX runtime-cache options");
 
     const std::string second_cache_path = (runtime_root / std::string(256, 's')).string();
     auto second_rtx_task =

@@ -86,6 +86,7 @@ set(TRTMC_CUDA_INCLUDE_DIR ${CUDAToolkit_INCLUDE_DIRS})
 set(TRTMC_CUDART_LIBRARY CUDA::cudart)
 
 add_library(trtmc_core SHARED
+  core/runtime/cache/history_cache.cpp
   core/runtime/bundle/bundle_format.cpp
   core/runtime/primitives/cuda_common.cpp
   core/runtime/primitives/device_tensor.cpp
@@ -455,6 +456,12 @@ if(TRTMC_BUILD_EXAMPLES)
 endif()
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_history_cache core/runtime/tests/test_history_cache.cpp)
+  target_link_libraries(test_history_cache PRIVATE trtmc_core)
+  target_compile_options(test_history_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME history_cache COMMAND test_history_cache)
+  set_tests_properties(history_cache PROPERTIES LABELS cpu)
+
   add_executable(test_bundle_format_v1 core/runtime/tests/test_bundle_format_v1.cpp)
   target_include_directories(test_bundle_format_v1 PRIVATE ${PROJECT_SOURCE_DIR}/core)
   target_link_libraries(test_bundle_format_v1 PRIVATE trtmc_core)
@@ -552,6 +559,17 @@ if(TRTMC_BUILD_TESTS)
     LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
   )
 
+  add_library(trtmc_test_backend_fake_trt SHARED core/runtime/tests/fake_backend.cpp)
+  target_include_directories(trtmc_test_backend_fake_trt PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(trtmc_test_backend_fake_trt PRIVATE CUDA::cudart)
+  target_compile_definitions(trtmc_test_backend_fake_trt PRIVATE TRTMC_FAKE_BACKEND_NAME="trt")
+  set_target_properties(trtmc_test_backend_fake_trt PROPERTIES
+    OUTPUT_NAME trtmc_backend_trt
+    LIBRARY_OUTPUT_DIRECTORY "${_trtmc_test_runtime_root}"
+  )
+
   add_library(trtmc_test_family_fake SHARED core/runtime/tests/fake_family.cpp)
   target_include_directories(trtmc_test_family_fake PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
   target_link_libraries(trtmc_test_family_fake PRIVATE trtmc_core)
@@ -571,6 +589,7 @@ if(TRTMC_BUILD_TESTS)
   add_dependencies(test_family_loader
     trtmc_test_backend_fake
     trtmc_test_backend_fake_rtx
+    trtmc_test_backend_fake_trt
     trtmc_test_family_fake
   )
   add_custom_command(TARGET test_family_loader POST_BUILD
