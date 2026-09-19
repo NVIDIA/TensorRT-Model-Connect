@@ -60,6 +60,10 @@ excluded_profiles:
       performance baseline runs Ultralytics, which cannot load a legacy YOLOv5
       archive: those archives pickle classes from the standalone yolov5
       repository, which is not a dependency here.
+  - model: yolox-s
+    reason: >-
+      Functional and official-reference parity are covered by family tests,
+      but no matching release-performance workload or receipt is provided.
   - model: mobilenetv4-conv-small
     reason: &mobilenetv4_performance_exclusion >-
       Functional and timm reference-parity qualification is present for every

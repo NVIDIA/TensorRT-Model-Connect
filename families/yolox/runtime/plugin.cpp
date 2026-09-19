@@ -1,0 +1,74 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "families/yolox/runtime/pipeline.h"
+#include "trtmc/runtime/family_factory.h"
+#include "trtmc/runtime/trt_backend.h"
+
+#include <nlohmann/json.hpp>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+namespace trtmc::yolox {
+namespace {
+
+constexpr float kScoreThreshold = 0.25F;
+constexpr float kIouThreshold = 0.45F;
+
+std::int32_t detection_slots(const YoloxPreprocessConfig& config) {
+    std::int32_t count = 0;
+    for (const int stride : {8, 16, 32})
+        count += (config.input_image_h / stride) * (config.input_image_w / stride);
+    return count;
+}
+
+std::vector<char> require_section(const BundleReader& bundle, const char* name) {
+    const auto* section = bundle.find_section(name);
+    if (section == nullptr || section->length == 0)
+        throw std::runtime_error("YOLOX bundle section is missing or empty: " + std::string(name));
+    return bundle.read_section(name);
+}
+
+YoloxPreprocessConfig parse_config(const std::vector<char>& data) {
+    const auto json = nlohmann::json::parse(data.begin(), data.end());
+    YoloxPreprocessConfig config;
+    config.input_image_h = json.at("input_image_h").get<std::int32_t>();
+    config.input_image_w = json.at("input_image_w").get<std::int32_t>();
+    config.pad_value = json.at("pad_value").get<float>();
+    const auto score = json.at("score_threshold").get<float>();
+    const auto iou = json.at("iou_threshold").get<float>();
+    const auto maximum = json.at("max_detections").get<std::int32_t>();
+    if ((config.input_image_h != 416 && config.input_image_h != 640) ||
+        config.input_image_w != config.input_image_h || config.pad_value != 114.0F ||
+        json.at("num_classes").get<std::int32_t>() != 80 || maximum != detection_slots(config) ||
+        score != kScoreThreshold || iou != kIouThreshold)
+        throw std::runtime_error("YOLOX runtime.json does not match its contract");
+    return config;
+}
+
+std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<char>& plan) {
+    ModuleCreateOptions options{};
+    auto engine = backend.create_module(plan.data(), plan.size(), options);
+    if (!engine || !engine->ok())
+        throw std::runtime_error("YOLOX engine failed to load");
+    return engine;
+}
+
+} // namespace
+} // namespace trtmc::yolox
+
+extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("yolox does not support --kv-cache-size");
+    const auto config_data = trtmc::yolox::require_section(context.reader, "runtime.json");
+    const auto plan = trtmc::yolox::require_section(context.reader, "engine.plan");
+    auto config = trtmc::yolox::parse_config(config_data);
+    auto engine = trtmc::yolox::load_engine(context.backend, plan);
+    const auto maximum = trtmc::yolox::detection_slots(config);
+    return new trtmc::YoloxObjectDetectionPipeline(std::move(engine), std::move(config),
+                                                   trtmc::yolox::kScoreThreshold,
+                                                   trtmc::yolox::kIouThreshold, maximum);
+}
