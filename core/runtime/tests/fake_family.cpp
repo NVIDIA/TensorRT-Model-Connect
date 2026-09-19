@@ -65,19 +65,7 @@ class FakeSegmentation final : public trtmc::ISegmentation {
     }
 };
 
-} // namespace
-
-extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
-    if (context.reader.info().family != "fake")
-        throw std::runtime_error("unexpected family");
-    const char* backend_name = context.backend.name();
-    if (backend_name == nullptr ||
-        (std::string(backend_name) != "fake" && std::string(backend_name) != "trt_rtx")) {
-        throw std::runtime_error("unexpected backend");
-    }
-    const auto plan = context.reader.read_section("engine.plan");
-    if (std::string(plan.begin(), plan.end()) != "PLAN")
-        throw std::runtime_error("unexpected engine plan");
+trtmc::ITask* create_fake_task(const trtmc::FamilyContext& context) {
     if (context.reader.info().task == trtmc::IEncoding::kTask)
         return new FakeEncoding();
     if (context.reader.info().task == trtmc::IEmbedding::kTask)
@@ -91,4 +79,20 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         return new FakeForecast(context.backend, context.kv_cache_size_bytes);
     }
     throw std::runtime_error("unsupported fake task");
+}
+
+} // namespace
+
+extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.reader.info().family != "fake")
+        throw std::runtime_error("unexpected family");
+    const char* backend_name = context.backend.name();
+    if (backend_name == nullptr ||
+        (std::string(backend_name) != "fake" && std::string(backend_name) != "trt_rtx")) {
+        throw std::runtime_error("unexpected backend");
+    }
+    const auto plan = context.reader.read_section("engine.plan");
+    if (std::string(plan.begin(), plan.end()) != "PLAN")
+        throw std::runtime_error("unexpected engine plan");
+    return create_fake_task(context);
 }
