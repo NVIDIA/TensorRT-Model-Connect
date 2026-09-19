@@ -20,6 +20,7 @@ accuracy:
     benchmark: librispeech_transcription
     samples: 10
     request: &request
+      language: en
       max_new_tokens: 50
     reference:
       command: reference.py
