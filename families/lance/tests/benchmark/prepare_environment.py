@@ -13,10 +13,27 @@ REPOSITORY = "https://github.com/bytedance/Lance.git"
 REVISION = "4baeee086648996f6ab12e673cbe461b0b149997"
 
 
+def _prepare_image_only_checkout(repository: Path) -> None:
+    dataset = repository / "data/datasets_custom/validation_dataset.py"
+    text = dataset.read_text(encoding="utf-8")
+    for line in ("import decord\n", "from decord import VideoReader\n"):
+        if line in text:
+            if text.count(line) != 1:
+                raise RuntimeError(f"Lance upstream import contract changed: {line.strip()}")
+            text = text.replace(line, "")
+    annotation = "video: VideoReader"
+    if annotation in text:
+        if text.count(annotation) != 1:
+            raise RuntimeError("Lance upstream VideoReader annotation contract changed")
+        text = text.replace(annotation, "video")
+    dataset.write_text(text, encoding="utf-8")
+
+
 def main() -> None:
     parent = Path(sys.prefix) / "trtmc-reference"
     destination = parent / "Lance"
     if (destination / "inference_lance.py").is_file():
+        _prepare_image_only_checkout(destination)
         return
     if destination.exists():
         raise RuntimeError(f"incomplete Lance reference: {destination}")
@@ -36,6 +53,7 @@ def main() -> None:
             check=True,
         )
         temporary.rename(destination)
+        _prepare_image_only_checkout(destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
