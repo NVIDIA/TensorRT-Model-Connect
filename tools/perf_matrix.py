@@ -40,6 +40,12 @@ for source in (REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE):
 
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract  # noqa: E402
 from apps.benchmark.performance.baselines.hf_transformers import flatten_config  # noqa: E402
+from trtmc_benchmark.artifact_metrics import (  # noqa: E402
+    metric_geometry_metrics,
+    metric_geometry_passes,
+    robot_action_metrics,
+    robot_action_passes,
+)
 from trtmc_benchmark.catalog import ManifestCatalog, resolve_case, selected_task_for_case  # noqa: E402
 from trtmc_benchmark.task_adapters import default_operation  # noqa: E402
 from trtmc_benchmark.types import BenchmarkError  # noqa: E402
@@ -65,6 +71,7 @@ HF_CACHE_ENVIRONMENT_NAMES = (
 OUTPUT_CONTRACTS = {
     "audio-shape",
     "classification-top-class",
+    "detection-parity",
     "disparity-parity",
     "embedding-shape",
     "exact-text",
@@ -76,18 +83,23 @@ OUTPUT_CONTRACTS = {
     "regression-values",
     "generated-token-count",
     "image-features-shape",
+    "instance-mask-parity",
     "localization",
     "media-shape",
     "metric-geometry-shape",
+    "metric-geometry-parity",
     "molecular-structure-shape",
     "normalized-text",
     "ocr-text",
     "offline-speech-shape",
     "pose-refinement-shape",
+    "prompted-mask-parity",
     "reranking-order",
     "robot-action-shape",
+    "robot-action-parity",
     "segmentation-shape",
     "transcription-text",
+    "vision-language-text",
 }
 REFERENCE_INPUTS = {
     "pytorch-lerobot-act": (("source_root", "lerobot_repo"),),
@@ -374,6 +386,15 @@ def _validate_entry(entry: Mapping[str, Any]) -> None:
     fallback = baseline.get("fallback")
     if fallback is not None and (not isinstance(fallback, str) or not fallback):
         raise PerfMatrixError(f"entry {entry['id']} baseline.fallback must be a mode")
+    source_placement = baseline.get("source_language_placement")
+    if source_placement is not None and (
+        baseline["runner"] != "hf-transformers"
+        or source_placement != "replace-final-unk"
+    ):
+        raise PerfMatrixError(
+            f"entry {entry['id']} baseline.source_language_placement must be "
+            "replace-final-unk on an hf-transformers reference"
+        )
     if not isinstance(measurement, Mapping):
         raise PerfMatrixError(f"entry {entry['id']} requires measurement")
     warmup = measurement.get("warmup")
@@ -826,6 +847,24 @@ def _baseline_mode(baseline: Mapping[str, Any]) -> str:
     return str(baseline.get("mode", "reference" if "script" in baseline else "torch-compile"))
 
 
+def _baseline_model(entry: ResolvedEntry, environment: Environment) -> str:
+    configured = entry.spec["baseline"].get("model")
+    if configured is None:
+        configured = _adapter_options(entry, environment).get("model_id", entry.model.hf_id)
+    if not isinstance(configured, str) or not configured:
+        raise PerfMatrixError(f"entry {entry.spec['id']} baseline model must be non-empty")
+    return configured
+
+
+def _baseline_revision(entry: ResolvedEntry, model: str) -> str | None:
+    configured = entry.spec["baseline"].get("revision")
+    if configured is None and model == entry.model.hf_id:
+        configured = entry.model.hf_revision or None
+    if configured is not None and (not isinstance(configured, str) or not configured):
+        raise PerfMatrixError(f"entry {entry.spec['id']} baseline revision must be non-empty")
+    return configured
+
+
 def baseline_command(entry: ResolvedEntry, environment: Environment, output: Path) -> list[str]:
     return _baseline_command(entry, environment, output)
 
@@ -840,10 +879,15 @@ def _baseline_command(
     baseline = entry.spec["baseline"]
     runner = str(baseline["runner"])
     selected_mode = str(mode or _baseline_mode(baseline))
-    request = json.dumps(flatten_config(entry.case.request), ensure_ascii=True, separators=(",", ":"))
+    request_value = flatten_config(entry.case.request)
+    source_placement = baseline.get("source_language_placement")
+    if source_placement is not None:
+        request_value["source_language_placement"] = source_placement
+    request = json.dumps(request_value, ensure_ascii=True, separators=(",", ":"))
+    model = _baseline_model(entry, environment)
     common = [
         "--model",
-        str(_adapter_options(entry, environment).get("model_id", entry.model.hf_id)),
+        model,
         "--request-json",
         request,
         "--precision",
@@ -916,7 +960,7 @@ def _baseline_command(
             arguments.extend(("--testcase-name", entry.case.testcase_name))
         if "script" in baseline or entry.case.selected_task is not None:
             arguments.extend(("--selected-task", _effective_task(entry)))
-    revision = entry.model.hf_revision
+    revision = _baseline_revision(entry, model)
     if revision:
         arguments.extend(("--revision", revision))
     if bool(entry.manifest.get("trust_remote_code", False)):
@@ -932,7 +976,7 @@ def _validate_script_result(
     expected = {
         "schema_version": "trtmc.perf-baseline/v1",
         "status": "completed",
-        "model": str(_adapter_options(entry, environment).get("model_id", entry.model.hf_id)),
+        "model": _baseline_model(entry, environment),
         "family": entry.model.family,
         "operation": str(entry.spec["operation"]),
         "case_name": str(entry.spec["id"]),
@@ -1309,8 +1353,37 @@ def _output_contract(
                 "maximum": limit,
             },
         )
+    if contract == "vision-language-text":
+        left_text = _normalized_text(left.get("text")).strip(".,!?;:'\"")
+        right_text = _normalized_text(right.get("text")).strip(".,!?;:'\"")
+        distance = _text_distance(left_text, right_text)
+        limit = float(entry.spec["baseline"].get("max_normalized_edit_distance", 0.15))
+        return (
+            bool(left_text) and distance <= limit,
+            "vision-language text distance exceeds the contract",
+            {
+                "normalized_edit_distance": distance,
+                "maximum": limit,
+            },
+        )
     if contract == "localization":
         return _localization_contract(entry, left, right)
+    if contract == "metric-geometry-parity":
+        try:
+            metrics = metric_geometry_metrics(left, right)
+            passed = metric_geometry_passes(metrics, entry.spec["baseline"])
+        except (OSError, ValueError) as error:
+            return (
+                False,
+                f"metric-geometry parity could not be evaluated: {error}",
+                {"contract": contract, "numerical_parity_checked": True},
+            )
+        evidence = {
+            "contract": contract,
+            "numerical_parity_checked": True,
+            **metrics,
+        }
+        return passed, "metric-geometry parity is outside the contract" if not passed else "", evidence
     if contract in {"metric-geometry-shape", "molecular-structure-shape", "pose-refinement-shape"}:
         signature = {
             "metric-geometry-shape": _metric_geometry_signature,
@@ -1351,6 +1424,12 @@ def _output_contract(
         right_shape = tuple(right.get(name) for name in ("num_masks", "height", "width"))
         matched = None not in left_shape and left_shape == right_shape
         return matched, "segmentation output shape differs" if not matched else "", None
+    if contract == "prompted-mask-parity":
+        return _prompted_mask_parity(entry, left, right)
+    if contract == "instance-mask-parity":
+        return _instance_mask_parity(entry, left, right)
+    if contract == "detection-parity":
+        return _detection_parity(entry, left, right)
     if contract == "classification-top-class":
         left_class = left.get("top_class")
         right_class = right.get("top_class")
@@ -1393,6 +1472,23 @@ def _output_contract(
             and right.get("finite") is True
         )
         return matched, "robot action output contract differs" if not matched else "", None
+    if contract == "robot-action-parity":
+        try:
+            metrics = robot_action_metrics(left, right)
+            passed = robot_action_passes(metrics, entry.spec["baseline"])
+        except ValueError as error:
+            return (
+                False,
+                f"robot action parity could not be evaluated: {error}",
+                {"contract": contract, "numerical_parity_checked": True},
+            )
+        evidence = {
+            "contract": contract,
+            "numerical_parity_checked": True,
+            **metrics,
+        }
+        reason = "robot action numerical parity is outside the contract" if not passed else ""
+        return passed, reason, evidence
     if contract == "disparity-parity":
         evidence = _disparity(entry, left, right)
         return bool(evidence["passed"]), str(evidence.get("reason", "")), evidence
@@ -1976,6 +2072,269 @@ def _localization_contract(
     limit = float(entry.spec["baseline"]["max_normalized_edit_distance"])
     evidence.update(normalized_edit_distance=distance, maximum_text_distance=limit)
     return distance <= limit, "localization text distance exceeds the contract", evidence
+
+
+def _detection_values(summary: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    boxes = summary.get("boxes")
+    scores = summary.get("scores")
+    classes = summary.get("class_ids", summary.get("classes"))
+    if not isinstance(boxes, list) or not isinstance(scores, list) or not isinstance(classes, list):
+        return None
+    if boxes and isinstance(boxes[0], list):
+        rows = boxes
+    else:
+        if len(boxes) % 4:
+            return None
+        rows = [boxes[index : index + 4] for index in range(0, len(boxes), 4)]
+    if len(rows) != len(scores) or len(rows) != len(classes):
+        return None
+    detections = []
+    for box, score, class_id in zip(rows, scores, classes, strict=True):
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or isinstance(class_id, bool)
+            or not isinstance(class_id, int)
+        ):
+            return None
+        try:
+            coordinates = tuple(float(value) for value in box)
+            confidence = float(score)
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in (*coordinates, confidence)):
+            return None
+        detections.append(
+            {"box": coordinates, "score": confidence, "class_id": class_id}
+        )
+    return detections
+
+
+def _prompted_mask_values(
+    summary: Mapping[str, Any],
+) -> tuple[int, int, list[list[bool]]] | None:
+    height = summary.get("height")
+    width = summary.get("width")
+    count = summary.get("num_masks")
+    masks = summary.get("masks")
+    kind = summary.get("mask_kind", "logits")
+    if (
+        isinstance(height, bool)
+        or not isinstance(height, int)
+        or height < 1
+        or isinstance(width, bool)
+        or not isinstance(width, int)
+        or width < 1
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 1
+        or not isinstance(masks, list)
+        or len(masks) != count * height * width
+        or kind not in {"logits", "probability", "binary"}
+    ):
+        return None
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in masks):
+        return None
+    numeric = [float(value) for value in masks]
+    if not all(math.isfinite(value) for value in numeric):
+        return None
+    threshold = 0.0 if kind == "logits" else 0.5
+    area = height * width
+    return height, width, [
+        [value > threshold for value in numeric[index : index + area]]
+        for index in range(0, len(numeric), area)
+    ]
+
+
+def _binary_mask_iou(left: Sequence[bool], right: Sequence[bool]) -> float:
+    intersection = sum(a and b for a, b in zip(left, right, strict=True))
+    union = sum(a or b for a, b in zip(left, right, strict=True))
+    return intersection / union if union else 1.0
+
+
+def _prompted_mask_parity(
+    entry: ResolvedEntry,
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> tuple[bool, str, dict[str, Any] | None]:
+    candidate = _prompted_mask_values(left)
+    reference = _prompted_mask_values(right)
+    if candidate is None or reference is None:
+        return False, "prompted mask output is invalid", None
+    if candidate[:2] != reference[:2] or len(candidate[2]) != len(reference[2]):
+        return (
+            False,
+            "prompted mask shape or count differs",
+            {
+                "candidate_shape": [len(candidate[2]), *candidate[:2]],
+                "reference_shape": [len(reference[2]), *reference[:2]],
+            },
+        )
+    matched_reference: set[int] = set()
+    matches = []
+    for mask in candidate[2]:
+        choices = [
+            (_binary_mask_iou(mask, expected), index)
+            for index, expected in enumerate(reference[2])
+            if index not in matched_reference
+        ]
+        iou, index = max(choices)
+        matched_reference.add(index)
+        matches.append(iou)
+    minimum_iou = min(matches)
+    required_iou = float(entry.spec["baseline"].get("min_mask_iou", 0.7))
+    evidence = {
+        "masks": len(matches),
+        "minimum_mask_iou": minimum_iou,
+        "required_mask_iou": required_iou,
+    }
+    if minimum_iou < required_iou:
+        return False, "prompted mask IoU is below the contract", evidence
+    return True, "", evidence
+
+
+def _instance_mask_values(
+    summary: Mapping[str, Any],
+) -> tuple[int, int, list[list[bool]], list[float], list[list[float]]] | None:
+    masks = _prompted_mask_values(summary)
+    if masks is None:
+        return None
+    scores = summary.get("iou_scores")
+    boxes = summary.get("boxes")
+    if (
+        not isinstance(scores, list)
+        or len(scores) != len(masks[2])
+        or not isinstance(boxes, list)
+        or len(boxes) != len(masks[2])
+        or summary.get("box_coordinates") != "original_image_pixels_xyxy"
+    ):
+        return None
+    try:
+        numeric_scores = [float(score) for score in scores]
+        numeric_boxes = [
+            [float(coordinate) for coordinate in box]
+            for box in boxes
+            if isinstance(box, list) and len(box) == 4
+        ]
+    except (TypeError, ValueError):
+        return None
+    if len(numeric_boxes) != len(boxes) or not all(
+        math.isfinite(number)
+        for number in (*numeric_scores, *(value for box in numeric_boxes for value in box))
+    ):
+        return None
+    return *masks, numeric_scores, numeric_boxes
+
+
+def _instance_mask_parity(
+    entry: ResolvedEntry,
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> tuple[bool, str, dict[str, Any] | None]:
+    candidate = _instance_mask_values(left)
+    reference = _instance_mask_values(right)
+    if candidate is None or reference is None:
+        return False, "instance mask output is invalid", None
+    if candidate[:2] != reference[:2] or len(candidate[2]) != len(reference[2]):
+        return (
+            False,
+            "instance mask shape or count differs",
+            {
+                "candidate_shape": [len(candidate[2]), *candidate[:2]],
+                "reference_shape": [len(reference[2]), *reference[:2]],
+            },
+        )
+    matched_reference: set[int] = set()
+    matches = []
+    for index, mask in enumerate(candidate[2]):
+        choices = [
+            (_binary_mask_iou(mask, expected), expected_index)
+            for expected_index, expected in enumerate(reference[2])
+            if expected_index not in matched_reference
+        ]
+        mask_iou, expected_index = max(choices)
+        matched_reference.add(expected_index)
+        matches.append(
+            (
+                mask_iou,
+                _box_iou(candidate[4][index], reference[4][expected_index]),
+                abs(candidate[3][index] - reference[3][expected_index]),
+            )
+        )
+    minimum_mask_iou = min(match[0] for match in matches)
+    minimum_box_iou = min(match[1] for match in matches)
+    maximum_score_error = max(match[2] for match in matches)
+    required_mask_iou = float(entry.spec["baseline"].get("min_mask_iou", 0.7))
+    required_box_iou = float(entry.spec["baseline"].get("min_box_iou", 0.9))
+    allowed_score_error = float(entry.spec["baseline"].get("max_score_abs_error", 0.05))
+    evidence = {
+        "instances": len(matches),
+        "minimum_mask_iou": minimum_mask_iou,
+        "required_mask_iou": required_mask_iou,
+        "minimum_box_iou": minimum_box_iou,
+        "required_box_iou": required_box_iou,
+        "maximum_score_abs_error": maximum_score_error,
+        "allowed_score_abs_error": allowed_score_error,
+    }
+    if minimum_mask_iou < required_mask_iou:
+        return False, "instance mask IoU is below the contract", evidence
+    if minimum_box_iou < required_box_iou:
+        return False, "instance box IoU is below the contract", evidence
+    if maximum_score_error > allowed_score_error:
+        return False, "instance score error exceeds the contract", evidence
+    return True, "", evidence
+
+
+def _detection_parity(
+    entry: ResolvedEntry,
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> tuple[bool, str, dict[str, Any] | None]:
+    candidate = _detection_values(left)
+    reference = _detection_values(right)
+    if candidate is None or reference is None:
+        return False, "detection output is invalid", None
+    if len(candidate) != len(reference):
+        return (
+            False,
+            "detection count differs",
+            {"candidate_count": len(candidate), "reference_count": len(reference)},
+        )
+    matched_reference: set[int] = set()
+    matches = []
+    for detection in sorted(candidate, key=lambda item: -float(item["score"])):
+        choices = [
+            (_box_iou(detection["box"], expected["box"]), index)
+            for index, expected in enumerate(reference)
+            if index not in matched_reference
+            and int(detection["class_id"]) == int(expected["class_id"])
+        ]
+        if not choices:
+            return False, "detection classes differ", None
+        iou, index = max(choices)
+        matched_reference.add(index)
+        matches.append(
+            (
+                iou,
+                abs(float(detection["score"]) - float(reference[index]["score"])),
+            )
+        )
+    minimum_iou = min((match[0] for match in matches), default=1.0)
+    maximum_score_error = max((match[1] for match in matches), default=0.0)
+    required_iou = float(entry.spec["baseline"].get("min_box_iou", 0.5))
+    allowed_score_error = float(entry.spec["baseline"].get("max_score_abs_error", 0.05))
+    evidence = {
+        "detections": len(matches),
+        "minimum_box_iou": minimum_iou,
+        "required_box_iou": required_iou,
+        "maximum_score_abs_error": maximum_score_error,
+        "allowed_score_abs_error": allowed_score_error,
+    }
+    if minimum_iou < required_iou:
+        return False, "detection box IoU is below the contract", evidence
+    if maximum_score_error > allowed_score_error:
+        return False, "detection score error exceeds the contract", evidence
+    return True, "", evidence
 
 
 def _box_iou(left: tuple[float, ...], right: tuple[float, ...]) -> float:

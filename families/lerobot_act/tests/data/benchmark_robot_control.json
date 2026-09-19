@@ -1,0 +1,9 @@
+{
+  "requests": [
+    {
+      "id": "aloha-sim-transfer-cube-episode-0-frame-0",
+      "image": "recorded_observation/observation.images.top.png",
+      "state": "recorded_observation/observation.state.f32"
+    }
+  ]
+}

@@ -86,6 +86,19 @@ void test_detr_preprocess_fits_half_tie_engine_dimensions() {
     check(portrait.size() == 3U * 1333U * 666U, "detr portrait fits reference dimensions");
 }
 
+void test_detr_square_engine_accepts_both_image_orientations() {
+    trtmc::DetrPreprocessConfig config;
+    config.input_image_h = 1333;
+    config.input_image_w = 1333;
+
+    const auto landscape = trtmc::compute_detr_resize_shape(382, 640, config);
+    const auto portrait = trtmc::compute_detr_resize_shape(640, 382, config);
+    check(landscape.height == 796 && landscape.width == 1333,
+          "detr square engine accepts landscape resize");
+    check(portrait.height == 1333 && portrait.width == 796,
+          "detr square engine accepts portrait resize");
+}
+
 void test_detr_preprocess_applies_normalization() {
     const std::vector<float> pixels(3U * 2U * 2U, 0.75F);
     trtmc::DetrPreprocessConfig config;
@@ -160,6 +173,7 @@ int main() {
     test_detr_resize_rounds_half_ties_to_even();
     test_detr_resize_rounds_non_ties_to_nearest();
     test_detr_preprocess_fits_half_tie_engine_dimensions();
+    test_detr_square_engine_accepts_both_image_orientations();
     test_detr_preprocess_applies_normalization();
     test_detr_preprocess_rejects_invalid_config();
     test_detr_preprocess_rejects_resize_larger_than_engine_input();

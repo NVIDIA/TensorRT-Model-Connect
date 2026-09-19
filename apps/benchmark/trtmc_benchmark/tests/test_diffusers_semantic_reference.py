@@ -172,8 +172,11 @@ def test_prompt_and_seed_order_reaches_every_pipeline_invocation(recording_diffu
     assert all(call["observed_seeds"] == expected_seeds for call in recorded.calls)
     assert [generator.resets for generator in recorded.generators] == [[seed] * 4 for seed in expected_seeds]
     assert all(generator.device == "cuda" for generator in recorded.generators)
-    assert all(summary == {"media_type": "image", "media_count": len(expected_seeds),
-                           "height": 8, "width": 10, "channels": 3, "finite": True} for summary in summaries)
+    for summary in summaries:
+        media = summary.pop("_media")
+        assert np.asarray(media).shape == (len(expected_seeds), 8, 10, 3)
+        assert summary == {"media_type": "image", "media_count": len(expected_seeds),
+                           "height": 8, "width": 10, "channels": 3, "finite": True}
     assert payload == source
 
 

@@ -99,17 +99,21 @@ def family_support(
         default_precision=default_precision,
     )
 
-    def describe(metadata: ModelMetadata) -> FamilySupport | None:
-        if _key(metadata.model_type) in model_type_keys:
-            return support
-        if architecture_keys.intersection(_key(value) for value in metadata.architectures):
-            return support
-        if _key(metadata.pipeline_class) in pipeline_keys:
-            return support
+    def match_specificity(metadata: ModelMetadata) -> int:
         if file_keys and file_keys.issubset(metadata.files):
-            return support
-        return None
+            return 4
+        if _key(metadata.pipeline_class) in pipeline_keys:
+            return 3
+        if architecture_keys.intersection(_key(value) for value in metadata.architectures):
+            return 2
+        if _key(metadata.model_type) in model_type_keys:
+            return 1
+        return 0
 
+    def describe(metadata: ModelMetadata) -> FamilySupport | None:
+        return support if match_specificity(metadata) else None
+
+    setattr(describe, "_trtmc_match_specificity", match_specificity)
     return describe
 
 
@@ -148,7 +152,13 @@ def resolve_model(model: str, revision: str | None = None) -> Path:
         raise ValueError(f"model path is not a directory: {local}")
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(repo_id=model, revision=revision))
+    return Path(
+        snapshot_download(
+            repo_id=model,
+            revision=revision,
+            ignore_patterns=["*flax_model*", "*tf_model*"],
+        )
+    )
 
 
 def _family_directories() -> list[Path]:
@@ -162,9 +172,9 @@ def _family_directories() -> list[Path]:
 
 
 def resolve_family(metadata: ModelMetadata) -> tuple[str, FamilySupport]:
-    """Ask every lightweight family support module and require one owner."""
+    """Ask every lightweight family support module and select one exact owner."""
 
-    matches: list[tuple[str, FamilySupport]] = []
+    matches: list[tuple[str, FamilySupport, int]] = []
     for family in _family_directories():
         module = importlib.import_module(f"families.{family.name}.support")
         describe = getattr(module, "describe", None)
@@ -176,12 +186,17 @@ def resolve_family(metadata: ModelMetadata) -> tuple[str, FamilySupport]:
                 raise TypeError(
                     f"family {family.name!r} support.describe() returned an invalid value"
                 )
-            matches.append((family.name, support))
+            specificity = getattr(describe, "_trtmc_match_specificity", None)
+            priority = int(specificity(metadata)) if callable(specificity) else 4
+            matches.append((family.name, support, priority))
 
     if not matches:
         identity = metadata.model_type or metadata.pipeline_class or "unknown"
         raise ValueError(f"no family supports model {identity!r}")
+    strongest = max(priority for _, _, priority in matches)
+    matches = [match for match in matches if match[2] == strongest]
     if len(matches) > 1:
-        names = ", ".join(family for family, _ in matches)
+        names = ", ".join(family for family, _, _ in matches)
         raise ValueError(f"multiple families support this model: {names}")
-    return matches[0]
+    family, support, _ = matches[0]
+    return family, support

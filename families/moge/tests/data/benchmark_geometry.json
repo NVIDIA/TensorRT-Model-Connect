@@ -1,0 +1,8 @@
+{
+  "requests": [
+    {
+      "id": "moge-test-image",
+      "image": "test_img.jpeg"
+    }
+  ]
+}

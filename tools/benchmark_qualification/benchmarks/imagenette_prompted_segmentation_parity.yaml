@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: imagenette-validation
+  version: imagenette2-320-task-eval
+  sha256: 07cd93194d148b8b68d89ba537b7a43741810e02a22429578a60bb85aeab5ea3
+  source:
+    mode: manual
+    path: Imagenette/imagenette2-320_task_eval.json
+    instructions: https://github.com/fastai/imagenette
+  license: Apache-2.0
+selection:
+  method: first
+input:
+  adapter: image_path
+metric:
+  name: prompted_segmentation_parity

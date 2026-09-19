@@ -9,6 +9,8 @@ import hashlib
 import html
 import json
 import os
+import shlex
+import site
 import shutil
 import subprocess
 import sys
@@ -20,6 +22,16 @@ from .catalog import QualificationCase, QualificationError
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+
+# Public benchmark requests use Task API field names. These legacy manifest
+# tasks still describe their primary assets under ``inputs`` with shorter names.
+_MANIFEST_INPUT_FIELDS = {
+    "robot_control": {"image_path": "image", "state_path": "state"},
+    "stereo_disparity": {
+        "left_image_path": "left_image",
+        "right_image_path": "right_image",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -92,23 +104,47 @@ def require_candidate(context: RuntimeContext) -> tuple[Path, Path]:
 
 
 def write_model_descriptor(
-    case: QualificationCase, output: Path, request: Mapping[str, Any]
+    case: QualificationCase,
+    output: Path,
+    request: Mapping[str, Any],
+    *,
+    context: RuntimeContext | None = None,
 ) -> Path:
     candidate = case.candidate
     task = str(candidate["task"])
     testcase: dict[str, Any] = {"name": case.name}
     if task == "time_series_forecast":
         testcase["inputs"] = dict(request)
+    elif task in _MANIFEST_INPUT_FIELDS:
+        testcase.update(request)
+        fields = _MANIFEST_INPUT_FIELDS[task]
+        testcase["inputs"] = {target: testcase.pop(source) for source, target in fields.items()}
     else:
         testcase.update(request)
+    selected_task = candidate.get("selected_task")
+    if selected_task is not None:
+        testcase["selected_task"] = str(selected_task)
+    checkpoint = str(candidate["checkpoint"])
+    configured_directory = candidate.get("model_directory")
+    if configured_directory is not None:
+        if context is None:
+            raise QualificationError("candidate.model_directory requires a runtime context")
+        environment = reference_python(case, context).parent.parent.resolve()
+        model_directory = (environment / str(configured_directory)).resolve()
+        if not model_directory.is_relative_to(environment) or not model_directory.is_dir():
+            raise QualificationError(
+                f"prepared candidate model directory is unavailable: {model_directory}"
+            )
+        checkpoint = str(model_directory)
     value = {
         "name": case.model,
-        "hf_id": str(candidate["checkpoint"]),
+        "hf_id": checkpoint,
         "hf_revision": str(candidate.get("revision", "")),
         "bundle": str(candidate.get("bundle", f"{case.model}.bundle")),
         "family": case.family,
         "task": task,
         "precision": str(candidate["precision"]),
+        "trust_remote_code": bool(candidate.get("trust_remote_code", False)),
         "testcases": [testcase],
         **dict(candidate.get("build", {})),
     }
@@ -124,7 +160,7 @@ def prepare_bundle(
     descriptor: Path,
 ) -> Path:
     command = [
-        str(context.trtmc_bench),
+        str(benchmark_executable(case, context)),
         "run",
         "--model",
         str(descriptor),
@@ -165,8 +201,12 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     if requirements is None:
         return Path(os.path.abspath(sys.executable))
     digest = hashlib.sha256()
+    digest.update(b"qualification-family-environment-v1\0")
     digest.update(requirements.read_bytes())
     digest.update(sys.version.encode())
+    digest.update(f"build-isolation={case.reference_build_isolation}".encode())
+    if case.environment_hook is not None:
+        digest.update(case.environment_hook.read_bytes())
     environment = context.environment_root / f"{case.family}-{digest.hexdigest()[:12]}"
     python = environment / "bin/python"
     stamp = environment / ".qualification-requirements.sha256"
@@ -176,6 +216,7 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
         and stamp.is_file()
         and stamp.read_text(encoding="utf-8").strip() == expected
     ):
+        _inherit_parent_site_packages(environment)
         return python
     environment.parent.mkdir(parents=True, exist_ok=True)
     setup_root = context.artifacts / "environment-setup" / case.family
@@ -189,25 +230,91 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     )
     if created.returncode != 0 or not python.is_file():
         raise QualificationError(f"cannot create reference environment; see {setup_root}")
+    _inherit_parent_site_packages(environment)
+    install_command = [
+        str(python),
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+    ]
+    if not case.reference_build_isolation:
+        install_command.append("--no-build-isolation")
+    install_command.extend(("-r", str(requirements)))
+    install_environment = dict(os.environ)
+    # Source distributions commonly delegate extension builds to Ninja.  Keep one
+    # family environment from exhausting a shared validation host while allowing
+    # operators to select a different limit explicitly.
+    install_environment.setdefault("MAX_JOBS", "4")
     installed = run_command(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "-r",
-            str(requirements),
-        ],
+        install_command,
         setup_root,
         "pip",
         timeout=1800,
         verbose=context.verbose,
+        env=install_environment,
     )
     if installed.returncode != 0:
         raise QualificationError(f"cannot install reference requirements; see {setup_root}")
+    if case.environment_hook is not None:
+        prepared = run_command(
+            [str(python), str(case.environment_hook)],
+            setup_root,
+            "prepare",
+            timeout=1800,
+            verbose=context.verbose,
+        )
+        if prepared.returncode != 0:
+            raise QualificationError(f"cannot prepare family environment; see {setup_root}")
     stamp.write_text(expected + "\n", encoding="utf-8")
     return python
+
+
+def reference_environment_paths(case: QualificationCase, context: RuntimeContext) -> dict[str, str]:
+    """Resolve family-declared reference inputs below its isolated environment."""
+    if not case.reference_paths:
+        return {}
+    environment = reference_python(case, context).parent.parent.resolve()
+    result = {}
+    for name, relative in case.reference_paths.items():
+        path = (environment / relative).resolve()
+        if not path.is_relative_to(environment) or not path.exists():
+            raise QualificationError(f"prepared reference path {name!r} is unavailable: {path}")
+        result[name] = str(path)
+    return result
+
+
+def benchmark_executable(case: QualificationCase, context: RuntimeContext) -> Path:
+    """Run user-facing benchmark and bundle build with the family Python environment."""
+    python = reference_python(case, context)
+    digest = hashlib.sha256(f"{python.resolve()}\0{context.trtmc_bench}".encode()).hexdigest()[:12]
+    launcher = context.environment_root / "launchers" / f"{case.family}-{digest}"
+    contents = (
+        f'#!/bin/sh\nexec {shlex.quote(str(python))} {shlex.quote(str(context.trtmc_bench))} "$@"\n'
+    )
+    if not launcher.is_file() or launcher.read_text(encoding="utf-8") != contents:
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        temporary = launcher.with_name(f".{launcher.name}.{os.getpid()}.tmp")
+        temporary.write_text(contents, encoding="utf-8")
+        temporary.chmod(0o755)
+        os.replace(temporary, launcher)
+    return launcher
+
+
+def _inherit_parent_site_packages(environment: Path) -> None:
+    child_packages = sorted(environment.glob("lib/python*/site-packages"))
+    if len(child_packages) != 1:
+        raise QualificationError(
+            f"reference environment has no unambiguous site-packages directory: {environment}"
+        )
+    parent_packages = sorted(
+        {str(Path(value).resolve()) for value in site.getsitepackages() if Path(value).is_dir()}
+    )
+    if not parent_packages or any("\n" in value for value in parent_packages):
+        raise QualificationError("cannot resolve parent Python site-packages")
+    (child_packages[0] / "trtmc-parent-environment.pth").write_text(
+        "\n".join(parent_packages) + "\n", encoding="utf-8"
+    )
 
 
 def run_command(

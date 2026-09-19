@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: librispeech-clean-test
+  version: test-clean-task-eval
+  sha256: 45306828857c7e4174baa52dab089214a8b2956165dacad3eaec8d2aa1483b1f
+  source:
+    mode: manual
+    path: librispeech_clean_test/librispeech_clean_test.json
+    instructions: https://www.openslr.org/12
+  license: CC-BY-4.0
+selection:
+  method: first
+input:
+  adapter: audio_path
+metric:
+  name: speech_transcription_wer_parity

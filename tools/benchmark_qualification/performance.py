@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import sys
 from typing import Any, Mapping
 
@@ -15,12 +16,45 @@ import yaml
 from .catalog import QualificationCase, QualificationError, load_benchmark
 from .runtime import (
     RuntimeContext,
+    benchmark_executable,
+    reference_environment_paths,
     reference_python,
     require_candidate,
     run_command,
     write_model_descriptor,
     write_result,
 )
+
+
+_COMPLETED_COMPARISONS = frozenset({"green", "yellow", "red"})
+
+
+def _qualification_status(
+    process_returncode: int,
+    matrix: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> tuple[str, str | None]:
+    row_error = row.get("error")
+    if isinstance(row_error, str) and row_error:
+        return "error", row_error
+    row_status = row.get("status")
+    matrix_status = matrix.get("status")
+    if row_status == "contract-mismatch":
+        return "failed", None
+    if (
+        row_status in _COMPLETED_COMPARISONS
+        and matrix_status == "completed"
+        and process_returncode == 0
+    ):
+        return "passed", None
+    comparison = row.get("comparison")
+    reason = comparison.get("reason") if isinstance(comparison, Mapping) else None
+    if not isinstance(reason, str) or not reason:
+        reason = (
+            f"Performance matrix ended with row status {row_status!r}, "
+            f"matrix status {matrix_status!r}, and exit code {process_returncode}"
+        )
+    return "error", reason
 
 
 def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[str, Any]:
@@ -34,8 +68,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     measurement = configured.get("measurement")
     reference_timing = definition.get("reference_timing")
     if not all(
-        isinstance(value, Mapping)
-        for value in (request, baseline, measurement, reference_timing)
+        isinstance(value, Mapping) for value in (request, baseline, measurement, reference_timing)
     ):
         raise QualificationError(
             "Performance request, reference, measurement, and reference timing must be objects"
@@ -44,7 +77,19 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     assert isinstance(baseline, Mapping)
     assert isinstance(measurement, Mapping)
     assert isinstance(reference_timing, Mapping)
-    descriptor = write_model_descriptor(case, output, request)
+    stability = definition.get("stability", {})
+    required_samples = stability.get("samples") if isinstance(stability, Mapping) else None
+    if (
+        isinstance(required_samples, bool)
+        or not isinstance(required_samples, int)
+        or int(measurement.get("iterations", 10)) < required_samples
+    ):
+        raise QualificationError(
+            "Performance measurement.iterations must satisfy the stability sample count"
+        )
+    request = _resolve_family_assets(case, request)
+    baseline = _resolve_reference_assets(case, baseline)
+    descriptor = write_model_descriptor(case, output, request, context=context)
     entry_id = f"qualification.{case.family}.{case.name}"
     suite = {
         "schema_version": "trtmc.perf-suite/v2",
@@ -71,7 +116,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
             }
         ],
     }
-    if definition.get("stability") != {
+    if stability != {
         "samples": 10,
         "max_half_median_change_percent": 5.0,
         "median_band_percent": 5.0,
@@ -91,11 +136,12 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
         "personaplex_repo": "",
         "fast_foundation_stereo_model": "",
     }
+    references.update(reference_environment_paths(case, context))
     environment = {
         "schema_version": "trtmc.perf-environment/v2",
         "name": "qualification",
         "tools": {
-            "trtmc_bench": str(context.trtmc_bench),
+            "trtmc_bench": str(benchmark_executable(case, context)),
             "trtmc_worker": str(worker),
             "hf_transformers_runner": str(
                 context.repository / "apps/benchmark/performance/baselines/hf_transformers.py"
@@ -149,16 +195,28 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     if not run_directories:
         raise QualificationError(f"Performance produced no result; see {output}")
     run_directory = run_directories[-1]
-    matrix = json.loads((run_directory / "results.json").read_text(encoding="utf-8"))
+    try:
+        matrix = json.loads((run_directory / "results.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise QualificationError(
+            f"Performance produced an unreadable result; see {run_directory}"
+        ) from error
+    if not isinstance(matrix, Mapping):
+        raise QualificationError(f"Performance produced an invalid result; see {run_directory}")
     rows = matrix.get("rows")
-    row = rows[0] if isinstance(rows, list) and len(rows) == 1 else {}
-    passed = completed.returncode == 0 and matrix.get("status") == "completed"
-    comparison = row.get("comparison", {}) if isinstance(row, Mapping) else {}
+    row = (
+        rows[0]
+        if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], Mapping)
+        else {}
+    )
+    status, error = _qualification_status(completed.returncode, matrix, row)
+    comparison_value = row.get("comparison")
+    comparison = comparison_value if isinstance(comparison_value, Mapping) else {}
     result = {
         "schema_version": "trtmc.qualification-result/v1",
         "case": case.id,
         "kind": "performance",
-        "status": "passed" if passed else "failed",
+        "status": status,
         "model": case.model,
         "benchmark": case.benchmark,
         "matrix_run": str(run_directory),
@@ -170,5 +228,61 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
         },
         "reference_attempts": row.get("reference_attempts", []) if isinstance(row, Mapping) else [],
     }
+    if error is not None:
+        result["error"] = error
     write_result(output, result)
     return result
+
+
+def _resolve_family_assets(case: QualificationCase, request: Mapping[str, Any]) -> dict[str, Any]:
+    resolved = dict(request)
+    family_root = case.source.parents[2].resolve()
+    for key, value in request.items():
+        if not key.endswith("_path") or not isinstance(value, str):
+            continue
+        path = Path(value)
+        if path.is_absolute():
+            continue
+        path = (case.source.parent / path).resolve()
+        if family_root not in path.parents or not path.is_file():
+            raise QualificationError(
+                f"Performance request asset {key!r} is unavailable inside {family_root}: {path}"
+            )
+        if key == "prompt_path":
+            payload = (
+                json.loads(path.read_text(encoding="utf-8")) if path.suffix == ".json" else None
+            )
+            prompt = (
+                payload.get("prompt")
+                if isinstance(payload, Mapping)
+                else path.read_text(encoding="utf-8").strip()
+            )
+            if not isinstance(prompt, str) or not prompt:
+                raise QualificationError(f"Performance prompt is unavailable: {path}")
+            resolved.pop(key, None)
+            resolved["prompt"] = prompt
+        else:
+            resolved[key] = str(path)
+    return resolved
+
+
+def _resolve_reference_assets(
+    case: QualificationCase, reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    resolved = dict(reference)
+    options = reference.get("adapter_options", {})
+    if not isinstance(options, Mapping):
+        raise QualificationError("Performance reference.adapter_options must be an object")
+    resolved_options = dict(options)
+    family_root = case.source.parents[2].resolve()
+    for key, value in options.items():
+        if not key.endswith("_path") or not isinstance(value, str):
+            continue
+        path = Path(value)
+        if not path.is_absolute():
+            path = (case.source.parent / path).resolve()
+        if not path.is_relative_to(family_root) or not path.is_file():
+            raise QualificationError(f"Performance reference asset {key!r} is unavailable: {path}")
+        resolved_options[key] = str(path)
+    resolved["adapter_options"] = resolved_options
+    return resolved

@@ -265,6 +265,7 @@ Json image_observation(const std::vector<trtmc::ImageResult>& results) {
     Json value = {{"generated_images", results.size()},
                   {"batch_size", results.size()},
                   {"generated_frames", frames},
+                  {"media_count", frames},
                   {"output_elements", pixels}};
     if (!results.empty()) {
         value["height"] = results.front().height;
@@ -276,20 +277,51 @@ Json image_observation(const std::vector<trtmc::ImageResult>& results) {
     return value;
 }
 
+auto legacy_image_artifact_writer(std::string prefix) {
+    return [prefix = std::move(prefix),
+            iteration = std::uint64_t{0}](const std::vector<trtmc::ImageResult>& results) mutable {
+        ++iteration;
+        Json paths = Json::array();
+        std::size_t artifact_index = 0;
+        for (const auto& result : results) {
+            if (result.height <= 0 || result.width <= 0 || result.channels <= 0 ||
+                result.num_frames <= 0)
+                throw std::runtime_error("generated media has invalid dimensions");
+            const auto frame_elements =
+                static_cast<std::uint64_t>(result.height) * result.width * result.channels;
+            const auto expected = frame_elements * static_cast<std::uint64_t>(result.num_frames);
+            if (expected != result.pixels.size())
+                throw std::runtime_error("generated media has inconsistent pixel storage");
+            for (int frame = 0; frame < result.num_frames; ++frame) {
+                const auto path = prefix + "." + std::to_string(iteration) + "." +
+                                  std::to_string(artifact_index++) + ".png";
+                const auto offset = static_cast<std::size_t>(frame_elements) * frame;
+                trtmc::cli::io::save_png(
+                    path, {result.pixels.data() + offset, static_cast<std::size_t>(frame_elements)},
+                    result.width, result.height, result.channels);
+                paths.push_back(std::filesystem::path(path).filename().string());
+            }
+        }
+        return paths;
+    };
+}
+
 Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& timing) {
     const auto config = image_config(request);
-    const std::string prompt =
-        request.at("prompt").is_array() ? "" : request.at("prompt").get<std::string>();
+    const bool batch_request = request.at("prompt").is_array();
+    const std::string prompt = batch_request ? "" : request.at("prompt").get<std::string>();
     std::function<std::vector<trtmc::ImageResult>()> invoke;
     std::optional<Image> cached;
 
-    if (auto* batch = dynamic_cast<trtmc::IImageBatchGeneration*>(&task)) {
+    if (batch_request) {
+        auto& batch =
+            require_interface<trtmc::IImageBatchGeneration>(task, "IImageBatchGeneration");
         const auto prompts = request.at("prompt").get<std::vector<std::string>>();
         auto seeds = optional_value<std::vector<std::uint32_t>>(request, "seeds", {});
         if (seeds.empty())
             seeds.assign(prompts.size(), static_cast<std::uint32_t>(std::max(config.seed, 0)));
-        invoke = [batch, prompts, seeds, config]() {
-            return batch->generate_image_batch(prompts, seeds, config);
+        invoke = [&batch, prompts, seeds, config]() {
+            return batch.generate_image_batch(prompts, seeds, config);
         };
     } else if (auto* edit = dynamic_cast<trtmc::IImageEditing*>(&task)) {
         const std::string path = request.at("image_path").get<std::string>();
@@ -331,7 +363,15 @@ Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& t
             return std::vector<trtmc::ImageResult>{image.generate_image(prompt, config)};
         };
     }
-    return measure(timing, invoke, image_observation);
+    auto write_images =
+        legacy_image_artifact_writer(request.at("_artifact_prefix").get<std::string>());
+    return measure(timing, invoke, [&](const auto& results) {
+        auto output = image_observation(results);
+        output[output.value("media_type", "image") == "video" ? "frame_artifacts"
+                                                              : "image_artifacts"] =
+            write_images(results);
+        return output;
+    });
 }
 
 Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& timing) {
@@ -342,9 +382,15 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
         optional_value<std::int32_t>(request, "talker_max_new_tokens", 0);
     config.seed = optional_value<std::int32_t>(request, "seed", -1);
     const std::string prompt = request.at("prompt").get<std::string>();
+    auto write_audio = [prefix = request.at("_artifact_prefix").get<std::string>(),
+                        iteration = std::uint64_t{0}](const trtmc::AudioResult& result) mutable {
+        const auto path = prefix + "." + std::to_string(++iteration) + ".wav";
+        trtmc::cli::io::write_wav(result, path);
+        return std::filesystem::path(path).filename().string();
+    };
     return measure(
         timing, [&]() { return interface.generate_audio(prompt, config); },
-        [](const trtmc::AudioResult& result) {
+        [&](const trtmc::AudioResult& result) {
             const double seconds =
                 result.sample_rate > 0
                     ? static_cast<double>(result.samples.size()) / result.sample_rate
@@ -352,7 +398,8 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
             return Json{{"output_samples", result.samples.size()},
                         {"num_samples", result.samples.size()},
                         {"output_audio_seconds", seconds},
-                        {"sample_rate", result.sample_rate}};
+                        {"sample_rate", result.sample_rate},
+                        {"audio_artifact", write_audio(result)}};
         });
 }
 
@@ -366,6 +413,12 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
     config.max_new_tokens = optional_value<std::int32_t>(request, "max_new_tokens", 50);
     config.seed = optional_value<std::int32_t>(request, "seed", -1);
     config.tail_frames = optional_value<std::int32_t>(request, "tail_frames", 0);
+    auto write_audio = [prefix = request.at("_artifact_prefix").get<std::string>(),
+                        iteration = std::uint64_t{0}](const trtmc::AudioResult& result) mutable {
+        const auto path = prefix + "." + std::to_string(++iteration) + ".wav";
+        trtmc::cli::io::write_wav(result, path);
+        return std::filesystem::path(path).filename().string();
+    };
     return measure(
         timing,
         [&]() {
@@ -379,7 +432,7 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
                                 audio.sample_rate),
                 static_cast<double>(audio.samples.size()) / audio.sample_rate};
         },
-        [](const auto& value) {
+        [&](const auto& value) {
             const auto& result = value.first;
             return Json{{"input_audio_seconds", value.second},
                         {"output_audio_seconds",
@@ -388,7 +441,8 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
                              : 0.0},
                         {"output_samples", result.samples.size()},
                         {"num_samples", result.samples.size()},
-                        {"sample_rate", result.sample_rate}};
+                        {"sample_rate", result.sample_rate},
+                        {"audio_artifact", write_audio(result)}};
         });
 }
 
@@ -465,6 +519,75 @@ Json run_transcribe(trtmc::ITask& task, const Json& request, const Timing& timin
         });
 }
 
+template <class T>
+void write_binary_artifact(const std::string& path, const T* values, std::uint64_t count) {
+    if (count > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) / sizeof(T))
+        throw std::runtime_error("binary artifact is too large");
+    std::ofstream output(path, std::ios::binary);
+    output.exceptions(std::ios::badbit | std::ios::failbit);
+    output.write(reinterpret_cast<const char*>(values),
+                 static_cast<std::streamsize>(count * sizeof(T)));
+    output.close();
+}
+
+Json run_geometry(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& interface = require_interface<trtmc::IMonocularGeometry>(task, "IMonocularGeometry");
+    const auto path = request.at("image_path").get<std::string>();
+    std::optional<Image> cached;
+    if (!timing.asset_loading_included)
+        cached = read_image(path);
+    auto invoke = [&]() {
+        std::optional<Image> loaded;
+        if (!cached)
+            loaded = read_image(path);
+        const auto& image = cached ? *cached : *loaded;
+        return interface.estimate_geometry(image.pixels.data(), image.height, image.width);
+    };
+    std::optional<trtmc::GeometryResult> last;
+    for (int index = 0; index < timing.warmup; ++index)
+        last = invoke();
+    Json observations = Json::array();
+    for (int index = 0; index < timing.iterations; ++index) {
+        last.reset();
+        const auto started = Clock::now();
+        auto result = invoke();
+        const auto wall_ms = elapsed_ms(started);
+        last.emplace(std::move(result));
+        observations.push_back({{"runtime_e2e_wall_ms", wall_ms},
+                                {"geometry_images", 1},
+                                {"geometry_pixels", last->depth.size()}});
+    }
+    if (last->height <= 0 || last->width <= 0)
+        throw std::runtime_error("monocular geometry returned invalid dimensions");
+    const auto pixels = static_cast<std::size_t>(last->height) * last->width;
+    if (last->points.size() != pixels * 3 || last->depth.size() != pixels ||
+        last->mask.size() != pixels)
+        throw std::runtime_error("monocular geometry returned inconsistent output shapes");
+    const auto prefix = request.at("_artifact_prefix").get<std::string>();
+    write_binary_artifact(prefix + ".points.f32", last->points.data(), last->points.size());
+    write_binary_artifact(prefix + ".depth.f32", last->depth.data(), last->depth.size());
+    write_binary_artifact(prefix + ".mask.u8", last->mask.data(), last->mask.size());
+    Json intrinsics = Json::array();
+    for (int row = 0; row < 3; ++row)
+        intrinsics.push_back({last->intrinsics[row * 3], last->intrinsics[row * 3 + 1],
+                              last->intrinsics[row * 3 + 2]});
+    return {{"observations", std::move(observations)},
+            {"output_summary",
+             {{"geometry_images", 1},
+              {"geometry_pixels", pixels},
+              {"height", last->height},
+              {"width", last->width},
+              {"point_shape", {last->height, last->width, 3}},
+              {"valid_pixels", std::count(last->mask.begin(), last->mask.end(), std::uint8_t{1})},
+              {"normalized_intrinsics", std::move(intrinsics)},
+              {"units", "meters"},
+              {"camera_axes", {"right", "down", "forward"}},
+              {"intrinsics_coordinates", "normalized_uv"},
+              {"points_artifact", prefix + ".points.f32"},
+              {"depth_artifact", prefix + ".depth.f32"},
+              {"valid_mask_artifact", prefix + ".mask.u8"}}}};
+}
+
 Json run_segment(trtmc::ITask& task, const Json& request, const Timing& timing) {
     auto& interface = require_interface<trtmc::ISegmentation>(task, "ISegmentation");
     const Image image = read_image(request.at("image_path").get<std::string>());
@@ -475,7 +598,8 @@ Json run_segment(trtmc::ITask& task, const Json& request, const Timing& timing) 
                         {"num_masks", 1},
                         {"height", result.height},
                         {"width", result.width},
-                        {"mask_pixels", result.mask.size()}};
+                        {"mask_pixels", result.mask.size()},
+                        {"mask", result.mask}};
         });
 }
 
@@ -502,9 +626,19 @@ Json run_segment_prompted(trtmc::ITask& task, const Json& request, const Timing&
         };
     }
     return measure(timing, invoke, [](const trtmc::PromptedSegmentationResult& result) {
-        return Json{{"segmented_images", 1},         {"generated_masks", result.num_masks},
-                    {"num_masks", result.num_masks}, {"height", result.height},
-                    {"width", result.width},         {"mask_pixels", result.masks.size()}};
+        if (result.boxes.size() % 4U != 0U)
+            throw std::runtime_error("prompted segmentation returned incomplete boxes");
+        Json boxes = Json::array();
+        for (std::size_t offset = 0; offset < result.boxes.size(); offset += 4U) {
+            boxes.push_back({result.boxes[offset], result.boxes[offset + 1U],
+                             result.boxes[offset + 2U], result.boxes[offset + 3U]});
+        }
+        return Json{
+            {"segmented_images", 1},         {"generated_masks", result.num_masks},
+            {"num_masks", result.num_masks}, {"height", result.height},
+            {"width", result.width},         {"mask_pixels", result.masks.size()},
+            {"masks", result.masks},         {"iou_scores", result.iou_scores},
+            {"boxes", std::move(boxes)},     {"box_coordinates", "original_image_pixels_xyxy"}};
     });
 }
 
@@ -526,10 +660,23 @@ Json run_detect(trtmc::ITask& task, const Json& request, const Timing& timing) {
     return measure(
         timing, [&]() { return interface.detect(image.pixels.data(), image.height, image.width); },
         [](const trtmc::ObjectDetectionResult& result) {
+            Json boxes = Json::array(), scores = Json::array(), classes = Json::array();
+            for (const auto& detection : result.boxes) {
+                boxes.insert(boxes.end(),
+                             {detection.x_min, detection.y_min, detection.x_max, detection.y_max});
+                scores.push_back(detection.score);
+                classes.push_back(detection.class_id);
+            }
             return Json{{"detected_images", 1},
                         {"detections", result.boxes.size()},
                         {"image_height", result.image_height},
-                        {"image_width", result.image_width}};
+                        {"image_width", result.image_width},
+                        {"boxes", std::move(boxes)},
+                        {"scores", std::move(scores)},
+                        {"class_ids", std::move(classes)},
+                        {"shape", {result.boxes.size(), 4}},
+                        {"coordinates", "xyxy"},
+                        {"units", "pixels"}};
         });
 }
 
@@ -613,10 +760,12 @@ Json run_embedding(trtmc::ITask& task, const Json& request, const Timing& timing
         auto& interface = require_interface<trtmc::IEncoding>(task, "IEncoding");
         invoke = [&interface, prompt]() { return interface.encode(prompt); };
     }
-    return measure(timing, invoke, [](const trtmc::EmbeddingResult& result) {
+    return measure(timing, invoke, [pooled](const trtmc::EmbeddingResult& result) {
         return Json{{"embedding_vectors", 1},
                     {"embedding_elements", result.data.size()},
-                    {"dim", result.dim}};
+                    {"dim", result.dim},
+                    {"values", result.data},
+                    {"feature_kind", pooled ? "pooled" : "token"}};
     });
 }
 
@@ -683,6 +832,7 @@ Json run_control(trtmc::ITask& task, const Json& request, const Timing& timing) 
             return Json{{"action_steps", result.num_actions},
                         {"action_dim", result.action_dim},
                         {"action_values", result.actions.size()},
+                        {"actions", result.actions},
                         {"within_training_bounds", result.within_training_bounds},
                         {"inference_ms", result.inference_ms}};
         });
@@ -2867,17 +3017,6 @@ Json run_track_pose(const trtmc::Model& model, const Json& request, const Timing
         });
 }
 
-template <class T>
-void write_binary_artifact(const std::string& path, const T* values, std::uint64_t count) {
-    if (count > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) / sizeof(T))
-        throw std::runtime_error("binary artifact is too large");
-    std::ofstream output(path, std::ios::binary);
-    output.exceptions(std::ios::badbit | std::ios::failbit);
-    output.write(reinterpret_cast<const char*>(values),
-                 static_cast<std::streamsize>(count * sizeof(T)));
-    output.close();
-}
-
 Json run_geometry(const trtmc::Model& model, const Json& request, const Timing& timing,
                   const std::string& task_id) {
     const auto task = task_for_operation<trtmc::ImageToMetricGeometry>(model, task_id);
@@ -3769,6 +3908,7 @@ Json execute(const Json& request, const std::string& output_path) {
             {"classify", run_classify},
             {"detect", run_detect},
             {"extract_features", run_extract_features},
+            {"geometry", run_geometry},
             {"disparity", run_disparity},
             {"rerank", run_rerank},
             {"encode", run_encode},

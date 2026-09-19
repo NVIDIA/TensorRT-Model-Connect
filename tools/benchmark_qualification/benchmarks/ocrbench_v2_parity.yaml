@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: ocrbench-v2
+  version: unified-task-eval-v1
+  sha256: e62c2fbdfe5d02f11d6e48d37ae548c854a19dcb3985eaa7ba3ba51492d10a94
+  source:
+    mode: manual
+    path: OCRBench_v2/unified/dataset.json
+    instructions: https://huggingface.co/datasets/ling99/OCRBench_v2
+  license: MIT
+selection:
+  method: first
+input:
+  adapter: ocrbench_v2
+metric:
+  name: ocr_text_parity

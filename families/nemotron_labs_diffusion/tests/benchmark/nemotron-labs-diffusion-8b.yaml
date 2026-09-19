@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: nemotron-labs-diffusion-8b
+candidate:
+  family: nemotron_labs_diffusion
+  checkpoint: nvidia/Nemotron-Labs-Diffusion-8B
+  revision: 16c67f0560b912e93e0cabb6e0c4f5c3086d95fc
+  task: text_generation
+  precision: bf16
+  trust_remote_code: true
+  bundle: nemotron-labs-diffusion-8b.bundle
+  build:
+    max_sequence_length: 257
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: mmlu-ar-continuation
+    benchmark: mmlu_continuation
+    samples: 10
+    prompt_token_limit: 192
+    truncation_side: left
+    reference:
+      command: reference.py
+      precision: fp32
+    request: &ar-generation
+      max_new_tokens: 32
+      temperature: 0.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      repetition_penalty: 1.0
+      use_chat_template: true
+      enable_thinking: false
+      do_sample: false
+      text_generation_mode: ar
+    gate:
+      min_pass_rate: 0.9
+      allowed_failures: 1
+
+performance:
+  - name: generate-ar-8
+    benchmark: text_generation_performance
+    operation: generate
+    request:
+      <<: *ar-generation
+      prompt: What is the capital of France? Answer in one word.
+      max_new_tokens: 8
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: hf-transformers
+      mode: hf-eager
+      model_class: auto
+      generation_method: ar-generate
+      precision: fp32
+      output_contract: exact-token-ids

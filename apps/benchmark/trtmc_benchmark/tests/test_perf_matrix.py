@@ -132,15 +132,15 @@ def test_translation_languages_use_tokenizer_controls_and_preserve_absence() -> 
             return {10: "eng_Latn", 11: "fra_Latn"}[token]
 
     tokenizer = Tokenizer()
-    assert hf_transformers._translation_controls(tokenizer, {}) == {}
+    assert hf_transformers._translation_controls(tokenizer, {}) == ({}, None)
     assert tokenizer.src_lang == "default"
     assert hf_transformers._translation_controls(
         tokenizer, {"source_language": "eng_Latn", "target_language": "fra_Latn"}
-    ) == {"forced_bos_token_id": 11}
+    ) == ({"forced_bos_token_id": 11}, None)
     assert tokenizer.src_lang == "eng_Latn"
     assert hf_transformers._translation_controls(
         tokenizer, {"source_language_token_id": 10, "forced_bos_token_id": 0}
-    ) == {"forced_bos_token_id": 0}
+    ) == ({"forced_bos_token_id": 0}, None)
     with pytest.raises(ValueError, match="disagrees"):
         hf_transformers._translation_controls(
             tokenizer, {"target_language": "fra_Latn", "forced_bos_token_id": 10}
@@ -152,7 +152,7 @@ def test_translation_languages_use_tokenizer_controls_and_preserve_absence() -> 
         hf_transformers._translation_controls(
             fixed, {"source_language": "en", "target_language": "ru"}
         )
-        == {}
+        == ({}, None)
     )
     with pytest.raises(ValueError, match="target language"):
         hf_transformers._translation_controls(fixed, {"target_language": "de"})
@@ -200,6 +200,7 @@ def test_translation_and_config_reach_reference_generate(monkeypatch) -> None:
 
     class Model:
         config = SimpleNamespace(decoder_start_token_id=0, eos_token_id=3)
+        generation_config = SimpleNamespace(num_beams=4)
 
         def generate(self, **kwargs):
             captured.update(kwargs)
@@ -228,8 +229,36 @@ def test_translation_and_config_reach_reference_generate(monkeypatch) -> None:
     assert captured["input_ids"].tolist() == [[10, 17]]
     assert captured["forced_bos_token_id"] == 11
     assert captured["max_new_tokens"] == 5 and captured["do_sample"] is False
+    assert captured["num_beams"] == 1
     assert captured["repetition_penalty"] == 1.1
     assert output["token_ids"] == [8]
+
+
+def test_reference_only_source_language_placement_reaches_hf_runner(
+    tmp_path: Path,
+) -> None:
+    _, environment = _environment(tmp_path)
+    _, entries, _ = perf.load_suite(SUITE)
+    original = next(row for row in entries if row["id"] == "m2m_100.generate")
+    spec = {
+        **original,
+        "baseline": {
+            **original["baseline"],
+            "source_language_placement": "replace-final-unk",
+        },
+    }
+    entry = perf.resolve_entries([spec], environment)[0]
+
+    command = perf.baseline_command(entry, environment, tmp_path / "reference.json")
+    request = json.loads(command[command.index("--request-json") + 1])
+
+    assert request["source_language_placement"] == "replace-final-unk"
+    assert not any(
+        "source_language_placement" in argument
+        for argument in perf.candidate_command(
+            entry, environment, tmp_path / "candidate", no_build=True
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -1449,16 +1478,83 @@ def test_release_suite_expands_profiles_and_covers_ready_catalog() -> None:
         "family",
         "expected_scope",
         "input_preparation_included",
+        "mode",
         "calls_after_load",
         "calls_after_invoke",
+        "calls_after_summary",
+        "compiled",
     ),
     [
-        ("bert", "task-pipeline-call-wall", True, [], ["tokenize", "model"]),
-        ("eagle_vlm", "task-model-call-wall", False, ["tokenize"], ["tokenize", "model"]),
-        ("bert", "task-model-call-wall", False, ["tokenize"], ["tokenize", "model"]),
-        ("eagle_vlm", "task-pipeline-call-wall", True, [], ["tokenize", "model"]),
-        ("renamed_embedding", "task-model-call-wall", False, ["tokenize"], ["tokenize", "model"]),
-        ("renamed_embedding", "task-pipeline-call-wall", True, [], ["tokenize", "model"]),
+        (
+            "bert",
+            "task-pipeline-call-wall",
+            True,
+            "hf-eager",
+            [],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "bert",
+            "task-pipeline-call-wall",
+            True,
+            "torch-compile",
+            ["compile"],
+            ["compile", "tokenize", "model", "materialize"],
+            ["compile", "tokenize", "model", "materialize", "validate"],
+            True,
+        ),
+        (
+            "eagle_vlm",
+            "task-model-call-wall",
+            False,
+            "hf-eager",
+            ["tokenize"],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "bert",
+            "task-model-call-wall",
+            False,
+            "hf-eager",
+            ["tokenize"],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "eagle_vlm",
+            "task-pipeline-call-wall",
+            True,
+            "hf-eager",
+            [],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "renamed_embedding",
+            "task-model-call-wall",
+            False,
+            "hf-eager",
+            ["tokenize"],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
+        (
+            "renamed_embedding",
+            "task-pipeline-call-wall",
+            True,
+            "hf-eager",
+            [],
+            ["tokenize", "model", "materialize"],
+            ["tokenize", "model", "materialize", "validate"],
+            False,
+        ),
     ],
 )
 def test_embedding_reference_measures_the_declared_timing_contract(
@@ -1466,8 +1562,11 @@ def test_embedding_reference_measures_the_declared_timing_contract(
     family,
     expected_scope,
     input_preparation_included,
+    mode,
     calls_after_load,
     calls_after_invoke,
+    calls_after_summary,
+    compiled,
 ) -> None:
     calls: list[str] = []
 
@@ -1476,6 +1575,10 @@ def test_embedding_reference_measures_the_declared_timing_contract(
         dtype = "fp32"
 
         def to(self, *_args, **_kwargs):
+            return self
+
+        def detach(self):
+            calls.append("materialize")
             return self
 
         def unsqueeze(self, _dimension):
@@ -1491,6 +1594,7 @@ def test_embedding_reference_measures_the_declared_timing_contract(
             return 2
 
         def isfinite(self):
+            calls.append("validate")
             return self
 
         def all(self):
@@ -1546,9 +1650,16 @@ def test_embedding_reference_measures_the_declared_timing_contract(
     fake_transformers.AutoTokenizer = FakeTokenizer
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    compile_evidence = {"compiled_graph_count": 0}
+    monkeypatch.setattr(
+        task_reference,
+        "_compile_forward",
+        lambda _model: calls.append("compile") or compile_evidence,
+    )
     arguments = SimpleNamespace(
         family=family,
         model="sentence-transformers/all-MiniLM-L6-v2",
+        mode=mode,
         precision="fp32",
         revision="model-revision",
         trust_remote_code=False,
@@ -1570,8 +1681,42 @@ def test_embedding_reference_measures_the_declared_timing_contract(
     assert session.timing_scope == expected_scope
     assert session.input_preparation_included is input_preparation_included
     assert session.asset_loading_included is False
-    assert session.invoke()["embedding_vectors"] == 1
+    assert (session.compile_evidence is compile_evidence) is compiled
+    vector = session.invoke()
     assert calls == calls_after_invoke
+    assert session.summarize is not None
+    assert session.summarize(vector)["embedding_vectors"] == 1
+    assert calls == calls_after_summary
+
+
+@pytest.mark.parametrize(("compiled", "expected_invocations"), [(False, 2), (True, 3)])
+def test_zero_warmup_keeps_compilation_outside_timed_samples(
+    monkeypatch, compiled, expected_invocations
+) -> None:
+    invocations = 0
+    compile_evidence = {"compiled_graph_count": 0} if compiled else None
+
+    def invoke():
+        nonlocal invocations
+        invocations += 1
+        if compile_evidence is not None and invocations == 1:
+            compile_evidence["compiled_graph_count"] = 1
+        return {"value": invocations}
+
+    monkeypatch.setattr(task_reference, "_synchronize", lambda: None)
+    samples, output = task_reference._measure(
+        task_reference.Session(
+            invoke=invoke,
+            framework="test",
+            compile_evidence=compile_evidence,
+        ),
+        warmup=0,
+        iterations=2,
+    )
+
+    assert len(samples) == 2
+    assert invocations == expected_invocations
+    assert output == {"value": expected_invocations}
 
 
 def test_check_resolves_selected_entry_with_one_runtime_root(tmp_path: Path, capsys) -> None:
@@ -2650,8 +2795,12 @@ def test_sana_reference_calls_official_pipeline_with_exact_workload(
             captured["image_mode"] = mode
             return self
 
+        def save(self, path):
+            Path(path).write_bytes(b"png")
+            return None
+
     pil = ModuleType("PIL")
-    pil.Image = SimpleNamespace(open=lambda path: FakeImage())
+    pil.Image = SimpleNamespace(open=lambda path: FakeImage(), fromarray=lambda value: FakeImage())
     monkeypatch.setitem(sys.modules, "PIL", pil)
 
     synchronize_calls = []
@@ -3033,3 +3182,122 @@ def test_output_contracts_are_closed_and_semantic(tmp_path: Path) -> None:
     )
     with pytest.raises(perf.PerfMatrixError, match="unsupported output contract"):
         perf._contract_name(bad)
+
+
+def test_detection_output_contract_matches_by_class_and_iou() -> None:
+    entry = SimpleNamespace(
+        spec={
+            "baseline": {
+                "output_contract": "detection-parity",
+                "min_box_iou": 0.9,
+                "max_score_abs_error": 0.05,
+            }
+        }
+    )
+    candidate = {
+        "output_summary": {
+            "boxes": [10.0, 10.0, 50.0, 50.0],
+            "scores": [0.91],
+            "class_ids": [7],
+        }
+    }
+    reference = {
+        "output_summary": {
+            "boxes": [[10.5, 10.0, 50.0, 50.0]],
+            "scores": [0.9],
+            "class_ids": [7],
+        }
+    }
+
+    matched, reason, evidence = perf._output_contract(entry, candidate, reference)
+
+    assert matched is True
+    assert reason == ""
+    assert evidence["minimum_box_iou"] >= 0.9
+    reference["output_summary"]["class_ids"] = [8]
+    assert perf._output_contract(entry, candidate, reference)[0] is False
+
+
+def test_prompted_mask_contract_matches_binary_semantics() -> None:
+    entry = SimpleNamespace(
+        spec={"baseline": {"output_contract": "prompted-mask-parity", "min_mask_iou": 0.7}}
+    )
+    candidate = {
+        "output_summary": {
+            "num_masks": 1,
+            "height": 2,
+            "width": 2,
+            "mask_kind": "logits",
+            "masks": [2.0, -1.0, -1.0, 3.0],
+        }
+    }
+    reference = {
+        "output_summary": {
+            "num_masks": 1,
+            "height": 2,
+            "width": 2,
+            "mask_kind": "binary",
+            "masks": [1, 0, 0, 1],
+        }
+    }
+
+    matched, reason, evidence = perf._output_contract(entry, candidate, reference)
+
+    assert matched is True
+    assert reason == ""
+    assert evidence == {"masks": 1, "minimum_mask_iou": 1.0, "required_mask_iou": 0.7}
+    reference["output_summary"]["masks"] = [0, 1, 1, 0]
+    assert perf._output_contract(entry, candidate, reference)[0] is False
+
+
+def test_instance_mask_contract_checks_masks_boxes_and_scores() -> None:
+    entry = SimpleNamespace(
+        spec={
+            "baseline": {
+                "output_contract": "instance-mask-parity",
+                "min_mask_iou": 0.7,
+                "min_box_iou": 0.9,
+                "max_score_abs_error": 0.05,
+            }
+        }
+    )
+    value = {
+        "num_masks": 1,
+        "height": 2,
+        "width": 2,
+        "mask_kind": "binary",
+        "masks": [1, 0, 0, 1],
+        "iou_scores": [0.9],
+        "boxes": [[0.0, 0.0, 2.0, 2.0]],
+        "box_coordinates": "original_image_pixels_xyxy",
+    }
+    candidate = {"output_summary": value}
+    reference = {"output_summary": dict(value)}
+
+    matched, reason, evidence = perf._output_contract(entry, candidate, reference)
+
+    assert matched is True
+    assert reason == ""
+    assert evidence["minimum_mask_iou"] == evidence["minimum_box_iou"] == 1.0
+    reference["output_summary"]["iou_scores"] = [0.7]
+    assert perf._output_contract(entry, candidate, reference)[0] is False
+
+
+def test_vision_language_text_contract_allows_small_normalized_differences() -> None:
+    entry = SimpleNamespace(
+        spec={
+            "baseline": {
+                "output_contract": "vision-language-text",
+                "max_normalized_edit_distance": 0.15,
+            }
+        }
+    )
+    candidate = {"output_summary": {"text": "Red."}}
+    reference = {"output_summary": {"text": "red"}}
+
+    matched, _, evidence = perf._output_contract(entry, candidate, reference)
+
+    assert matched is True
+    assert evidence["normalized_edit_distance"] <= 0.15
+    candidate["output_summary"]["text"] = "blue"
+    assert perf._output_contract(entry, candidate, reference)[0] is False

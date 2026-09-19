@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: metric-geometry-test-image
+  version: family-test-image-v1
+  sha256: b600ba0a7d131e831dcb3ff4140759b8c3d6bd319345cf5f3756df8c8f1bf5c2
+  source:
+    mode: family
+    path: ../data/benchmark_geometry.json
+  license: Apache-2.0
+selection:
+  method: first
+input:
+  adapter: image_path
+metric:
+  name: metric_geometry_parity

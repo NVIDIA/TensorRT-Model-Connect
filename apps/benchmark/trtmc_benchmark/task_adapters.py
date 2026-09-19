@@ -58,6 +58,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "image_text_to_instance_masks": ("segment_prompted", 10, 100),
     "stereo_images_to_disparity": ("disparity", 3, 100),
     "image_to_metric_geometry": ("geometry", 3, 100),
+    "monocular_geometry": ("geometry", 3, 100),
     "text_to_pooled_features": ("encode", 50, 500),
     "text_to_head_scores": ("head_scores", 50, 500),
     "text_to_token_features": ("encode", 50, 500),
@@ -312,7 +313,7 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return _text_controls(case, include_defaults=False)
     if task in _LATENT_TEXT | _LATENT_STEPS:
         return _latent_request(task, case, root)
-    if task == "image_to_metric_geometry":
+    if task in {"image_to_metric_geometry", "monocular_geometry"}:
         request = {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
         _copy_explicit(request, case, "fov_x")
         return request
@@ -408,8 +409,11 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return {"prompt": _prompt(case, root), "batch_size": 1}
     if task == "reranking":
         inputs = _inputs(case)
-        query = inputs.get("query", inputs.get("prompt", case.get("prompt")))
-        documents = inputs.get("documents")
+        query = inputs.get(
+            "query",
+            inputs.get("prompt", case.get("query", case.get("prompt"))),
+        )
+        documents = inputs.get("documents", case.get("documents"))
         if not isinstance(query, str) or not query:
             raise BenchmarkError("reranking testcase requires inputs.prompt or inputs.query")
         if not isinstance(documents, list) or not documents:
@@ -988,7 +992,7 @@ def _prompt(case: Mapping[str, Any], root: Path) -> str:
 
 
 def _image_path(case: Mapping[str, Any], root: Path) -> str:
-    return _required_asset(case, ("test_image", "image"), root, "image")
+    return _required_asset(case, ("image_path", "test_image", "image"), root, "image")
 
 
 def _audio_path(case: Mapping[str, Any], root: Path) -> str:
