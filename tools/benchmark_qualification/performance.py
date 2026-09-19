@@ -17,6 +17,7 @@ from .catalog import QualificationCase, QualificationError, load_benchmark
 from .runtime import (
     RuntimeContext,
     benchmark_executable,
+    reference_environment_paths,
     reference_python,
     require_candidate,
     run_command,
@@ -67,8 +68,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     measurement = configured.get("measurement")
     reference_timing = definition.get("reference_timing")
     if not all(
-        isinstance(value, Mapping)
-        for value in (request, baseline, measurement, reference_timing)
+        isinstance(value, Mapping) for value in (request, baseline, measurement, reference_timing)
     ):
         raise QualificationError(
             "Performance request, reference, measurement, and reference timing must be objects"
@@ -77,7 +77,18 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     assert isinstance(baseline, Mapping)
     assert isinstance(measurement, Mapping)
     assert isinstance(reference_timing, Mapping)
+    stability = definition.get("stability", {})
+    required_samples = stability.get("samples") if isinstance(stability, Mapping) else None
+    if (
+        isinstance(required_samples, bool)
+        or not isinstance(required_samples, int)
+        or int(measurement.get("iterations", 10)) < required_samples
+    ):
+        raise QualificationError(
+            "Performance measurement.iterations must satisfy the stability sample count"
+        )
     request = _resolve_family_assets(case, request)
+    baseline = _resolve_reference_assets(case, baseline)
     descriptor = write_model_descriptor(case, output, request, context=context)
     entry_id = f"qualification.{case.family}.{case.name}"
     suite = {
@@ -105,7 +116,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
             }
         ],
     }
-    if definition.get("stability") != {
+    if stability != {
         "samples": 10,
         "max_half_median_change_percent": 5.0,
         "median_band_percent": 5.0,
@@ -125,6 +136,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
         "personaplex_repo": "",
         "fast_foundation_stereo_model": "",
     }
+    references.update(reference_environment_paths(case, context))
     environment = {
         "schema_version": "trtmc.perf-environment/v2",
         "name": "qualification",
@@ -222,9 +234,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     return result
 
 
-def _resolve_family_assets(
-    case: QualificationCase, request: Mapping[str, Any]
-) -> dict[str, Any]:
+def _resolve_family_assets(case: QualificationCase, request: Mapping[str, Any]) -> dict[str, Any]:
     resolved = dict(request)
     family_root = case.source.parents[2].resolve()
     for key, value in request.items():
@@ -238,5 +248,41 @@ def _resolve_family_assets(
             raise QualificationError(
                 f"Performance request asset {key!r} is unavailable inside {family_root}: {path}"
             )
-        resolved[key] = str(path)
+        if key == "prompt_path":
+            payload = (
+                json.loads(path.read_text(encoding="utf-8")) if path.suffix == ".json" else None
+            )
+            prompt = (
+                payload.get("prompt")
+                if isinstance(payload, Mapping)
+                else path.read_text(encoding="utf-8").strip()
+            )
+            if not isinstance(prompt, str) or not prompt:
+                raise QualificationError(f"Performance prompt is unavailable: {path}")
+            resolved.pop(key, None)
+            resolved["prompt"] = prompt
+        else:
+            resolved[key] = str(path)
+    return resolved
+
+
+def _resolve_reference_assets(
+    case: QualificationCase, reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    resolved = dict(reference)
+    options = reference.get("adapter_options", {})
+    if not isinstance(options, Mapping):
+        raise QualificationError("Performance reference.adapter_options must be an object")
+    resolved_options = dict(options)
+    family_root = case.source.parents[2].resolve()
+    for key, value in options.items():
+        if not key.endswith("_path") or not isinstance(value, str):
+            continue
+        path = Path(value)
+        if not path.is_absolute():
+            path = (case.source.parent / path).resolve()
+        if not path.is_relative_to(family_root) or not path.is_file():
+            raise QualificationError(f"Performance reference asset {key!r} is unavailable: {path}")
+        resolved_options[key] = str(path)
+    resolved["adapter_options"] = resolved_options
     return resolved

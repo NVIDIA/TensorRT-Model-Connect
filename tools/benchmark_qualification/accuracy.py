@@ -10,12 +10,17 @@ import csv
 from itertools import permutations
 import json
 import math
+import os
 import random
 import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from trtmc_benchmark.artifact_metrics import (
+    generated_audio_metrics,
+    generated_audio_passes,
+    generated_media_metrics,
+    generated_media_passes,
     metric_geometry_metrics,
     metric_geometry_passes,
     robot_action_metrics,
@@ -29,6 +34,7 @@ from .runtime import (
     benchmark_executable,
     prepare_bundle,
     reference_python,
+    reference_environment_paths,
     require_candidate,
     run_command,
     write_model_descriptor,
@@ -40,9 +46,12 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
     output = context.case_artifacts(case)
     output.mkdir(parents=True, exist_ok=True)
     definition = load_benchmark(context.repository, case)
-    dataset = resolve_dataset(definition, context, case.source)
     metric = definition.get("metric")
     metric_name = metric.get("name") if isinstance(metric, Mapping) else None
+    if metric_name == "task_output_parity":
+        result = _task_output_parity(case, context, output)
+    else:
+        dataset = resolve_dataset(definition, context, case.source)
     if metric_name == "exact_token_ids":
         result = _text_generation_parity(case, context, dataset, output)
     elif metric_name == "embedding_vector_parity":
@@ -77,10 +86,175 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _metric_geometry_parity(case, context, dataset, output)
     elif metric_name == "robot_action_parity":
         result = _robot_action_parity(case, context, dataset, output)
+    elif metric_name == "task_output_parity":
+        pass
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
     return result
+
+
+_REFERENCE_OPTIONS = {
+    "upstream-lance": {"lance_repo": "reference_repo"},
+    "upstream-sana-wm": {"sana_repo": "reference_repo", "sana_model": "model_dir"},
+    "pytorch-personaplex": {"personaplex_repo": "official_repo"},
+}
+
+
+def _task_output_parity(
+    case: QualificationCase, context: RuntimeContext, output: Path
+) -> dict[str, Any]:
+    configured = case.values
+    request = configured.get("request", {})
+    reference = configured.get("reference", {})
+    gate = configured.get("gate", {})
+    if not all(isinstance(value, Mapping) for value in (request, reference, gate)):
+        raise QualificationError("task-output request, reference, and gate must be objects")
+    request = _resolve_task_assets(case, request)
+    descriptor = write_model_descriptor(case, output, request, context=context)
+    descriptor_value = json.loads(descriptor.read_text(encoding="utf-8"))
+    adapter = str(reference.get("adapter", ""))
+    if not adapter:
+        raise QualificationError("task-output reference.adapter must be set")
+    adapter_options = dict(reference.get("adapter_options", {}))
+    family_root = case.source.parents[2].resolve()
+    for name, value in tuple(adapter_options.items()):
+        if not name.endswith("_path") or not isinstance(value, str):
+            continue
+        path = Path(value)
+        if not path.is_absolute():
+            path = (case.source.parent / path).resolve()
+        if not path.is_relative_to(family_root) or not path.is_file():
+            raise QualificationError(f"task-output reference asset {name!r} is unavailable: {path}")
+        adapter_options[name] = str(path)
+    environment_paths = reference_environment_paths(case, context)
+    for source, target in _REFERENCE_OPTIONS.get(adapter, {}).items():
+        if source not in environment_paths:
+            raise QualificationError(f"task-output reference path {source!r} is not configured")
+        adapter_options[target] = environment_paths[source]
+    reference_path = output / "reference-result.json"
+    command = [
+        str(reference_python(case, context)),
+        str(context.repository / "apps/benchmark/performance/baselines/task_reference.py"),
+        "--adapter",
+        adapter,
+        "--family",
+        case.family,
+        "--operation",
+        str(configured["operation"]),
+        "--model",
+        str(descriptor_value["hf_id"]),
+        "--manifest",
+        str(descriptor),
+        "--testcase-name",
+        case.name,
+        "--request-json",
+        json.dumps(request),
+        "--adapter-options-json",
+        json.dumps(adapter_options),
+        "--precision",
+        str(reference.get("precision", case.candidate["precision"])),
+        "--mode",
+        str(reference.get("mode", "hf-eager")),
+        "--warmup",
+        "0",
+        "--iterations",
+        "1",
+        "--case-name",
+        case.name,
+        "--output",
+        str(reference_path),
+    ]
+    revision = reference.get("revision", descriptor_value.get("hf_revision"))
+    if revision:
+        command.extend(("--revision", str(revision)))
+    selected_task = case.candidate.get("selected_task")
+    if selected_task:
+        command.extend(("--selected-task", str(selected_task)))
+    if bool(case.candidate.get("trust_remote_code", False)):
+        command.append("--trust-remote-code")
+    if os.environ.get("TRTMC_QUALIFICATION_LOCAL_FILES_ONLY") == "1":
+        command.append("--local-files-only")
+    completed = run_command(command, output, "reference", timeout=7200, verbose=context.verbose)
+    if completed.returncode != 0:
+        raise QualificationError(f"task-output Accuracy reference failed; see {output}")
+    try:
+        reference_result = json.loads(reference_path.read_text(encoding="utf-8"))
+        expected = reference_result["output_summary"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise QualificationError("task-output Accuracy reference returned no output") from error
+    actual_values, bundle = _candidate_outputs(
+        case,
+        context,
+        output,
+        str(configured["operation"]),
+        [{"sample_id": case.name, "request": request}],
+    )
+    actual = actual_values[0]
+    contract = str(reference.get("output_contract", ""))
+    if not isinstance(expected, Mapping):
+        raise QualificationError("task-output Accuracy reference returned an invalid output")
+    try:
+        if contract == "media-artifact-parity":
+            metrics = generated_media_metrics(actual, expected)
+            passed = generated_media_passes(metrics, gate)
+        elif contract == "audio-artifact-parity":
+            metrics = generated_audio_metrics(actual, expected)
+            passed = generated_audio_passes(metrics, gate)
+        elif contract == "normalized-text":
+            candidate_text = _normalized_answer(actual.get("text"))
+            reference_text = _normalized_answer(expected.get("text"))
+            distance = _normalized_edit_distance(candidate_text, reference_text)
+            metrics = {"normalized_edit_distance": distance}
+            passed = bool(candidate_text) and distance <= float(
+                gate["max_normalized_edit_distance"]
+            )
+        else:
+            raise QualificationError(f"unsupported task-output contract {contract!r}")
+    except (KeyError, TypeError, ValueError) as error:
+        raise QualificationError(f"task-output Accuracy comparison failed: {error}") from error
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if passed else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "reference": {"adapter": adapter, "model": reference_result.get("model")},
+        "metrics": metrics,
+        "gate": dict(gate),
+    }
+
+
+def _resolve_task_assets(case: QualificationCase, request: Mapping[str, Any]) -> dict[str, Any]:
+    resolved = dict(request)
+    family_root = case.source.parents[2].resolve()
+    for key, value in request.items():
+        if not key.endswith("_path") or not isinstance(value, str):
+            continue
+        path = Path(value)
+        if path.is_absolute():
+            continue
+        path = (case.source.parent / path).resolve()
+        if not path.is_relative_to(family_root) or not path.is_file():
+            raise QualificationError(f"task-output asset {key!r} is unavailable: {path}")
+        if key == "prompt_path":
+            payload = (
+                json.loads(path.read_text(encoding="utf-8")) if path.suffix == ".json" else None
+            )
+            prompt = (
+                payload.get("prompt")
+                if isinstance(payload, Mapping)
+                else path.read_text(encoding="utf-8").strip()
+            )
+            if not isinstance(prompt, str) or not prompt:
+                raise QualificationError(f"task-output prompt is unavailable: {path}")
+            resolved.pop(key, None)
+            resolved["prompt"] = prompt
+        else:
+            resolved[key] = str(path)
+    return resolved
 
 
 def _robot_control_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]:
@@ -145,9 +319,7 @@ def _robot_action_parity(
         raise QualificationError("robot-action min_sample_pass_rate must be in [0, 1]")
     thresholds = {key: value for key, value in gate.items() if key != "min_sample_pass_rate"}
     rows = []
-    for sample, candidate_sample, reference_sample in zip(
-        selected, actual, expected, strict=True
-    ):
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
         try:
             metrics = robot_action_metrics(candidate_sample, reference_sample)
             passed = robot_action_passes(metrics, thresholds)
@@ -205,9 +377,7 @@ def _metric_geometry_parity(
         raise QualificationError("metric-geometry min_sample_pass_rate must be in [0, 1]")
     thresholds = {key: value for key, value in gate.items() if key != "min_sample_pass_rate"}
     rows = []
-    for sample, candidate_sample, reference_sample in zip(
-        selected, actual, expected, strict=True
-    ):
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
         try:
             metrics = metric_geometry_metrics(candidate_sample, reference_sample)
             passed = metric_geometry_passes(metrics, thresholds)
@@ -264,9 +434,7 @@ def _stereo_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]
                 raise QualificationError(f"stereo request {index} has no {source}")
             image = (root / relative).resolve()
             if not image.is_relative_to(root) or not image.is_file():
-                raise QualificationError(
-                    f"stereo request {index} {source} is unavailable: {image}"
-                )
+                raise QualificationError(f"stereo request {index} {source} is unavailable: {image}")
             sample[target] = str(image)
         selected.append(sample)
     return selected
@@ -366,9 +534,7 @@ def _stereo_disparity_parity(
         }
         for sample in selected
     ]
-    actual, bundle = _candidate_outputs(
-        case, context, output, "disparity", candidate_requests
-    )
+    actual, bundle = _candidate_outputs(case, context, output, "disparity", candidate_requests)
     gate = configured.get("gate", {})
     if not isinstance(gate, Mapping):
         raise QualificationError("stereo Accuracy gate must be an object")
@@ -386,9 +552,7 @@ def _stereo_disparity_parity(
         raise QualificationError("stereo error gates are invalid")
 
     rows = []
-    for sample, candidate_sample, reference_sample in zip(
-        selected, actual, expected, strict=True
-    ):
+    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
         candidate_values = _disparity_values(candidate_sample, "candidate")
         reference_values = _disparity_values(reference_sample, "reference")
         if len(candidate_values) != len(reference_values):
@@ -396,15 +560,12 @@ def _stereo_disparity_parity(
         candidate_valid = all(math.isfinite(value) and value >= 0.0 for value in candidate_values)
         reference_valid = all(math.isfinite(value) and value >= 0.0 for value in reference_values)
         dot = math.fsum(
-            left * right
-            for left, right in zip(candidate_values, reference_values, strict=True)
+            left * right for left, right in zip(candidate_values, reference_values, strict=True)
         )
         candidate_norm = math.sqrt(math.fsum(value * value for value in candidate_values))
         reference_norm = math.sqrt(math.fsum(value * value for value in reference_values))
         cosine = (
-            dot / (candidate_norm * reference_norm)
-            if candidate_norm and reference_norm
-            else 0.0
+            dot / (candidate_norm * reference_norm) if candidate_norm and reference_norm else 0.0
         )
         differences = [
             abs(left - right)
@@ -1288,7 +1449,29 @@ def _candidate_outputs(
         summary = cell.get("output_summary")
         if not isinstance(summary, Mapping):
             raise QualificationError("trtmc-bench omitted an Accuracy output")
-        outputs.append(dict(summary))
+        resolved_summary = dict(summary)
+        artifact_dir = cell.get("artifact_dir")
+        if isinstance(artifact_dir, str) and artifact_dir:
+            artifact_root = (candidate_output / artifact_dir).resolve()
+            if not artifact_root.is_relative_to(candidate_output.resolve()):
+                raise QualificationError("trtmc-bench returned an unsafe artifact directory")
+            for name, value in tuple(resolved_summary.items()):
+                if name.endswith("_artifact") and isinstance(value, str):
+                    path = Path(value)
+                    resolved_summary[name] = str(
+                        path if path.is_absolute() else (artifact_root / path).resolve()
+                    )
+                elif name.endswith("_artifacts") and isinstance(value, list):
+                    resolved_summary[name] = [
+                        str(
+                            Path(item)
+                            if Path(item).is_absolute()
+                            else (artifact_root / item).resolve()
+                        )
+                        for item in value
+                        if isinstance(item, str)
+                    ]
+        outputs.append(resolved_summary)
     return outputs, bundle
 
 
@@ -1579,17 +1762,19 @@ def _binary_masks(value: Mapping[str, Any], label: str) -> tuple[int, int, list[
     try:
         numeric = [float(value) for value in masks]
     except (TypeError, ValueError) as error:
-        raise QualificationError(
-            f"{label} prompted-segmentation masks are not numeric"
-        ) from error
+        raise QualificationError(f"{label} prompted-segmentation masks are not numeric") from error
     if not all(math.isfinite(value) for value in numeric):
         raise QualificationError(f"{label} prompted-segmentation masks are not finite")
     threshold = 0.0 if kind == "logits" else 0.5
     area = height * width
-    return height, width, [
-        [value > threshold for value in numeric[index : index + area]]
-        for index in range(0, len(numeric), area)
-    ]
+    return (
+        height,
+        width,
+        [
+            [value > threshold for value in numeric[index : index + area]]
+            for index in range(0, len(numeric), area)
+        ],
+    )
 
 
 def _mask_iou(left: Sequence[bool], right: Sequence[bool]) -> float:
@@ -1598,7 +1783,9 @@ def _mask_iou(left: Sequence[bool], right: Sequence[bool]) -> float:
     return intersection / union if union else 1.0
 
 
-def _match_masks(candidate: Sequence[Sequence[bool]], reference: Sequence[Sequence[bool]]) -> list[float]:
+def _match_masks(
+    candidate: Sequence[Sequence[bool]], reference: Sequence[Sequence[bool]]
+) -> list[float]:
     matched_reference: set[int] = set()
     matches = []
     for mask in candidate:
@@ -1810,12 +1997,8 @@ def _text_prompted_instance_segmentation_parity(
         matches = _match_instances(candidate, reference)
         denominator = max(len(candidate[2]), len(reference[2]), 1)
         match_rate = len(matches) / denominator
-        minimum_sample_mask_iou = min(
-            (match["mask_iou"] for match in matches), default=0.0
-        )
-        minimum_sample_box_iou = min(
-            (match["box_iou"] for match in matches), default=0.0
-        )
+        minimum_sample_mask_iou = min((match["mask_iou"] for match in matches), default=0.0)
+        minimum_sample_box_iou = min((match["box_iou"] for match in matches), default=0.0)
         maximum_sample_score_error = max(
             (match["score_abs_error"] for match in matches), default=1.0
         )
@@ -2016,10 +2199,7 @@ def _ocr_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]:
 
 def _ocr_gold_match(text: str, answers: Sequence[str]) -> bool:
     normalized = _normalized_answer(text).strip(".,!?;:'\"")
-    return any(
-        normalized == _normalized_answer(answer).strip(".,!?;:'\"")
-        for answer in answers
-    )
+    return any(normalized == _normalized_answer(answer).strip(".,!?;:'\"") for answer in answers)
 
 
 def _ocr_text_parity(
@@ -2180,10 +2360,14 @@ def _localization_text_parity(
     maximum_point_distance = float(gate.get("max_localization_point_distance", 10.0))
     maximum_text_distance = float(gate.get("max_normalized_edit_distance", 0.5))
     minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
-    if not all(
-        0.0 <= value <= 1.0
-        for value in (minimum_box_iou, maximum_text_distance, minimum_sample_rate)
-    ) or maximum_point_distance < 0.0 or not math.isfinite(maximum_point_distance):
+    if (
+        not all(
+            0.0 <= value <= 1.0
+            for value in (minimum_box_iou, maximum_text_distance, minimum_sample_rate)
+        )
+        or maximum_point_distance < 0.0
+        or not math.isfinite(maximum_point_distance)
+    ):
         raise QualificationError("localization gates are outside their valid ranges")
 
     rows = []
@@ -2206,7 +2390,9 @@ def _localization_text_parity(
         localization_passed = (
             alignment >= minimum_box_iou
             if candidate_kind == "box"
-            else alignment <= maximum_point_distance if candidate_kind == "point" else False
+            else alignment <= maximum_point_distance
+            if candidate_kind == "point"
+            else False
         )
         rows.append(
             {

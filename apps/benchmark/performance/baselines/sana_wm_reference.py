@@ -57,6 +57,26 @@ def media_summary(video: Any) -> dict[str, int | str]:
     }
 
 
+def materialize_media(video: Any, output: Path) -> dict[str, Any]:
+    import numpy as np
+    from PIL import Image
+
+    frames = np.asarray(video)
+    summary: dict[str, Any] = media_summary(frames)
+    indices = sorted({0, len(frames) // 2, len(frames) - 1})
+    directory = output.with_suffix(".media")
+    directory.mkdir(parents=True, exist_ok=True)
+    artifacts = []
+    for index in indices:
+        values = frames[index]
+        scale = 255.0 if np.issubdtype(values.dtype, np.floating) else 1.0
+        path = directory / f"{index:06d}.png"
+        Image.fromarray(np.clip(values * scale, 0, 255).astype(np.uint8)).convert("RGB").save(path)
+        artifacts.append(str(path.resolve()))
+    summary.update(artifact_indices=indices, frame_artifacts=artifacts)
+    return summary
+
+
 def _official_module(reference_repo: Path) -> Any:
     entrypoint = reference_repo / "inference_video_scripts/wm/inference_sana_wm.py"
     if not entrypoint.is_file():
@@ -162,7 +182,7 @@ def main() -> int:
         video = official.apply_overlay(video, result["c2w"])
     arguments.output.write_text(
         json.dumps(
-            {"samples_ms": samples, "output_summary": media_summary(video)},
+            {"samples_ms": samples, "output_summary": materialize_media(video, arguments.output)},
             indent=2,
             sort_keys=True,
         )

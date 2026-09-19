@@ -2795,8 +2795,12 @@ def test_sana_reference_calls_official_pipeline_with_exact_workload(
             captured["image_mode"] = mode
             return self
 
+        def save(self, path):
+            Path(path).write_bytes(b"png")
+            return None
+
     pil = ModuleType("PIL")
-    pil.Image = SimpleNamespace(open=lambda path: FakeImage())
+    pil.Image = SimpleNamespace(open=lambda path: FakeImage(), fromarray=lambda value: FakeImage())
     monkeypatch.setitem(sys.modules, "PIL", pil)
 
     synchronize_calls = []

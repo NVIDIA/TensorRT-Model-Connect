@@ -1844,8 +1844,12 @@ def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
         assert "models" not in definition
         assert definition["kind"] == case.kind
         if case.kind == "accuracy":
-            assert definition["dataset"]["id"]
             assert definition["metric"]["name"]
+            if definition["metric"]["name"] == "task_output_parity":
+                assert definition["input"]["adapter"] == "configured_request"
+                assert "dataset" not in definition
+            else:
+                assert definition["dataset"]["id"]
 
 
 def test_shared_performance_definitions_own_complete_reference_timing() -> None:

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
@@ -30,6 +30,7 @@ class QualificationCase:
     values: Mapping[str, Any]
     source: Path
     reference_requirements: Path | None
+    reference_paths: Mapping[str, str] = dataclass_field(default_factory=dict)
     reference_build_isolation: bool = True
     environment_hook: Path | None = None
 
@@ -55,6 +56,7 @@ def discover(repository: Path) -> tuple[QualificationCase, ...]:
         candidate = _candidate(raw.get("candidate"), family, path)
         reference_environment = raw.get("reference_environment")
         requirements = _requirements(reference_environment, path)
+        reference_paths = _reference_paths(reference_environment, path)
         build_isolation = _build_isolation(reference_environment, path)
         hook_path = path.parent / "prepare_environment.py"
         environment_hook = hook_path.resolve() if hook_path.is_file() else None
@@ -77,6 +79,7 @@ def discover(repository: Path) -> tuple[QualificationCase, ...]:
                     values=dict(value),
                     source=path.resolve(),
                     reference_requirements=requirements,
+                    reference_paths=reference_paths,
                     reference_build_isolation=build_isolation,
                     environment_hook=environment_hook,
                 )
@@ -184,10 +187,29 @@ def _build_isolation(raw: Any, path: Path) -> bool:
         raise QualificationError(f"{path}: reference_environment must be an object")
     value = raw.get("build_isolation", True)
     if not isinstance(value, bool):
-        raise QualificationError(
-            f"{path}: reference_environment.build_isolation must be a boolean"
-        )
+        raise QualificationError(f"{path}: reference_environment.build_isolation must be a boolean")
     return value
+
+
+def _reference_paths(raw: Any, path: Path) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise QualificationError(f"{path}: reference_environment must be an object")
+    configured = raw.get("paths", {})
+    if not isinstance(configured, Mapping):
+        raise QualificationError(f"{path}: reference_environment.paths must be an object")
+    result = {}
+    for name, value in configured.items():
+        if not isinstance(name, str) or not name:
+            raise QualificationError(f"{path}: reference_environment.paths keys must be strings")
+        relative = Path(_string(value, f"reference_environment.paths.{name}", path))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise QualificationError(
+                f"{path}: reference_environment.paths.{name} must stay inside the environment"
+            )
+        result[name] = relative.as_posix()
+    return result
 
 
 def _yaml_object(path: Path, label: str) -> dict[str, Any]:
