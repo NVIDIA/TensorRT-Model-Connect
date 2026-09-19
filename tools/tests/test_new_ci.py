@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import inspect
+import importlib.util
 import io
 import json
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -555,6 +557,134 @@ def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
     dockerfile = (repository / "Dockerfile").read_text()
     assert "openmpi-bin" in dockerfile
     assert "nvidia/nccl/lib" in dockerfile
+
+
+@pytest.fixture
+def conan_recipe(monkeypatch: pytest.MonkeyPatch):
+    """Exercise the recipe without requiring Conan in source-only test environments."""
+
+    def copy(_recipe, pattern, *, src, dst, keep_path):
+        assert not keep_path
+        for path in Path(src).rglob(pattern):
+            if path.is_file():
+                Path(dst).mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, Path(dst) / path.name)
+
+    modules = {
+        "conan": SimpleNamespace(ConanFile=object),
+        "conan.errors": SimpleNamespace(ConanException=RuntimeError),
+        "conan.tools.cmake": SimpleNamespace(CMake=None, CMakeToolchain=None, cmake_layout=None),
+        "conan.tools.files": SimpleNamespace(copy=copy),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    path = Path(__file__).resolve().parents[2] / "conanfile.py"
+    specification = importlib.util.spec_from_file_location("test_conan_recipe", path)
+    recipe = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(recipe)
+    return recipe
+
+
+def test_conan_package_ships_native_family_commands(
+    conan_recipe, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, build, package = (tmp_path / name for name in ("source", "build", "package"))
+    (source / "families/alpha").mkdir(parents=True)
+    (source / "families/alpha/model.py").write_text("")
+    build.mkdir()
+    # The ELF payload is opaque here; the external patchelf call is recorded.
+    for command in ("trtmc", "trtmc-server", "trtmc-alpha"):
+        path = build / command
+        path.write_bytes(b"\x7fELF" + command.encode())
+        path.chmod(0o744)
+    for name in (
+        "libtrtmc_core.so", "libtrtmc_runtime.so", "libtrtmc_backend_trt.so",
+        "libtrtmc_byok_tvm_ffi.so", "libtrtmc_model_alpha.so",
+        "trtmc_benchmark_worker", "trtmc_dataset_benchmark",
+    ):
+        (build / name).write_bytes(b"fixture")
+    (build / "trtmc-notes.txt").write_text("build notes")
+    (build / "trtmc-helper.py").write_text("print('helper')")
+    (build / "trtmc-helper.py").chmod(0o755)
+    (build / "trtmc-nested").mkdir()
+    (build / "trtmc-nested/trtmc-alpha").write_bytes(b"nested duplicate")
+    runpaths = []
+    installs = []
+
+    def install_sdk(command, *, check):
+        assert check
+        assert command == [
+            "cmake", "--install", str(build), "--prefix",
+            str(package / "tensorrt_model_connect"), "--component", "sdk",
+        ]
+        installs.append(command)
+        native_bin = package / "tensorrt_model_connect/bin"
+        native_bin.mkdir(parents=True)
+        for name in ("libtrtmc_c.so", "libtrtmc_c.so.1"):
+            (native_bin / name).write_bytes(b"sdk fixture")
+
+    monkeypatch.setattr(conan_recipe.subprocess, "run", install_sdk)
+    monkeypatch.setattr(conan_recipe, "_set_runpath", lambda path, value: runpaths.append((path, value)))
+    monkeypatch.setattr(conan_recipe, "_needed_libraries", lambda path: ())
+    instance = SimpleNamespace(
+        source_folder=str(source), build_folder=str(build), package_folder=str(package),
+        name="tensorrt-model-connect", version="0.1.0",
+    )
+
+    conan_recipe.TensorRTModelConnectConan.package(instance)
+
+    assert len(installs) == 1
+    # Current wheel entrypoints use Python launchers and one native payload.
+    # Family executables must not duplicate that payload under .data/scripts.
+    assert not (package / "tensorrt_model_connect-0.1.0.data/scripts").exists()
+    destinations = (package / "tensorrt_model_connect/bin",)
+    for directory in destinations:
+        for command in ("trtmc", "trtmc-server", "trtmc-alpha"):
+            path = directory / command
+            assert path.read_bytes() == b"\x7fELF" + command.encode()
+            assert path.stat().st_mode & 0o111 == 0o111
+            assert (path, "$ORIGIN") in runpaths
+        assert not (directory / "trtmc-notes.txt").exists()
+        assert not (directory / "trtmc-helper.py").exists()
+        assert not (directory / "trtmc-nested").exists()
+
+
+@pytest.mark.parametrize(
+    ("invalid", "message"),
+    (
+        ("missing", "cannot package native command"),
+        ("text", "not an ELF executable"),
+        ("not_executable", "not a regular executable"),
+        ("symlink", "not a regular executable"),
+        ("duplicate", "duplicate native command destination"),
+    ),
+)
+def test_conan_native_commands_reject_invalid_payloads(
+    conan_recipe, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: str, message: str
+) -> None:
+    build, destination = tmp_path / "build", tmp_path / "package"
+    build.mkdir()
+    command = build / "trtmc"
+    command.write_bytes(b"\x7fELFfixture")
+    command.chmod(0o755)
+    if invalid == "missing":
+        command.unlink()
+    elif invalid == "text":
+        (build / "trtmc-helper").write_text("#!/bin/sh\necho helper\n")
+        (build / "trtmc-helper").chmod(0o755)
+    elif invalid == "not_executable":
+        command.chmod(0o644)
+    elif invalid == "symlink":
+        (build / "trtmc-alias").symlink_to(command)
+    elif invalid == "duplicate":
+        destination.mkdir()
+        (destination / "trtmc").write_bytes(b"existing payload")
+    monkeypatch.setattr(conan_recipe, "_set_runpath", lambda path, value: None)
+
+    with pytest.raises(RuntimeError, match=message):
+        conan_recipe._package_native_commands(build, (destination,))
+    if invalid == "duplicate":
+        assert (destination / "trtmc").read_bytes() == b"existing payload"
 
 
 def test_internal_ci_image_supports_embedded_workflow_shell_regressions() -> None:

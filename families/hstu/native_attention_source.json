@@ -1,0 +1,43 @@
+{
+  "repository": "https://github.com/pytorch/FBGEMM",
+  "revision": "43791a0ade113a0ad5530c2a4948870dd0f7e417",
+  "files": {
+    "hstu.h": "2da021d852e4a68d4b17f0bd859106e91eac3fb69e35d68d45874a3fff3f7381",
+    "hstu_fwd.h": "1d18b1f9880c476be2b77bf374b60b1a5d6a2517ac504481e8d6243f4704ba02",
+    "kernel_traits.h": "fef8f41c95055809462ec2aad0ba5b0101c39aac46bab6177dcf4e96ec8c73ce",
+    "static_switch.h": "054a369ee7becd9f338c35119f5130a787ff9cb46b8f03acbd73e88968e59335",
+    "block_info.h": "8b5534dcbfde54f79a3d3d5189cb81fae925b6e76964429f8ad0bead3afd86f7",
+    "utils.h": "3f43ed5abc9a41e3d1efdb4726359119b0b2ab56ec397adc1060383bca3fce25"
+  },
+  "module": "hstu.hstu_ampere",
+  "content_key_domain": "hstu-original-kernel-source-v1",
+  "cutlass": {
+    "repository": "https://github.com/jwfromm/cutlass",
+    "revision": "571edeb2d0ac872a8392fc49285b156b07884b4e",
+    "include_content_key": "1c97ed909c7f7281ae86e0ba535083bd66fbbd093bc531c56fdbdd3befdabec0",
+    "content_key_domain": "hstu-original-cutlass-include-v1"
+  },
+  "licenses": {
+    "LICENSE": {
+      "sha256": "12c2370ec32e78115dcd71ba22cdcb1297320fdc4ade81f798136d42357c58b8",
+      "notice_file": "FBGEMM.LICENSE.txt",
+      "content_key": "66146f3ec95f474f3a42340ce2df23626c73c4c60a157c2d4ee41e7fb39e8573"
+    },
+    "fbgemm_gpu/experimental/hstu/LICENSE": {
+      "sha256": "8c9ccb96c065e706135b6cbad279b721da6156e51f3a5f27c6b3329af9416d73",
+      "notice_file": "HSTU.LICENSE.txt",
+      "content_key": "0ba7ffb9e8c6fa4a9a92c57f86a4f5d1d5815ed09996657844067a588529fc4e"
+    },
+    "external/cutlass/LICENSE.txt": {
+      "sha256": "80a7a18b73d41f64dd9ca881af35938f8de88b18c728703251f4c94d1299884d",
+      "notice_file": "CUTLASS.LICENSE.txt",
+      "content_key": "30ba0a3f70f4556bcc3be3fe67244581cd2b6aca16efe3db432ad784269c08e2"
+    }
+  },
+  "cccl_notice": {
+    "source": "https://github.com/NVIDIA/cccl/blob/v3.3.3/LICENSE",
+    "sha256": "f96f51edda77fb9897de29d924d615e6bd153f4969db85fc6b7a22d7a624631e",
+    "notice_file": "CCCL.LICENSE.txt",
+    "content_key": "39a28ef4ca82c4110975c7f74c07b63e92602c6cba5620b89e4cc873560c3f30"
+  }
+}

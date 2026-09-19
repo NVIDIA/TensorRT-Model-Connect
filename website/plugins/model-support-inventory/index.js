@@ -19,6 +19,7 @@ const TASKS = {
   object_detection: ['Object detection', 'Computer Vision', 'object-detection', 'detect'],
   pose_hypothesis_refinement: ['Pose hypothesis refinement', 'Robotics', 'robotics', null],
   prompted_segmentation: ['Prompted segmentation', 'Computer Vision', 'mask-generation', 'segment'],
+  recommendation: ['Recommendation', 'Recommender Systems', null, null],
   reranking: ['Text ranking', 'Natural Language Processing', 'text-ranking', 'rerank'],
   robot_control: ['Robot control', 'Robotics', 'robotics', 'control'],
   segmentation: ['Image segmentation', 'Computer Vision', 'image-segmentation', 'segment'],

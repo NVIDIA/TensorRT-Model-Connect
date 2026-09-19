@@ -62,10 +62,22 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
                              cudaStream_t stream, int32_t profile_idx,
                              void* distributed_communicator,
                              const std::vector<ModuleExternalBinding>& external_bindings,
-                             bool backend_managed_cuda_graph)
-    : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
+                             bool backend_managed_cuda_graph, bool drain_before_destroy,
+                             bool collect_timing)
+    : TrtModuleImpl(engine, TrtUniquePtr<nvinfer1::IExecutionContext>(ctx), stream, profile_idx,
+                    distributed_communicator, external_bindings, backend_managed_cuda_graph,
+                    drain_before_destroy, collect_timing) {}
+
+TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine,
+                             TrtUniquePtr<nvinfer1::IExecutionContext> ctx, cudaStream_t stream,
+                             int32_t profile_idx, void* distributed_communicator,
+                             const std::vector<ModuleExternalBinding>& external_bindings,
+                             bool backend_managed_cuda_graph, bool drain_before_destroy,
+                             bool collect_timing)
+    : engine_(engine), ctx_(std::move(ctx)), stream_(stream), profile_idx_(profile_idx),
       distributed_communicator_(distributed_communicator),
-      backend_managed_cuda_graph_(backend_managed_cuda_graph),
+      backend_managed_cuda_graph_(backend_managed_cuda_graph), collect_timing_(collect_timing),
+      drain_before_destroy_(drain_before_destroy || !collect_timing),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
@@ -74,25 +86,28 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
         validate_initial_external_bindings(engine, external_bindings);
     } catch (const std::exception& error) {
         std::cerr << "[trt_module] Invalid external binding: " << error.what() << '\n';
-        delete ctx_;
-        ctx_ = nullptr;
+        ctx_.reset();
         return;
     }
     if (!attach_distributed_communicator()) {
-        delete ctx_;
-        ctx_ = nullptr;
+        ctx_.reset();
         return;
     }
     if (profile_idx_ > 0) {
         if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
             std::cerr << "[trt_module] Failed to set optimization profile " << profile_idx_ << "\n";
-            delete ctx_;
-            ctx_ = nullptr;
+            ctx_.reset();
             return;
         }
         cudaStreamSynchronize(stream_);
     }
-    allocate_buffers(engine);
+    try {
+        allocate_buffers(engine);
+    } catch (...) {
+        cudaStreamSynchronize(stream_);
+        free_buffers();
+        throw;
+    }
 }
 
 void TrtModuleImpl::discover_tensor_aliases(nvinfer1::ICudaEngine* engine) {
@@ -190,6 +205,8 @@ bool TrtModuleImpl::attach_distributed_communicator() {
 bool TrtModuleImpl::bind_tensor_address(const std::string& name, const BufferEntry& entry) {
     if (!ctx_ || !entry.d_ptr)
         return false;
+    // TensorRT schedules runtime-plugin preparation after binding setters.
+    invalidate_cuda_graph();
     const bool ok = entry.is_input ? ctx_->setInputTensorAddress(name.c_str(), entry.d_ptr)
                                    : ctx_->setOutputTensorAddress(name.c_str(), entry.d_ptr);
     if (!ok) {
@@ -209,13 +226,17 @@ void TrtModuleImpl::reset_execution_context() {
 }
 
 TrtModuleImpl::~TrtModuleImpl() {
+    // Scoped libraries can unload, and disabled timing has no event drain.
+    // Protect asynchronous work before destroying context/buffers in both cases.
+    if (drain_before_destroy_)
+        cudaStreamSynchronize(stream_);
     flush_timing_events();
     // CUDA Graphs may contain TensorRT collective launches that retain the
     // distributed communicator. Destroy the captured graph before member
     // teardown releases distributed_owner from keep_alive_.
     cuda_graph_->reset();
     free_buffers();
-    delete ctx_;
+    ctx_.reset();
 }
 
 void TrtModuleImpl::keep_alive(std::shared_ptr<void> resource) {
@@ -249,16 +270,32 @@ void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& e
     // engine as a whole advertises dynamic shapes via optimization profiles.
     if (!has_dynamic_shapes_ || !entry.is_dynamic || new_shape == entry.shape)
         return;
-    // Any captured CUDA graph was baked against the OLD shape; force a
-    // re-capture on the next enqueue so the new shape actually takes.
-    if (use_cuda_graph_)
-        cuda_graph_->reset();
-    nvinfer1::Dims dims;
+    invalidate_cuda_graph();
+    if (automatic_cuda_graph_)
+        validate_graph_input_shape(name, new_shape);
+    if (new_shape.size() > static_cast<std::size_t>(nvinfer1::Dims::MAX_DIMS))
+        throw std::invalid_argument("TensorRT input rank exceeds the supported limit: " + name);
+    nvinfer1::Dims dims{};
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = new_shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    if (!ctx_->setInputShape(name.c_str(), dims))
+        throw std::invalid_argument("TensorRT rejected input shape for '" + name + "'");
     entry.shape = new_shape;
+}
+
+void TrtModuleImpl::validate_graph_input_shape(const std::string& name,
+                                               const std::vector<int64_t>& shape) const {
+    const auto minimum =
+        engine_->getProfileShape(name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kMIN);
+    const auto maximum =
+        engine_->getProfileShape(name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kMAX);
+    if (minimum.nbDims != static_cast<int32_t>(shape.size()) || maximum.nbDims != minimum.nbDims)
+        throw std::invalid_argument("TensorRT input shape rank differs from profile: " + name);
+    for (int32_t index = 0; index < minimum.nbDims; ++index) {
+        if (shape[index] < minimum.d[index] || shape[index] > maximum.d[index])
+            throw std::invalid_argument("TensorRT input shape is outside profile: " + name);
+    }
 }
 
 std::size_t TrtModuleImpl::compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
@@ -479,9 +516,8 @@ void TrtModuleImpl::bind_alias_outputs_or_invalidate(const std::vector<std::stri
             // TensorRT address updates are not transactional. Once part of a
             // group has changed, discard the context rather than risk enqueue
             // with mixed state addresses.
-            cuda_graph_->reset();
-            delete ctx_;
-            ctx_ = nullptr;
+            invalidate_cuda_graph();
+            ctx_.reset();
             throw std::runtime_error("TensorRT rejected external alias output '" + output_name +
                                      "'");
         }
@@ -489,8 +525,18 @@ void TrtModuleImpl::bind_alias_outputs_or_invalidate(const std::vector<std::stri
 }
 
 void TrtModuleImpl::reset_cuda_graph_if_rebound(void* previous_ptr, void* ptr) {
-    if (previous_ptr != ptr && use_cuda_graph_)
-        cuda_graph_->reset();
+    if (previous_ptr != ptr)
+        invalidate_cuda_graph();
+}
+
+bool TrtModuleImpl::alias_group_matches(const BufferEntry& input,
+                                        const std::vector<std::string>& outputs, void* ptr) const {
+    if (input.d_ptr != ptr || !input.is_external)
+        return false;
+    return std::all_of(outputs.begin(), outputs.end(), [&](const auto& name) {
+        const auto& output = buffers_.at(name);
+        return output.d_ptr == ptr && output.is_external;
+    });
 }
 
 void TrtModuleImpl::bind_alias_group(const std::string& input_name, void* ptr) {
@@ -504,6 +550,10 @@ void TrtModuleImpl::bind_alias_group(const std::string& input_name, void* ptr) {
                                     "'");
     }
     validate_alias_outputs_exist(outputs->second);
+    // Rebinding a complete unchanged group would schedule onShapeChange and
+    // invalidate an otherwise prepared context without changing any address.
+    if (alias_group_matches(input->second, outputs->second, ptr))
+        return;
 
     BufferEntry candidate_input = input->second;
     candidate_input.d_ptr = ptr;
@@ -599,8 +649,44 @@ TensorMap TrtModuleImpl::forward(const TensorMap& inputs) {
 void TrtModuleImpl::enable_cuda_graph() {
     if (backend_managed_cuda_graph_)
         return;
+    automatic_cuda_graph_ = false;
     use_cuda_graph_ = true;
-    cuda_graph_->reset();
+    invalidate_cuda_graph();
+}
+
+void TrtModuleImpl::validate_automatic_cuda_graph() const {
+    if (backend_managed_cuda_graph_ || !engine_ || !ctx_)
+        throw std::invalid_argument(
+            "Automatic CUDA graph preparation requires a standard TRT context");
+    validate_automatic_cuda_graph_engine(engine_);
+}
+
+void TrtModuleImpl::validate_automatic_cuda_graph_engine(nvinfer1::ICudaEngine* engine) {
+    if (!engine)
+        throw std::invalid_argument("Automatic CUDA graphs require a valid TRT engine");
+    for (int32_t index = 0; index < engine->getNbIOTensors(); ++index) {
+        const auto* name = engine->getIOTensorName(index);
+        if (name && engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT &&
+            engine->isShapeInferenceIO(name)) {
+            throw std::invalid_argument(
+                "Automatic CUDA graphs do not support shape-inference input values: " +
+                std::string(name));
+        }
+    }
+}
+
+void TrtModuleImpl::enable_automatic_cuda_graph() {
+    validate_automatic_cuda_graph();
+    automatic_cuda_graph_ = true;
+    drain_before_destroy_ = true;
+    use_cuda_graph_ = true;
+    invalidate_cuda_graph();
+}
+
+void TrtModuleImpl::invalidate_cuda_graph() {
+    cuda_graph_prepared_ = false;
+    if (use_cuda_graph_)
+        cuda_graph_->reset();
 }
 
 void TrtModuleImpl::forward_async(const TensorMap& inputs) {
@@ -642,7 +728,7 @@ bool TrtModuleImpl::cuda_graph_captured() const {
     return use_cuda_graph_ && cuda_graph_->ready();
 }
 
-bool TrtModuleImpl::begin_timing_event(TimingEvent& event) {
+bool TrtModuleImpl::create_timing_event(TimingEvent& event) {
     if (cudaEventCreate(&event.start) != cudaSuccess)
         return false;
     if (cudaEventCreate(&event.stop) != cudaSuccess) {
@@ -650,12 +736,53 @@ bool TrtModuleImpl::begin_timing_event(TimingEvent& event) {
         event.start = nullptr;
         return false;
     }
+    return true;
+}
+
+void TrtModuleImpl::destroy_timing_event(TimingEvent event) {
+    if (event.start)
+        cudaEventDestroy(event.start);
+    if (event.stop)
+        cudaEventDestroy(event.stop);
+}
+
+bool TrtModuleImpl::accumulate_timing_event(const TimingEvent& event) {
+    float elapsed_ms = 0.0F;
+    if (cudaEventElapsedTime(&elapsed_ms, event.start, event.stop) != cudaSuccess)
+        return false;
+    timing_total_ms_ += static_cast<double>(elapsed_ms);
+    ++timing_launches_;
+    return true;
+}
+
+void TrtModuleImpl::reclaim_timing_events() {
+    // All pairs are recorded on stream_, so a pending oldest stop also keeps
+    // later pairs pending. Never synchronize or reuse an unfinished pair here.
+    while (!timing_events_.empty()) {
+        const auto event = timing_events_.front();
+        if (cudaEventQuery(event.stop) != cudaSuccess)
+            break;
+        timing_events_.pop_front();
+        if (accumulate_timing_event(event))
+            free_timing_events_.push_back(event);
+        else
+            destroy_timing_event(event);
+    }
+}
+
+bool TrtModuleImpl::begin_timing_event(TimingEvent& event) {
+    reclaim_timing_events();
+    if (free_timing_events_.empty()) {
+        if (!create_timing_event(event))
+            return false;
+    } else {
+        event = free_timing_events_.back();
+        free_timing_events_.pop_back();
+    }
     if (cudaEventRecord(event.start, stream_) == cudaSuccess)
         return true;
-    cudaEventDestroy(event.start);
-    cudaEventDestroy(event.stop);
-    event.start = nullptr;
-    event.stop = nullptr;
+    destroy_timing_event(event);
+    event = {};
     return false;
 }
 
@@ -664,10 +791,7 @@ void TrtModuleImpl::finish_timing_event(TimingEvent event) {
         timing_events_.push_back(event);
         return;
     }
-    if (event.start)
-        cudaEventDestroy(event.start);
-    if (event.stop)
-        cudaEventDestroy(event.stop);
+    destroy_timing_event(event);
 }
 
 void TrtModuleImpl::launch_ready_cuda_graph() {
@@ -696,15 +820,11 @@ void TrtModuleImpl::enqueue_without_cuda_graph() {
 
 void TrtModuleImpl::record_timed_enqueue() {
     TimingEvent timing_event;
-    const bool timing_ok = begin_timing_event(timing_event);
+    const bool timing_ok = collect_timing_ && begin_timing_event(timing_event);
     try {
-        if (!use_cuda_graph_)
-            enqueue_without_cuda_graph();
-        else if (cuda_graph_->ready())
-            launch_ready_cuda_graph();
-        else
-            capture_and_launch_cuda_graph();
+        enqueue_with_graph_policy();
     } catch (...) {
+        invalidate_cuda_graph();
         if (timing_ok)
             finish_timing_event(timing_event);
         throw;
@@ -713,35 +833,45 @@ void TrtModuleImpl::record_timed_enqueue() {
         finish_timing_event(timing_event);
 }
 
+void TrtModuleImpl::enqueue_with_graph_policy() {
+    if (!use_cuda_graph_ || (automatic_cuda_graph_ && !cuda_graph_prepared_)) {
+        // This is the caller's real request, not a warmup or duplicate call.
+        enqueue_without_cuda_graph();
+        cuda_graph_prepared_ = automatic_cuda_graph_;
+    } else if (cuda_graph_->ready()) {
+        launch_ready_cuda_graph();
+    } else {
+        capture_and_launch_cuda_graph();
+    }
+}
+
 void TrtModuleImpl::flush_timing_events() {
-    if (timing_events_.empty())
-        return;
-    double total_ms = 0.0;
-    int32_t launches = 0;
     for (auto& event : timing_events_) {
-        if (event.stop && cudaEventSynchronize(event.stop) == cudaSuccess) {
-            float elapsed_ms = 0.0F;
-            if (cudaEventElapsedTime(&elapsed_ms, event.start, event.stop) == cudaSuccess) {
-                total_ms += static_cast<double>(elapsed_ms);
-                ++launches;
-            }
-        }
-        if (event.start)
-            cudaEventDestroy(event.start);
-        if (event.stop)
-            cudaEventDestroy(event.stop);
+        if (event.stop && cudaEventSynchronize(event.stop) == cudaSuccess)
+            accumulate_timing_event(event);
+        destroy_timing_event(event);
     }
     timing_events_.clear();
-    if (launches <= 0)
+    for (const auto& event : free_timing_events_)
+        destroy_timing_event(event);
+    free_timing_events_.clear();
+    if (timing_launches_ == 0)
         return;
     std::ostringstream line;
     line << std::fixed << std::setprecision(6) << "[trtmc.engine_timing] label=\"" << timing_label_
-         << "\" execute_ms=" << total_ms << " launches=" << launches;
+         << "\" execute_ms=" << timing_total_ms_ << " launches=" << timing_launches_;
     std::cerr << line.str() << '\n';
+    timing_total_ms_ = 0.0;
+    timing_launches_ = 0;
 }
 
 void TrtModuleImpl::sync() {
-    cudaStreamSynchronize(stream_);
+    const auto status = cudaStreamSynchronize(stream_);
+    if (automatic_cuda_graph_ && status != cudaSuccess) {
+        invalidate_cuda_graph();
+        throw std::runtime_error(std::string("CUDA graph preparation stream failed: ") +
+                                 cudaGetErrorString(status));
+    }
 }
 
 // --- Forward device async (GPU → GPU, no sync) ---

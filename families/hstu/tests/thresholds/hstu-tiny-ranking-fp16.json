@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "rtol": 0.001,
+    "atol": 0.0001
+  }
+}
