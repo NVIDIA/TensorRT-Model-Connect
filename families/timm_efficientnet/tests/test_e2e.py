@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 import pytest
 import numpy as np
-from tensorrt_model_connect import BuildRequest, build
+from families.timm_efficientnet.cli import BuildRequest, build_bundle
 
 FAMILY = "timm_efficientnet"
 TASKS = frozenset({"image_to_class_scores"})
@@ -121,6 +121,8 @@ def _runtime() -> tuple[Path, Path]:
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
     assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
+    if not (runtime_root / f"libtrtmc_cli_{FAMILY}.so").is_file():
+        raise AssertionError(f"selected {FAMILY} E2E requires its native CLI adapter")
     import torch
 
     assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
@@ -129,23 +131,14 @@ def _runtime() -> tuple[Path, Path]:
 
 
 def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
-    build(
-        BuildRequest(
-            model_dir=model_dir,
-            output_path=bundle,
-            family=FAMILY,
-            task=manifest["task"],
-            precision=manifest["precision"],
-            max_sequence_length=manifest.get("max_sequence_length"),
-            image_height=manifest.get("image_height"),
-            image_width=manifest.get("image_width"),
-            video_num_frames=manifest.get("video_num_frames"),
-            max_batch_size=int(manifest.get("max_batch_size", 1)),
-            tensor_parallel_size=int(manifest["tensor_parallel_size"]),
-            quantization=manifest.get("quantization"),
-            fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
+    build_bundle(
+            BuildRequest(
+                model_dir=model_dir,
+                task=manifest["task"],
+                precision=manifest["precision"],
+            ),
+            bundle,
         )
-    )
 
 
 def _run_json(
@@ -158,6 +151,7 @@ def _run_json(
 ) -> dict:
     invocation = [
         str(binary),
+        FAMILY,
         command,
         str(bundle),
         "--runtime-root",
@@ -387,6 +381,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
+    if int(manifest["tensor_parallel_size"]) != 1:
+        raise NotImplementedError("this family does not support tensor parallelism")
     with evidence_stage("build"):
         _build(model_dir, bundle, manifest)
     with evidence_stage("native"):
