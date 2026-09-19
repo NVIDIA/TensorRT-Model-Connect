@@ -139,6 +139,12 @@ def _thresholds(case_name: str) -> dict[str, float]:
     return thresholds
 
 
+def _reference_mode(case: dict) -> str:
+    mode = str(case.get("reference_mode", "hf"))
+    assert mode in {"hf", "contract_only"}, mode
+    return mode
+
+
 def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
     quantization = manifest.get("quantization")
     assert quantization is None or isinstance(quantization, str)
@@ -705,6 +711,17 @@ def test_fp8_text_gate_uses_prefix_fallback_and_expected_answer_or() -> None:
         )
 
 
+def test_native_kv_semantic_case_reaches_the_third_prefill_chunk() -> None:
+    _, case = _CASES["qwen3-0.6b-bf16-native-kv-two-chunk-parity"]
+    prompt_tokens = int(case["expected_prompt_tokens"])
+    chunk_limit = int(case["expected_prefill_chunk_limit"])
+
+    assert _reference_mode(case) == "hf"
+    assert int(case["expected_prefill_chunks"]) == 3
+    assert 2 * chunk_limit < prompt_tokens <= 3 * chunk_limit
+    assert _thresholds(case["name"])["contract_ned_threshold"] == 0.0
+
+
 @pytest.mark.parametrize("case_name", sorted(_CASES))
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
@@ -762,9 +779,10 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         record_evidence("thresholds", {"case_contract": case})
         return
 
-    if "expected_prompt_tokens" in case:
+    if _reference_mode(case) == "contract_only":
         from families.qwen.tests.runtime_receipt import assert_native_kv_receipt
 
+        assert "expected_prompt_tokens" in case
         prompt_tokens = _raw_prompt_token_count(model_dir, manifest, prompt)
         with evidence_stage("compare"):
             assert_native_kv_receipt(payload, case, prompt_tokens)
