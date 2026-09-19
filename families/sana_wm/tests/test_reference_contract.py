@@ -54,6 +54,22 @@ def test_qualification_snapshot_is_materialized_inside_family_environment(
     assert prepare_environment.MODEL_REVISION == "e96271d77398def8ebb9fc595e7c0056dc625ab7"
 
 
+def test_qualification_environment_replaces_gui_opencv(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        prepare_environment.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    prepare_environment._install_headless_opencv()
+
+    assert calls[0][0][-2:] == ["--yes", "opencv-python"]
+    assert calls[0][1]["check"] is False
+    assert calls[1][0][-1] == "opencv-python-headless==4.11.0.86"
+    assert calls[1][1]["check"] is True
+
+
 def test_manifest_owns_the_exact_camera_control_workload() -> None:
     _, manifest, case = e2e.CASES["sana-wm-bidirectional"]
     assert manifest["video_num_frames"] == 321

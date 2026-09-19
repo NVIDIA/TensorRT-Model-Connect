@@ -16,6 +16,30 @@ REPOSITORY = "https://github.com/NVlabs/Sana.git"
 REVISION = "59629fdf790850797cb657bad014fce432bd713d"
 MODEL = "Efficient-Large-Model/SANA-WM_bidirectional"
 MODEL_REVISION = "e96271d77398def8ebb9fc595e7c0056dc625ab7"
+OPENCV_HEADLESS_VERSION = "4.11.0.86"
+
+
+def _install_headless_opencv() -> None:
+    # mmcv declares the GUI OpenCV distribution, whose Linux wheel requires
+    # libxcb. The reference only uses image-processing APIs, so replace it
+    # with the headless wheel inside this family environment.
+    subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "--yes", "opencv-python"],
+        check=False,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--force-reinstall",
+            "--no-deps",
+            f"opencv-python-headless=={OPENCV_HEADLESS_VERSION}",
+        ],
+        check=True,
+    )
 
 
 def _materialize_snapshot(snapshot: Path, destination: Path) -> None:
@@ -41,6 +65,7 @@ def _materialize_snapshot(snapshot: Path, destination: Path) -> None:
 
 
 def main() -> None:
+    _install_headless_opencv()
     parent = Path(sys.prefix) / "trtmc-reference"
     source = parent / "Sana"
     parent.mkdir(parents=True, exist_ok=True)
