@@ -39,6 +39,25 @@ def _entry(operation):
     )
 
 
+def _control_entry():
+    return perf.ResolvedEntry(
+        spec={"id": "robot-action-fixture", "operation": "control", "baseline": {}},
+        model=SimpleNamespace(task="robot_control"),
+        case=SimpleNamespace(
+            selected_task=None,
+            request={},
+            measurement=SimpleNamespace(asset_loading_included=False),
+        ),
+        manifest={},
+        reference_precision="fp32",
+        baseline_timing={
+            "timing_scope": "task-pipeline-call-wall",
+            "input_preparation_included": True,
+            "asset_loading_included": False,
+        },
+    )
+
+
 def _geometry(root: Path):
     root.mkdir()
     # Two HWC pixels: a valid metric point and an invalid +Inf sentinel.
@@ -109,7 +128,22 @@ def _poses(_root: Path):
     }
 
 
-FIXTURES = {"geometry": _geometry, "predict_structure": _structure, "refine_pose": _poses}
+def _actions(_root: Path):
+    return {
+        "action_steps": 2,
+        "action_dim": 2,
+        "action_values": 4,
+        "actions": [0.1, -0.2, 0.3, -0.4],
+        "finite": True,
+        "within_training_bounds": True,
+    }
+
+
+FIXTURES = {
+    "geometry": _geometry,
+    "predict_structure": _structure,
+    "refine_pose": _poses,
+}
 
 
 def _compare(operation, left, right):
@@ -305,6 +339,51 @@ def test_geometry_parity_compares_complete_numerical_artifacts(tmp_path):
     assert matched is True and reason == ""
     assert evidence["numerical_parity_checked"] is True
     Path(right["depth_artifact"]).write_bytes(struct.pack("<2f", 6, float("inf")))
+    assert perf._output_contract(
+        entry, {"output_summary": left}, {"output_summary": right}
+    )[0] is False
+
+
+def test_robot_action_parity_compares_every_action_value(tmp_path):
+    left = _actions(tmp_path / "candidate")
+    right = _actions(tmp_path / "reference")
+    entry = _control_entry()
+    entry.spec["baseline"].update(
+        output_contract="robot-action-parity",
+        action_max_abs_error=0.00005,
+        action_mean_abs_error=0.000005,
+        action_rmse=0.00001,
+    )
+
+    matched, reason, evidence = perf._output_contract(
+        entry, {"output_summary": left}, {"output_summary": right}
+    )
+
+    assert matched is True and reason == ""
+    assert evidence["numerical_parity_checked"] is True
+    right["actions"][2] += 0.01
+    assert perf._output_contract(
+        entry, {"output_summary": left}, {"output_summary": right}
+    )[0] is False
+
+
+def test_robot_action_parity_rejects_missing_or_out_of_bounds_values(tmp_path):
+    left = _actions(tmp_path / "candidate")
+    right = _actions(tmp_path / "reference")
+    entry = _control_entry()
+    entry.spec["baseline"].update(
+        output_contract="robot-action-parity",
+        action_max_abs_error=0.00005,
+        action_mean_abs_error=0.000005,
+        action_rmse=0.00001,
+    )
+
+    left["within_training_bounds"] = False
+    assert perf._output_contract(
+        entry, {"output_summary": left}, {"output_summary": right}
+    )[0] is False
+    left["within_training_bounds"] = True
+    right["actions"].pop()
     assert perf._output_contract(
         entry, {"output_summary": left}, {"output_summary": right}
     )[0] is False

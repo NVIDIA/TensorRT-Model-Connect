@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: act-aloha-sim-transfer-cube
+candidate:
+  family: lerobot_act
+  checkpoint: lerobot/act_aloha_sim_transfer_cube_human
+  revision: ba73b2766f1371cdc133ca4efb97eb090d744625
+  task: robot_control
+  precision: fp32
+  bundle: act-aloha-sim-transfer-cube.bundle
+  build:
+    tensor_parallel_size: 1
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: recorded-action-parity
+    benchmark: robot_action_parity
+    samples: 1
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      action_max_abs_error: 0.00005
+      action_mean_abs_error: 0.000005
+      action_rmse: 0.00001
+      min_sample_pass_rate: 1.0
+
+performance:
+  - name: control
+    benchmark: robot_action_performance
+    operation: control
+    request:
+      image_path: ../data/recorded_observation/observation.images.top.png
+      state_path: ../data/recorded_observation/observation.state.f32
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: pytorch-eager
+      reference_backend: official_lerobot
+      precision: fp32
+      output_contract: robot-action-parity
+      action_max_abs_error: 0.00005
+      action_mean_abs_error: 0.000005
+      action_rmse: 0.00001

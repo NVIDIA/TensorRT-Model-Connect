@@ -686,6 +686,7 @@ Json run_control(trtmc::ITask& task, const Json& request, const Timing& timing) 
             return Json{{"action_steps", result.num_actions},
                         {"action_dim", result.action_dim},
                         {"action_values", result.actions.size()},
+                        {"actions", result.actions},
                         {"within_training_bounds", result.within_training_bounds},
                         {"inference_ms", result.inference_ms}};
         });
