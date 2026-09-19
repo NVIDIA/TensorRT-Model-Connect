@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
             request_file << image_request << '\n';
         }
         check(std::system(command.c_str()) == 0,
-              "single prompt uses the scalar interface when a task also supports batching");
+              "text-only prompt uses generation when a task also supports editing and batching");
         std::ifstream image_output_file(output_path);
         Json image_result;
         image_output_file >> image_result;

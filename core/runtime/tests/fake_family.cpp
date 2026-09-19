@@ -57,6 +57,7 @@ class FakeEmbedding final : public trtmc::IEmbedding {
 };
 
 class FakeImageGeneration final : public trtmc::IImageGeneration,
+                                  public trtmc::IImageEditing,
                                   public trtmc::IImageBatchGeneration {
   public:
     const char* task() const noexcept override { return trtmc::IImageGeneration::kTask; }
@@ -64,6 +65,11 @@ class FakeImageGeneration final : public trtmc::IImageGeneration,
     trtmc::ImageResult generate_image(const std::string&,
                                       const trtmc::ImageGenerationConfig&) override {
         return {{0.25F, 0.5F, 0.75F}, 1, 1, 3, 1};
+    }
+
+    trtmc::ImageResult generate_image(const std::string&, const float*, std::int32_t, std::int32_t,
+                                      const trtmc::ImageGenerationConfig&) override {
+        return {{0.75F, 0.5F, 0.25F}, 1, 1, 3, 1};
     }
 
     std::vector<trtmc::ImageResult>

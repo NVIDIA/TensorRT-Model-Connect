@@ -323,24 +323,29 @@ Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& t
         invoke = [&batch, prompts, seeds, config]() {
             return batch.generate_image_batch(prompts, seeds, config);
         };
-    } else if (auto* edit = dynamic_cast<trtmc::IImageEditing*>(&task)) {
+    } else if (request.contains("image_path") &&
+               dynamic_cast<trtmc::IImageEditing*>(&task) != nullptr) {
+        auto& edit = require_interface<trtmc::IImageEditing>(task, "IImageEditing");
         const std::string path = request.at("image_path").get<std::string>();
         if (!timing.asset_loading_included)
             cached = read_image(path);
-        invoke = [edit, prompt, path, config, &cached]() {
+        invoke = [&edit, prompt, path, config, &cached]() {
             if (cached) {
-                return std::vector<trtmc::ImageResult>{edit->generate_image(
+                return std::vector<trtmc::ImageResult>{edit.generate_image(
                     prompt, cached->pixels.data(), cached->height, cached->width, config)};
             }
             const Image image = read_image(path);
-            return std::vector<trtmc::ImageResult>{edit->generate_image(
+            return std::vector<trtmc::ImageResult>{edit.generate_image(
                 prompt, image.pixels.data(), image.height, image.width, config)};
         };
-    } else if (auto* world = dynamic_cast<trtmc::IWorldModelGeneration*>(&task)) {
+    } else if (request.contains("image_path") &&
+               dynamic_cast<trtmc::IWorldModelGeneration*>(&task) != nullptr) {
+        auto& world =
+            require_interface<trtmc::IWorldModelGeneration>(task, "IWorldModelGeneration");
         const std::string path = request.at("image_path").get<std::string>();
         if (!timing.asset_loading_included)
             cached = read_image(path);
-        invoke = [world, prompt, path, config, request, &cached]() {
+        invoke = [&world, prompt, path, config, request, &cached]() {
             std::optional<Image> loaded;
             if (!cached)
                 loaded = read_image(path);
@@ -355,7 +360,7 @@ Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& t
                 optional_value<std::vector<float>>(request, "camera_intrinsics", {});
             value.num_frames = optional_value<std::int32_t>(request, "num_frames", 0);
             value.generation = config;
-            return std::vector<trtmc::ImageResult>{world->generate_world(value)};
+            return std::vector<trtmc::ImageResult>{world.generate_world(value)};
         };
     } else {
         auto& image = require_interface<trtmc::IImageGeneration>(task, "IImageGeneration");
