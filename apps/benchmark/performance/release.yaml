@@ -18,6 +18,10 @@ defaults:
     asset_loading_included: false
 
 excluded_profiles:
+  - model: moge-2-vitl
+    reason: >-
+      Family-owned accuracy and internal performance qualification are present,
+      but no user-facing release-performance workload or receipt has been added.
   - model: s1-mini-fp16
     reason: >-
       families/s1_mini has no release-performance workload or receipt yet;
