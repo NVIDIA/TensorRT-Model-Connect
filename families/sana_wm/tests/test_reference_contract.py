@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from . import test_e2e as e2e
+from .benchmark import prepare_environment
 
 
 def test_official_source_dependencies_are_family_owned() -> None:
@@ -27,6 +28,30 @@ def test_official_source_dependencies_are_family_owned() -> None:
         "qwen-vl-utils",
         "termcolor",
     } <= requirements
+
+
+def test_qualification_snapshot_is_materialized_inside_family_environment(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "cache"
+    blob = cache / "blobs/weights"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"weights")
+    snapshot = cache / "snapshots/revision"
+    (snapshot / "dit").mkdir(parents=True)
+    (snapshot / "dit/model.safetensors").symlink_to(blob)
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    destination = environment / "SANA-model"
+
+    prepare_environment._materialize_snapshot(snapshot, destination)
+
+    materialized = destination / "dit/model.safetensors"
+    assert destination.is_dir() and not destination.is_symlink()
+    assert destination.resolve().is_relative_to(environment)
+    assert materialized.read_bytes() == b"weights"
+    assert materialized.samefile(blob)
+    assert prepare_environment.MODEL_REVISION == "e96271d77398def8ebb9fc595e7c0056dc625ab7"
 
 
 def test_manifest_owns_the_exact_camera_control_workload() -> None:

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 schema_version: trtmc.qualification/v1
 model: sana-wm-bidirectional
-candidate: {family: sana_wm, checkpoint: Efficient-Large-Model/SANA-WM_bidirectional, task: world_model_generation, precision: bf16, bundle: sana-wm-bidirectional.bundle, build: {max_sequence_length: 256, image_height: 704, image_width: 1280, video_num_frames: 321}}
+candidate: {family: sana_wm, checkpoint: Efficient-Large-Model/SANA-WM_bidirectional, revision: e96271d77398def8ebb9fc595e7c0056dc625ab7, task: world_model_generation, precision: bf16, bundle: sana-wm-bidirectional.bundle, build: {max_sequence_length: 256, image_height: 704, image_width: 1280, video_num_frames: 321}}
 reference_environment:
   requirements: ../../requirements.txt
   paths: {sana_repo: trtmc-reference/Sana, sana_model: trtmc-reference/SANA-model}
