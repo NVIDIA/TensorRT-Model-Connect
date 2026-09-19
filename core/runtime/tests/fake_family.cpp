@@ -58,8 +58,7 @@ class FakeEmbedding final : public trtmc::IEmbedding {
 
 class FakeSegmentation final : public trtmc::ISegmentation {
   public:
-    trtmc::SegmentResult segment(const float*, std::int32_t height,
-                                 std::int32_t width) override {
+    trtmc::SegmentResult segment(const float*, std::int32_t height, std::int32_t width) override {
         return {std::vector<std::int32_t>(static_cast<std::size_t>(height) * width, 7), height,
                 width};
     }
