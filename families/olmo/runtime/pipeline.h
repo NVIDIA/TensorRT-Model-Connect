@@ -13,7 +13,10 @@
 
 #include "families/olmo/runtime/inference_state.h"
 #include "families/olmo/runtime/sampler.h"
+#include "families/olmo/runtime/task_config.h"
 #include "families/olmo/runtime/tokenizer.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -40,7 +43,8 @@ struct OlmoTextGenConfig {
     int32_t num_layers{0};
 };
 
-class OlmoTextGenerationPipeline final : public ITextGeneration {
+class OlmoTextGenerationPipeline final : public internal::IModel,
+                                         public internal::ITextContinuation {
   public:
     OlmoTextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
                                std::unique_ptr<OlmoInferenceState> state, OlmoTextGenConfig config,
@@ -48,9 +52,12 @@ class OlmoTextGenerationPipeline final : public ITextGeneration {
                                std::unique_ptr<ITrtModule> prefill,
                                std::shared_ptr<void> distributed_owner = nullptr);
 
-    // Public API: takes raw text, returns typed result.
-    TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
-    int32_t default_max_new_tokens() const override { return 128; }
+    const char* task() const noexcept override { return ITextContinuation::kTask.data(); }
+    std::vector<internal::TaskInstance> task_bindings() override {
+        return {internal::bind<internal::ITextContinuation>(*this, olmo::text_config_fields())};
+    }
+    TextResult run(const internal::TextContinuationRequest& request,
+                   internal::ConfigView config) override;
 
     // Token-ID-based generation (for unit tests and internal callers).
     struct GenerationResult {

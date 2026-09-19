@@ -13,7 +13,10 @@
 
 #include "families/bloom/runtime/inference_state.h"
 #include "families/bloom/runtime/sampler.h"
+#include "families/bloom/runtime/task_config.h"
 #include "families/bloom/runtime/tokenizer.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -40,7 +43,8 @@ struct BloomTextGenConfig {
     int32_t num_layers{0};
 };
 
-class BloomTextGenerationPipeline final : public ITextGeneration {
+class BloomTextGenerationPipeline final : public internal::IModel,
+                                          public internal::ITextContinuation {
   public:
     BloomTextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
                                 std::unique_ptr<BloomInferenceState> state,
@@ -48,9 +52,12 @@ class BloomTextGenerationPipeline final : public ITextGeneration {
                                 std::unique_ptr<ITrtModule> prefill,
                                 std::shared_ptr<void> distributed_owner = nullptr);
 
-    // Public API: takes raw text, returns typed result.
-    TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
-    int32_t default_max_new_tokens() const override { return 128; }
+    const char* task() const noexcept override { return ITextContinuation::kTask.data(); }
+    std::vector<internal::TaskInstance> task_bindings() override {
+        return {internal::bind<internal::ITextContinuation>(*this, bloom::text_config_fields())};
+    }
+    TextResult run(const internal::TextContinuationRequest& request,
+                   internal::ConfigView config) override;
 
     // Token-ID-based generation (for unit tests and internal callers).
     struct GenerationResult {

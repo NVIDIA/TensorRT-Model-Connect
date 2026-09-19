@@ -3,7 +3,7 @@
   "hf_id": "tiiuae/falcon-rw-1b",
   "bundle": "falcon-rw-1b-tp4.bundle",
   "family": "falcon",
-  "task": "text_generation",
+  "task": "text_continuation",
   "trust_remote_code": false,
   "testcases": [
     {

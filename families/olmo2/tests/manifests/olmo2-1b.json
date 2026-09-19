@@ -4,7 +4,7 @@
   "hf_revision": "a1847dff35000b4271fa70afc5db10fd29fedbdf",
   "bundle": "olmo2-1b.bundle",
   "family": "olmo2",
-  "task": "text_generation",
+  "task": "text_continuation",
   "trust_remote_code": false,
   "precision": "fp32",
   "testcases": [

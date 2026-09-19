@@ -3,7 +3,7 @@
   "hf_id": "facebook/xglm-564M",
   "bundle": "xglm-564m.bundle",
   "family": "xglm",
-  "task": "text_generation",
+  "task": "text_continuation",
   "precision": "fp16",
   "trust_remote_code": false,
   "testcases": [
