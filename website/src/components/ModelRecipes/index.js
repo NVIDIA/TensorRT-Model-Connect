@@ -13,6 +13,7 @@ const CATEGORY_ORDER = [
   'Computer Vision',
   'Audio',
   'Time Series',
+  'Recommender Systems',
   'Biology',
 ];
 
@@ -32,7 +33,7 @@ export default function ModelRecipeTaskIndex() {
           <table>
             <thead>
               <tr>
-                <th>Hugging Face task</th>
+                <th>Task</th>
                 <th>Model families</th>
                 <th>Declared recipes</th>
                 <th>What it covers</th>

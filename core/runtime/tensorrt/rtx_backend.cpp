@@ -134,6 +134,9 @@ class RtxBackend final : public IBackend {
     BackendDualProfileModules
     create_dual_profile_modules(const void* plan_data, size_t plan_size,
                                 const ModuleCreateOptions& options) override {
+        if (!options.plugin_libraries.empty())
+            throw std::invalid_argument(
+                "[trtmc] Scoped plugin libraries require the standard TRT backend");
         auto engine = deserialize_engine(*runtime_, plan_data, plan_size);
         const auto stream_setup = resolve_stream(options.stream);
         if (engine->getNbOptimizationProfiles() < 2)
@@ -151,6 +154,9 @@ class RtxBackend final : public IBackend {
     std::unique_ptr<ITrtModule>
     create_module_impl(const void* plan_data, size_t plan_size, const ModuleCreateOptions& options,
                        const std::vector<ModuleExternalBinding>& external_bindings) {
+        if (!options.plugin_libraries.empty())
+            throw std::invalid_argument(
+                "[trtmc] Scoped plugin libraries require the standard TRT backend");
         auto engine = deserialize_engine(*runtime_, plan_data, plan_size);
         return create_context_module(engine, resolve_stream(options.stream), options, 0,
                                      external_bindings);
@@ -180,9 +186,10 @@ class RtxBackend final : public IBackend {
         if (!context)
             throw std::runtime_error("[trtmc] Failed to create RTX execution context");
 
-        auto module = std::make_unique<TrtModuleImpl>(
-            engine.get(), context.release(), stream_setup.stream, profile_idx,
-            options.distributed_communicator, external_bindings, true);
+        auto module =
+            std::make_unique<TrtModuleImpl>(engine.get(), std::move(context), stream_setup.stream,
+                                            profile_idx, options.distributed_communicator,
+                                            external_bindings, true, false, options.collect_timing);
         if (!module->ok())
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed (RTX)");
 
