@@ -9,6 +9,7 @@ add_library(trtmc_model_qwen SHARED
   pipeline.cpp
   plugin.cpp
   plugin_helpers.cpp
+  refit_weights.cpp
   sampler.cpp
 )
 

@@ -21,6 +21,51 @@ namespace trtmc {
 
 namespace {
 
+nvinfer1::DataType to_trt_dtype(DType dtype) {
+    switch (dtype) {
+    case DType::kFloat32: return nvinfer1::DataType::kFLOAT;
+    case DType::kFloat16: return nvinfer1::DataType::kHALF;
+    case DType::kBFloat16: return nvinfer1::DataType::kBF16;
+    case DType::kInt32: return nvinfer1::DataType::kINT32;
+    case DType::kInt8: return nvinfer1::DataType::kINT8;
+    }
+    throw std::runtime_error("[trtmc] refit: unsupported weight dtype");
+}
+
+// Supply weights to an engine built with kSTRIP_PLAN. Must run before any
+// execution context is created: a placeholder engine produces garbage until
+// refit, and ensureSessionWeightsFullyBacked fires inside CUDA-graph capture
+// while the session weights are unbacked.
+void apply_refit_weights(nvinfer1::ICudaEngine& engine,
+                         const ModuleCreateOptions& options) {
+    if (options.refit_weights == nullptr || options.refit_weights->empty())
+        return;
+
+    std::unique_ptr<nvinfer1::IRefitter> refitter(
+        nvinfer1::createInferRefitter(engine, trt_shared_logger()));
+    if (!refitter)
+        throw std::runtime_error(
+            "[trtmc] refit: engine is not refittable (was it built with "
+            "kSTRIP_PLAN + kREFIT_INDIVIDUAL?)");
+
+    for (const auto& [name, view] : *options.refit_weights) {
+        nvinfer1::Weights weights{to_trt_dtype(view.dtype), view.data,
+                                  static_cast<int64_t>(view.count)};
+        if (!refitter->setNamedWeights(name.c_str(), weights))
+            throw std::runtime_error("[trtmc] refit: setNamedWeights failed for " + name);
+    }
+
+    // getMissingWeights() is empty on a fresh stripped engine even before any
+    // weight is supplied, so it is only meaningful as a post-set check.
+    const int32_t missing = refitter->getMissingWeights(0, nullptr);
+    if (missing > 0)
+        throw std::runtime_error("[trtmc] refit: " + std::to_string(missing) +
+                                 " weight(s) still missing after setNamedWeights");
+    if (!refitter->refitCudaEngine())
+        throw std::runtime_error("[trtmc] refit: refitCudaEngine() failed");
+}
+
+
 void keep_backend_resources(ITrtModule& module,
                             const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
                             const std::shared_ptr<void>& stream_owner,
@@ -61,6 +106,7 @@ class TrtBackend final : public IBackend {
         auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine_raw)
             throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
+        apply_refit_weights(*engine_raw, options);
         std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
                                                       [](nvinfer1::ICudaEngine* p) { delete p; });
 
@@ -104,6 +150,13 @@ class TrtBackend final : public IBackend {
         auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine)
             throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
+
+        try {
+            apply_refit_weights(*engine, options);
+        } catch (...) {
+            delete engine;
+            throw;
+        }
 
         auto* ctx = engine->createExecutionContext();
         if (!ctx) {

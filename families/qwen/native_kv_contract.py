@@ -93,9 +93,18 @@ def validate_native_kv_weights(
                 f"native Qwen3 metadata {name} must be {expected}"
             )
 
+    # Under native layout the projections keep the checkpoint's [out, in]
+    # orientation and TensorRT transposes them in the matmul, so every
+    # projection shape below is flipped. `embedding` is a gather table, not a
+    # matmul RHS, so it is unaffected.
+    from .checkpoint_mapper import native_layout as _native_layout
+
+    def _proj(rows: int, cols: int) -> tuple[int, int]:
+        return (cols, rows) if _native_layout() else (rows, cols)
+
     _require(weights, "embedding", (vocab, hidden))
     _require(weights, "final_norm", (hidden,))
-    _require(weights, "w_out", (hidden, vocab))
+    _require(weights, "w_out", _proj(hidden, vocab))
     forbidden = [
         name
         for name in ("final_norm_beta", "lm_head_bias")
@@ -106,14 +115,14 @@ def validate_native_kv_weights(
         prefix = f"layer.{layer}"
         for suffix, expected in (
             ("input_norm", (hidden,)),
-            ("w_q", (hidden, attention)),
-            ("w_k", (hidden, kv_attention)),
-            ("w_v", (hidden, kv_attention)),
-            ("w_o", (attention, hidden)),
+            ("w_q", _proj(hidden, attention)),
+            ("w_k", _proj(hidden, kv_attention)),
+            ("w_v", _proj(hidden, kv_attention)),
+            ("w_o", _proj(attention, hidden)),
             ("post_attn_norm", (hidden,)),
-            ("w_gate", (hidden, mlp)),
-            ("w_up", (hidden, mlp)),
-            ("w_down", (mlp, hidden)),
+            ("w_gate", _proj(hidden, mlp)),
+            ("w_up", _proj(hidden, mlp)),
+            ("w_down", _proj(mlp, hidden)),
             ("q_norm", (attention,)),
             ("k_norm", (kv_attention,)),
         ):
