@@ -7,4 +7,4 @@ reference_environment: {requirements: ../../requirements.txt}
 accuracy:
   - {name: generated-media-parity, benchmark: task_output_parity, operation: generate_image, request: &request {prompt: A cat holding a sign that says hello world, negative_prompt: ' ', seed: 42, num_steps: 20, cfg_scale: 4.0, height: 1024, width: 1024}, reference: &reference {adapter: hf-diffusers, mode: hf-eager, precision: bf16, output_contract: media-artifact-parity, adapter_options: {cpu_offload: true}}, gate: {min_psnr: 5.0, min_ssim: 0.1}}
 performance:
-  - {name: generate-image, benchmark: media_generation_performance, operation: generate_image, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: hf_diffusers, output_contract: media-shape}}
+  - {name: generate-image, benchmark: media_generation_performance, operation: generate_image, request: *request, measurement: {warmup: 10, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: hf_diffusers, output_contract: media-shape}}
