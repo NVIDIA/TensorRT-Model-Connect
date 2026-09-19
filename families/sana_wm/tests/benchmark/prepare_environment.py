@@ -16,6 +16,8 @@ REPOSITORY = "https://github.com/NVlabs/Sana.git"
 REVISION = "59629fdf790850797cb657bad014fce432bd713d"
 MODEL = "Efficient-Large-Model/SANA-WM_bidirectional"
 MODEL_REVISION = "e96271d77398def8ebb9fc595e7c0056dc625ab7"
+STAGE1_TEXT_ENCODER = "Efficient-Large-Model/gemma-2-2b-it"
+STAGE1_TEXT_ENCODER_REVISION = "569d9809d0c8b6722d4d31b5a77a2ec7a400650a"
 OPENCV_HEADLESS_VERSION = "4.11.0.86"
 
 
@@ -64,6 +66,26 @@ def _materialize_snapshot(snapshot: Path, destination: Path) -> None:
         raise
 
 
+def _materialize_stage1_text_encoder(model: Path) -> None:
+    destination = model / "stage1_text_encoder"
+    required = (
+        destination / "config.json",
+        destination / "model.safetensors.index.json",
+        destination / "tokenizer.json",
+    )
+    if all(path.is_file() for path in required):
+        return
+    if destination.exists() or destination.is_symlink():
+        raise RuntimeError(f"incomplete SANA stage-1 text encoder: {destination}")
+    snapshot = Path(
+        snapshot_download(
+            STAGE1_TEXT_ENCODER,
+            revision=STAGE1_TEXT_ENCODER_REVISION,
+        )
+    ).resolve()
+    _materialize_snapshot(snapshot, destination)
+
+
 def main() -> None:
     _install_headless_opencv()
     parent = Path(sys.prefix) / "trtmc-reference"
@@ -92,11 +114,13 @@ def main() -> None:
             raise
     model = parent / "SANA-model"
     if model.is_dir() and not model.is_symlink():
+        _materialize_stage1_text_encoder(model)
         return
     if model.exists() or model.is_symlink():
         raise RuntimeError(f"incomplete SANA model directory: {model}")
     snapshot = Path(snapshot_download(MODEL, revision=MODEL_REVISION)).resolve()
     _materialize_snapshot(snapshot, model)
+    _materialize_stage1_text_encoder(model)
 
 
 if __name__ == "__main__":

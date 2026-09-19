@@ -141,8 +141,14 @@ def _prepared_model_dir(model_dir: Path, manifest: dict, tmp_path: Path) -> Path
     stage1_text_encoder = Path(
         snapshot_download(
             repo_id=stage1_repo,
+            revision=dependencies[0].get("revision"),
             local_files_only=True,
-            allow_patterns=["config.json"],
+            allow_patterns=[
+                "config.json",
+                "model*.safetensors*",
+                "special_tokens_map.json",
+                "tokenizer*",
+            ],
         )
     )
     prepared = tmp_path / "prepared-model"

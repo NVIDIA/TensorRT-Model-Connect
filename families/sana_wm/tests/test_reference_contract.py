@@ -54,6 +54,33 @@ def test_qualification_snapshot_is_materialized_inside_family_environment(
     assert prepare_environment.MODEL_REVISION == "e96271d77398def8ebb9fc595e7c0056dc625ab7"
 
 
+def test_qualification_materializes_pinned_stage1_text_encoder(
+    monkeypatch, tmp_path: Path
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    for name in ("config.json", "model.safetensors.index.json", "tokenizer.json"):
+        (snapshot / name).write_text("{}\n", encoding="utf-8")
+    model = tmp_path / "model"
+    model.mkdir()
+    captured = {}
+
+    def download(model_id, **kwargs):
+        captured.update(model_id=model_id, **kwargs)
+        return str(snapshot)
+
+    monkeypatch.setattr(prepare_environment, "snapshot_download", download)
+    prepare_environment._materialize_stage1_text_encoder(model)
+
+    destination = model / "stage1_text_encoder"
+    assert destination.is_dir() and not destination.is_symlink()
+    assert (destination / "tokenizer.json").is_file()
+    assert captured == {
+        "model_id": "Efficient-Large-Model/gemma-2-2b-it",
+        "revision": "569d9809d0c8b6722d4d31b5a77a2ec7a400650a",
+    }
+
+
 def test_qualification_environment_replaces_gui_opencv(monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(
