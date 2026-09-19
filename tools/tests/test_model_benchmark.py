@@ -51,6 +51,8 @@ def test_family_configs_auto_discover_without_a_central_model_registry() -> None
     assert not any("l0" in case.model.lower() for case in cases)
     nemotron_h = [case for case in cases if case.model == "nemotron-h-nano-9b"]
     assert nemotron_h and all(not case.reference_build_isolation for case in nemotron_h)
+    lance = [case for case in cases if case.model == "lance-3b-x2t-image"]
+    assert lance and all(not case.reference_build_isolation for case in lance)
 
 
 def test_timm_qualification_profiles_use_the_family_build_task() -> None:
@@ -2112,9 +2114,11 @@ def test_family_reference_environment_inherits_parent_venv_packages(
     parent_packages = tmp_path / "parent-venv/site-packages"
     parent_packages.mkdir(parents=True)
     commands = []
+    environments = []
 
     def complete(command, *_args, **_kwargs):
         commands.append(command)
+        environments.append(_kwargs.get("env"))
         if command[1:3] == ["-m", "venv"]:
             environment = Path(command[-1])
             (environment / "bin").mkdir(parents=True)
@@ -2137,6 +2141,8 @@ def test_family_reference_environment_inherits_parent_venv_packages(
     assert inherited.read_text(encoding="utf-8") == f"{parent_packages.resolve()}\n"
     pip_command = next(command for command in commands if command[1:3] == ["-m", "pip"])
     assert "--no-build-isolation" in pip_command
+    pip_index = commands.index(pip_command)
+    assert environments[pip_index]["MAX_JOBS"] == "4"
 
 
 def test_family_environment_hook_runs_after_requirements_install(

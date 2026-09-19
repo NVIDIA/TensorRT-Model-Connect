@@ -5,6 +5,7 @@ model: lance-3b-x2t-image
 candidate: {family: lance, checkpoint: bytedance-research/Lance, revision: 7395315758865e6f56ab87ad06a88c7ac172f056, task: vision_language_generation, precision: bf16, bundle: lance-3b-x2t-image.bundle, build: {max_sequence_length: 384}}
 reference_environment:
   requirements: ../../requirements.txt
+  build_isolation: false
   paths: {lance_repo: trtmc-reference/Lance}
 accuracy:
   - name: generated-text-parity

@@ -241,12 +241,18 @@ def reference_python(case: QualificationCase, context: RuntimeContext) -> Path:
     if not case.reference_build_isolation:
         install_command.append("--no-build-isolation")
     install_command.extend(("-r", str(requirements)))
+    install_environment = dict(os.environ)
+    # Source distributions commonly delegate extension builds to Ninja.  Keep one
+    # family environment from exhausting a shared validation host while allowing
+    # operators to select a different limit explicitly.
+    install_environment.setdefault("MAX_JOBS", "4")
     installed = run_command(
         install_command,
         setup_root,
         "pip",
         timeout=1800,
         verbose=context.verbose,
+        env=install_environment,
     )
     if installed.returncode != 0:
         raise QualificationError(f"cannot install reference requirements; see {setup_root}")
