@@ -104,6 +104,70 @@ def metric_geometry_passes(
     return True
 
 
+def robot_action_metrics(
+    candidate: Mapping[str, Any], reference: Mapping[str, Any]
+) -> dict[str, float]:
+    """Compare every value in two robot action chunks."""
+    actual = _robot_actions(candidate, "candidate")
+    expected = _robot_actions(reference, "reference")
+    if len(actual) != len(expected):
+        raise ValueError("candidate and reference action chunks differ in size")
+    deltas = [float(left) - float(right) for left, right in zip(actual, expected, strict=True)]
+    metrics = {
+        "action_max_abs_error": max(abs(value) for value in deltas),
+        "action_mean_abs_error": math.fsum(abs(value) for value in deltas) / len(deltas),
+        "action_rmse": math.sqrt(math.fsum(value * value for value in deltas) / len(deltas)),
+    }
+    if not all(math.isfinite(value) for value in metrics.values()):
+        raise ValueError("robot action comparison produced non-finite metrics")
+    return metrics
+
+
+def robot_action_passes(
+    metrics: Mapping[str, float], thresholds: Mapping[str, Any]
+) -> bool:
+    """Apply the public robot-action threshold vocabulary."""
+    required = {
+        "action_max_abs_error",
+        "action_mean_abs_error",
+        "action_rmse",
+    }
+    if set(metrics) != required or not required.issubset(thresholds):
+        raise ValueError("robot action thresholds are incomplete")
+    for name in required:
+        threshold = thresholds[name]
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+            raise ValueError(f"robot action threshold {name} must be numeric")
+        if not math.isfinite(float(threshold)) or float(threshold) < 0.0:
+            raise ValueError(f"robot action threshold {name} must be finite and non-negative")
+        if metrics[name] > float(threshold):
+            return False
+    return True
+
+
+def _robot_actions(summary: Mapping[str, Any], label: str) -> list[float]:
+    steps = _integer(summary.get("action_steps"), f"{label} action_steps", minimum=1)
+    dimension = _integer(summary.get("action_dim"), f"{label} action_dim", minimum=1)
+    count = _integer(summary.get("action_values"), f"{label} action_values", minimum=1)
+    values = summary.get("actions")
+    if count != steps * dimension:
+        raise ValueError(f"{label} action shape does not match its value count")
+    if not isinstance(values, list) or len(values) != count:
+        raise ValueError(f"{label} action values are missing or incomplete")
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        for value in values
+    ):
+        raise ValueError(f"{label} action values must be finite numbers")
+    if label == "candidate" and summary.get("within_training_bounds") is not True:
+        raise ValueError("candidate action values are outside the training bounds")
+    if label == "reference" and summary.get("finite") is not True:
+        raise ValueError("reference action values are not declared finite")
+    return [float(value) for value in values]
+
+
 def _metric_geometry(summary: Mapping[str, Any], label: str, np):
     height = _integer(summary.get("height"), f"{label} height", minimum=1)
     width = _integer(summary.get("width"), f"{label} width", minimum=1)

@@ -15,7 +15,12 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from trtmc_benchmark.artifact_metrics import metric_geometry_metrics, metric_geometry_passes
+from trtmc_benchmark.artifact_metrics import (
+    metric_geometry_metrics,
+    metric_geometry_passes,
+    robot_action_metrics,
+    robot_action_passes,
+)
 
 from .catalog import QualificationCase, QualificationError, load_benchmark
 from .datasets import Dataset, resolve_dataset
@@ -70,10 +75,105 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _stereo_disparity_parity(case, context, dataset, output)
     elif metric_name == "metric_geometry_parity":
         result = _metric_geometry_parity(case, context, dataset, output)
+    elif metric_name == "robot_action_parity":
+        result = _robot_action_parity(case, context, dataset, output)
     else:
         raise QualificationError(f"unsupported Accuracy metric {metric_name!r}")
     write_result(output, result)
     return result
+
+
+def _robot_control_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(dataset.path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise QualificationError("robot-control dataset is not valid JSON") from error
+    requests = payload.get("requests") if isinstance(payload, Mapping) else None
+    if not isinstance(requests, list) or len(requests) < sample_limit:
+        raise QualificationError(f"robot-control dataset requires at least {sample_limit} requests")
+    root = dataset.path.parent.resolve()
+    selected = []
+    for index, request in enumerate(requests[:sample_limit]):
+        if not isinstance(request, Mapping):
+            raise QualificationError(f"robot-control request {index} must be an object")
+        sample = {"sample_id": str(request.get("id") or f"sample-{index}")}
+        for source, target in (("image", "image_path"), ("state", "state_path")):
+            relative = request.get(source)
+            if not isinstance(relative, str) or not relative:
+                raise QualificationError(f"robot-control request {index} has no {source}")
+            path = (root / relative).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                raise QualificationError(
+                    f"robot-control request {index} {source} is unavailable: {path}"
+                )
+            sample[target] = str(path)
+        selected.append(sample)
+    return selected
+
+
+def _robot_action_parity(
+    case: QualificationCase,
+    context: RuntimeContext,
+    dataset: Dataset,
+    output: Path,
+) -> dict[str, Any]:
+    configured = case.values
+    sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
+    selected = _robot_control_samples(dataset, sample_limit)
+    expected = _family_image_reference(case, context, output, selected)
+    actual, bundle = _candidate_outputs(
+        case,
+        context,
+        output,
+        "control",
+        [
+            {
+                "sample_id": sample["sample_id"],
+                "request": {
+                    "image_path": sample["image_path"],
+                    "state_path": sample["state_path"],
+                },
+            }
+            for sample in selected
+        ],
+    )
+    gate = configured.get("gate", {})
+    if not isinstance(gate, Mapping):
+        raise QualificationError("robot-action gate must be an object")
+    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
+    if not 0.0 <= minimum_sample_rate <= 1.0:
+        raise QualificationError("robot-action min_sample_pass_rate must be in [0, 1]")
+    thresholds = {key: value for key, value in gate.items() if key != "min_sample_pass_rate"}
+    rows = []
+    for sample, candidate_sample, reference_sample in zip(
+        selected, actual, expected, strict=True
+    ):
+        try:
+            metrics = robot_action_metrics(candidate_sample, reference_sample)
+            passed = robot_action_passes(metrics, thresholds)
+        except ValueError as error:
+            raise QualificationError(
+                f"robot-action sample {sample['sample_id']} is invalid: {error}"
+            ) from error
+        rows.append({"sample_id": sample["sample_id"], "passed": passed, **metrics})
+    pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
+    return {
+        "schema_version": "trtmc.qualification-result/v1",
+        "case": case.id,
+        "kind": "accuracy",
+        "status": "passed" if pass_rate >= minimum_sample_rate else "failed",
+        "model": case.model,
+        "benchmark": case.benchmark,
+        "bundle": str(bundle),
+        "dataset": dataset.receipt(),
+        "metrics": {
+            "samples": len(rows),
+            "sample_pass_rate": pass_rate,
+            **{name: max(float(row[name]) for row in rows) for name in thresholds},
+        },
+        "gate": dict(gate),
+        "samples": rows,
+    }
 
 
 def _metric_geometry_parity(

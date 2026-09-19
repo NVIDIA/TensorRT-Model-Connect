@@ -43,6 +43,8 @@ from apps.benchmark.performance.baselines.hf_transformers import flatten_config 
 from trtmc_benchmark.artifact_metrics import (  # noqa: E402
     metric_geometry_metrics,
     metric_geometry_passes,
+    robot_action_metrics,
+    robot_action_passes,
 )
 from trtmc_benchmark.catalog import ManifestCatalog, resolve_case, selected_task_for_case  # noqa: E402
 from trtmc_benchmark.task_adapters import default_operation  # noqa: E402
@@ -94,6 +96,7 @@ OUTPUT_CONTRACTS = {
     "prompted-mask-parity",
     "reranking-order",
     "robot-action-shape",
+    "robot-action-parity",
     "segmentation-shape",
     "transcription-text",
     "vision-language-text",
@@ -1469,6 +1472,23 @@ def _output_contract(
             and right.get("finite") is True
         )
         return matched, "robot action output contract differs" if not matched else "", None
+    if contract == "robot-action-parity":
+        try:
+            metrics = robot_action_metrics(left, right)
+            passed = robot_action_passes(metrics, entry.spec["baseline"])
+        except ValueError as error:
+            return (
+                False,
+                f"robot action parity could not be evaluated: {error}",
+                {"contract": contract, "numerical_parity_checked": True},
+            )
+        evidence = {
+            "contract": contract,
+            "numerical_parity_checked": True,
+            **metrics,
+        }
+        reason = "robot action numerical parity is outside the contract" if not passed else ""
+        return passed, reason, evidence
     if contract == "disparity-parity":
         evidence = _disparity(entry, left, right)
         return bool(evidence["passed"]), str(evidence.get("reason", "")), evidence

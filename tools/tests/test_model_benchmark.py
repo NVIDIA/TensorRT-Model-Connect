@@ -420,6 +420,108 @@ def test_performance_resolves_profile_owned_relative_assets(tmp_path: Path) -> N
     assert resolved == {"image_path": str(image.resolve()), "batch_size": 1}
 
 
+def test_robot_action_accuracy_compares_complete_action_chunk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = tmp_path / "families/lerobot_act/tests/data"
+    data.mkdir(parents=True)
+    image = data / "image.png"
+    state = data / "state.f32"
+    image.write_bytes(b"fixture")
+    state.write_bytes(b"state")
+    dataset_path = data / "requests.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "requests": [
+                    {"id": "recorded", "image": image.name, "state": state.name}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = tmp_path / "families/lerobot_act/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    runner = profile.parent / "reference.py"
+    runner.write_text("# family reference\n", encoding="utf-8")
+    case = QualificationCase(
+        kind="accuracy",
+        model="act-example",
+        family="lerobot_act",
+        name="recorded-action-parity",
+        benchmark="robot_action_parity",
+        candidate={
+            "family": "lerobot_act",
+            "checkpoint": "lerobot/example",
+            "task": "robot_control",
+            "precision": "fp32",
+            "build": {},
+        },
+        values={
+            "samples": 1,
+            "reference": {"command": "reference.py", "precision": "fp32"},
+            "gate": {
+                "action_max_abs_error": 0.00005,
+                "action_mean_abs_error": 0.000005,
+                "action_rmse": 0.00001,
+                "min_sample_pass_rate": 1.0,
+            },
+        },
+        source=profile,
+        reference_requirements=None,
+    )
+    dataset = Dataset("lerobot-act-recorded-observation", dataset_path, "family", "digest")
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    reference = {
+        "action_steps": 2,
+        "action_dim": 2,
+        "action_values": 4,
+        "actions": [0.1, -0.2, 0.3, -0.4],
+        "finite": True,
+    }
+    candidate = {
+        **reference,
+        "within_training_bounds": True,
+    }
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {"metric": {"name": "robot_action_parity"}},
+    )
+    monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_family_image_reference",
+        lambda *_args: [reference],
+    )
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "_candidate_outputs",
+        lambda *_args: ([candidate], tmp_path / "act.bundle"),
+    )
+
+    result = qualification_accuracy.run_accuracy(case, context)
+
+    assert result["status"] == "passed"
+    assert result["metrics"]["sample_pass_rate"] == 1.0
+    assert result["metrics"]["action_max_abs_error"] == pytest.approx(0.0)
+
+
 def test_object_detection_accuracy_matches_classes_boxes_and_scores(
     tmp_path: Path, monkeypatch
 ) -> None:
