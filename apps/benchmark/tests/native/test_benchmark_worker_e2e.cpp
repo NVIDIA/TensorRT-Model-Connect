@@ -159,6 +159,27 @@ int main(int argc, char** argv) {
             std::filesystem::remove(vector_bundle);
         }
 
+        const auto image_bundle = runtime_root / "benchmark_fake_image_generation.bundle";
+        write_bundle(image_bundle, "image_generation");
+        Json image_request = request;
+        image_request["case_name"] = "fake-image-generation";
+        image_request["bundle"] = image_bundle.string();
+        image_request["operation"] = "generate_image";
+        image_request["request"] = {{"prompt", "Hello"}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << image_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0,
+              "single prompt uses the scalar interface when a task also supports batching");
+        std::ifstream image_output_file(output_path);
+        Json image_result;
+        image_output_file >> image_result;
+        check(image_result.at("status") == "completed" &&
+                  image_result.at("output_summary").at("generated_images") == 1,
+              "single image generation returns one result");
+        std::filesystem::remove(image_bundle);
+
         const auto legacy_image = runtime_root / "benchmark_legacy_segment.ppm";
         {
             std::ofstream image(legacy_image, std::ios::binary);
