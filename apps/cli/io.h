@@ -27,7 +27,9 @@ struct LoadedAudio {
     std::int32_t channels{0};
 };
 
+// Audio input remains mono: multichannel files are averaged across channels.
 AudioResult read_wav(const std::string& path);
+// Preserve AudioResult's interleaved channels in a float32 WAV file.
 void write_wav(const AudioResult& audio, const std::string& path);
 LoadedAudio read_wav_interleaved(const std::string& path);
 void write_wav_interleaved(Span<const float> samples, std::int32_t sample_rate,

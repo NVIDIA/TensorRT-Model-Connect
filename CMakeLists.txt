@@ -530,6 +530,16 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME family_cli COMMAND test_family_cli $<TARGET_FILE:trtmc_test_cli_fixture>)
   set_tests_properties(family_cli PROPERTIES LABELS cpu)
 
+  add_executable(test_audio_io apps/cli/tests/test_audio_io.cpp apps/cli/io.cpp)
+  target_include_directories(test_audio_io PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${PROJECT_SOURCE_DIR}/apps
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_compile_options(test_audio_io PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME audio_io COMMAND test_audio_io)
+  set_tests_properties(audio_io PROPERTIES LABELS "cpu")
+
   set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
   add_library(trtmc_test_backend_fake SHARED core/runtime/tests/fake_backend.cpp)
   target_include_directories(trtmc_test_backend_fake PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
@@ -873,6 +883,16 @@ if(TRTMC_BUILD_TESTS)
     add_dependencies(test_voicechat_sdk_io trtmc_api_test_backend trtmc_api_test_speech_family)
     add_test(NAME voicechat_sdk_io COMMAND test_voicechat_sdk_io "${_trtmc_api_test_runtime_root}")
     set_tests_properties(voicechat_sdk_io PROPERTIES LABELS "cpu;e2e")
+
+    add_executable(test_audio_observation apps/benchmark/tests/native/test_audio_observation.cpp)
+    target_include_directories(test_audio_observation PRIVATE
+      ${PROJECT_SOURCE_DIR}/apps/benchmark/native
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_link_libraries(test_audio_observation PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_options(test_audio_observation PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME audio_observation COMMAND test_audio_observation)
+    set_tests_properties(audio_observation PROPERTIES LABELS "cpu")
 
     add_executable(test_dataset_answer apps/benchmark/tests/native/test_dataset_answer.cpp)
     target_include_directories(test_dataset_answer PRIVATE
