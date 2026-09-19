@@ -14,6 +14,7 @@
 #include "trtmc/language.hpp"
 #include "trtmc/numeric.hpp"
 #include "trtmc/perception.hpp"
+#include "trtmc/point_cloud.hpp"
 #include "trtmc/recurrent.hpp"
 #include "trtmc/speech.hpp"
 #include "trtmc/stream.hpp"

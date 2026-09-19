@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "argmax_agreement": 0.98,
+    "mean_abs_logits_error": 2,
+    "max_abs_logits_error": 20
+  }
+}

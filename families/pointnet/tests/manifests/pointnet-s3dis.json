@@ -1,0 +1,22 @@
+{
+  "name": "pointnet-s3dis",
+  "bundle": "pointnet-s3dis.bundle",
+  "family": "pointnet",
+  "task": "points_to_semantic_segmentation",
+  "precision": "fp16",
+  "external_files": [
+    {
+      "path": "pointnet.onnx"
+    }
+  ],
+  "testcases": [
+    {
+      "name": "pointnet-s3dis-parity-4096",
+      "premerge": true,
+      "test_points": "data/pointnet-s3dis-parity-input-4096.f32",
+      "num_points": 4096
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}
