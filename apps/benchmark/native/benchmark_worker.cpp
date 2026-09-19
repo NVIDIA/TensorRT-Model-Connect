@@ -503,9 +503,19 @@ Json run_segment_prompted(trtmc::ITask& task, const Json& request, const Timing&
         };
     }
     return measure(timing, invoke, [](const trtmc::PromptedSegmentationResult& result) {
-        return Json{{"segmented_images", 1},         {"generated_masks", result.num_masks},
-                    {"num_masks", result.num_masks}, {"height", result.height},
-                    {"width", result.width},         {"mask_pixels", result.masks.size()}};
+        if (result.boxes.size() % 4U != 0U)
+            throw std::runtime_error("prompted segmentation returned incomplete boxes");
+        Json boxes = Json::array();
+        for (std::size_t offset = 0; offset < result.boxes.size(); offset += 4U) {
+            boxes.push_back({result.boxes[offset], result.boxes[offset + 1U],
+                             result.boxes[offset + 2U], result.boxes[offset + 3U]});
+        }
+        return Json{
+            {"segmented_images", 1},         {"generated_masks", result.num_masks},
+            {"num_masks", result.num_masks}, {"height", result.height},
+            {"width", result.width},         {"mask_pixels", result.masks.size()},
+            {"masks", result.masks},         {"iou_scores", result.iou_scores},
+            {"boxes", std::move(boxes)},     {"box_coordinates", "original_image_pixels_xyxy"}};
     });
 }
 
@@ -527,10 +537,23 @@ Json run_detect(trtmc::ITask& task, const Json& request, const Timing& timing) {
     return measure(
         timing, [&]() { return interface.detect(image.pixels.data(), image.height, image.width); },
         [](const trtmc::ObjectDetectionResult& result) {
+            Json boxes = Json::array(), scores = Json::array(), classes = Json::array();
+            for (const auto& detection : result.boxes) {
+                boxes.insert(boxes.end(),
+                             {detection.x_min, detection.y_min, detection.x_max, detection.y_max});
+                scores.push_back(detection.score);
+                classes.push_back(detection.class_id);
+            }
             return Json{{"detected_images", 1},
                         {"detections", result.boxes.size()},
                         {"image_height", result.image_height},
-                        {"image_width", result.image_width}};
+                        {"image_width", result.image_width},
+                        {"boxes", std::move(boxes)},
+                        {"scores", std::move(scores)},
+                        {"class_ids", std::move(classes)},
+                        {"shape", {result.boxes.size(), 4}},
+                        {"coordinates", "xyxy"},
+                        {"units", "pixels"}};
         });
 }
 

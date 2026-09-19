@@ -64,13 +64,51 @@ class FakeSegmentation final : public trtmc::ISegmentation {
     }
 };
 
+class FakeObjectDetection final : public trtmc::IObjectDetection {
+  public:
+    trtmc::ObjectDetectionResult detect(const float*, std::int32_t height,
+                                        std::int32_t width) override {
+        trtmc::ObjectDetectionResult result;
+        result.boxes = {{-2.0F, 1.0F, 5.0F, 1.0F, 0.75F, 42}, {0.0F, 0.0F, 1.0F, 1.0F, 0.0F, 7}};
+        result.image_height = height;
+        result.image_width = width;
+        return result;
+    }
+};
+
+class FakePointPromptedSegmentation final : public trtmc::IPointPromptedSegmentation {
+  public:
+    trtmc::PromptedSegmentationResult segment_prompted(const float*, std::int32_t height,
+                                                       std::int32_t width, float, float,
+                                                       bool) override {
+        trtmc::PromptedSegmentationResult result;
+        result.masks = {1.0F, -1.0F, -2.0F, 2.0F};
+        result.iou_scores = {0.5F, 0.75F};
+        result.boxes = {0.0F, 0.0F, 1.0F, 1.0F, 1.0F, 0.0F, 2.0F, 1.0F};
+        result.num_masks = 2;
+        result.height = height;
+        result.width = width;
+        return result;
+    }
+};
+
+trtmc::ITask* create_fake_perception_task(const trtmc::FamilyContext& context) {
+    if (context.reader.info().task == trtmc::ISegmentation::kTask)
+        return new FakeSegmentation();
+    if (context.reader.info().task == trtmc::IObjectDetection::kTask)
+        return new FakeObjectDetection();
+    if (context.reader.info().task == trtmc::IPointPromptedSegmentation::kTask)
+        return new FakePointPromptedSegmentation();
+    return nullptr;
+}
+
 trtmc::ITask* create_fake_task(const trtmc::FamilyContext& context) {
+    if (auto* task = create_fake_perception_task(context))
+        return task;
     if (context.reader.info().task == trtmc::IEncoding::kTask)
         return new FakeEncoding();
     if (context.reader.info().task == trtmc::IEmbedding::kTask)
         return new FakeEmbedding();
-    if (context.reader.info().task == trtmc::ISegmentation::kTask)
-        return new FakeSegmentation();
     if (context.reader.info().task == trtmc::ITimeSeriesForecast::kTask)
         return new FakeForecast(context.backend, context.kv_cache_size_bytes);
     if (context.reader.info().task == trtmc::ITextGeneration::kTask) {

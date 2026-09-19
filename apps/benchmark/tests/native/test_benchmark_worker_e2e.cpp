@@ -183,6 +183,53 @@ int main(int argc, char** argv) {
         check(segment_result.at("output_summary").at("mask") == Json::array({7, 7}),
               "legacy segmentation retains labels for Accuracy comparison");
         std::filesystem::remove(segment_bundle);
+
+        const auto detection_bundle = runtime_root / "benchmark_fake_detection.bundle";
+        write_bundle(detection_bundle, "object_detection");
+        Json detection_request = request;
+        detection_request["case_name"] = "fake-detection";
+        detection_request["bundle"] = detection_bundle.string();
+        detection_request["operation"] = "detect";
+        detection_request["request"] = {{"image_path", legacy_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << detection_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "detection worker process completed");
+        std::ifstream detection_output_file(output_path);
+        Json detection_result;
+        detection_output_file >> detection_result;
+        const auto& detection = detection_result.at("output_summary");
+        check(detection.at("boxes") == Json::array({-2, 1, 5, 1, 0, 0, 1, 1}) &&
+                  detection.at("scores") == Json::array({0.75, 0.0}) &&
+                  detection.at("class_ids") == Json::array({42, 7}) &&
+                  detection.at("shape") == Json::array({2, 4}) &&
+                  detection.at("coordinates") == "xyxy" && detection.at("units") == "pixels",
+              "legacy detection retains boxes, scores and classes for Accuracy comparison");
+        std::filesystem::remove(detection_bundle);
+
+        const auto prompted_bundle = runtime_root / "benchmark_fake_prompted.bundle";
+        write_bundle(prompted_bundle, "prompted_segmentation");
+        Json prompted_request = request;
+        prompted_request["case_name"] = "fake-prompted-segmentation";
+        prompted_request["bundle"] = prompted_bundle.string();
+        prompted_request["operation"] = "segment_prompted";
+        prompted_request["request"] = {{"image_path", legacy_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << prompted_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "prompted segmentation worker process completed");
+        std::ifstream prompted_output_file(output_path);
+        Json prompted_result;
+        prompted_output_file >> prompted_result;
+        const auto& prompted = prompted_result.at("output_summary");
+        check(prompted.at("masks") == Json::array({1, -1, -2, 2}) &&
+                  prompted.at("iou_scores") == Json::array({0.5, 0.75}) &&
+                  prompted.at("boxes") == Json::array({{0, 0, 1, 1}, {1, 0, 2, 1}}) &&
+                  prompted.at("box_coordinates") == "original_image_pixels_xyxy",
+              "legacy prompted segmentation retains masks, scores and boxes for comparison");
+        std::filesystem::remove(prompted_bundle);
         std::filesystem::remove(legacy_image);
 
         Json sdk = request;
