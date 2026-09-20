@@ -8,9 +8,22 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 from . import test_e2e as e2e
 from .benchmark import prepare_environment
+
+
+def test_qualification_candidate_uses_the_prepared_family_model() -> None:
+    profile = yaml.safe_load(
+        (Path(__file__).parent / "benchmark/sana-wm-bidirectional.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    prepared_model = "trtmc-reference/SANA-model"
+    assert profile["candidate"]["model_directory"] == prepared_model
+    assert profile["reference_environment"]["paths"]["sana_model"] == prepared_model
 
 
 def test_official_source_dependencies_are_family_owned() -> None:
