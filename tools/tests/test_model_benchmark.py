@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tools import model_benchmark
 from apps.benchmark.performance.baselines import hf_transformers, task_reference
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
 from families.personaplex.tests.benchmark import prepare_environment as personaplex_environment
@@ -38,6 +39,29 @@ from tools.benchmark_qualification.runtime import (
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+
+
+def test_qualification_summary_is_written_as_report_json(tmp_path: Path) -> None:
+    summary = {
+        "schema_version": "trtmc.qualification-summary/v1",
+        "status": "passed",
+        "cases": [
+            {
+                "model": "example-model",
+                "kind": "accuracy",
+                "case": "example-model/accuracy/parity",
+                "status": "passed",
+            }
+        ],
+    }
+
+    model_benchmark._write_summary(tmp_path, summary)
+
+    assert json.loads((tmp_path / "report.json").read_text(encoding="utf-8")) == summary
+    assert not (tmp_path / "summary.json").exists()
+    html_report = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert 'href="report.json"' in html_report
+    assert "summary.json" not in html_report
 
 
 def test_family_configs_auto_discover_without_a_central_model_registry() -> None:

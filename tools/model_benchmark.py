@@ -126,13 +126,13 @@ def _run(cases: Sequence[QualificationCase], arguments: argparse.Namespace) -> i
         "cases": results,
     }
     _write_summary(context.artifacts, summary)
-    print(f"JSON: {context.artifacts / 'summary.json'}")
+    print(f"JSON: {context.artifacts / 'report.json'}")
     print(f"HTML: {context.artifacts / 'report.html'}")
     return 0 if summary["status"] == "passed" else 1
 
 
 def _write_summary(output: Path, summary: Mapping[str, Any]) -> None:
-    (output / "summary.json").write_text(
+    (output / "report.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     rows = []
@@ -148,7 +148,7 @@ def _write_summary(output: Path, summary: Mapping[str, Any]) -> None:
     document = """<!doctype html><meta charset=\"utf-8\"><title>TRTMC model benchmark</title>
 <h1>Internal model benchmark</h1><p>Status: <strong>{status}</strong></p>
 <table><thead><tr><th>Model</th><th>Kind</th><th>Case</th><th>Status</th></tr></thead>
-<tbody>{rows}</tbody></table><p><a href=\"summary.json\">summary.json</a></p>
+<tbody>{rows}</tbody></table><p><a href=\"report.json\">report.json</a></p>
 """.format(status=html.escape(str(summary["status"])), rows="".join(rows))
     (output / "report.html").write_text(document, encoding="utf-8")
 
