@@ -510,6 +510,10 @@ class Qwen38Model:
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
         trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        if quant_ctx is not None and getattr(quant_ctx, "disable_dual_gemm_fusion", False):
+            # Works around a TRT dual-GEMM fusion bug with plain scalar-scale
+            # FP8 (see quantization.py::calibrate_qwen3_8_fp8's docstring).
+            trt_config.build_route = "-peep:match_dual_gemm=off"
 
         # --- Inputs ---
         token_id = network.add_input("token_id", trt.int32, (1,))

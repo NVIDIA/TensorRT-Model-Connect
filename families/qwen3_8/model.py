@@ -95,8 +95,8 @@ def build(request, writer) -> None:
         raise NotImplementedError("qwen3_8 requires max_batch_size=1")
     if request.tensor_parallel_size != 1 or request.context_parallel_size != 1:
         raise NotImplementedError("qwen3_8 supports only single-device builds")
-    quantized = request.quantization == "nvfp4"
-    if request.quantization not in {None, "none", "nvfp4"}:
+    quantized = request.quantization in {"nvfp4", "fp8"}
+    if request.quantization not in {None, "none", "nvfp4", "fp8"}:
         raise NotImplementedError(
             f"qwen3_8 does not support quantization={request.quantization!r}")
 
@@ -130,12 +130,16 @@ def build(request, writer) -> None:
     if quantized:
         from . import graph_ops
         from .checkpoint_mapper import _open_safetensors
-        from .quantization import calibrate_qwen3_8_nvfp4
 
         # Share one set of safetensors readers between calibration and
         # load_weights() so the checkpoint's shard index is only built once.
         readers = _open_safetensors(model_dir)
-        quant_ctx = calibrate_qwen3_8_nvfp4(model_dir, config, graph_ops, readers=readers)
+        if request.quantization == "nvfp4":
+            from .quantization import calibrate_qwen3_8_nvfp4
+            quant_ctx = calibrate_qwen3_8_nvfp4(model_dir, config, graph_ops, readers=readers)
+        else:
+            from .quantization import calibrate_qwen3_8_fp8
+            quant_ctx = calibrate_qwen3_8_fp8(model_dir, config, graph_ops, readers=readers)
 
     weights = model.load_weights(
         str(model_dir), config, precision=precision,
