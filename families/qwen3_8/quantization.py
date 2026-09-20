@@ -3,7 +3,7 @@
 
 """Qwen3.8-owned NVFP4 + FP8 TensorRT Q/DQ graph context.
 
-RadixArk/Qwen3.8-27B-NVFP4 is a ModelOpt MIXED_PRECISION export that carries
+nvidia/Qwen3.8-27B-NVFP4 is a ModelOpt MIXED_PRECISION export that carries
 two quantization schemes side by side:
 
   NVFP4  MLP projections (gate/up/down) and lm_head: E2M1 values packed two
@@ -474,7 +474,7 @@ def calibrate_qwen3_8_nvfp4(
     if not scales:
         raise RuntimeError(
             "Qwen3.8 quantization calibration found no quantized tensors in "
-            "the checkpoint; is this a RadixArk/Qwen3.8-27B-NVFP4-style "
+            "the checkpoint; is this an nvidia/Qwen3.8-27B-NVFP4-style "
             "checkpoint?"
         )
 
