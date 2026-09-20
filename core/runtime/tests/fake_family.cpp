@@ -56,6 +56,14 @@ class FakeEmbedding final : public trtmc::IEmbedding {
     }
 };
 
+class FakeImageFeatures final : public trtmc::IImageFeatureExtractor {
+  public:
+    trtmc::ImageFeaturesResult extract_image_features(const float*, std::int32_t,
+                                                      std::int32_t) override {
+        return {{1.0F, 2.0F, 3.0F, 4.0F}, {1, 2, 2}, {0.25F, 0.75F}, {1, 2}};
+    }
+};
+
 class FakeImageGeneration final : public trtmc::IImageGeneration,
                                   public trtmc::IImageEditing,
                                   public trtmc::IImageBatchGeneration {
@@ -160,6 +168,8 @@ trtmc::ITask* create_fake_task(const trtmc::FamilyContext& context) {
         return new FakeEncoding();
     if (context.reader.info().task == trtmc::IEmbedding::kTask)
         return new FakeEmbedding();
+    if (context.reader.info().task == trtmc::IImageFeatureExtractor::kTask)
+        return new FakeImageFeatures();
     if (context.reader.info().task == trtmc::IImageGeneration::kTask)
         return new FakeImageGeneration();
     if (context.reader.info().task == trtmc::IAudioGeneration::kTask)

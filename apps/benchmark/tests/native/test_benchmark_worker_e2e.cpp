@@ -159,6 +159,35 @@ int main(int argc, char** argv) {
             std::filesystem::remove(vector_bundle);
         }
 
+        const auto feature_image = runtime_root / "benchmark_fake_features.ppm";
+        {
+            std::ofstream image(feature_image, std::ios::binary);
+            image << "P6\n1 1\n255\n";
+            image.write("ABC", 3);
+        }
+        const auto feature_bundle = runtime_root / "benchmark_fake_image_features.bundle";
+        write_bundle(feature_bundle, "image_features");
+        Json feature_request = request;
+        feature_request["case_name"] = "fake-image-features";
+        feature_request["bundle"] = feature_bundle.string();
+        feature_request["operation"] = "extract_features";
+        feature_request["request"] = {{"image_path", feature_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << feature_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "legacy image feature worker completed");
+        std::ifstream feature_output_file(output_path);
+        Json feature_result;
+        feature_output_file >> feature_result;
+        const auto& feature_summary = feature_result.at("output_summary");
+        check(feature_summary.at("pooler_output") == Json::array({0.25F, 0.75F}),
+              "legacy image feature output retains pooled values for Accuracy comparison");
+        check(feature_summary.at("pooler_output_shape") == Json::array({1, 2}),
+              "legacy image feature output retains pooled shape");
+        std::filesystem::remove(feature_bundle);
+        std::filesystem::remove(feature_image);
+
         const auto image_bundle = runtime_root / "benchmark_fake_image_generation.bundle";
         write_bundle(image_bundle, "image_generation");
         Json image_request = request;
