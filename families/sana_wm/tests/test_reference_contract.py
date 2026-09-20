@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import yaml
 
+from .. import native_plugin_builder
 from . import test_e2e as e2e
 from .benchmark import prepare_environment
 
@@ -24,6 +25,18 @@ def test_qualification_candidate_uses_the_prepared_family_model() -> None:
     prepared_model = "trtmc-reference/SANA-model"
     assert profile["candidate"]["model_directory"] == prepared_model
     assert profile["reference_environment"]["paths"]["sana_model"] == prepared_model
+
+
+def test_native_plugin_uses_configured_tensorrt_prefix(tmp_path: Path) -> None:
+    command = native_plugin_builder._configure_command(
+        tmp_path / "source",
+        tmp_path / "build",
+        "/torch/cmake",
+        {"TRT_INC_DIR": "/tensorrt/include", "TRT_LIB_DIR": "/tensorrt/lib"},
+    )
+
+    assert "-DSANA_WM_TRT_INCLUDE_DIR=/tensorrt/include" in command
+    assert "-DSANA_WM_TRT_LIBRARY=/tensorrt/lib/libnvinfer.so.11" in command
 
 
 def test_official_source_dependencies_are_family_owned() -> None:

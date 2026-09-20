@@ -6,14 +6,37 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 _PLUGIN_HANDLE: Any | None = None
 _PLUGIN_PATH: Path | None = None
+
+
+def _configure_command(
+    source_dir: Path,
+    build_dir: Path,
+    torch_prefix: str,
+    environment: Mapping[str, str],
+) -> list[str]:
+    command = [
+        "cmake",
+        "-S",
+        str(source_dir),
+        "-B",
+        str(build_dir),
+        "-DCMAKE_BUILD_TYPE=Release",
+        f"-DCMAKE_PREFIX_PATH={torch_prefix}",
+    ]
+    if include_dir := environment.get("TRT_INC_DIR"):
+        command.append(f"-DSANA_WM_TRT_INCLUDE_DIR={include_dir}")
+    if library_dir := environment.get("TRT_LIB_DIR"):
+        command.append(f"-DSANA_WM_TRT_LIBRARY={Path(library_dir) / 'libnvinfer.so.11'}")
+    return command
 
 
 def ensure_native_plugin(*, verbose: bool = False) -> Path:
@@ -23,15 +46,9 @@ def ensure_native_plugin(*, verbose: bool = False) -> Path:
     source_dir = Path(__file__).with_name("native_plugins")
     build_dir = Path(tempfile.mkdtemp(prefix="sana-wm-plugin-"))
     output = build_dir / "libtrtmc_sana_wm_native_plugin.so"
-    configure = [
-        "cmake",
-        "-S",
-        str(source_dir),
-        "-B",
-        str(build_dir),
-        "-DCMAKE_BUILD_TYPE=Release",
-        f"-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}",
-    ]
+    configure = _configure_command(
+        source_dir, build_dir, torch.utils.cmake_prefix_path, os.environ
+    )
     build = [
         "cmake",
         "--build",
