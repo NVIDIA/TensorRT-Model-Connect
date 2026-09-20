@@ -144,7 +144,7 @@ def test_official_reference_declares_its_real_import_dependencies() -> None:
         "dashscope",
         "diffusers>=0.31.0",
         "easydict",
-        "flash-attn",
+        "flash-attn==2.8.3",
         "imageio[ffmpeg]",
         "librosa",
         "opencv-python>=4.9.0.80",
