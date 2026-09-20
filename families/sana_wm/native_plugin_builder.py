@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import ctypes
-import os
+import importlib.util
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 
 _PLUGIN_HANDLE: Any | None = None
@@ -21,7 +21,7 @@ def _configure_command(
     source_dir: Path,
     build_dir: Path,
     torch_prefix: str,
-    environment: Mapping[str, str],
+    tensorrt_library: Path | None,
 ) -> list[str]:
     command = [
         "cmake",
@@ -32,11 +32,22 @@ def _configure_command(
         "-DCMAKE_BUILD_TYPE=Release",
         f"-DCMAKE_PREFIX_PATH={torch_prefix}",
     ]
-    if include_dir := environment.get("TRT_INC_DIR"):
-        command.append(f"-DSANA_WM_TRT_INCLUDE_DIR={include_dir}")
-    if library_dir := environment.get("TRT_LIB_DIR"):
-        command.append(f"-DSANA_WM_TRT_LIBRARY={Path(library_dir) / 'libnvinfer.so.11'}")
+    if tensorrt_library is not None:
+        command.append(f"-DSANA_WM_TRT_LIBRARY={tensorrt_library}")
     return command
+
+
+def _installed_tensorrt_library() -> Path | None:
+    """Return the TensorRT library shipped with the active Python installation."""
+
+    spec = importlib.util.find_spec("tensorrt_libs")
+    if spec is None:
+        return None
+    for location in spec.submodule_search_locations or ():
+        library = Path(location) / "libnvinfer.so.11"
+        if library.is_file():
+            return library
+    return None
 
 
 def ensure_native_plugin(*, verbose: bool = False) -> Path:
@@ -47,7 +58,10 @@ def ensure_native_plugin(*, verbose: bool = False) -> Path:
     build_dir = Path(tempfile.mkdtemp(prefix="sana-wm-plugin-"))
     output = build_dir / "libtrtmc_sana_wm_native_plugin.so"
     configure = _configure_command(
-        source_dir, build_dir, torch.utils.cmake_prefix_path, os.environ
+        source_dir,
+        build_dir,
+        torch.utils.cmake_prefix_path,
+        _installed_tensorrt_library(),
     )
     build = [
         "cmake",
@@ -57,7 +71,9 @@ def ensure_native_plugin(*, verbose: bool = False) -> Path:
         "trtmc_sana_wm_native_plugin",
         "-j2",
     ]
-    kwargs = {} if verbose else {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
+    kwargs = (
+        {} if verbose else {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
+    )
     try:
         subprocess.run(configure, check=True, **kwargs)
         subprocess.run(build, check=True, **kwargs)

@@ -17,9 +17,7 @@ from .benchmark import prepare_environment
 
 def test_qualification_candidate_uses_the_prepared_family_model() -> None:
     profile = yaml.safe_load(
-        (Path(__file__).parent / "benchmark/sana-wm-bidirectional.yaml").read_text(
-            encoding="utf-8"
-        )
+        (Path(__file__).parent / "benchmark/sana-wm-bidirectional.yaml").read_text(encoding="utf-8")
     )
 
     prepared_model = "trtmc-reference/SANA-model"
@@ -27,16 +25,34 @@ def test_qualification_candidate_uses_the_prepared_family_model() -> None:
     assert profile["reference_environment"]["paths"]["sana_model"] == prepared_model
 
 
-def test_native_plugin_uses_configured_tensorrt_prefix(tmp_path: Path) -> None:
+def test_native_plugin_uses_installed_tensorrt_library(tmp_path: Path) -> None:
+    tensorrt_library = tmp_path / "tensorrt/libnvinfer.so.11"
     command = native_plugin_builder._configure_command(
         tmp_path / "source",
         tmp_path / "build",
         "/torch/cmake",
-        {"TRT_INC_DIR": "/tensorrt/include", "TRT_LIB_DIR": "/tensorrt/lib"},
+        tensorrt_library,
     )
 
-    assert "-DSANA_WM_TRT_INCLUDE_DIR=/tensorrt/include" in command
-    assert "-DSANA_WM_TRT_LIBRARY=/tensorrt/lib/libnvinfer.so.11" in command
+    assert f"-DSANA_WM_TRT_LIBRARY={tensorrt_library}" in command
+
+
+def test_native_plugin_discovers_tensorrt_python_library(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "tensorrt_libs"
+    package.mkdir()
+    library = package / "libnvinfer.so.11"
+    library.touch()
+    spec = native_plugin_builder.importlib.util.spec_from_file_location(
+        "tensorrt_libs",
+        package / "__init__.py",
+        submodule_search_locations=[str(package)],
+    )
+    monkeypatch.setattr(native_plugin_builder.importlib.util, "find_spec", lambda _name: spec)
+
+    assert native_plugin_builder._installed_tensorrt_library() == library
 
 
 def test_official_source_dependencies_are_family_owned() -> None:
@@ -80,9 +96,7 @@ def test_qualification_snapshot_is_materialized_inside_family_environment(
     assert prepare_environment.MODEL_REVISION == "e96271d77398def8ebb9fc595e7c0056dc625ab7"
 
 
-def test_qualification_materializes_pinned_stage1_text_encoder(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_qualification_materializes_pinned_stage1_text_encoder(monkeypatch, tmp_path: Path) -> None:
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
     for name in ("config.json", "model.safetensors.index.json", "tokenizer.json"):
