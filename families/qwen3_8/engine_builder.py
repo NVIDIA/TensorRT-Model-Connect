@@ -481,11 +481,19 @@ class Qwen38Model:
         partial_rotary_factor: float = weights["_partial_rotary_factor"]
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "bf16":
+            # Constants are staged as FP16 bytes (TensorRT's Weights constructor
+            # does not accept ml_dtypes.bfloat16 arrays directly) and explicitly
+            # cast to BF16 in-graph by graph_ops._cast_back_to_trt_dtype, which
+            # every constant-building helper already calls to match its
+            # activation's runtime dtype -- mirroring families/qwen's own
+            # "storage np_dtype is fp16, runtime trt_dtype is bfloat16" pattern.
+            work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
         elif precision == "fp32":
             work_np_dtype, work_trt_dtype = np.float32, trt.float32
         else:
             raise ValueError(
-                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32 or fp16")
+                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32, fp16, or bf16")
         requested_fp32_layers = frozenset(
             int(layer) for layer in config.raw.get("_fp32_layers", ()))
         invalid_fp32_layers = sorted(
@@ -603,7 +611,7 @@ class Qwen38Model:
             prefix = f"layer.{layer_idx}"
             lt = layer_types[layer_idx]
             layer_is_fp32 = (
-                precision == "fp16" and layer_idx in requested_fp32_layers)
+                precision in ("fp16", "bf16") and layer_idx in requested_fp32_layers)
             layer_np_dtype = np.float32 if layer_is_fp32 else work_np_dtype
             layer_trt_dtype = trt.float32 if layer_is_fp32 else work_trt_dtype
 
@@ -897,6 +905,8 @@ def _add_deltanet_layer(
     conv_w = graph_ops.add_constant(
         network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"],
         dtype=dtype)
+    if conv_w.dtype != present_conv.dtype:
+        conv_w = network.add_cast(conv_w, present_conv.dtype).get_output(0)
     conv_prod = network.add_elementwise(
         present_conv, conv_w, trt.ElementWiseOperation.PROD)
     conv_sum = network.add_reduce(
@@ -950,6 +960,8 @@ def _add_deltanet_layer(
         tile_ones = graph_ops.add_constant(
             network, (1, heads_per_group, 1),
             np.ones((1, heads_per_group, 1), dtype=dtype), dtype=dtype)
+        if tile_ones.dtype != q_3d.get_output(0).dtype:
+            tile_ones = network.add_cast(tile_ones, q_3d.get_output(0).dtype).get_output(0)
         q_tiled = network.add_elementwise(
             q_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD)
         q_expanded_s = network.add_shuffle(q_tiled.get_output(0))

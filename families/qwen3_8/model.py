@@ -110,8 +110,8 @@ def build(request, writer) -> None:
     ):
         raise ValueError("checkpoint is not a Qwen3.8 model")
     precision = str(request.precision).lower()
-    if precision not in {"fp16", "fp32"}:
-        raise ValueError("qwen3_8 precision must be fp16 or fp32")
+    if precision not in {"fp16", "fp32", "bf16"}:
+        raise ValueError("qwen3_8 precision must be fp16, bf16, or fp32")
     max_sequence_length = _positive_int(
         request.max_sequence_length or min(config.max_position_embeddings, 256),
         "max_sequence_length",
