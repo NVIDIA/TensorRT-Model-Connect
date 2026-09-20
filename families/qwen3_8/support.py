@@ -10,8 +10,10 @@ _ALIASES = family_support(
     model_types=("qwen38", "qwen3.8", "qwen3_8"),
     tasks=("text_generation",),
     default_task="text_generation",
+    default_precision="bf16",
 )
-_SUPPORT = FamilySupport(tasks=("text_generation",), default_task="text_generation")
+_SUPPORT = FamilySupport(
+    tasks=("text_generation",), default_task="text_generation", default_precision="bf16")
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
