@@ -52,7 +52,8 @@ constant, since activations are only known at runtime.
 
 ``calibrate_qwen3_8_fp8`` below is a separate scheme for the *original*
 (unquantized) ``Qwen/Qwen3.8-27B`` BF16 checkpoint: it self-quantizes MLP
-gate/up/down to FP8 on the fly at build time (bit-exact-style scalar scale,
+(gate/up/down), attention (q/k/v/o), and DeltaNet (in_proj_qkv/in_proj_z/
+out_proj) to FP8 on the fly at build time (bit-exact-style scalar scale,
 same mechanism as ``_FP8Format`` above, just computed here instead of read
 from a checkpoint), using a small one-time-calibrated activation-scale file
 bundled with this family instead of a checkpoint-shipped ``input_scale``. See
@@ -432,14 +433,43 @@ def _quantize_fp8_weight(weight_fp32: np.ndarray) -> tuple[np.ndarray, float]:
     return packed, scale
 
 
+def _quantize_fp8_weight_split_q(
+    weight_fp32: np.ndarray, num_heads: int, head_dim: int,
+) -> tuple[_FP8Weight, _FP8Weight]:
+    """Quantize a raw BF16 q_proj weight ([2*attn_size, hidden]) to FP8 with a
+    single scalar scale shared by both halves, then split it into (w_q,
+    w_gate_attn) -- mirroring `_read_fp8_weight_split_q`'s per-head interleave
+    split of an already-quantized checkpoint tensor, just computing the FP8
+    bytes here instead of reading them.
+    """
+    attn_size = num_heads * head_dim
+    hidden = weight_fp32.shape[1]
+    packed, weight_scale = _quantize_fp8_weight(weight_fp32)
+    reshaped = packed.reshape(num_heads, 2 * head_dim, hidden)
+    q_part = np.ascontiguousarray(reshaped[:, :head_dim, :].reshape(attn_size, hidden))
+    gate_part = np.ascontiguousarray(reshaped[:, head_dim:, :].reshape(attn_size, hidden))
+    q_w = _FP8Weight(packed=q_part, weight_scale=weight_scale,
+                      out_features=attn_size, in_features=hidden)
+    gate_w = _FP8Weight(packed=gate_part, weight_scale=weight_scale,
+                         out_features=attn_size, in_features=hidden)
+    return q_w, gate_w
+
+
 def calibrate_qwen3_8_fp8(
     model_dir: Path, config, graph_ops, *, readers=None,
 ) -> Qwen38QuantContext:
     """Build the Q/DQ context for the real, original `Qwen/Qwen3.8-27B` BF16
-    checkpoint, self-quantizing its MLP gate/up/down projections to the same
+    checkpoint, self-quantizing MLP (gate/up/down), attention (q/k/v/o), and
+    DeltaNet (in_proj_qkv/in_proj_z/out_proj) projections to the same
     scalar-scale FP8 scheme already proven to fuse into a real Blackwell
     tensor-core GEMM (confirmed via RadixArk/Qwen3.8-27B-NVFP4's FP8
     attention/DeltaNet layers -- see this module's history/PR discussion).
+    This mirrors the official `Qwen/Qwen3.8-27B-FP8` checkpoint's own choice
+    of which layers to quantize (same `modules_to_not_convert` scope: norms,
+    lm_head, embeddings, and DeltaNet's decay/beta/gate parameters all stay
+    unquantized) -- only the numeric scheme differs, since that checkpoint's
+    2D block-scale format is the one that cannot reach a real fused GEMM in
+    this stack.
 
     Two published Qwen3.8-27B-FP8-style checkpoints were evaluated and found
     architecturally unable to reach a real fused FP8 tensor-core GEMM: the
@@ -472,6 +502,8 @@ def calibrate_qwen3_8_fp8(
     if readers is None:
         readers = _open_safetensors(Path(model_dir))
     num_layers = int(config.num_hidden_layers)
+    num_heads = int(config.num_attention_heads)
+    head_dim = int(config.head_dim)
 
     scales_path = Path(__file__).parent / _FP8_ACTIVATION_SCALES_FILENAME
     try:
@@ -484,23 +516,46 @@ def calibrate_qwen3_8_fp8(
         ) from error
 
     scales: dict[str, _LayerScales] = {}
+
+    def self_quantize_simple(layer: int, hf_stem: str, weight_stem: str) -> None:
+        name = f"layer.{layer}.{weight_stem}"
+        input_scale = activation_scales.get(name)
+        if input_scale is None:
+            return
+        hf_prefix = f"model.language_model.layers.{layer}.{hf_stem}"
+        weight_key = f"{hf_prefix}.weight"
+        if not _has_tensor(readers, weight_key):
+            return
+        raw = _to_numpy_fp32(_get_raw_tensor(readers, weight_key))
+        out_features, in_features = raw.shape
+        packed, weight_scale = _quantize_fp8_weight(raw)
+        weight = _FP8Weight(
+            packed=packed, weight_scale=weight_scale,
+            out_features=out_features, in_features=in_features)
+        scales[name] = _LayerScales(input_scale=float(input_scale), weight=weight)
+
     for layer in range(num_layers):
         for hf_stem, weight_stem in _FP8_SELF_QUANTIZED_MLP_PROJECTIONS:
-            name = f"layer.{layer}.{weight_stem}"
-            input_scale = activation_scales.get(name)
-            if input_scale is None:
-                continue
-            hf_prefix = f"model.language_model.layers.{layer}.{hf_stem}"
-            weight_key = f"{hf_prefix}.weight"
-            if not _has_tensor(readers, weight_key):
-                continue
-            raw = _to_numpy_fp32(_get_raw_tensor(readers, weight_key))
-            out_features, in_features = raw.shape
-            packed, weight_scale = _quantize_fp8_weight(raw)
-            weight = _FP8Weight(
-                packed=packed, weight_scale=weight_scale,
-                out_features=out_features, in_features=in_features)
-            scales[name] = _LayerScales(input_scale=float(input_scale), weight=weight)
+            self_quantize_simple(layer, hf_stem, weight_stem)
+
+        for hf_stem, weight_stem in _FP8_ATTENTION_SIMPLE_PROJECTIONS:
+            self_quantize_simple(layer, hf_stem, weight_stem)
+
+        for hf_stem, weight_stem in _FP8_DELTANET_PROJECTIONS:
+            self_quantize_simple(layer, hf_stem, weight_stem)
+
+        # --- attention q_proj: split into (w_q, w_gate_attn), sharing one
+        # calibrated input_scale and one self-quantized weight_scale ---
+        q_input_scale = activation_scales.get(f"layer.{layer}.w_q")
+        q_hf_prefix = f"model.language_model.layers.{layer}.self_attn.q_proj"
+        q_weight_key = f"{q_hf_prefix}.weight"
+        if q_input_scale is not None and _has_tensor(readers, q_weight_key):
+            raw = _to_numpy_fp32(_get_raw_tensor(readers, q_weight_key))
+            q_weight, gate_weight = _quantize_fp8_weight_split_q(raw, num_heads, head_dim)
+            scales[f"layer.{layer}.w_q"] = _LayerScales(
+                input_scale=float(q_input_scale), weight=q_weight)
+            scales[f"layer.{layer}.w_gate_attn"] = _LayerScales(
+                input_scale=float(q_input_scale), weight=gate_weight)
 
     if not scales:
         raise RuntimeError(
