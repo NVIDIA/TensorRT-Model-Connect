@@ -1,6 +1,7 @@
 {
   "name": "qwen3-vl-2b",
   "hf_id": "Qwen/Qwen3-VL-2B-Instruct",
+  "hf_revision": "89644892e4d85e24eaac8bacfd4f463576704203",
   "bundle": "qwen3-vl-2b.bundle",
   "family": "qwen_vl",
   "task": "vision_language_generation",
