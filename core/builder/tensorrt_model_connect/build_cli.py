@@ -7,12 +7,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Sequence
 
 from .build import BuildRequest, _load_family, build
-from .model_support import load_model_metadata, resolve_family, resolve_model
+from .model_support import (
+    AmbiguousFamilyError,
+    FamilyResolutionError,
+    load_model_metadata,
+    resolve_family,
+    resolve_model,
+)
 
 
 def _parser(prepare_family: object | None = None) -> argparse.ArgumentParser:
@@ -21,6 +28,9 @@ def _parser(prepare_family: object | None = None) -> argparse.ArgumentParser:
     build_parser = commands.add_parser("build", help="Build one TensorRT bundle")
     build_parser.add_argument("model", help="Hugging Face model ID or local snapshot")
     build_parser.add_argument("-o", "--output", type=Path, required=True)
+    build_parser.add_argument(
+        "--family", help="Select one compatible family instead of automatic resolution"
+    )
     build_parser.add_argument("--task", help="Override the family-owned default task")
     build_parser.add_argument("--revision", help="Hugging Face model revision")
     build_parser.add_argument("--precision", choices=("fp16", "bf16", "fp32"))
@@ -44,6 +54,9 @@ def _parser(prepare_family: object | None = None) -> argparse.ArgumentParser:
     prepare_parser.add_argument("--input", type=Path, required=True)
     prepare_parser.add_argument("-o", "--output", type=Path, required=True)
     prepare_parser.add_argument("--revision", help="Hugging Face model revision")
+    prepare_parser.add_argument(
+        "--family", help="Select one compatible family instead of automatic resolution"
+    )
     prepare_parser.add_argument("--cache-dir", type=Path)
     add_arguments = getattr(prepare_family, "add_prepare_structure_arguments", None)
     if callable(add_arguments):
@@ -63,7 +76,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         base_parser.error("MODEL must immediately follow prepare-structure")
     preliminary, _ = base_parser.parse_known_args(arguments)
     model_dir = _resolve_model(preliminary.model, preliminary.revision)
-    family, support = resolve_family(load_model_metadata(model_dir))
+    metadata = load_model_metadata(model_dir)
+    try:
+        family, support = (
+            resolve_family(metadata, preliminary.family)
+            if preliminary.family is not None
+            else resolve_family(metadata)
+        )
+    except FamilyResolutionError as error:
+        _print_family_error(error, arguments)
+        return 2
     family_module = _load_family(family) if preliminary.command == "prepare-structure" else None
     args = _parser(family_module).parse_args(arguments)
     if args.command == "prepare-structure":
@@ -115,3 +137,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _resolve_model(model: str, revision: str | None) -> Path:
     return resolve_model(model, revision)
+
+
+def _print_family_error(error: FamilyResolutionError, arguments: Sequence[str]) -> None:
+    print(f"trtmc: error: {error}", file=sys.stderr)
+    if not isinstance(error, AmbiguousFamilyError):
+        return
+    print("\nCompatible families:", file=sys.stderr)
+    for family, support in error.matches:
+        print(f"  {family} (Tasks: {', '.join(support.tasks)})", file=sys.stderr)
+    print("\nChoose one explicitly:", file=sys.stderr)
+    for family, _ in error.matches:
+        command = shlex.join(["trtmc", *arguments, "--family", family])
+        print(f"  {command}", file=sys.stderr)

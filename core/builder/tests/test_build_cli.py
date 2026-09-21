@@ -11,7 +11,11 @@ from types import SimpleNamespace
 import pytest
 
 from tensorrt_model_connect import build_cli
-from tensorrt_model_connect.model_support import FamilySupport
+from tensorrt_model_connect.model_support import (
+    AmbiguousFamilyError,
+    FamilyResolutionError,
+    FamilySupport,
+)
 
 
 def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) -> None:
@@ -99,6 +103,85 @@ def test_build_command_uses_the_family_owned_default_task(monkeypatch, tmp_path:
     assert captured[0].family == "example_owner"
     assert captured[0].task == "owner_default"
     assert captured[0].precision == "fp32"
+
+
+def test_build_command_uses_an_explicit_compatible_family(monkeypatch, tmp_path: Path) -> None:
+    captured_requests = []
+    captured_resolution = []
+    monkeypatch.setattr(build_cli, "build", captured_requests.append)
+
+    def resolve(metadata, requested_family=None):
+        captured_resolution.append(requested_family)
+        return requested_family, FamilySupport(("generation",), "generation")
+
+    monkeypatch.setattr(build_cli, "resolve_family", resolve)
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"shared"}', encoding="utf-8")
+
+    assert build_cli.main([
+        "build", str(model), "--output", str(tmp_path / "out.bundle"),
+        "--family", "specialized",
+    ]) == 0
+
+    assert captured_resolution == ["specialized"]
+    assert captured_requests[0].family == "specialized"
+
+
+def test_build_command_reports_ambiguous_family_choices(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"shared"}', encoding="utf-8")
+    matches = (
+        ("general", FamilySupport(("generation",), "generation")),
+        ("specialized", FamilySupport(("generation", "editing"), "editing")),
+    )
+    monkeypatch.setattr(
+        build_cli,
+        "resolve_family",
+        lambda metadata: (_ for _ in ()).throw(AmbiguousFamilyError(matches)),
+    )
+    monkeypatch.setattr(
+        build_cli, "build", lambda request: pytest.fail("ambiguous model reached build")
+    )
+    arguments = ["build", str(model), "--output", str(tmp_path / "out.bundle")]
+
+    assert build_cli.main(arguments) == 2
+
+    error = capsys.readouterr().err
+    assert "multiple families support this model: general, specialized" in error
+    assert "general (Tasks: generation)" in error
+    assert "specialized (Tasks: generation, editing)" in error
+    assert f"trtmc {' '.join(arguments)} --family general" in error
+    assert f"trtmc {' '.join(arguments)} --family specialized" in error
+
+
+def test_build_command_reports_an_invalid_explicit_family(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"shared"}', encoding="utf-8")
+
+    def reject(metadata, requested_family=None):
+        assert requested_family == "wrong"
+        raise FamilyResolutionError(
+            "family 'wrong' does not support this model; "
+            "omit --family to discover compatible families"
+        )
+
+    monkeypatch.setattr(build_cli, "resolve_family", reject)
+    monkeypatch.setattr(
+        build_cli, "build", lambda request: pytest.fail("invalid family reached build")
+    )
+
+    assert build_cli.main([
+        "build", str(model), "--output", str(tmp_path / "out.bundle"),
+        "--family", "wrong",
+    ]) == 2
+    assert "omit --family to discover compatible families" in capsys.readouterr().err
 
 
 def test_console_build_reuses_the_existing_builder(monkeypatch) -> None:

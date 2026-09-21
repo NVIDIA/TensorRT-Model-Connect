@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from tensorrt_model_connect.model_support import (
+    AmbiguousFamilyError,
+    FamilyResolutionError,
     FamilySupport,
     ModelMetadata,
     family_support,
@@ -111,8 +113,77 @@ def test_resolve_family_requires_exactly_one_match(monkeypatch) -> None:
         describe=lambda value: FamilySupport(("generation",), "generation")
     )
     modules["families.beta.support"] = modules["families.alpha.support"]
-    with pytest.raises(ValueError, match="multiple families.*alpha, beta"):
+    with pytest.raises(AmbiguousFamilyError, match="multiple families.*alpha, beta") as error:
         resolve_family(metadata)
+    assert error.value.matches == (
+        ("alpha", FamilySupport(("generation",), "generation")),
+        ("beta", FamilySupport(("generation",), "generation")),
+    )
+
+
+def test_s1_mini_reports_qwen_and_specialized_family() -> None:
+    metadata = ModelMetadata(
+        {
+            "model_type": "qwen3",
+            "architectures": ["Qwen3ForCausalLM"],
+        },
+        {},
+        files=("banner.jpg", "config.json", "model.safetensors"),
+    )
+
+    with pytest.raises(AmbiguousFamilyError) as error:
+        resolve_family(metadata)
+
+    assert tuple(family for family, _ in error.value.matches) == ("qwen", "s1_mini")
+
+
+def test_explicit_family_selects_only_that_compatible_owner(monkeypatch) -> None:
+    metadata = ModelMetadata({"model_type": "shared"}, {})
+    directories = [Path("alpha"), Path("beta")]
+    modules = {
+        "families.alpha.support": SimpleNamespace(
+            describe=lambda value: FamilySupport(("generation",), "generation")
+        ),
+        "families.beta.support": SimpleNamespace(
+            describe=lambda value: FamilySupport(("editing",), "editing")
+        ),
+    }
+    imported = []
+
+    support_module = importlib.import_module("tensorrt_model_connect.model_support")
+    monkeypatch.setattr(support_module, "_family_directories", lambda: directories)
+
+    def fake_import(name: str):
+        imported.append(name)
+        return modules[name]
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+
+    assert resolve_family(metadata, "beta") == (
+        "beta",
+        FamilySupport(("editing",), "editing"),
+    )
+    assert imported == ["families.beta.support"]
+
+
+def test_explicit_family_rejects_unknown_or_incompatible_selection(monkeypatch) -> None:
+    metadata = ModelMetadata({"model_type": "shared"}, {})
+    directories = [Path("alpha")]
+    support_module = importlib.import_module("tensorrt_model_connect.model_support")
+    monkeypatch.setattr(support_module, "_family_directories", lambda: directories)
+
+    with pytest.raises(FamilyResolutionError, match="unknown family 'missing'.*omit --family"):
+        resolve_family(metadata, "missing")
+
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name: SimpleNamespace(describe=lambda value: None),
+    )
+    with pytest.raises(
+        FamilyResolutionError, match="family 'alpha' does not support.*omit --family"
+    ):
+        resolve_family(metadata, "alpha")
 
 
 @pytest.mark.parametrize(

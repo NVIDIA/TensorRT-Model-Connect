@@ -71,6 +71,19 @@ class FamilySupport:
 DescribeSupport = Callable[[ModelMetadata], FamilySupport | None]
 
 
+class FamilyResolutionError(ValueError):
+    """A model family cannot be selected safely."""
+
+
+class AmbiguousFamilyError(FamilyResolutionError):
+    """More than one family declares support for the same model metadata."""
+
+    def __init__(self, matches: tuple[tuple[str, FamilySupport], ...]) -> None:
+        self.matches = matches
+        names = ", ".join(family for family, _ in matches)
+        super().__init__(f"multiple families support this model: {names}")
+
+
 def _key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
@@ -161,27 +174,53 @@ def _family_directories() -> list[Path]:
     )
 
 
-def resolve_family(metadata: ModelMetadata) -> tuple[str, FamilySupport]:
-    """Ask every lightweight family support module and require one owner."""
+def _describe_family(family: Path, metadata: ModelMetadata) -> FamilySupport | None:
+    module = importlib.import_module(f"families.{family.name}.support")
+    describe = getattr(module, "describe", None)
+    if not callable(describe):
+        raise RuntimeError(f"family {family.name!r} does not define support.describe()")
+    support = describe(metadata)
+    if support is not None and not isinstance(support, FamilySupport):
+        raise TypeError(f"family {family.name!r} support.describe() returned an invalid value")
+    return support
+
+
+def resolve_family(
+    metadata: ModelMetadata, requested_family: str | None = None
+) -> tuple[str, FamilySupport]:
+    """Select one compatible family automatically or by an explicit family ID."""
+
+    directories = _family_directories()
+    if requested_family is not None:
+        if _ID.fullmatch(requested_family) is None:
+            raise FamilyResolutionError(
+                "family must be a lowercase identifier containing only letters, digits, "
+                "and underscores"
+            )
+        selected = next(
+            (family for family in directories if family.name == requested_family), None
+        )
+        if selected is None:
+            raise FamilyResolutionError(
+                f"unknown family {requested_family!r}; omit --family to discover compatible families"
+            )
+        support = _describe_family(selected, metadata)
+        if support is None:
+            raise FamilyResolutionError(
+                f"family {requested_family!r} does not support this model; "
+                "omit --family to discover compatible families"
+            )
+        return requested_family, support
 
     matches: list[tuple[str, FamilySupport]] = []
-    for family in _family_directories():
-        module = importlib.import_module(f"families.{family.name}.support")
-        describe = getattr(module, "describe", None)
-        if not callable(describe):
-            raise RuntimeError(f"family {family.name!r} does not define support.describe()")
-        support = describe(metadata)
+    for family in directories:
+        support = _describe_family(family, metadata)
         if support is not None:
-            if not isinstance(support, FamilySupport):
-                raise TypeError(
-                    f"family {family.name!r} support.describe() returned an invalid value"
-                )
             matches.append((family.name, support))
 
     if not matches:
         identity = metadata.model_type or metadata.pipeline_class or "unknown"
-        raise ValueError(f"no family supports model {identity!r}")
+        raise FamilyResolutionError(f"no family supports model {identity!r}")
     if len(matches) > 1:
-        names = ", ".join(family for family, _ in matches)
-        raise ValueError(f"multiple families support this model: {names}")
+        raise AmbiguousFamilyError(tuple(matches))
     return matches[0]
