@@ -5,7 +5,6 @@
 
 #include "families/bark/runtime/sparse_multinomial_kernel.h"
 
-#include <algorithm>
 #include <cfloat>
 #include <curand_kernel.h>
 #include <limits>
@@ -14,9 +13,7 @@ namespace trtmc {
 
 namespace {
 
-constexpr int kDistributionBlockSize = 256;
 constexpr int kSamplerBlockSize = 128;
-constexpr uint64_t kGeneratorOffsetsPerCurandCall = 4;
 
 __device__ float torch_exponential_from_uniform(float value) {
     const float log_value = value >= 1.0F - FLT_EPSILON / 2.0F ? -FLT_EPSILON / 2.0F : logf(value);
@@ -84,34 +81,6 @@ __global__ void sparse_multinomial_exact_kernel(const int32_t* __restrict__ indi
 }
 
 } // namespace
-
-BarkTorchMultinomialExecutionPolicy bark_compute_torch_multinomial_execution_policy(int32_t numel) {
-    if (numel <= 0) {
-        return {};
-    }
-
-    int device = 0;
-    cudaGetDevice(&device);
-    cudaDeviceProp properties{};
-    cudaGetDeviceProperties(&properties, device);
-
-    const uint32_t blocks_per_sm =
-        static_cast<uint32_t>(properties.maxThreadsPerMultiProcessor / kDistributionBlockSize);
-    const uint32_t grid =
-        std::min(static_cast<uint32_t>(properties.multiProcessorCount) * blocks_per_sm,
-                 static_cast<uint32_t>((static_cast<uint64_t>(numel) + kDistributionBlockSize - 1) /
-                                       kDistributionBlockSize));
-    const uint64_t total_threads = static_cast<uint64_t>(grid) * kDistributionBlockSize;
-    const uint64_t counter_offset =
-        ((static_cast<uint64_t>(numel) - 1) / (total_threads * kGeneratorOffsetsPerCurandCall) +
-         1) *
-        kGeneratorOffsetsPerCurandCall;
-
-    BarkTorchMultinomialExecutionPolicy policy;
-    policy.total_threads = static_cast<int32_t>(total_threads);
-    policy.counter_offset = counter_offset;
-    return policy;
-}
 
 void bark_gpu_sparse_torch_multinomial_exact(const int32_t* d_indices, const float* d_probs,
                                              int32_t rows, int32_t vocab_size, int32_t keep,
