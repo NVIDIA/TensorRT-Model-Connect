@@ -28,6 +28,12 @@ def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
     cases = discover(REPOSITORY)
 
     assert {(case.model, case.kind) for case in cases} == {
+        ("bloom-560m", "accuracy"),
+        ("bloom-560m", "performance"),
+        ("gpt-neo-125m", "accuracy"),
+        ("gpt-neo-125m", "performance"),
+        ("pythia-70m", "accuracy"),
+        ("pythia-70m", "performance"),
         ("gpt2-125m", "accuracy"),
         ("gpt2-125m", "performance"),
         ("chronos-bolt-tiny-official", "accuracy"),
