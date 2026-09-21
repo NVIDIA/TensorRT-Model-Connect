@@ -24,15 +24,16 @@ from tools.benchmark_qualification.runtime import (
 REPOSITORY = Path(__file__).resolve().parents[2]
 
 
-def test_family_configs_auto_discover_both_kinds_without_l0() -> None:
+def test_family_configs_auto_discover_without_a_central_model_registry() -> None:
     cases = discover(REPOSITORY)
 
-    assert {(case.model, case.kind) for case in cases} == {
-        ("gpt2-125m", "accuracy"),
-        ("gpt2-125m", "performance"),
-        ("chronos-bolt-tiny-official", "accuracy"),
-        ("chronos-bolt-tiny-official", "performance"),
-    }
+    assert cases
+    assert len({case.id for case in cases}) == len(cases)
+    for case in cases:
+        relative = case.source.relative_to(REPOSITORY / "families")
+        assert relative.parts[0] == case.family
+        assert relative.parts[1:3] == ("tests", "benchmark")
+        assert case.kind in {"accuracy", "performance"}
     assert not any("l0" in case.model.lower() for case in cases)
 
 

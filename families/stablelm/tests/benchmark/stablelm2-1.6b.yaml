@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: stablelm2-1.6b
+candidate:
+  family: stablelm
+  checkpoint: stabilityai/stablelm-2-1_6b
+  revision: f499ead74c53749bd93cebc6ce8bc0d7bdf1eaef
+  task: text_generation
+  precision: fp16
+  bundle: stablelm2-1.6b.bundle
+  build:
+    max_sequence_length: 384
+    fp32_layers: [23]
+
+accuracy:
+  - name: mmlu-continuation
+    benchmark: mmlu_continuation
+    samples: 10
+    prompt_token_limit: 192
+    truncation_side: left
+    reference:
+      precision: fp16
+    request: &greedy-generation
+      max_new_tokens: 64
+      temperature: 0.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      repetition_penalty: 1.0
+      use_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    gate:
+      min_pass_rate: 0.9
+      allowed_failures: 1
+
+performance:
+  - name: generate-22
+    benchmark: text_generation_performance
+    operation: generate
+    request:
+      <<: *greedy-generation
+      prompt: |-
+        The following are multiple choice questions (with answers) about abstract algebra.
+
+        Find all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.
+        A. 0
+        B. 1
+        C. 2
+        D. 3
+        Answer: B
+
+        Statement 1 | If aH is an element of a factor group, then |aH| divides |a|. Statement 2 | If H and K are subgroups of G then HK is a subgroup of G.
+        A. True, True
+        B. False, False
+        C. True, False
+        D. False, True
+        Answer: B
+
+        Statement 1 | Every element of a group generates a cyclic subgroup of the group. Statement 2 | The symmetric group S_10 has 10 elements.
+        A. True, True
+        B. False, False
+        C. True, False
+        D. False, True
+        Answer: C
+
+        Statement 1| Every function from a finite set onto itself must be one to one. Statement 2 | Every subgroup of an abelian group is abelian.
+        A. True, True
+        B. False, False
+        C. True, False
+        D. False, True
+        Answer: A
+
+        Find the characteristic of the ring 2Z.
+        A. 0
+        B. 3
+        C. 12
+        D. 30
+        Answer: A
+
+        Let p = (1, 2, 5, 4)(2, 3) in S_5 . Find the index of <p> in S_5.
+        A. 8
+        B. 2
+        C. 24
+        D. 120
+        Answer:
+      max_new_tokens: 22
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: hf-transformers
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      precision: fp16
+      output_contract: exact-token-ids
