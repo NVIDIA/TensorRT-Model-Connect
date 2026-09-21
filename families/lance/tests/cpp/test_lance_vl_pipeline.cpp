@@ -49,11 +49,20 @@
 #include <vector>
 
 static int failures = 0;
+static bool skipped = false;
+
 static void check(bool c, const char* n) {
     if (!c) {
         std::cerr << "FAIL: " << n << '\n';
         ++failures;
     }
+}
+
+// A test body that bails out has verified nothing, so it is a skip and not a
+// pass. ctest reads 77 through this target's SKIP_RETURN_CODE.
+static void skip(const std::string& what) {
+    std::cerr << "SKIP: " << what << '\n';
+    skipped = true;
 }
 
 static trtmc::TrtLogger g_logger;
@@ -314,7 +323,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_vision_encoder() {
 static void test_vl_text_only() {
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP\n";
+        skip("vl_text_only");
         return;
     }
 
@@ -351,7 +360,7 @@ static void test_vl_text_only() {
 static void test_vl_text_only_max_tokens() {
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP\n";
+        skip("vl_text_only_max_tokens");
         return;
     }
 
@@ -384,7 +393,7 @@ static void test_vl_text_only_max_tokens() {
 static void test_vl_validates_decoder() {
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP vl_validates_decoder\n";
+        skip("vl_validates_decoder");
         return;
     }
 
@@ -412,7 +421,7 @@ static void test_vl_validates_decoder() {
 static void test_vl_validates_cache() {
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP vl_validates_cache\n";
+        skip("vl_validates_cache");
         return;
     }
 
@@ -444,7 +453,7 @@ static void test_vl_config_sync() {
     // Constructor should sync: config_.image_token_id = 1, config_.vision_output_dim = 64
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP vl_config_sync\n";
+        skip("vl_config_sync");
         return;
     }
 
@@ -482,7 +491,7 @@ static void test_vl_zero_max_tokens() {
     // generate_ids with max_new_tokens=0 returns input_ids unchanged (early exit)
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP vl_zero_max_tokens\n";
+        skip("vl_zero_max_tokens");
         return;
     }
 
@@ -519,7 +528,7 @@ static void test_vl_no_tokenizer_throws() {
     // and image generate(string, pixels, h, w, cfg) throws (line 109)
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP vl_no_tokenizer\n";
+        skip("vl_no_tokenizer");
         return;
     }
 
@@ -568,7 +577,7 @@ static void test_vl_generate_with_image_no_encoder() {
     // but no vision encoder -> falls through to text-only generate
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP vl_image_no_encoder\n";
+        skip("vl_image_no_encoder");
         return;
     }
 
@@ -611,7 +620,7 @@ static void test_vl_generate_with_vision_encoder() {
     auto dec_engine = build_mock_decoder();
     auto vis_engine = build_mock_vision_encoder();
     if (!dec_engine || !vis_engine) {
-        std::cerr << "SKIP vl_vision_encoder\n";
+        skip("vl_vision_encoder");
         return;
     }
 
@@ -657,7 +666,7 @@ static void test_vl_generate_with_vision_encoder() {
         check(!result.token_ids.empty(), "vl_vision_encoder: result not empty");
     } catch (const std::runtime_error& e) {
         // Preprocessing might fail in unusual environments; skip gracefully
-        std::cerr << "SKIP vl_vision_encoder (preprocessing error): " << e.what() << '\n';
+        skip(std::string("vl_vision_encoder (preprocessing error): ") + e.what());
     }
 
     cudaStreamDestroy(stream);
@@ -729,7 +738,7 @@ static void test_vl_generate_with_embed_decoder() {
     auto dec_engine = build_mock_decoder_with_embed();
     auto vis_engine = build_mock_vision_encoder();
     if (!dec_engine || !vis_engine) {
-        std::cerr << "SKIP embed_decoder\n";
+        skip("embed_decoder");
         return;
     }
 
@@ -771,7 +780,7 @@ static void test_vl_generate_with_embed_decoder() {
         auto result = pipeline.generate("test", pixels, 2, 2, gen_cfg);
         check(!result.token_ids.empty(), "embed_decoder: non-empty result");
     } catch (const std::runtime_error& e) {
-        std::cerr << "SKIP embed_decoder (error): " << e.what() << '\n';
+        skip(std::string("embed_decoder (error): ") + e.what());
     }
 
     cudaStreamDestroy(stream);
@@ -896,7 +905,7 @@ static void test_vl_generate_with_tokenizer() {
     // Covers the string-based generate(const string&, cfg) method
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP vl_generate_tokenizer\n";
+        skip("vl_generate_tokenizer");
         return;
     }
 
@@ -943,7 +952,9 @@ int main() {
     test_vl_sequence_prefill_uses_one_text_launch();
     test_vl_sequence_prefill_uses_full_attention_for_vision_block();
     test_vl_generate_with_tokenizer();
-    if (failures > 0)
+    if (failures > 0) {
         std::cerr << failures << " FAILED\n";
-    return failures;
+        return failures;
+    }
+    return skipped ? 77 : 0;
 }
