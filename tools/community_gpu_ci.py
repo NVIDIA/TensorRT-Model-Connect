@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
 from collections import Counter
 from dataclasses import dataclass
@@ -38,6 +39,29 @@ class FamilyPlan:
     family: str
     testcases: tuple[str, ...]
     checkpoints: tuple[tuple[str, str | None], ...]
+
+
+def native_cli_library(declaration: Path) -> str | None:
+    """Return the adapter required by one owner's native CLI commands."""
+    try:
+        commands = json.loads(declaration.read_text(encoding="utf-8"))["commands"]
+        native = any(command["executor"] == "native" for command in commands)
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise CommunityGpuError(f"invalid CLI declaration {declaration}: {error}") from error
+    return f"libtrtmc_cli_{declaration.parent.name}.so" if native else None
+
+
+def _checkpoint(value: object, label: str) -> tuple[str, str | None]:
+    """Validate one manifest-owned Hugging Face checkpoint reference."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    repo_id = value.get("repo_id")
+    revision = value.get("revision")
+    if not isinstance(repo_id, str) or not repo_id:
+        raise ValueError(f"{label}.repo_id must be a non-empty string")
+    if revision is not None and (not isinstance(revision, str) or not revision):
+        raise ValueError(f"{label}.revision must be a non-empty string when present")
+    return repo_id, revision
 
 
 def _family_list(raw: str, label: str) -> tuple[str, ...]:
@@ -108,14 +132,22 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
                     raise ValueError("every testcase requires a non-empty string name")
                 if case.get("premerge") is True:
                     selected_cases.append(name)
-            if selected_cases and "hf_id" in manifest:
-                repo_id = manifest["hf_id"]
-                revision = manifest.get("hf_revision")
-                if not isinstance(repo_id, str) or not repo_id:
-                    raise ValueError("hf_id must be a non-empty string")
-                if revision is not None and (not isinstance(revision, str) or not revision):
-                    raise ValueError("hf_revision must be a non-empty string when present")
-                checkpoints.add((repo_id, revision))
+            if selected_cases:
+                if "hf_id" in manifest:
+                    checkpoints.add(
+                        _checkpoint(
+                            {
+                                "repo_id": manifest["hf_id"],
+                                "revision": manifest.get("hf_revision"),
+                            },
+                            "checkpoint",
+                        )
+                    )
+                dependencies = manifest.get("hf_dependencies", [])
+                if not isinstance(dependencies, list):
+                    raise ValueError("hf_dependencies must be a list")
+                for index, dependency in enumerate(dependencies):
+                    checkpoints.add(_checkpoint(dependency, f"hf_dependencies[{index}]"))
             cases.extend(selected_cases)
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise CommunityGpuError(f"invalid GPU manifest {path}: {error}") from error
@@ -138,13 +170,17 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
 
 def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
     """Resolve and cache each selected Hugging Face revision before offline E2E."""
+    checkpoints = sorted(
+        {checkpoint for plan in plans for checkpoint in plan.checkpoints},
+        key=lambda item: (item[0], item[1] or ""),
+    )
+    if not checkpoints:
+        return
+
     from huggingface_hub import HfApi, snapshot_download
 
     api = HfApi()
-    for repo_id, requested_revision in sorted(
-        {checkpoint for plan in plans for checkpoint in plan.checkpoints},
-        key=lambda item: (item[0], item[1] or ""),
-    ):
+    for repo_id, requested_revision in checkpoints:
         resolved = api.model_info(repo_id, revision=requested_revision).sha
         if not isinstance(resolved, str) or not re.fullmatch(r"[0-9a-f]{40}", resolved):
             raise CommunityGpuError(
@@ -162,8 +198,6 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
                 f"checkpoint revision changed while staging {repo_id}: "
                 f"resolved={resolved}, downloaded={snapshot.name}"
             )
-        if not (snapshot / "config.json").is_file():
-            raise CommunityGpuError(f"staged checkpoint has no config.json: {repo_id}@{resolved}")
         print(f"Staged checkpoint {repo_id}@{resolved}")
 
 
@@ -187,7 +221,7 @@ def _install_family_requirements(context: CiContext, plans: tuple[FamilyPlan, ..
             )
 
 
-def _runtime_root(build: Path, plan: FamilyPlan) -> Path:
+def _runtime_root(build: Path, plan: FamilyPlan, repository: Path | None = None) -> Path:
     """Create one family-local runtime tree expected by E2ERunner."""
     runtime = build.parent / f"trtmc-community-runtime-{plan.family}/tensorrt_model_connect/bin"
     runtime.mkdir(parents=True)
@@ -208,6 +242,28 @@ def _runtime_root(build: Path, plan: FamilyPlan) -> Path:
     byok = build / "libtrtmc_byok_tvm_ffi.so"
     if byok.is_file():
         (runtime / byok.name).symlink_to(byok.resolve())
+
+    declaration = build / "families" / plan.family / "cli.json"
+    source_declaration = (
+        repository / "families" / plan.family / "cli.json" if repository is not None else None
+    )
+    if (
+        source_declaration is not None
+        and source_declaration.is_file()
+        and not declaration.is_file()
+    ):
+        raise CommunityGpuError(
+            f"native Community GPU build has no CLI declaration for {plan.family}"
+        )
+    if declaration.is_file():
+        destination = runtime / "families" / plan.family / "cli.json"
+        destination.parent.mkdir(parents=True)
+        destination.symlink_to(declaration.resolve())
+        if library := native_cli_library(declaration):
+            adapter = build / library
+            if not adapter.is_file():
+                raise CommunityGpuError(f"native Community GPU build is missing {adapter}")
+            (runtime / library).symlink_to(adapter.resolve())
 
     site_packages = runtime.parent.parent
     for package_name in ("tensorrt_libs", "torch", "tvm_ffi"):
@@ -234,6 +290,10 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
     print(f"Running Community GPU E2E: {family} ({', '.join(plan.testcases)})", flush=True)
     # Install before configuring native targets so they use this family's ABI.
     _install_family_requirements(context, (plan,))
+    targets = [f"trtmc_model_{plan.family}"]
+    declaration = repository / "families" / plan.family / "cli.json"
+    if declaration.is_file() and native_cli_library(declaration) is not None:
+        targets.append(f"trtmc_cli_{plan.family}")
     context.run(
         [
             sys.executable,
@@ -290,12 +350,13 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
             "--parallel",
             "8",
             "--target",
-            f"trtmc_model_{plan.family}",
+            *targets,
         ],
         limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
     )
-    runtime_root = _runtime_root(build, plan)
-    _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
+    runtime_root = _runtime_root(build, plan, repository)
+    if env.get("TRTMC_CHECKPOINTS_PRESTAGED") != "1":
+        _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
     runtime_env = {
         **checkpoint_env,
         "CMAKE_CUDA_ARCHITECTURES": build_env["CMAKE_CUDA_ARCHITECTURES"],
@@ -343,58 +404,92 @@ def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
     failures = []
     for family in selected:
         name = f"trtmc-community-{run_id}-{family}"
-        command = [
-            "docker",
-            "run",
-            "--rm",
-            "--name",
-            name,
-            "--gpus",
-            "all",
-            "--shm-size",
-            "16g",
-            "--volume",
-            f"{repository}:/src:ro",
-            "--volume",
-            f"{runner}:/opt/community_gpu_ci.py:ro",
-            "--workdir",
-            "/src",
-            "--env",
-            "PYTHONPATH=/src",
-            "--env",
-            "PYTHONDONTWRITEBYTECODE=1",
-            "--env",
-            "PYTHONUNBUFFERED=1",
-            "--env",
-            f"CMAKE_CUDA_ARCHITECTURES={env.get('CMAKE_CUDA_ARCHITECTURES', '89')}",
-            image_id,
-            "python3.12",
-            "/opt/community_gpu_ci.py",
-            "--family",
-            family,
-        ]
-        print(f"Starting isolated Community GPU container: {family}", flush=True)
-        try:
-            result = subprocess.run(command, check=False)
-            if result.returncode:
-                failures.append(f"{family}: container exited {result.returncode}")
-            print(
-                f"Community GPU container finished: {family} (exit {result.returncode})", flush=True
-            )
-        finally:
-            # Also remove containers left by an interrupted Docker client.
-            cleanup = subprocess.run(
-                ["docker", "rm", "--force", name],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            # --rm normally removed it already. Other errors may leave a live
-            # workload behind, so do not admit the next family in that case.
-            if cleanup.returncode and f"No such container: {name}" not in cleanup.stderr:
-                raise CommunityGpuError(
-                    f"Cannot remove Community GPU container {name}: {cleanup.stderr.strip()}"
+        with tempfile.TemporaryDirectory(prefix=f"{name}-") as cache:
+            stage_command = [
+                sys.executable,
+                str(runner),
+                "--stage-family",
+                family,
+                "--repository",
+                str(repository),
+                "--cache-dir",
+                str(Path(cache) / "hub"),
+            ]
+            stage_env = {
+                key: env[key]
+                for key in (
+                    "HF_ENDPOINT",
+                    "HTTP_PROXY",
+                    "HTTPS_PROXY",
+                    "NO_PROXY",
+                    "REQUESTS_CA_BUNDLE",
+                    "SSL_CERT_FILE",
                 )
+                if env.get(key)
+            }
+            print(f"Staging checkpoints on the trusted host for: {family}", flush=True)
+            staged = subprocess.run(stage_command, check=False, env=stage_env)
+            if staged.returncode:
+                failures.append(f"{family}: checkpoint staging exited {staged.returncode}")
+                continue
+
+            command = [
+                "docker",
+                "run",
+                "--rm",
+                "--name",
+                name,
+                "--gpus",
+                "all",
+                "--shm-size",
+                "16g",
+                "--volume",
+                f"{repository}:/src:ro",
+                "--volume",
+                f"{runner}:/opt/community_gpu_ci.py:ro",
+                "--volume",
+                f"{cache}:/tmp/trtmc-community-huggingface",
+                "--workdir",
+                "/src",
+                "--env",
+                "PYTHONPATH=/src",
+                "--env",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "--env",
+                "PYTHONUNBUFFERED=1",
+                "--env",
+                "TRTMC_CHECKPOINTS_PRESTAGED=1",
+                "--env",
+                f"CMAKE_CUDA_ARCHITECTURES={env.get('CMAKE_CUDA_ARCHITECTURES', '89')}",
+                image_id,
+                "python3.12",
+                "/opt/community_gpu_ci.py",
+                "--family",
+                family,
+            ]
+            print(f"Starting isolated Community GPU container: {family}", flush=True)
+            try:
+                result = subprocess.run(command, check=False)
+                if result.returncode:
+                    failures.append(f"{family}: container exited {result.returncode}")
+                print(
+                    f"Community GPU container finished: {family} (exit {result.returncode})",
+                    flush=True,
+                )
+            finally:
+                # Also remove containers left by an interrupted Docker client.
+                cleanup = subprocess.run(
+                    ["docker", "rm", "--force", name],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                # --rm normally removed it already. Other errors may leave a live
+                # workload behind, so do not admit the next family in that case.
+                if cleanup.returncode and f"No such container: {name}" not in cleanup.stderr:
+                    raise CommunityGpuError(
+                        f"Cannot remove Community GPU container {name}: {cleanup.stderr.strip()}"
+                    )
     if failures:
         raise CommunityGpuError("Community GPU family failures: " + "; ".join(failures))
 
@@ -404,12 +499,19 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--containers", action="store_true")
     mode.add_argument("--family")
+    mode.add_argument("--stage-family")
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--image", default="trtmc-quickstart-gpu")
+    parser.add_argument("--cache-dir", type=Path)
     args = parser.parse_args()
     try:
         if args.containers:
             run_containers(args.repository, dict(os.environ), args.image)
+        elif args.stage_family:
+            if args.cache_dir is None:
+                raise CommunityGpuError("--stage-family requires --cache-dir")
+            plan = family_plan(args.repository.resolve(), args.stage_family)
+            _stage_checkpoints((plan,), args.cache_dir)
         else:
             # Source imports happen only inside the selected family's container.
             from tools.ci.process import CiError

@@ -930,6 +930,9 @@ jobs:
           # group membership yet. The first live GPU run reached this point
           # and failed on docker.sock, so do not depend on propagation timing.
           brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements"
+          # Checkpoints are downloaded by the trusted coordinator before the
+          # family container switches Hugging Face into offline mode.
+          brev exec "$INSTANCE_NAME" "python3 -m venv /tmp/trtmc-community-stage-venv && /tmp/trtmc-community-stage-venv/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0"
 
           # Each selected family gets a fresh container on this one VM. The
           # coordinator waits for its removal before starting the next family,
@@ -946,7 +949,7 @@ jobs:
             "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
             "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
             "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
-            python3 -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect
+            /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
