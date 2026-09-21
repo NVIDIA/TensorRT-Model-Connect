@@ -1776,6 +1776,33 @@ def _semantic_task_interfaces() -> dict[str, str]:
     return interfaces
 
 
+def _support_test_covers_identity(source: str, family: str, filename: str) -> bool:
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError:
+        return False
+    assertions = [node for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+    if not assertions:
+        return False
+    if not any("default_task" in ast.dump(node) for node in assertions):
+        return False
+    return f"families.{family}.support" in source or "resolve_family" in source
+
+
+def test_support_test_content_check_rejects_placeholders() -> None:
+    assert not _support_test_covers_identity("", "owner", "empty.py")
+    assert not _support_test_covers_identity(
+        "def test_nothing():\n    assert True\n", "owner", "unrelated.py"
+    )
+    assert _support_test_covers_identity(
+        "from families.owner.support import describe\n\n"
+        "def test_default():\n"
+        '    assert describe(None).default_task == "task"\n',
+        "owner",
+        "valid.py",
+    )
+
+
 def test_migrated_families_own_dependency_free_support_tests() -> None:
     """A semantic Task family keeps CPU-visible identity and default-task tests.
 
@@ -1783,18 +1810,25 @@ def test_migrated_families_own_dependency_free_support_tests() -> None:
     assertions in a dependency-free ``tests/test_support.py``. The public CPU
     gate discovers every family that ships that file, so a family migrated to
     the Task SDK must not keep those assertions only in a TensorRT-gated
-    ``tests/test_model.py`` module.
+    ``tests/test_model.py`` module. The file must resolve its own identity and
+    assert its default task; an empty or unrelated placeholder is not enough.
     """
     interfaces = _semantic_task_interfaces()
-    missing = [
-        f"families/{family.name}/tests/test_support.py"
-        for family in family_dirs()
-        if _implemented_task_ids(_family_runtime_source(family), interfaces)
-        and not (family / "tests/test_support.py").is_file()
-    ]
-    assert missing == [], (
-        "semantic Task families must keep dependency-free identity tests: " + ", ".join(missing)
-    )
+    violations = []
+    for family in family_dirs():
+        if not _implemented_task_ids(_family_runtime_source(family), interfaces):
+            continue
+        support_test = family / "tests/test_support.py"
+        if not support_test.is_file():
+            violations.append(f"families/{family.name}/tests/test_support.py: missing")
+        elif not _support_test_covers_identity(
+            support_test.read_text(encoding="utf-8"), family.name, str(support_test)
+        ):
+            violations.append(
+                f"families/{family.name}/tests/test_support.py: "
+                "needs an identity lookup and a default_task assertion"
+            )
+    assert violations == [], "invalid semantic Task support tests: " + "; ".join(violations)
 
 
 def test_manifests_contain_only_family_test_inputs_not_central_orchestration() -> None:
