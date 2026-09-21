@@ -78,6 +78,7 @@ def test_family_plan_selects_only_explicit_premerge_cases(tmp_path: Path) -> Non
                 "family": "alpha",
                 "hf_id": "example/alpha",
                 "hf_revision": "a" * 40,
+                "hf_dependencies": [{"repo_id": "example/dependency", "revision": "b" * 40}],
                 "testcases": [
                     {"name": "alpha-smoke", "premerge": True},
                     {"name": "alpha-nightly", "premerge": False},
@@ -94,7 +95,10 @@ def test_family_plan_selects_only_explicit_premerge_cases(tmp_path: Path) -> Non
 
     assert plan.family == "alpha"
     assert plan.testcases == ("alpha-local", "alpha-smoke")
-    assert plan.checkpoints == (("example/alpha", "a" * 40),)
+    assert plan.checkpoints == (
+        ("example/alpha", "a" * 40),
+        ("example/dependency", "b" * 40),
+    )
 
 
 @pytest.mark.parametrize(
@@ -108,6 +112,13 @@ def test_family_plan_selects_only_explicit_premerge_cases(tmp_path: Path) -> Non
                     {"name": "duplicate", "premerge": True},
                     {"name": "duplicate", "premerge": True},
                 ],
+            }
+        ],
+        [
+            {
+                "family": "alpha",
+                "hf_dependencies": [{"repo_id": "example/dependency", "revision": ""}],
+                "testcases": [{"name": "invalid-dependency", "premerge": True}],
             }
         ],
     ],
@@ -172,15 +183,61 @@ def test_runtime_root_rejects_missing_public_runtime_libraries(
         community_gpu_ci._runtime_root(build, plan)
 
 
+@pytest.mark.parametrize("state", ["python", "native", "missing_declaration", "missing_adapter"])
+def test_runtime_root_preserves_selected_family_cli(tmp_path: Path, state: str) -> None:
+    """A family CLI declaration and its optional native adapter reach E2E."""
+    build = tmp_path / "build"
+    build.mkdir()
+    plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
+    for name in (
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_alpha.so",
+        "libtrtmc_cli_beta.so",
+    ):
+        (build / name).write_bytes(b"native")
+    source = tmp_path / "families/alpha/cli.json"
+    source.parent.mkdir(parents=True)
+    executor = "native" if state in {"native", "missing_adapter"} else "python"
+    source.write_text(json.dumps({"version": 1, "commands": [{"executor": executor}]}))
+    if state == "native":
+        (build / "libtrtmc_cli_alpha.so").write_bytes(b"adapter")
+    for family in ("alpha", "beta"):
+        if family == "alpha" and state == "missing_declaration":
+            continue
+        declaration = build / "families" / family / "cli.json"
+        declaration.parent.mkdir(parents=True)
+        declaration.write_bytes(source.read_bytes())
+
+    if state.startswith("missing_"):
+        message = (
+            "no CLI declaration for alpha"
+            if state == "missing_declaration"
+            else "libtrtmc_cli_alpha.so"
+        )
+        with pytest.raises(CiError, match=message):
+            community_gpu_ci._runtime_root(build, plan, tmp_path)
+        return
+
+    runtime = community_gpu_ci._runtime_root(build, plan, tmp_path)
+    assert (runtime / "families/alpha/cli.json").read_bytes() == source.read_bytes()
+    assert not (runtime / "families/beta").exists()
+    assert (runtime / "libtrtmc_cli_alpha.so").is_file() == (state == "native")
+    assert not (runtime / "libtrtmc_cli_beta.so").exists()
+
+
 def test_checkpoint_staging_verifies_the_resolved_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A moving or incomplete checkpoint cannot enter offline E2E execution."""
+    """A moving checkpoint cannot enter offline E2E execution."""
     revision = "a" * 40
     snapshot = tmp_path / revision
     snapshot.mkdir()
-    (snapshot / "config.json").write_text("{}\n", encoding="utf-8")
+    (snapshot / "checkpoint.pt").write_bytes(b"weights")
     calls: list[tuple[str, str | None, Path]] = []
 
     class FakeApi:
@@ -215,9 +272,11 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
         community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
 
 
+@pytest.mark.parametrize("executor", [None, "python", "native"])
 def test_gpu_run_builds_native_contract_before_family_e2e(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    executor: str | None,
 ) -> None:
     """The entrypoint supplies every native path required by E2ERunner."""
     _family(
@@ -225,6 +284,10 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         "alpha",
         [{"family": "alpha", "testcases": [{"name": "alpha-smoke", "premerge": True}]}],
     )
+    if executor is not None:
+        (tmp_path / "families/alpha/cli.json").write_text(
+            json.dumps({"version": 1, "commands": [{"executor": executor}]})
+        )
     build = Path("/tmp") / f"{tmp_path.name}-native-build"
     commands: list[list[str]] = []
     e2e_calls: list[tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]] = []
@@ -256,7 +319,7 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     monkeypatch.setattr(
         community_gpu_ci,
         "_runtime_root",
-        lambda native_build, _plans: native_build / "runtime",
+        lambda native_build, _plans, _repository: native_build / "runtime",
     )
 
     community_gpu_ci.run(
@@ -277,7 +340,10 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     assert "trtmc_backend_trt" in native_builds[0]
     assert "trtmc_runtime" in native_builds[0]
     assert "trtmc_c" in native_builds[0]
-    assert native_builds[1][-1] == "trtmc_model_alpha"
+    expected_targets = ["trtmc_model_alpha"]
+    if executor == "native":
+        expected_targets.append("trtmc_cli_alpha")
+    assert native_builds[1][native_builds[1].index("--target") + 1 :] == expected_targets
     assert len(e2e_calls) == 1
     runtime, families, testcases = e2e_calls[0]
     assert families == ("alpha",)
@@ -296,18 +362,29 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
 ) -> None:
     """Each execution is removed before the next family starts, including failures."""
     events = []
+    staged = []
     image = "sha256:" + "a" * 64
 
     def docker(command, **kwargs):
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
+        if "--stage-family" in command:
+            family = command[command.index("--stage-family") + 1]
+            assert command[:2] == [sys.executable, str(Path(community_gpu_ci.__file__).resolve())]
+            assert command[command.index("--repository") + 1] == str(tmp_path)
+            assert kwargs["env"] == {}
+            staged.append(family)
+            return subprocess.CompletedProcess(command, 0)
         if command[:2] == ["docker", "run"]:
             family = command[-1]
             assert command[-2] == "--family"
             assert image in command
             assert "--rm" in command
             assert f"{tmp_path}:/src:ro" in command
-            assert f"{Path(community_gpu_ci.__file__).resolve()}:/opt/community_gpu_ci.py:ro" in command
+            assert (
+                f"{Path(community_gpu_ci.__file__).resolve()}:/opt/community_gpu_ci.py:ro"
+                in command
+            )
             assert "PYTHONPATH=/src" in command
             assert command[-4:] == ["python3.12", "/opt/community_gpu_ci.py", "--family", family]
             assert not any("HF_TOKEN" in value or "docker.sock" in value for value in command)
@@ -324,7 +401,6 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
         "TRTMC_GPU_FAMILIES": '["alpha","beta","gamma"]',
         "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta","gamma"]',
         "TRTMC_GPU_ADDED_FAMILIES": "[]",
-        "HF_TOKEN": "must-not-be-forwarded",
     }
     if failed_family:
         with pytest.raises(CiError, match="alpha: container exited 17"):
@@ -334,7 +410,56 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
     assert [(kind, family) for kind, family, _ in events] == [
         (kind, family) for family in ("alpha", "beta", "gamma") for kind in ("start", "remove")
     ]
+    assert staged == ["alpha", "beta", "gamma"]
     assert len({name for kind, _, name in events if kind == "start"}) == 3
+
+
+def test_checkpoint_staging_forwards_only_network_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checkpoint staging receives networking configuration but no unrelated environment."""
+    image = "sha256:" + "c" * 64
+    runs: list[tuple[list[str], dict]] = []
+
+    def docker(command, **kwargs):
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
+        if "--stage-family" in command or command[:2] == ["docker", "run"]:
+            runs.append((command, kwargs))
+            return subprocess.CompletedProcess(command, 0)
+        assert command[:3] == ["docker", "rm", "--force"]
+        return subprocess.CompletedProcess(command, 1, stderr=f"No such container: {command[-1]}")
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    community_gpu_ci.run_containers(
+        tmp_path,
+        {
+            "TRTMC_GPU_SCOPE": "families",
+            "TRTMC_GPU_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_ADDED_FAMILIES": "[]",
+            "HTTPS_PROXY": "https://proxy.example",
+            "UNRELATED_SECRET": "secret-value",
+        },
+        "test-image",
+    )
+
+    assert len(runs) == 2
+    (stage, stage_options), (family, family_options) = runs
+    assert stage[:2] == [sys.executable, str(Path(community_gpu_ci.__file__).resolve())]
+    assert "--stage-family" in stage
+    assert "secret-value" not in stage
+    assert stage_options["env"] == {"HTTPS_PROXY": "https://proxy.example"}
+    assert "--family" in family
+    assert "env" not in family_options
+    assert not any("UNRELATED_SECRET" in value or "secret-value" in value for value in family)
+    assert "TRTMC_CHECKPOINTS_PRESTAGED=1" in family
+    stage_cache = str(Path(stage[stage.index("--cache-dir") + 1]).parent)
+    family_cache = next(
+        value for value in family if value.endswith(":/tmp/trtmc-community-huggingface")
+    ).split(":", 1)[0]
+    assert family_cache == stage_cache
 
 
 def test_dependency_build_uses_the_family_container_environment(tmp_path: Path) -> None:
@@ -361,6 +486,8 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
     def docker(command, **kwargs):
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
+        if "--stage-family" in command:
+            return subprocess.CompletedProcess(command, 0)
         if command[:2] == ["docker", "run"]:
             started.append(command[-1])
             return subprocess.CompletedProcess(command, 0)
@@ -385,6 +512,11 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
 
 def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
     """An untrusted tools package cannot execute in the VM coordinator."""
+    _family(
+        tmp_path,
+        "alpha",
+        [{"family": "alpha", "testcases": [{"name": "alpha", "premerge": True}]}],
+    )
     tools = tmp_path / "tools"
     tools.mkdir()
     sentinel = tmp_path / "imported"
