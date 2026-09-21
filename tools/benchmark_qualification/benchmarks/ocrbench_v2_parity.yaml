@@ -13,7 +13,20 @@ dataset:
     instructions: https://huggingface.co/datasets/ling99/OCRBench_v2
   license: MIT
 selection:
-  method: first
+  # Ten task types keep the existing runtime while covering recognition,
+  # parsing, extraction, reasoning, tables, charts, formulas, and translation.
+  method: fixed-indices
+  indices:
+    - 150 # APP agent en / rico
+    - 2100 # chart parsing en / OneChart
+    - 3950 # document parsing cn / CDLA
+    - 7100 # fine-grained text recognition en / spotting_cocotext
+    - 4900 # formula recognition en / HME100K
+    - 5700 # full-page OCR cn / CDLA
+    - 1100 # key information extraction en / POIE
+    - 6300 # reasoning VQA en / mmsi
+    - 8000 # table parsing en / table_to_html
+    - 9800 # text translation cn / memes
 input:
   adapter: ocrbench_v2
 metric:

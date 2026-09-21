@@ -324,6 +324,15 @@ def test_accuracy_forwards_declared_reference_model_load_options(
 
     monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
     monkeypatch.setattr(
+        qualification_accuracy,
+        "load_benchmark",
+        lambda *_args: {
+            "kind": "accuracy",
+            "selection": {"method": "first"},
+            "metric": {"name": "exact_token_ids"},
+        },
+    )
+    monkeypatch.setattr(
         qualification_accuracy, "reference_python", lambda *_args: Path(sys.executable)
     )
     monkeypatch.setattr(qualification_accuracy, "run_command", reference)
@@ -505,9 +514,7 @@ def test_performance_resolves_profile_owned_relative_assets(tmp_path: Path) -> N
     assert resolved == {"image_path": str(image.resolve()), "batch_size": 1}
 
 
-def test_robot_action_accuracy_compares_complete_action_chunk(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_robot_action_accuracy_compares_complete_action_chunk(tmp_path: Path, monkeypatch) -> None:
     data = tmp_path / "families/lerobot_act/tests/data"
     data.mkdir(parents=True)
     image = data / "image.png"
@@ -516,13 +523,7 @@ def test_robot_action_accuracy_compares_complete_action_chunk(
     state.write_bytes(b"state")
     dataset_path = data / "requests.json"
     dataset_path.write_text(
-        json.dumps(
-            {
-                "requests": [
-                    {"id": "recorded", "image": image.name, "state": state.name}
-                ]
-            }
-        ),
+        json.dumps({"requests": [{"id": "recorded", "image": image.name, "state": state.name}]}),
         encoding="utf-8",
     )
     profile = tmp_path / "families/lerobot_act/tests/benchmark/example.yaml"
@@ -965,13 +966,11 @@ def test_localization_accuracy_matches_unordered_boxes_and_points() -> None:
     )
 
     assert first_kind == second_kind == "box"
-    assert qualification_accuracy._localization_alignment(
-        first_boxes, second_boxes, "box"
-    ) == 1.0
+    assert qualification_accuracy._localization_alignment(first_boxes, second_boxes, "box") == 1.0
     assert first_point_kind == second_point_kind == "point"
-    assert qualification_accuracy._localization_alignment(
-        first_points, second_points, "point"
-    ) == 10.0
+    assert (
+        qualification_accuracy._localization_alignment(first_points, second_points, "point") == 10.0
+    )
     with pytest.raises(QualificationError, match="reference tag"):
         qualification_accuracy._localization_values("<box><10><20><100><200></box>")
 
@@ -1965,6 +1964,53 @@ def test_shared_definitions_own_dataset_and_metric_not_models() -> None:
                 assert definition["dataset"]["id"]
 
 
+def test_fixed_dataset_selection_uses_declared_indices() -> None:
+    rows = [f"sample-{index}" for index in range(8)]
+
+    selected, receipt = qualification_accuracy._select_dataset_rows(
+        rows,
+        {"selection": {"method": "fixed-indices", "indices": [6, 2, 4]}},
+        2,
+        "example",
+    )
+
+    assert selected == ["sample-6", "sample-2"]
+    assert receipt == {"method": "fixed-indices", "indices": [6, 2]}
+
+
+@pytest.mark.parametrize(
+    ("indices", "message"),
+    [
+        ([1, 1], "must be unique"),
+        ([1, True], "nonnegative integers"),
+        ([1, 8], "out of range"),
+    ],
+)
+def test_fixed_dataset_selection_rejects_invalid_indices(indices: list[int], message: str) -> None:
+    with pytest.raises(QualificationError, match=message):
+        qualification_accuracy._select_dataset_rows(
+            list(range(8)),
+            {"selection": {"method": "fixed-indices", "indices": indices}},
+            2,
+            "example",
+        )
+
+
+@pytest.mark.parametrize(
+    "benchmark",
+    ["mmlu_continuation", "librispeech_transcription", "ocrbench_v2_parity"],
+)
+def test_slow_dataset_benchmarks_keep_ten_fixed_representative_samples(
+    benchmark: str,
+) -> None:
+    case = next(case for case in discover(REPOSITORY) if case.benchmark == benchmark)
+    selection = load_benchmark(REPOSITORY, case)["selection"]
+
+    assert selection["method"] == "fixed-indices"
+    assert len(selection["indices"]) == 10
+    assert len(set(selection["indices"])) == 10
+
+
 def test_shared_performance_definitions_own_complete_reference_timing() -> None:
     for case in discover(REPOSITORY):
         if case.kind != "performance":
@@ -2370,8 +2416,7 @@ def test_benchmark_launcher_uses_the_family_python(tmp_path: Path, monkeypatch) 
 
     assert os.access(launcher, os.X_OK)
     assert launcher.read_text(encoding="utf-8") == (
-        "#!/bin/sh\n"
-        f"exec '{python}' '{bench}' \"$@\"\n"
+        f"#!/bin/sh\nexec '{python}' '{bench}' \"$@\"\n"
     )
 
 
@@ -2551,9 +2596,7 @@ def test_family_dataset_stays_with_its_discovered_model_profile(tmp_path: Path) 
         resolve_dataset(definition, context, profile)
 
 
-def test_stereo_accuracy_compares_complete_disparity_artifacts(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_stereo_accuracy_compares_complete_disparity_artifacts(tmp_path: Path, monkeypatch) -> None:
     profile = tmp_path / "families/stereo/tests/benchmark/stereo.yaml"
     reference_script = profile.parent / "reference.py"
     reference_script.parent.mkdir(parents=True)

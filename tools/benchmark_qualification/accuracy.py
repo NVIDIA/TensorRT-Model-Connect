@@ -54,7 +54,7 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
     else:
         dataset = resolve_dataset(definition, context, case.source)
     if metric_name == "exact_token_ids":
-        result = _text_generation_parity(case, context, dataset, output)
+        result = _text_generation_parity(case, context, definition, dataset, output)
     elif metric_name == "embedding_vector_parity":
         result = _encoder_embedding_parity(case, context, dataset, output)
     elif metric_name == "reranking_score_parity":
@@ -64,7 +64,7 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
     elif metric_name == "image_classification_top1_parity":
         result = _image_classification_parity(case, context, dataset, output)
     elif metric_name == "speech_transcription_wer_parity":
-        result = _speech_transcription_parity(case, context, dataset, output)
+        result = _speech_transcription_parity(case, context, definition, dataset, output)
     elif metric_name == "image_feature_knn_parity":
         result = _image_feature_knn_parity(case, context, dataset, output)
     elif metric_name == "coco_object_detection_accuracy":
@@ -78,7 +78,7 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
     elif metric_name == "vision_language_text_parity":
         result = _vision_language_text_parity(case, context, dataset, output)
     elif metric_name == "ocr_text_parity":
-        result = _ocr_text_parity(case, context, dataset, output)
+        result = _ocr_text_parity(case, context, definition, dataset, output)
     elif metric_name == "localization_text_parity":
         result = _localization_text_parity(case, context, dataset, output)
     elif metric_name == "stereo_disparity_parity":
@@ -620,6 +620,7 @@ def _stereo_disparity_parity(
 def _text_generation_parity(
     case: QualificationCase,
     context: RuntimeContext,
+    definition: Mapping[str, Any],
     dataset: Dataset,
     output: Path,
 ) -> dict[str, Any]:
@@ -629,8 +630,11 @@ def _text_generation_parity(
     requests = payload.get("requests") if isinstance(payload, Mapping) else None
     if not isinstance(requests, list) or not requests:
         raise QualificationError("text-generation dataset must contain a non-empty requests list")
+    selected_requests, selection = _select_dataset_rows(
+        requests, definition, sample_limit, "text-generation"
+    )
     selected = []
-    for index, request in enumerate(requests[:sample_limit]):
+    for index, request in enumerate(selected_requests):
         if not isinstance(request, Mapping):
             raise QualificationError(f"text-generation request {index} must be an object")
         selected.append(
@@ -766,7 +770,7 @@ def _text_generation_parity(
         "model": case.model,
         "benchmark": case.benchmark,
         "bundle": str(bundle),
-        "dataset": dataset.receipt(),
+        "dataset": {**dataset.receipt(), "selection": selection},
         "metrics": {
             "samples": len(rows),
             "passed_samples": passed_count,
@@ -2249,7 +2253,11 @@ def _vision_language_text_parity(
     }
 
 
-def _ocr_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]:
+def _ocr_samples(
+    dataset: Dataset,
+    definition: Mapping[str, Any],
+    sample_limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         payload = json.loads(dataset.path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
@@ -2258,8 +2266,9 @@ def _ocr_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]:
     if not isinstance(samples, list) or len(samples) < sample_limit:
         raise QualificationError(f"OCR dataset requires at least {sample_limit} samples")
     root = dataset.path.parent.resolve()
+    selected_rows, selection = _select_dataset_rows(samples, definition, sample_limit, "OCR")
     selected = []
-    for index, sample in enumerate(samples[:sample_limit]):
+    for index, sample in enumerate(selected_rows):
         if not isinstance(sample, Mapping):
             raise QualificationError(f"OCR sample {index} must be an object")
         media = sample.get("media")
@@ -2299,7 +2308,7 @@ def _ocr_samples(dataset: Dataset, sample_limit: int) -> list[dict[str, Any]]:
                 "answers": answers,
             }
         )
-    return selected
+    return selected, selection
 
 
 def _ocr_gold_match(text: str, answers: Sequence[str]) -> bool:
@@ -2310,12 +2319,13 @@ def _ocr_gold_match(text: str, answers: Sequence[str]) -> bool:
 def _ocr_text_parity(
     case: QualificationCase,
     context: RuntimeContext,
+    definition: Mapping[str, Any],
     dataset: Dataset,
     output: Path,
 ) -> dict[str, Any]:
     configured = case.values
     sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
-    selected = _ocr_samples(dataset, sample_limit)
+    selected, selection = _ocr_samples(dataset, definition, sample_limit)
     expected = _family_image_reference(case, context, output, selected)
     request = configured.get("request", {})
     if not isinstance(request, Mapping):
@@ -2367,7 +2377,7 @@ def _ocr_text_parity(
         "model": case.model,
         "benchmark": case.benchmark,
         "bundle": str(bundle),
-        "dataset": dataset.receipt(),
+        "dataset": {**dataset.receipt(), "selection": selection},
         "metrics": {
             "samples": len(rows),
             "sample_pass_rate": sample_pass_rate,
@@ -2770,6 +2780,7 @@ def _image_classification_parity(
 def _speech_transcription_parity(
     case: QualificationCase,
     context: RuntimeContext,
+    definition: Mapping[str, Any],
     dataset: Dataset,
     output: Path,
 ) -> dict[str, Any]:
@@ -2780,9 +2791,12 @@ def _speech_transcription_parity(
     if not isinstance(requests, list) or len(requests) < sample_limit:
         raise QualificationError(f"speech dataset requires at least {sample_limit} requests")
 
+    selected_requests, selection = _select_dataset_rows(
+        requests, definition, sample_limit, "speech"
+    )
     selected = []
     data_root = context.data_root.resolve()
-    for index, request in enumerate(requests[:sample_limit]):
+    for index, request in enumerate(selected_requests):
         if not isinstance(request, Mapping):
             raise QualificationError(f"speech request {index} must be an object")
         audio_value = _speech_audio(request)
@@ -2913,7 +2927,7 @@ def _speech_transcription_parity(
         "model": case.model,
         "benchmark": case.benchmark,
         "bundle": str(bundle),
-        "dataset": dataset.receipt(),
+        "dataset": {**dataset.receipt(), "selection": selection},
         "metrics": {
             "samples": len(rows),
             "reference_wer": reference_wer,
@@ -3307,6 +3321,41 @@ def _prompt(request: Mapping[str, Any]) -> str:
         if isinstance(prompt, str) and prompt.strip():
             return prompt
     raise QualificationError("text-generation request has neither a prompt nor a user message")
+
+
+def _select_dataset_rows(
+    rows: Sequence[Any],
+    definition: Mapping[str, Any],
+    count: int,
+    label: str,
+) -> tuple[list[Any], dict[str, Any]]:
+    selection = definition.get("selection", {})
+    if not isinstance(selection, Mapping):
+        raise QualificationError(f"{label} dataset selection must be an object")
+    method = str(selection.get("method", "first"))
+    if method == "first":
+        if len(rows) < count:
+            raise QualificationError(f"{label} dataset requires at least {count} samples")
+        indices = list(range(count))
+    elif method == "fixed-indices":
+        configured = selection.get("indices")
+        if not isinstance(configured, list) or len(configured) < count:
+            raise QualificationError(
+                f"{label} fixed dataset selection requires at least {count} indices"
+            )
+        if any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in configured
+        ):
+            raise QualificationError(f"{label} fixed dataset indices must be nonnegative integers")
+        if len(set(configured)) != len(configured):
+            raise QualificationError(f"{label} fixed dataset indices must be unique")
+        indices = configured[:count]
+        if any(index >= len(rows) for index in indices):
+            raise QualificationError(f"{label} fixed dataset index is out of range")
+    else:
+        raise QualificationError(f"unsupported {label} dataset selection method {method!r}")
+    return [rows[index] for index in indices], {"method": method, "indices": indices}
 
 
 def _positive_int(value: Any, name: str) -> int:

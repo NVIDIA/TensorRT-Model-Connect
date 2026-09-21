@@ -13,7 +13,20 @@ dataset:
     instructions: https://github.com/hendrycks/test
   license: MIT
 selection:
-  method: first
+  # Ten subjects keep the existing runtime while covering STEM, medicine,
+  # humanities, social science, and professional knowledge.
+  method: fixed-indices
+  indices:
+    - 50 # abstract_algebra
+    - 167 # anatomy
+    - 437 # business_ethics
+    - 1046 # college_computer_science
+    - 1863 # econometrics
+    - 5970 # high_school_world_history
+    - 6891 # machine_learning
+    - 11398 # professional_law
+    - 13504 # sociology
+    - 13956 # world_religions
 input:
   adapter: mmlu_continuation
 metric:
