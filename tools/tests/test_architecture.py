@@ -1665,6 +1665,14 @@ def _implemented_task_ids(source: str, interfaces: dict[str, str]) -> set[str]:
     }
 
 
+def _family_runtime_source(family: Path) -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8", errors="ignore")
+        for path in (family / "runtime").rglob("*")
+        if path.is_file() and path.suffix in {".h", ".hpp", ".cpp", ".cu"}
+    )
+
+
 def test_task_contract_inventory_recognizes_implemented_interfaces_not_mentions() -> None:
     declarations = _declared_task_interfaces(
         '''
@@ -1759,6 +1767,34 @@ def test_every_manifest_task_has_a_concrete_family_implementation() -> None:
             if task not in implemented:
                 violations.append(f"{manifest.relative_to(REPO)}:{task}")
     assert violations == []
+
+
+def _semantic_task_interfaces() -> dict[str, str]:
+    interfaces: dict[str, str] = {}
+    for header in sorted((REPO / "core/runtime/include/trtmc/internal").glob("*.h")):
+        interfaces.update(_declared_task_interfaces(header.read_text(encoding="utf-8")))
+    return interfaces
+
+
+def test_migrated_families_own_dependency_free_support_tests() -> None:
+    """A semantic Task family keeps CPU-visible identity and default-task tests.
+
+    ``add-model-family.md`` requires checkpoint identity and default-task
+    assertions in a dependency-free ``tests/test_support.py``. The public CPU
+    gate discovers every family that ships that file, so a family migrated to
+    the Task SDK must not keep those assertions only in a TensorRT-gated
+    ``tests/test_model.py`` module.
+    """
+    interfaces = _semantic_task_interfaces()
+    missing = [
+        f"families/{family.name}/tests/test_support.py"
+        for family in family_dirs()
+        if _implemented_task_ids(_family_runtime_source(family), interfaces)
+        and not (family / "tests/test_support.py").is_file()
+    ]
+    assert missing == [], (
+        "semantic Task families must keep dependency-free identity tests: " + ", ".join(missing)
+    )
 
 
 def test_manifests_contain_only_family_test_inputs_not_central_orchestration() -> None:
