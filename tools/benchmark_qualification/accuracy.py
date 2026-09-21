@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from array import array
+from collections import defaultdict
 import csv
 from itertools import permutations
 import json
@@ -66,8 +67,8 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
         result = _speech_transcription_parity(case, context, dataset, output)
     elif metric_name == "image_feature_knn_parity":
         result = _image_feature_knn_parity(case, context, dataset, output)
-    elif metric_name == "object_detection_parity":
-        result = _object_detection_parity(case, context, dataset, output)
+    elif metric_name == "coco_object_detection_accuracy":
+        result = _coco_object_detection_accuracy(case, context, dataset, output)
     elif metric_name == "prompted_segmentation_parity":
         result = _prompted_segmentation_parity(case, context, dataset, output)
     elif metric_name == "text_prompted_instance_segmentation_parity":
@@ -1595,35 +1596,165 @@ def _detections(value: Mapping[str, Any], label: str) -> list[dict[str, Any]]:
     return detections
 
 
-def _match_detections(
-    candidate: Sequence[Mapping[str, Any]], reference: Sequence[Mapping[str, Any]]
-) -> list[dict[str, Any]]:
-    matched_reference: set[int] = set()
-    matches = []
-    for detection in sorted(candidate, key=lambda item: -float(item["score"])):
-        choices = [
-            (_box_iou(detection["box"], expected["box"]), index)
-            for index, expected in enumerate(reference)
-            if index not in matched_reference
-            and int(detection["class_id"]) == int(expected["class_id"])
-        ]
-        if not choices:
-            continue
-        iou, index = max(choices)
-        matched_reference.add(index)
-        matches.append(
+def _coco_detection_samples(
+    dataset: Dataset, sample_limit: int
+) -> tuple[list[dict[str, Any]], str]:
+    try:
+        payload = json.loads(dataset.path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise QualificationError("COCO object-detection dataset is not valid JSON") from error
+    requests = payload.get("requests") if isinstance(payload, Mapping) else None
+    if not isinstance(requests, list) or len(requests) < sample_limit:
+        raise QualificationError(
+            f"COCO object-detection dataset requires at least {sample_limit} requests"
+        )
+    root = dataset.path.parent.resolve()
+    selected = []
+    for index, request in enumerate(requests[:sample_limit]):
+        if not isinstance(request, Mapping):
+            raise QualificationError(f"COCO object-detection request {index} is invalid")
+        relative = request.get("image")
+        annotations = request.get("annotations")
+        if not isinstance(relative, str) or not relative:
+            raise QualificationError(f"COCO object-detection request {index} has no image")
+        if not isinstance(annotations, list) or not annotations:
+            raise QualificationError(
+                f"COCO object-detection request {index} has no ground-truth annotations"
+            )
+        image = (root / relative).resolve()
+        if root not in image.parents or not image.is_file():
+            raise QualificationError(
+                f"COCO object-detection request {index} image is unavailable: {image}"
+            )
+        ground_truth = []
+        for annotation_index, annotation in enumerate(annotations):
+            if not isinstance(annotation, Mapping):
+                raise QualificationError(
+                    f"COCO object-detection annotation {index}:{annotation_index} is invalid"
+                )
+            box = annotation.get("bbox_xyxy")
+            category_id = annotation.get("category_id")
+            category_index = annotation.get("category_index")
+            if (
+                not isinstance(box, list)
+                or len(box) != 4
+                or any(not isinstance(value, (int, float)) for value in box)
+                or isinstance(category_id, bool)
+                or not isinstance(category_id, int)
+                or isinstance(category_index, bool)
+                or not isinstance(category_index, int)
+            ):
+                raise QualificationError(
+                    f"COCO object-detection annotation {index}:{annotation_index} is invalid"
+                )
+            numeric_box = [float(value) for value in box]
+            if (
+                not all(math.isfinite(value) for value in numeric_box)
+                or numeric_box[2] <= numeric_box[0]
+                or numeric_box[3] <= numeric_box[1]
+            ):
+                raise QualificationError(
+                    f"COCO object-detection annotation {index}:{annotation_index} has an invalid box"
+                )
+            ground_truth.append(
+                {
+                    "box": numeric_box,
+                    "category_id": category_id,
+                    "category_index": category_index,
+                }
+            )
+        selected.append(
             {
-                "class_id": int(detection["class_id"]),
-                "iou": iou,
-                "score_abs_error": abs(
-                    float(detection["score"]) - float(reference[index]["score"])
-                ),
+                "sample_id": str(request.get("id") or f"sample-{index}"),
+                "image_path": str(image),
+                "annotations": ground_truth,
             }
         )
-    return matches
+    sampling = payload.get("sampling")
+    return selected, str(sampling) if isinstance(sampling, str) else "fixed manifest order"
 
 
-def _object_detection_parity(
+def _coco_ap_at_iou(
+    selected: Sequence[Mapping[str, Any]],
+    outputs: Sequence[Mapping[str, Any]],
+    label_field: str,
+    iou_threshold: float,
+) -> float:
+    ground_truth: dict[int, dict[str, list[Sequence[float]]]] = {}
+    predictions: dict[int, list[tuple[float, str, Sequence[float]]]] = {}
+    for sample, output in zip(selected, outputs, strict=True):
+        sample_id = str(sample["sample_id"])
+        for annotation in sample["annotations"]:
+            class_id = int(annotation[label_field])
+            ground_truth.setdefault(class_id, {}).setdefault(sample_id, []).append(
+                annotation["box"]
+            )
+        for detection in sorted(
+            _detections(output, "object-detection output"),
+            key=lambda value: -float(value["score"]),
+        )[:100]:
+            predictions.setdefault(int(detection["class_id"]), []).append(
+                (float(detection["score"]), sample_id, detection["box"])
+            )
+
+    category_aps = []
+    for class_id, sample_boxes in ground_truth.items():
+        total_ground_truth = sum(len(boxes) for boxes in sample_boxes.values())
+        matched: dict[str, set[int]] = defaultdict(set)
+        true_positives = false_positives = 0
+        precisions = []
+        recalls = []
+        for _, sample_id, box in sorted(predictions.get(class_id, []), key=lambda value: -value[0]):
+            candidates = [
+                (_box_iou(box, expected), index)
+                for index, expected in enumerate(sample_boxes.get(sample_id, []))
+                if index not in matched[sample_id]
+            ]
+            if candidates and max(candidates)[0] >= iou_threshold:
+                _, matched_index = max(candidates)
+                matched[sample_id].add(matched_index)
+                true_positives += 1
+            else:
+                false_positives += 1
+            precisions.append(true_positives / (true_positives + false_positives))
+            recalls.append(true_positives / total_ground_truth)
+        category_aps.append(
+            sum(
+                max(
+                    (
+                        precision
+                        for precision, recall in zip(precisions, recalls, strict=True)
+                        if recall >= point
+                    ),
+                    default=0.0,
+                )
+                for point in (index / 100.0 for index in range(101))
+            )
+            / 101.0
+        )
+    if not category_aps:
+        raise QualificationError("COCO object-detection subset has no ground truth")
+    return sum(category_aps) / len(category_aps)
+
+
+def _coco_detection_metrics(
+    selected: Sequence[Mapping[str, Any]],
+    outputs: Sequence[Mapping[str, Any]],
+    label_field: str,
+) -> dict[str, float]:
+    if len(selected) != len(outputs):
+        raise QualificationError("COCO object-detection output count differs from the dataset")
+    thresholds = [0.5 + index * 0.05 for index in range(10)]
+    average_precisions = [
+        _coco_ap_at_iou(selected, outputs, label_field, threshold) for threshold in thresholds
+    ]
+    return {
+        "map_50_95": sum(average_precisions) / len(average_precisions),
+        "map_50": average_precisions[0],
+    }
+
+
+def _coco_object_detection_accuracy(
     case: QualificationCase,
     context: RuntimeContext,
     dataset: Dataset,
@@ -1631,11 +1762,11 @@ def _object_detection_parity(
 ) -> dict[str, Any]:
     configured = case.values
     sample_limit = _positive_int(configured.get("samples"), "accuracy.samples")
-    selected = _image_parity_samples(dataset, sample_limit, "object-detection")
+    selected, sampling = _coco_detection_samples(dataset, sample_limit)
     expected = _family_image_reference(case, context, output, selected)
     request = configured.get("request", {})
     if not isinstance(request, Mapping):
-        raise QualificationError("object-detection request must be an object")
+        raise QualificationError("COCO object-detection request must be an object")
     candidate_requests = [
         {
             "sample_id": sample["sample_id"],
@@ -1646,52 +1777,26 @@ def _object_detection_parity(
     actual, bundle = _candidate_outputs(case, context, output, "detect", candidate_requests)
     gate = configured.get("gate", {})
     if not isinstance(gate, Mapping):
-        raise QualificationError("object-detection gate must be an object")
-    minimum_iou = float(gate.get("min_box_iou", 0.5))
-    maximum_score_error = float(gate.get("max_score_abs_error", 0.05))
-    minimum_match_rate = float(gate.get("min_detection_match_rate", 1.0))
-    minimum_sample_rate = float(gate.get("min_sample_pass_rate", 1.0))
-    if not all(
-        0.0 <= value <= 1.0 for value in (minimum_iou, minimum_match_rate, minimum_sample_rate)
-    ):
-        raise QualificationError("object-detection rates and IoU must be in [0, 1]")
-    if maximum_score_error < 0.0 or not math.isfinite(maximum_score_error):
-        raise QualificationError("max_score_abs_error must be finite and nonnegative")
-
-    rows = []
-    total_matches = total_detections = 0
-    for sample, candidate_sample, reference_sample in zip(selected, actual, expected, strict=True):
-        candidate_detections = _detections(candidate_sample, "candidate")
-        reference_detections = _detections(reference_sample, "reference")
-        matches = _match_detections(candidate_detections, reference_detections)
-        denominator = max(len(candidate_detections), len(reference_detections), 1)
-        match_rate = len(matches) / denominator
-        minimum_sample_iou = min((match["iou"] for match in matches), default=1.0)
-        maximum_sample_score_error = max(
-            (match["score_abs_error"] for match in matches), default=0.0
+        raise QualificationError("COCO object-detection gate must be an object")
+    label_spaces = {
+        "coco-category-id": "category_id",
+        "coco-contiguous-80": "category_index",
+    }
+    label_space = configured.get("label_space")
+    if label_space not in label_spaces:
+        raise QualificationError(
+            "COCO object-detection label_space must be coco-category-id or coco-contiguous-80"
         )
-        passed = (
-            match_rate >= minimum_match_rate
-            and minimum_sample_iou >= minimum_iou
-            and maximum_sample_score_error <= maximum_score_error
-        )
-        rows.append(
-            {
-                "sample_id": sample["sample_id"],
-                "passed": passed,
-                "candidate_detections": len(candidate_detections),
-                "reference_detections": len(reference_detections),
-                "matched_detections": len(matches),
-                "detection_match_rate": match_rate,
-                "min_box_iou": minimum_sample_iou,
-                "max_score_abs_error": maximum_sample_score_error,
-            }
-        )
-        total_matches += len(matches)
-        total_detections += denominator
-    sample_pass_rate = sum(bool(row["passed"]) for row in rows) / len(rows)
-    detection_match_rate = total_matches / total_detections
-    passed = sample_pass_rate >= minimum_sample_rate
+    map_50_95_limit = float(gate.get("max_map_50_95_drop", 0.02))
+    map_50_limit = float(gate.get("max_map_50_drop", 0.02))
+    if not all(math.isfinite(value) and value >= 0.0 for value in (map_50_95_limit, map_50_limit)):
+        raise QualificationError("COCO object-detection mAP drops must be finite and nonnegative")
+    label_field = label_spaces[str(label_space)]
+    candidate_metrics = _coco_detection_metrics(selected, actual, label_field)
+    reference_metrics = _coco_detection_metrics(selected, expected, label_field)
+    map_50_95_drop = reference_metrics["map_50_95"] - candidate_metrics["map_50_95"]
+    map_50_drop = reference_metrics["map_50"] - candidate_metrics["map_50"]
+    passed = map_50_95_drop <= map_50_95_limit and map_50_drop <= map_50_limit
     return {
         "schema_version": "trtmc.qualification-result/v1",
         "case": case.id,
@@ -1700,21 +1805,21 @@ def _object_detection_parity(
         "model": case.model,
         "benchmark": case.benchmark,
         "bundle": str(bundle),
-        "dataset": dataset.receipt(),
+        "dataset": {**dataset.receipt(), "sampling": sampling},
         "metrics": {
-            "samples": len(rows),
-            "sample_pass_rate": sample_pass_rate,
-            "detection_match_rate": detection_match_rate,
-            "min_box_iou": min(row["min_box_iou"] for row in rows),
-            "max_score_abs_error": max(row["max_score_abs_error"] for row in rows),
+            "samples": len(selected),
+            "label_space": label_space,
+            "candidate_map_50_95": candidate_metrics["map_50_95"],
+            "reference_map_50_95": reference_metrics["map_50_95"],
+            "map_50_95_drop": map_50_95_drop,
+            "candidate_map_50": candidate_metrics["map_50"],
+            "reference_map_50": reference_metrics["map_50"],
+            "map_50_drop": map_50_drop,
         },
         "gate": {
-            "min_box_iou": minimum_iou,
-            "max_score_abs_error": maximum_score_error,
-            "min_detection_match_rate": minimum_match_rate,
-            "min_sample_pass_rate": minimum_sample_rate,
+            "max_map_50_95_drop": map_50_95_limit,
+            "max_map_50_drop": map_50_limit,
         },
-        "samples": rows,
     }
 
 

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools import model_benchmark
+from tools import model_benchmark, prepare_coco_detection_dataset
 from apps.benchmark.performance.baselines import hf_transformers, task_reference
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
 from families.personaplex.tests.benchmark import prepare_environment as personaplex_environment
@@ -607,16 +607,31 @@ def test_robot_action_accuracy_compares_complete_action_chunk(
     assert result["metrics"]["action_max_abs_error"] == pytest.approx(0.0)
 
 
-def test_object_detection_accuracy_matches_classes_boxes_and_scores(
-    tmp_path: Path, monkeypatch
-) -> None:
-    dataset_root = tmp_path / "Imagenette"
+def test_coco_object_detection_accuracy_uses_ground_truth_map(tmp_path: Path, monkeypatch) -> None:
+    dataset_root = tmp_path / "COCO2017_object_detection"
     dataset_root.mkdir()
     image = dataset_root / "image.jpeg"
     image.write_bytes(b"fixture")
     dataset_path = dataset_root / "manifest.json"
     dataset_path.write_text(
-        json.dumps({"requests": [{"id": "image", "image": "image.jpeg"}]}),
+        json.dumps(
+            {
+                "sampling": "test fixture",
+                "requests": [
+                    {
+                        "id": "image",
+                        "image": "image.jpeg",
+                        "annotations": [
+                            {
+                                "bbox_xyxy": [10.0, 20.0, 50.0, 70.0],
+                                "category_id": 3,
+                                "category_index": 2,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     profile = tmp_path / "families/detr/tests/benchmark/example.yaml"
@@ -627,8 +642,8 @@ def test_object_detection_accuracy_matches_classes_boxes_and_scores(
         kind="accuracy",
         model="example",
         family="detr",
-        name="detection-parity",
-        benchmark="imagenette_detection_parity",
+        name="coco2017-object-detection",
+        benchmark="coco2017_object_detection",
         candidate={
             "family": "detr",
             "checkpoint": "facebook/example",
@@ -638,19 +653,18 @@ def test_object_detection_accuracy_matches_classes_boxes_and_scores(
         },
         values={
             "samples": 1,
+            "label_space": "coco-category-id",
             "request": {"score_threshold": 0.5},
             "reference": {"command": "reference.py", "precision": "fp32"},
             "gate": {
-                "min_box_iou": 0.9,
-                "max_score_abs_error": 0.05,
-                "min_detection_match_rate": 1.0,
-                "min_sample_pass_rate": 1.0,
+                "max_map_50_95_drop": 0.02,
+                "max_map_50_drop": 0.02,
             },
         },
         source=profile,
         reference_requirements=None,
     )
-    dataset = Dataset("imagenette-validation", dataset_path, "provided", "digest")
+    dataset = Dataset("coco2017-object-detection", dataset_path, "provided", "digest")
     context = RuntimeContext(
         repository=REPOSITORY,
         artifacts=tmp_path / "artifacts",
@@ -689,7 +703,7 @@ def test_object_detection_accuracy_matches_classes_boxes_and_scores(
     monkeypatch.setattr(
         qualification_accuracy,
         "load_benchmark",
-        lambda *_args: {"metric": {"name": "object_detection_parity"}},
+        lambda *_args: {"metric": {"name": "coco_object_detection_accuracy"}},
     )
     monkeypatch.setattr(qualification_accuracy, "resolve_dataset", lambda *_args: dataset)
     monkeypatch.setattr(
@@ -702,7 +716,7 @@ def test_object_detection_accuracy_matches_classes_boxes_and_scores(
         lambda *_args: (
             [
                 {
-                    "boxes": [10.5, 20.0, 50.0, 70.0],
+                    "boxes": [10.0, 20.0, 50.0, 70.0],
                     "scores": [0.89],
                     "class_ids": [3],
                 }
@@ -714,8 +728,61 @@ def test_object_detection_accuracy_matches_classes_boxes_and_scores(
     result = qualification_accuracy.run_accuracy(case, context)
 
     assert result["status"] == "passed"
-    assert result["metrics"]["detection_match_rate"] == 1.0
-    assert result["metrics"]["min_box_iou"] >= 0.9
+    assert result["metrics"]["candidate_map_50_95"] == pytest.approx(1.0)
+    assert result["metrics"]["reference_map_50_95"] == pytest.approx(1.0)
+    assert result["metrics"]["map_50_95_drop"] == pytest.approx(0.0)
+
+
+def test_prepare_coco_detection_dataset_is_balanced_and_keeps_real_boxes(
+    tmp_path: Path,
+) -> None:
+    coco_root = tmp_path / "source"
+    (coco_root / "annotations").mkdir(parents=True)
+    (coco_root / "val2017").mkdir()
+    images = [
+        {"id": 11, "file_name": "000000000011.jpg", "width": 100, "height": 100},
+        {"id": 22, "file_name": "000000000022.jpg", "width": 100, "height": 100},
+    ]
+    annotations = [
+        {
+            "id": 101,
+            "image_id": 11,
+            "category_id": 1,
+            "bbox": [10, 20, 30, 40],
+            "area": 1200,
+            "iscrowd": 0,
+        },
+        {
+            "id": 202,
+            "image_id": 22,
+            "category_id": 3,
+            "bbox": [1, 2, 10, 20],
+            "area": 200,
+            "iscrowd": 0,
+        },
+    ]
+    categories = [{"id": 1, "name": "person"}, {"id": 3, "name": "car"}]
+    (coco_root / "annotations" / "instances_val2017.json").write_text(
+        json.dumps({"images": images, "annotations": annotations, "categories": categories}),
+        encoding="utf-8",
+    )
+    for image in images:
+        (coco_root / "val2017" / image["file_name"]).write_bytes(b"fixture")
+
+    output = prepare_coco_detection_dataset.prepare(coco_root, tmp_path / "output", 2)
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+
+    assert [request["image_id"] for request in manifest["requests"]] == [11, 22]
+    assert manifest["requests"][0]["annotations"] == [
+        {
+            "id": 101,
+            "category_id": 1,
+            "category_index": 0,
+            "bbox_xyxy": [10.0, 20.0, 40.0, 60.0],
+            "area": 1200.0,
+        }
+    ]
+    assert manifest["requests"][1]["annotations"][0]["category_index"] == 1
 
 
 def test_prompted_segmentation_masks_match_independent_of_order() -> None:
