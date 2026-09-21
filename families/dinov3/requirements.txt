@@ -2,4 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 Pillow
-timm>=1.0
+# The public parity oracle was qualified against this exact release. Keep its
+# numerical reference fixed instead of resolving a different timm at runtime.
+timm==1.0.28

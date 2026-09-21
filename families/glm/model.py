@@ -8,8 +8,6 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -122,20 +120,10 @@ class _GlmModel:
 
             return layer_idx, layer, q_raw.shape[0], intermediate
 
-        layer_results: list[tuple[int, WeightDict, int, int] | None] = [None] * num_layers
-        max_workers = min(8, max(1, os.cpu_count() or 1))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(_load_layer, i) for i in range(num_layers)]
-            for future in as_completed(futures):
-                layer_idx, layer, attention_size, mlp_size = future.result()
-                layer_results[layer_idx] = (layer_idx, layer, attention_size, mlp_size)
-
         attention_size = 0
         mlp_size = 0
-        for result in layer_results:
-            if result is None:
-                continue
-            _layer_idx, layer, layer_attention_size, layer_mlp_size = result
+        for layer_idx in range(num_layers):
+            _layer_idx, layer, layer_attention_size, layer_mlp_size = _load_layer(layer_idx)
             weights.update(layer)
             if attention_size == 0:
                 attention_size = layer_attention_size

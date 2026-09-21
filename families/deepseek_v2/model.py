@@ -948,7 +948,7 @@ def _stack_expert_weights(
     )
 
 
-def _add_native_routed_experts(
+def _add_routed_experts(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     weights: WeightDict,
@@ -960,56 +960,63 @@ def _add_native_routed_experts(
     scaled_weights: trt.ITensor,
     dtype: np.dtype,
 ) -> trt.ITensor:
-    """Routed-expert output computed by the native TensorRT MoE layer.
-
-    ``set_gated_weights`` takes one stacked tensor per projection covering every
-    expert, in the orientation this family already stores them: gate and up as
-    ``[experts, hidden, intermediate]`` and down as
-    ``[experts, intermediate, hidden]``. No transposition is required.
-
-    The layer applies the routing scores itself, so its output is the weighted
-    sum over the selected experts and only those experts are evaluated.
-    """
+    """Compute only the selected experts with portable TensorRT graph layers."""
     w_gate = _stack_expert_weights(weights, prefix, n_routed_experts, "w_gate", dtype)
     w_up = _stack_expert_weights(weights, prefix, n_routed_experts, "w_up", dtype)
     w_down = _stack_expert_weights(weights, prefix, n_routed_experts, "w_down", dtype)
 
-    # IMoELayer requires rank-3 hidden states [batch, tokens, hidden]; the
-    # decoder carries rank-2 [tokens, hidden].
-    def _with_batch_dim(tensor: trt.ITensor, last_dim: int) -> trt.ITensor:
-        shuffle = network.add_shuffle(tensor)
-        shuffle.reshape_dims = (1, -1, last_dim)
-        return shuffle.get_output(0)
-
     rank = len(tuple(inp.shape))
-    if rank == 2:
-        moe_hidden = _with_batch_dim(inp, hidden_size)
-        moe_indices = _with_batch_dim(top_indices, num_experts_per_tok)
-        moe_scores = _with_batch_dim(scaled_weights, num_experts_per_tok)
-    elif rank == 3:
-        moe_hidden, moe_indices, moe_scores = inp, top_indices, scaled_weights
-    else:
-        raise ValueError(f"DeepSeek-V2 MoE expects rank-2 or rank-3 hidden states, got rank {rank}")
+    if rank != 2:
+        raise ValueError(f"DeepSeek-V2 MoE expects rank-2 hidden states, got rank {rank}")
 
-    moe = network.add_moe(moe_hidden, moe_indices, moe_scores)
-    if moe is None:
-        raise RuntimeError(
-            "TensorRT rejected addMoE for this build; the per-expert path "
-            "should have been selected instead"
-        )
-    moe.set_gated_weights(
-        graph_ops.add_constant(network, w_gate.shape, w_gate, dtype=dtype),
-        graph_ops.add_constant(network, w_up.shape, w_up, dtype=dtype),
-        graph_ops.add_constant(network, w_down.shape, w_down, dtype=dtype),
-        trt.MoEActType.SILU,
-    )
-    routed_out = moe.get_output(0)
+    hidden = network.add_shuffle(inp)
+    hidden.reshape_dims = (-1, 1, 1, hidden_size)
 
-    if rank == 2:
-        restore = network.add_shuffle(routed_out)
-        restore.reshape_dims = (-1, hidden_size)
-        routed_out = restore.get_output(0)
-    return routed_out
+    def selected(values: np.ndarray) -> trt.ITensor:
+        packed = graph_ops.add_constant(network, values.shape, values, dtype=dtype)
+        if packed.dtype != inp.dtype:
+            packed = network.add_cast(packed, inp.dtype).get_output(0)
+        return network.add_gather(packed, top_indices, 0).get_output(0)
+
+    gate = network.add_matrix_multiply(
+        hidden.get_output(0),
+        trt.MatrixOperation.NONE,
+        selected(w_gate),
+        trt.MatrixOperation.NONE,
+    ).get_output(0)
+    up = network.add_matrix_multiply(
+        hidden.get_output(0),
+        trt.MatrixOperation.NONE,
+        selected(w_up),
+        trt.MatrixOperation.NONE,
+    ).get_output(0)
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID).get_output(0)
+    swish = network.add_elementwise(gate, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
+    gated = network.add_elementwise(swish, up, trt.ElementWiseOperation.PROD).get_output(0)
+    down = network.add_matrix_multiply(
+        gated,
+        trt.MatrixOperation.NONE,
+        selected(w_down),
+        trt.MatrixOperation.NONE,
+    ).get_output(0)
+    experts = network.add_shuffle(down)
+    experts.reshape_dims = (-1, num_experts_per_tok, hidden_size)
+    routing = network.add_shuffle(scaled_weights)
+    routing.reshape_dims = (-1, num_experts_per_tok, 1)
+    routing_weights = routing.get_output(0)
+    if routing_weights.dtype != experts.get_output(0).dtype:
+        routing_weights = network.add_cast(
+            routing_weights, experts.get_output(0).dtype
+        ).get_output(0)
+    weighted = network.add_elementwise(
+        experts.get_output(0), routing_weights, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    return network.add_reduce(
+        weighted,
+        trt.ReduceOperation.SUM,
+        1 << 1,
+        keep_dims=False,
+    ).get_output(0)
 
 
 def _add_moe_with_shared_experts(
@@ -1035,7 +1042,7 @@ def _add_moe_with_shared_experts(
     1. Router logits -> softmax/sigmoid -> top-k selection
     2. Scale weights: renormalize (norm_topk_prob=True) or multiply by
        routed_scaling_factor (norm_topk_prob=False)
-    3. Native TensorRT MoE routed-expert output.
+    3. TensorRT graph layers compute the selected routed experts.
     4. Compute shared expert output (always active)
     5. Final = routed_output + shared_output
     """
@@ -1055,7 +1062,7 @@ def _add_moe_with_shared_experts(
         routed_scaling_factor=routed_scaling_factor,
     )
 
-    result = _add_native_routed_experts(
+    result = _add_routed_experts(
         network,
         inp,
         weights,
