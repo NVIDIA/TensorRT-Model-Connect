@@ -932,6 +932,9 @@ jobs:
           brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements"
           # Checkpoints are downloaded by the trusted coordinator before the
           # family container switches Hugging Face into offline mode.
+          # Ubuntu host images do not ship ensurepip by default, so the
+          # staging venv needs python3-venv installed before creation.
+          brev exec "$INSTANCE_NAME" "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-venv"
           brev exec "$INSTANCE_NAME" "python3 -m venv /tmp/trtmc-community-stage-venv && /tmp/trtmc-community-stage-venv/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0"
 
           # Each selected family gets a fresh container on this one VM. The
