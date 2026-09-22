@@ -6,6 +6,7 @@ model: xlnet-base
 candidate:
   family: xlnet
   checkpoint: xlnet/xlnet-base-cased
+  revision: ceaa69c7bc5e512b5007106a7ccbb7daf24b2c79
   task: encoding
   precision: fp16
   bundle: xlnet-base.bundle

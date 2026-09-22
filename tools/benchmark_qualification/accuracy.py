@@ -1437,6 +1437,15 @@ def _candidate_outputs(
     if not isinstance(cells, list) or len(cells) != len(requests):
         raise QualificationError("trtmc-bench returned an invalid Accuracy result set")
     outputs = []
+    candidate_root = candidate_output.resolve()
+
+    def resolve_artifact(artifact_root: Path, value: str) -> str:
+        path = Path(value)
+        resolved = path.resolve() if path.is_absolute() else (artifact_root / path).resolve()
+        if not resolved.is_relative_to(artifact_root):
+            raise QualificationError("trtmc-bench returned an unsafe artifact path")
+        return str(resolved)
+
     for cell in cells:
         if not isinstance(cell, Mapping) or cell.get("status") != "completed":
             raise QualificationError("trtmc-bench reported a failed Accuracy request")
@@ -1447,21 +1456,14 @@ def _candidate_outputs(
         artifact_dir = cell.get("artifact_dir")
         if isinstance(artifact_dir, str) and artifact_dir:
             artifact_root = (candidate_output / artifact_dir).resolve()
-            if not artifact_root.is_relative_to(candidate_output.resolve()):
+            if not artifact_root.is_relative_to(candidate_root):
                 raise QualificationError("trtmc-bench returned an unsafe artifact directory")
             for name, value in tuple(resolved_summary.items()):
                 if name.endswith("_artifact") and isinstance(value, str):
-                    path = Path(value)
-                    resolved_summary[name] = str(
-                        path if path.is_absolute() else (artifact_root / path).resolve()
-                    )
+                    resolved_summary[name] = resolve_artifact(artifact_root, value)
                 elif name.endswith("_artifacts") and isinstance(value, list):
                     resolved_summary[name] = [
-                        str(
-                            Path(item)
-                            if Path(item).is_absolute()
-                            else (artifact_root / item).resolve()
-                        )
+                        resolve_artifact(artifact_root, item)
                         for item in value
                         if isinstance(item, str)
                     ]

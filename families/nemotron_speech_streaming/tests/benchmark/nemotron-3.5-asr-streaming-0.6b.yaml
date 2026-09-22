@@ -6,6 +6,7 @@ model: nemotron-3.5-asr-streaming-0.6b
 candidate:
   family: nemotron_speech_streaming
   checkpoint: nvidia/nemotron-3.5-asr-streaming-0.6b
+  revision: ea30d66debe3740a08b573244286791d423d6b3e
   task: transcription_streaming
   precision: fp16
   bundle: nemotron-3.5-asr-streaming-0.6b.bundle
@@ -46,6 +47,7 @@ performance:
     reference:
       runner: task-reference
       adapter: nemo-asr
+      adapter_options: {transcription_input: manifest, model_loader: prompted-nemo-archive}
       mode: pytorch-eager
       reference_backend: nemo_reference
       precision: fp32

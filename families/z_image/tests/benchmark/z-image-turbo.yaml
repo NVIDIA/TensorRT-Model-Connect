@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 schema_version: trtmc.qualification/v1
 model: z-image-turbo
-candidate: {family: z_image, checkpoint: Tongyi-MAI/Z-Image-Turbo, task: image_generation, precision: fp16, bundle: z-image-turbo.bundle, build: {fp32_layers: [2, 3, 4, 7, 8], image_height: 1024, image_width: 1024}}
+candidate: {family: z_image, checkpoint: Tongyi-MAI/Z-Image-Turbo, revision: f332072aa78be7aecdf3ee76d5c247082da564a6, task: image_generation, precision: fp16, bundle: z-image-turbo.bundle, build: {fp32_layers: [2, 3, 4, 7, 8], image_height: 1024, image_width: 1024}}
 reference_environment: {requirements: ../../requirements.txt}
 accuracy:
   - name: generated-media-parity

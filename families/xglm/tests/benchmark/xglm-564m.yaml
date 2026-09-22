@@ -6,6 +6,7 @@ model: xglm-564m
 candidate:
   family: xglm
   checkpoint: facebook/xglm-564M
+  revision: f3059f01b98ccc877c673149e0178c0e957660f9
   task: text_generation
   precision: fp16
   bundle: xglm-564m.bundle

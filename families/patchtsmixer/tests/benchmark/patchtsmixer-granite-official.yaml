@@ -47,6 +47,7 @@ performance:
     reference:
       runner: task-reference
       adapter: pytorch-timeseries
+      adapter_options: {reference_type: patchtsmixer}
       mode: pytorch-eager
       precision: fp32
       output_contract: forecast-parity

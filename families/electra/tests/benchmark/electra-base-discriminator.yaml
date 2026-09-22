@@ -6,6 +6,7 @@ model: electra-base-discriminator
 candidate:
   family: electra
   checkpoint: google/electra-base-discriminator
+  revision: 1ae76a97c7e84a4e640876a07453fccd636f0667
   task: encoding
   precision: fp16
   bundle: electra-base-discriminator.bundle

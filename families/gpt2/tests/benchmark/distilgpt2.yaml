@@ -6,6 +6,7 @@ model: distilgpt2
 candidate:
   family: gpt2
   checkpoint: distilbert/distilgpt2
+  revision: 2290a62682d06624634c1f46a6ad5be0f47f38aa
   task: text_generation
   precision: fp16
   bundle: distilgpt2.bundle

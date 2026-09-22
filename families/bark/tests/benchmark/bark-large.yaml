@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 schema_version: trtmc.qualification/v1
 model: bark-large
-candidate: {family: bark, checkpoint: suno/bark, task: audio_generation, precision: fp32, bundle: bark-large.bundle, build: {max_sequence_length: 1024}}
+candidate: {family: bark, checkpoint: suno/bark, revision: 70a8a7d34168586dc5d028fa9666aceade177992, task: audio_generation, precision: fp32, bundle: bark-large.bundle, build: {max_sequence_length: 1024}}
 reference_environment: {requirements: ../../requirements.txt}
 accuracy:
   - name: generated-audio-parity

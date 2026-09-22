@@ -6,6 +6,7 @@ model: xlm-roberta-base
 candidate:
   family: roberta
   checkpoint: FacebookAI/xlm-roberta-base
+  revision: e73636d4f797dec63c3081bb6ed5c7b0bb3f2089
   task: encoding
   precision: fp16
   bundle: xlm-roberta-base.bundle

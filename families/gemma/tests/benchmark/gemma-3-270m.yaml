@@ -6,6 +6,7 @@ model: gemma-3-270m
 candidate: &candidate
   family: gemma
   checkpoint: google/gemma-3-270m-it
+  revision: ac82b4e820549b854eebf28ce6dedaf9fdfa17b3
   task: text_generation
   precision: bf16
   bundle: gemma-3-270m.bundle

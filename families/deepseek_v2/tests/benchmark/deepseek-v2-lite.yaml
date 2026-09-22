@@ -6,6 +6,7 @@ model: deepseek-v2-lite
 candidate:
   family: deepseek_v2
   checkpoint: deepseek-ai/DeepSeek-V2-Lite
+  revision: 604d5664dddd88a0433dbae533b7fe9472482de0
   task: text_generation
   precision: fp16
   bundle: deepseek-v2-lite.bundle

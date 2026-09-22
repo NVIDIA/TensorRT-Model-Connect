@@ -6,6 +6,7 @@ model: gemma-2-2b
 candidate:
   family: gemma
   checkpoint: google/gemma-2-2b-it
+  revision: 299a8560bedf22ed1c72a8a11e7dce4a7f9f51f8
   task: text_generation
   precision: fp16
   bundle: gemma-2-2b.bundle

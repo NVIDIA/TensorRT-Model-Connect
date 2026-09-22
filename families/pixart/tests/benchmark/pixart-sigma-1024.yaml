@@ -5,6 +5,7 @@ model: pixart-sigma-1024
 candidate:
   family: pixart
   checkpoint: PixArt-alpha/PixArt-Sigma-XL-2-1024-MS
+  revision: e102b3591cc82e97071b8b4cb90d834d0c487207
   task: image_generation
   precision: fp16
   bundle: pixart-sigma-1024.bundle

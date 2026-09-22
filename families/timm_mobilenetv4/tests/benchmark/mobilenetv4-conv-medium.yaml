@@ -6,6 +6,7 @@ model: mobilenetv4-conv-medium
 candidate:
   family: timm_mobilenetv4
   checkpoint: timm/mobilenetv4_conv_medium.e500_r256_in1k
+  revision: ad66898c045c1b5223ea3f2c0830b74cf2e75bac
   task: image_to_class_scores
   precision: fp16
   bundle: mobilenetv4-conv-medium.bundle

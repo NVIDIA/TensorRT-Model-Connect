@@ -148,6 +148,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
+      adapter_options: {vision_task: object-detection}
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -246,6 +247,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: pytorch-timeseries
+      adapter_options: {reference_type: chronos-bolt}
       mode: pytorch-eager
       reference_backend: torch_reference
       timing_scope: task-model-call-wall
@@ -290,6 +292,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
+      adapter_options: {workflow: document-ocr-infer}
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-pipeline-call-wall
@@ -323,6 +326,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
+      adapter_options: {vision_task: image-features}
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -541,6 +545,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
+      adapter_options: {model_class: AutoModel}
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -603,6 +608,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
+      adapter_options: {workflow: grounded-generation}
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -742,6 +748,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: nemo-asr
+      adapter_options: {transcription_input: manifest, model_loader: prompted-nemo-archive}
       mode: pytorch-eager
       reference_backend: nemo_reference
       timing_scope: task-pipeline-call-wall
@@ -787,6 +794,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: pytorch-timeseries
+      adapter_options: {reference_type: patchtsmixer}
       mode: pytorch-eager
       reference_backend: torch_reference
       timing_scope: task-model-call-wall
@@ -800,6 +808,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: pytorch-timeseries
+      adapter_options: {reference_type: patchtst}
       mode: pytorch-eager
       reference_backend: torch_reference
       timing_scope: task-model-call-wall
@@ -839,6 +848,10 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
+      adapter_options:
+        model_class: AutoModelForCausalLM
+        workflow: single-image-token-chat
+        eager_attention: true
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -932,6 +945,8 @@ entries:
       output_contract: media-shape
       adapter_options:
         cpu_offload: true
+        always_negative_prompt: true
+        guidance_parameter: true_cfg_scale
   - id: qwen_moe.generate
     family: qwen_moe
     operation: generate
@@ -952,6 +967,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm
+      adapter_options: {model_class: AutoModelForImageTextToText}
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -985,6 +1001,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
+      adapter_options: {vision_task: point-prompted-segmentation}
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -999,6 +1016,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
+      adapter_options: {vision_task: text-prompted-segmentation}
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1032,6 +1050,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
+      adapter_options: {vision_task: semantic-segmentation}
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1077,6 +1096,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: pytorch-timeseries
+      adapter_options: {reference_type: timesfm}
       mode: pytorch-eager
       reference_backend: torch_reference
       timing_scope: task-model-call-wall
@@ -1515,6 +1535,8 @@ entries:
       adapter_options:
         model_id: Wan-AI/Wan2.2-TI2V-5B-Diffusers
         model_revision: b8fff7315c768468a5333511427288870b2e9635
+        vae_class: AutoencoderKLWan
+        vae_precision: fp32
   - id: whisper.transcribe
     family: whisper
     operation: transcribe
@@ -1599,6 +1621,8 @@ additional_profiles:
     inherit: llama.generate
   - model: nemotron-speech-streaming-en-0.6b
     inherit: nemotron_speech_streaming.transcribe
+    baseline:
+      adapter_options: {transcription_input: manifest, model_loader: nemo-pretrained}
   - model: paraphrase-multilingual-minilm-l12-v2
     inherit: bert.encode
   - model: patchtst-granite-official

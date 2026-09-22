@@ -6,6 +6,7 @@ model: vgg16-tv-in1k
 candidate:
   family: timm_vgg
   checkpoint: timm/vgg16.tv_in1k
+  revision: b8d8aa2dd860af9233c8c67385a8097fd6c35d3f
   task: classification
   precision: fp16
   bundle: vgg16-tv-in1k.bundle

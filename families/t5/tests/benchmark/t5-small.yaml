@@ -6,6 +6,7 @@ model: t5-small
 candidate:
   family: t5
   checkpoint: google-t5/t5-small
+  revision: df1b051c49625cf57a3d0d8d3863ed4d13564fe4
   task: text_generation
   precision: fp16
   bundle: t5-small.bundle

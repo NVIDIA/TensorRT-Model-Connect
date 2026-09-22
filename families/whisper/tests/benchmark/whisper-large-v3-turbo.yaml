@@ -6,6 +6,7 @@ model: whisper-large-v3-turbo
 candidate:
   family: whisper
   checkpoint: openai/whisper-large-v3-turbo
+  revision: 41f01f3fe87f28c78e2fbf8b568835947dd65ed9
   task: transcription
   precision: fp32
   bundle: whisper-large-v3-turbo.bundle

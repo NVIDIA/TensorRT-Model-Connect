@@ -6,6 +6,7 @@ model: distilbert-base-uncased
 candidate:
   family: distilbert
   checkpoint: distilbert/distilbert-base-uncased
+  revision: 12040accade4e8a0f71eabdb258fecc2e7e948be
   task: encoding
   precision: fp16
   bundle: distilbert-base-uncased.bundle

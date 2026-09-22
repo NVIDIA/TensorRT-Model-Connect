@@ -6,6 +6,7 @@ model: resnet50-a1-in1k
 candidate:
   family: timm_resnet
   checkpoint: timm/resnet50.a1_in1k
+  revision: 767268603ca0cb0bfe326fa87277f19c419566ef
   task: image_to_class_scores
   precision: fp16
   bundle: resnet50-a1-in1k.bundle

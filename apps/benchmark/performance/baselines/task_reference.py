@@ -430,7 +430,7 @@ def _load_tts(
     torch.use_deterministic_algorithms(True)
     device = torch.device("cuda")
     prompt = str(request.get("prompt", ""))
-    if arguments.family == "magpie_tts":
+    if arguments.adapter == "nemo-tts":
         import fsspec
         from huggingface_hub import hf_hub_download
         from nemo.collections.tts.models import MagpieTTSModel
@@ -503,7 +503,7 @@ def _load_tts(
                 "_audio_f32": audio.detach().float().cpu().reshape(-1).numpy(),
             }
 
-    if arguments.family == "magpie_tts":
+    if arguments.adapter == "nemo-tts":
         return Session(
             invoke,
             "nemo",
@@ -515,13 +515,12 @@ def _load_tts(
 
 def _load_nemo_asr_reference_model(
     arguments: argparse.Namespace,
+    options: Mapping[str, Any],
     *,
     device: Any,
 ) -> Any:
-    if (
-        arguments.family == "nemotron_speech_streaming"
-        and "nemotron-3.5-asr-streaming" in arguments.model.lower()
-    ):
+    loader = str(options.get("model_loader", "nemo-pretrained"))
+    if loader == "prompted-nemo-archive":
         from apps.benchmark.performance.baselines.audio_reference import (
             load_nemotron35_asr_model,
         )
@@ -532,6 +531,8 @@ def _load_nemo_asr_reference_model(
             local_files_only=arguments.local_files_only,
             device=str(device),
         )
+    if loader != "nemo-pretrained":
+        raise ValueError(f"unsupported NeMo ASR model_loader: {loader}")
 
     import nemo.collections.asr as nemo_asr
 
@@ -553,7 +554,7 @@ def _disable_nemo_asr_cuda_graphs(model: Any) -> bool:
 def _load_asr(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
-    _options: Mapping[str, Any],
+    options: Mapping[str, Any],
 ) -> Session:
     import torch
     from apps.benchmark.performance.baselines.audio_reference import (
@@ -611,8 +612,8 @@ def _load_asr(
                 "output_tokens": len(token_ids),
             }
 
-    elif arguments.family in {"canary", "nemotron_speech_streaming"}:
-        model = _load_nemo_asr_reference_model(arguments, device=device).eval().to(device)
+    elif arguments.adapter == "nemo-asr":
+        model = _load_nemo_asr_reference_model(arguments, options, device=device).eval().to(device)
         _disable_nemo_asr_cuda_graphs(model)
         reference_dtype = _torch_dtype(torch, arguments.precision)
         autocast_dtype = reference_dtype if arguments.precision != "fp32" else torch.float16
@@ -622,7 +623,8 @@ def _load_asr(
         write_wav_pcm16(Path(temporary.name), audio, target_rate)
 
         transcription_input: str | list[str]
-        if arguments.family == "nemotron_speech_streaming":
+        transcription_format = str(options.get("transcription_input", "audio-files"))
+        if transcription_format == "manifest":
             manifest = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
             manifest.close()
             atexit.register(Path(manifest.name).unlink, missing_ok=True)
@@ -636,8 +638,12 @@ def _load_asr(
                 record["lang"] = language
             Path(manifest.name).write_text(json.dumps(record) + "\n", encoding="utf-8")
             transcription_input = manifest.name
-        else:
+        elif transcription_format == "audio-files":
             transcription_input = [temporary.name]
+        else:
+            raise ValueError(
+                f"unsupported NeMo ASR transcription_input: {transcription_format}"
+            )
 
         def invoke() -> Mapping[str, Any]:
             with torch.autocast(
@@ -681,10 +687,8 @@ def _load_asr(
                 "output_tokens": len(token_ids),
             }
 
-    framework = (
-        "nemo" if arguments.family in {"canary", "nemotron_speech_streaming"} else "transformers"
-    )
-    if arguments.family in {"canary", "nemotron_speech_streaming"}:
+    framework = "nemo" if arguments.adapter == "nemo-asr" else "transformers"
+    if arguments.adapter == "nemo-asr":
         return Session(
             invoke,
             framework,
@@ -696,13 +700,14 @@ def _load_asr(
 
 
 def _load_vlm_model(
-    transformers_module: Any, family: str, model_id: str, kwargs: dict[str, Any]
+    transformers_module: Any, class_name: str, model_id: str, kwargs: dict[str, Any]
 ) -> Any:
-    class_name = {
-        "internvl": "AutoModel",
-        "phi4_multimodal": "AutoModelForCausalLM",
-        "qwen_vl": "AutoModelForImageTextToText",
-    }[family]
+    if class_name not in {
+        "AutoModel",
+        "AutoModelForCausalLM",
+        "AutoModelForImageTextToText",
+    }:
+        raise ValueError(f"unsupported vision-language model_class: {class_name}")
     model_class = getattr(transformers_module, class_name)
     return model_class.from_pretrained(model_id, **kwargs)
 
@@ -852,12 +857,15 @@ def _vl_prompt_has_image_placeholder(text: str) -> bool:
 def _load_vlm(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
-    _options: Mapping[str, Any],
+    options: Mapping[str, Any],
 ) -> Session:
-    if arguments.family == "deepseek_ocr":
+    workflow = str(options.get("workflow", "chat"))
+    if workflow == "document-ocr-infer":
         return _load_deepseek_ocr(arguments, request)
-    if arguments.family == "locateanything":
+    if workflow == "grounded-generation":
         return _load_locateanything(arguments, request)
+    if workflow not in {"chat", "single-image-token-chat"}:
+        raise ValueError(f"unsupported vision-language workflow: {workflow}")
 
     import torch
     import transformers
@@ -867,7 +875,7 @@ def _load_vlm(
     device = torch.device("cuda")
     processor = AutoProcessor.from_pretrained(arguments.model, **_processor_kwargs(arguments))
     load_options = _load_kwargs(arguments, torch)
-    if arguments.family == "phi4_multimodal":
+    if bool(options.get("eager_attention", False)):
         config = transformers.AutoConfig.from_pretrained(
             arguments.model, **_processor_kwargs(arguments)
         )
@@ -875,7 +883,12 @@ def _load_vlm(
         config._attn_implementation_internal = "eager"
         load_options.update({"config": config, "attn_implementation": "eager"})
     model = (
-        _load_vlm_model(transformers, arguments.family, arguments.model, load_options)
+        _load_vlm_model(
+            transformers,
+            str(options.get("model_class", "AutoModelForImageTextToText")),
+            arguments.model,
+            load_options,
+        )
         .eval()
         .to(device)
     )
@@ -883,7 +896,7 @@ def _load_vlm(
     prompt = str(request.get("prompt", ""))
     max_new_tokens = int(request.get("max_new_tokens", 16))
 
-    if arguments.family == "phi4_multimodal":
+    if workflow == "single-image-token-chat":
         messages = [{"role": "user", "content": f"<|image_1|>{prompt}"}]
         template_owner = getattr(processor, "tokenizer", processor)
     else:
@@ -1053,8 +1066,8 @@ def _diffusion_component_precision_contract(
         return ""
     if contract != _PIXART_TRTMC_MIXED_PRECISION:
         raise ValueError(f"unsupported diffusion component precision contract: {contract}")
-    if arguments.family != "pixart" or arguments.precision != "fp16":
-        raise ValueError(f"{contract} requires family=pixart and precision=fp16")
+    if arguments.precision != "fp16":
+        raise ValueError(f"{contract} requires precision=fp16")
     return contract
 
 
@@ -1129,11 +1142,19 @@ def _diffusion_pipeline(
             ),
             local_files_only=arguments.local_files_only,
         )
-    if arguments.family == "wan2_2_ti2v":
-        load_options["vae"] = diffusers.AutoencoderKLWan.from_pretrained(
+    vae_class_name = options.get("vae_class")
+    if vae_class_name is not None:
+        if not isinstance(vae_class_name, str) or not vae_class_name.startswith("Autoencoder"):
+            raise ValueError("diffusion adapter_options.vae_class must name an Autoencoder class")
+        try:
+            vae_class = getattr(diffusers, vae_class_name)
+        except AttributeError as error:
+            raise ValueError(f"unsupported Diffusers VAE class: {vae_class_name}") from error
+        vae_precision = str(options.get("vae_precision", arguments.precision))
+        load_options["vae"] = vae_class.from_pretrained(
             model_source,
             subfolder="vae",
-            torch_dtype=torch_module.float32,
+            torch_dtype=_torch_dtype(torch_module, vae_precision),
             **(
                 {"revision": requested_revision}
                 if requested_revision and model_source == model_id
@@ -1200,7 +1221,11 @@ def _load_diffusers(
         prompt_value = [prompt] * batch_size if batch_size > 1 else prompt
     values: dict[str, Any] = {"prompt": prompt_value}
     negative_prompt = str(request.get("negative_prompt", ""))
-    if negative_prompt or "negative_prompt" in request or arguments.family == "qwen_image":
+    if (
+        negative_prompt
+        or "negative_prompt" in request
+        or bool(options.get("always_negative_prompt", False))
+    ):
         values["negative_prompt"] = negative_prompt
     steps = int(request.get("num_steps", -1))
     if steps > 0:
@@ -1234,13 +1259,15 @@ def _load_diffusers(
         if value is not None:
             values[name] = float(value)
     cfg_scale = float(request.get("cfg_scale", -1.0))
-    if cfg_scale >= 0 and arguments.family != "qwen_image":
+    guidance_parameter = str(options.get("guidance_parameter", "guidance_scale"))
+    if guidance_parameter not in {"guidance_scale", "true_cfg_scale"}:
+        raise ValueError(f"unsupported diffusion guidance_parameter: {guidance_parameter}")
+    if cfg_scale >= 0 and guidance_parameter != "true_cfg_scale":
         values["cfg_scale"] = cfg_scale
     if bool(request.get("no_refiner", False)):
         values["no_refiner"] = True
     guidance = float(request.get("guidance_scale", -1.0))
-    if arguments.family == "qwen_image":
-        # Native Qwen guidance is true CFG; cfg_scale remains a legacy fallback.
+    if guidance_parameter == "true_cfg_scale":
         true_cfg_scale = guidance if guidance >= 0 else cfg_scale
         if true_cfg_scale >= 0:
             values["true_cfg_scale"] = true_cfg_scale
@@ -1546,7 +1573,7 @@ def _patchtst_task(config: Any) -> str:
 def _load_timeseries(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
-    _options: Mapping[str, Any],
+    options: Mapping[str, Any],
 ) -> Session:
     import torch
     import transformers
@@ -1554,7 +1581,8 @@ def _load_timeseries(
     device = torch.device("cuda")
     dtype = _torch_dtype(torch, arguments.precision)
     task_id = _selected_task(arguments)
-    if arguments.family == "chronos_bolt":
+    reference_type = str(options.get("reference_type", ""))
+    if reference_type == "chronos-bolt":
         from chronos import ChronosBoltPipeline
 
         chronos_options = _processor_kwargs(arguments)
@@ -1586,7 +1614,7 @@ def _load_timeseries(
     config = transformers.AutoConfig.from_pretrained(
         arguments.model, **_processor_kwargs(arguments)
     )
-    if arguments.family == "timesfm":
+    if reference_type == "timesfm":
         model = (
             transformers.TimesFmModelForPrediction.from_pretrained(
                 arguments.model, **_load_kwargs(arguments, torch)
@@ -1620,7 +1648,9 @@ def _load_timeseries(
             return _forecast_summary(output, task_id)
 
     else:
-        is_mixer = arguments.family == "patchtsmixer"
+        if reference_type not in {"patchtsmixer", "patchtst"}:
+            raise ValueError(f"unsupported time-series reference_type: {reference_type}")
+        is_mixer = reference_type == "patchtsmixer"
         if is_mixer:
             model_class = transformers.PatchTSMixerForPrediction
             output_name = "prediction_outputs"
@@ -1695,7 +1725,7 @@ def _load_timeseries(
 def _load_vision(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
-    _options: Mapping[str, Any],
+    options: Mapping[str, Any],
 ) -> Session:
     import torch
     from PIL import Image
@@ -1706,6 +1736,7 @@ def _load_vision(
     width, height = image.size
     kwargs = _load_kwargs(arguments, torch)
     processor_kwargs = _processor_kwargs(arguments)
+    vision_task = str(options.get("vision_task", ""))
 
     if arguments.adapter == "timm-classification":
         import timm
@@ -1725,7 +1756,7 @@ def _load_vision(
                 logits = model(inputs)
             return {"top_class": int(logits.argmax(dim=-1)[0]), **_tensor_summary(logits)}
 
-    elif arguments.family == "detr":
+    elif vision_task == "object-detection":
         processor = transformers.AutoImageProcessor.from_pretrained(
             arguments.model, **processor_kwargs
         )
@@ -1760,7 +1791,7 @@ def _load_vision(
                 "units": "pixels",
             }
 
-    elif arguments.family == "dinov3":
+    elif vision_task == "image-features":
         processor = transformers.AutoImageProcessor.from_pretrained(
             arguments.model, **processor_kwargs
         )
@@ -1779,7 +1810,7 @@ def _load_vision(
                 "pooler_output_shape": _tensor_summary(outputs.pooler_output)["shape"],
             }
 
-    elif arguments.family == "segformer":
+    elif vision_task == "semantic-segmentation":
         processor = transformers.AutoImageProcessor.from_pretrained(
             arguments.model, **processor_kwargs
         )
@@ -1806,7 +1837,7 @@ def _load_vision(
                 "width": int(mask.shape[1]),
             }
 
-    elif arguments.family == "sam3":
+    elif vision_task == "text-prompted-segmentation":
         processor = _load_sam3_processor(transformers, arguments.model, processor_kwargs)
         model = transformers.Sam3Model.from_pretrained(arguments.model, **kwargs).eval().to(device)
         inputs = _to_device(
@@ -1840,7 +1871,7 @@ def _load_vision(
                 "width": width,
             }
 
-    else:
+    elif vision_task == "point-prompted-segmentation":
         processor = transformers.SamProcessor.from_pretrained(arguments.model, **processor_kwargs)
         model = transformers.SamModel.from_pretrained(arguments.model, **kwargs).eval().to(device)
         points = [
@@ -1872,6 +1903,9 @@ def _load_vision(
                 "height": height,
                 "width": width,
             }
+
+    else:
+        raise ValueError(f"unsupported Transformers vision_task: {vision_task}")
 
     framework = "timm" if arguments.adapter == "timm-classification" else "transformers"
     return Session(invoke, framework)
@@ -3020,16 +3054,19 @@ def _environment() -> dict[str, Any]:
 def run(arguments: argparse.Namespace) -> int:
     if arguments.warmup < 0 or arguments.iterations <= 0:
         raise ValueError("warmup must be non-negative and iterations must be positive")
+    options = _json_object(arguments.adapter_options_json, "--adapter-options-json")
     expected_mode = "pytorch-eager" if arguments.adapter in PYTORCH_ADAPTERS else "hf-eager"
     supported_modes = {expected_mode}
-    if arguments.adapter == "pytorch-timeseries" and arguments.family == "chronos_bolt":
+    if (
+        arguments.adapter == "pytorch-timeseries"
+        and options.get("reference_type") == "chronos-bolt"
+    ):
         supported_modes.add("torch-compile")
     if arguments.adapter == "hf-transformers-embedding":
         supported_modes.add("torch-compile")
     if arguments.mode not in supported_modes:
         raise ValueError(f"adapter {arguments.adapter} requires one of {sorted(supported_modes)}")
     request = flatten_config(_json_object(arguments.request_json, "--request-json"))
-    options = _json_object(arguments.adapter_options_json, "--adapter-options-json")
     configured_timing = _json_object(arguments.timing_contract_json, "--timing-contract-json")
     fields = ("timing_scope", "input_preparation_included", "asset_loading_included")
     expected_timing = None

@@ -6,6 +6,7 @@ model: convbert-base
 candidate:
   family: convbert
   checkpoint: YituTech/conv-bert-base
+  revision: 5cb451936b5c4a96562d8b146de85f64f9cf2c22
   task: encoding
   precision: fp16
   bundle: convbert-base.bundle

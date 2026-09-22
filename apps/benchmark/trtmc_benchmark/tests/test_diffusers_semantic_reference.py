@@ -220,12 +220,20 @@ def test_invalid_batch_requests_do_not_call_pipeline(recording_diffusers, payloa
 @pytest.mark.parametrize("class_name", ["QwenImageEditPipeline", "QwenImageEditPlusPipeline"])
 def test_qwen_edit_checkpoint_selects_edit_class_and_receives_full_request(recording_diffusers, tmp_path, image_key, class_name):
     recorded = recording_diffusers
-    arguments = recorded.arguments(class_name, "qwen_image", "images_text_to_image_edit")
+    arguments = recorded.arguments(class_name, "synthetic", "images_text_to_image_edit")
     image = tmp_path / "condition.ppm"
     image.write_bytes(b"P6\n1 1\n255\n\xff\x00\x80")
     request = {"prompt": "Make it blue", image_key: [image.name] if image_key == "image_paths" else image.name,
                "config": {"seed": 2**32 - 1, "num_steps": 5, "guidance_scale": 3.25, "negative_prompt": " "}}
-    session = task_reference._load_diffusers(arguments, task_reference.flatten_config(request), {"cpu_offload": True})
+    session = task_reference._load_diffusers(
+        arguments,
+        task_reference.flatten_config(request),
+        {
+            "cpu_offload": True,
+            "always_negative_prompt": True,
+            "guidance_parameter": "true_cfg_scale",
+        },
+    )
     session.invoke()
     pipeline = recorded.constructors[0]
     assert pipeline.__class__.__name__ == class_name
@@ -256,8 +264,12 @@ def test_qwen_edit_checkpoint_selects_edit_class_and_receives_full_request(recor
 @pytest.mark.parametrize("negative", [{}, {"negative_prompt": ""}])
 def test_qwen_native_guidance_controls_true_cfg_and_preserves_empty_negative_prompt(recording_diffusers, controls, expected, negative):
     recorded = recording_diffusers
-    arguments = recorded.arguments("QwenImagePipeline", "qwen_image")
-    session = task_reference._load_diffusers(arguments, {"prompt": "a", **negative, **controls}, {})
+    arguments = recorded.arguments("QwenImagePipeline", "synthetic")
+    session = task_reference._load_diffusers(
+        arguments,
+        {"prompt": "a", **negative, **controls},
+        {"always_negative_prompt": True, "guidance_parameter": "true_cfg_scale"},
+    )
     session.invoke()
     assert recorded.calls[0]["true_cfg_scale"] == expected
     assert recorded.calls[0]["guidance_scale"] is None
@@ -280,7 +292,9 @@ def test_non_qwen_guidance_retains_provider_parameter(recording_diffusers):
 ])
 def test_qwen_edit_image_contract_fails_before_invocation(recording_diffusers, inputs, match):
     recorded = recording_diffusers
-    arguments = recorded.arguments("QwenImageEditPlusPipeline", "qwen_image", "images_text_to_image_edit")
+    arguments = recorded.arguments(
+        "QwenImageEditPlusPipeline", "synthetic", "images_text_to_image_edit"
+    )
     with pytest.raises(ValueError, match=match):
         task_reference._load_diffusers(arguments, {"prompt": "edit", **inputs}, {})
     assert recorded.calls == recorded.images == []
@@ -288,23 +302,39 @@ def test_qwen_edit_image_contract_fails_before_invocation(recording_diffusers, i
 
 def test_conditioning_image_is_never_silently_filtered(recording_diffusers):
     recorded = recording_diffusers
-    arguments = recorded.arguments("QwenImagePipeline", "qwen_image", "images_text_to_image_edit")
+    arguments = recorded.arguments("QwenImagePipeline", "synthetic", "images_text_to_image_edit")
     with pytest.raises(ValueError, match="does not accept conditioning image"):
         task_reference._load_diffusers(arguments, {"prompt": "edit", "image_paths": ["condition.ppm"]}, {})
     assert recorded.calls == []
 
 
-@pytest.mark.parametrize("family,class_name,contract,component_key,subfolder", [
-    ("pixart", "PixArtSigmaPipeline", "pixart_fp16_dit_fp32_t5", "text_encoder", "text_encoder"),
-    ("wan2_2_ti2v", "WanPipeline", "", "vae", "vae"),
+@pytest.mark.parametrize("class_name,options,component_key,subfolder", [
+    (
+        "PixArtSigmaPipeline",
+        {"component_precision_contract": "pixart_fp16_dit_fp32_t5"},
+        "text_encoder",
+        "text_encoder",
+    ),
+    (
+        "WanPipeline",
+        {"vae_class": "AutoencoderKLWan", "vae_precision": "fp32"},
+        "vae",
+        "vae",
+    ),
 ])
 @pytest.mark.parametrize("local_files_only", [True, False])
 def test_checkpoint_owned_loader_preserves_component_precision_and_revision(
-    recording_diffusers, family, class_name, contract, component_key, subfolder, local_files_only,
+    recording_diffusers, class_name, options, component_key, subfolder, local_files_only,
 ):
     recorded = recording_diffusers
-    arguments = recorded.arguments(class_name, family, precision="fp16", local_files_only=local_files_only)
-    options = {"component_precision_contract": contract, "model_revision": "override-revision", "trust_remote_code": True}
+    arguments = recorded.arguments(
+        class_name, "synthetic", precision="fp16", local_files_only=local_files_only
+    )
+    options = {
+        **options,
+        "model_revision": "override-revision",
+        "trust_remote_code": True,
+    }
     session = task_reference._load_diffusers(arguments, {"prompt": "a"}, options)
     session.invoke()
     source, kwargs, component = recorded.components[0]
@@ -316,7 +346,7 @@ def test_checkpoint_owned_loader_preserves_component_precision_and_revision(
         "torch_dtype": "fp16", component_key: component, "local_files_only": local_files_only,
         "trust_remote_code": True, **revision})]
     assert recorded.constructors[0].__class__.__name__ == class_name
-    if contract:
+    if options.get("component_precision_contract"):
         transformer = recorded.constructors[0].transformer
         assert len(transformer.pre_hooks) == len(transformer.hooks) == 1
         assert transformer.pre_hooks[0][1] == {"with_kwargs": True}

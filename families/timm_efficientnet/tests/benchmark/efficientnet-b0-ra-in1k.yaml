@@ -6,6 +6,7 @@ model: efficientnet-b0-ra-in1k
 candidate:
   family: timm_efficientnet
   checkpoint: timm/efficientnet_b0.ra_in1k
+  revision: 1b5383e5f79cc0f7fc067e372f8f26a5fa73f26a
   task: image_to_class_scores
   precision: fp16
   bundle: efficientnet-b0-ra-in1k.bundle

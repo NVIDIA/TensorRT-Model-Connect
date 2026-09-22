@@ -6,6 +6,7 @@ model: riva-translate-4b
 candidate:
   family: mistral
   checkpoint: nvidia/Riva-Translate-4B-Instruct-v1.1
+  revision: 1eb944ce9f2717d7be6b7b7c2310f7c58b35d10b
   task: text_generation
   precision: fp16
   bundle: riva-translate-4b.bundle

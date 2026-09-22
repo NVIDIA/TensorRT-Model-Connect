@@ -6,6 +6,7 @@ model: nemotron-nano-4b
 candidate:
   family: llama
   checkpoint: nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1
+  revision: d552708a9d575fa8d4a690b988fd870d65279f98
   task: text_generation
   precision: fp16
   bundle: nemotron-nano-4b.bundle

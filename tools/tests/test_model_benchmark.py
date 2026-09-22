@@ -80,7 +80,8 @@ def test_qualification_yaml_preserves_merge_keys(tmp_path: Path) -> None:
     profile.write_text(
         "schema_version: trtmc.qualification/v1\n"
         "model: example-model\n"
-        "candidate: {family: example, checkpoint: example/model, task: example_task, "
+        "candidate: {family: example, checkpoint: example/model, revision: "
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, task: example_task, "
         "precision: fp32}\n"
         "reference: &reference {runner: hf-transformers, mode: hf-eager}\n"
         "accuracy: []\n"
@@ -185,6 +186,7 @@ def test_l0_configs_outside_the_benchmark_folder_are_not_discovered(
         "candidate:\n"
         "  family: example\n"
         "  checkpoint: example/model\n"
+        "  revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "  task: text_generation\n"
         "  precision: fp16\n"
         "accuracy: []\n"
@@ -218,6 +220,31 @@ def test_trusted_remote_code_requires_an_immutable_revision(
     )
 
     with pytest.raises(QualificationError, match="immutable 40-character revision"):
+        discover(tmp_path)
+
+
+@pytest.mark.parametrize("revision", [None, "main", "abc1234"])
+def test_remote_checkpoint_requires_an_immutable_revision(
+    tmp_path: Path, revision: str | None
+) -> None:
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
+    profile.parent.mkdir(parents=True)
+    revision_line = "" if revision is None else f"  revision: {revision}\n"
+    profile.write_text(
+        "schema_version: trtmc.qualification/v1\n"
+        "model: example\n"
+        "candidate:\n"
+        "  family: example\n"
+        "  checkpoint: example/model\n"
+        f"{revision_line}"
+        "  task: text_generation\n"
+        "  precision: fp16\n"
+        "accuracy: []\n"
+        "performance: []\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QualificationError, match="remote checkpoint requires an immutable"):
         discover(tmp_path)
 
 
@@ -256,6 +283,7 @@ def test_one_model_file_owns_multiple_cases_without_testcase_indirection(
         "candidate:\n"
         "  family: example\n"
         "  checkpoint: example/model\n"
+        "  revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "  task: text_generation\n"
         "  precision: fp16\n"
         "accuracy:\n"
@@ -288,6 +316,7 @@ def test_family_environment_hook_is_discovered_with_the_model_profiles(tmp_path:
         "candidate:\n"
         "  family: example\n"
         "  checkpoint: example/model\n"
+        "  revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "  task: text_generation\n"
         "  precision: fp16\n"
         "accuracy:\n"
@@ -2205,6 +2234,83 @@ def test_candidate_descriptor_uses_family_environment_model_directory(
     assert json.loads(descriptor.read_text(encoding="utf-8"))["hf_id"] == str(
         model_directory.resolve()
     )
+
+
+@pytest.mark.parametrize("artifact_path", ["../outside.npy", "absolute"])
+def test_accuracy_rejects_candidate_artifacts_outside_the_cell_directory(
+    tmp_path: Path, monkeypatch, artifact_path: str
+) -> None:
+    case = _example_case(tmp_path)
+    context = RuntimeContext(
+        repository=REPOSITORY,
+        artifacts=tmp_path / "artifacts",
+        data_root=tmp_path / "data",
+        environment_root=tmp_path / "envs",
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_root=None,
+        trtmc_bench=tmp_path / "trtmc-bench",
+        worker=None,
+        datasets={},
+        reference_pythons={},
+        no_build=True,
+        verbose=False,
+    )
+    outside = tmp_path / "outside.npy"
+    reported_path = str(outside.resolve()) if artifact_path == "absolute" else artifact_path
+
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "require_candidate",
+        lambda _context: (tmp_path / "worker", tmp_path / "runtime"),
+    )
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "write_model_descriptor",
+        lambda *_args, **_kwargs: tmp_path / "model.json",
+    )
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "prepare_bundle",
+        lambda *_args, **_kwargs: tmp_path / "model.bundle",
+    )
+    monkeypatch.setattr(
+        qualification_accuracy,
+        "benchmark_executable",
+        lambda *_args, **_kwargs: tmp_path / "trtmc-bench",
+    )
+
+    def candidate(command, *_args, **_kwargs):
+        candidate_output = Path(command[command.index("--output") + 1])
+        candidate_output.mkdir(parents=True)
+        (candidate_output / "result.json").write_text(
+            json.dumps(
+                {
+                    "cells": [
+                        {
+                            "status": "completed",
+                            "artifact_dir": "artifacts/case",
+                            "output_summary": {"mask_artifact": reported_path},
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(qualification_accuracy, "run_command", candidate)
+
+    output = tmp_path / "qualification"
+    output.mkdir()
+    with pytest.raises(QualificationError, match="unsafe artifact path"):
+        qualification_accuracy._candidate_outputs(
+            case,
+            context,
+            output,
+            "segment",
+            [{"request": {"image_path": "/data/image.jpg"}}],
+        )
 
 
 @pytest.mark.parametrize(

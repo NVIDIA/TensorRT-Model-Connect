@@ -6,6 +6,7 @@ model: whisper-tiny-fp16
 candidate:
   family: whisper
   checkpoint: openai/whisper-tiny
+  revision: 169d4a4341b33bc18d8881c4b69c2e104e1cc0af
   task: transcription
   precision: fp16
   bundle: whisper-tiny-fp16.bundle

@@ -6,6 +6,7 @@ model: canary-1b-v2
 candidate:
   family: canary
   checkpoint: nvidia/canary-1b-v2
+  revision: d455706339a6b32e1aa40f82c713a482a0c938e2
   task: transcription
   precision: fp16
   bundle: canary-1b-v2.bundle

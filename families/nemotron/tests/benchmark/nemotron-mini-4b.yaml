@@ -6,6 +6,7 @@ model: nemotron-mini-4b
 candidate:
   family: nemotron
   checkpoint: nvidia/Nemotron-Mini-4B-Instruct
+  revision: 791833e92ebddb0bc2c1007f6d2b6764f886a2ae
   task: text_generation
   precision: fp16
   bundle: nemotron-mini-4b.bundle

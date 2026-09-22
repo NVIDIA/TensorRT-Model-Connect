@@ -6,6 +6,7 @@ model: starcoder2-3b
 candidate:
   family: starcoder2
   checkpoint: bigcode/starcoder2-3b
+  revision: 733247c55e3f73af49ce8e9c7949bf14af205928
   task: text_generation
   precision: fp16
   bundle: starcoder2-3b.bundle

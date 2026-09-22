@@ -6,6 +6,7 @@ model: mobilenetv2-100-ra-in1k
 candidate:
   family: timm_mobilenetv2
   checkpoint: timm/mobilenetv2_100.ra_in1k
+  revision: 5afa12513b048c79b9147a5d210e9bdc50035481
   task: image_to_class_scores
   precision: fp16
   bundle: mobilenetv2-100-ra-in1k.bundle

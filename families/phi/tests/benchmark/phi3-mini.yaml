@@ -6,6 +6,7 @@ model: phi3-mini
 candidate:
   family: phi
   checkpoint: microsoft/Phi-3-mini-4k-instruct
+  revision: f39ac1d28e925b323eae81227eaba4464caced4e
   task: text_generation
   precision: fp16
   bundle: phi3-mini.bundle

@@ -6,6 +6,7 @@ model: camembert-base
 candidate:
   family: roberta
   checkpoint: almanach/camembert-base
+  revision: a75967561c78f2aa81cc41045378d3b4ee25af9e
   task: encoding
   precision: fp16
   bundle: camembert-base.bundle

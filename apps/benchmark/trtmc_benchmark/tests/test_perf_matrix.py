@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import sys
 from contextlib import nullcontext
 from copy import deepcopy
@@ -23,10 +24,38 @@ from apps.benchmark.performance.baselines import (
     sana_wm_reference,
     task_reference,
 )
+from apps.benchmark.trtmc_benchmark.types import ModelDescriptor
 
 
 REPO = Path(__file__).resolve().parents[4]
 SUITE = REPO / "apps/benchmark/performance/release.yaml"
+
+
+def test_shared_reference_runner_never_uses_family_identity_to_select_behavior() -> None:
+    tree = ast.parse(Path(task_reference.__file__).read_text(encoding="utf-8"))
+    parents: dict[ast.AST, ast.AST] = {
+        child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+    }
+    family_reads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "family"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "arguments"
+    ]
+    controls = [
+        node.test
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.If, ast.IfExp))
+    ] + [node.subject for node in ast.walk(tree) if isinstance(node, ast.Match)]
+    violations = [
+        node.lineno
+        for node in family_reads
+        if any(node in ast.walk(control) for control in controls)
+        or (isinstance(parents.get(node), ast.Call) and node in parents[node].args)
+    ]
+    assert violations == []
 
 
 def test_reference_config_preserves_explicit_values_without_defaults() -> None:
@@ -235,15 +264,50 @@ def test_translation_and_config_reach_reference_generate(monkeypatch) -> None:
 
 
 def test_reference_only_source_language_placement_reaches_hf_runner(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     _, environment = _environment(tmp_path)
-    _, entries, _ = perf.load_suite(SUITE)
-    original = next(row for row in entries if row["id"] == "m2m_100.generate")
+    manifest = tmp_path / "synthetic" / "tests" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps({"task": "text_translation", "reference_precision": "fp16"}),
+        encoding="utf-8",
+    )
+    model = ModelDescriptor(
+        name="synthetic-translator",
+        hf_id="example/synthetic-translator",
+        hf_revision="a" * 40,
+        bundle_name="synthetic-translator.bundle",
+        family="synthetic",
+        task="text_translation",
+        precision="fp16",
+        manifest_path=manifest,
+        testcases=(
+            {
+                "name": "translate",
+                "source_text": "Hello",
+                "source_language": "eng_Latn",
+                "target_language": "fra_Latn",
+                "max_new_tokens": 8,
+            },
+        ),
+        build_settings={"max_sequence_length": 32},
+    )
+    monkeypatch.setattr(perf.ManifestCatalog, "resolve", lambda *_args: model)
     spec = {
-        **original,
+        "id": "synthetic.translate",
+        "family": "synthetic",
+        "operation": "translate",
+        "model": model.name,
+        "workload": {"testcase": "translate"},
+        "measurement": {"warmup": 1, "iterations": 1},
         "baseline": {
-            **original["baseline"],
+            "runner": "hf-transformers",
+            "task": "seq2seq-lm",
+            "mode": "hf-eager",
+            "timing_scope": "public_operation_call_wall",
+            "input_preparation_included": True,
+            "asset_loading_included": False,
             "source_language_placement": "replace-final-unk",
         },
     }

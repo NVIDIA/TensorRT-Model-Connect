@@ -6,6 +6,7 @@ model: roberta-large
 candidate:
   family: roberta
   checkpoint: FacebookAI/roberta-large
+  revision: 722cf37b1afa9454edce342e7895e588b6ff1d59
   task: encoding
   precision: fp16
   bundle: roberta-large.bundle

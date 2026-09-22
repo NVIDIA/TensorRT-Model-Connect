@@ -6,6 +6,7 @@ model: bart-base
 candidate:
   family: bart
   checkpoint: facebook/bart-base
+  revision: aadd2ab0ae0c8268c7c9693540e9904811f36177
   task: text_generation
   precision: fp16
   bundle: bart-base.bundle

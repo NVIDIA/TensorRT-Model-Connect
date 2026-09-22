@@ -6,6 +6,7 @@ model: bert-base-uncased
 candidate:
   family: bert
   checkpoint: google-bert/bert-base-uncased
+  revision: 86b5e0934494bd15c9632b12f734a8a67f723594
   task: encoding
   precision: fp16
   bundle: bert-base-uncased.bundle

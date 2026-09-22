@@ -6,6 +6,7 @@ model: falcon3-1b
 candidate:
   family: llama
   checkpoint: tiiuae/Falcon3-1B-Base
+  revision: cb37ef3559b157b5c9d9226296ba01a5162da1f7
   task: text_generation
   precision: fp16
   bundle: falcon3-1b.bundle

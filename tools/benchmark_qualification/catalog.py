@@ -186,6 +186,12 @@ def _candidate(raw: Any, family: str, path: Path) -> dict[str, Any]:
         raise QualificationError(
             f"{path}: trusted remote code requires an immutable 40-character revision"
         )
+    if model_directory is None and (
+        not isinstance(revision, str) or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None
+    ):
+        raise QualificationError(
+            f"{path}: remote checkpoint requires an immutable 40-character revision"
+        )
     build = value.get("build", {})
     if not isinstance(build, Mapping):
         raise QualificationError(f"{path}: candidate.build must be an object")

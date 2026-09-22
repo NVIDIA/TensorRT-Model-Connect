@@ -6,6 +6,7 @@ model: fnet-base
 candidate:
   family: fnet
   checkpoint: google/fnet-base
+  revision: d89b6fad3cf5384848b783dc480f9685f49d008c
   task: encoding
   precision: fp16
   bundle: fnet-base.bundle

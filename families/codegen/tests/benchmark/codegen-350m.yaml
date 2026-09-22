@@ -6,6 +6,7 @@ model: codegen-350m
 candidate:
   family: codegen
   checkpoint: Salesforce/codegen-350M-mono
+  revision: d9107f71cca463240db1143f4a75a927a27fcb27
   task: text_generation
   precision: fp16
   bundle: codegen-350m.bundle

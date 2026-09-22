@@ -6,6 +6,7 @@ model: albert-base
 candidate:
   family: albert
   checkpoint: albert/albert-base-v2
+  revision: 8e2f239c5f8a2c0f253781ca60135db913e5c80c
   task: encoding
   precision: fp16
   bundle: albert-base.bundle

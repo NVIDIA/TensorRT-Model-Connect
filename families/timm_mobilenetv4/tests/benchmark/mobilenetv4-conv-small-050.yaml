@@ -6,6 +6,7 @@ model: mobilenetv4-conv-small-050
 candidate:
   family: timm_mobilenetv4
   checkpoint: timm/mobilenetv4_conv_small_050.e3000_r224_in1k
+  revision: 0ca27fbda87631d17b5a3d348af8e6b150dd9282
   task: image_to_class_scores
   precision: fp16
   bundle: mobilenetv4-conv-small-050.bundle

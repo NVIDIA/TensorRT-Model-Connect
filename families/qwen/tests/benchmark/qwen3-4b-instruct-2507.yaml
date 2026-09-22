@@ -6,6 +6,7 @@ model: qwen3-4b-instruct-2507
 candidate:
   family: qwen
   checkpoint: Qwen/Qwen3-4B-Instruct-2507
+  revision: cdbee75f17c01a7cc42f958dc650907174af0554
   task: text_generation
   precision: fp16
   bundle: qwen3-4b-instruct-2507.bundle

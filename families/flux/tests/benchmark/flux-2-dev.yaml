@@ -5,6 +5,7 @@ model: flux-2-dev
 candidate:
   family: flux
   checkpoint: black-forest-labs/FLUX.2-dev
+  revision: 26afe3a78bb242c0a8bb181dcc8937bb16e5c66c
   task: image_generation
   precision: bf16
   bundle: flux-2-dev.bundle

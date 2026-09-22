@@ -6,6 +6,7 @@ model: mnasnet-100-rmsp-in1k
 candidate:
   family: timm_mnasnet
   checkpoint: timm/mnasnet_100.rmsp_in1k
+  revision: a30af72360c7a4871b0156cc11d7b767208273d7
   task: classification
   precision: fp16
   bundle: mnasnet-100-rmsp-in1k.bundle

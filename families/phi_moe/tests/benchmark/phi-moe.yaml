@@ -6,6 +6,7 @@ model: phi-moe
 candidate:
   family: phi_moe
   checkpoint: microsoft/Phi-tiny-MoE-instruct
+  revision: 2fe50e88d0e2a5a132563815686ea0dcc8e252b5
   task: text_generation
   precision: fp16
   bundle: phi-moe.bundle

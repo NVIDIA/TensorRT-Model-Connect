@@ -42,6 +42,7 @@ performance:
     reference:
       runner: task-reference
       adapter: hf-transformers-vision
+      adapter_options: {vision_task: image-features}
       mode: hf-eager
       reference_backend: hf_transformers
       precision: fp32

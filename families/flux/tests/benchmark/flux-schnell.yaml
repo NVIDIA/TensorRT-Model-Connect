@@ -5,6 +5,7 @@ model: flux-schnell
 candidate:
   family: flux
   checkpoint: black-forest-labs/FLUX.1-schnell
+  revision: 741f7c3ce8b383c54771c7003378a50191e9efe9
   task: image_generation
   precision: fp16
   bundle: flux-schnell.bundle
