@@ -3,16 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <cfloat>
+#include <cmath>
+#include <cstdint>
 #include <cublas_v2.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/function.h>
-
-#include <cfloat>
-#include <cmath>
-#include <cstdint>
 #include <utility>
 
 #define VSA_BLK128 false
@@ -35,9 +34,9 @@ constexpr int kSortItems = 1024;
 constexpr int64_t kPoolElements = static_cast<int64_t>(kHeads) * kTiles * kHeadDim;
 constexpr int64_t kScoreElements = static_cast<int64_t>(kHeads) * kTiles * kTiles;
 constexpr int64_t kCountElements = static_cast<int64_t>(kHeads) * kTiles;
-constexpr int64_t kWorkspaceBytes =
-    3 * kPoolElements * sizeof(float) + 2 * kScoreElements * sizeof(float) +
-    kCountElements * sizeof(int32_t);
+constexpr int64_t kWorkspaceBytes = 3 * kPoolElements * sizeof(float) +
+                                    2 * kScoreElements * sizeof(float) +
+                                    kCountElements * sizeof(int32_t);
 
 void require_cuda_contiguous(const tvm::ffi::TensorView& tensor, const char* name) {
     if (tensor.device().device_type != kDLCUDA)
@@ -77,14 +76,13 @@ const T* tensor_data(const tvm::ffi::TensorView& tensor) {
 
 void check_cuda(cudaError_t status, const char* operation) {
     if (status != cudaSuccess)
-        TVM_FFI_THROW(RuntimeError) << "FastH3 VSA " << operation
-                                    << " failed: " << cudaGetErrorString(status);
+        TVM_FFI_THROW(RuntimeError)
+            << "FastH3 VSA " << operation << " failed: " << cudaGetErrorString(status);
 }
 
 void check_cublas(cublasStatus_t status, const char* operation) {
     if (status != CUBLAS_STATUS_SUCCESS)
-        TVM_FFI_THROW(RuntimeError) << "FastH3 VSA " << operation
-                                    << " failed with cuBLAS status "
+        TVM_FFI_THROW(RuntimeError) << "FastH3 VSA " << operation << " failed with cuBLAS status "
                                     << static_cast<int>(status);
 }
 
@@ -117,8 +115,7 @@ cublasHandle_t get_cublas_handle(int device, cudaStream_t stream) {
     return holder.value;
 }
 
-__global__ void mean_pool_tiles(const __nv_bfloat16* input, const int32_t* sizes,
-                                float* output) {
+__global__ void mean_pool_tiles(const __nv_bfloat16* input, const int32_t* sizes, float* output) {
     const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= kPoolElements)
         return;
@@ -177,8 +174,7 @@ __global__ void build_block_map(const float* scores, int32_t* q2k_idx, int32_t* 
 
     for (int width = 2; width <= kSortItems; width <<= 1) {
         for (int stride = width >> 1; stride > 0; stride >>= 1) {
-            for (int item = static_cast<int>(threadIdx.x); item < kSortItems;
-                 item += blockDim.x) {
+            for (int item = static_cast<int>(threadIdx.x); item < kSortItems; item += blockDim.x) {
                 const int partner = item ^ stride;
                 if (partner > item)
                     swap_if_needed(values, indices, item, partner, (item & width) == 0);
@@ -209,8 +205,7 @@ __global__ void softmax_scores(float* scores, const int32_t* sizes) {
     __syncthreads();
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (threadIdx.x < stride)
-            reduction[threadIdx.x] = fmaxf(reduction[threadIdx.x],
-                                            reduction[threadIdx.x + stride]);
+            reduction[threadIdx.x] = fmaxf(reduction[threadIdx.x], reduction[threadIdx.x + stride]);
         __syncthreads();
     }
     const float maximum = reduction[0];
@@ -248,20 +243,19 @@ __global__ void add_gate_compression(__nv_bfloat16* output, const __nv_bfloat16*
         (static_cast<int64_t>(head) * kTiles + tile) * kHeadDim + dimension;
 
     const __nv_bfloat16 compressed_bf16 = __float2bfloat16_rn(compression[pooled_index]);
-    const __nv_bfloat16 product_bf16 = __float2bfloat16_rn(
-        __bfloat162float(compressed_bf16) * __bfloat162float(gate[index]));
-    output[index] = __float2bfloat16_rn(__bfloat162float(output[index]) +
-                                        __bfloat162float(product_bf16));
+    const __nv_bfloat16 product_bf16 =
+        __float2bfloat16_rn(__bfloat162float(compressed_bf16) * __bfloat162float(gate[index]));
+    output[index] =
+        __float2bfloat16_rn(__bfloat162float(output[index]) + __bfloat162float(product_bf16));
 }
 
-void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key,
-             tvm::ffi::TensorView value, tvm::ffi::TensorView gate,
-             tvm::ffi::TensorView variable_block_sizes,
+void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::TensorView value,
+             tvm::ffi::TensorView gate, tvm::ffi::TensorView variable_block_sizes,
              tvm::ffi::TensorView workspace, tvm::ffi::TensorView output) {
-    for (const auto& item : {std::pair{&query, "query"}, std::pair{&key, "key"},
-                             std::pair{&value, "value"}, std::pair{&gate, "gate"},
-                             std::pair{&variable_block_sizes, "variable_block_sizes"},
-                             std::pair{&workspace, "workspace"}, std::pair{&output, "output"}})
+    for (const auto& item :
+         {std::pair{&query, "query"}, std::pair{&key, "key"}, std::pair{&value, "value"},
+          std::pair{&gate, "gate"}, std::pair{&variable_block_sizes, "variable_block_sizes"},
+          std::pair{&workspace, "workspace"}, std::pair{&output, "output"}})
         require_cuda_contiguous(*item.first, item.second);
     if (query.device().device_id != key.device().device_id ||
         query.device().device_id != value.device().device_id ||
@@ -290,8 +284,8 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key,
     if (workspace.numel() < kWorkspaceBytes)
         TVM_FFI_THROW(ValueError) << "FastH3 VSA workspace is too small";
 
-    auto stream = reinterpret_cast<cudaStream_t>(
-        TVMFFIEnvGetStream(kDLCUDA, query.device().device_id));
+    auto stream =
+        reinterpret_cast<cudaStream_t>(TVMFFIEnvGetStream(kDLCUDA, query.device().device_id));
     auto* cursor = tensor_data<uint8_t>(workspace);
     auto* q_pool = reinterpret_cast<float*>(cursor);
     cursor += kPoolElements * sizeof(float);
@@ -309,22 +303,22 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key,
     constexpr int kThreads = 256;
     const int pool_blocks = static_cast<int>((kPoolElements + kThreads - 1) / kThreads);
     mean_pool_tiles<<<pool_blocks, kThreads, 0, stream>>>(tensor_data<__nv_bfloat16>(query), sizes,
-                                                         q_pool);
+                                                          q_pool);
     mean_pool_tiles<<<pool_blocks, kThreads, 0, stream>>>(tensor_data<__nv_bfloat16>(key), sizes,
-                                                         k_pool);
+                                                          k_pool);
     mean_pool_tiles<<<pool_blocks, kThreads, 0, stream>>>(tensor_data<__nv_bfloat16>(value), sizes,
-                                                         v_pool);
+                                                          v_pool);
     check_cuda(cudaGetLastError(), "mean pooling");
 
     cublasHandle_t handle = get_cublas_handle(query.device().device_id, stream);
     const float score_alpha = 1.0F / std::sqrt(static_cast<float>(kHeadDim));
     const float beta = 0.0F;
-    check_cublas(
-        cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, kTiles, kTiles, kHeadDim,
-                                  &score_alpha, k_pool, kHeadDim, kPoolElements / kHeads, q_pool,
-                                  kHeadDim, kPoolElements / kHeads, &beta, scores, kTiles,
-                                  kScoreElements / kHeads, kHeads),
-        "routing score GEMM");
+    check_cublas(cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, kTiles, kTiles,
+                                           kHeadDim, &score_alpha, k_pool, kHeadDim,
+                                           kPoolElements / kHeads, q_pool, kHeadDim,
+                                           kPoolElements / kHeads, &beta, scores, kTiles,
+                                           kScoreElements / kHeads, kHeads),
+                 "routing score GEMM");
 
     build_block_map<<<kHeads * kTiles, kThreads, 0, stream>>>(scores, q2k_idx, q2k_num);
     check_cuda(cudaGetLastError(), "Top-K block-map selection");
@@ -352,12 +346,12 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key,
     check_cuda(cudaGetLastError(), "compression softmax");
 
     const float compression_alpha = 1.0F;
-    check_cublas(
-        cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, kHeadDim, kTiles, kTiles,
-                                  &compression_alpha, v_pool, kHeadDim, kPoolElements / kHeads,
-                                  scores, kTiles, kScoreElements / kHeads, &beta, q_pool, kHeadDim,
-                                  kPoolElements / kHeads, kHeads),
-        "compression GEMM");
+    check_cublas(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, kHeadDim, kTiles,
+                                           kTiles, &compression_alpha, v_pool, kHeadDim,
+                                           kPoolElements / kHeads, scores, kTiles,
+                                           kScoreElements / kHeads, &beta, q_pool, kHeadDim,
+                                           kPoolElements / kHeads, kHeads),
+                 "compression GEMM");
 
     constexpr int64_t output_elements = static_cast<int64_t>(kHeads) * kSequence * kHeadDim;
     const int output_blocks = static_cast<int>((output_elements + kThreads - 1) / kThreads);
