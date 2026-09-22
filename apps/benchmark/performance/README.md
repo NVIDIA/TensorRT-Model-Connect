@@ -119,6 +119,26 @@ central exclusions for validation; it does not establish qualification.
 Use an existing reference adapter when it implements the actual workload.
 Otherwise declare a Python script relative to the owning family directory:
 
+Reference adapters that need prepared repositories or model directories declare
+their inputs on the suite entry instead of relying on a shared adapter registry.
+Each option names a field from the selected performance environment; optional
+`required` paths are checked below that directory before the reference starts:
+
+```yaml
+baseline:
+  runner: task-reference
+  adapter: upstream-example
+  reference_inputs:
+    reference_repo:
+      environment: example_repo
+      required: [inference.py]
+```
+
+The environment supplies `references.example_repo`. A family qualification
+profile may instead put `reference_repo` directly under
+`reference_environment.paths`; the qualification runner forwards all such
+family-declared paths as adapter options without knowing their meaning.
+
 ```yaml
 schema_version: trtmc.perf-suite/v2
 name: example-performance

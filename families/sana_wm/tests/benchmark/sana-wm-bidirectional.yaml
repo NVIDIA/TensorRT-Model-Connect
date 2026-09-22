@@ -5,7 +5,7 @@ model: sana-wm-bidirectional
 candidate: {family: sana_wm, checkpoint: Efficient-Large-Model/SANA-WM_bidirectional, revision: e96271d77398def8ebb9fc595e7c0056dc625ab7, model_directory: trtmc-reference/SANA-model, task: world_model_generation, precision: bf16, bundle: sana-wm-bidirectional.bundle, build: {max_sequence_length: 256, image_height: 704, image_width: 1280, video_num_frames: 321}}
 reference_environment:
   requirements: ../../requirements.txt
-  paths: {sana_repo: trtmc-reference/Sana, sana_model: trtmc-reference/SANA-model}
+  paths: {reference_repo: trtmc-reference/Sana, model_dir: trtmc-reference/SANA-model}
 accuracy:
   - name: generated-media-parity
     benchmark: task_output_parity

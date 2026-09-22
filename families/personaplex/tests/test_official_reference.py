@@ -14,11 +14,29 @@ import numpy as np
 import pytest
 
 from . import official_reference
+from .benchmark import prepare_environment
 from .personaplex_audio_compat import sphn
 
 
 TEST_ROOT = Path(__file__).resolve().parent
 SOURCE_REVISION = "3428dfd95309a7f3c84fd93259ded0f810d1ff91"
+
+
+def test_qualification_environment_installs_official_audio_dependency(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(prepare_environment, "package_version", lambda _name: "0.1.3")
+    monkeypatch.setattr(
+        prepare_environment.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    prepare_environment._install_sphn()
+
+    command, kwargs = calls[0]
+    assert command[-1] == "sphn==0.1.4"
+    assert kwargs["check"] is True
+    assert kwargs["env"]["CMAKE_POLICY_VERSION_MINIMUM"] == "3.5"
 
 
 def _write_wav(path: Path) -> None:

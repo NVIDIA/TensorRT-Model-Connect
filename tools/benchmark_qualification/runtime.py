@@ -286,6 +286,22 @@ def reference_environment_paths(case: QualificationCase, context: RuntimeContext
     return result
 
 
+def reference_environment_options(
+    case: QualificationCase,
+    context: RuntimeContext,
+    configured: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Add family-declared reference paths without knowing their meaning."""
+    result = dict(configured)
+    paths = reference_environment_paths(case, context)
+    if duplicates := sorted(result.keys() & paths.keys()):
+        raise QualificationError(
+            "reference options duplicate prepared environment paths: " + ", ".join(duplicates)
+        )
+    result.update(paths)
+    return result
+
+
 def benchmark_executable(case: QualificationCase, context: RuntimeContext) -> Path:
     """Run user-facing benchmark and bundle build with the family Python environment."""
     python = reference_python(case, context)

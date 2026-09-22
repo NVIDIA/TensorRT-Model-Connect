@@ -6,7 +6,7 @@ candidate: {family: lance, checkpoint: bytedance-research/Lance, revision: 73953
 reference_environment:
   requirements: ../../requirements.txt
   build_isolation: false
-  paths: {lance_repo: trtmc-reference/Lance}
+  paths: {reference_repo: trtmc-reference/Lance}
 accuracy:
   - name: generated-text-parity
     benchmark: task_output_parity

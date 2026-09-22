@@ -101,28 +101,6 @@ OUTPUT_CONTRACTS = {
     "transcription-text",
     "vision-language-text",
 }
-REFERENCE_INPUTS = {
-    "pytorch-lerobot-act": (("source_root", "lerobot_repo"),),
-    "upstream-elf": (("reference_repo", "elf_repo"),),
-    "upstream-lance": (("reference_repo", "lance_repo"),),
-    "upstream-sana-wm": (
-        ("reference_repo", "sana_repo"),
-        ("model_dir", "sana_model"),
-    ),
-    "pytorch-personaplex": (("official_repo", "personaplex_repo"),),
-    "upstream-fast-foundation-stereo": (("model_dir", "fast_foundation_stereo_model"),),
-}
-REFERENCE_FIELDS = {
-    "elf_repo",
-    "lance_repo",
-    "lerobot_repo",
-    "sana_repo",
-    "sana_model",
-    "personaplex_repo",
-    "fast_foundation_stereo_model",
-}
-
-
 class PerfMatrixError(RuntimeError):
     pass
 
@@ -383,6 +361,35 @@ def _validate_entry(entry: Mapping[str, Any]) -> None:
         _family_script(entry)
     elif baseline["runner"] == "task-reference" and not isinstance(baseline.get("adapter"), str):
         raise PerfMatrixError(f"entry {entry['id']} requires baseline.adapter")
+    reference_inputs = baseline.get("reference_inputs", {})
+    if not isinstance(reference_inputs, Mapping):
+        raise PerfMatrixError(f"entry {entry['id']} baseline.reference_inputs must be an object")
+    for option_name, declaration in reference_inputs.items():
+        if not isinstance(option_name, str) or not option_name:
+            raise PerfMatrixError(
+                f"entry {entry['id']} baseline.reference_inputs keys must be non-empty strings"
+            )
+        if not isinstance(declaration, Mapping):
+            raise PerfMatrixError(
+                f"entry {entry['id']} reference input {option_name!r} must be an object"
+            )
+        environment_field = declaration.get("environment")
+        required = declaration.get("required", [])
+        if not isinstance(environment_field, str) or not environment_field:
+            raise PerfMatrixError(
+                f"entry {entry['id']} reference input {option_name!r} requires environment"
+            )
+        if not isinstance(required, list) or not all(
+            isinstance(path, str)
+            and path
+            and not Path(path).is_absolute()
+            and ".." not in Path(path).parts
+            for path in required
+        ):
+            raise PerfMatrixError(
+                f"entry {entry['id']} reference input {option_name!r} required files "
+                "must be relative paths"
+            )
     fallback = baseline.get("fallback")
     if fallback is not None and (not isinstance(fallback, str) or not fallback):
         raise PerfMatrixError(f"entry {entry['id']} baseline.fallback must be a mode")
@@ -474,10 +481,11 @@ def load_environment(path: Path) -> Environment:
         raise PerfMatrixError("environment tools is missing: " + ", ".join(missing))
     if missing := sorted(required_storage - storage.keys()):
         raise PerfMatrixError("environment storage is missing: " + ", ".join(missing))
-    if missing := sorted(REFERENCE_FIELDS - references.keys()):
-        raise PerfMatrixError("environment references is missing: " + ", ".join(missing))
-    if not all(isinstance(references[name], str) for name in REFERENCE_FIELDS):
-        raise PerfMatrixError("environment reference inputs must be strings")
+    if not all(
+        isinstance(name, str) and name and isinstance(value, str)
+        for name, value in references.items()
+    ):
+        raise PerfMatrixError("environment reference inputs must map names to strings")
     timeout = execution.get("timeout_seconds", 7200)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
         raise PerfMatrixError("execution.timeout_seconds must be positive")
@@ -515,7 +523,7 @@ def load_environment(path: Path) -> Environment:
         bundle_retention=retention,
         local_files_only=bool(execution.get("local_files_only", False)),
         timeout_seconds=timeout,
-        references={name: str(references[name]) for name in REFERENCE_FIELDS},
+        references={str(name): str(value) for name, value in references.items()},
         storage_root=(
             _path(storage_root, "storage.storage_root") if storage_root is not None else None
         ),
@@ -812,35 +820,29 @@ def _adapter_options(entry: ResolvedEntry, environment: Environment) -> dict[str
     if not isinstance(configured, Mapping):
         raise PerfMatrixError(f"entry {entry.spec['id']} adapter_options must be an object")
     options = dict(configured)
-    inputs = REFERENCE_INPUTS.get(str(entry.spec["baseline"].get("adapter", "")), ())
-    for option_name, field in inputs:
+    inputs = entry.spec["baseline"].get("reference_inputs", {})
+    for option_name, declaration in inputs.items():
+        field = str(declaration["environment"])
+        if field not in environment.references:
+            raise PerfMatrixError(
+                f"entry {entry.spec['id']} environment references is missing: {field}"
+            )
         path = _path(environment.references[field], f"references.{field}")
         if not path.is_dir():
             raise PerfMatrixError(
                 f"entry {entry.spec['id']} reference path is not a directory: {path}"
             )
-        _validate_reference_path(entry, field, path)
+        missing = [
+            relative
+            for relative in declaration.get("required", [])
+            if not (path / relative).exists()
+        ]
+        if missing:
+            raise PerfMatrixError(
+                f"entry {entry.spec['id']} reference path {path} is missing: " + ", ".join(missing)
+            )
         options[option_name] = str(path)
     return options
-
-
-def _validate_reference_path(entry: ResolvedEntry, field: str, path: Path) -> None:
-    required = {
-        "elf_repo": ("src",),
-        "lance_repo": ("inference_lance.py",),
-        "lerobot_repo": ("lerobot/common/policies/act/modeling_act.py",),
-        "personaplex_repo": ("moshi",),
-        "fast_foundation_stereo_model": (
-            "core/foundation_stereo.py",
-            "core/submodule.py",
-            "weights/23-36-37/model_best_bp2_serialize.pth",
-        ),
-    }.get(field, ())
-    missing = [relative for relative in required if not (path / relative).exists()]
-    if missing:
-        raise PerfMatrixError(
-            f"entry {entry.spec['id']} reference path {path} is missing: " + ", ".join(missing)
-        )
 
 
 def _baseline_mode(baseline: Mapping[str, Any]) -> str:

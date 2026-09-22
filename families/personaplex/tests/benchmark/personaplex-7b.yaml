@@ -5,7 +5,7 @@ model: personaplex-7b
 candidate: {family: personaplex, checkpoint: nvidia/personaplex-7b-v1, revision: fdaf4090a61cb315c138a1faee287ffd6c716309, task: speech_to_speech, precision: fp16, bundle: personaplex-7b.bundle, build: {max_sequence_length: 512, fp32_layers: [0, 1]}}
 reference_environment:
   requirements: ../../requirements.txt
-  paths: {personaplex_repo: trtmc-reference/personaplex}
+  paths: {official_repo: trtmc-reference/personaplex}
 accuracy:
   - name: generated-audio-parity
     benchmark: task_output_parity

@@ -4,8 +4,22 @@
 import json
 from pathlib import Path
 
+import yaml
+
 
 TEST_ROOT = Path(__file__).resolve().parent
+
+
+def test_qualification_profile_owns_source_language_placement() -> None:
+    profile = yaml.safe_load(
+        (TEST_ROOT / "benchmark/nllb-200-distilled-600m.yaml").read_text(encoding="utf-8")
+    )
+
+    cases = [*profile["accuracy"], *profile["performance"]]
+    assert cases
+    assert all(
+        case["reference"]["source_language_placement"] == "replace-final-unk" for case in cases
+    )
 
 
 def test_nllb_case_keeps_the_explicit_english_to_french_contract() -> None:

@@ -34,8 +34,8 @@ from .runtime import (
     RuntimeContext,
     benchmark_executable,
     prepare_bundle,
+    reference_environment_options,
     reference_python,
-    reference_environment_paths,
     require_candidate,
     run_command,
     write_model_descriptor,
@@ -95,13 +95,6 @@ def run_accuracy(case: QualificationCase, context: RuntimeContext) -> dict[str, 
     return result
 
 
-_REFERENCE_OPTIONS = {
-    "upstream-lance": {"lance_repo": "reference_repo"},
-    "upstream-sana-wm": {"sana_repo": "reference_repo", "sana_model": "model_dir"},
-    "pytorch-personaplex": {"personaplex_repo": "official_repo"},
-}
-
-
 def _task_output_parity(
     case: QualificationCase, context: RuntimeContext, output: Path
 ) -> dict[str, Any]:
@@ -128,11 +121,7 @@ def _task_output_parity(
         if not path.is_relative_to(family_root) or not path.is_file():
             raise QualificationError(f"task-output reference asset {name!r} is unavailable: {path}")
         adapter_options[name] = str(path)
-    environment_paths = reference_environment_paths(case, context)
-    for source, target in _REFERENCE_OPTIONS.get(adapter, {}).items():
-        if source not in environment_paths:
-            raise QualificationError(f"task-output reference path {source!r} is not configured")
-        adapter_options[target] = environment_paths[source]
+    adapter_options = reference_environment_options(case, context, adapter_options)
     reference_path = output / "reference-result.json"
     command = [
         str(reference_python(case, context)),

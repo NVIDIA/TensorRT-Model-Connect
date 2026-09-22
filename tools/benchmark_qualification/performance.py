@@ -17,7 +17,7 @@ from .catalog import QualificationCase, QualificationError, load_benchmark
 from .runtime import (
     RuntimeContext,
     benchmark_executable,
-    reference_environment_paths,
+    reference_environment_options,
     reference_python,
     require_candidate,
     run_command,
@@ -88,7 +88,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
             "Performance measurement.iterations must satisfy the stability sample count"
         )
     request = _resolve_family_assets(case, request)
-    baseline = _resolve_reference_assets(case, baseline)
+    baseline = _resolve_reference_assets(case, context, baseline)
     descriptor = write_model_descriptor(case, output, request, context=context)
     entry_id = f"qualification.{case.family}.{case.name}"
     suite = {
@@ -127,16 +127,6 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     suite_path = output / "resolved-suite.yaml"
     suite_path.write_text(yaml.safe_dump(suite, sort_keys=False), encoding="utf-8")
     results_root = output / "matrix"
-    references = {
-        "elf_repo": "",
-        "lance_repo": "",
-        "lerobot_repo": "",
-        "sana_repo": "",
-        "sana_model": "",
-        "personaplex_repo": "",
-        "fast_foundation_stereo_model": "",
-    }
-    references.update(reference_environment_paths(case, context))
     environment = {
         "schema_version": "trtmc.perf-environment/v2",
         "name": "qualification",
@@ -151,7 +141,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
             ),
             "reference_python": str(reference_python(case, context)),
         },
-        "references": references,
+        "references": {},
         "storage": {
             "results_root": str(results_root),
             "scratch_root": str(output / "scratch"),
@@ -267,7 +257,9 @@ def _resolve_family_assets(case: QualificationCase, request: Mapping[str, Any]) 
 
 
 def _resolve_reference_assets(
-    case: QualificationCase, reference: Mapping[str, Any]
+    case: QualificationCase,
+    context: RuntimeContext,
+    reference: Mapping[str, Any],
 ) -> dict[str, Any]:
     resolved = dict(reference)
     options = reference.get("adapter_options", {})
@@ -284,5 +276,5 @@ def _resolve_reference_assets(
         if not path.is_relative_to(family_root) or not path.is_file():
             raise QualificationError(f"Performance reference asset {key!r} is unavailable: {path}")
         resolved_options[key] = str(path)
-    resolved["adapter_options"] = resolved_options
+    resolved["adapter_options"] = reference_environment_options(case, context, resolved_options)
     return resolved

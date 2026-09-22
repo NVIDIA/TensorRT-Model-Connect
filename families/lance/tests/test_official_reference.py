@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from families.lance.tests.official_reference import (
     _image_only_source,
@@ -16,6 +17,14 @@ from families.lance.tests.official_reference import (
     run_official_generation,
 )
 from families.lance.tests.benchmark import prepare_environment
+
+
+def test_qualification_environment_keeps_extension_builds_in_family_environment() -> None:
+    profile = yaml.safe_load(
+        (Path(__file__).parent / "benchmark/lance-3b-x2t-image.yaml").read_text(encoding="utf-8")
+    )
+
+    assert profile["reference_environment"]["build_isolation"] is False
 
 
 def test_reference_source_is_required_and_fail_closed(monkeypatch, tmp_path) -> None:

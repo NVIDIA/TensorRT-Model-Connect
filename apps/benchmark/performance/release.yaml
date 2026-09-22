@@ -412,6 +412,10 @@ entries:
     baseline:
       runner: task-reference
       adapter: upstream-fast-foundation-stereo
+      reference_inputs:
+        model_dir:
+          environment: fast_foundation_stereo_model
+          required: [core/foundation_stereo.py, core/submodule.py, weights/23-36-37/model_best_bp2_serialize.pth]
       mode: pytorch-eager
       reference_backend: official_pytorch
       timing_scope: task-pipeline-call-wall
@@ -551,6 +555,8 @@ entries:
     baseline:
       runner: task-reference
       adapter: upstream-lance
+      reference_inputs:
+        reference_repo: {environment: lance_repo, required: [inference_lance.py]}
       mode: pytorch-eager
       reference_backend: upstream_lance
       timing_scope: task-pipeline-call-wall
@@ -569,6 +575,8 @@ entries:
     baseline:
       runner: task-reference
       adapter: pytorch-lerobot-act
+      reference_inputs:
+        source_root: {environment: lerobot_repo, required: [lerobot/common/policies/act/modeling_act.py]}
       mode: pytorch-eager
       precision: fp32
       reference_backend: official_lerobot
@@ -805,6 +813,8 @@ entries:
     baseline:
       runner: task-reference
       adapter: pytorch-personaplex
+      reference_inputs:
+        official_repo: {environment: personaplex_repo, required: [moshi]}
       mode: pytorch-eager
       reference_backend: torch_reference
       timing_scope: task-pipeline-call-wall
@@ -1004,6 +1014,9 @@ entries:
     baseline:
       runner: task-reference
       adapter: upstream-sana-wm
+      reference_inputs:
+        reference_repo: {environment: sana_repo}
+        model_dir: {environment: sana_model}
       mode: pytorch-eager
       reference_backend: official_sana
       timing_scope: task-pipeline-call-wall
@@ -1076,7 +1089,7 @@ entries:
       testcase: timm-vit-base-p16-224-augreg-in21k-ft-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1089,7 +1102,7 @@ entries:
       testcase: resnet50-a1-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1102,7 +1115,7 @@ entries:
       testcase: xception41-tf-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1115,7 +1128,7 @@ entries:
       testcase: regnety-040-ra3-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1128,7 +1141,7 @@ entries:
       testcase: seresnet50-a1-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1141,7 +1154,7 @@ entries:
       testcase: senet154-gluon-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1154,7 +1167,7 @@ entries:
       testcase: ghostnet-100-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1167,7 +1180,7 @@ entries:
       testcase: convnext-tiny-in12k-ft-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1180,7 +1193,7 @@ entries:
       testcase: inception-v4-tf-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1193,7 +1206,7 @@ entries:
       testcase: inception-resnet-v2-tf-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1206,7 +1219,7 @@ entries:
       testcase: hrnet-w18-ms-aug-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1219,7 +1232,7 @@ entries:
       testcase: resnest50d-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1232,7 +1245,7 @@ entries:
       testcase: swin-tiny-patch4-window7-224-ms-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1245,7 +1258,7 @@ entries:
       testcase: crossvit-9-240-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1258,7 +1271,7 @@ entries:
       testcase: dpn68b-ra-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1271,7 +1284,7 @@ entries:
       testcase: res2net50-26w-4s-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1297,7 +1310,7 @@ entries:
       testcase: dm-nfnet-f0-dm-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1310,7 +1323,7 @@ entries:
       testcase: mobilevit-s-cvnets-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1349,7 +1362,7 @@ entries:
       testcase: xcit-tiny-12-p16-224-fb-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1362,7 +1375,7 @@ entries:
       testcase: repvgg-a2-rvgg-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1375,7 +1388,7 @@ entries:
       testcase: inception-v3-tv-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1388,7 +1401,7 @@ entries:
       testcase: mnasnet-100-rmsp-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1401,7 +1414,7 @@ entries:
       testcase: mobilenetv2-100-ra-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1414,7 +1427,7 @@ entries:
       testcase: densenet121-ra-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1427,7 +1440,7 @@ entries:
       testcase: efficientnet-b0-ra-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1440,7 +1453,7 @@ entries:
       testcase: mobilenetv4-conv-small-050
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1453,7 +1466,7 @@ entries:
       testcase: mobilenetv3-large-100-ra-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
@@ -1466,7 +1479,7 @@ entries:
       testcase: vgg16-tv-in1k
     baseline:
       runner: task-reference
-      adapter: hf-transformers-vision
+      adapter: timm-classification
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall

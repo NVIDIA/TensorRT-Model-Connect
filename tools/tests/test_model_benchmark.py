@@ -17,9 +17,9 @@ import pytest
 from tools import model_benchmark, prepare_coco_detection_dataset
 from apps.benchmark.performance.baselines import hf_transformers, task_reference
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
-from families.personaplex.tests.benchmark import prepare_environment as personaplex_environment
 from tools.benchmark_qualification import accuracy as qualification_accuracy
 from tools.benchmark_qualification import performance as qualification_performance
+from tools.benchmark_qualification import runtime as qualification_runtime
 from tools.benchmark_qualification.catalog import (
     QualificationCase,
     QualificationError,
@@ -32,6 +32,7 @@ from tools.benchmark_qualification.runtime import (
     RuntimeContext,
     benchmark_executable,
     prepare_bundle,
+    reference_environment_options,
     reference_python,
     run_command,
     write_model_descriptor,
@@ -39,6 +40,86 @@ from tools.benchmark_qualification.runtime import (
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+
+
+def _example_case(tmp_path: Path, *, kind: str = "accuracy") -> QualificationCase:
+    return QualificationCase(
+        kind=kind,
+        model="example-model",
+        family="example",
+        name="parity",
+        benchmark="example_benchmark",
+        candidate={
+            "family": "example",
+            "checkpoint": "example/model",
+            "task": "example_task",
+            "precision": "fp32",
+            "build": {},
+        },
+        values={},
+        source=tmp_path / "families/example/tests/benchmark/example-model.yaml",
+        reference_requirements=None,
+    )
+
+
+def test_qualification_yaml_rejects_duplicate_explicit_keys(tmp_path: Path) -> None:
+    profile = tmp_path / "families/example/tests/benchmark/example-model.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        "schema_version: trtmc.qualification/v1\nmodel: example-model\nmodel: replaced-model\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QualificationError, match="duplicate key 'model'"):
+        discover(tmp_path)
+
+
+def test_qualification_yaml_preserves_merge_keys(tmp_path: Path) -> None:
+    profile = tmp_path / "families/example/tests/benchmark/example-model.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        "schema_version: trtmc.qualification/v1\n"
+        "model: example-model\n"
+        "candidate: {family: example, checkpoint: example/model, task: example_task, "
+        "precision: fp32}\n"
+        "reference: &reference {runner: hf-transformers, mode: hf-eager}\n"
+        "accuracy: []\n"
+        "performance:\n"
+        "  - name: parity\n"
+        "    benchmark: example_performance\n"
+        "    reference: {<<: *reference, precision: fp32}\n",
+        encoding="utf-8",
+    )
+
+    cases = discover(tmp_path)
+
+    assert len(cases) == 1
+    assert cases[0].values["reference"] == {
+        "runner": "hf-transformers",
+        "mode": "hf-eager",
+        "precision": "fp32",
+    }
+
+
+def test_reference_environment_options_are_family_declared(tmp_path: Path, monkeypatch) -> None:
+    case = _example_case(tmp_path)
+    context = SimpleNamespace()
+    monkeypatch.setattr(
+        qualification_runtime,
+        "reference_environment_paths",
+        lambda *_args: {"reference_repo": "/reference/example"},
+    )
+
+    assert reference_environment_options(case, context, {"variant": "official"}) == {
+        "variant": "official",
+        "reference_repo": "/reference/example",
+    }
+    with pytest.raises(QualificationError, match="duplicate.*reference_repo"):
+        reference_environment_options(
+            case,
+            context,
+            {"reference_repo": "/different/reference"},
+        )
 
 
 def test_qualification_summary_is_written_as_report_json(tmp_path: Path) -> None:
@@ -74,42 +155,21 @@ def test_family_configs_auto_discover_without_a_central_model_registry() -> None
         assert relative.parts[1:3] == ("tests", "benchmark")
         assert case.kind in {"accuracy", "performance"}
     assert not any("l0" in case.model.lower() for case in cases)
-    nemotron_h = [case for case in cases if case.model == "nemotron-h-nano-9b"]
-    assert nemotron_h and all(not case.reference_build_isolation for case in nemotron_h)
-    lance = [case for case in cases if case.model == "lance-3b-x2t-image"]
-    assert lance and all(not case.reference_build_isolation for case in lance)
 
 
-def test_personaplex_reference_environment_installs_official_audio_dependency(
-    monkeypatch,
-) -> None:
-    calls = []
-    monkeypatch.setattr(personaplex_environment, "package_version", lambda _name: "0.1.3")
-    monkeypatch.setattr(
-        personaplex_environment.subprocess,
-        "run",
-        lambda command, **kwargs: calls.append((command, kwargs)),
-    )
-
-    personaplex_environment._install_sphn()
-
-    command, kwargs = calls[0]
-    assert command[-1] == "sphn==0.1.4"
-    assert kwargs["check"] is True
-    assert kwargs["env"]["CMAKE_POLICY_VERSION_MINIMUM"] == "3.5"
-
-
-def test_timm_qualification_profiles_use_the_family_build_task() -> None:
-    cases = discover(REPOSITORY)
-    profiles = {
-        case.model: case
-        for case in cases
-        if case.kind == "accuracy" and case.family.startswith("timm_")
-    }
+def test_qualification_profiles_match_family_manifest_tasks_when_present() -> None:
+    profiles = {}
+    for case in discover(REPOSITORY):
+        manifest = case.source.parent.parent / "manifests" / f"{case.model}.json"
+        if (
+            case.kind == "accuracy"
+            and case.benchmark == "imagenette_classification"
+            and manifest.is_file()
+        ):
+            profiles[case.model] = (case, manifest)
 
     assert profiles
-    for model, case in profiles.items():
-        manifest = case.source.parent.parent / "manifests" / f"{model}.json"
+    for model, (case, manifest) in profiles.items():
         declared = json.loads(manifest.read_text(encoding="utf-8"))
         assert case.candidate["task"] == declared["task"], model
 
@@ -389,17 +449,17 @@ def test_image_classification_accuracy_compares_top1_and_gold_accuracy(
         ),
         encoding="utf-8",
     )
-    profile = tmp_path / "families/timm_example/tests/benchmark/example.yaml"
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
     profile.parent.mkdir(parents=True)
     case = QualificationCase(
         kind="accuracy",
         model="example",
-        family="timm_example",
+        family="example",
         name="imagenette-parity",
         benchmark="imagenette_classification",
         candidate={
-            "family": "timm_example",
-            "checkpoint": "timm/example",
+            "family": "example",
+            "checkpoint": "example/model",
             "task": "classification",
             "precision": "fp16",
             "build": {},
@@ -484,7 +544,7 @@ def test_image_classification_accuracy_compares_top1_and_gold_accuracy(
 
 
 def test_performance_resolves_profile_owned_relative_assets(tmp_path: Path) -> None:
-    profile = tmp_path / "families/timm_example/tests/benchmark/example.yaml"
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
     profile.parent.mkdir(parents=True)
     image = profile.parent.parent / "data/test.jpeg"
     image.parent.mkdir(parents=True)
@@ -492,12 +552,12 @@ def test_performance_resolves_profile_owned_relative_assets(tmp_path: Path) -> N
     case = QualificationCase(
         kind="performance",
         model="example",
-        family="timm_example",
+        family="example",
         name="classify",
         benchmark="image_classification_performance",
         candidate={
-            "family": "timm_example",
-            "checkpoint": "timm/example",
+            "family": "example",
+            "checkpoint": "example/model",
             "task": "classification",
             "precision": "fp16",
             "build": {},
@@ -515,7 +575,7 @@ def test_performance_resolves_profile_owned_relative_assets(tmp_path: Path) -> N
 
 
 def test_robot_action_accuracy_compares_complete_action_chunk(tmp_path: Path, monkeypatch) -> None:
-    data = tmp_path / "families/lerobot_act/tests/data"
+    data = tmp_path / "families/example/tests/data"
     data.mkdir(parents=True)
     image = data / "image.png"
     state = data / "state.f32"
@@ -526,19 +586,19 @@ def test_robot_action_accuracy_compares_complete_action_chunk(tmp_path: Path, mo
         json.dumps({"requests": [{"id": "recorded", "image": image.name, "state": state.name}]}),
         encoding="utf-8",
     )
-    profile = tmp_path / "families/lerobot_act/tests/benchmark/example.yaml"
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
     profile.parent.mkdir(parents=True)
     runner = profile.parent / "reference.py"
     runner.write_text("# family reference\n", encoding="utf-8")
     case = QualificationCase(
         kind="accuracy",
-        model="act-example",
-        family="lerobot_act",
+        model="example-control",
+        family="example",
         name="recorded-action-parity",
         benchmark="robot_action_parity",
         candidate={
-            "family": "lerobot_act",
-            "checkpoint": "lerobot/example",
+            "family": "example",
+            "checkpoint": "example/control",
             "task": "robot_control",
             "precision": "fp32",
             "build": {},
@@ -556,7 +616,7 @@ def test_robot_action_accuracy_compares_complete_action_chunk(tmp_path: Path, mo
         source=profile,
         reference_requirements=None,
     )
-    dataset = Dataset("lerobot-act-recorded-observation", dataset_path, "family", "digest")
+    dataset = Dataset("robot-action-recorded-observation", dataset_path, "family", "digest")
     context = RuntimeContext(
         repository=REPOSITORY,
         artifacts=tmp_path / "artifacts",
@@ -863,19 +923,19 @@ def test_ocr_accuracy_uses_dataset_questions_and_reports_gold_matches(
         ),
         encoding="utf-8",
     )
-    profile = tmp_path / "families/deepseek_ocr/tests/benchmark/deepseek-ocr.yaml"
+    profile = tmp_path / "families/example/tests/benchmark/example-ocr.yaml"
     profile.parent.mkdir(parents=True)
     runner = profile.parent / "reference.py"
     runner.write_text("# family reference\n", encoding="utf-8")
     case = QualificationCase(
         kind="accuracy",
-        model="deepseek-ocr",
-        family="deepseek_ocr",
+        model="example-ocr",
+        family="example",
         name="ocrbench-v2-parity",
         benchmark="ocrbench_v2_parity",
         candidate={
-            "family": "deepseek_ocr",
-            "checkpoint": "deepseek-ai/DeepSeek-OCR-2",
+            "family": "example",
+            "checkpoint": "example/ocr",
             "revision": "a" * 40,
             "task": "vision_language_generation",
             "precision": "fp16",
@@ -997,19 +1057,19 @@ def test_semantic_segmentation_accuracy_compares_pixel_and_class_iou(
         json.dumps({"requests": [{"id": "image", "image": "image.jpeg"}]}),
         encoding="utf-8",
     )
-    profile = tmp_path / "families/segformer/tests/benchmark/example.yaml"
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
     profile.parent.mkdir(parents=True)
     runner = profile.parent / "reference.py"
     runner.write_text("# family reference\n", encoding="utf-8")
     case = QualificationCase(
         kind="accuracy",
         model="example",
-        family="segformer",
+        family="example",
         name="segmentation-parity",
         benchmark="imagenette_segmentation_parity",
         candidate={
-            "family": "segformer",
-            "checkpoint": "nvidia/example",
+            "family": "example",
+            "checkpoint": "example/segmentation",
             "task": "segmentation",
             "precision": "fp16",
             "build": {},
@@ -1136,19 +1196,19 @@ def test_image_feature_accuracy_compares_vectors_and_knn_utility(
         ),
         encoding="utf-8",
     )
-    profile = tmp_path / "families/dinov3/tests/benchmark/example.yaml"
+    profile = tmp_path / "families/example/tests/benchmark/example.yaml"
     profile.parent.mkdir(parents=True)
     runner = profile.parent / "reference.py"
     runner.write_text("# family reference\n", encoding="utf-8")
     case = QualificationCase(
         kind="accuracy",
         model="example",
-        family="dinov3",
+        family="example",
         name="beans-knn-parity",
         benchmark="beans_image_feature_knn",
         candidate={
-            "family": "dinov3",
-            "checkpoint": "facebook/example",
+            "family": "example",
+            "checkpoint": "example/features",
             "task": "image_features",
             "precision": "fp16",
             "build": {"max_sequence_length": 1},
@@ -1169,7 +1229,7 @@ def test_image_feature_accuracy_compares_vectors_and_knn_utility(
         source=profile,
         reference_requirements=None,
     )
-    dataset = Dataset("dinov3-beans-knn-v1", dataset_path, "provided", "digest")
+    dataset = Dataset("image-feature-knn-v1", dataset_path, "provided", "digest")
     context = RuntimeContext(
         repository=REPOSITORY,
         artifacts=tmp_path / "artifacts",
@@ -1530,10 +1590,10 @@ def test_hf_accuracy_reference_applies_explicit_translation_languages() -> None:
 
 
 @pytest.mark.parametrize("runner", [hf_text_generation, hf_transformers])
-def test_hf_translation_supports_transformers5_generic_nllb_tokenizer(runner) -> None:
+def test_hf_translation_supports_replace_final_unknown_tokenizer(runner) -> None:
     import torch
 
-    class GenericNllbTokenizer:
+    class GenericTranslationTokenizer:
         unk_token_id = 3
 
         @staticmethod
@@ -1544,7 +1604,7 @@ def test_hf_translation_supports_transformers5_generic_nllb_tokenizer(runner) ->
         def convert_ids_to_tokens(value: int) -> str:
             return {256047: "eng_Latn", 256057: "fra_Latn"}[value]
 
-    tokenizer = GenericNllbTokenizer()
+    tokenizer = GenericTranslationTokenizer()
     request = {
         "source_language": "eng_Latn",
         "source_language_token_id": 256047,
@@ -1571,16 +1631,6 @@ def test_hf_translation_supports_transformers5_generic_nllb_tokenizer(runner) ->
     assert controls == {"forced_bos_token_id": 256057}
     assert source_token_id == 256047
     assert encoded["input_ids"].tolist() == [[17, 2, 256047]]
-
-
-def test_nllb_profile_owns_its_reference_source_language_placement() -> None:
-    cases = [case for case in discover(REPOSITORY) if case.model == "nllb-200-distilled-600m"]
-
-    assert {case.kind for case in cases} == {"accuracy", "performance"}
-    assert all(
-        case.values["reference"]["source_language_placement"] == "replace-final-unk"
-        for case in cases
-    )
 
 
 @pytest.mark.parametrize(
@@ -2724,7 +2774,7 @@ def test_stereo_accuracy_compares_complete_disparity_artifacts(tmp_path: Path, m
 def test_metric_geometry_accuracy_compares_complete_task_artifacts(
     tmp_path: Path, monkeypatch
 ) -> None:
-    profile = tmp_path / "families/moge/tests/benchmark/moge.yaml"
+    profile = tmp_path / "families/example/tests/benchmark/example-geometry.yaml"
     profile.parent.mkdir(parents=True)
     image = tmp_path / "data/image.jpeg"
     image.parent.mkdir()
@@ -2777,13 +2827,13 @@ def test_metric_geometry_accuracy_compares_complete_task_artifacts(
     }
     case = QualificationCase(
         kind="accuracy",
-        model="moge",
-        family="moge",
+        model="example-geometry",
+        family="example",
         name="geometry",
         benchmark="metric_geometry_parity",
         candidate={
-            "family": "moge",
-            "checkpoint": "example/moge",
+            "family": "example",
+            "checkpoint": "example/geometry",
             "task": "monocular_geometry",
             "precision": "fp32",
             "build": {},
@@ -2824,7 +2874,7 @@ def test_metric_geometry_accuracy_compares_complete_task_artifacts(
     monkeypatch.setattr(
         qualification_accuracy,
         "_candidate_outputs",
-        lambda *_args: ([candidate], tmp_path / "moge.bundle"),
+        lambda *_args: ([candidate], tmp_path / "example.bundle"),
     )
 
     result = qualification_accuracy.run_accuracy(case, context)

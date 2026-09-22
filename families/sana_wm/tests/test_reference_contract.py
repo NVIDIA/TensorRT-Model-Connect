@@ -22,7 +22,7 @@ def test_qualification_candidate_uses_the_prepared_family_model() -> None:
 
     prepared_model = "trtmc-reference/SANA-model"
     assert profile["candidate"]["model_directory"] == prepared_model
-    assert profile["reference_environment"]["paths"]["sana_model"] == prepared_model
+    assert profile["reference_environment"]["paths"]["model_dir"] == prepared_model
 
 
 def test_native_plugin_uses_installed_tensorrt_library(tmp_path: Path) -> None:

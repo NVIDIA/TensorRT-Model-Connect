@@ -1707,18 +1707,7 @@ def _load_vision(
     kwargs = _load_kwargs(arguments, torch)
     processor_kwargs = _processor_kwargs(arguments)
 
-    if arguments.adapter == "timm-classification" or arguments.family in {
-        "timm_densenet",
-        "timm_efficientnet",
-        "timm_inception",
-        "timm_mnasnet",
-        "timm_mobilenetv2",
-        "timm_mobilenetv3",
-        "timm_repvgg",
-        "timm_resnet",
-        "timm_vgg",
-        "timm_vit",
-    }:
+    if arguments.adapter == "timm-classification":
         import timm
         from timm.data import create_transform, resolve_model_data_config
 

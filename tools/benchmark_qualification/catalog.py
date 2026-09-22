@@ -19,6 +19,35 @@ class QualificationError(RuntimeError):
     pass
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Load policy YAML while rejecting duplicate explicit mapping keys."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = self.construct_object(key_node, deep=False)
+            try:
+                duplicate = key in seen
+                seen.add(key)
+            except TypeError as error:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found an unhashable mapping key",
+                    key_node.start_mark,
+                ) from error
+            if duplicate:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+        return super().construct_mapping(node, deep=deep)
+
+
 @dataclass(frozen=True)
 class QualificationCase:
     kind: str
@@ -214,7 +243,7 @@ def _reference_paths(raw: Any, path: Path) -> dict[str, str]:
 
 def _yaml_object(path: Path, label: str) -> dict[str, Any]:
     try:
-        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        value = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
     except (OSError, yaml.YAMLError) as error:
         raise QualificationError(f"cannot read {label} {path}: {error}") from error
     if not isinstance(value, dict):

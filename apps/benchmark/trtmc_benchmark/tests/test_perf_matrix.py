@@ -1245,8 +1245,14 @@ def _environment(tmp_path: Path) -> tuple[Path, perf.Environment]:
         "libtrtmc_model_lance.so",
     ):
         (runtime / name).write_bytes(b"")
+    _, suite_entries, _ = perf._load_suite_file(SUITE)
+    reference_fields = {
+        str(declaration["environment"])
+        for entry in suite_entries
+        for declaration in entry.get("baseline", {}).get("reference_inputs", {}).values()
+    }
     references = {}
-    for name in perf.REFERENCE_FIELDS:
+    for name in reference_fields:
         path = tmp_path / name
         path.mkdir()
         references[name] = str(path)
@@ -1463,13 +1469,15 @@ def test_release_suite_expands_profiles_and_covers_ready_catalog() -> None:
     vision_entries = {entry["id"]: entry for entry in entries if entry["id"] in vision_ids}
     assert set(vision_entries) == vision_ids
     perf._coverage(entries, excluded)
-    # Adapter identity belongs to the builtin fixture, not an owned replacement.
+    # Adapter identity belongs to the suite entry, not a shared family-name registry.
     _, builtin_entries, _ = perf._load_suite_file(SUITE)
     builtin_vision = {entry["id"]: entry for entry in builtin_entries if entry["id"] in vision_ids}
     assert set(builtin_vision) == vision_ids
+    builtin_timm = [entry for entry in builtin_entries if entry["family"].startswith("timm_")]
+    assert builtin_timm
     assert all(
-        entry["baseline"]["adapter"] == "hf-transformers-vision"
-        for entry in builtin_vision.values()
+        entry["baseline"]["adapter"] == "timm-classification"
+        for entry in builtin_timm
     )
 
 

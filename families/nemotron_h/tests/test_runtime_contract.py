@@ -8,8 +8,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from families.nemotron_h.model import _runtime_config, _stop_token_ids
+
+
+def test_qualification_environment_keeps_extension_builds_in_family_environment() -> None:
+    profile = yaml.safe_load(
+        (Path(__file__).parent / "benchmark/nemotron-h-nano-9b.yaml").read_text(encoding="utf-8")
+    )
+
+    assert profile["reference_environment"]["build_isolation"] is False
 
 
 def test_runtime_keeps_a_scalar_eos_and_every_declared_stop_token(tmp_path) -> None:
