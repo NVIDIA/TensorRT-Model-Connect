@@ -76,7 +76,7 @@ def load_suite(path: Path) -> tuple[str, list[dict[str, Any]], set[str]]:
         return (name, entries, excluded)
     positions = {entry['id']: index for index, entry in enumerate(entries)}
     for family_suite in sorted(MANIFEST_ROOT.glob('*/tests/performance.yaml')):
-        owner = family_suite.parents[2].name
+        owner = family_suite.parents[1].name
         _family_file(owner, 'tests/performance.yaml', 'performance suite')
         _, owned_entries, _ = _load_suite_file(family_suite, owner=owner)
         for entry in owned_entries:
