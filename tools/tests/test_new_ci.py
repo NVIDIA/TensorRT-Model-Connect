@@ -189,6 +189,8 @@ def test_selective_e2e_calls_family_tests_directly(
         "families/beta/tests/test_model.py",
     ]
     assert ["-m", "not gpu and not trt"] == unit_command[5:7]
+    assert unit_command[7:9] == ["--e2e-model", "beta"]
+    assert "--e2e-testcase" not in unit_command
     assert unit_command[-2:] == [
         "--junitxml",
         native_build / "trtmc-beta-unit-junit.xml",
@@ -204,6 +206,8 @@ def test_selective_e2e_calls_family_tests_directly(
         "families/beta/tests/test_gpu.py",
     ]
     assert ["-m", "gpu or trt"] == hardware_command[4:6]
+    assert hardware_command[6:8] == ["--e2e-model", "beta"]
+    assert "--e2e-testcase" not in hardware_command
     assert hardware_command[-2:] == [
         "--junitxml",
         native_build / "trtmc-beta-hardware-junit.xml",
@@ -939,6 +943,8 @@ def test_gpu_free_unit_scope_keeps_family_python_in_physical_jobs(tmp_path: Path
         "tools/tests",
     ]
     assert "families" not in python_command
+    assert "--e2e-model" not in python_command
+    assert "--e2e-testcase" not in python_command
 
     ctest_command = context.calls[5][0]
     assert ctest_command[-2:] == ["--label-exclude", "gpu"]
