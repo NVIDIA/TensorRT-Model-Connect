@@ -129,8 +129,8 @@ def repository(tmp_path, monkeypatch):
     _write_suite(canonical, [_entry("other", "other-model")])
     owned_suite = families / "sample/tests/performance.yaml"
     _write_suite(owned_suite, [_entry("sample", "sample-model", script=True)])
-    monkeypatch.setattr(perf, "REPOSITORY", root)
-    monkeypatch.setattr(perf, "MANIFEST_ROOT", families)
+    monkeypatch.setattr(perf.core, "REPOSITORY", root)
+    monkeypatch.setattr(perf.core, "MANIFEST_ROOT", families)
     environment = SimpleNamespace(
         bundle_cache=tmp_path / "bundles", runtime_root=tmp_path / "runtime",
         hf_runner=tmp_path / "hf.py", task_runner=tmp_path / "task.py",

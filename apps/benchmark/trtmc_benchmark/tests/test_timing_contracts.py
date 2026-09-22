@@ -68,7 +68,7 @@ def test_candidate_and_reference_use_the_same_effective_declaration(tmp_path, mo
     manifest.write_text("{}", encoding="utf-8")
     model = ModelDescriptor("fixture", "", "", "fixture.bundle", "new_owner", "text_continuation", "fp32",
                             manifest, ({"name": "case", "prompt": "hello"},), {})
-    monkeypatch.setattr(perf, "ManifestCatalog", lambda _: SimpleNamespace(resolve=lambda _selector: model))
+    monkeypatch.setattr(perf.core, "ManifestCatalog", lambda _: SimpleNamespace(resolve=lambda _selector: model))
     declaration = _declaration(assets=True)
     spec = {
         "id": "fixture.generate", "family": model.family, "model": model.name,

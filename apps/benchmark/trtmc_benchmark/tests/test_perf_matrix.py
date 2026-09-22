@@ -1627,7 +1627,7 @@ def test_reference_falls_back_when_compiled_process_fails(tmp_path: Path, monkey
                 return {"argv": list(arguments), "exit_code": 1}
         return successful(arguments, **kwargs)
 
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
     row = perf._execute_entry(
         entry,
         environment,
@@ -1662,7 +1662,7 @@ def test_compiled_output_mismatch_tries_the_configured_fallback(
     entry = perf.resolve_entries((spec,), environment)[0]
     state, successful = _fake_measurement_runner(environment, entry, candidate_tokens=([9],))
 
-    monkeypatch.setattr(perf, "run_command", successful)
+    monkeypatch.setattr(perf.core, "run_command", successful)
 
     row = perf._execute_entry(
         entry,
@@ -1786,7 +1786,7 @@ def test_unstable_measurement_is_retried_once(
         entry,
         candidate_samples=(falling, second),
     )
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
     row = perf._execute_entry(
         entry,
         environment,
@@ -1823,7 +1823,7 @@ def test_scratch_is_run_scoped_and_success_cleans_all_entry_attempts(
     entry_work = environment.scratch_root / "run-a" / "gpt2.generate"
     (entry_work / "attempt-1" / "hf-cache").mkdir(parents=True)
     state, run_command = _fake_measurement_runner(environment, entry)
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
 
     row = perf._execute_entry(
         entry,
@@ -1848,7 +1848,7 @@ def test_existing_artifact_attempt_is_skipped_in_one_execution(tmp_path: Path, m
     run = tmp_path / "run"
     (run / "artifacts" / "gpt2.generate" / "attempt-1").mkdir(parents=True)
     _, run_command = _fake_measurement_runner(environment, entry)
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
 
     row = perf._execute_entry(
         entry,
@@ -1885,9 +1885,9 @@ def test_failed_command_records_the_scanned_artifact_attempt(tmp_path: Path, mon
         "selected_entry_ids": ["first"],
         "rows": [],
     }
-    monkeypatch.setattr(perf, "_execute_entry", execute)
-    monkeypatch.setattr(perf, "_write_json", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(perf, "write_report", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(perf.core, "_execute_entry", execute)
+    monkeypatch.setattr(perf.core, "_write_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(perf.core, "write_report", lambda *_args, **_kwargs: {})
 
     assert (
         perf._run_rows(
@@ -1931,7 +1931,7 @@ def test_second_measurement_contract_mismatch_discards_first_stability(
         candidate_samples=(falling, [10.0] * 10),
         candidate_tokens=([1, 2], [9]),
     )
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
 
     row = perf._execute_entry(
         entry,
@@ -1962,7 +1962,7 @@ def test_failed_remeasurement_is_not_treated_as_a_pass(tmp_path: Path, monkeypat
         candidate_exit_codes=(0, 1),
         record_bundle=True,
     )
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
 
     with pytest.raises(perf.PerfMatrixError, match="candidate command failed"):
         perf._execute_entry(
@@ -1992,7 +1992,7 @@ def test_delete_always_cleans_declared_bundle_when_candidate_process_fails(
         entry,
         candidate_exit_codes=(1,),
     )
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
 
     with pytest.raises(perf.PerfMatrixError, match="candidate command failed"):
         perf._execute_entry(
@@ -2017,7 +2017,7 @@ def test_delete_always_cleans_declared_bundle_when_candidate_process_fails(
         external_entry,
         candidate_exit_codes=(1,),
     )
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
     with pytest.raises(perf.PerfMatrixError, match="candidate command failed"):
         perf._execute_entry(
             external_entry,
@@ -2061,7 +2061,7 @@ def test_prepare_aggregates_public_builder_receipts(tmp_path: Path, monkeypatch)
             "stderr_log": str(stderr_path),
         }
 
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
     output = tmp_path / "preparation.json"
     assert perf.prepare_entries((entry,), environment, output, verbose=False) == 0
     receipt = json.loads(output.read_text(encoding="utf-8"))
@@ -2126,9 +2126,9 @@ def test_multi_entry_progress_publishes_only_completed_rows(tmp_path: Path, monk
         if path.name == "results.json":
             snapshots.append([row["id"] for row in value["rows"]])
 
-    monkeypatch.setattr(perf, "_execute_entry", execute)
-    monkeypatch.setattr(perf, "_write_json", write_json)
-    monkeypatch.setattr(perf, "write_report", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(perf.core, "_execute_entry", execute)
+    monkeypatch.setattr(perf.core, "_write_json", write_json)
+    monkeypatch.setattr(perf.core, "write_report", lambda *_args, **_kwargs: {})
 
     assert (
         perf._run_rows(
@@ -2157,8 +2157,8 @@ def test_contract_mismatch_is_finished_but_keeps_run_non_green(tmp_path: Path, m
         "_execute_entry",
         lambda *_args, **_kwargs: pytest.fail("finished contract mismatch was rerun"),
     )
-    monkeypatch.setattr(perf, "_write_json", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(perf, "write_report", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(perf.core, "_write_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(perf.core, "write_report", lambda *_args, **_kwargs: {})
 
     assert (
         perf._run_rows(
@@ -2262,7 +2262,7 @@ def test_run_executes_candidate_then_reference_and_publishes_report(
             "stderr_log": str(stderr_path),
         }
 
-    monkeypatch.setattr(perf, "run_command", run_command)
+    monkeypatch.setattr(perf.core, "run_command", run_command)
     assert (
         perf.main(
             [
@@ -2473,7 +2473,7 @@ def test_reference_testcase_name_is_only_sent_to_builtin_runner(monkeypatch, tmp
     if route == "script":
         baseline.pop("adapter")
         baseline["script"] = "tests/reference.py"
-        monkeypatch.setattr(perf, "_family_script", lambda _: tmp_path / "reference.py")
+        monkeypatch.setattr(perf.core, "_family_script", lambda _: tmp_path / "reference.py")
     elif route == "hf":
         baseline["runner"] = "hf-transformers"
     entry = replace(entry, spec={**entry.spec, "baseline": baseline})
