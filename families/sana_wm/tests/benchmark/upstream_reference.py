@@ -14,6 +14,15 @@ from pathlib import Path
 from typing import Any
 
 
+REPOSITORY = Path(__file__).resolve().parents[4]
+if str(REPOSITORY) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY))
+
+from families.sana_wm.tests.official_reference import (  # noqa: E402
+    install_local_stage1_text_encoder,
+)
+
+
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser()
     value.add_argument("--reference-repo", required=True, type=Path)
@@ -102,6 +111,7 @@ def main() -> int:
     required_model_paths = {
         "config": model_dir / "config.yaml",
         "model": model_dir / "dit/sana_wm_1600m_720p.safetensors",
+        "stage1 text encoder": model_dir / "stage1_text_encoder",
         "refiner": model_dir / "refiner",
         "refiner text encoder": model_dir / "refiner/text_encoder",
     }
@@ -146,6 +156,7 @@ def main() -> int:
         gemma_root=required_model_paths["refiner text encoder"],
         seed=arguments.refiner_seed,
     )
+    install_local_stage1_text_encoder(official, required_model_paths["stage1 text encoder"])
     pipeline = official.SanaWMPipeline(
         config=config,
         model_path=required_model_paths["model"],

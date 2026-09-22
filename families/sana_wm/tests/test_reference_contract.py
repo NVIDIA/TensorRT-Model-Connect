@@ -5,14 +5,25 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
+from types import ModuleType
 
 import numpy as np
 import pytest
 import yaml
 
 from .. import native_plugin_builder
+from . import official_reference
 from . import test_e2e as e2e
 from .benchmark import prepare_environment
+
+
+def _write_stage1_text_encoder(model_dir: Path) -> Path:
+    stage1_text_encoder = model_dir / "stage1_text_encoder"
+    stage1_text_encoder.mkdir(parents=True)
+    for name in ("config.json", "tokenizer.json", "model.safetensors"):
+        (stage1_text_encoder / name).write_text("{}\n", encoding="utf-8")
+    return stage1_text_encoder
 
 
 def test_qualification_candidate_uses_the_prepared_family_model() -> None:
@@ -121,6 +132,66 @@ def test_qualification_materializes_pinned_stage1_text_encoder(monkeypatch, tmp_
     }
 
 
+def test_official_reference_loads_stage1_encoder_from_explicit_local_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stage1_text_encoder = tmp_path / "stage1-text-encoder"
+    stage1_text_encoder.mkdir()
+    for name in ("config.json", "tokenizer.json", "model.safetensors"):
+        (stage1_text_encoder / name).write_text("{}\n", encoding="utf-8")
+    calls: list[tuple[object, ...]] = []
+
+    class Decoder:
+        def to(self, device: str):
+            calls.append(("to", device))
+            return "local-decoder"
+
+    class Model:
+        def get_decoder(self):
+            calls.append(("get_decoder",))
+            return Decoder()
+
+    class AutoTokenizer:
+        padding_side = "left"
+
+        @staticmethod
+        def from_pretrained(path: str, **kwargs):
+            calls.append(("tokenizer", path, kwargs))
+            return AutoTokenizer()
+
+    class AutoModelForCausalLM:
+        @staticmethod
+        def from_pretrained(path: str, **kwargs):
+            calls.append(("model", path, kwargs))
+            return Model()
+
+    transformers = ModuleType("transformers")
+    transformers.AutoModelForCausalLM = AutoModelForCausalLM
+    transformers.AutoTokenizer = AutoTokenizer
+    torch = ModuleType("torch")
+    torch.bfloat16 = "bf16"
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+
+    tokenizer, decoder = official_reference.load_local_stage1_text_encoder(
+        stage1_text_encoder, "cuda:0"
+    )
+    assert isinstance(tokenizer, AutoTokenizer)
+    assert tokenizer.padding_side == "right"
+    assert decoder == "local-decoder"
+    assert calls == [
+        ("tokenizer", str(stage1_text_encoder), {"local_files_only": True}),
+        (
+            "model",
+            str(stage1_text_encoder),
+            {"local_files_only": True, "torch_dtype": "bf16"},
+        ),
+        ("get_decoder",),
+        ("to", "cuda:0"),
+    ]
+
+
 def test_qualification_environment_replaces_gui_opencv(monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(
@@ -196,6 +267,7 @@ def test_raw_snapshot_calls_declared_official_entrypoint(monkeypatch, tmp_path: 
     (model_dir / "dit").mkdir(parents=True)
     (model_dir / "vae").mkdir()
     (model_dir / "refiner/text_encoder").mkdir(parents=True)
+    stage1_text_encoder = _write_stage1_text_encoder(model_dir)
     (model_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
     (model_dir / "dit/sana_wm_1600m_720p.safetensors").write_bytes(b"weights")
     assert not (model_dir / "model_index.json").exists()
@@ -234,7 +306,9 @@ def test_raw_snapshot_calls_declared_official_entrypoint(monkeypatch, tmp_path: 
     result = e2e._official_reference(model_dir, manifest, case, tmp_path)
 
     command = captured["command"]
-    assert command[1] == str(entrypoint)
+    assert command[1] == str(e2e.TEST_ROOT / "official_reference.py")
+    assert command[command.index("--reference-repo") + 1] == str(source)
+    assert command[command.index("--stage1-text-encoder") + 1] == str(stage1_text_encoder)
     assert command[command.index("--action") + 1] == case["action"]
     assert command[command.index("--intrinsics") + 1] == str(
         e2e._asset(case["camera_intrinsics_file"])
@@ -282,6 +356,7 @@ def test_official_reference_dependency_failure_is_not_hidden(monkeypatch, tmp_pa
     model_dir = tmp_path / "raw-checkpoint"
     (model_dir / "dit").mkdir(parents=True)
     (model_dir / "refiner/text_encoder").mkdir(parents=True)
+    _write_stage1_text_encoder(model_dir)
     (model_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
     (model_dir / "dit/sana_wm_1600m_720p.safetensors").write_bytes(b"weights")
     monkeypatch.setenv("TRTMC_REFERENCE_SOURCE_DIR", str(source))
@@ -338,6 +413,7 @@ def test_official_refiner_requires_every_output_frame(
     model_dir = tmp_path / "checkpoint"
     (model_dir / "dit").mkdir(parents=True)
     (model_dir / "refiner/text_encoder").mkdir(parents=True)
+    _write_stage1_text_encoder(model_dir)
     (model_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
     (model_dir / "dit/sana_wm_1600m_720p.safetensors").write_bytes(b"weights")
     monkeypatch.setenv("TRTMC_REFERENCE_SOURCE_DIR", str(source))

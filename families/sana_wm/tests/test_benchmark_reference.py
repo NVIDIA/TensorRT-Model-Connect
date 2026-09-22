@@ -294,6 +294,10 @@ def test_sana_reference_calls_official_pipeline_with_exact_workload(
     model_dir = tmp_path / "model"
     (model_dir / "dit").mkdir(parents=True)
     (model_dir / "refiner/text_encoder").mkdir(parents=True)
+    stage1_text_encoder = model_dir / "stage1_text_encoder"
+    stage1_text_encoder.mkdir()
+    for name in ("config.json", "tokenizer.json", "model.safetensors"):
+        (stage1_text_encoder / name).write_text("{}\n", encoding="utf-8")
     (model_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
     (model_dir / "dit/sana_wm_1600m_720p.safetensors").write_bytes(b"weights")
     image = tmp_path / "image.png"
@@ -375,6 +379,12 @@ def test_sana_reference_calls_official_pipeline_with_exact_workload(
         ),
     )
     monkeypatch.setattr(sana_wm_reference, "_official_module", lambda path: official)
+    installed = {}
+    monkeypatch.setattr(
+        sana_wm_reference,
+        "install_local_stage1_text_encoder",
+        lambda module, path: installed.update(module=module, path=path),
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -430,6 +440,7 @@ def test_sana_reference_calls_official_pipeline_with_exact_workload(
         "gemma_root": model_dir / "refiner/text_encoder",
         "seed": 42,
     }
+    assert installed == {"module": official, "path": stage1_text_encoder.resolve()}
     assert captured["generation"] == {
         "num_frames": 321,
         "fps": 16,
