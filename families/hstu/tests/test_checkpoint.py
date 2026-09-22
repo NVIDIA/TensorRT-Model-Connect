@@ -16,12 +16,12 @@ from families.hstu.tests.fixtures import make_checkpoint, tiny_config
 
 
 def _original_source(config):
-    if not os.environ.get("TRTMC_HSTU_REFERENCE_ROOT"):
+    if not (os.environ.get("TRTMC_HSTU_REFERENCE_ROOT") or os.environ.get("TRTMC_REFERENCE_SOURCE_DIR")):
         from families.hstu.tests.test_e2e import _selected_cases
 
         cases, enabled = _selected_cases(config)
         if not enabled or not cases:
-            pytest.skip("HSTU source oracle requires TRTMC_HSTU_REFERENCE_ROOT or an explicit HSTU E2E selector")
+            pytest.skip("HSTU source oracle requires an explicit reference checkout or HSTU E2E selector")
     from families.hstu.tests.environment import reference_source
 
     return reference_source()
@@ -38,7 +38,8 @@ def original_source(request):
     (["bert"], [], False, False),
     (["hstu"], [], False, True),
     ([], ["hstu-tiny-ranking-fp32"], False, True),
-    ([], [], True, True),
+    ([], [], "TRTMC_HSTU_REFERENCE_ROOT", True),
+    ([], [], "TRTMC_REFERENCE_SOURCE_DIR", True),
 ])
 def test_source_oracle_opt_in_precedes_reference_preparation(
     tmp_path, monkeypatch, models, testcases, explicit, selected,
@@ -46,8 +47,9 @@ def test_source_oracle_opt_in_precedes_reference_preparation(
     from families.hstu.tests import environment
 
     monkeypatch.delenv("TRTMC_HSTU_REFERENCE_ROOT", raising=False)
+    monkeypatch.delenv("TRTMC_REFERENCE_SOURCE_DIR", raising=False)
     if explicit:
-        monkeypatch.setenv("TRTMC_HSTU_REFERENCE_ROOT", str(tmp_path))
+        monkeypatch.setenv(explicit, str(tmp_path))
     calls = []
 
     def prepare():
@@ -66,10 +68,13 @@ def test_source_oracle_opt_in_precedes_reference_preparation(
         assert not calls
 
 
-def test_selected_source_oracle_preparation_failure_is_not_skipped(monkeypatch):
+@pytest.mark.parametrize("variable", ["TRTMC_HSTU_REFERENCE_ROOT", "TRTMC_REFERENCE_SOURCE_DIR"])
+def test_selected_source_oracle_preparation_failure_is_not_skipped(monkeypatch, variable):
     from families.hstu.tests import environment
 
-    monkeypatch.setenv("TRTMC_HSTU_REFERENCE_ROOT", "/explicit-reference")
+    monkeypatch.delenv("TRTMC_HSTU_REFERENCE_ROOT", raising=False)
+    monkeypatch.delenv("TRTMC_REFERENCE_SOURCE_DIR", raising=False)
+    monkeypatch.setenv(variable, "/explicit-reference")
 
     def fail():
         raise ValueError("source differs from pinned revision")

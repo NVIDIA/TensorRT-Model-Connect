@@ -21,7 +21,10 @@ python -m pytest families/hstu/tests/test_e2e.py --e2e-model hstu -q
 
 `TRTMC_HSTU_BINARY` can override the default `trtmc-hstu` sibling of
 `TRTMC_BINARY`. For offline validation, set `TRTMC_HSTU_REFERENCE_ROOT` to an
-existing exact checkout including its `.git` metadata. Explicitly selected
+existing exact checkout including its `.git` metadata. The shared CI override
+`TRTMC_REFERENCE_SOURCE_DIR` is also accepted; the HSTU-specific override takes
+precedence. Both overrides verify the exact checkout and never fall back to a
+download when it is invalid. Explicitly selected
 cases fail when native artifacts, a GPU, verified reference source, or their
 threshold sidecar cannot be obtained. Without an E2E
 selector these hardware cases are skipped. No checkpoint download is needed.
@@ -75,9 +78,10 @@ scores must remain within the normalized dot-product range.
 The oracle runs original upstream HSTU layer, attention-mask, SiLU attention,
 normalization/gating, L2 postprocessing, prediction-MLP, and dot-product
 methods. Its test-only adapters handle jagged tensor storage, embedding lookup,
-and position/timestamp indexing. See `reference-source.json` for the precise
-source and adaptation boundaries. The PyTorch oracle is not a runtime
-backend.
+and position/timestamp indexing. `reference-source.json` declares the checkout
+repository and revision for CI. See `reference-provenance.json` for the nine
+source-file identities, adaptation boundaries, and precision policy. The PyTorch
+oracle is not a runtime backend.
 
 The fixtures use two HSTU blocks, nonzero affine normalization and projection
 weights, large sparse INT64 feature keys, different user sequence lengths,

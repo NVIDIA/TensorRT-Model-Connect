@@ -1,23 +1,4 @@
 {
-  "repository": "https://github.com/NVIDIA/recsys-examples",
-  "revision": "97062d97eef53115105063801e35184e36186df5",
-  "source_sha256": {
-    "examples/hstu/ops/pt_ops/pt_hstu_attention.py": "a0f2465b046c016f8db0af0c7d19a5be1c0c5a20300c1209acd63e8141654aca",
-    "examples/hstu/ops/pt_ops/pt_norm_mul_dropout.py": "fd3370a0c415cb4f4cfe5d5486a4b43136d0e64e67dfd45ae6fdc273bff11394",
-    "examples/hstu/modules/debug/debug_hstu_layer.py": "d3d6fb424caea77ae010ed63a46d8516e3f25b9f2f8f4ab99675b560de22d049",
-    "examples/hstu/modules/mlp.py": "947538d8d17caba7d913e71a6d16357f4e850d95d63e55349760642ae3945af8",
-    "examples/hstu/modules/output_postprocessors.py": "ff4dca2f8d18308cfd1b7ff68554d5a289acb2b67de33ab99415cffab9299971",
-    "examples/hstu/modules/position_encoder.py": "c2685b668fd30b26f61f34466b844bc2472aa68f20e96703b778a911a93d292b",
-    "examples/hstu/ops/triton_ops/triton_position.py": "015fb4a0745bdff9cb6850d4dbca2245ef502c8dbb0ad2ae839451c21a9a8386",
-    "examples/hstu/modules/hstu_processor.py": "b49ff5787e35965eb4d65b6237c7eeddf9c1f51c104597f99dc7db20f6f34c2e",
-    "examples/hstu/modules/similarity/dot_product.py": "52b68677c94d2b7af80b76bb2a69649e55871d88da1337a6d2a01dcb94512a05"
-  },
-  "adapters": [
-    "CPU embedding lookup",
-    "jagged packing and unpacking",
-    "position and timestamp indexing",
-    "removed instrumentation decorators and optional dependency imports"
-  ],
-  "weights": "deterministic synthetic fixture; not a trained checkpoint",
-  "precision_policy": "Original model dtype for dense HSTU, normalization output, and ranking MLP; retrieval candidate table normalization and C++ dot accumulation use FP32."
+  "repository": "NVIDIA/recsys-examples",
+  "revision": "97062d97eef53115105063801e35184e36186df5"
 }

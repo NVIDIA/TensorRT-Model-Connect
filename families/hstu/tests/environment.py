@@ -19,10 +19,11 @@ _SOURCE_URL = "https://github.com/NVIDIA/recsys-examples.git"
 def reference_source() -> Path:
     """Use an explicit checkout or fetch the pinned source into a local cache.
 
-    No upstream package is installed. Only the test oracle reads these files;
+    The family override takes precedence over the shared CI checkout. No
+    upstream package is installed. Only the test oracle reads these files;
     the model build and C++ deployment do not use this checkout.
     """
-    explicit = os.environ.get("TRTMC_HSTU_REFERENCE_ROOT")
+    explicit = os.environ.get("TRTMC_HSTU_REFERENCE_ROOT") or os.environ.get("TRTMC_REFERENCE_SOURCE_DIR")
     if explicit:
         source = Path(explicit).resolve()
         _verify_source(source)
