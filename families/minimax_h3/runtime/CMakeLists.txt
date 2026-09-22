@@ -68,6 +68,7 @@ if(TRTMC_BUILD_MINIMAX_H3_VSA_SM100A)
   target_link_libraries(trtmc_minimax_h3_vsa_sm100a PRIVATE
     CUDA::cuda_driver
     CUDA::cudart
+    CUDA::cublas
     ${TRTMC_TVM_FFI_LIBRARY}
   )
   target_compile_features(trtmc_minimax_h3_vsa_sm100a PRIVATE cxx_std_17 cuda_std_17)

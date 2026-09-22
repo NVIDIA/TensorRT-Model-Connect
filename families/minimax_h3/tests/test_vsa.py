@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 
 from families.minimax_h3.config import SOL_ENGINE_1344X768_124F
-from families.minimax_h3.vsa import make_vsa_geometry
+from families.minimax_h3.vsa import make_vsa_geometry, vsa_workspace_bytes
 
 
 def test_vsa_geometry_matches_the_fasth3_64_token_contract() -> None:
@@ -57,3 +57,10 @@ def test_vsa_video_tiles_follow_fastvideo_t_h_w_order() -> None:
     assert geometry.gather_indices[first_video_slot : first_video_slot + 64].tolist() == expected
     # The final video tile covers 1x4x4 because T=37, H=28, W=36.
     assert geometry.variable_block_sizes[-1] == 16
+
+
+def test_vsa_workspace_covers_fp32_routing_compression_and_block_map() -> None:
+    profile = SOL_ENGINE_1344X768_124F
+    geometry = make_vsa_geometry(profile)
+
+    assert vsa_workspace_bytes(geometry, profile) == 242_668_608

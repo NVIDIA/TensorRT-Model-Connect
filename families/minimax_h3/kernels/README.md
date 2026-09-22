@@ -10,9 +10,12 @@ SPDX-License-Identifier: Apache-2.0
 repository at commit `48a047c05ff4138f20cfa33351499c6ec5945f5d`. They are the
 forward-only Blackwell kernel used by the public FastH3 VSA checkpoint.
 
-`vsa_sm100a.cu` is the MiniMax-H3-owned TVM-FFI binding. It converts the
-checkpoint's per-query Top-K video indices into the kernel's compact block map
-and runs the vendored kernel on TensorRT's current CUDA stream.
+`vsa_sm100a.cu` is the MiniMax-H3-owned TVM-FFI binding. It owns the complete
+trained VSA operation: FP32 tile pooling and routing, per-query Top-K block-map
+construction, the vendored sparse-attention kernel, and the learned FP32
+compression branch with its BF16 gate. Keeping those coupled operations behind
+one BYOK boundary avoids a TensorRT 11.2 Myelin format-selection failure when
+the dynamic gather/pooling/GEMM producer is fused through a native TopK layer.
 
 The official recipe calls this kernel `sm100a`, but architecture-specific
 cubins do not carry across Blackwell variants. The CMake target defaults to

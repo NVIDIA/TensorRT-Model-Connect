@@ -350,139 +350,13 @@ def _tile_heads(network, tensor, geometry: VsaGeometry, profile: MiniMaxH3Config
     return transpose.get_output(0)
 
 
-def _pool_tiles(network, tensor, variable_block_sizes, geometry: VsaGeometry, profile):
-    import tensorrt as trt
+def vsa_workspace_bytes(geometry: VsaGeometry, profile: MiniMaxH3Config) -> int:
+    """Workspace for FP32 pooling/scores plus the sparse block map."""
 
-    from . import graph_ops as op
-
-    tensor = op.cast(network, tensor, trt.float32)
-    shaped = network.add_shuffle(tensor)
-    shaped.reshape_dims = (
-        1,
-        profile.num_heads,
-        geometry.num_tiles,
-        geometry.tile_size,
-        profile.head_dim,
-    )
-    pooled = network.add_reduce(
-        shaped.get_output(0),
-        trt.ReduceOperation.SUM,
-        1 << 3,
-        False,
-    ).get_output(0)
-    sizes = op.cast(network, variable_block_sizes, trt.float32)
-    sizes_shape = network.add_shuffle(sizes)
-    sizes_shape.reshape_dims = (1, 1, geometry.num_tiles, 1)
-    one = op.constant(network, np.ones((1, 1, 1, 1), dtype=np.float32))
-    divisor = network.add_elementwise(
-        sizes_shape.get_output(0),
-        one,
-        trt.ElementWiseOperation.MAX,
-    ).get_output(0)
-    return network.add_elementwise(pooled, divisor, trt.ElementWiseOperation.DIV).get_output(0)
-
-
-def _tile_scores(network, q, k, context: VsaGraphContext, profile: MiniMaxH3Config):
-    import tensorrt as trt
-
-    from . import graph_ops as op
-
-    q_pooled = _pool_tiles(network, q, context.variable_block_sizes, context.geometry, profile)
-    k_pooled = _pool_tiles(network, k, context.variable_block_sizes, context.geometry, profile)
-    scores = network.add_matrix_multiply(
-        q_pooled,
-        trt.MatrixOperation.NONE,
-        k_pooled,
-        trt.MatrixOperation.TRANSPOSE,
-    ).get_output(0)
-    scale = op.constant(
-        network,
-        np.full((1, 1, 1, 1), 1.0 / math.sqrt(profile.head_dim), dtype=np.float32),
-    )
-    scores = network.add_elementwise(scores, scale, trt.ElementWiseOperation.PROD).get_output(0)
-    return scores, q_pooled, k_pooled
-
-
-def _topk_video_indices(network, scores, geometry: VsaGeometry):
-    import tensorrt as trt
-
-    video_scores = network.add_slice(
-        scores,
-        (0, 0, 0, geometry.num_prefix_tiles),
-        (1, int(scores.shape[1]), geometry.num_tiles, geometry.num_video_tiles),
-        (1, 1, 1, 1),
-    ).get_output(0)
-    topk = network.add_topk(
-        video_scores,
-        trt.TopKOperation.MAX,
-        geometry.topk_video_tiles,
-        1 << 3,
-    )
-    if topk is None:
-        raise RuntimeError("TensorRT failed to add FastH3 VSA TopK")
-    return topk.get_output(1)
-
-
-def _compression_branch(
-    network,
-    scores,
-    value,
-    gate,
-    context: VsaGraphContext,
-    profile: MiniMaxH3Config,
-):
-    import tensorrt as trt
-
-    from . import graph_ops as op
-
-    geometry = context.geometry
-    sizes = network.add_shuffle(context.variable_block_sizes)
-    sizes.reshape_dims = (1, 1, 1, geometry.num_tiles)
-    zero_i32 = op.constant(network, np.zeros((1, 1, 1, 1), dtype=np.int32), dtype=np.int32)
-    valid = network.add_elementwise(
-        sizes.get_output(0),
-        zero_i32,
-        trt.ElementWiseOperation.GREATER,
-    ).get_output(0)
-    negative = op.constant(network, np.full((1, 1, 1, 1), -1.0e30, dtype=np.float32))
-    masked = network.add_select(valid, scores, negative).get_output(0)
-    softmax = network.add_softmax(masked)
-    softmax.axes = 1 << 3
-    pooled_value = _pool_tiles(
-        network,
-        value,
-        context.variable_block_sizes,
-        geometry,
-        profile,
-    )
-    compressed = network.add_matrix_multiply(
-        softmax.get_output(0),
-        trt.MatrixOperation.NONE,
-        pooled_value,
-        trt.MatrixOperation.NONE,
-    ).get_output(0)
-    compressed = op.cast(network, compressed, gate.dtype)
-    compressed_shape = network.add_shuffle(compressed)
-    compressed_shape.reshape_dims = (
-        1,
-        profile.num_heads,
-        geometry.num_tiles,
-        1,
-        profile.head_dim,
-    )
-    gate_shape = network.add_shuffle(gate)
-    gate_shape.reshape_dims = (
-        1,
-        profile.num_heads,
-        geometry.num_tiles,
-        geometry.tile_size,
-        profile.head_dim,
-    )
-    return network.add_elementwise(
-        compressed_shape.get_output(0),
-        gate_shape.get_output(0),
-        trt.ElementWiseOperation.PROD,
-    ).get_output(0)
+    pool_bytes = profile.num_heads * geometry.num_tiles * profile.head_dim * 4
+    score_bytes = profile.num_heads * geometry.num_tiles * geometry.num_tiles * 4
+    count_bytes = profile.num_heads * geometry.num_tiles * 4
+    return 3 * pool_bytes + 2 * score_bytes + count_bytes
 
 
 def sparse_attention(
@@ -496,9 +370,7 @@ def sparse_attention(
     *,
     name: str,
 ):
-    """Add trained VSA selection, sm100a attention, and gate compression."""
-
-    import tensorrt as trt
+    """Add the complete trained VSA operation through one BYOK boundary."""
 
     from tensorrt_model_connect.byok import add_kernel
 
@@ -509,45 +381,17 @@ def sparse_attention(
     k_tiled = _tile_heads(network, k, geometry, profile)
     v_tiled = _tile_heads(network, v, geometry, profile)
     gate_tiled = _tile_heads(network, gate, geometry, profile)
-    scores, _, _ = _tile_scores(network, q_tiled, k_tiled, context, profile)
-    topk_indices = _topk_video_indices(network, scores, geometry)
-    index_bytes = profile.num_heads * geometry.num_tiles * geometry.num_tiles * 4
-    count_bytes = profile.num_heads * geometry.num_tiles * 4
-    workspace_bytes = index_bytes + count_bytes
-    sparse, = add_kernel(
+    combined, = add_kernel(
         network,
         plugin_library=context.byok_plugin_library,
         kernel_name=VSA_BYOK_KERNEL_NAME,
-        inputs=[q_tiled, k_tiled, v_tiled, topk_indices, context.variable_block_sizes],
+        inputs=[q_tiled, k_tiled, v_tiled, gate_tiled, context.variable_block_sizes],
         output_specs=[{"dims": "same_as_input_0", "dtype": "bfloat16"}],
-        workspace_bytes=workspace_bytes,
+        workspace_bytes=vsa_workspace_bytes(geometry, profile),
     )
-    sparse.name = f"{name}.sparse_output"
-    sparse_shape = network.add_shuffle(sparse)
-    sparse_shape.reshape_dims = (
-        1,
-        profile.num_heads,
-        geometry.num_tiles,
-        geometry.tile_size,
-        profile.head_dim,
-    )
-    compressed = _compression_branch(
-        network,
-        scores,
-        v_tiled,
-        gate_tiled,
-        context,
-        profile,
-    )
-    combined = network.add_elementwise(
-        sparse_shape.get_output(0),
-        compressed,
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
-    flatten = network.add_shuffle(combined)
-    flatten.reshape_dims = (1, profile.num_heads, geometry.padded_rows, profile.head_dim)
+    combined.name = f"{name}.output"
     untile = op.constant(network, geometry.untile_indices, dtype=np.int32)
-    packed = network.add_gather(flatten.get_output(0), untile, 2).get_output(0)
+    packed = network.add_gather(combined, untile, 2).get_output(0)
     return op.heads_to_rows(
         network,
         packed,
