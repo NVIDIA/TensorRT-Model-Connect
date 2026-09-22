@@ -745,6 +745,47 @@ void test_runtime_config() {
             "duplicate sparse keys accepted");
 }
 
+void test_runtime_config_requires_item_table() {
+    for (const bool cached : {false, true}) {
+        for (const auto* mode : {"ranking", "retrieval"}) {
+            auto parse = [&](const std::string& tables, int group_size = 1) {
+                const std::string source =
+                    R"({"schema_version":1,"hidden_size":2,"max_sequence_length":16,)"
+                    R"("max_batch_size":2,"position_buckets":0,"time_buckets":0,)"
+                    R"("scaling_seqlen":16,"is_causal":true,"disable_contextual_mask":false,)"
+                    R"("prediction_head":[2],"num_layers":2,"num_heads":1,"head_dim":2,)"
+                    R"("cache_artifact_id":"item-table-test","mode":")" +
+                    std::string(mode) + R"(","enable_history_cache":)" +
+                    (cached ? "true" : "false") + R"(,"target_group_size":)" +
+                    std::to_string(group_size) + R"(,"embedding_tables":)" + tables + "}";
+                return trtmc::hstu::parse_runtime_config({source.begin(), source.end()}, {});
+            };
+            const std::string valid =
+                R"([{"name":"products","role":"item","num_embeddings":2,"offset":0}])";
+            const auto config = parse(valid);
+            check(config.enable_history_cache == cached && config.mode == mode,
+                  "valid item role must be accepted for both cache modes and tasks");
+            check(trtmc::hstu::find_role(config, "item")->name == "products",
+                  "item table admission must use role rather than table name");
+            for (const auto* invalid :
+                 {"[]", R"([{"name":"actions","role":"action","num_embeddings":2,"offset":0}])",
+                  R"([{"name":"context","role":"context","num_embeddings":2,"offset":0}])",
+                  R"([{"name":"item","role":"context","num_embeddings":2,"offset":0}])"}) {
+                bool rejected = false;
+                try {
+                    (void)parse(invalid);
+                } catch (const std::invalid_argument& error) {
+                    check(std::string(error.what()) == "hstu requires one item embedding table",
+                          "missing item role must fail through configuration validation");
+                    rejected = true;
+                }
+                check(rejected, "runtime configuration without an item role was accepted");
+            }
+            rejects([&] { (void)parse(valid, 0); }, "zero target group size must remain rejected");
+        }
+    }
+}
+
 trtmc::hstu::RuntimeConfig dense_configuration() {
     auto config = configuration();
     config.embedding_tables.pop_back();
@@ -1007,6 +1048,7 @@ int main() {
         test_interval_mask_randomized();
         test_finite_classification();
         test_runtime_config();
+        test_runtime_config_requires_item_table();
         test_dense_metadata_contract();
         test_dense_pipeline_outputs_and_admission();
         std::cout << "HSTU runtime contracts passed\n";

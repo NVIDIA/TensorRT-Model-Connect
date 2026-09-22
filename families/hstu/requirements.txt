@@ -1,4 +1,4 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Required only to read NVIDIA training checkpoints and run the reference tests.
-torch>=2.6
+torch>=2.10

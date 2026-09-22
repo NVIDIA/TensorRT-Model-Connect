@@ -4,6 +4,10 @@
 """CPU controls for the standalone native-provider artifact qualification gate."""
 
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -11,6 +15,25 @@ from families.hstu.native_attention_build import HERE, native_attention_notices
 from families.hstu.tests.native_e2e import verify_bundle
 from tensorrt_model_connect.build import content_cache_key
 from tensorrt_model_connect.bundle_writer import BundleWriter
+
+
+@pytest.mark.parametrize("flags,optimize", [(["-O"], ""), (["-OO"], ""), ([], "1"), ([], "2")])
+def test_optimized_python_cannot_publish_a_qualification_receipt(tmp_path, flags, optimize):
+    root = Path(__file__).resolve().parents[3]
+    output = tmp_path / "qualification"
+    environment = os.environ.copy()
+    environment.pop("PYTHONOPTIMIZE", None)
+    if optimize:
+        environment["PYTHONOPTIMIZE"] = optimize
+    environment["PYTHONPATH"] = os.pathsep.join((str(root), str(root / "core/builder")))
+    command = [sys.executable, *flags, "-m", "families.hstu.tests.native_e2e",
+               "--source", str(tmp_path / "source"),
+               "--reference-source", str(tmp_path / "reference"),
+               "--runtime-root", str(tmp_path / "runtime"), "--output", str(output)]
+    result = subprocess.run(command, capture_output=True, text=True, env=environment, timeout=30)
+    assert result.returncode != 0
+    assert "requires Python assertions" in result.stderr
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("mutation", [None, "manifest_path", "binary_path", "notice", "library", "mode"])

@@ -132,6 +132,9 @@ RuntimeConfig parse_runtime_config(const std::vector<char>& data,
     config.is_causal = boolean(json, "is_causal");
     config.disable_contextual_mask = boolean(json, "disable_contextual_mask");
     config.embedding_tables = parse_tables(json, embedding_keys);
+    if (std::none_of(config.embedding_tables.begin(), config.embedding_tables.end(),
+                     [](const auto& table) { return table.role == "item"; }))
+        throw std::invalid_argument("hstu requires one item embedding table");
     config.output_dim = prediction_width(json, config.mode);
     config.enable_history_cache =
         json.contains("enable_history_cache") && boolean(json, "enable_history_cache");

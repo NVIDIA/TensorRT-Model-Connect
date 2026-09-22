@@ -3,6 +3,8 @@
 """Checkpoint compatibility tests; all weights here are synthetic."""
 
 import json
+import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,6 +13,70 @@ from safetensors.numpy import load_file
 from families.hstu.checkpoint import _load_pytorch_checkpoint, convert_state_dict, export_checkpoint, load_dynamic_table
 from families.hstu.config import expected_shapes
 from families.hstu.tests.fixtures import make_checkpoint, tiny_config
+
+
+def _original_source(config):
+    if not os.environ.get("TRTMC_HSTU_REFERENCE_ROOT"):
+        from families.hstu.tests.test_e2e import _selected_cases
+
+        cases, enabled = _selected_cases(config)
+        if not enabled or not cases:
+            pytest.skip("HSTU source oracle requires TRTMC_HSTU_REFERENCE_ROOT or an explicit HSTU E2E selector")
+    from families.hstu.tests.environment import reference_source
+
+    return reference_source()
+
+
+@pytest.fixture
+def original_source(request):
+    pytest.importorskip("torch")
+    return _original_source(request.config)
+
+
+@pytest.mark.parametrize("models,testcases,explicit,selected", [
+    ([], [], False, False),
+    (["bert"], [], False, False),
+    (["hstu"], [], False, True),
+    ([], ["hstu-tiny-ranking-fp32"], False, True),
+    ([], [], True, True),
+])
+def test_source_oracle_opt_in_precedes_reference_preparation(
+    tmp_path, monkeypatch, models, testcases, explicit, selected,
+):
+    from families.hstu.tests import environment
+
+    monkeypatch.delenv("TRTMC_HSTU_REFERENCE_ROOT", raising=False)
+    if explicit:
+        monkeypatch.setenv("TRTMC_HSTU_REFERENCE_ROOT", str(tmp_path))
+    calls = []
+
+    def prepare():
+        calls.append("prepare")
+        return tmp_path
+
+    monkeypatch.setattr(environment, "reference_source", prepare)
+    options = {"--e2e-model": models, "--e2e-testcase": testcases}
+    config = SimpleNamespace(getoption=lambda name: options.get(name))
+    if selected:
+        assert _original_source(config) == tmp_path
+        assert calls == ["prepare"]
+    else:
+        with pytest.raises(pytest.skip.Exception, match="HSTU source oracle requires"):
+            _original_source(config)
+        assert not calls
+
+
+def test_selected_source_oracle_preparation_failure_is_not_skipped(monkeypatch):
+    from families.hstu.tests import environment
+
+    monkeypatch.setenv("TRTMC_HSTU_REFERENCE_ROOT", "/explicit-reference")
+
+    def fail():
+        raise ValueError("source differs from pinned revision")
+
+    monkeypatch.setattr(environment, "reference_source", fail)
+    with pytest.raises(ValueError, match="source differs"):
+        _original_source(None)
 
 
 def upstream_state(config, layout):
@@ -241,13 +307,12 @@ def test_safe_loader_getattr_is_limited_to_process_group_metadata(tmp_path):
         _load_pytorch_checkpoint(path)
 
 
-def test_original_source_oracle_executes_multiple_blocks(tmp_path, monkeypatch):
+def test_original_source_oracle_executes_multiple_blocks(tmp_path, original_source):
     pytest.importorskip("torch")
-    from families.hstu.tests.environment import reference_source
     from families.hstu.tests.reference import run_reference
     from families.hstu.tests.fixtures import sample_request
 
-    source = reference_source()
+    source = original_source
     config = make_checkpoint(tmp_path)
     request = sample_request(config)
     result = run_reference(tmp_path, request, upstream_root=source)
@@ -261,12 +326,11 @@ def test_original_source_oracle_executes_multiple_blocks(tmp_path, monkeypatch):
     assert first["logits"][2:4] != changed["logits"][2:4]
 
 
-def test_original_retrieval_postprocessor_selects_last_item_before_action():
+def test_original_retrieval_postprocessor_selects_last_item_before_action(original_source):
     torch = pytest.importorskip("torch")
-    from families.hstu.tests.environment import reference_source
     from families.hstu.tests.reference import _upstream
 
-    original = _upstream(str(reference_source()))
+    original = _upstream(str(original_source))
     # Two context tokens followed by three item/action pairs; final action is
     # deliberately orthogonal to the final item so using it changes the score.
     values = torch.tensor([[9., 1.], [8., 2.], [1., 1.], [2., 1.], [1., 2.], [1., 3.], [3., 0.], [0., 3.]])

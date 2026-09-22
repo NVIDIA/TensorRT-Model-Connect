@@ -43,6 +43,8 @@ PYTHONPATH=core/builder:. python -m families.hstu.tests.native_e2e \
 The output directory must be new. This command builds Dense and Paged BF16
 bundles through the public builder, verifies embedded notices and path-free
 provenance, and compares native C++ outputs with the original CPU reference.
+Qualification requires Python assertions and rejects `-O`, `-OO`, or
+`PYTHONOPTIMIZE` at startup so that every validation gate runs.
 It covers batch sizes one and eight, CUDA Graphs off and on, history-cache
 hits/appends/invalidation/CPU-tier restoration, and request-local sessions and
 branches. The source directories are explicit inputs; this command never

@@ -322,15 +322,19 @@ class _Graph:
         raw = self.out(self.net.add_gather(table, ids, 0), "embedding.lookup")
         x = raw
         if c["position_buckets"]:
-            # The position-only upstream kernel scales and adds in FP32 registers.
-            if not c["time_buckets"]:
-                x = self.cast(x, self.trt.float32, "position.input.fp32")
+            # Both upstream paths multiply by the full FP32 scale. In the
+            # timestamp path, PyTorch materializes that product in model dtype
+            # before the separate positional addition. Position-only encoding
+            # keeps the product in FP32 until the combined result is stored.
+            x = self.cast(x, self.trt.float32, "position.input.fp32")
             x = self.binary(
                 x,
                 self.scalar(c["hidden_size"] ** 0.5, x, "position.scale"),
                 "PROD",
                 "position.scaled_embeddings",
             )
+            if c["time_buckets"]:
+                x = self.cast(x, self.dtype, "position.scaled_output")
             position_parts = []
             for name, enabled in (("position", c["position_buckets"]), ("time", c["time_buckets"])):
                 if enabled:

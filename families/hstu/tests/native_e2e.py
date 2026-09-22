@@ -18,6 +18,12 @@ from pathlib import Path
 import struct
 import subprocess
 
+if not __debug__:
+    raise RuntimeError(
+        "HSTU native qualification requires Python assertions; "
+        "run without -O, -OO, or PYTHONOPTIMIZE"
+    )
+
 from families.hstu.native_attention_build import (
     native_attention_notices, source_directory, verify_source,
 )
