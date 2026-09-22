@@ -13,6 +13,5 @@
       "test_image": "data/test_img.jpeg"
     }
   ],
-  "tensor_parallel_size": 1,
-  "max_sequence_length": 1
+  "tensor_parallel_size": 1
 }

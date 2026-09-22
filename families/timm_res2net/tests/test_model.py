@@ -110,7 +110,7 @@ def test_support_claims_only_its_own_identity() -> None:
     assert describe(_metadata("seresnet50")) is None
 
 
-@pytest.mark.parametrize("missing_library", ["backend", "model", None])
+@pytest.mark.parametrize("missing_library", ["backend", "model", "cli", None])
 def test_e2e_runtime_library_checks_record_setup_before_build(
     tmp_path: Path, monkeypatch, missing_library: str | None
 ) -> None:
@@ -126,6 +126,7 @@ def test_e2e_runtime_library_checks_record_setup_before_build(
     libraries = {
         "backend": runtime_root / "libtrtmc_backend_trt.so",
         "model": runtime_root / "libtrtmc_model_timm_res2net.so",
+        "cli": runtime_root / "libtrtmc_cli_timm_res2net.so",
     }
     for role, path in libraries.items():
         if role != missing_library:
@@ -152,13 +153,13 @@ def test_e2e_runtime_library_checks_record_setup_before_build(
 
     build_stop = RuntimeError("CPU control reached the original build boundary")
 
-    def build(request):
+    def build(request, output):
         events.append("build")
         assert request.model_dir == tmp_path
         raise build_stop
 
     monkeypatch.setattr(test_e2e, "_model_dir", model_dir)
-    monkeypatch.setattr(test_e2e, "build", build)
+    monkeypatch.setattr(test_e2e, "build_bundle", build)
     setup_errors = []
 
     @contextmanager
@@ -182,14 +183,13 @@ def test_e2e_runtime_library_checks_record_setup_before_build(
             assert [(row["stage"], row["status"]) for row in recorder.data["timing"]] == [
                 ("setup", "failed")
             ]
-            assert events == [libraries["backend"].name] + (
-                [libraries["model"].name] if missing_library == "model" else []
-            )
+            roles = list(libraries)
+            assert events == [libraries[role].name for role in roles[:roles.index(missing_library) + 1]]
         else:
             with pytest.raises(RuntimeError) as caught:
                 test_e2e.test_official_checkpoint_e2e("res2net50-26w-4s-in1k", tmp_path)
             assert caught.value is build_stop
-            assert events == [libraries["backend"].name, libraries["model"].name, "model_dir", "build"]
+            assert events == [path.name for path in libraries.values()] + ["model_dir", "build"]
             assert [(row["stage"], row["status"]) for row in recorder.data["timing"]] == [
                 ("setup", "passed"), ("build", "failed")
             ]
@@ -202,6 +202,42 @@ def test_layout_reads_the_scale_from_the_convolution_chain(tmp_path: Path) -> No
     for scale in (2, 4, 8):
         layout = model._layout(Checkpoint.open(_checkpoint(tmp_path / f"s{scale}", scale=scale)))
         assert layout["scale"] == scale
+
+
+@pytest.mark.parametrize("scale", [4, 8])
+@pytest.mark.parametrize("precision", ["fp16", "fp32"])
+@pytest.mark.parametrize("verbose", [False, True])
+def test_builder_logs_checkpoint_scale_before_creating_tensor_rt(
+    tmp_path: Path, monkeypatch, capsys, scale: int, precision: str, verbose: bool
+) -> None:
+    model_dir = _checkpoint(tmp_path, scale=scale)
+    levels = []
+    reached_builder = RuntimeError("CPU control reached the TensorRT builder")
+
+    class Logger:
+        VERBOSE = "verbose"
+        WARNING = "warning"
+
+        def __init__(self, level):
+            levels.append(level)
+
+    def builder(logger):
+        raise reached_builder
+
+    monkeypatch.setattr(
+        model, "trt",
+        SimpleNamespace(float16="fp16", float32="fp32", Logger=Logger, Builder=builder),
+    )
+    with pytest.raises(RuntimeError) as caught:
+        model._build_engine(model._read_config(model_dir), Checkpoint.open(model_dir), precision, verbose)
+    assert caught.value is reached_builder
+    assert levels == [Logger.VERBOSE if verbose else Logger.WARNING]
+    output = capsys.readouterr().err
+    if verbose:
+        assert f"scale={scale}" in output
+        assert f"precision={precision}" in output
+    else:
+        assert output == ""
 
 
 def test_layout_rejects_a_bottleneck_with_no_chain(tmp_path: Path) -> None:
