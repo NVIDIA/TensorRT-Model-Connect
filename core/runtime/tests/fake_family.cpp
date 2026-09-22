@@ -18,10 +18,11 @@ class FakeForecast final : public trtmc::ITimeSeriesForecast {
     trtmc::ForecastResult forecast(const trtmc::ForecastRequest& request) override {
         const char* backend_name = backend_.name();
         if (backend_name == nullptr ||
-            (std::string(backend_name) != "fake" && std::string(backend_name) != "trt_rtx")) {
+            (std::string(backend_name) != "fake" && std::string(backend_name) != "trt_rtx" &&
+             std::string(backend_name) != "trt")) {
             throw std::runtime_error("backend lifetime did not extend to task execution");
         }
-        if (std::string(backend_name) == "trt_rtx")
+        if (std::string(backend_name) == "trt_rtx" || std::string(backend_name) == "trt")
             (void)backend_.create_module(nullptr, 0, {});
         if (!request.observed_mask.empty() &&
             request.observed_mask.size() != request.past_values.size()) {
@@ -49,7 +50,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("unexpected family");
     const char* backend_name = context.backend.name();
     if (backend_name == nullptr ||
-        (std::string(backend_name) != "fake" && std::string(backend_name) != "trt_rtx")) {
+        (std::string(backend_name) != "fake" && std::string(backend_name) != "trt_rtx" &&
+         std::string(backend_name) != "trt")) {
         throw std::runtime_error("unexpected backend");
     }
     const auto plan = context.reader.read_section("engine.plan");
