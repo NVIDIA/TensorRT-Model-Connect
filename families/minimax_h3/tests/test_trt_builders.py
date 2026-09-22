@@ -17,6 +17,7 @@ from families.minimax_h3.adaln_builder import (  # noqa: E402
 )
 from families.minimax_h3.config import (  # noqa: E402
     ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
+    AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES,
     DENOISER_DEFAULT_WORKSPACE_BYTES,
     FASTH3_VSA_4STEP_GENERATION_PROFILE,
     MiniMaxH3Config,
@@ -41,6 +42,10 @@ from families.minimax_h3.text_encoder_builder import (  # noqa: E402
 )
 from families.minimax_h3.vae_builder import (  # noqa: E402
     build_vae_tile_decoder_engine,
+)
+from families.minimax_h3.audio_vae_builder import (  # noqa: E402
+    build_audio_vae_decoder_engine,
+    checkpoint_keys as audio_vae_checkpoint_keys,
 )
 
 
@@ -116,6 +121,11 @@ def _weights(profile: MiniMaxH3Config) -> dict[str, np.ndarray]:
             DENOISER_DEFAULT_WORKSPACE_BYTES,
         ),
         (build_vae_tile_decoder_engine, ({},), VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES),
+        (
+            build_audio_vae_decoder_engine,
+            ({}, [0.0] * 32, [1.0] * 32),
+            AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES,
+        ),
     ],
 )
 @pytest.mark.parametrize("workspace_bytes", [None, 8 << 30])
@@ -160,6 +170,16 @@ def test_builders_apply_default_or_overridden_workspace(
         "default_bytes": default_bytes,
         "builder_optimization_level": 1,
     }
+
+
+def test_audio_vae_checkpoint_partition_selects_only_the_decoder() -> None:
+    keys = set(audio_vae_checkpoint_keys())
+    assert "dec_in_proj.weight" in keys
+    assert "decoder.conv_pre.weight_v" in keys
+    assert "decoder.ups.6.0.weight_v" in keys
+    assert "decoder.resblocks.20.convs2.2.weight_v" in keys
+    assert "decoder.conv_post.weight_v" in keys
+    assert not any(name.startswith("encoder.") for name in keys)
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "8589934592"])

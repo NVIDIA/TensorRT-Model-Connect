@@ -59,10 +59,22 @@ def load_selected_component_state_dict(
 
     root = Path(component_dir)
     indexes = sorted(root.glob("*.safetensors.index.json"))
-    if len(indexes) != 1:
-        raise ValueError(f"Selective loading requires one safetensors index in {root}")
-    weight_map = json.loads(indexes[0].read_text())["weight_map"]
     requested = tuple(names)
+    if indexes:
+        if len(indexes) != 1:
+            raise ValueError(f"Selective loading requires one safetensors index in {root}")
+        weight_map = json.loads(indexes[0].read_text())["weight_map"]
+    else:
+        paths = sorted(root.glob("*.safetensors"))
+        if not paths:
+            raise FileNotFoundError(f"No safetensors checkpoint found in {root}")
+        weight_map = {}
+        for path in paths:
+            with safe_open(path, framework="pt", device="cpu") as reader:
+                for name in reader.keys():
+                    if name in weight_map:
+                        raise ValueError(f"Duplicate MiniMax-H3 tensor {name!r}")
+                    weight_map[name] = path.name
     missing = sorted(set(requested) - set(weight_map))
     if missing:
         raise ValueError(f"MiniMax-H3 checkpoint is missing tensors: {missing}")

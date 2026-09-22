@@ -39,11 +39,11 @@ std::unique_ptr<ITokenizer> load_tokenizer(const BundleReader& bundle) {
 }
 
 PlanMap load_plans(const BundleReader& bundle, bool first_block_cache) {
-    constexpr std::array<const char*, 4> monolithic = {"text_encoder.plan", "adaln.plan",
-                                                       "denoiser.plan", "vae.plan"};
-    constexpr std::array<const char*, 6> split = {"text_encoder.plan",    "adaln.plan",
-                                                  "denoiser.head.plan",   "denoiser.tail.plan",
-                                                  "denoiser.finish.plan", "vae.plan"};
+    constexpr std::array<const char*, 5> monolithic = {
+        "text_encoder.plan", "adaln.plan", "denoiser.plan", "vae.plan", "audio_vae.plan"};
+    constexpr std::array<const char*, 7> split = {
+        "text_encoder.plan",    "adaln.plan", "denoiser.head.plan", "denoiser.tail.plan",
+        "denoiser.finish.plan", "vae.plan",   "audio_vae.plan"};
     PlanMap plans;
     if (first_block_cache) {
         for (const char* name : split)
@@ -80,7 +80,10 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto config = nlohmann::json::parse(runtime.begin(), runtime.end());
     if (config.at("context_parallel_size").get<std::int32_t>() != 1 ||
         config.at("padded_sequence_length").get<std::int32_t>() != 38247 ||
-        config.at("vae_tile_batch").get<std::int32_t>() != 28) {
+        config.at("vae_tile_batch").get<std::int32_t>() != 28 ||
+        config.at("audio_sample_rate").get<std::int32_t>() != 32000 ||
+        config.at("audio_channels").get<std::int32_t>() != 2 ||
+        config.at("audio_samples_per_channel").get<std::int32_t>() != 165600) {
         throw std::runtime_error("MiniMax-H3 runtime.json declares an unsupported profile");
     }
     const bool cache = config.at("first_block_cache").get<bool>();

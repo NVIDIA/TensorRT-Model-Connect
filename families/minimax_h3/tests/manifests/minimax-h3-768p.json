@@ -4,7 +4,7 @@
   "hf_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
   "bundle": "minimax-h3-768p.bundle",
   "family": "minimax_h3",
-  "task": "image_generation",
+  "task": "text_to_audio_video",
   "precision": "bf16",
   "reference_precision": "bf16",
   "testcases": [

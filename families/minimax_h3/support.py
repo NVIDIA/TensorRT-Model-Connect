@@ -9,6 +9,6 @@ from tensorrt_model_connect.model_support import family_support
 describe = family_support(
     model_types=("minimax-h3", "minimax_h3", "minimaxh3"),
     pipeline_classes=("MiniMaxH3ModularPipeline", "MiniMaxH3Pipeline"),
-    tasks=("image_generation",),
-    default_task="image_generation",
+    tasks=("text_to_audio_video",),
+    default_task="text_to_audio_video",
 )

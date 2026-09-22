@@ -1,4 +1,8 @@
-// SPDX-License-Identifier: Apache-2.0
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // primitives.cuh -- device primitives for the sm_100a VSA block-sparse attention
 // forward: tcgen05 (alloc / mma / ld / st / commit / wait / fence), TMA load / store /
 // tensormap, mbarrier, cluster launch control, setmaxnreg, fast math, and the FMHA helpers.

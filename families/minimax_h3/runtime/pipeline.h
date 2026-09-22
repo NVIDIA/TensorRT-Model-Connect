@@ -6,8 +6,9 @@
 #pragma once
 
 #include "families/minimax_h3/runtime/tokenizer.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/video.h"
 #include "trtmc/runtime/trt_module.h"
-#include "trtmc/task.h"
 
 #include <cuda_runtime_api.h>
 #include <functional>
@@ -41,15 +42,17 @@ std::vector<float> make_minimax_h3_position_ids(int32_t text_rows);
 void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t count,
                                float timestep, float sigma, float sigma_next);
 
-class MiniMaxH3Pipeline final : public IImageGeneration {
+class MiniMaxH3Pipeline final : public internal::IModel, public internal::ITextToAudioVideo {
   public:
     MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader, std::unique_ptr<ITokenizer> tokenizer,
                       std::string model_id, MiniMaxH3GenerationConfig generation = {},
                       bool first_block_cache = false, float cache_threshold = 0.025F);
     ~MiniMaxH3Pipeline() override;
 
-    ImageResult generate_image(const std::string& prompt,
-                               const ImageGenerationConfig& cfg = {}) override;
+    const char* task() const noexcept override { return internal::ITextToAudioVideo::kTask.data(); }
+    std::vector<internal::TaskInstance> task_bindings() override;
+    internal::AudioVideoResult run(const internal::TextToAudioVideoRequest& request,
+                                   internal::ConfigView config) override;
 
   private:
     struct ResidentState;

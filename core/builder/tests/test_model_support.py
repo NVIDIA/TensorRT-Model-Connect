@@ -243,7 +243,7 @@ def test_qwen38_marker_has_one_owner() -> None:
 def test_minimax_h3_modular_pipeline_has_one_owner() -> None:
     family, support = resolve_family(ModelMetadata({}, {"_class_name": "MiniMaxH3ModularPipeline"}))
     assert family == "minimax_h3"
-    assert support.default_task == "image_generation"
+    assert support.default_task == "text_to_audio_video"
 
 
 @pytest.mark.parametrize(

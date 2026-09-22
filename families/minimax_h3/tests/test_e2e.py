@@ -22,7 +22,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "minimax_h3"
-TASKS = frozenset({"image_generation"})
+TASKS = frozenset({"text_to_audio_video"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"

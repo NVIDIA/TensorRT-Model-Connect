@@ -5,7 +5,7 @@
   "bundle": "fasth3-dense-4step-768p.bundle",
   "family": "minimax_h3",
   "generation_profile": "fasth3-dense-4step",
-  "task": "image_generation",
+  "task": "text_to_audio_video",
   "precision": "bf16",
   "reference_precision": "bf16",
   "testcases": [

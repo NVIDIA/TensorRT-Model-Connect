@@ -19,12 +19,14 @@ TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES = 64 << 30
 DENOISER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
+AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 
 DEFAULT_WORKSPACE_LIMIT_BYTES = {
     "text_encoder.plan": TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
     "adaln_precompute.plan": ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
     "denoiser.plan": DENOISER_DEFAULT_WORKSPACE_BYTES,
     "vae_tile_decoder.plan": VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
+    "audio_vae_decoder.plan": AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES,
 }
 
 FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES = (
@@ -47,6 +49,7 @@ def native_plan_filenames(*, first_block_cache: bool) -> tuple[str, ...]:
         "adaln_precompute.plan",
         *denoiser_plans,
         "vae_tile_decoder.plan",
+        "audio_vae_decoder.plan",
     )
 
 

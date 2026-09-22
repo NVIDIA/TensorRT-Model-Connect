@@ -1,4 +1,8 @@
-// SPDX-License-Identifier: Apache-2.0
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // block_sparse_kernel_sm100a.cuh -- VSA block-sparse FMHA forward (per-q-block top-k), sm_100a.
 // Warp-specialized: load / MMA (tcgen05) / softmax / correction / epilogue / scheduler.
 // Writes O and, when asked, the log-sum-exp the backward consumes.

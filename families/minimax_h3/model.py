@@ -322,6 +322,59 @@ class _MiniMaxH3Model:
             consume_weights=True,
             workspace_bytes=workspace_limits["vae_tile_decoder.plan"],
         )
+        del vae_weights
+        gc.collect()
+
+        from .audio_vae_builder import (
+            build_audio_vae_decoder_engine,
+            checkpoint_keys as audio_vae_checkpoint_keys,
+        )
+
+        audio_config = _read_json_object(
+            Path(weights["_audio_vae_dir"]) / "config.json", label="audio VAE config"
+        )
+        expected_audio = {
+            "_class_name": "AutoencoderKLMiniMaxH3Audio",
+            "latent_dim": 2048,
+            "latent_channels": 32,
+            "decoder_dim": 1024,
+            "decoder_rates": [5, 5, 2, 2, 2, 2, 2],
+            "decoder_kernel_sizes": [9, 9, 4, 4, 4, 4, 4],
+            "resblock_kernel_sizes": [3, 7, 11],
+            "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+            "sampling_rate": 32000,
+        }
+        audio_mismatches = {
+            name: (audio_config.get(name), value)
+            for name, value in expected_audio.items()
+            if audio_config.get(name) != value
+        }
+        if audio_mismatches:
+            raise ValueError(f"Unsupported MiniMax-H3 audio VAE architecture: {audio_mismatches}")
+        latent_mean = audio_config.get("latents_mean")
+        latent_std = audio_config.get("latents_std")
+        if (
+            not isinstance(latent_mean, list)
+            or not isinstance(latent_std, list)
+            or len(latent_mean) != 32
+            or len(latent_std) != 32
+        ):
+            raise ValueError("MiniMax-H3 audio VAE must declare 32 latent mean/std values")
+        audio_state = load_selected_component_state_dict(
+            weights["_audio_vae_dir"], audio_vae_checkpoint_keys()
+        )
+        audio_weights = numpy_state(audio_state)
+        del audio_state
+        audio_vae_decoder_plan = build_audio_vae_decoder_engine(
+            audio_weights,
+            latent_mean,
+            latent_std,
+            verbose=verbose,
+            consume_weights=True,
+            workspace_bytes=workspace_limits["audio_vae_decoder.plan"],
+        )
+        del audio_weights
+        gc.collect()
         tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
 
         return {
@@ -329,6 +382,7 @@ class _MiniMaxH3Model:
             "adaln_precompute": adaln_plan,
             **denoiser_components,
             "vae_decoder": vae_decoder_plan,
+            "audio_vae_decoder": audio_vae_decoder_plan,
             "profile": profile,
             "generation_profile": generation_profile,
             # Text/VAE paths remain explicit so follow-on native component
@@ -341,7 +395,7 @@ class _MiniMaxH3Model:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one MiniMax-H3 image-generation bundle."""
+    """Build one MiniMax-H3 synchronized audio/video bundle."""
     if request.dynamic_kv_cache:
         raise NotImplementedError("minimax_h3 does not support dynamic_kv_cache")
 
@@ -351,8 +405,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "image_generation":
-        raise ValueError("minimax_h3 supports only task=image_generation")
+    if request.task != "text_to_audio_video":
+        raise ValueError("minimax_h3 supports only task=text_to_audio_video")
     if request.precision != "bf16":
         raise ValueError("MiniMax-H3 requires precision=bf16")
     if request.tensor_parallel_size != 1:
@@ -389,6 +443,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.add_bytes("adaln.plan", components["adaln_precompute"])
     writer.add_bytes("denoiser.plan", components["denoiser"])
     writer.add_bytes("vae.plan", components["vae_decoder"])
+    writer.add_bytes("audio_vae.plan", components["audio_vae_decoder"])
     writer.add_bytes("tokenizer.json", components["tokenizer_json"])
     writer.add_json(
         "runtime.json",
@@ -397,6 +452,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "width": 1344,
             "num_frames": 124,
             "fps": 24,
+            "audio_sample_rate": 32000,
+            "audio_channels": 2,
+            "audio_samples_per_channel": 165600,
             "generation_profile": generation_profile.name,
             "num_inference_steps": generation_profile.num_inference_steps,
             "transformer_forwards": generation_profile.transformer_forwards,
