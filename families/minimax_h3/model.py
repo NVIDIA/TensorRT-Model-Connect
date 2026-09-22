@@ -18,13 +18,74 @@ from .checkpoint import (
     validate_component_key_partition,
 )
 from .config import (
+    BASE_GENERATION_PROFILE,
+    FASTH3_DENSE_4STEP_GENERATION_PROFILE,
+    FASTH3_DENSE_4STEP_MODEL_ID,
     SOL_ENGINE_1344X768_124F,
+    MiniMaxH3GenerationProfile,
     default_workspace_limit_bytes,
 )
 
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
+
+
+def _read_json_object(path: Path, *, label: str) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Invalid MiniMax-H3 {label}: {path}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"MiniMax-H3 {label} must be a JSON object: {path}")
+    return value
+
+
+def _generation_profile(root: Path) -> MiniMaxH3GenerationProfile:
+    """Resolve and validate a checkpoint-owned base or distilled schedule."""
+
+    contract_path = root / "fastvideo_inference.json"
+    if not contract_path.exists():
+        BASE_GENERATION_PROFILE.validate()
+        return BASE_GENERATION_PROFILE
+
+    contract = _read_json_object(contract_path, label="FastVideo inference contract")
+    expected = {
+        "schema_version": "fasth3-inference-contract-v1",
+        "model_id": FASTH3_DENSE_4STEP_MODEL_ID,
+        "attention_backend": "FLASH_ATTN",
+        "checkpoint_step": 1000,
+        "guidance_scale": 1.0,
+        "num_inference_steps": 5,
+        "transformer_forwards": 4,
+        "task": "t2av",
+        "dmd_denoising_steps": [999, 749, 500, 250],
+    }
+    mismatches = {
+        name: (contract.get(name), value)
+        for name, value in expected.items()
+        if contract.get(name) != value
+    }
+    if mismatches:
+        raise ValueError(f"Unsupported FastH3 inference contract: {mismatches}")
+
+    scheduler_paths = {
+        "video": root / "scheduler" / "scheduler_config.json",
+        "audio": root / "audio_scheduler" / "scheduler_config.json",
+    }
+    expected_shifts = {
+        "video": FASTH3_DENSE_4STEP_GENERATION_PROFILE.video_scheduler_shift,
+        "audio": FASTH3_DENSE_4STEP_GENERATION_PROFILE.audio_scheduler_shift,
+    }
+    for name, path in scheduler_paths.items():
+        scheduler = _read_json_object(path, label=f"{name} scheduler config")
+        if scheduler.get("_class_name") != "MiniMaxH3Scheduler":
+            raise ValueError(f"FastH3 {name} scheduler is not MiniMaxH3Scheduler")
+        if scheduler.get("shift") != expected_shifts[name]:
+            raise ValueError(f"FastH3 {name} scheduler shift must be {expected_shifts[name]}")
+
+    FASTH3_DENSE_4STEP_GENERATION_PROFILE.validate()
+    return FASTH3_DENSE_4STEP_GENERATION_PROFILE
 
 
 def _fixed_profile(raw: dict):
@@ -93,6 +154,7 @@ class _MiniMaxH3Model:
             "_vae_dir": str(root / "vae"),
             "_audio_vae_dir": str(root / "audio_vae"),
             "_tokenizer_dir": str(root / "tokenizer"),
+            "_generation_profile": _generation_profile(root),
         }
 
     def build_components(
@@ -240,6 +302,7 @@ class _MiniMaxH3Model:
             **denoiser_components,
             "vae_decoder": vae_decoder_plan,
             "profile": profile,
+            "generation_profile": weights["_generation_profile"],
             # Text/VAE paths remain explicit so follow-on native component
             # builders cannot silently substitute a different checkpoint.
             "vae_dir": weights["_vae_dir"],
@@ -289,6 +352,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         verbose=request.verbose,
     )
     profile = components["profile"]
+    generation_profile = components["generation_profile"]
     if profile.first_block_cache:
         raise RuntimeError("MiniMax-H3 minimal build uses the monolithic denoiser profile")
 
@@ -305,7 +369,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "width": 1344,
             "num_frames": 124,
             "fps": 24,
-            "num_inference_steps": 50,
+            "generation_profile": generation_profile.name,
+            "num_inference_steps": generation_profile.num_inference_steps,
+            "transformer_forwards": generation_profile.transformer_forwards,
+            "video_scheduler_shift": generation_profile.video_scheduler_shift,
+            "audio_scheduler_shift": generation_profile.audio_scheduler_shift,
+            "dmd_denoising_steps": list(generation_profile.dmd_denoising_steps),
             "seed": 0,
             "first_block_cache": False,
             "denoiser_cache_mode": "monolithic",

@@ -73,6 +73,41 @@ def resolve_workspace_bytes(workspace_bytes: int | None, *, default_bytes: int) 
 
 
 @dataclass(frozen=True)
+class MiniMaxH3GenerationProfile:
+    """Checkpoint-owned denoising schedule for one MiniMax-H3 variant."""
+
+    name: str
+    num_inference_steps: int
+    video_scheduler_shift: float
+    audio_scheduler_shift: float
+    dmd_denoising_steps: tuple[int, ...] = ()
+
+    @property
+    def transformer_forwards(self) -> int:
+        return self.num_inference_steps - 1
+
+    def validate(self) -> None:
+        if self.num_inference_steps < 2:
+            raise ValueError("MiniMax-H3 requires at least two sigma-grid points")
+        if self.video_scheduler_shift <= 0.0 or self.audio_scheduler_shift <= 0.0:
+            raise ValueError("MiniMax-H3 scheduler shifts must be positive")
+        if not self.dmd_denoising_steps:
+            return
+        if len(self.dmd_denoising_steps) != self.transformer_forwards:
+            raise ValueError("MiniMax-H3 DMD rung count must equal num_inference_steps - 1")
+        if any(
+            isinstance(step, bool) or not isinstance(step, int) or not 1 <= step <= 999
+            for step in self.dmd_denoising_steps
+        ):
+            raise ValueError("MiniMax-H3 DMD rungs must be integers in [1, 999]")
+        if any(
+            current <= following
+            for current, following in zip(self.dmd_denoising_steps, self.dmd_denoising_steps[1:])
+        ):
+            raise ValueError("MiniMax-H3 DMD rungs must be strictly decreasing")
+
+
+@dataclass(frozen=True)
 class MiniMaxH3Config:
     hidden_size: int = 5376
     num_layers: int = 50
@@ -149,3 +184,19 @@ class MiniMaxH3Config:
 
 
 SOL_ENGINE_1344X768_124F = MiniMaxH3Config()
+
+BASE_GENERATION_PROFILE = MiniMaxH3GenerationProfile(
+    name="minimax-h3-base",
+    num_inference_steps=50,
+    video_scheduler_shift=12.0,
+    audio_scheduler_shift=3.0,
+)
+
+FASTH3_DENSE_4STEP_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
+FASTH3_DENSE_4STEP_GENERATION_PROFILE = MiniMaxH3GenerationProfile(
+    name="fasth3-dense-4step",
+    num_inference_steps=5,
+    video_scheduler_shift=12.0,
+    audio_scheduler_shift=3.0,
+    dmd_denoising_steps=(999, 749, 500, 250),
+)

@@ -1,0 +1,29 @@
+{
+  "name": "fasth3-dense-4step-768p",
+  "hf_id": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree",
+  "hf_revision": "f58c2eb023afcad8379de99bebe14c43b23b49b8",
+  "bundle": "fasth3-dense-4step-768p.bundle",
+  "family": "minimax_h3",
+  "generation_profile": "fasth3-dense-4step",
+  "task": "image_generation",
+  "precision": "bf16",
+  "reference_precision": "bf16",
+  "testcases": [
+    {
+      "name": "fasth3-dense-4step-768p",
+      "premerge": false,
+      "semantic_assessment": true,
+      "runtime_timeout_s": 3600,
+      "test_type": "diffusion",
+      "prompt_file": "prompts/t2va-example-1.json",
+      "num_inference_steps": 5,
+      "guidance_scale": 1.0,
+      "seed": 0,
+      "reference_precision": "bf16"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "image_height": 768,
+  "image_width": 1344,
+  "video_num_frames": 124
+}

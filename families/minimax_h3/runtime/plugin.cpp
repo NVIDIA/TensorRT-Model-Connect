@@ -16,6 +16,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace trtmc::minimax_h3_factory {
 namespace {
@@ -89,8 +90,30 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const float threshold = config.at("first_block_cache_threshold").get<float>();
     if (!std::isfinite(threshold) || threshold <= 0.0F)
         throw std::runtime_error("MiniMax-H3 cache threshold must be finite and positive");
+    MiniMaxH3GenerationConfig generation;
+    generation.profile = config.value("generation_profile", "minimax-h3-base");
+    generation.num_inference_steps = config.at("num_inference_steps").get<std::int32_t>();
+    generation.video_scheduler_shift = config.value("video_scheduler_shift", 12.0F);
+    generation.audio_scheduler_shift = config.value("audio_scheduler_shift", 3.0F);
+    generation.dmd_denoising_steps =
+        config.value("dmd_denoising_steps", std::vector<std::int32_t>{});
+    const bool base_profile =
+        generation.profile == "minimax-h3-base" && generation.num_inference_steps == 50 &&
+        generation.video_scheduler_shift == 12.0F && generation.audio_scheduler_shift == 3.0F &&
+        generation.dmd_denoising_steps.empty();
+    const bool fast_profile =
+        generation.profile == "fasth3-dense-4step" && generation.num_inference_steps == 5 &&
+        generation.video_scheduler_shift == 12.0F && generation.audio_scheduler_shift == 3.0F &&
+        generation.dmd_denoising_steps == std::vector<std::int32_t>{999, 749, 500, 250};
+    if (!base_profile && !fast_profile)
+        throw std::runtime_error(
+            "MiniMax-H3 runtime.json declares an unsupported generation profile");
+    if (config.value("transformer_forwards", generation.num_inference_steps - 1) !=
+        generation.num_inference_steps - 1)
+        throw std::runtime_error("MiniMax-H3 transformer forward count is inconsistent");
     return new MiniMaxH3Pipeline(
         minimax_h3_factory::make_loader(context.backend,
                                         minimax_h3_factory::load_plans(context.reader, cache)),
-        minimax_h3_factory::load_tokenizer(context.reader), "", cache, threshold);
+        minimax_h3_factory::load_tokenizer(context.reader), "", std::move(generation), cache,
+        threshold);
 }

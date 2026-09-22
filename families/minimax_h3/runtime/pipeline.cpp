@@ -49,7 +49,6 @@ constexpr int32_t kHidden = 5376;
 constexpr int32_t kTimestepSlots = 4;
 constexpr int32_t kModalityCount = 3;
 constexpr int32_t kAdalnRows = kTimestepSlots * kModalityCount;
-constexpr int32_t kSteps = 50;
 constexpr int32_t kOutputFrames = 124;
 constexpr int32_t kOutputHeight = 768;
 constexpr int32_t kOutputWidth = 1344;
@@ -571,12 +570,14 @@ std::vector<float> to_frame_major_rgb(const std::vector<float>& video) {
     return pixels;
 }
 
-void validate_generate_config(const ImageGenerationConfig& cfg) {
+void validate_generate_config(const ImageGenerationConfig& cfg,
+                              const MiniMaxH3GenerationConfig& generation) {
     if ((cfg.height > 0 && cfg.height != kOutputHeight) ||
         (cfg.width > 0 && cfg.width != kOutputWidth) ||
-        (cfg.num_steps > 0 && cfg.num_steps != kSteps))
+        (cfg.num_steps > 0 && cfg.num_steps != generation.num_inference_steps))
         throw std::invalid_argument(
-            "MiniMax-H3 native profile is fixed at 124 frames, 768x1344, 50 grid points");
+            "MiniMax-H3 native profile is fixed at 124 frames, 768x1344, and the "
+            "checkpoint-declared sigma-grid size");
 }
 
 struct DenoiserStats {
@@ -1096,6 +1097,28 @@ MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift) {
     return result;
 }
 
+MiniMaxH3Schedule make_minimax_h3_dmd_schedule(const std::vector<int32_t>& denoising_steps,
+                                               float shift) {
+    if (denoising_steps.empty() || !std::isfinite(shift) || shift <= 0.0F)
+        throw std::invalid_argument("MiniMax-H3 DMD schedule arguments are invalid");
+    MiniMaxH3Schedule result;
+    result.sigmas.reserve(denoising_steps.size() + 1);
+    int32_t previous = 1000;
+    for (const int32_t step : denoising_steps) {
+        if (step < 1 || step > 999 || step >= previous)
+            throw std::invalid_argument(
+                "MiniMax-H3 DMD denoising steps must be strictly decreasing integers in [1, 999]");
+        const float base = static_cast<float>(step) / 1000.0F;
+        result.sigmas.push_back(shift * base / (1.0F + (shift - 1.0F) * base));
+        previous = step;
+    }
+    result.sigmas.push_back(0.0F);
+    result.timesteps.reserve(denoising_steps.size());
+    for (std::size_t index = 0; index < denoising_steps.size(); ++index)
+        result.timesteps.push_back(1.0F - result.sigmas[index]);
+    return result;
+}
+
 void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t count,
                                float timestep, float sigma, float sigma_next) {
     if (sample == nullptr || velocity == nullptr || !(sigma > 0.0F))
@@ -1110,12 +1133,22 @@ void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t
 
 MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
                                      std::unique_ptr<ITokenizer> tokenizer, std::string model_id,
-                                     bool first_block_cache, float cache_threshold)
+                                     MiniMaxH3GenerationConfig generation, bool first_block_cache,
+                                     float cache_threshold)
     : loader_(std::move(loader)), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id)),
-      resident_(std::make_unique<ResidentState>()), first_block_cache_(first_block_cache),
-      cache_threshold_(cache_threshold) {
+      generation_(std::move(generation)), resident_(std::make_unique<ResidentState>()),
+      first_block_cache_(first_block_cache), cache_threshold_(cache_threshold) {
     if (!loader_ || !tokenizer_)
         throw std::invalid_argument("MiniMax-H3 pipeline requires a loader and tokenizer");
+    if (generation_.num_inference_steps < 2 || !std::isfinite(generation_.video_scheduler_shift) ||
+        generation_.video_scheduler_shift <= 0.0F ||
+        !std::isfinite(generation_.audio_scheduler_shift) ||
+        generation_.audio_scheduler_shift <= 0.0F)
+        throw std::invalid_argument("MiniMax-H3 generation profile is invalid");
+    if (!generation_.dmd_denoising_steps.empty() &&
+        generation_.dmd_denoising_steps.size() + 1 !=
+            static_cast<std::size_t>(generation_.num_inference_steps))
+        throw std::invalid_argument("MiniMax-H3 DMD rung count does not match sigma-grid size");
     if (!std::isfinite(cache_threshold_) || cache_threshold_ <= 0.0F)
         throw std::invalid_argument("MiniMax-H3 cache threshold must be finite and positive");
     if (cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking) != cudaSuccess)
@@ -1131,7 +1164,7 @@ MiniMaxH3Pipeline::~MiniMaxH3Pipeline() {
 ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
                                               const ImageGenerationConfig& cfg) {
     std::lock_guard<std::mutex> lock(generation_mutex_);
-    validate_generate_config(cfg);
+    validate_generate_config(cfg, generation_);
     const int64_t seed = cfg.seed >= 0 ? cfg.seed : 0;
     const auto total_begin = Clock::now();
 
@@ -1141,8 +1174,18 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
         resident_->load_text_embeddings(prompt, *tokenizer_, loader_, stream_);
     const auto text_end = Clock::now();
 
-    const auto video_schedule = make_minimax_h3_schedule(kSteps, 12.0F);
-    const auto audio_schedule = make_minimax_h3_schedule(kSteps, 3.0F);
+    const auto video_schedule =
+        generation_.dmd_denoising_steps.empty()
+            ? make_minimax_h3_schedule(generation_.num_inference_steps,
+                                       generation_.video_scheduler_shift)
+            : make_minimax_h3_dmd_schedule(generation_.dmd_denoising_steps,
+                                           generation_.video_scheduler_shift);
+    const auto audio_schedule =
+        generation_.dmd_denoising_steps.empty()
+            ? make_minimax_h3_schedule(generation_.num_inference_steps,
+                                       generation_.audio_scheduler_shift)
+            : make_minimax_h3_dmd_schedule(generation_.dmd_denoising_steps,
+                                           generation_.audio_scheduler_shift);
     const bool adaln_cache_hit = !resident_->modulations.empty();
     const auto adaln_begin = Clock::now();
     if (!adaln_cache_hit)
@@ -1198,6 +1241,8 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
               << " vae_resident_hit=" << static_cast<int>(vae_resident_hit)
               << " first_block_cache=" << static_cast<int>(first_block_cache_)
               << " cache_threshold=" << cache_threshold_
+              << " generation_profile=" << generation_.profile
+              << " sigma_grid_points=" << generation_.num_inference_steps
               << " full_denoiser_steps=" << denoiser_stats.full_steps
               << " skipped_denoiser_steps=" << denoiser_stats.skipped_steps << '\n';
     ImageResult result;
