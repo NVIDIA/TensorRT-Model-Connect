@@ -41,7 +41,7 @@ def _legacy_common_options(request: object) -> None:
     if request.task != "object_detection":
         raise ValueError("detr supports only task=object_detection")
     if request.backend not in {"trt", "trt_rtx"}:
-        raise ValueError("detr supports only backend=trt")
+        raise ValueError("backend must be 'trt' or 'trt_rtx'")
     if request.dynamic_kv_cache:
         raise NotImplementedError("detr does not support dynamic_kv_cache")
     if request.max_sequence_length not in {None, 1}:
