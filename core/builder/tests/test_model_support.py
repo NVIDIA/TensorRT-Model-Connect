@@ -66,6 +66,17 @@ def test_load_model_metadata_reads_only_standard_identity_files(tmp_path: Path) 
     assert metadata.files == ("config.json", "model_index.json")
 
 
+def test_load_model_metadata_reads_modular_pipeline_identity(tmp_path: Path) -> None:
+    (tmp_path / "modular_model_index.json").write_text(
+        '{"_class_name":"MiniMaxH3ModularPipeline"}', encoding="utf-8"
+    )
+
+    metadata = load_model_metadata(tmp_path)
+
+    assert metadata.pipeline_class == "MiniMaxH3ModularPipeline"
+    assert metadata.files == ("modular_model_index.json",)
+
+
 def test_load_model_metadata_keeps_exact_snapshot_files_without_root_json(
     tmp_path: Path,
 ) -> None:
@@ -227,6 +238,12 @@ def test_qwen38_marker_has_one_owner() -> None:
         )
     )
     assert family == "qwen3_8"
+
+
+def test_minimax_h3_modular_pipeline_has_one_owner() -> None:
+    family, support = resolve_family(ModelMetadata({}, {"_class_name": "MiniMaxH3ModularPipeline"}))
+    assert family == "minimax_h3"
+    assert support.default_task == "image_generation"
 
 
 @pytest.mark.parametrize(
