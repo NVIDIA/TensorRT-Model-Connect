@@ -257,7 +257,7 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         num_layers=1,
         num_refiner_layers=1,
         num_heads=4,
-        head_dim=8,
+        head_dim=128,
         ffn_dim=16,
         video_in_channels=2,
         audio_in_channels=2,
