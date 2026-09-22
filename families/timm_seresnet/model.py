@@ -336,8 +336,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_seresnet does not support tensor parallelism")
     if request.context_parallel_size != 1:
         raise NotImplementedError("timm_seresnet does not support context parallelism")
-    if request.task != "classification":
-        raise ValueError("timm_seresnet supports only task=classification")
+    if request.task != "image_to_class_scores":
+        raise ValueError("timm_seresnet supports only task=image_to_class_scores")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("timm_seresnet does not support quantization")
     if request.fp32_layers:
@@ -345,6 +345,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)
+    vocabulary_id = raw.get("vocabulary_id", "")
+    labels = raw.get("label_names", [])
+    if not isinstance(vocabulary_id, str):
+        raise ValueError("timm SE-ResNet vocabulary_id must be a string")
+    if not isinstance(labels, list) or (labels and (
+        len(labels) != _preprocess_config(raw)["num_classes"]
+        or any(not isinstance(label, str) or not label for label in labels)
+    )):
+        raise ValueError("timm SE-ResNet label_names must name every class")
     plan, runtime = _build_engine(
         raw,
         Checkpoint.open(model_dir),
@@ -356,6 +365,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.add_json(
         "runtime.json",
         {
+            "num_classes": runtime["num_classes"],
+            "vocabulary_id": vocabulary_id,
+            "labels": labels,
             "input_image_h": runtime["image_height"],
             "input_image_w": runtime["image_width"],
             "crop_pct": runtime["crop_pct"],

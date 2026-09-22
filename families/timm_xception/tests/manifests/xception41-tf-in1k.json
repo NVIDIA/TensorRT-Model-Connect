@@ -4,7 +4,7 @@
   "hf_revision": "8a17189361e63c972815ef62f2a30dd5b9f393b1",
   "bundle": "xception41-tf-in1k.bundle",
   "family": "timm_xception",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {
