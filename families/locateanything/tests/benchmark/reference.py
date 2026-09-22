@@ -10,6 +10,10 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
+from typing import Any, Mapping, Sequence
+
+from qualification_tests.benchmark_qualification.performance import reference_harness
 
 from families.locateanything.tests.hf_reference import (
     _LocalTokenizer,
@@ -77,11 +81,11 @@ def _infer(model, tokenizer, image_path: str, prompt: str, max_new_tokens: int) 
     return str(text).strip()
 
 
-def main() -> int:
+def _run_accuracy(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
     request = json.loads(arguments.request.read_text(encoding="utf-8"))
 
     import torch
@@ -126,6 +130,52 @@ def main() -> int:
         encoding="utf-8",
     )
     return 0
+
+
+def _load_performance(
+    arguments: Any,
+    request: Mapping[str, Any],
+    _options: Mapping[str, Any],
+) -> reference_harness.Session:
+    import torch
+    from transformers import AutoModel
+
+    if arguments.precision != "fp32":
+        raise ValueError("LocateAnything official reference requires fp32")
+    model_dir = _model_directory(arguments.model, arguments.revision)
+    config = _load_config(model_dir)
+    tokenizer = _LocalTokenizer(model_dir)
+    model = (
+        AutoModel.from_pretrained(
+            model_dir,
+            config=config,
+            trust_remote_code=arguments.trust_remote_code,
+            local_files_only=arguments.local_files_only,
+            torch_dtype=torch.float32,
+        )
+        .to("cuda")
+        .eval()
+    )
+    _repair_rotary_buffers(model)
+    image_path = str(request["image_path"])
+    prompt = str(request.get("prompt", ""))
+    max_new_tokens = int(request.get("max_new_tokens", 32))
+
+    def invoke() -> Mapping[str, Any]:
+        text = _infer(model, tokenizer, image_path, prompt, max_new_tokens)
+        if not text:
+            raise RuntimeError("LocateAnything reference produced empty text")
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
+        return {"text": text, "token_ids": token_ids, "output_tokens": len(token_ids)}
+
+    return reference_harness.Session(invoke, "transformers")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--request" in arguments:
+        return _run_accuracy(arguments)
+    return reference_harness.run(arguments, description=__doc__, load=_load_performance)
 
 
 if __name__ == "__main__":

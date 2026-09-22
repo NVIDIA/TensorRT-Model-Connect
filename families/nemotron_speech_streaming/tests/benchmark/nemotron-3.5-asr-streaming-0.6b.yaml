@@ -46,8 +46,7 @@ performance:
       iterations: 10
     reference:
       runner: task-reference
-      adapter: nemo-asr
-      adapter_options: {transcription_input: manifest, model_loader: prompted-nemo-archive}
+      script: tests/benchmark/reference.py
       mode: pytorch-eager
       reference_backend: nemo_reference
       precision: fp32

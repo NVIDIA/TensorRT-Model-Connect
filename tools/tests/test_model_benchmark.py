@@ -15,22 +15,23 @@ from types import SimpleNamespace
 import pytest
 
 from tools import model_benchmark, prepare_coco_detection_dataset
-from apps.benchmark.performance.baselines import hf_transformers, task_reference
-from apps.benchmark.performance.baselines.timing_contracts import timing_contract
-from tools.benchmark_qualification import accuracy as qualification_accuracy
-from tools.benchmark_qualification import performance as qualification_performance
-from tools.benchmark_qualification import runtime as qualification_runtime
-from tools.benchmark_qualification.catalog import (
+from qualification_tests.benchmark_qualification.performance.references import hf_transformers, generic_reference
+from qualification_tests.benchmark_qualification.performance.references.timing_contracts import timing_contract
+from qualification_tests.benchmark_qualification import accuracy as qualification_accuracy
+from qualification_tests.benchmark_qualification.performance import (
+    qualification as qualification_performance,
+)
+from qualification_tests.benchmark_qualification import runtime as qualification_runtime
+from qualification_tests.benchmark_qualification.catalog import (
     QualificationCase,
     QualificationError,
     discover,
     load_benchmark,
 )
-from tools.benchmark_qualification.datasets import Dataset, resolve_dataset
-from tools.benchmark_qualification.references import hf_encoder, hf_text_generation
-from tools.benchmark_qualification.runtime import (
+from qualification_tests.benchmark_qualification.datasets import Dataset, resolve_dataset
+from qualification_tests.benchmark_qualification.references import hf_encoder, hf_text_generation
+from qualification_tests.benchmark_qualification.runtime import (
     RuntimeContext,
-    benchmark_executable,
     prepare_bundle,
     reference_environment_options,
     reference_python,
@@ -1320,14 +1321,19 @@ def test_image_feature_accuracy_compares_vectors_and_knn_utility(
     assert result["metrics"]["candidate_knn_top1_accuracy"] == 1.0
 
 
-def test_timm_classification_uses_a_generic_task_reference_adapter() -> None:
-    assert "timm-classification" in task_reference.ADAPTERS
-    assert task_reference.LOADERS["timm-classification"] is task_reference._load_vision
+def test_timm_classification_uses_a_generic_reference_adapter() -> None:
+    assert "timm-classification" in generic_reference.ADAPTERS
+    assert generic_reference.LOADERS["timm-classification"] is generic_reference._load_vision
 
 
-def test_chat_asr_uses_the_generic_asr_reference_loader() -> None:
-    assert "hf-chat-asr" in task_reference.ADAPTERS
-    assert task_reference.LOADERS["hf-chat-asr"] is task_reference._load_asr
+def test_glm_asr_performance_uses_its_family_reference() -> None:
+    case = next(
+        value
+        for value in discover(REPOSITORY)
+        if value.model == "glmasr-nano-fp16" and value.kind == "performance"
+    )
+    assert case.values["reference"]["script"] == "tests/benchmark/reference.py"
+    assert "hf-chat-asr" not in generic_reference.ADAPTERS
 
 
 def test_speech_accuracy_reports_reference_and_labeled_wer(tmp_path: Path, monkeypatch) -> None:
@@ -1760,15 +1766,8 @@ def test_performance_distinguishes_model_contract_failures_from_execution_errors
         },
     }
 
-    def run_matrix(command, *_args, **_kwargs):
-        run_directory = context.case_artifacts(case) / "matrix/run"
-        run_directory.mkdir(parents=True)
-        matrix_row = {"id": "qualification.example.generate", **row}
-        (run_directory / "results.json").write_text(
-            json.dumps({"status": "failed", "rows": [matrix_row]}),
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+    def run_single_case(*_args, **_kwargs):
+        return {"id": "qualification.example.generate", **row}
 
     monkeypatch.setattr(qualification_performance, "load_benchmark", lambda *_: definition)
     monkeypatch.setattr(
@@ -1779,7 +1778,7 @@ def test_performance_distinguishes_model_contract_failures_from_execution_errors
     monkeypatch.setattr(
         qualification_performance, "reference_python", lambda *_: Path(sys.executable)
     )
-    monkeypatch.setattr(qualification_performance, "run_command", run_matrix)
+    monkeypatch.setattr(qualification_performance, "run_case", run_single_case)
 
     result = qualification_performance.run_performance(case, context)
 
@@ -2108,12 +2107,7 @@ def test_shared_performance_definitions_own_complete_reference_timing() -> None:
 def test_internal_automation_is_separate_from_the_installed_benchmark() -> None:
     old_application = REPOSITORY / "apps/benchmark/qualification"
     assert list(old_application.rglob("*.py")) == []
-    internal_sources = [
-        path.read_text(encoding="utf-8")
-        for path in (REPOSITORY / "tools/benchmark_qualification").rglob("*.py")
-    ]
-    assert not any("ManifestCatalog" in source for source in internal_sources)
-    assert not any("tests/manifests" in source for source in internal_sources)
+    assert list((REPOSITORY / "tools/benchmark_qualification").rglob("*.py")) == []
     user_sources = [
         path.read_text(encoding="utf-8")
         for path in (REPOSITORY / "apps/benchmark").rglob("*.py")
@@ -2224,7 +2218,7 @@ def test_candidate_descriptor_uses_family_environment_model_directory(
         verbose=False,
     )
     monkeypatch.setattr(
-        "tools.benchmark_qualification.runtime.reference_python", lambda *_args: python
+        "qualification_tests.benchmark_qualification.runtime.reference_python", lambda *_args: python
     )
 
     descriptor = write_model_descriptor(
@@ -2274,12 +2268,6 @@ def test_accuracy_rejects_candidate_artifacts_outside_the_cell_directory(
         "prepare_bundle",
         lambda *_args, **_kwargs: tmp_path / "model.bundle",
     )
-    monkeypatch.setattr(
-        qualification_accuracy,
-        "benchmark_executable",
-        lambda *_args, **_kwargs: tmp_path / "trtmc-bench",
-    )
-
     def candidate(command, *_args, **_kwargs):
         candidate_output = Path(command[command.index("--output") + 1])
         candidate_output.mkdir(parents=True)
@@ -2444,7 +2432,7 @@ def test_family_reference_environment_inherits_parent_venv_packages(
             child_packages.mkdir(parents=True)
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("tools.benchmark_qualification.runtime.run_command", complete)
+    monkeypatch.setattr("qualification_tests.benchmark_qualification.runtime.run_command", complete)
     monkeypatch.setattr("site.getsitepackages", lambda: [str(parent_packages)])
 
     python = reference_python(case, context)
@@ -2517,63 +2505,12 @@ def test_family_environment_hook_runs_after_requirements_install(
             child.mkdir(parents=True)
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("tools.benchmark_qualification.runtime.run_command", complete)
+    monkeypatch.setattr("qualification_tests.benchmark_qualification.runtime.run_command", complete)
     monkeypatch.setattr("site.getsitepackages", lambda: [str(parent_packages)])
 
     python = reference_python(case, context)
 
     assert commands[-1] == [str(python), str(hook)]
-
-
-def test_benchmark_launcher_uses_the_family_python(tmp_path: Path, monkeypatch) -> None:
-    python = tmp_path / "family env/bin/python"
-    python.parent.mkdir(parents=True)
-    python.write_text("", encoding="utf-8")
-    bench = tmp_path / "user tools/trtmc-bench"
-    bench.parent.mkdir(parents=True)
-    bench.write_text("", encoding="utf-8")
-    case = QualificationCase(
-        kind="performance",
-        model="example",
-        family="example",
-        name="generate",
-        benchmark="text_generation_performance",
-        candidate={
-            "family": "example",
-            "checkpoint": "example/model",
-            "task": "text_generation",
-            "precision": "fp16",
-            "build": {},
-        },
-        values={},
-        source=tmp_path / "example.yaml",
-        reference_requirements=None,
-    )
-    context = RuntimeContext(
-        repository=REPOSITORY,
-        artifacts=tmp_path / "artifacts",
-        data_root=tmp_path / "data",
-        environment_root=tmp_path / "envs",
-        bundle_cache=tmp_path / "bundles",
-        bundle_roots=(),
-        runtime_root=None,
-        trtmc_bench=bench,
-        worker=None,
-        datasets={},
-        reference_pythons={},
-        no_build=False,
-        verbose=False,
-    )
-    monkeypatch.setattr(
-        "tools.benchmark_qualification.runtime.reference_python", lambda *_args: python
-    )
-
-    launcher = benchmark_executable(case, context)
-
-    assert os.access(launcher, os.X_OK)
-    assert launcher.read_text(encoding="utf-8") == (
-        f"#!/bin/sh\nexec '{python}' '{bench}' \"$@\"\n"
-    )
 
 
 def test_bundle_preparation_uses_the_selected_runtime(tmp_path: Path, monkeypatch) -> None:
@@ -2627,9 +2564,10 @@ def test_bundle_preparation_uses_the_selected_runtime(tmp_path: Path, monkeypatc
             stderr="",
         )
 
-    monkeypatch.setattr("tools.benchmark_qualification.runtime.run_command", complete)
+    monkeypatch.setattr("qualification_tests.benchmark_qualification.runtime.run_command", complete)
 
     assert prepare_bundle(case, context, tmp_path, descriptor) == bundle
+    assert captured[0] == str(context.trtmc_bench)
     assert captured[captured.index("--runtime-root") + 1] == str(runtime_root)
 
 

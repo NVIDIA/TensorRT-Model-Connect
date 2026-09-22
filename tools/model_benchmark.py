@@ -21,15 +21,15 @@ if str(BENCHMARK_SOURCE) not in sys.path:
 if str(REPOSITORY) not in sys.path:
     sys.path.insert(0, str(REPOSITORY))
 
-from tools.benchmark_qualification.accuracy import run_accuracy  # noqa: E402
-from tools.benchmark_qualification.catalog import (  # noqa: E402
+from qualification_tests.benchmark_qualification.accuracy import run_accuracy  # noqa: E402
+from qualification_tests.benchmark_qualification.catalog import (  # noqa: E402
     QualificationCase,
     QualificationError,
     discover,
     select,
 )
-from tools.benchmark_qualification.performance import run_performance  # noqa: E402
-from tools.benchmark_qualification.runtime import context_from_args, write_result  # noqa: E402
+from qualification_tests.benchmark_qualification.performance.qualification import run_performance  # noqa: E402
+from qualification_tests.benchmark_qualification.runtime import context_from_args, write_result  # noqa: E402
 
 
 def parser() -> argparse.ArgumentParser:

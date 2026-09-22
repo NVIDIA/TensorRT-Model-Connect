@@ -31,7 +31,7 @@ from tools.ci.package import (
 from tools.ci.pipeline import CiPipeline
 from tools.ci.process import CiError
 from tools.ci.quality import SourceQualityChecks, UnitTestRunner
-from tools import perf_matrix
+from qualification_tests.benchmark_qualification.performance import matrix as perf_matrix
 
 
 class RecordingContext:

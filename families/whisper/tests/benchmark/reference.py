@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from tools.benchmark_qualification.references import speech_io
+from qualification_tests.benchmark_qualification.references import speech_io
 
 
 def main(argv: Sequence[str] | None = None) -> int:

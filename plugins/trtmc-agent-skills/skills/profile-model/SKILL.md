@@ -10,7 +10,7 @@ description: >-
 Choose the evidence level before running:
 
 - For one model or testcase, use `trtmc-bench`.
-- For a checked-in release comparison, use `tools/perf_matrix.py`.
+- For a checked-in release comparison, use `python3 -m qualification_tests.benchmark_qualification.performance`.
 
 The public benchmark boundary is `public_task_call_wall`. It excludes bundle
 building, process startup, warmup, report generation, and bundle loading.
@@ -39,9 +39,9 @@ confounder instead of one causal speedup percentage.
 For release evidence, first check and then run the exact entry:
 
 ```bash
-python3 tools/perf_matrix.py check <suite> \
+python3 -m qualification_tests.benchmark_qualification.performance check <suite> \
   --environment <environment> --entry <entry>
-python3 tools/perf_matrix.py run <suite> \
+python3 -m qualification_tests.benchmark_qualification.performance run <suite> \
   --environment <environment> --entry <entry>
 ```
 

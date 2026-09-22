@@ -24,7 +24,7 @@ DOC_FILES = {
     "README.md",
 }
 MODEL_PROOF_NEUTRAL_FILES = {
-    "apps/benchmark/performance/release.yaml",
+    "qualification_tests/benchmark_qualification/performance/config/release.yaml",
 }
 SHARED_PREFIXES = (
     ".github/",
@@ -33,6 +33,7 @@ SHARED_PREFIXES = (
     "core/",
     "examples/",
     "plugins/",
+    "qualification_tests/",
     "requirements/",
     "third_party/",
     "tools/",

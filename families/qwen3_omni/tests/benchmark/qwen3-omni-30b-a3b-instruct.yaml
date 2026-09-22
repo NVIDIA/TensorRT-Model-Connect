@@ -9,7 +9,7 @@ accuracy:
     benchmark: task_output_parity
     operation: generate
     request: &request {prompt: Please say hello from Qwen3 Omni in one short sentence., max_new_tokens: 16}
-    reference: &reference {adapter: hf-qwen3-omni, mode: hf-eager, precision: bf16, output_contract: normalized-text}
+    reference: &reference {script: tests/benchmark/reference.py, mode: hf-eager, precision: bf16, output_contract: normalized-text}
     gate: {max_normalized_edit_distance: 0.15}
 performance:
   - {name: generate, benchmark: vision_language_performance, operation: generate, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: hf_transformers, output_contract: exact-text}}

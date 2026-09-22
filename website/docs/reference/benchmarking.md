@@ -9,12 +9,10 @@ does not register model families or import family implementation code.
 
 ## Single-model benchmark
 
-Install the optional benchmark dependencies, then select an installed runtime
-root containing the core runtime, TensorRT backend, and required family DSOs:
+Install TRTMC, then select an installed runtime root containing the core
+runtime, TensorRT backend, and required family DSOs:
 
 ```bash
-python -m pip install -r apps/benchmark/performance/requirements.txt
-
 trtmc-bench list models
 trtmc-bench run \
   --model distilgpt2 \
@@ -87,7 +85,10 @@ reference within five percent of candidate p50 is considered equivalent.
 Candidate or reference execution failures are operational failures, not slow
 performance results.
 
-## Release performance matrix
+## Internal release performance matrix
+
+This repository-only workflow is CI qualification. It is separate from the
+installed `trtmc-bench` user interface above and is not included in the wheel.
 
 The matrix coordinates candidate and reference runs without introducing a
 second model registry:
@@ -97,19 +98,19 @@ export TRTMC_PERF_WORKER=/opt/trtmc/bin/trtmc_benchmark_worker
 export TRTMC_PERF_RUNTIME_ROOT=/opt/trtmc/lib
 export TRTMC_PERF_BUNDLE_CACHE=/data/trtmc-bundles
 
-python3 tools/perf_matrix.py check \
-  apps/benchmark/performance/release.yaml \
-  --environment apps/benchmark/performance/environments/gb300.yaml
+python3 -m qualification_tests.benchmark_qualification.performance check \
+  qualification_tests/benchmark_qualification/performance/config/release.yaml \
+  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml
 
-python3 tools/perf_matrix.py prepare \
-  apps/benchmark/performance/release.yaml \
-  --environment apps/benchmark/performance/environments/gb300.yaml \
+python3 -m qualification_tests.benchmark_qualification.performance prepare \
+  qualification_tests/benchmark_qualification/performance/config/release.yaml \
+  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml \
   --entry gpt2.generate \
   --output artifacts/perf/bundle-preparation.json
 
-python3 tools/perf_matrix.py run \
-  apps/benchmark/performance/release.yaml \
-  --environment apps/benchmark/performance/environments/gb300.yaml \
+python3 -m qualification_tests.benchmark_qualification.performance run \
+  qualification_tests/benchmark_qualification/performance/config/release.yaml \
+  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml \
   --entry gpt2.generate
 ```
 
@@ -117,8 +118,8 @@ Preparation is deliberately separate and untimed. Resume or regenerate a
 report from stored observations with:
 
 ```bash
-python3 tools/perf_matrix.py resume artifacts/perf/<run-directory>
-python3 tools/perf_matrix.py report artifacts/perf/<run-directory>
+python3 -m qualification_tests.benchmark_qualification.performance resume artifacts/perf/<run-directory>
+python3 -m qualification_tests.benchmark_qualification.performance report artifacts/perf/<run-directory>
 ```
 
 The release YAML owns model, testcase, operation, measurement, reference, and
