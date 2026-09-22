@@ -1183,10 +1183,12 @@ def test_cli_dry_run_uses_explicit_bundle_without_runtime(tmp_path: Path, capsys
     assert payload[0]["bundle_is_explicit"] is True
 
 
-@pytest.mark.parametrize("task", ["text_generation", "text_continuation"])
+@pytest.mark.parametrize("matches_task", [True, False])
 def test_prepare_only_checks_explicit_bundle_identity_without_loading_a_model(
-    tmp_path: Path, monkeypatch, capsys, task: str
+    tmp_path: Path, monkeypatch, capsys, matches_task: bool
 ) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    task = model.task if matches_task else model.task + "_mismatch"
     bundle = tmp_path / "model.bundle"
     bundle.write_bytes(b"user bundle")
     commands = []
@@ -1195,7 +1197,7 @@ def test_prepare_only_checks_explicit_bundle_identity_without_loading_a_model(
         commands.append(command)
         assert options["timeout"] == 30
         return subprocess.CompletedProcess(
-            command, 0, json.dumps({"family": "gpt2", "task": task}), ""
+            command, 0, json.dumps({"family": model.family, "task": task}), ""
         )
 
     monkeypatch.setattr(benchmark_builder.subprocess, "run", inspect)
@@ -1203,7 +1205,7 @@ def test_prepare_only_checks_explicit_bundle_identity_without_loading_a_model(
         "run", "--model", "distilgpt2", "--manifest-root", str(REPO / "families"),
         "--bundle", str(bundle), "--prepare-only", "--no-build",
     ]
-    if task == "text_generation":
+    if matches_task:
         assert main(arguments) == 0
         assert json.loads(capsys.readouterr().out)["bundles"][0]["status"] == "reused"
     else:

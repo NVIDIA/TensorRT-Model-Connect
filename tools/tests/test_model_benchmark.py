@@ -98,10 +98,11 @@ def test_candidate_descriptor_is_generated_from_public_build_inputs(tmp_path: Pa
 
     descriptor = write_model_descriptor(case, tmp_path, {"prompt": "hello"})
     value = descriptor.read_text(encoding="utf-8")
+    payload = json.loads(value)
 
-    assert '"hf_id": "openai-community/gpt2"' in value
-    assert '"task": "text_generation"' in value
-    assert '"max_sequence_length": 1024' in value
+    assert payload["hf_id"] == case.candidate["checkpoint"]
+    assert payload["task"] == case.candidate["task"]
+    assert payload["max_sequence_length"] == case.candidate["build"]["max_sequence_length"]
     assert "tests/manifests" not in value
 
 
