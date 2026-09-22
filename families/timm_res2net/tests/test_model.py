@@ -204,6 +204,42 @@ def test_layout_reads_the_scale_from_the_convolution_chain(tmp_path: Path) -> No
         assert layout["scale"] == scale
 
 
+@pytest.mark.parametrize("scale", [4, 8])
+@pytest.mark.parametrize("precision", ["fp16", "fp32"])
+@pytest.mark.parametrize("verbose", [False, True])
+def test_builder_logs_checkpoint_scale_before_creating_tensor_rt(
+    tmp_path: Path, monkeypatch, capsys, scale: int, precision: str, verbose: bool
+) -> None:
+    model_dir = _checkpoint(tmp_path, scale=scale)
+    levels = []
+    reached_builder = RuntimeError("CPU control reached the TensorRT builder")
+
+    class Logger:
+        VERBOSE = "verbose"
+        WARNING = "warning"
+
+        def __init__(self, level):
+            levels.append(level)
+
+    def builder(logger):
+        raise reached_builder
+
+    monkeypatch.setattr(
+        model, "trt",
+        SimpleNamespace(float16="fp16", float32="fp32", Logger=Logger, Builder=builder),
+    )
+    with pytest.raises(RuntimeError) as caught:
+        model._build_engine(model._read_config(model_dir), Checkpoint.open(model_dir), precision, verbose)
+    assert caught.value is reached_builder
+    assert levels == [Logger.VERBOSE if verbose else Logger.WARNING]
+    output = capsys.readouterr().err
+    if verbose:
+        assert f"scale={scale}" in output
+        assert f"precision={precision}" in output
+    else:
+        assert output == ""
+
+
 def test_layout_rejects_a_bottleneck_with_no_chain(tmp_path: Path) -> None:
     """A plain ResNet has every stage but no convs chain, so it is rejected."""
     tensors: dict[str, np.ndarray] = {}

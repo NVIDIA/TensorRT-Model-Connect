@@ -371,7 +371,7 @@ def _build_engine(
         print(
             "[trtmc build] timm_res2net: "
             f"image={height}x{width}, depths={layout['depths']}, "
-            f"bottleneck={layout['bottleneck']}, classes={config['num_classes']}, "
+            f"scale={layout['scale']}, classes={config['num_classes']}, "
             f"precision={precision}",
             file=sys.stderr,
         )
