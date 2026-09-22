@@ -10,8 +10,19 @@
 
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace trtmc::bloom {
+
+inline std::vector<std::int32_t> copy_token_prefix(Span<const std::int32_t> ids) {
+    if (ids.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
+        throw std::invalid_argument("prefix token count exceeds int32 capacity");
+    if (ids.empty())
+        return {};
+    if (!ids.data())
+        throw std::invalid_argument("token input has no storage");
+    return {ids.begin(), ids.end()};
+}
 
 inline Span<const internal::ConfigField> text_config_fields() {
     using namespace internal;

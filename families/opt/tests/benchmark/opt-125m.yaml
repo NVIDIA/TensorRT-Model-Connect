@@ -6,7 +6,7 @@ model: opt-125m
 candidate:
   family: opt
   checkpoint: facebook/opt-125m
-  task: text_generation
+  task: text_continuation
   precision: fp16
   bundle: opt-125m.bundle
   build:

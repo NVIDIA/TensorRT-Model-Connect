@@ -28,6 +28,29 @@ int main() {
     using namespace trtmc::internal;
     using trtmc::bloom::parse_text_config;
     try {
+        using trtmc::bloom::copy_token_prefix;
+        require(copy_token_prefix({nullptr, 0}).empty());
+        std::int32_t tokens[] = {3, 1, 4};
+        require(copy_token_prefix({tokens, 0}).empty());
+        const auto copied = copy_token_prefix(tokens);
+        require(copied == std::vector<std::int32_t>({3, 1, 4}));
+        tokens[0] = 9;
+        require(copied[0] == 3);
+        const auto capacity = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+        // Null storage avoids allocating or reading huge arrays if the guard regresses.
+        for (const auto count :
+             {std::size_t{1}, capacity, capacity + 1, std::numeric_limits<std::size_t>::max()}) {
+            bool rejected = false;
+            try {
+                (void)copy_token_prefix({nullptr, count});
+            } catch (const std::invalid_argument& error) {
+                const auto* expected = count > capacity
+                                           ? "prefix token count exceeds int32 capacity"
+                                           : "token input has no storage";
+                rejected = std::string_view(error.what()) == expected;
+            }
+            require(rejected);
+        }
         const auto defaults = parse_text_config({});
         require(defaults.max_new_tokens == 128 && defaults.temperature == 1 &&
                 defaults.top_k == 1 && defaults.top_p == 1 && defaults.min_p == 0 &&

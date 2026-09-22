@@ -6,7 +6,7 @@ model: falcon-rw-1b
 candidate:
   family: falcon
   checkpoint: tiiuae/falcon-rw-1b
-  task: text_generation
+  task: text_continuation
   precision: fp32
   bundle: falcon-rw-1b.bundle
   build:

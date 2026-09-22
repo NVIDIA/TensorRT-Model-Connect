@@ -6,7 +6,7 @@ model: gpt-neo-125m
 candidate:
   family: gpt_neo
   checkpoint: EleutherAI/gpt-neo-125m
-  task: text_generation
+  task: text_continuation
   precision: fp16
   bundle: gpt-neo-125m.bundle
   build:

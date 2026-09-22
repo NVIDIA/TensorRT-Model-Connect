@@ -6,7 +6,7 @@ model: bloom-560m
 candidate:
   family: bloom
   checkpoint: bigscience/bloom-560m
-  task: text_generation
+  task: text_continuation
   precision: fp32
   bundle: bloom-560m.bundle
   build:

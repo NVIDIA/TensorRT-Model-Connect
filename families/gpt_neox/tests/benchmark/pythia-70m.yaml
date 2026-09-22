@@ -6,7 +6,7 @@ model: pythia-70m
 candidate:
   family: gpt_neox
   checkpoint: EleutherAI/pythia-70m
-  task: text_generation
+  task: text_continuation
   precision: fp32
   bundle: pythia-70m.bundle
   build:
