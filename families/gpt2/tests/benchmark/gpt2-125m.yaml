@@ -7,7 +7,7 @@ model: gpt2-125m
 candidate:
   family: gpt2
   checkpoint: openai-community/gpt2
-  task: text_generation
+  task: text_continuation
   precision: fp32
   bundle: gpt2-125m.bundle
   build:
@@ -31,7 +31,6 @@ accuracy:
       repetition_penalty: 1.0
       use_chat_template: false
       enable_thinking: false
-      do_sample: false
     gate:
       min_pass_rate: 0.9
       allowed_failures: 1
