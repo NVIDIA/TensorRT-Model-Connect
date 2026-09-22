@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-import os
-from pathlib import Path
 
 import numpy as np
 
@@ -28,7 +26,6 @@ VSA_SPARSITY = 0.9
 # therefore packs video rows in a 37x24x42 T/H/W grid.
 VSA_VIDEO_SHAPE = (37, 24, 42)
 VSA_BYOK_KERNEL_NAME = "minimax_h3.vsa_sm100a"
-VSA_BYOK_BRIDGE_ENV = "TRTMC_BYOK_PLUGIN_LIBRARY"
 
 
 @dataclass(frozen=True)
@@ -55,7 +52,6 @@ class VsaGeometry:
 class VsaGraphContext:
     geometry: VsaGeometry
     variable_block_sizes: object
-    byok_plugin_library: Path
 
 
 def _segment_tiles(start: int, rows: int, *, sentinel: int) -> tuple[list[int], list[int]]:
@@ -317,19 +313,9 @@ def _runtime_variable_block_sizes(
 
 def prepare_vsa_graph(network, text, profile: MiniMaxH3Config) -> VsaGraphContext:
     geometry = make_vsa_geometry(profile)
-    raw_library = os.environ.get(VSA_BYOK_BRIDGE_ENV)
-    if not raw_library:
-        raise RuntimeError(
-            f"FastH3 VSA build requires {VSA_BYOK_BRIDGE_ENV} to name "
-            "libtrtmc_byok_tvm_ffi.so"
-        )
-    library = Path(raw_library).expanduser().resolve()
-    if not library.is_file():
-        raise FileNotFoundError(f"FastH3 VSA BYOK bridge does not exist: {library}")
     return VsaGraphContext(
         geometry=geometry,
         variable_block_sizes=_runtime_variable_block_sizes(network, text, geometry, profile),
-        byok_plugin_library=library,
     )
 
 
@@ -340,7 +326,9 @@ def _tile_heads(network, tensor, geometry: VsaGeometry, profile: MiniMaxH3Config
 
     shaped = network.add_shuffle(tensor)
     shaped.reshape_dims = (profile.sequence_length, profile.num_heads, profile.head_dim)
-    zero = op.constant(network, np.zeros((1, profile.num_heads, profile.head_dim), dtype=np.float32))
+    zero = op.constant(
+        network, np.zeros((1, profile.num_heads, profile.head_dim), dtype=np.float32)
+    )
     zero = op.cast(network, zero, tensor.dtype)
     extended = network.add_concatenation((shaped.get_output(0), zero))
     extended.axis = 0
@@ -383,9 +371,8 @@ def sparse_attention(
     k_tiled = _tile_heads(network, k, geometry, profile)
     v_tiled = _tile_heads(network, v, geometry, profile)
     gate_tiled = _tile_heads(network, gate, geometry, profile)
-    combined, = add_kernel(
+    (combined,) = add_kernel(
         network,
-        plugin_library=context.byok_plugin_library,
         kernel_name=VSA_BYOK_KERNEL_NAME,
         inputs=[q_tiled, k_tiled, v_tiled, gate_tiled, context.variable_block_sizes],
         output_specs=[{"dims": "same_as_input_0", "dtype": "bfloat16"}],
