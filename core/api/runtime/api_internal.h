@@ -133,6 +133,7 @@ Span<const TaskBinding> speech_task_bindings() noexcept;
 Span<const TaskBinding> action_task_bindings() noexcept;
 Span<const TaskBinding> recurrent_task_bindings() noexcept;
 Span<const TaskBinding> structure_task_bindings() noexcept;
+Span<const TaskBinding> point_cloud_task_bindings() noexcept;
 
 struct ModelState;
 std::shared_ptr<ModelState> model_owner(const trtmc_model* model);

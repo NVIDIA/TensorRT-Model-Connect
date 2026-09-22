@@ -145,6 +145,7 @@ add_library(trtmc_c SHARED
   core/api/runtime/stream.cpp
   core/api/runtime/video.cpp
   core/api/runtime/perception.cpp
+  core/api/runtime/point_cloud.cpp
   core/api/runtime/language.cpp
   core/api/runtime/tracking.cpp
   core/api/runtime/speech.cpp
