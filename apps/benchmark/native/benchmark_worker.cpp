@@ -1168,8 +1168,9 @@ Json run_transcribe(const trtmc::Model& model, const Json& request, const Timing
             });
     };
     if (primary == trtmc::SpeechTranscription::kTask)
-        return run(task_for_operation<trtmc::SpeechTranscription>(model, task_id),
-                   [&](auto audio) { return trtmc::SpeechTranscriptionRequest{audio, language}; });
+        return run(task_for_operation<trtmc::SpeechTranscription>(model, task_id), [&](auto audio) {
+            return trtmc::SpeechTranscriptionRequest{audio, language};
+        });
     return run(task_for_operation<trtmc::SpeechTranslation>(model, task_id), [&](auto audio) {
         return trtmc::SpeechTranslationRequest{audio, target, language};
     });
@@ -1219,14 +1220,20 @@ Json run_generate_audio(const trtmc::Model& model, const Json& request, const Ti
         const auto task = task_for_operation<trtmc::TextToAudio>(model, task_id);
         const auto config =
             sdk_config(request, task.config_fields(), {"prompt", "streaming", "_artifact_prefix"});
-        return measure(timing, [&]() { return task.run({prompt}, config); }, observe);
+        return measure(
+            timing, [&]() { return task.run({prompt}, config); }, observe);
     }
     const auto language = language_input(request, "language");
     if (primary == trtmc::TextToSpeech::kTask) {
         const auto task = task_for_operation<trtmc::TextToSpeech>(model, task_id);
         const auto config = sdk_config(request, task.config_fields(),
                                        {"prompt", "language", "streaming", "_artifact_prefix"});
-        return measure(timing, [&]() { return task.run({prompt, language}, config); }, observe);
+        return measure(
+            timing,
+            [&]() {
+                return task.run({prompt, language}, config);
+            },
+            observe);
     }
     if (!streaming)
         throw std::invalid_argument("generate_audio requires an audio generation Task");
@@ -1903,7 +1910,10 @@ Json run_embed(const trtmc::Model& model, const Json& request, const Timing& tim
             throw std::invalid_argument("invalid embedding role");
     }
     return measure(
-        timing, [&]() { return task.run({prompt, role}, config); },
+        timing,
+        [&]() {
+            return task.run({prompt, role}, config);
+        },
         [](const trtmc::SemanticEmbeddingResult& result) {
             return Json{{"embedding_vectors", 1},
                         {"embedding_elements", result.values().size()},
@@ -1924,7 +1934,10 @@ Json run_rerank(const trtmc::Model& model, const Json& request, const Timing& ti
     const auto query = request.at("query").get<std::string>();
     const auto documents = request.at("documents").get<std::vector<std::string>>();
     return measure(
-        timing, [&]() { return task.run({query, documents}, config); },
+        timing,
+        [&]() {
+            return task.run({query, documents}, config);
+        },
         [&](const trtmc::DocumentRelevanceResult& result) {
             return Json{{"documents", documents.size()},
                         {"scores", json_values(result.scores())},
@@ -3233,7 +3246,8 @@ Json run_translate(const trtmc::Model& model, const Json& request, const Timing&
                                               language_input(request, "source_language")};
     const auto config = sdk_config(request, task.config_fields(),
                                    {"source_text", "source_language", "target_language"});
-    return measure(timing, [&]() { return task.run(input, config); }, text_observation);
+    return measure(
+        timing, [&]() { return task.run(input, config); }, text_observation);
 }
 
 std::vector<float> optional_float32(const Json& request, const char* name) {
@@ -3450,7 +3464,8 @@ Json run_generate(const trtmc::Model& model, const Json& request, const Timing& 
         auto run = [&](const auto& task, const auto& input) {
             const auto config =
                 sdk_config(request, task.config_fields(), {"prompt", "token_ids", "batch_size"});
-            return measure(timing, [&]() { return task.run(input, config); }, text_observation);
+            return measure(
+                timing, [&]() { return task.run(input, config); }, text_observation);
         };
         if (primary == trtmc::ConditionalTextGeneration::kTask)
             return run(task_for_operation<trtmc::ConditionalTextGeneration>(model, task_id),
@@ -3465,7 +3480,8 @@ Json run_generate(const trtmc::Model& model, const Json& request, const Timing& 
             throw std::invalid_argument("unconditional text generation has no prompt input");
         const auto task = task_for_operation<trtmc::UnconditionalTextGeneration>(model, task_id);
         const auto config = sdk_config(request, task.config_fields(), {});
-        return measure(timing, [&]() { return task.run(config); }, text_observation);
+        return measure(
+            timing, [&]() { return task.run(config); }, text_observation);
     }
     if (primary == trtmc::LatentConditionedTextGeneration::kTask ||
         primary == trtmc::LatentReplayToText::kTask)
@@ -3496,7 +3512,8 @@ Json run_generate(const trtmc::Model& model, const Json& request, const Timing& 
     }
     auto run = [&](const auto& task, const auto& input) {
         const auto config = sdk_config(request, task.config_fields(), {"prompt"});
-        return measure(timing, [&]() { return task.run(input, config); }, text_observation);
+        return measure(
+            timing, [&]() { return task.run(input, config); }, text_observation);
     };
     if (primary == trtmc::CorruptedTextReconstruction::kTask)
         return run(task_for_operation<trtmc::CorruptedTextReconstruction>(model, task_id),
@@ -3717,7 +3734,8 @@ Json run_solve(const trtmc::Model& model, const Json& request, const Timing& tim
     auto run = [&](const auto& task, const auto& input, auto observe) {
         const auto config =
             sdk_config(request, task.config_fields(), {"past_values", "observed_mask", "shape"});
-        return measure(timing, [&]() { return task.run(input, config); }, observe);
+        return measure(
+            timing, [&]() { return task.run(input, config); }, observe);
     };
     if (primary == trtmc::SeriesToPointForecast::kTask)
         return run(task_for_operation<trtmc::SeriesToPointForecast>(model, task_id),
