@@ -15,8 +15,10 @@ import tensorrt as trt
 
 from . import graph_ops as op
 from .config import (
+    BASE_GENERATION_PROFILE,
     DENOISER_DEFAULT_WORKSPACE_BYTES,
     MiniMaxH3Config,
+    MiniMaxH3GenerationProfile,
     SOL_ENGINE_1344X768_124F,
 )
 
@@ -40,7 +42,10 @@ def _refiner_checkpoint_keys(profile: MiniMaxH3Config) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _block_checkpoint_keys(indices) -> tuple[str, ...]:
+def _block_checkpoint_keys(
+    indices,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
+) -> tuple[str, ...]:
     names: list[str] = []
     for index in indices:
         prefix = f"transformer_blocks.{index}"
@@ -56,11 +61,14 @@ def _block_checkpoint_keys(indices) -> tuple[str, ...]:
                 f"{prefix}.ff.net.2.weight",
             ]
         )
+        if generation_profile.uses_vsa:
+            names.append(f"{prefix}.attn.to_gate_compress.weight")
     return tuple(names)
 
 
 def head_checkpoint_keys(
     profile: MiniMaxH3Config = SOL_ENGINE_1344X768_124F,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
 ) -> tuple[str, ...]:
     """Weights used by packing, token refinement, and transformer block zero."""
 
@@ -73,22 +81,26 @@ def head_checkpoint_keys(
         "context_embedder.bias",
         "token_refiner.final_norm.weight",
         *_refiner_checkpoint_keys(profile),
-        *_block_checkpoint_keys(range(1)),
+        *_block_checkpoint_keys(range(1), generation_profile),
     )
 
 
 def tail_checkpoint_keys(
     profile: MiniMaxH3Config = SOL_ENGINE_1344X768_124F,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
 ) -> tuple[str, ...]:
     """Weights used by transformer blocks one through the final block."""
 
-    return _block_checkpoint_keys(range(1, profile.num_layers))
+    return _block_checkpoint_keys(range(1, profile.num_layers), generation_profile)
 
 
 def finish_checkpoint_keys(
     profile: MiniMaxH3Config = SOL_ENGINE_1344X768_124F,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
 ) -> tuple[str, ...]:
     """Weights used by the final norm and modality-specific projections."""
+
+    del profile, generation_profile
 
     return (
         "norm_out.norm.weight",
@@ -101,13 +113,14 @@ def finish_checkpoint_keys(
 
 def checkpoint_keys(
     profile: MiniMaxH3Config = SOL_ENGINE_1344X768_124F,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
 ) -> tuple[str, ...]:
     """Checkpoint tensors used by all DiT plans, excluding AdaLN."""
 
     return (
-        *head_checkpoint_keys(profile),
-        *tail_checkpoint_keys(profile),
-        *finish_checkpoint_keys(profile),
+        *head_checkpoint_keys(profile, generation_profile),
+        *tail_checkpoint_keys(profile, generation_profile),
+        *finish_checkpoint_keys(profile, generation_profile),
     )
 
 
@@ -181,6 +194,8 @@ def _attention_block(
     *,
     cos=None,
     sin=None,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
+    vsa_context=None,
 ):
     q, k, v = op.fused_qkv(network, hidden, weights, f"{prefix}.attn")
     q = _per_head_norm(network, q, weights[f"{prefix}.attn.norm_q.weight"], profile, rows)
@@ -207,16 +222,37 @@ def _attention_block(
             head_dim=profile.head_dim,
             rotary_dim=rotary_dim,
         )
-        attended = op.native_attention(
-            network,
-            q,
-            k,
-            v,
-            rows=rows,
-            heads=profile.num_heads,
-            head_dim=profile.head_dim,
-            name=f"{prefix}.attn.native_attention",
-        )
+        if generation_profile.uses_vsa:
+            if vsa_context is None:
+                raise ValueError("FastH3 VSA transformer attention requires VSA graph context")
+            from . import vsa
+
+            gate = op.linear(
+                network,
+                hidden,
+                weights[f"{prefix}.attn.to_gate_compress.weight"],
+            )
+            attended = vsa.sparse_attention(
+                network,
+                q,
+                k,
+                v,
+                gate,
+                vsa_context,
+                profile,
+                name=f"{prefix}.attn.vsa_sm100a",
+            )
+        else:
+            attended = op.native_attention(
+                network,
+                q,
+                k,
+                v,
+                rows=rows,
+                heads=profile.num_heads,
+                head_dim=profile.head_dim,
+                name=f"{prefix}.attn.native_attention",
+            )
     else:
         attended = _native_attention(
             network,
@@ -270,10 +306,22 @@ def _refine_text(network, text, weights, profile: MiniMaxH3Config):
     )
 
 
-def _packed_hidden(network, video, audio, text, weights, profile: MiniMaxH3Config):
+def _packed_hidden(
+    network,
+    video,
+    audio,
+    text,
+    weights,
+    profile: MiniMaxH3Config,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
+):
     """Project and pack text | audio | video exactly like the Diffusers model."""
 
     text_hidden = _refine_text(network, text, weights, profile)
+    if generation_profile.uses_vsa:
+        from . import vsa
+
+        text_hidden = vsa.pad_text_rows(network, text_hidden, profile.text_rows)
     audio_hidden = op.linear(
         network, audio, weights["audio_proj_in.weight"], weights["audio_proj_in.bias"], bf16=False
     )
@@ -297,6 +345,8 @@ def _transformer_block(
     weights,
     profile: MiniMaxH3Config,
     index: int,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
+    vsa_context=None,
 ):
     """Add one native H3 transformer block and return its residual stream."""
 
@@ -323,6 +373,8 @@ def _transformer_block(
         rows,
         cos=cos,
         sin=sin,
+        generation_profile=generation_profile,
+        vsa_context=vsa_context,
     )
     hidden = op.gated_residual(network, hidden, update, gate_msa)
 
@@ -487,6 +539,7 @@ def build_dit_engine(
     weights: dict,
     profile: MiniMaxH3Config,
     *,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
@@ -494,6 +547,7 @@ def build_dit_engine(
     """Build the full-sequence single-device H3 TensorRT plan."""
 
     profile.validate()
+    generation_profile.validate()
     if profile.first_block_cache:
         raise ValueError("MiniMax-H3 first_block_cache profile requires the split DiT builders")
     rows = -1
@@ -530,7 +584,23 @@ def build_dit_engine(
     # The public single-device FL2VA profile is packed as text | audio | video.
     # Projection, text refinement, packing, and full-sequence attention all
     # remain native TensorRT operations on one device.
-    hidden = _packed_hidden(network, video, audio, text, weights, profile)
+    vsa_context = None
+    if generation_profile.uses_vsa:
+        from . import vsa
+
+        vsa_context = vsa.prepare_vsa_graph(network, text, profile)
+        positions = vsa.pad_packed_text_segment(network, positions, profile)
+        adaln_indices = vsa.pad_packed_text_segment(network, adaln_indices, profile)
+        timestep_indices = vsa.pad_packed_text_segment(network, timestep_indices, profile)
+    hidden = _packed_hidden(
+        network,
+        video,
+        audio,
+        text,
+        weights,
+        profile,
+        generation_profile,
+    )
 
     cos, sin = _rope_tables(network, positions, profile, rows)
     # The dynamic packed sequence contains live rows only, like Diffusers, so
@@ -546,19 +616,30 @@ def build_dit_engine(
             weights,
             profile,
             index,
+            generation_profile,
+            vsa_context,
         )
 
     hidden = _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile)
     _mark_sliced_velocity_outputs(network, hidden, weights, profile)
 
-    op.validate_native_network(
-        network,
-        expected_attentions=profile.num_refiner_layers + profile.num_layers,
-        label="DiT",
-    )
+    if generation_profile.uses_vsa:
+        op.validate_vsa_network(
+            network,
+            expected_dense_attentions=profile.num_refiner_layers,
+            expected_sparse_plugins=profile.num_layers,
+            label="DiT VSA",
+        )
+    else:
+        op.validate_native_network(
+            network,
+            expected_attentions=profile.num_refiner_layers + profile.num_layers,
+            label="DiT",
+        )
 
     print(
         f"[minimax-h3] building native DiT: layers={profile.num_layers}, "
+        f"attention={generation_profile.attention_backend}, "
         f"packed={profile.min_sequence_length}..{profile.sequence_length} "
         f"(opt={profile.opt_sequence_length}), devices=1",
         file=sys.stderr,
@@ -584,6 +665,7 @@ def build_dit_head_engine(
     weights: dict,
     profile: MiniMaxH3Config,
     *,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
@@ -591,6 +673,8 @@ def build_dit_head_engine(
     """Build packing, text refinement, block zero, and the native cache metric."""
 
     _require_first_block_cache_profile(profile)
+    if generation_profile.uses_vsa:
+        raise ValueError("FastH3 VSA does not support the split FirstBlockCache graph")
     rows = -1
     logger, builder, network, config = _native_builder(verbose, workspace_bytes)
     video = network.add_input(
@@ -694,6 +778,7 @@ def build_dit_tail_engine(
     weights: dict,
     profile: MiniMaxH3Config,
     *,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
@@ -701,6 +786,8 @@ def build_dit_tail_engine(
     """Build blocks one through 49 and expose their reusable total residual."""
 
     _require_first_block_cache_profile(profile)
+    if generation_profile.uses_vsa:
+        raise ValueError("FastH3 VSA does not support the split FirstBlockCache graph")
     rows = -1
     logger, builder, network, config = _native_builder(verbose, workspace_bytes)
     head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
@@ -764,6 +851,7 @@ def build_dit_finish_engine(
     weights: dict,
     profile: MiniMaxH3Config,
     *,
+    generation_profile: MiniMaxH3GenerationProfile = BASE_GENERATION_PROFILE,
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
@@ -771,6 +859,8 @@ def build_dit_finish_engine(
     """Apply a selected tail residual, final norm, and consumed-row projections."""
 
     _require_first_block_cache_profile(profile)
+    if generation_profile.uses_vsa:
+        raise ValueError("FastH3 VSA does not support the split FirstBlockCache graph")
     logger, builder, network, config = _native_builder(verbose, workspace_bytes)
     head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
     tail_residual = network.add_input("tail_residual", trt.bfloat16, (-1, profile.hidden_size))

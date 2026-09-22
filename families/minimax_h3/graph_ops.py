@@ -77,6 +77,38 @@ def validate_native_network(network, *, expected_attentions: int, label: str) ->
     }
 
 
+def validate_vsa_network(
+    network,
+    *,
+    expected_dense_attentions: int,
+    expected_sparse_plugins: int,
+    label: str,
+) -> dict[str, int]:
+    """Fail closed unless VSA uses only the family-owned TVM-FFI boundary."""
+
+    counts = Counter(network.get_layer(index).type for index in range(network.num_layers))
+    expected = {
+        trt.LayerType.ATTENTION_INPUT: expected_dense_attentions,
+        trt.LayerType.ATTENTION_OUTPUT: expected_dense_attentions,
+        trt.LayerType.PLUGIN_V2: expected_sparse_plugins,
+    }
+    forbidden = (trt.LayerType.PLUGIN, trt.LayerType.PLUGIN_V3, trt.LayerType.DIST_COLLECTIVE)
+    violations = {
+        str(kind): counts[kind] for kind, wanted in expected.items() if counts[kind] != wanted
+    }
+    violations.update({str(kind): counts[kind] for kind in forbidden if counts[kind]})
+    if violations:
+        raise RuntimeError(f"MiniMax-H3 {label} layer contract failed: {violations}")
+    return {
+        "attention_input": counts[trt.LayerType.ATTENTION_INPUT],
+        "attention_output": counts[trt.LayerType.ATTENTION_OUTPUT],
+        "plugin": 0,
+        "plugin_v2": counts[trt.LayerType.PLUGIN_V2],
+        "plugin_v3": 0,
+        "dist_collective": 0,
+    }
+
+
 def _add_constant(network, array: np.ndarray):
     array = np.ascontiguousarray(array)
     _WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).append(array)

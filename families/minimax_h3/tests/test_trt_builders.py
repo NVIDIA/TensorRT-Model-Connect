@@ -18,6 +18,7 @@ from families.minimax_h3.adaln_builder import (  # noqa: E402
 from families.minimax_h3.config import (  # noqa: E402
     ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
     DENOISER_DEFAULT_WORKSPACE_BYTES,
+    FASTH3_VSA_4STEP_GENERATION_PROFILE,
     MiniMaxH3Config,
     SOL_ENGINE_1344X768_124F,
     TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
@@ -208,6 +209,17 @@ def test_first_block_cache_checkpoint_partitions_are_exact() -> None:
     assert "transformer_blocks.0.norm1.weight" in head
     assert "transformer_blocks.1.norm1.weight" in tail
     assert "norm_out.norm.weight" in finish
+
+
+def test_vsa_checkpoint_partition_adds_one_gate_per_transformer_block() -> None:
+    profile = replace(SOL_ENGINE_1344X768_124F, num_layers=3)
+    dense = set(dit_checkpoint_keys(profile))
+    sparse = set(dit_checkpoint_keys(profile, FASTH3_VSA_4STEP_GENERATION_PROFILE))
+
+    assert sparse - dense == {
+        f"transformer_blocks.{index}.attn.to_gate_compress.weight"
+        for index in range(profile.num_layers)
+    }
 
 
 def test_split_builders_require_explicit_first_block_cache_profile() -> None:

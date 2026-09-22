@@ -39,6 +39,52 @@ install(TARGETS trtmc_model_minimax_h3
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+option(TRTMC_BUILD_MINIMAX_H3_VSA_SM100A
+  "Build the FastH3 forward-only Blackwell VSA TVM-FFI kernel" OFF)
+set(TRTMC_MINIMAX_H3_VSA_GPU_ARCH "103a" CACHE STRING
+  "Blackwell architecture for FastH3 VSA (100a for GB200/B200, 103a for GB300/B300)")
+if(TRTMC_BUILD_MINIMAX_H3_VSA_SM100A)
+  if(NOT TRTMC_HAS_TVM_FFI)
+    message(FATAL_ERROR
+      "TRTMC_BUILD_MINIMAX_H3_VSA_SM100A requires TRTMC_ENABLE_BYOK=ON")
+  endif()
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.0)
+    message(FATAL_ERROR "FastH3 VSA sm100a requires CUDA 13.0 or newer")
+  endif()
+  if(NOT TRTMC_MINIMAX_H3_VSA_GPU_ARCH MATCHES "^(100a|103a)$")
+    message(FATAL_ERROR
+      "TRTMC_MINIMAX_H3_VSA_GPU_ARCH must be 100a or 103a")
+  endif()
+  add_library(trtmc_minimax_h3_vsa_sm100a SHARED
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/kernels/vsa_sm100a.cu
+  )
+  target_include_directories(trtmc_minimax_h3_vsa_sm100a PRIVATE
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/kernels
+  )
+  target_include_directories(trtmc_minimax_h3_vsa_sm100a SYSTEM PRIVATE
+    ${CUDAToolkit_INCLUDE_DIRS}
+    ${TRTMC_TVM_FFI_INCLUDE_DIR}
+  )
+  target_link_libraries(trtmc_minimax_h3_vsa_sm100a PRIVATE
+    CUDA::cuda_driver
+    CUDA::cudart
+    ${TRTMC_TVM_FFI_LIBRARY}
+  )
+  target_compile_features(trtmc_minimax_h3_vsa_sm100a PRIVATE cxx_std_17 cuda_std_17)
+  target_compile_options(trtmc_minimax_h3_vsa_sm100a PRIVATE
+    "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra;--generate-code=arch=compute_${TRTMC_MINIMAX_H3_VSA_GPU_ARCH},code=sm_${TRTMC_MINIMAX_H3_VSA_GPU_ARCH}>"
+  )
+  set_target_properties(trtmc_minimax_h3_vsa_sm100a PROPERTIES
+    CUDA_ARCHITECTURES OFF
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH "\$ORIGIN;${TRTMC_TVM_FFI_LIBRARY_DIR}"
+    INSTALL_RPATH "\$ORIGIN;${TRTMC_TVM_FFI_LIBRARY_DIR}"
+  )
+  install(TARGETS trtmc_minimax_h3_vsa_sm100a
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+endif()
+
 if(TRTMC_BUILD_TESTS)
   add_executable(test_minimax_h3_math
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_minimax_h3_math.cpp

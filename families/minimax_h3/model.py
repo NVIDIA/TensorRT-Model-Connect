@@ -21,6 +21,8 @@ from .config import (
     BASE_GENERATION_PROFILE,
     FASTH3_DENSE_4STEP_GENERATION_PROFILE,
     FASTH3_DENSE_4STEP_MODEL_ID,
+    FASTH3_VSA_4STEP_GENERATION_PROFILE,
+    FASTH3_VSA_4STEP_MODEL_ID,
     SOL_ENGINE_1344X768_124F,
     MiniMaxH3GenerationProfile,
     default_workspace_limit_bytes,
@@ -50,16 +52,38 @@ def _generation_profile(root: Path) -> MiniMaxH3GenerationProfile:
         return BASE_GENERATION_PROFILE
 
     contract = _read_json_object(contract_path, label="FastVideo inference contract")
+    model_id = contract.get("model_id")
+    profiles = {
+        FASTH3_DENSE_4STEP_MODEL_ID: (
+            FASTH3_DENSE_4STEP_GENERATION_PROFILE,
+            {
+                "attention_backend": "FLASH_ATTN",
+                "checkpoint_step": 1000,
+            },
+        ),
+        FASTH3_VSA_4STEP_MODEL_ID: (
+            FASTH3_VSA_4STEP_GENERATION_PROFILE,
+            {
+                "attention_backend": "VIDEO_SPARSE_ATTN_H3",
+                "checkpoint_step": 1300,
+                "vsa_tile_size": 64,
+                "vsa_sparsity": 0.9,
+                "vsa_kernel": "sm100a",
+            },
+        ),
+    }
+    if model_id not in profiles:
+        raise ValueError(f"Unsupported FastH3 model_id: {model_id!r}")
+    profile, variant_contract = profiles[model_id]
     expected = {
         "schema_version": "fasth3-inference-contract-v1",
-        "model_id": FASTH3_DENSE_4STEP_MODEL_ID,
-        "attention_backend": "FLASH_ATTN",
-        "checkpoint_step": 1000,
+        "model_id": model_id,
         "guidance_scale": 1.0,
         "num_inference_steps": 5,
         "transformer_forwards": 4,
         "task": "t2av",
         "dmd_denoising_steps": [999, 749, 500, 250],
+        **variant_contract,
     }
     mismatches = {
         name: (contract.get(name), value)
@@ -74,8 +98,8 @@ def _generation_profile(root: Path) -> MiniMaxH3GenerationProfile:
         "audio": root / "audio_scheduler" / "scheduler_config.json",
     }
     expected_shifts = {
-        "video": FASTH3_DENSE_4STEP_GENERATION_PROFILE.video_scheduler_shift,
-        "audio": FASTH3_DENSE_4STEP_GENERATION_PROFILE.audio_scheduler_shift,
+        "video": profile.video_scheduler_shift,
+        "audio": profile.audio_scheduler_shift,
     }
     for name, path in scheduler_paths.items():
         scheduler = _read_json_object(path, label=f"{name} scheduler config")
@@ -84,8 +108,8 @@ def _generation_profile(root: Path) -> MiniMaxH3GenerationProfile:
         if scheduler.get("shift") != expected_shifts[name]:
             raise ValueError(f"FastH3 {name} scheduler shift must be {expected_shifts[name]}")
 
-    FASTH3_DENSE_4STEP_GENERATION_PROFILE.validate()
-    return FASTH3_DENSE_4STEP_GENERATION_PROFILE
+    profile.validate()
+    return profile
 
 
 def _fixed_profile(raw: dict):
@@ -172,6 +196,9 @@ class _MiniMaxH3Model:
         raw = getattr(config, "raw", {})
         profile = _fixed_profile(raw)
         profile.validate()
+        generation_profile = weights["_generation_profile"]
+        if generation_profile.uses_vsa and profile.first_block_cache:
+            raise ValueError("FastH3 VSA does not support the split FirstBlockCache graph")
         workspace_limits = default_workspace_limit_bytes(
             first_block_cache=profile.first_block_cache
         )
@@ -198,19 +225,19 @@ class _MiniMaxH3Model:
                     "denoiser_head",
                     "denoiser_head.plan",
                     build_dit_head_engine,
-                    head_checkpoint_keys(profile),
+                    head_checkpoint_keys(profile, generation_profile),
                 ),
                 (
                     "denoiser_tail",
                     "denoiser_tail.plan",
                     build_dit_tail_engine,
-                    tail_checkpoint_keys(profile),
+                    tail_checkpoint_keys(profile, generation_profile),
                 ),
                 (
                     "denoiser_finish",
                     "denoiser_finish.plan",
                     build_dit_finish_engine,
-                    finish_checkpoint_keys(profile),
+                    finish_checkpoint_keys(profile, generation_profile),
                 ),
             )
             checkpoint_groups = (
@@ -223,12 +250,12 @@ class _MiniMaxH3Model:
                     "denoiser",
                     "denoiser.plan",
                     build_dit_engine,
-                    dit_checkpoint_keys(profile),
+                    dit_checkpoint_keys(profile, generation_profile),
                 ),
             )
             checkpoint_groups = (
                 adaln_checkpoint_keys(profile),
-                dit_checkpoint_keys(profile),
+                dit_checkpoint_keys(profile, generation_profile),
             )
         validate_component_key_partition(weights["_transformer_dir"], checkpoint_groups)
 
@@ -272,6 +299,7 @@ class _MiniMaxH3Model:
             denoiser_plan = denoiser_builder(
                 dit_weights,
                 profile,
+                generation_profile=generation_profile,
                 verbose=verbose,
                 consume_weights=True,
                 workspace_bytes=workspace_limits[filename],
@@ -302,7 +330,7 @@ class _MiniMaxH3Model:
             **denoiser_components,
             "vae_decoder": vae_decoder_plan,
             "profile": profile,
-            "generation_profile": weights["_generation_profile"],
+            "generation_profile": generation_profile,
             # Text/VAE paths remain explicit so follow-on native component
             # builders cannot silently substitute a different checkpoint.
             "vae_dir": weights["_vae_dir"],
@@ -375,6 +403,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "video_scheduler_shift": generation_profile.video_scheduler_shift,
             "audio_scheduler_shift": generation_profile.audio_scheduler_shift,
             "dmd_denoising_steps": list(generation_profile.dmd_denoising_steps),
+            "attention_backend": generation_profile.attention_backend,
+            "vsa_tile_size": generation_profile.vsa_tile_size,
+            "vsa_sparsity": generation_profile.vsa_sparsity,
+            "vsa_kernel": generation_profile.vsa_kernel,
             "seed": 0,
             "first_block_cache": False,
             "denoiser_cache_mode": "monolithic",

@@ -81,16 +81,36 @@ class MiniMaxH3GenerationProfile:
     video_scheduler_shift: float
     audio_scheduler_shift: float
     dmd_denoising_steps: tuple[int, ...] = ()
+    attention_backend: str = "FLASH_ATTN"
+    vsa_tile_size: int | None = None
+    vsa_sparsity: float | None = None
+    vsa_kernel: str | None = None
 
     @property
     def transformer_forwards(self) -> int:
         return self.num_inference_steps - 1
+
+    @property
+    def uses_vsa(self) -> bool:
+        return self.attention_backend == "VIDEO_SPARSE_ATTN_H3"
 
     def validate(self) -> None:
         if self.num_inference_steps < 2:
             raise ValueError("MiniMax-H3 requires at least two sigma-grid points")
         if self.video_scheduler_shift <= 0.0 or self.audio_scheduler_shift <= 0.0:
             raise ValueError("MiniMax-H3 scheduler shifts must be positive")
+        if self.uses_vsa:
+            if self.vsa_tile_size != 64:
+                raise ValueError("FastH3 VSA requires 64-token tiles")
+            if self.vsa_sparsity != 0.9:
+                raise ValueError("FastH3 VSA requires sparsity=0.9")
+            if self.vsa_kernel != "sm100a":
+                raise ValueError("FastH3 VSA requires the sm100a kernel")
+        elif any(
+            value is not None
+            for value in (self.vsa_tile_size, self.vsa_sparsity, self.vsa_kernel)
+        ):
+            raise ValueError("MiniMax-H3 dense attention cannot declare VSA settings")
         if not self.dmd_denoising_steps:
             return
         if len(self.dmd_denoising_steps) != self.transformer_forwards:
@@ -199,4 +219,17 @@ FASTH3_DENSE_4STEP_GENERATION_PROFILE = MiniMaxH3GenerationProfile(
     video_scheduler_shift=12.0,
     audio_scheduler_shift=3.0,
     dmd_denoising_steps=(999, 749, 500, 250),
+)
+
+FASTH3_VSA_4STEP_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
+FASTH3_VSA_4STEP_GENERATION_PROFILE = MiniMaxH3GenerationProfile(
+    name="fasth3-vsa-4step",
+    num_inference_steps=5,
+    video_scheduler_shift=12.0,
+    audio_scheduler_shift=3.0,
+    dmd_denoising_steps=(999, 749, 500, 250),
+    attention_backend="VIDEO_SPARSE_ATTN_H3",
+    vsa_tile_size=64,
+    vsa_sparsity=0.9,
+    vsa_kernel="sm100a",
 )
