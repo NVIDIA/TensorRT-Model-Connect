@@ -31,7 +31,6 @@ accuracy:
       repetition_penalty: 1.0
       use_chat_template: false
       enable_thinking: false
-      do_sample: false
     gate:
       min_pass_rate: 0.9
       allowed_failures: 1
