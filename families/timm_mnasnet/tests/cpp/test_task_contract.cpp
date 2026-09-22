@@ -117,6 +117,34 @@ void test_binding_and_complete_owned_logits() {
             "result must own all logits across another call and model destruction");
 }
 
+void test_class_identity_metadata() {
+    const std::vector<std::string> partial{"first", "", "third", "fourth", "fifth"};
+    for (const auto& labels : {partial, std::vector<std::string>(5)}) {
+        rejects<std::runtime_error>(
+            [&] {
+                trtmc::TimmMnasnetImageClassificationPipeline model(
+                    std::make_unique<RecordingModule>(), preprocessing(), 5, "", labels);
+            },
+            "reject blank class labels without vocabulary identity at construction");
+    }
+
+    const std::pair<std::string, std::vector<std::string>> valid[] = {
+        {"", {}},
+        {"", {"first", "second", "third", "fourth", "fifth"}},
+        {"test:five-classes", {}},
+        {"test:five-classes", partial},
+        {"test:five-classes", std::vector<std::string>(5)},
+    };
+    const std::vector<float> pixels(12, 0.75F);
+    for (const auto& [vocabulary, labels] : valid) {
+        trtmc::TimmMnasnetImageClassificationPipeline model(std::make_unique<RecordingModule>(),
+                                                            preprocessing(), 5, vocabulary, labels);
+        const auto result = model.run(request(pixels), {});
+        require(result.vocabulary_id == vocabulary && result.labels == labels,
+                "preserve valid unknown, named and explicitly identified class metadata");
+    }
+}
+
 void test_metadata_and_invalid_inputs() {
     auto module = std::make_unique<RecordingModule>();
     auto* recording = module.get();
@@ -154,6 +182,7 @@ void test_metadata_and_invalid_inputs() {
 int main() {
     try {
         test_binding_and_complete_owned_logits();
+        test_class_identity_metadata();
         test_metadata_and_invalid_inputs();
         return 0;
     } catch (const std::exception& error) {

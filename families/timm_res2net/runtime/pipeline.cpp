@@ -5,6 +5,7 @@
 
 #include "families/timm_res2net/runtime/pipeline.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -38,6 +39,11 @@ TimmRes2NetImageClassificationPipeline::TimmRes2NetImageClassificationPipeline(
     if (num_classes_ <= 0 ||
         (!labels_.empty() && labels_.size() != static_cast<std::size_t>(num_classes_)))
         throw std::runtime_error("timm Res2Net class metadata does not match its output size");
+    if (vocabulary_id_.empty() &&
+        std::any_of(labels_.begin(), labels_.end(),
+                    [](const std::string& label) { return label.empty(); }))
+        throw std::runtime_error(
+            "class labels require nonempty names without an explicit vocabulary identity");
 }
 
 internal::LabelScoresResult
