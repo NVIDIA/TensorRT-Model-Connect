@@ -1091,7 +1091,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_resnet.classify
@@ -1104,7 +1104,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_xception.classify
@@ -1117,7 +1117,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_regnet.classify
@@ -1130,7 +1130,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_seresnet.classify
@@ -1143,7 +1143,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_senet.classify
@@ -1156,7 +1156,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_ghostnet.classify
@@ -1169,7 +1169,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_convnext.classify
@@ -1182,7 +1182,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_inception_v4.classify
@@ -1195,7 +1195,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_inception_resnet.classify
@@ -1208,7 +1208,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_hrnet.classify
@@ -1221,7 +1221,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_resnest.classify
@@ -1234,7 +1234,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_swin.classify
@@ -1247,7 +1247,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_crossvit.classify
@@ -1260,7 +1260,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_dpn.classify
@@ -1273,7 +1273,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_res2net.classify
@@ -1286,7 +1286,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: yolov10.detect
@@ -1312,7 +1312,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_mobilevit.classify
@@ -1325,7 +1325,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: yolov8.detect
@@ -1364,7 +1364,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_repvgg.classify
@@ -1377,7 +1377,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_inception.classify
@@ -1390,7 +1390,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_mnasnet.classify
@@ -1403,7 +1403,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_mobilenetv2.classify
@@ -1416,7 +1416,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_densenet.classify
@@ -1429,7 +1429,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_efficientnet.classify
@@ -1442,7 +1442,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_mobilenetv4.classify
@@ -1455,7 +1455,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_mobilenetv3.classify
@@ -1468,7 +1468,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: timm_vgg.classify
@@ -1481,7 +1481,7 @@ entries:
       runner: task-reference
       adapter: timm-classification
       mode: hf-eager
-      reference_backend: hf_transformers
+      reference_backend: timm
       timing_scope: task-model-call-wall
       input_preparation_included: false
   - id: wan_t2v.generate_image

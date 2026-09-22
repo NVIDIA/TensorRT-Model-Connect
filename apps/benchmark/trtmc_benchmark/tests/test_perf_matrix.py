@@ -1477,6 +1477,7 @@ def test_release_suite_expands_profiles_and_covers_ready_catalog() -> None:
     assert builtin_timm
     assert all(
         entry["baseline"]["adapter"] == "timm-classification"
+        and entry["baseline"]["reference_backend"] == "timm"
         for entry in builtin_timm
     )
 
