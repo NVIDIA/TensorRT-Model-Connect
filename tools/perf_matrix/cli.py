@@ -20,6 +20,16 @@ from pathlib import Path
 from string import Template
 from typing import Any, Mapping, Sequence
 import yaml
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+BUILDER_SOURCE = REPOSITORY / 'core/builder'
+BENCHMARK_SOURCE = REPOSITORY / 'apps/benchmark'
+MANIFEST_ROOT = REPOSITORY / 'families'
+
+for source in (REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE):
+    if str(source) not in sys.path:
+        sys.path.insert(0, str(source))
+
 from apps.benchmark.performance.baselines.timing_contracts import timing_contract
 from apps.benchmark.performance.baselines.hf_transformers import flatten_config
 from trtmc_benchmark.catalog import ManifestCatalog, resolve_case, selected_task_for_case
@@ -28,10 +38,7 @@ from trtmc_benchmark.types import BenchmarkError
 from .types import PerfMatrixError
 
 from .core import *
-REPOSITORY = Path(__file__).resolve().parents[2]
-BUILDER_SOURCE = REPOSITORY / 'core/builder'
-BENCHMARK_SOURCE = REPOSITORY / 'apps/benchmark'
-MANIFEST_ROOT = REPOSITORY / 'families'
+
 SUITE_SCHEMA = 'trtmc.perf-suite/v2'
 ENVIRONMENT_SCHEMA = 'trtmc.perf-environment/v2'
 RESULT_SCHEMA = 'trtmc.perf-matrix/v2'
@@ -49,9 +56,6 @@ _TIMING_STABILITY_MEDIAN_BAND_PERCENT = 5.0
 _TIMING_STABILITY_MIN_IN_BAND = 8
 'Run and report the TRTMC release performance matrix.'
 
-for source in (REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE):
-    if str(source) not in sys.path:
-        sys.path.insert(0, str(source))
 
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
@@ -127,4 +131,3 @@ def main(argv: Sequence[str] | None=None) -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
-

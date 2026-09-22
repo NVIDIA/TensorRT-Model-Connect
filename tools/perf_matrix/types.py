@@ -76,4 +76,3 @@ class ResolvedEntry:
     manifest: Mapping[str, Any]
     reference_precision: str
     baseline_timing: Mapping[str, Any]
-

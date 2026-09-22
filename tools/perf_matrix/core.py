@@ -1731,4 +1731,3 @@ def _common(arguments: argparse.Namespace) -> tuple[Path, Path, str, list[dict[s
     selected_ids = {entry['id'] for entry in selected}
     resolved_selected = [entry for entry in resolved if entry.spec['id'] in selected_ids]
     return (suite_path, environment_path, suite_name, selected, excluded, environment, resolved_selected)
-
