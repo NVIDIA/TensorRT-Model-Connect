@@ -1,0 +1,23 @@
+{
+  "name": "ornith-1-5-9b",
+  "hf_id": "ornith-ai/Ornith-1.5-9B",
+  "hf_revision": "489cb97981b8654bcfcf30ce1f94ed1b62e07b53",
+  "bundle": "ornith-1-5-9b.bundle",
+  "family": "qwen3_5",
+  "task": "text_generation",
+  "trust_remote_code": true,
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "ornith-1-5-9b",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "reference_precision": "fp32"
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}
