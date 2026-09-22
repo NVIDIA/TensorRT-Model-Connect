@@ -92,6 +92,8 @@ excluded_profiles:
     reason: *gemma3_performance_exclusion
   - model: gemma-3-12b
     reason: *gemma3_performance_exclusion
+  - model: gemma-3-27b
+    reason: *gemma3_performance_exclusion
   - model: gemma-3-1b
     reason: >-
       Functional and Hugging Face reference-parity qualification is present,

@@ -359,6 +359,36 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
     return runtime
 
 
+# The split layout stores the weights twice: a prefill engine with a dynamic
+# sequence axis plus a decode engine with a static Sq=1 graph. That duplication
+# buys decode throughput - measured with apps/benchmark at about 6% on
+# gemma-3-4b - and it is worth paying while the pair fits.
+#
+# It stops being a trade when the pair cannot be loaded at all. gemma-3-27b at
+# bf16 needs about 50 GiB per engine, and TensorRT fails deserializing the
+# second one on an 80 GiB H100 with
+# "OutOfMemory (Requested size was 56842909440 bytes.)".
+#
+# 28 GiB per engine keeps every qualified Gemma on the split pair. Measured with
+# this estimator: gemma-3-4b 8.9 GiB, gemma-3-12b 25.0 GiB, gemma-3-27b
+# 55.6 GiB. Erring low is safe and erring high is not - a model that falls back
+# unnecessarily is about 6% slower to decode, while a model that stays on split
+# and does not fit cannot be loaded at all.
+_MAX_SPLIT_ENGINE_BYTES = 28 * 1024**3
+
+# A serialized plan runs a little over the raw weights. Checked against two
+# measured points: gemma-3-4b's engines are 8.5 GiB each and this returns
+# 8.9 GiB; TensorRT asked 52.9 GiB for gemma-3-27b and this returns 55.6 GiB.
+_PLAN_OVERHEAD = 1.05
+
+
+def _decoder_engine_bytes(weights: "WeightDict", precision: str) -> int:
+    """Roughly what one decoder engine will occupy on the device."""
+    element = 2 if str(precision).lower() in {"fp16", "bf16"} else 4
+    parameters = sum(int(getattr(value, "size", 0)) for value in weights.values())
+    return int(parameters * element * _PLAN_OVERHEAD)
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Gemma bundle through family-owned code only."""
     if request.dynamic_kv_cache:
@@ -440,6 +470,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 parallel_config=parallel.for_rank(rank),
             )
             writer.add_bytes(f"engine.rank{rank}.plan", plan)
+        layout = "dual_profile"
+    elif _decoder_engine_bytes(weights, precision) > _MAX_SPLIT_ENGINE_BYTES:
+        # One plan carrying both profiles, so the weights are stored once.
+        config.raw["_decoder_engine_role"] = "dual_profile"
+        plan = model.build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            quant_ctx=None,
+            verbose=bool(request.verbose),
+            parallel_config=parallel,
+        )
+        config.raw.pop("_decoder_engine_role", None)
+        writer.add_bytes("engine.plan", plan)
         layout = "dual_profile"
     else:
         config.raw["_decoder_engine_role"] = "prefill"
