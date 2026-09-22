@@ -54,14 +54,20 @@ def add_kernel(
     }
     if extra_args:
         spec["extra_args"] = extra_args
+    # TensorRT's Python PluginField is a non-owning view. Keep both encoded
+    # buffers alive until create_plugin() has copied them into the C++ plugin;
+    # inline temporaries can otherwise leave later graph nodes serializing
+    # allocator-reused bytes as their kernel name.
+    kernel_name_buffer = kernel_name.encode("utf-8")
+    shape_spec_buffer = json.dumps(spec, separators=(",", ":")).encode("utf-8")
     fields = trt.PluginFieldCollection(
         [
             trt.PluginField(
-                "kernel_name", kernel_name.encode("utf-8"), trt.PluginFieldType.CHAR
+                "kernel_name", kernel_name_buffer, trt.PluginFieldType.CHAR
             ),
             trt.PluginField(
                 "shape_spec",
-                json.dumps(spec, separators=(",", ":")).encode("utf-8"),
+                shape_spec_buffer,
                 trt.PluginFieldType.CHAR,
             ),
         ]
