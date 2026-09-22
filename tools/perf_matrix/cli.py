@@ -1,24 +1,8 @@
 from __future__ import annotations
 import argparse
-import html
-import json
-import math
-import os
-import re
-import shlex
-import shutil
-import statistics
-import struct
-import subprocess
 import sys
-import time
-from array import array
-from copy import deepcopy
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from string import Template
-from typing import Any, Mapping, Sequence
+from typing import Sequence
 import yaml
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -30,14 +14,23 @@ for source in (REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE):
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
 
-from apps.benchmark.performance.baselines.timing_contracts import timing_contract
-from apps.benchmark.performance.baselines.hf_transformers import flatten_config
-from trtmc_benchmark.catalog import ManifestCatalog, resolve_case, selected_task_for_case
-from trtmc_benchmark.task_adapters import default_operation
-from trtmc_benchmark.types import BenchmarkError
-from .types import PerfMatrixError
+from .types import PerfMatrixError  # noqa: E402
 
-from .core import *
+from .core import (  # noqa: E402
+    _common,
+    _coverage,
+    _initial_results,
+    _json_file,
+    _load_results,
+    _new_run_directory,
+    _run_rows,
+    _write_json,
+    load_environment,
+    load_suite,
+    preflight,
+    prepare_entries,
+    write_report,
+)
 
 SUITE_SCHEMA = 'trtmc.perf-suite/v2'
 ENVIRONMENT_SCHEMA = 'trtmc.perf-environment/v2'
