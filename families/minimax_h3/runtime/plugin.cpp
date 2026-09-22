@@ -105,7 +105,14 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         generation.profile == "fasth3-dense-4step" && generation.num_inference_steps == 5 &&
         generation.video_scheduler_shift == 12.0F && generation.audio_scheduler_shift == 3.0F &&
         generation.dmd_denoising_steps == std::vector<std::int32_t>{999, 749, 500, 250};
-    if (!base_profile && !fast_profile)
+    const bool fast_vsa_profile =
+        generation.profile == "fasth3-vsa-4step" && generation.num_inference_steps == 5 &&
+        generation.video_scheduler_shift == 12.0F && generation.audio_scheduler_shift == 3.0F &&
+        generation.dmd_denoising_steps == std::vector<std::int32_t>{999, 749, 500, 250} &&
+        config.value("attention_backend", "") == "VIDEO_SPARSE_ATTN_H3" &&
+        config.value("vsa_tile_size", 0) == 64 && config.value("vsa_sparsity", 0.0F) == 0.9F &&
+        config.value("vsa_kernel", "") == "sm100a";
+    if (!base_profile && !fast_profile && !fast_vsa_profile)
         throw std::runtime_error(
             "MiniMax-H3 runtime.json declares an unsupported generation profile");
     if (config.value("transformer_forwards", generation.num_inference_steps - 1) !=
