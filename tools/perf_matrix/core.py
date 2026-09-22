@@ -411,7 +411,6 @@ def preflight(
     *,
     require_runtime: bool,
 ) -> list[ResolvedEntry]:
-    from .execution import baseline_command
     files = (('trtmc-bench', environment.trtmc_bench), ('reference Python', environment.reference_python), ('HF reference runner', environment.hf_runner), ('task reference runner', environment.task_runner))
     if require_runtime:
         files += (('TRTMC worker', environment.worker),)
