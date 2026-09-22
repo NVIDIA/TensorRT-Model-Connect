@@ -243,14 +243,26 @@ def test_build_exports_task_and_checkpoint_metadata(tmp_path, monkeypatch, metad
     assert sections["runtime.json"]["vocabulary_id"] == metadata.get("vocabulary_id", "")
 
 
-@pytest.mark.parametrize("labels", [["only-one"], ["a", "b", "", "d", "e"], 5])
-def test_build_rejects_incomplete_class_labels(tmp_path, monkeypatch, labels):
+@pytest.mark.parametrize("metadata,message", [
+    ({"label_names": ["only-one"]}, "label_names must name every class"),
+    ({"label_names": ["a", "b", "", "d", "e"]}, "label_names must name every class"),
+    ({"label_names": 5}, "label_names must name every class"),
+    ({"vocabulary_id": 5}, "vocabulary_id must be a string"),
+])
+def test_build_rejects_invalid_class_metadata_before_engine(tmp_path, monkeypatch, metadata, message):
     _write_tiny_vgg(tmp_path)
     raw = json.loads((tmp_path / "config.json").read_text())
-    raw["label_names"] = labels
+    raw.update(metadata)
     (tmp_path / "config.json").write_text(json.dumps(raw))
-    monkeypatch.setattr(_TimmVggModel, "build_engine", lambda *args, **kwargs: b"plan")
+    engine_calls = []
+
+    def build_engine(*args, **kwargs):
+        engine_calls.append((args, kwargs))
+        return b"plan"
+
+    monkeypatch.setattr(_TimmVggModel, "build_engine", build_engine)
     request = BuildRequest(model_dir=tmp_path, output_path=tmp_path / "model.bundle",
                            family="timm_vgg", task="image_to_class_scores", precision="fp32")
-    with pytest.raises(ValueError, match="label_names must name every class"):
+    with pytest.raises(ValueError, match=message):
         build_family(request, object())
+    assert not engine_calls

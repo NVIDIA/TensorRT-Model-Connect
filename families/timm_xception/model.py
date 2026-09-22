@@ -362,21 +362,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)
+    vocabulary_id = raw.get("vocabulary_id", "")
+    labels = raw.get("label_names", [])
+    if not isinstance(vocabulary_id, str):
+        raise ValueError("timm Xception vocabulary_id must be a string")
+    if not isinstance(labels, list) or (labels and (
+        len(labels) != _preprocess_config(raw)["num_classes"]
+        or any(not isinstance(label, str) or not label for label in labels)
+    )):
+        raise ValueError("timm Xception label_names must name every class")
     plan, runtime = _build_engine(
         raw,
         Checkpoint.open(model_dir),
         str(request.precision).lower(),
         bool(request.verbose),
     )
-    vocabulary_id = raw.get("vocabulary_id", "")
-    labels = raw.get("label_names", [])
-    if not isinstance(vocabulary_id, str):
-        raise ValueError("timm Xception vocabulary_id must be a string")
-    if not isinstance(labels, list) or (labels and (
-        len(labels) != runtime["num_classes"]
-        or any(not isinstance(label, str) or not label for label in labels)
-    )):
-        raise ValueError("timm Xception label_names must name every class")
     writer.set_header(family="timm_xception", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json(

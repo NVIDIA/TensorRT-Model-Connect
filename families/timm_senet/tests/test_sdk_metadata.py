@@ -26,7 +26,13 @@ def test_builder_task_and_metadata(tmp_path, monkeypatch, metadata, invalid):
                "mean": [0.5] * 3, "std": [0.25] * 3}
     monkeypatch.setattr(model, "_read_config", lambda _: raw)
     monkeypatch.setattr(model.Checkpoint, "open", lambda _: object())
-    monkeypatch.setattr(model, "_build_engine", lambda *_: (b"plan", runtime))
+    engine_calls = []
+
+    def build_engine(*args):
+        engine_calls.append(args)
+        return b"plan", runtime
+
+    monkeypatch.setattr(model, "_build_engine", build_engine)
     sections = {}
     headers = []
     writer = SimpleNamespace(set_header=lambda **value: headers.append(value),
@@ -38,8 +44,10 @@ def test_builder_task_and_metadata(tmp_path, monkeypatch, metadata, invalid):
         with pytest.raises(ValueError, match="vocabulary_id|label_names"):
             model.build(request, writer)
         assert not sections and not headers
+        assert not engine_calls
         return
     model.build(request, writer)
+    assert len(engine_calls) == 1
     assert headers == [{"family": "timm_senet", "task": "image_to_class_scores", "backend": "trt"}]
     assert sections["engine.plan"] == b"plan"
     assert sections["runtime.json"]["num_classes"] == 5

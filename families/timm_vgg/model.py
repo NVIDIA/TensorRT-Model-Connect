@@ -318,13 +318,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     precision = str(request.precision).lower()
     model = _TimmVggModel()
     weights = model.load_weights(str(model_dir), config, precision=precision)
+    runtime_source = model.get_bundle_config_overrides(config)
     plan = model.build_engine(
         config,
         weights,
         precision=precision,
         verbose=bool(request.verbose),
     )
-    runtime_source = model.get_bundle_config_overrides(config)
     writer.set_header(family="timm_vgg", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json(
