@@ -72,6 +72,9 @@ if(TRTMC_BUILD_MINIMAX_H3_VSA_SM100A)
     ${TRTMC_TVM_FFI_LIBRARY}
   )
   target_compile_features(trtmc_minimax_h3_vsa_sm100a PRIVATE cxx_std_17 cuda_std_17)
+  target_compile_definitions(trtmc_minimax_h3_vsa_sm100a PRIVATE
+    TRTMC_MINIMAX_H3_VSA_REQUIRE_DEVICE_BODY=1
+  )
   target_compile_options(trtmc_minimax_h3_vsa_sm100a PRIVATE
     "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra;--generate-code=arch=compute_${TRTMC_MINIMAX_H3_VSA_GPU_ARCH},code=sm_${TRTMC_MINIMAX_H3_VSA_GPU_ARCH}>"
   )

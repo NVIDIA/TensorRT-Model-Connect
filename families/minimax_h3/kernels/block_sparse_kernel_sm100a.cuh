@@ -204,14 +204,16 @@ fmha_context_bf16_gen_kernel(const __grid_constant__ CUtensorMap tmap_q,
       float* __restrict__ lse_out) {
 // Multi-arch builds: torch's cmake appends -gencode for EVERY entry of
 // TORCH_CUDA_ARCH_LIST to this TU on top of the pinned compute_100a pass, and
-// tcgen05/setmaxnreg do not exist outside sm_100a -- ptxas rejects the sm_120a
-// (or plain sm_100) pass outright. Keep the body only where it can compile:
+// tcgen05/setmaxnreg do not exist outside the supported architecture-specific
+// Blackwell passes -- ptxas rejects the sm_120a (or plain sm_100) pass
+// outright. Keep the body only where it can compile:
 // the host pass (no __CUDA_ARCH__, needed for launch plumbing) and the
 // sm_100a device pass (arch 1000 WITH the family-specific feature set that the
-// "a" suffix defines). Every other device pass gets an empty stub; the Python
-// is_supported() / host launcher never dispatch here off sm_100, so the stub
-// is unreachable at runtime.
-#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ == 1000 && defined(__CUDA_ARCH_FEAT_SM100_ALL))
+// "a" suffix defines), plus the sm_103a device pass used by GB300. CUDA 13.0
+// reports __CUDA_ARCH__ == 1030 for sm_103a without defining an
+// __CUDA_ARCH_FEAT_SM*_ALL macro. Every other device pass gets an empty stub.
+#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ == 1000 && defined(__CUDA_ARCH_FEAT_SM100_ALL)) || \
+    __CUDA_ARCH__ == 1030
 
   const int total_workitems = num_samples * num_heads * packed_mtiles_per_seq;
 
@@ -1071,7 +1073,9 @@ fmha_context_bf16_gen_kernel(const __grid_constant__ CUtensorMap tmap_q,
   }
   __syncthreads();
   if (warp_id == 0) tcgen05_dealloc<1>(tmem_base, TMEM_TOTAL);
-#endif  // host pass or sm_100a device pass (multi-arch guard; see note at the top of the body)
+#elif defined(TRTMC_MINIMAX_H3_VSA_REQUIRE_DEVICE_BODY)
+#error "FastH3 VSA has no device implementation for the selected CUDA architecture"
+#endif  // supported host/device pass (multi-arch guard; see note at the top of the body)
 }
 
 }  // namespace VSA_NAMESPACE
