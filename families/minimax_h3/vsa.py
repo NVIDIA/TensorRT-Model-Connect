@@ -24,7 +24,9 @@ from .config import MiniMaxH3Config
 VSA_TILE_SHAPE = (4, 4, 4)
 VSA_TILE_SIZE = math.prod(VSA_TILE_SHAPE)
 VSA_SPARSITY = 0.9
-VSA_VIDEO_SHAPE = (37, 28, 36)
+# 1344x768 decodes from a 37x48x84 latent.  The DiT's (1,2,2) patching
+# therefore packs video rows in a 37x24x42 T/H/W grid.
+VSA_VIDEO_SHAPE = (37, 24, 42)
 VSA_BYOK_KERNEL_NAME = "minimax_h3.vsa_sm100a"
 VSA_BYOK_BRIDGE_ENV = "TRTMC_BYOK_PLUGIN_LIBRARY"
 
@@ -102,7 +104,7 @@ def make_vsa_geometry(profile: MiniMaxH3Config) -> VsaGeometry:
     """
 
     if profile.video_rows != math.prod(VSA_VIDEO_SHAPE):
-        raise ValueError("FastH3 VSA requires video rows shaped as 37x28x36")
+        raise ValueError("FastH3 VSA requires video rows shaped as 37x24x42")
     sentinel = profile.sequence_length
     text_indices, text_sizes = _segment_tiles(0, profile.text_rows, sentinel=sentinel)
     audio_indices, audio_sizes = _segment_tiles(
