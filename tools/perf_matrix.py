@@ -14,6 +14,8 @@ sys.path.insert(0, str(repo_root / "core" / "builder"))
 sys.path.insert(0, str(repo_root / "apps" / "benchmark"))
 
 from tools.perf_matrix.cli import main
+from tools.perf_matrix.core import *
+from tools.perf_matrix.types import *
 
 if __name__ == "__main__":
     sys.exit(main())
