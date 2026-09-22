@@ -9,8 +9,9 @@ for p in (repo_root, repo_root / "core" / "builder", repo_root / "apps" / "bench
         sys.path.insert(0, str(p))
 
 import inspect  # noqa: E402
-from . import core, types  # noqa: E402
+from . import cli, core, types  # noqa: E402
 
-for mod in (core, types):
+for mod in (cli, core, types):
     for name, obj in inspect.getmembers(mod):
-        globals()[name] = obj
+        if not name.startswith('_'):
+            globals()[name] = obj
