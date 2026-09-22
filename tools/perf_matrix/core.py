@@ -17,9 +17,8 @@ import sys
 import time
 from array import array
 from copy import deepcopy
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path  # noqa: E402
 from string import Template
 from typing import Any, Mapping, Sequence
 import yaml
@@ -452,33 +451,7 @@ def preflight(
     return resolved
 
 
-import argparse
-import html
-import json
-import math
-import os
-import re
-import shlex
-import shutil
-import statistics
-import struct
-import subprocess
-import sys
-import time
-from array import array
-from copy import deepcopy
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from string import Template
-from typing import Any, Mapping, Sequence
-import yaml
-from apps.benchmark.performance.baselines.timing_contracts import timing_contract
-from apps.benchmark.performance.baselines.hf_transformers import flatten_config
-from trtmc_benchmark.catalog import ManifestCatalog, resolve_case, selected_task_for_case
-from trtmc_benchmark.task_adapters import default_operation
-from trtmc_benchmark.types import BenchmarkError
-from .types import Environment, PerfMatrixError, ResolvedEntry
+from pathlib import Path  # noqa: E402
 REPOSITORY = Path(__file__).resolve().parents[2]
 BUILDER_SOURCE = REPOSITORY / 'core/builder'
 BENCHMARK_SOURCE = REPOSITORY / 'apps/benchmark'
@@ -667,33 +640,7 @@ def _stream_text(value: str | bytes | None) -> str:
     return value.decode(errors='replace') if isinstance(value, bytes) else value
 
 
-import argparse
-import html
-import json
-import math
-import os
-import re
-import shlex
-import shutil
-import statistics
-import struct
-import subprocess
-import sys
-import time
-from array import array
-from copy import deepcopy
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from string import Template
-from typing import Any, Mapping, Sequence
-import yaml
-from apps.benchmark.performance.baselines.timing_contracts import timing_contract
-from apps.benchmark.performance.baselines.hf_transformers import flatten_config
-from trtmc_benchmark.catalog import ManifestCatalog, resolve_case, selected_task_for_case
-from trtmc_benchmark.task_adapters import default_operation
-from trtmc_benchmark.types import BenchmarkError
-from .types import Environment, PerfMatrixError, ResolvedEntry
+from pathlib import Path  # noqa: E402
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 BUILDER_SOURCE = REPOSITORY / 'core/builder'
