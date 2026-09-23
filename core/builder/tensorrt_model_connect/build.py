@@ -40,6 +40,9 @@ class BuildRequest:
     quantization: str | None = None
     fp32_layers: tuple[int, ...] = ()
     dynamic_kv_cache: bool = False
+    # Build a stripped plan: large weights become null placeholders and are
+    # supplied by refit at load time. Supported families only.
+    strip_weights: bool = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
 
