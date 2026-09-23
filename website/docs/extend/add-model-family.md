@@ -160,15 +160,9 @@ The expected diff boundary for a normal family contribution is
 `families/my_family/**`. Examples, benchmarks, and BYOK are optional consumers
 of public APIs; neither a family nor core may import their implementation.
 
-Also check that the family's descriptors agree with the test-impact catalog:
+## Reproduce the pre-merge gates before you push
 
-```bash
-PYTHONPATH=python:. python3 tools/test_impact.py --validate
-```
-
-### Reproduce the pre-merge gates before you push
-
-`.github/workflows/community-cpu.yml` runs four jobs on every pull request, and
+`.github/workflows/community-ci.yml` runs four jobs on every pull request, and
 `Community CPU / Required` fails unless all four pass. Each has a local
 equivalent, so a failure does not have to cost a push and a CI round trip.
 
@@ -187,18 +181,19 @@ from (`upstream/main` or `github/main`):
 
 | Pre-merge job | Run locally | Covers |
 | --- | --- | --- |
-| `Community CPU / Source quality` | `python3 -m tools.community_ci source-quality --base <base-ref>` | the `src/` complexity ceiling across the whole tree; `ruff` and `clang-format` on changed files only; model architecture contracts |
+| `Community CPU / Source quality` | `python3 -m tools.community_ci source-quality --base <base-ref>` | the `core/runtime` complexity ceiling across that whole directory; `ruff` and `clang-format` on changed files only; model architecture contracts |
 | `Community CPU / Ownership and impact` | `python3 -m tools.community_ci impact --base <base-ref>` | ownership resolution and the CPU test scope your change selects |
-| `Community CPU / Unit / C++ and Python` | `python3 -m tools.community_ci unit --scope all` | compiles the C++ and runs the source-only C++ and Python unit tests in the CI container |
+| `Community CPU / Unit / C++ and Python` | `python3 -m tools.community_ci unit` | compiles the C++ and runs the source-only C++ and Python unit tests in the CI container |
 | `Community CPU / Docs` | `cd website && npm ci && npm run test:model-support && npm run build` | the generated model support inventory and the production documentation build |
 
-`unit --scope all` is the one that needs more than the virtual environment. It
+`unit` is the one that needs more than the virtual environment. It
 builds and runs the CI container, so it needs a working Docker daemon, and two
 things it does not tell you up front:
 
-- It refuses to start unless its scratch directory sits under `RUNNER_TEMP`,
-  which is set on a GitHub runner and usually not locally. Point it somewhere
-  writable first: `export RUNNER_TEMP="$(mktemp -d)"`.
+- Without `RUNNER_TEMP` (set on a GitHub runner, usually not locally) it
+  creates its scratch directory under the platform temp directory but requires
+  it to sit under `/tmp`. Those agree on Linux; on macOS they do not, and the
+  stage refuses to start. Set it first: `export RUNNER_TEMP="$(mktemp -d)"`.
 - The image is built without `--platform`, so it matches the Docker host.
   Pre-merge runs on `ubuntu-24.04`, which is `linux/amd64`; on an arm64 host
   the local container is a different architecture from the job it stands in
@@ -217,15 +212,14 @@ Two failure modes worth knowing, because both look like success:
   `importorskip` guards cannot import, so a virtual environment without
   `numpy`, `torch`, or `safetensors` silently drops that coverage. Run with
   `-rs` and read which tests skipped, not only the count.
-- The **complexity ceiling for `src/` is 10**, and it is checked against the
-  whole tree rather than only your diff.
+- The **complexity ceiling for `core/runtime` is 10**, and it is checked
+  against that whole directory rather than only your diff.
 
-A new family also has to be registered with the documentation site: add its
-checkpoint to `website/data/hf-model-metadata.json` with the `hf_id` and
-`hf_revision` its manifest pins. The `Docs` job fails on a manifest whose
-`hf_id` has no entry there.
-
-## 6. Build a smoke bundle, then run the family validator
+Also record a new checkpoint in `website/data/hf-model-metadata.json`, the
+documentation snapshot of pinned checkpoints. Each record takes the manifest's
+`hf_id`, and stores the manifest's `hf_revision` under the key `revision`. The
+file is documentation metadata only: no CI job reads it, so a missing record
+does not fail a check.
 
 ## Migrate an existing family to the Task SDK
 
