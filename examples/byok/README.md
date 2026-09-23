@@ -32,12 +32,15 @@ from tensorrt_model_connect.byok import add_kernel
 
 output, = add_kernel(
     network,
-    plugin_library="/absolute/path/build/install/lib/libtrtmc_byok_tvm_ffi.so",
     kernel_name="my_family.residual_add",
     inputs=[hidden, attention_projection],
     output_specs=[{"dims": [256, 768], "dtype": "float16"}],
 )
 ```
+
+The standard bridge is resolved from the installed package, or by its soname
+from the dynamic-library search path in a source build. Pass `plugin_library`
+explicitly only when selecting a bridge from another build tree.
 
 An application can also replace an already-built region without changing the
 family. Pass an in-place `graph_transform` through the public build API, add the

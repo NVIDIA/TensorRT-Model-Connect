@@ -19,12 +19,14 @@ TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES = 64 << 30
 DENOISER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
+AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 
 DEFAULT_WORKSPACE_LIMIT_BYTES = {
     "text_encoder.plan": TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
     "adaln_precompute.plan": ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
     "denoiser.plan": DENOISER_DEFAULT_WORKSPACE_BYTES,
     "vae_tile_decoder.plan": VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
+    "audio_vae_decoder.plan": AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES,
 }
 
 FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES = (
@@ -47,6 +49,7 @@ def native_plan_filenames(*, first_block_cache: bool) -> tuple[str, ...]:
         "adaln_precompute.plan",
         *denoiser_plans,
         "vae_tile_decoder.plan",
+        "audio_vae_decoder.plan",
     )
 
 
@@ -70,6 +73,61 @@ def resolve_workspace_bytes(workspace_bytes: int | None, *, default_bytes: int) 
     if not isinstance(resolved, int) or isinstance(resolved, bool) or resolved <= 0:
         raise ValueError("MiniMax-H3 TensorRT workspace_bytes must be a positive integer")
     return resolved
+
+
+@dataclass(frozen=True)
+class MiniMaxH3GenerationProfile:
+    """Checkpoint-owned denoising schedule for one MiniMax-H3 variant."""
+
+    name: str
+    num_inference_steps: int
+    video_scheduler_shift: float
+    audio_scheduler_shift: float
+    dmd_denoising_steps: tuple[int, ...] = ()
+    attention_backend: str = "FLASH_ATTN"
+    vsa_tile_size: int | None = None
+    vsa_sparsity: float | None = None
+    vsa_kernel: str | None = None
+
+    @property
+    def transformer_forwards(self) -> int:
+        return self.num_inference_steps - 1
+
+    @property
+    def uses_vsa(self) -> bool:
+        return self.attention_backend == "VIDEO_SPARSE_ATTN_H3"
+
+    def validate(self) -> None:
+        if self.num_inference_steps < 2:
+            raise ValueError("MiniMax-H3 requires at least two sigma-grid points")
+        if self.video_scheduler_shift <= 0.0 or self.audio_scheduler_shift <= 0.0:
+            raise ValueError("MiniMax-H3 scheduler shifts must be positive")
+        if self.uses_vsa:
+            if self.vsa_tile_size != 64:
+                raise ValueError("FastH3 VSA requires 64-token tiles")
+            if self.vsa_sparsity != 0.9:
+                raise ValueError("FastH3 VSA requires sparsity=0.9")
+            if self.vsa_kernel != "sm100a":
+                raise ValueError("FastH3 VSA requires the sm100a kernel contract")
+        elif any(
+            value is not None
+            for value in (self.vsa_tile_size, self.vsa_sparsity, self.vsa_kernel)
+        ):
+            raise ValueError("MiniMax-H3 dense attention cannot declare VSA settings")
+        if not self.dmd_denoising_steps:
+            return
+        if len(self.dmd_denoising_steps) != self.transformer_forwards:
+            raise ValueError("MiniMax-H3 DMD rung count must equal num_inference_steps - 1")
+        if any(
+            isinstance(step, bool) or not isinstance(step, int) or not 1 <= step <= 999
+            for step in self.dmd_denoising_steps
+        ):
+            raise ValueError("MiniMax-H3 DMD rungs must be integers in [1, 999]")
+        if any(
+            current <= following
+            for current, following in zip(self.dmd_denoising_steps, self.dmd_denoising_steps[1:])
+        ):
+            raise ValueError("MiniMax-H3 DMD rungs must be strictly decreasing")
 
 
 @dataclass(frozen=True)
@@ -149,3 +207,32 @@ class MiniMaxH3Config:
 
 
 SOL_ENGINE_1344X768_124F = MiniMaxH3Config()
+
+BASE_GENERATION_PROFILE = MiniMaxH3GenerationProfile(
+    name="minimax-h3-base",
+    num_inference_steps=50,
+    video_scheduler_shift=12.0,
+    audio_scheduler_shift=3.0,
+)
+
+FASTH3_DENSE_4STEP_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree"
+FASTH3_DENSE_4STEP_GENERATION_PROFILE = MiniMaxH3GenerationProfile(
+    name="fasth3-dense-4step",
+    num_inference_steps=5,
+    video_scheduler_shift=12.0,
+    audio_scheduler_shift=3.0,
+    dmd_denoising_steps=(999, 749, 500, 250),
+)
+
+FASTH3_VSA_4STEP_MODEL_ID = "FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree"
+FASTH3_VSA_4STEP_GENERATION_PROFILE = MiniMaxH3GenerationProfile(
+    name="fasth3-vsa-4step",
+    num_inference_steps=5,
+    video_scheduler_shift=12.0,
+    audio_scheduler_shift=3.0,
+    dmd_denoising_steps=(999, 749, 500, 250),
+    attention_backend="VIDEO_SPARSE_ATTN_H3",
+    vsa_tile_size=64,
+    vsa_sparsity=0.9,
+    vsa_kernel="sm100a",
+)

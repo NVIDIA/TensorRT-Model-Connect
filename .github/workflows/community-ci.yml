@@ -874,9 +874,11 @@ jobs:
     environment:
       name: gpu-ci-dispatch
       deployment: false
-    # Upper runtime bound for one externally reserved GPU instance. The
-    # separate cleanup job remains eligible if this job times out.
-    timeout-minutes: 60
+    # The bound covers checkpoint staging, one complete direct-family E2E,
+    # and the shared smoke set on a fresh instance. Large video checkpoints
+    # can spend most of an hour on staging and engine construction alone.
+    # The separate cleanup job remains eligible if this job times out.
+    timeout-minutes: 120
     concurrency:
       # Scoped per PR so independent pull requests each lease their own
       # Brev GPU instance and run in parallel; a new push on the same PR

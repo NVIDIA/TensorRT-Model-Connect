@@ -10,8 +10,10 @@
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -23,6 +25,7 @@ struct ModuleCreateOptions {
     std::shared_ptr<void> distributed_owner; // keeps communicator alive
     const char* runtime_cache_path{""};      // TensorRT-RTX JIT cache, optional
     bool cuda_graphs{false};                 // TensorRT-RTX whole-graph capture
+    std::optional<std::uint64_t> weight_streaming_budget_bytes;
 };
 
 struct ModuleExternalBinding {

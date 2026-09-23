@@ -13,24 +13,34 @@ from typing import Any
 
 
 _KERNEL_NAME = re.compile(r"[A-Za-z0-9_.@-]+\Z")
+_DEFAULT_PLUGIN_LIBRARY = "libtrtmc_byok_tvm_ffi.so"
+_PACKAGED_PLUGIN_LIBRARY = Path(__file__).resolve().parent / "bin" / _DEFAULT_PLUGIN_LIBRARY
 _LOADED_PLUGIN_LIBRARIES: list[ctypes.CDLL] = []
 
 
 def add_kernel(
     network: Any,
     *,
-    plugin_library: str | Path,
+    plugin_library: str | Path | None = None,
     kernel_name: str,
     inputs: list[Any],
     output_specs: list[dict[str, Any]],
     workspace_bytes: int = 0,
     extra_args: list[dict[str, Any]] | None = None,
 ) -> list[Any]:
-    """Add one TVM-FFI TensorRT plugin layer to the network."""
+    """Add one TVM-FFI TensorRT plugin layer using the standard bridge by default."""
 
-    path = Path(plugin_library).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"BYOK plugin library does not exist: {path}")
+    if plugin_library is None:
+        library = (
+            str(_PACKAGED_PLUGIN_LIBRARY)
+            if _PACKAGED_PLUGIN_LIBRARY.is_file()
+            else _DEFAULT_PLUGIN_LIBRARY
+        )
+    else:
+        path = Path(plugin_library).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"BYOK plugin library does not exist: {path}")
+        library = str(path)
     if _KERNEL_NAME.fullmatch(kernel_name) is None:
         raise ValueError("kernel_name contains unsupported characters")
     if not inputs or not output_specs:
@@ -38,7 +48,7 @@ def add_kernel(
     if workspace_bytes < 0:
         raise ValueError("workspace_bytes must be non-negative")
 
-    _LOADED_PLUGIN_LIBRARIES.append(ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL))
+    _LOADED_PLUGIN_LIBRARIES.append(ctypes.CDLL(library, mode=ctypes.RTLD_GLOBAL))
 
     import tensorrt as trt
 
@@ -54,14 +64,18 @@ def add_kernel(
     }
     if extra_args:
         spec["extra_args"] = extra_args
+    # TensorRT's Python PluginField is a non-owning view. Keep both encoded
+    # buffers alive until create_plugin() has copied them into the C++ plugin;
+    # inline temporaries can otherwise leave later graph nodes serializing
+    # allocator-reused bytes as their kernel name.
+    kernel_name_buffer = kernel_name.encode("utf-8")
+    shape_spec_buffer = json.dumps(spec, separators=(",", ":")).encode("utf-8")
     fields = trt.PluginFieldCollection(
         [
-            trt.PluginField(
-                "kernel_name", kernel_name.encode("utf-8"), trt.PluginFieldType.CHAR
-            ),
+            trt.PluginField("kernel_name", kernel_name_buffer, trt.PluginFieldType.CHAR),
             trt.PluginField(
                 "shape_spec",
-                json.dumps(spec, separators=(",", ":")).encode("utf-8"),
+                shape_spec_buffer,
                 trt.PluginFieldType.CHAR,
             ),
         ]

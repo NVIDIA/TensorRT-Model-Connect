@@ -886,6 +886,7 @@ def test_legacy_builders_handle_every_shared_request_field() -> None:
         "family",
         "output_path",
         "graph_transform",
+        "weight_streaming_budget_bytes",
     }
 
     violations: list[str] = []

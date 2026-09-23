@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from tools.e2e_evidence import evidence_stage, record_evidence
 from families.minimax_h3.tests.reporting import (
-    native_snapshot, record_native_preview, record_report_views, reference_snapshot,
+    native_snapshot,
+    record_native_preview,
+    record_report_views,
+    reference_snapshot,
 )
 import json
 import os
@@ -19,7 +22,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "minimax_h3"
-TASKS = frozenset({"image_generation"})
+TASKS = frozenset({"text_to_audio_video"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -108,7 +111,7 @@ def _model_dir(manifest: dict) -> Path:
             repo_id=manifest["hf_id"],
             revision=manifest.get("hf_revision"),
             local_files_only=True,
-            allow_patterns=["model_index.json"],
+            allow_patterns=["model_index.json", "modular_model_index.json"],
         )
     except Exception as error:
         raise AssertionError(
@@ -147,6 +150,7 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
             max_batch_size=int(manifest.get("max_batch_size", 1)),
             tensor_parallel_size=int(manifest["tensor_parallel_size"]),
             quantization=manifest.get("quantization"),
+            weight_streaming_budget_bytes=manifest.get("weight_streaming_budget_bytes"),
             fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
         )
     )
@@ -194,7 +198,13 @@ def _run_json(
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native",
+        {
+            "stdout": getattr(completed, "stdout", None),
+            "stderr": getattr(completed, "stderr", None),
+        },
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -322,6 +332,13 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         pretrained_model_name_or_path=model_ref,
         local_files_only=True,
     )
+    if manifest.get("generation_profile") == "fasth3-dense-4step":
+        contract = json.loads((model_dir / "fastvideo_inference.json").read_text(encoding="utf-8"))
+        dmd_steps = tuple(int(step) for step in contract["dmd_denoising_steps"])
+        assert dmd_steps == (999, 749, 500, 250)
+        assert int(contract["num_inference_steps"]) == len(dmd_steps) + 1
+        _pin_reference_dmd_schedule(pipeline.scheduler, dmd_steps)
+        _pin_reference_dmd_schedule(pipeline.audio_scheduler, dmd_steps)
     pipeline = pipeline.to("cuda")
     prompts = _case_text(case)
     generator = torch.Generator().manual_seed(int(case["seed"]))
@@ -349,6 +366,25 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     frames_path = tmp_path / "reference-frames.npy"
     np.save(frames_path, frames)
     return {"frames_path": frames_path}
+
+
+def _pin_reference_dmd_schedule(scheduler, dmd_steps: tuple[int, ...]) -> None:
+    """Make Diffusers consume FastH3's trained rungs instead of a uniform grid."""
+
+    shift = np.float32(scheduler.shift)
+    base = np.asarray(dmd_steps, dtype=np.float32) / np.float32(1000.0)
+    shifted = shift * base / (np.float32(1.0) + (shift - np.float32(1.0)) * base)
+    sigmas = [*(float(value) for value in shifted), 0.0]
+    original = scheduler.set_timesteps
+
+    def set_timesteps(num_inference_steps=None, device=None, sigmas_override=None):
+        if sigmas_override is not None:
+            raise ValueError("FastH3 reference schedule is checkpoint-pinned")
+        if int(num_inference_steps) != len(sigmas):
+            raise ValueError("FastH3 reference requested the wrong sigma-grid size")
+        return original(device=device, sigmas=sigmas)
+
+    scheduler.set_timesteps = set_timesteps
 
 
 def _write_semantic_artifacts(
@@ -557,7 +593,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
@@ -570,4 +613,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_report_views(actual, expected, tmp_path / "paired-report-views")
     record_evidence("reference", reference_snapshot(expected))
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_parity(
+            actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name))
+        )
