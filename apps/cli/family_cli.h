@@ -12,7 +12,7 @@
 namespace trtmc::cli {
 
 // Returns no value only when the invocation does not select a declared family.
-// The explicit executable path is a test seam; production resolves /proc/self/exe.
+// The explicit executable path is a test seam; production resolves the running executable.
 std::optional<int> run_family_cli(int argc, char** argv, std::ostream& output, std::ostream& error,
                                   const std::filesystem::path& executable = {});
 

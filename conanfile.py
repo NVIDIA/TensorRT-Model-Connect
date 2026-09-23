@@ -11,7 +11,7 @@ from pathlib import Path
 
 from conan import ConanFile
 from conan.errors import ConanException
-from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
+from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import copy
 
 
@@ -51,10 +51,18 @@ class TensorRTModelConnectConan(ConanFile):
 
     settings = "os", "compiler", "build_type", "arch"
 
+    def _windows(self) -> bool:
+        return str(self.settings.os) == "Windows"
+
     def layout(self) -> None:
         cmake_layout(self)
         # CMakeToolchain derives install directories from the package layout.
         self.cpp.package.libdirs = ["bin"]
+
+    def requirements(self) -> None:
+        # Linux images provide nlohmann-json3-dev; MSVC builds take it from Conan.
+        if self._windows():
+            self.requires("nlohmann_json/3.11.3")
 
     def generate(self) -> None:
         toolchain = CMakeToolchain(self)
@@ -62,10 +70,17 @@ class TensorRTModelConnectConan(ConanFile):
         for name in (
             "TRT_ROOT",
             "CMAKE_CUDA_ARCHITECTURES",
+            "TRTMC_FAMILIES",
         ):
             value = os.environ.get(name)
             if value:
                 toolchain.cache_variables[name] = value
+        if self._windows():
+            # The Windows port covers the native runtime, CLI, and model
+            # families; the server, BYOK bridge, and examples stay ELF-only.
+            for option in ("TRTMC_BUILD_SERVER", "TRTMC_ENABLE_BYOK", "TRTMC_BUILD_EXAMPLES"):
+                toolchain.cache_variables[option] = False
+            CMakeDeps(self).generate()
         toolchain.generate()
 
     def build(self) -> None:
@@ -73,7 +88,40 @@ class TensorRTModelConnectConan(ConanFile):
         cmake.configure()
         cmake.build()
 
+    def _package_windows(self) -> None:
+        source = Path(self.source_folder)
+        build = Path(self.build_folder)
+        module_bin = Path(self.package_folder) / "tensorrt_model_connect" / "bin"
+        # Windows has no RUNPATH: the executable, runtime DLLs, backend, and
+        # family DLLs share one directory, which is also the runtime root.
+        copy(self, "trtmc.exe", src=str(build), dst=str(module_bin), keep_path=False)
+        copy(self, "*.dll", src=str(build), dst=str(module_bin), keep_path=False)
+        selected = [name for name in os.environ.get("TRTMC_FAMILIES", "").split(";") if name]
+        expected = set(selected) or {
+            path.parent.name for path in (source / "families").glob("*/model.py")
+        }
+        packaged = {
+            path.stem.removeprefix("trtmc_model_") for path in module_bin.glob("trtmc_model_*.dll")
+        }
+        required = (
+            "trtmc.exe",
+            "trtmc_core.dll",
+            "trtmc_runtime.dll",
+            "trtmc_c.dll",
+            "trtmc_backend_trt.dll",
+        )
+        if not all((module_bin / name).is_file() for name in required):
+            raise ConanException("native Windows runtime package is incomplete")
+        if packaged != expected:
+            raise ConanException(
+                f"family DLL set does not match: missing={sorted(expected - packaged)}, "
+                f"extra={sorted(packaged - expected)}"
+            )
+
     def package(self) -> None:
+        if self._windows():
+            self._package_windows()
+            return
         source = Path(self.source_folder)
         build = Path(self.build_folder)
         package = Path(self.package_folder)

@@ -393,6 +393,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/primitives/cuda_common.cpp",
         "core/runtime/primitives/cuda_common.h",
         "core/runtime/primitives/device_tensor.cpp",
+        "core/runtime/primitives/dynamic_library.cpp",
         "core/runtime/primitives/trt_common.cpp",
         "core/runtime/primitives/trt_common.h",
         "core/runtime/loader/family_loader.cpp",
@@ -420,6 +421,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/internal/tracking.h",
         "core/runtime/include/trtmc/internal/video.h",
         "core/runtime/include/trtmc/runtime/device_tensor.h",
+        "core/runtime/include/trtmc/runtime/dynamic_library.h",
         "core/runtime/include/trtmc/runtime/family_factory.h",
         "core/runtime/include/trtmc/runtime/family_loader.h",
         "core/runtime/include/trtmc/runtime/span.h",
@@ -428,7 +430,9 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/runtime/trt_module.h",
         "core/runtime/tests/fake_backend.cpp",
         "core/runtime/tests/fake_family.cpp",
+        "core/runtime/tests/fake_partial_nccl.cpp",
         "core/runtime/tests/test_bundle_format_v1.cpp",
+        "core/runtime/tests/test_dynamic_library.cpp",
         "core/runtime/tests/test_byok_shape_spec.cpp",
         "core/runtime/tests/test_family_loader.cpp",
         "core/runtime/tests/test_internal_config.cpp",
@@ -505,6 +509,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/e2e_evidence.py",
         "tools/e2e_report.py",
         "tools/legal_header_exceptions.toml",
+        "tools/launch_ranks.py",
         "tools/legal_headers.py",
         "tools/model_ci.py",
         "tools/model_benchmark.py",
@@ -592,6 +597,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_devtoolkit_capabilities.py",
         "tools/tests/test_e2e_evidence.py",
         "tools/tests/test_family_impact.py",
+        "tools/tests/test_launch_ranks.py",
         "tools/tests/test_merge_ready_slack_alert.py",
         "tools/tests/test_new_ci.py",
         "tools/tests/test_model_benchmark.py",
@@ -1361,15 +1367,21 @@ def test_runtime_has_no_retired_shared_implementation_surface() -> None:
     assert violations == []
 
 
+# NCCL is loaded at run time, either directly as libnccl.so.2 (ELF-only
+# families) or through the portable loader, which honors TRTMC_NCCL_LIBRARY
+# and defaults to libnccl.so.2 (ELF) or nccl.dll (Windows).
+NCCL_LOADERS = ('dlopen("libnccl.so.2"', "platform::nccl_library()")
+
+
 def test_distributed_runtimes_use_one_explicit_launcher_contract() -> None:
     required = (
         '"OMPI_COMM_WORLD_SIZE"',
         '"OMPI_COMM_WORLD_RANK"',
         '"OMPI_COMM_WORLD_LOCAL_RANK"',
         '"TRTMC_NCCL_RENDEZVOUS"',
-        'dlopen("libnccl.so.2"',
         "ncclCommInitRank",
     )
+    nccl_loaders = NCCL_LOADERS
     forbidden = (
         '"PMI_SIZE"',
         '"PMI_RANK"',
@@ -1389,6 +1401,8 @@ def test_distributed_runtimes_use_one_explicit_launcher_contract() -> None:
         for token in required:
             if token not in source:
                 violations.append(f"{family.name}:missing:{token}")
+        if sum(loader in source for loader in nccl_loaders) != 1:
+            violations.append(f"{family.name}:nccl_loader")
         for token in forbidden:
             if token in source:
                 violations.append(f"{family.name}:forbidden:{token}")
@@ -1594,7 +1608,7 @@ def test_family_tp_runtimes_load_nccl_only_for_collective_communicators() -> Non
             sources.append(source)
             if 'getenv("RANK")' in source:
                 violations.append(f"{path.relative_to(REPO)}:RANK")
-            loads_nccl = 'dlopen("libnccl.so.2"' in source
+            loads_nccl = any(loader in source for loader in NCCL_LOADERS)
             initializes_nccl = "ncclCommInitRank" in source
             if loads_nccl and not initializes_nccl:
                 violations.append(f"{path.relative_to(REPO)}:NCCL-without-communicator")
@@ -1604,10 +1618,11 @@ def test_family_tp_runtimes_load_nccl_only_for_collective_communicators() -> Non
                     '"OMPI_COMM_WORLD_SIZE"',
                     '"OMPI_COMM_WORLD_RANK"',
                     '"OMPI_COMM_WORLD_LOCAL_RANK"',
-                    'dlopen("libnccl.so.2"',
                 ):
                     if token not in source:
                         violations.append(f"{path.relative_to(REPO)}:missing:{token}")
+                if not loads_nccl:
+                    violations.append(f"{path.relative_to(REPO)}:missing:NCCL loader")
 
         runtime = "\n".join(sources)
         build_source = "\n".join(
@@ -1622,7 +1637,7 @@ def test_family_tp_runtimes_load_nccl_only_for_collective_communicators() -> Non
             violations.append(f"{family.name}:collective-runtime-mismatch")
         if 'getenv("OMPI_COMM_WORLD_RANK")' in runtime and not initializes_nccl:
             rank_only_consumers += 1
-            if 'dlopen("libnccl.so.2"' in runtime:
+            if any(loader in runtime for loader in NCCL_LOADERS):
                 violations.append(f"{family.name}:rank-only-NCCL-loader")
         if family.name == "patchtsmixer":
             for token in (
