@@ -57,3 +57,5 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME ${test_name} COMMAND ${test_name})
 endif()
+
+include(edge_llm/Adapter.cmake)

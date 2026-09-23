@@ -66,6 +66,28 @@ long-context qualification remain outside this contract. The
 committed-token-per-forward receipt is an algorithmic diagnostic, not a
 wall-clock speedup claim.
 
+### Nemotron-H Edge-LLM execution
+
+Use `trtmc nemotron_h build MODEL -o model.bundle` with the owning
+family's options. `trtmc nemotron_h build --help` works offline without
+a checkpoint or GPU imports. This uses the existing
+[family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
+
+The Nemotron-H family owns optional pinned Edge-LLM whole-network offload.
+Ordinary compatible text builds use the experimental builder; the explicit
+Lightning NVFP4/DFlash pair uses ONNX with
+`--execution-variant dflash --companion draft=/path/to/draft`.
+Native fallback is attempted only during ordinary preparation; it cannot
+interpret unsupported packed checkpoints or replace a requested pair.
+
+See the [owning Nemotron-H recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/nemotron_h/edge_llm/README.md)
+for the six recorded ordinary profiles, the qualified greedy DFlash pair,
+immutable revisions and unchanged quality gates. These are bounded historical
+local qualifications, not catalog-wide or current-head CI proof. The separate
+direct-Edge 9B-NVFP4 quality failure and longer-context failures remain open.
+The original plain 9B case is registered in the owning E2E inventory; the other
+exact profiles are not implied to run in CI.
+
 ## Runtime and validation
 
 The directory name is also the runtime DSO identity:
