@@ -4,7 +4,7 @@
 schema_version: trtmc.qualification/v1
 model: s1-mini-fp16
 candidate:
-  family: s1_mini
+  family: qwen
   checkpoint: superwhisper/s1-mini
   revision: 65f84bcda1d13df582c4a8443c1c5aa53c0c66db
   task: text_generation
