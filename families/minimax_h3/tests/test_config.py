@@ -64,7 +64,7 @@ def test_fasth3_vsa_generation_profile_is_the_trained_sm100a_recipe() -> None:
     (
         ("vsa_tile_size", 256, "64-token"),
         ("vsa_sparsity", 0.8, "sparsity=0.9"),
-        ("vsa_kernel", "triton", "sm100a"),
+        ("vsa_kernel", "triton", "sm100a kernel contract"),
     ),
 )
 def test_fasth3_vsa_rejects_recipe_drift(field: str, value, match: str) -> None:

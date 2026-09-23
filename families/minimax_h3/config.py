@@ -108,7 +108,7 @@ class MiniMaxH3GenerationProfile:
             if self.vsa_sparsity != 0.9:
                 raise ValueError("FastH3 VSA requires sparsity=0.9")
             if self.vsa_kernel != "sm100a":
-                raise ValueError("FastH3 VSA requires the sm100a kernel")
+                raise ValueError("FastH3 VSA requires the sm100a kernel contract")
         elif any(
             value is not None
             for value in (self.vsa_tile_size, self.vsa_sparsity, self.vsa_kernel)

@@ -3,20 +3,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "vsa_backend.h"
+
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cublas_v2.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <iostream>
+#include <mutex>
+#include <string>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/function.h>
 #include <utility>
 
+#if defined(TRTMC_MINIMAX_H3_VSA_HAS_BLACKWELL)
 #define VSA_BLK128 false
 #define VSA_BHSD true
 #include "block_sparse_launch_sm100a.cuh"
+#endif
 
 namespace {
 
@@ -37,6 +45,8 @@ constexpr int64_t kCountElements = static_cast<int64_t>(kHeads) * kTiles;
 constexpr int64_t kWorkspaceBytes = 3 * kPoolElements * sizeof(float) +
                                     2 * kScoreElements * sizeof(float) +
                                     kCountElements * sizeof(int32_t);
+constexpr int kWarpSize = 32;
+constexpr int kGenericWarpsPerBlock = 8;
 
 void require_cuda_contiguous(const tvm::ffi::TensorView& tensor, const char* name) {
     if (tensor.device().device_type != kDLCUDA)
@@ -113,6 +123,110 @@ cublasHandle_t get_cublas_handle(int device, cudaStream_t stream) {
     }
     check_cublas(cublasSetStream(holder.value, stream), "cuBLAS stream binding");
     return holder.value;
+}
+
+__device__ float warp_sum(float value) {
+    for (int offset = kWarpSize / 2; offset > 0; offset >>= 1)
+        value += __shfl_down_sync(0xffffffffU, value, offset);
+    return value;
+}
+
+__global__ void block_sparse_attention_generic(const __nv_bfloat16* query, const __nv_bfloat16* key,
+                                               const __nv_bfloat16* value, const int32_t* q2k_idx,
+                                               const int32_t* q2k_num, const int32_t* sizes,
+                                               __nv_bfloat16* output, float scale) {
+    const int warp = static_cast<int>(threadIdx.x) / kWarpSize;
+    const int lane = static_cast<int>(threadIdx.x) % kWarpSize;
+    const int64_t query_index = static_cast<int64_t>(blockIdx.x) * kGenericWarpsPerBlock + warp;
+    if (query_index >= static_cast<int64_t>(kHeads) * kSequence)
+        return;
+
+    const int row = static_cast<int>(query_index % kSequence);
+    const int head = static_cast<int>(query_index / kSequence);
+    const int query_tile = row / kTileSize;
+    const int query_offset = row % kTileSize;
+    const int64_t output_base = query_index * kHeadDim;
+    if (query_offset >= sizes[query_tile]) {
+#pragma unroll
+        for (int item = 0; item < kHeadDim / kWarpSize; ++item)
+            output[output_base + lane + item * kWarpSize] = __float2bfloat16_rn(0.0F);
+        return;
+    }
+
+    float query_values[kHeadDim / kWarpSize];
+    float accumulator[kHeadDim / kWarpSize] = {};
+#pragma unroll
+    for (int item = 0; item < kHeadDim / kWarpSize; ++item)
+        query_values[item] = __bfloat162float(query[output_base + lane + item * kWarpSize]);
+
+    float maximum = -FLT_MAX;
+    float denominator = 0.0F;
+    const int map_row = head * kTiles + query_tile;
+    const int selected_tiles = q2k_num[map_row];
+    for (int selected = 0; selected < selected_tiles; ++selected) {
+        int key_tile = lane == 0 ? q2k_idx[static_cast<int64_t>(map_row) * kTiles + selected] : 0;
+        key_tile = __shfl_sync(0xffffffffU, key_tile, 0);
+        int valid = lane == 0 ? sizes[key_tile] : 0;
+        valid = __shfl_sync(0xffffffffU, valid, 0);
+        for (int key_offset = 0; key_offset < valid; ++key_offset) {
+            const int key_row = key_tile * kTileSize + key_offset;
+            const int64_t key_base = (static_cast<int64_t>(head) * kSequence + key_row) * kHeadDim;
+            float partial = 0.0F;
+#pragma unroll
+            for (int item = 0; item < kHeadDim / kWarpSize; ++item) {
+                const int dimension = lane + item * kWarpSize;
+                partial += query_values[item] * __bfloat162float(key[key_base + dimension]);
+            }
+            const float score = __shfl_sync(0xffffffffU, warp_sum(partial), 0) * scale;
+            const float next_maximum = fmaxf(maximum, score);
+            const float old_weight = __expf(maximum - next_maximum);
+            const float new_weight = __expf(score - next_maximum);
+            denominator = denominator * old_weight + new_weight;
+#pragma unroll
+            for (int item = 0; item < kHeadDim / kWarpSize; ++item) {
+                const int dimension = lane + item * kWarpSize;
+                accumulator[item] = accumulator[item] * old_weight +
+                                    new_weight * __bfloat162float(value[key_base + dimension]);
+            }
+            maximum = next_maximum;
+        }
+    }
+
+    const float inverse_denominator = denominator > 0.0F ? 1.0F / denominator : 0.0F;
+#pragma unroll
+    for (int item = 0; item < kHeadDim / kWarpSize; ++item)
+        output[output_base + lane + item * kWarpSize] =
+            __float2bfloat16_rn(accumulator[item] * inverse_denominator);
+}
+
+trtmc::minimax_h3::VsaBackend selected_backend(int device) {
+    static std::mutex mutex;
+    static int cached_device = -1;
+    static trtmc::minimax_h3::VsaBackend cached_backend = trtmc::minimax_h3::VsaBackend::kGeneric;
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (cached_device == device)
+        return cached_backend;
+
+    cudaDeviceProp properties{};
+    check_cuda(cudaGetDeviceProperties(&properties, device), "device capability query");
+    const char* value = std::getenv("TRTMC_MINIMAX_H3_VSA_BACKEND");
+    const std::string request = value != nullptr ? value : "auto";
+#if defined(TRTMC_MINIMAX_H3_VSA_HAS_BLACKWELL)
+    constexpr bool kHasBlackwellKernels = true;
+#else
+    constexpr bool kHasBlackwellKernels = false;
+#endif
+    try {
+        cached_backend = trtmc::minimax_h3::select_vsa_backend(
+            request, properties.major, properties.minor, kHasBlackwellKernels);
+    } catch (const std::exception& error) {
+        TVM_FFI_THROW(RuntimeError) << error.what();
+    }
+    cached_device = device;
+    std::cerr << "[MiniMax-H3 VSA] backend=" << trtmc::minimax_h3::vsa_backend_name(cached_backend)
+              << " device=" << properties.name << " sm_" << properties.major << properties.minor
+              << '\n';
+    return cached_backend;
 }
 
 __global__ void mean_pool_tiles(const __nv_bfloat16* input, const int32_t* sizes, float* output) {
@@ -323,24 +437,41 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
     build_block_map<<<kHeads * kTiles, kThreads, 0, stream>>>(scores, q2k_idx, q2k_num);
     check_cuda(cudaGetLastError(), "Top-K block-map selection");
 
-    BlockSparseVsaArgs args{};
-    args.q = tensor_data<__nv_bfloat16>(query);
-    args.k = tensor_data<__nv_bfloat16>(key);
-    args.v = tensor_data<__nv_bfloat16>(value);
-    args.v_t = nullptr;
-    args.o = tensor_data<__nv_bfloat16>(output);
-    args.lse = nullptr;
-    args.q2k_idx = q2k_idx;
-    args.q2k_num = q2k_num;
-    args.variable_block_sizes = sizes;
-    args.batch = kBatch;
-    args.num_heads = kHeads;
-    args.seqlen = kSequence;
-    args.head_dim = kHeadDim;
-    args.num_blocks = kTiles;
-    args.max_kv = kTiles;
-    args.sm_scale = score_alpha;
-    check_cuda(launch_block_sparse_sm100a(args, stream), "sm100a sparse attention");
+    const auto backend = selected_backend(query.device().device_id);
+    if (backend == trtmc::minimax_h3::VsaBackend::kBlackwell) {
+#if defined(TRTMC_MINIMAX_H3_VSA_HAS_BLACKWELL)
+        BlockSparseVsaArgs args{};
+        args.q = tensor_data<__nv_bfloat16>(query);
+        args.k = tensor_data<__nv_bfloat16>(key);
+        args.v = tensor_data<__nv_bfloat16>(value);
+        args.v_t = nullptr;
+        args.o = tensor_data<__nv_bfloat16>(output);
+        args.lse = nullptr;
+        args.q2k_idx = q2k_idx;
+        args.q2k_num = q2k_num;
+        args.variable_block_sizes = sizes;
+        args.batch = kBatch;
+        args.num_heads = kHeads;
+        args.seqlen = kSequence;
+        args.head_dim = kHeadDim;
+        args.num_blocks = kTiles;
+        args.max_kv = kTiles;
+        args.sm_scale = score_alpha;
+        check_cuda(launch_block_sparse_sm100a(args, stream), "Blackwell sparse attention");
+#else
+        TVM_FFI_THROW(RuntimeError) << "FastH3 VSA selected an unavailable Blackwell kernel";
+#endif
+    } else {
+        constexpr int kGenericThreads = kGenericWarpsPerBlock * 32;
+        constexpr int64_t kQueries = static_cast<int64_t>(kHeads) * kSequence;
+        const int blocks =
+            static_cast<int>((kQueries + kGenericWarpsPerBlock - 1) / kGenericWarpsPerBlock);
+        block_sparse_attention_generic<<<blocks, kGenericThreads, 0, stream>>>(
+            tensor_data<__nv_bfloat16>(query), tensor_data<__nv_bfloat16>(key),
+            tensor_data<__nv_bfloat16>(value), q2k_idx, q2k_num, sizes,
+            tensor_data<__nv_bfloat16>(output), score_alpha);
+        check_cuda(cudaGetLastError(), "generic sparse attention");
+    }
 
     softmax_scores<<<kHeads * kTiles, kThreads, 0, stream>>>(scores, sizes);
     check_cuda(cudaGetLastError(), "compression softmax");

@@ -25,6 +25,8 @@ VSA_SPARSITY = 0.9
 # 1344x768 decodes from a 37x48x84 latent.  The DiT's (1,2,2) patching
 # therefore packs video rows in a 37x24x42 T/H/W grid.
 VSA_VIDEO_SHAPE = (37, 24, 42)
+# Preserve the official checkpoint's logical kernel name. The loaded binding
+# dispatches to either the Blackwell implementation or the portable fallback.
 VSA_BYOK_KERNEL_NAME = "minimax_h3.vsa_sm100a"
 
 
@@ -133,7 +135,7 @@ def make_vsa_geometry(profile: MiniMaxH3Config) -> VsaGeometry:
         variable_block_sizes=sizes,
     )
     if geometry.num_tiles % 2:
-        raise ValueError("FastH3 sm100a requires an even tile count")
+        raise ValueError("FastH3 VSA requires an even tile count")
     if geometry.variable_block_sizes.sum() != profile.sequence_length:
         raise ValueError("FastH3 VSA tile geometry does not cover the packed sequence")
     return geometry
