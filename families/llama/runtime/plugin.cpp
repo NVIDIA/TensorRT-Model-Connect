@@ -7,6 +7,7 @@
 #include "families/llama/runtime/kv_cache.h"
 #include "families/llama/runtime/pipeline.h"
 #include "families/llama/runtime/plugin_helpers.h"
+#include "families/llama/runtime/speculative/pipeline.h"
 #include "families/llama/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
 
@@ -217,6 +218,8 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
 } // namespace
 
 ITask* create(const FamilyContext& context) {
+    if (context.reader.find_section("speculative.json") != nullptr)
+        return new speculative::Pipeline(context);
     const RuntimeConfig config = parse_runtime_config(context.reader);
     if (context.kv_cache_size_bytes != 0 && !config.dynamic_kv_cache) {
         throw std::invalid_argument(

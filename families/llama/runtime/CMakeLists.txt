@@ -9,6 +9,9 @@ add_library(trtmc_model_llama SHARED
   plugin.cpp
   plugin_helpers.cpp
   sampler.cpp
+  speculative/engine.cpp
+  speculative/eagle3.cpp
+  speculative/pipeline.cpp
 )
 
 target_include_directories(trtmc_model_llama
@@ -35,6 +38,18 @@ install(TARGETS trtmc_model_llama
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(llama_speculative_validation
+    ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/speculative_validation.cpp)
+  add_executable(llama_speculative_benchmark
+    ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/speculative_benchmark.cpp)
+  add_executable(test_llama_speculative_policy
+    ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/test_speculative_policy.cpp)
+  foreach(spec_target IN ITEMS llama_speculative_validation llama_speculative_benchmark test_llama_speculative_policy)
+    target_include_directories(${spec_target} PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(${spec_target} PRIVATE trtmc_model_llama trtmc_backend_trt
+      trtmc_core nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})
+  endforeach()
+  add_test(NAME test_llama_speculative_policy COMMAND test_llama_speculative_policy)
   foreach(test_name IN ITEMS test_llama_chat_template test_llama_native_kv_cache)
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/${test_name}.cpp
