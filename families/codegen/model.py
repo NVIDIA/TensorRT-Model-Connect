@@ -15,6 +15,8 @@ CodeGen (Salesforce) uses:
 
 from __future__ import annotations
 
+from .cli import BuildRequest, coerce_request
+
 import json
 from typing import TYPE_CHECKING
 
@@ -37,7 +39,6 @@ from .default_decoder import build_standard_decoder_engine
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -258,23 +259,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one CodeGen bundle through family-owned code only."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("codegen does not support dynamic_kv_cache")
+    request = coerce_request(request)
 
-    if request.image_height is not None:
-        raise NotImplementedError("codegen does not support image_height")
-
-    if request.image_width is not None:
-        raise NotImplementedError("codegen does not support image_width")
-
-    if request.video_num_frames is not None:
-        raise NotImplementedError("codegen does not support video_num_frames")
-
-    if request.max_batch_size != 1:
-        raise NotImplementedError("codegen does not support max_batch_size")
-
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
 
     if request.task != "text_generation":
         raise ValueError("codegen supports only task=text_generation")
@@ -292,10 +278,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("CodeGen max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("CodeGen has no qualified family-owned quantized build")
-    if request.fp32_layers:
-        raise NotImplementedError("CodeGen does not expose mixed-precision layer selection")
 
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")

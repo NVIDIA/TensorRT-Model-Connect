@@ -26,6 +26,7 @@ from tools.ci.package import (
     WheelArchiveValidator,
     WheelPackageManager,
     load_native_libraries,
+    native_cli_library,
     validate_installed_sdk,
 )
 from tools.ci.pipeline import CiPipeline
@@ -491,11 +492,8 @@ def test_isolated_family_runtime_preserves_only_owner_cli(tmp_path: Path, state:
         assert not (isolated / "libtrtmc_cli_beta.so").exists()
 
 
-def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
-    repository = Path(__file__).resolve().parents[2]
-    binary = tmp_path / "trtmc"
-    binary.write_text("")
-    runtime = tmp_path / "runtime"
+def _write_owner_runtime_fixture(repository: Path, runtime: Path, family: str) -> None:
+    """Stage the files required by the selected owner's current declaration."""
     runtime.mkdir()
     for name in (
         "libtrtmc_core.so",
@@ -503,9 +501,56 @@ def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
         "libtrtmc_c.so",
         "libtrtmc_c.so.1",
         "libtrtmc_backend_trt.so",
-        "libtrtmc_model_gpt2.so",
+        f"libtrtmc_model_{family}.so",
     ):
         (runtime / name).write_text("")
+    source = repository / "families" / family / "cli.json"
+    if source.is_file():
+        declaration = runtime / "families" / family / "cli.json"
+        declaration.parent.mkdir(parents=True)
+        declaration.write_bytes(source.read_bytes())
+        if library := native_cli_library(source):
+            (runtime / library).write_text("")
+
+
+@pytest.mark.parametrize("executor", [None, "python", "native"])
+def test_owner_runtime_fixture_follows_family_metadata(tmp_path: Path, executor: str | None) -> None:
+    source = tmp_path / "families/alpha/cli.json"
+    if executor is not None:
+        source.parent.mkdir(parents=True)
+        source.write_text(json.dumps({"version": 1, "commands": [{
+            "name": "execute", "executor": executor,
+            "handler": "execute" if executor == "native" else "cli:execute",
+            "arguments": [],
+        }]}))
+    runtime = tmp_path / "runtime"
+    _write_owner_runtime_fixture(tmp_path, runtime, "alpha")
+    runner = E2ERunner(RecordingContext(tmp_path, {}))
+    with runner._isolated_runtime_root(runtime, "alpha") as isolated:
+        declaration = isolated / "families/alpha/cli.json"
+        assert declaration.is_file() == (executor is not None)
+        if executor is not None:
+            assert declaration.read_bytes() == source.read_bytes()
+        assert (isolated / "libtrtmc_cli_alpha.so").is_file() == (executor == "native")
+    if executor is not None:
+        (runtime / "families/alpha/cli.json").unlink()
+        with pytest.raises(CiError, match="no CLI declaration for alpha"):
+            with runner._isolated_runtime_root(runtime, "alpha"):
+                pytest.fail("a missing declaration must fail before E2E")
+        (runtime / "families/alpha/cli.json").write_bytes(source.read_bytes())
+    if executor == "native":
+        (runtime / "libtrtmc_cli_alpha.so").unlink()
+        with pytest.raises(CiError, match="libtrtmc_cli_alpha.so"):
+            with runner._isolated_runtime_root(runtime, "alpha"):
+                pytest.fail("a missing adapter must fail before E2E")
+
+
+def test_e2e_nonexistent_testcase_fails_closed(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[2]
+    binary = tmp_path / "trtmc"
+    binary.write_text("")
+    runtime = tmp_path / "runtime"
+    _write_owner_runtime_fixture(repository, runtime, "gpt2")
     native_build = tmp_path / "native-build"
     native_build.mkdir()
     (native_build / "CTestTestfile.cmake").write_text("")
