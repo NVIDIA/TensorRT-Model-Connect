@@ -10,8 +10,12 @@
 namespace trtmc {
 namespace {
 
-std::string apply_chatml(const std::string& prompt, bool enable_thinking) {
-    std::string r = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+std::string apply_chatml(const std::string& prompt, bool enable_thinking,
+                         const std::string& system_prompt) {
+    std::string r;
+    if (!system_prompt.empty())
+        r += "<|im_start|>system\n" + system_prompt + "<|im_end|>\n";
+    r += "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
     if (!enable_thinking)
         r += "<think>\n\n</think>\n\n";
     return r;
@@ -28,11 +32,11 @@ std::string qwen_detect_chat_template_format(const std::string& jinja_template) 
 }
 
 std::string qwen_apply_chat_template(const std::string& format, const std::string& prompt,
-                                     bool enable_thinking) {
+                                     bool enable_thinking, const std::string& system_prompt) {
     if (format.empty())
         return prompt;
     if (format == "chatml")
-        return apply_chatml(prompt, enable_thinking);
+        return apply_chatml(prompt, enable_thinking, system_prompt);
     return prompt;
 }
 

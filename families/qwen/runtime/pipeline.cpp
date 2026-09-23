@@ -93,8 +93,8 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
     std::string effective = prompt;
     bool templated = false;
     if (cfg.use_chat_template && !config.chat_template_format.empty()) {
-        effective =
-            qwen_apply_chat_template(config.chat_template_format, prompt, cfg.enable_thinking);
+        effective = qwen_apply_chat_template(config.chat_template_format, prompt,
+                                             cfg.enable_thinking, cfg.system_prompt);
         templated = true;
     }
     auto ids = tokenizer.encode(effective);

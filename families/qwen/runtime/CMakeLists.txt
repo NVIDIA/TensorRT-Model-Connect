@@ -38,6 +38,7 @@ install(TARGETS trtmc_model_qwen
 
 if(TRTMC_BUILD_TESTS)
   foreach(test_name IN ITEMS
+      test_qwen_chat_templates
       test_qwen_native_kv_cache
       test_qwen_sampler
       test_qwen_tensor_names
