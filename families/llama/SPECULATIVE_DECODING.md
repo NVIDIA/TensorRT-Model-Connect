@@ -93,6 +93,8 @@ one per engine. Request progress belongs to the pipeline, not to those tensors.
 | K/V buffers | Each `Engine` owns `keys_`/`values_`, retained across calls and requests. Prefill/decode contexts bind the same allocations. |
 | Committed length | Request-local `committed` in `Pipeline::generate_ids`; accepted prefix length and target verification's next write start. `Engine` has no accepted-length counter. |
 | Pending root | Request-local `root`; an emitted token whose target KV is not yet committed. Its shifted draft conditioning is prepared before the next speculative round. |
+| Proposal IDs and ancestry | CPU vectors `proposal.tokens` / `proposal.parents` (`CandidateTree`), including the root at row zero; retained for one verification round. IDs are uploaded to the engine's GPU `token_id` input buffer for evaluation. |
+| Generated IDs | CPU vector `TextResult::token_ids`; receives accepted candidates and target predictions through `emit()`. Token IDs are separate from KV storage. |
 | Tentative span | Per-call `[s,s+Q)` writes. `key_value_lengths=s+Q` bounds the initialized span; positions and masks are regenerated for each call. It does not commit any token. |
 
 At target verification, `s=committed`: `[0,s)` is the accepted prefix and
@@ -104,19 +106,50 @@ visibility rather than clearing KV bytes.
 
 ## EAGLE3 alignment and transitions
 
-1. Target prefill of `prompt_length` tokens emits a root token whose target KV is
-   still pending. Draft prefill pairs `prompt[1:] + root` with the unshifted
-   target features at draft positions `0..prompt_length-1`.
-2. Draft proposals use recurrent residual features. Target verification consumes
-   `root + candidates`; a logits row predicts its child, not its own token.
-   Tree visibility follows ancestry, and RoPE positions follow depth rather
-   than flattened candidate row indices.
-3. Acceptance retains the root and matching candidate path. Emit accepted
-   candidates and a target bonus token; the bonus becomes the next pending root.
-4. Before continuing, draft feedback overwrites tentative recurrent rows using
-   verified target features from the retained path. Feature `F_i` pairs with
-   token `x_(i+1)` at draft position `i`, ending with the bonus token. Target
-   and draft committed lengths advance together despite this conditioning offset.
+Target prefill emits a root whose target KV is still pending. If generation
+continues, draft prefill pairs `prompt[1:] + root` with the unshifted target
+features at draft positions `0..prompt_length-1`.
+
+The diagram follows one round, starting at `s=committed`. `Q` includes the root
+and all proposed rows; `L=path.size()` includes the root and accepted candidates.
+Target and draft each own independent GPU `keys_` / `values_` buffers.
+
+```mermaid
+flowchart TD
+    Ready["Ready after prefill or feedback<br/>Both KV prefixes valid in [0, s), with s = committed<br/>root already emitted; its target KV is pending"]
+    Propose["Draft proposal<br/>Select from latest draft result and map IDs via d2t<br/>Rerun draft between depths using recurrent features<br/>CPU: proposal.tokens / parents; draft KV: tentative writes"]
+    Verify["Target verification<br/>Upload proposal.tokens to GPU token_id input<br/>Write root + candidates into target KV slots [s, s+Q)<br/>Mask follows ancestry; positions follow depth"]
+    Accept["Find accepted path from target predictions<br/>CPU path holds row indices, starting with root row 0<br/>Each logits row predicts its child"]
+    Commit["Retain accepted target KV in keys_ / values_<br/>Chain: already contiguous<br/>Tree: gather via commit_scratch_ and copy back<br/>Accepted rows occupy [s, s+L)"]
+    Emit["Emit accepted candidates, then target bonus<br/>Append IDs to CPU TextResult::token_ids<br/>Skip the already emitted root; stop at EOS or limit"]
+    More{"Continue generation?"}
+    Feedback["Refresh draft KV at [s, s+L)<br/>Rerun with accepted target features and following tokens<br/>Overwrite tentative recurrent state; last token is bonus"]
+    Advance["Advance pipeline state<br/>committed = s + L; root = bonus<br/>Bonus target KV remains pending"]
+    Done["Return generated IDs<br/>No further draft feedback needed"]
+
+    Ready --> Propose --> Verify --> Accept --> Commit --> Emit --> More
+    More -->|Yes| Feedback --> Advance --> Ready
+    More -->|No| Done
+```
+
+Target commit copies within the target cache; it never copies draft KV into
+target KV. Rejected rows become invisible, without clearing their bytes. Draft
+feedback instead recomputes state: feature `F_i` pairs with token `x_(i+1)` at
+draft position `i`. Target and draft valid prefix lengths advance together
+despite this conditioning offset. Only evaluated inputs materialize KV;
+selecting or emitting a token ID does not.
+
+For example, accepting a second-choice leaf requires target compaction and
+shifted draft feedback (`Z` is the target prediction after `A2`):
+
+```text
+proposal.tokens  = [root, A, B, A1, A2]
+proposal.parents = [  -1, 0, 0,  1,  1]
+accepted path    = [0, 1, 4]                 # root -> A -> A2
+target KV slots: [s, s+1, s+4] -> [s, s+1, s+2]
+draft feedback:  (F_root, A), (F_A, A2), (F_A2, Z)
+next round:      committed = s+3, root = Z   # Z emitted, target KV pending
+```
 
 The implemented tree expands the best branch and exposes a second-choice sibling
 at each depth; it is not a full beam-search policy. A future target-prefix cache
