@@ -87,6 +87,18 @@ Pipeline::Pipeline(const FamilyContext& context) {
     };
     target_ = load("target.plan", target, "llama target");
     draft_ = load("draft.plan", draft, "eagle3 draft");
+    if (manifest_.contains("device_policy")) {
+        const auto& policy = manifest_.at("device_policy");
+        if (policy.at("version") != 1 || !target.device_selection || !draft.device_selection)
+            throw std::invalid_argument("unsupported device policy contract");
+        const auto mode = policy.at("default").get<std::string>();
+        if (mode != "host" && mode != "device_draft" && mode != "device_full")
+            throw std::invalid_argument("unsupported default execution policy");
+        default_policy_ = mode == "host"           ? ExecutionPolicy::kHost
+                          : mode == "device_draft" ? ExecutionPolicy::kDeviceDraft
+                                                   : ExecutionPolicy::kDeviceFull;
+        device_ = std::make_unique<DeviceEagle3>(context, *target_, *draft_, depth_);
+    }
     prompt_features_ =
         DeviceTensor({target.capacity, target.feature_width}, DType::kFloat16, target_->stream());
     if (!prompt_features_.ok())
@@ -115,7 +127,16 @@ TextResult Pipeline::generate(const std::string& prompt, const TextGenerationCon
 }
 
 TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int count,
-                                  bool speculative, bool ignore_eos, int draft_width) {
+                                  bool speculative, bool ignore_eos, int draft_width,
+                                  ExecutionPolicy policy) {
+    if (policy == ExecutionPolicy::kDefault)
+        policy = default_policy_;
+    if (policy != ExecutionPolicy::kHost && policy != ExecutionPolicy::kDeviceDraft &&
+        policy != ExecutionPolicy::kDeviceFull)
+        throw std::invalid_argument("unsupported execution policy");
+    const bool device = speculative && policy != ExecutionPolicy::kHost;
+    if (device && !device_)
+        throw std::invalid_argument("bundle has no device policy plans");
     const auto& tc = target_->contract();
     Eagle3 method(*draft_, mapping_, depth_, draft_width);
     if (draft_width < 1 || draft_width > 2 ||
@@ -170,6 +191,8 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
     }
     result.prefill_ms = elapsed(prefill_start);
     const auto decode_start = std::chrono::steady_clock::now();
+    if (device && more)
+        device_->begin(method.features());
     int committed = static_cast<int>(prompt.size());
     while (more) {
         if (!speculative) {
@@ -178,10 +201,31 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
             more = emit(root);
             continue;
         }
-        const auto proposal =
-            method.propose(root, committed, count - static_cast<int>(result.token_ids.size()));
-        target_result =
-            target_->run(Phase::kDecode, proposal.tokens, committed, proposal.parents, true);
+        CandidateTree proposal;
+        const auto remaining = count - static_cast<int>(result.token_ids.size());
+        if (device) {
+            device_->propose_and_verify(root, committed, remaining, draft_width, ignore_eos);
+            if (policy == ExecutionPolicy::kDeviceFull) {
+                const auto accepted = device_->accept(committed);
+                accepted_lengths_.push_back(accepted.length - 1);
+                result.token_ids.insert(result.token_ids.end(), accepted.emitted.begin(),
+                                        accepted.emitted.end());
+                more = !accepted.stopped;
+                if (!more)
+                    break;
+                root = accepted.emitted.back();
+                device_->feedback(accepted.length);
+                committed += accepted.length;
+                continue;
+            }
+            auto verified = device_->read_verification();
+            proposal = std::move(verified.first);
+            target_result = std::move(verified.second);
+        } else {
+            proposal = method.propose(root, committed, remaining);
+            target_result =
+                target_->run(Phase::kDecode, proposal.tokens, committed, proposal.parents, true);
+        }
         const auto path = greedy_path(proposal.tokens, proposal.parents, target_result);
         accepted_lengths_.push_back(static_cast<int>(path.size()) - 1);
         if (draft_width > 1)
@@ -194,8 +238,12 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
         if (!more)
             break;
         method.feedback(proposal, path, target_result.features, root, committed);
+        if (device)
+            device_->adopt(method.features());
         committed += static_cast<int>(path.size());
     }
+    if (device)
+        device_->finish();
     result.decode_ms = elapsed(decode_start);
     result.text = tokenizer_->decode(result.token_ids);
     return result;

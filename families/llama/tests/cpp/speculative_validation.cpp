@@ -12,9 +12,12 @@
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 5)
-            throw std::invalid_argument(
-                "usage: llama_speculative_validation BUNDLE INPUT_IDS_JSON COUNT OUTPUT_JSON");
+        if (argc != 5 && argc != 6)
+            throw std::invalid_argument("usage: llama_speculative_validation BUNDLE INPUT_IDS_JSON "
+                                        "COUNT OUTPUT_JSON [all-policies]");
+        const bool all_policies = argc == 6 && std::string(argv[5]) == "all-policies";
+        if (argc == 6 && !all_policies)
+            throw std::invalid_argument("expected all-policies");
         std::ifstream input(argv[2]);
         if (!input)
             throw std::invalid_argument("cannot open input token fixture");
@@ -58,6 +61,38 @@ int main(int argc, char** argv) {
             const auto short_spec = pipeline.generate_ids(short_ids, 8, true, true, 1);
             short_prompt_equal &= short_ar.token_ids == short_spec.token_ids;
         }
+        int policy_checks = 0;
+        if (all_policies) {
+            using Policy = trtmc::llama::speculative::ExecutionPolicy;
+            for (const auto length :
+                 {ids.size(), std::size_t(1), std::min(ids.size(), std::size_t(65))}) {
+                const std::vector<std::int32_t> prompt(ids.begin(), ids.begin() + length);
+                for (const int outputs : {1, 2, 7, length == ids.size() ? count : 9}) {
+                    const auto reference = pipeline.generate_ids(prompt, outputs, false, true);
+                    for (int width : {1, 2}) {
+                        const auto host = pipeline.generate_ids(prompt, outputs, true, true, width,
+                                                                Policy::kHost);
+                        const auto host_lengths = pipeline.accepted_lengths();
+                        if (host.token_ids != reference.token_ids)
+                            throw std::runtime_error(
+                                "host policy disagrees with autoregressive reference");
+                        for (auto policy : {Policy::kDeviceDraft, Policy::kDeviceFull}) {
+                            const auto actual =
+                                pipeline.generate_ids(prompt, outputs, true, true, width, policy);
+                            if (actual.token_ids != reference.token_ids ||
+                                pipeline.accepted_lengths() != host_lengths)
+                                throw std::runtime_error(
+                                    "device policy tokens or acceptance paths differ");
+                            ++policy_checks;
+                        }
+                    }
+                    // Reuse contexts after GPU policy/compaction with a plain AR request.
+                    if (pipeline.generate_ids(prompt, outputs, false, true).token_ids !=
+                        reference.token_ids)
+                        throw std::runtime_error("device policy reset differs from AR reference");
+                }
+            }
+        }
         nlohmann::json result{
             {"input_tokens", ids.size()},
             {"requested_output_tokens", count},
@@ -68,6 +103,7 @@ int main(int argc, char** argv) {
             {"tokens_equal", equal},
             {"reset_equal", reset_equal},
             {"short_prompt_equal", short_prompt_equal},
+            {"device_policy_checks", policy_checks},
             {"accepted_lengths", accepted},
             {"verification_rounds", accepted.size()},
             {"autoregressive_prefill_ms", vanilla.prefill_ms},

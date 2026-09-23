@@ -65,11 +65,15 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
                       max_sequence_length: int = 2048, max_query: int = 64,
                       draft_depth: int = 4, spec_dec: str = "eagle3", verbose: bool = False,
                       execution_profiles: str = "single", prefill_query: int = 64,
-                      greedy_selection: str = "host") -> int:
+                      greedy_selection: str = "host", runtime_policy: str = "host") -> int:
     from .graph import build_draft, build_target
 
     if spec_dec != "eagle3":
         raise ValueError("only EAGLE3 is implemented in this prototype")
+    if runtime_policy not in {"host", "device_draft", "device_full"}:
+        raise ValueError("unsupported runtime policy")
+    if runtime_policy != "host" and greedy_selection != "device_v1":
+        raise ValueError("device runtime policy requires --greedy-selection=device_v1")
     config = ModelConfig.from_dir(model_dir)
     if (config.model_type != "llama" or config.hidden_size != 4096
             or config.num_hidden_layers != 32 or config.vocab_size != 128256
@@ -111,14 +115,17 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
     runtime_metadata = _runtime_config(model_dir, config)
     try:
         writer.set_header(family="llama", task="text_generation", backend="trt")
-        writer.add_json("speculative.json", {
+        metadata = {
             "version": 1, "method": spec_dec, "draft_depth": draft_depth,
             "target": target_contract.to_dict(), "draft": draft_contract.to_dict(),
             "target_feature_indices": [2, 16, 28], "d2t": mapping.tolist(),
             "stop_token_ids": runtime_metadata.get("eos_token_ids", [runtime_metadata["eos_token_id"]]),
             "attention_lowering": "tensorrt_primitives",
             "target_config": config.raw, "draft_config": draft_config.raw,
-        })
+        }
+        if runtime_policy != "host":
+            metadata["device_policy"] = {"version": 1, "default": runtime_policy}
+        writer.add_json("speculative.json", metadata)
         print("Compiling speculative target...", flush=True)
         writer.add_bytes("target.plan", build_target(config, weights, target_contract, verbose=verbose))
         del weights
@@ -126,6 +133,10 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
         writer.add_bytes("draft.plan", build_draft(draft_config, draft_weights, draft_contract, verbose=verbose))
         from .selection import add_selection_plans
         add_selection_plans(writer, target_contract, draft_contract, verbose=verbose)
+        if runtime_policy != "host":
+            from .device_policy import add_device_policy_plans
+            add_device_policy_plans(writer, target_contract, draft_contract, draft_depth,
+                                    mapping, metadata["stop_token_ids"])
         for filename in _BUNDLE_FILES:
             path = model_dir / filename
             if path.is_file():

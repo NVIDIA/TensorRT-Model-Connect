@@ -5,6 +5,7 @@
 #include "families/llama/runtime/speculative/pipeline.h"
 #include "trtmc/runtime/trt_backend.h"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -21,9 +22,12 @@ void synchronize() {
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 7)
+        if (argc != 7 && argc != 8)
             throw std::invalid_argument("usage: llama_speculative_benchmark BUNDLE INPUT_IDS COUNT "
-                                        "WARMUP REPEATS OUTPUT_JSON");
+                                        "WARMUP REPEATS OUTPUT_JSON [all-policies]");
+        const bool all_policies = argc == 8 && std::string(argv[7]) == "all-policies";
+        if (argc == 8 && !all_policies)
+            throw std::invalid_argument("expected all-policies");
         std::ifstream input(argv[2]);
         if (!input)
             throw std::invalid_argument("cannot open input token fixture");
@@ -42,15 +46,30 @@ int main(int argc, char** argv) {
                               {"warmup_per_mode", warmup},  {"repeats_per_mode", repeats},
                               {"cuda_graph", false},        {"samples", nlohmann::json::array()}};
         std::vector<std::int32_t> expected;
-        const char* names[] = {"autoregressive", "eagle3_chain", "eagle3_tree"};
+        using Policy = trtmc::llama::speculative::ExecutionPolicy;
+        struct Case {
+            const char* name;
+            const char* policy_name;
+            Policy policy;
+            int width;
+        };
+        std::vector<Case> cases{{"autoregressive", "host", Policy::kHost, 0},
+                                {"eagle3_chain", "host", Policy::kHost, 1},
+                                {"eagle3_tree", "host", Policy::kHost, 2}};
+        if (all_policies) {
+            cases.push_back({"eagle3_chain", "device_draft", Policy::kDeviceDraft, 1});
+            cases.push_back({"eagle3_tree", "device_draft", Policy::kDeviceDraft, 2});
+            cases.push_back({"eagle3_chain", "device_full", Policy::kDeviceFull, 1});
+            cases.push_back({"eagle3_tree", "device_full", Policy::kDeviceFull, 2});
+        }
         // Rotate mode order to reduce correlation with clock and thermal drift.
         for (int iteration = -warmup; iteration < repeats; ++iteration) {
-            for (int offset = 0; offset < 3; ++offset) {
-                const int mode = (iteration + warmup + offset) % 3;
+            for (int offset = 0; offset < static_cast<int>(cases.size()); ++offset) {
+                const auto& mode = cases[(iteration + warmup + offset) % cases.size()];
                 synchronize();
                 const auto start = std::chrono::steady_clock::now();
-                const auto result =
-                    pipeline.generate_ids(ids, count, mode != 0, true, mode == 2 ? 2 : 1);
+                const auto result = pipeline.generate_ids(ids, count, mode.width != 0, true,
+                                                          std::max(1, mode.width), mode.policy);
                 synchronize();
                 const double wall_ms = std::chrono::duration<double, std::milli>(
                                            std::chrono::steady_clock::now() - start)
@@ -64,7 +83,8 @@ int main(int argc, char** argv) {
                 if (iteration >= 0) {
                     report["samples"].push_back({
                         {"iteration", iteration},
-                        {"mode", names[mode]},
+                        {"mode", mode.name},
+                        {"policy", mode.policy_name},
                         {"wall_ms", wall_ms},
                         {"prefill_including_draft_ms", result.prefill_ms},
                         {"decode_ms", result.decode_ms},
@@ -75,7 +95,8 @@ int main(int argc, char** argv) {
                     });
                 }
                 std::cout << (iteration < 0 ? "warmup " : "sample ") << iteration << ' '
-                          << names[mode] << " wall_ms=" << wall_ms << std::endl;
+                          << mode.name << ' ' << mode.policy_name << " wall_ms=" << wall_ms
+                          << std::endl;
             }
         }
         report["output_ids"] = expected;

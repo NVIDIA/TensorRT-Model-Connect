@@ -93,8 +93,8 @@ one per engine. Request progress belongs to the pipeline, not to those tensors.
 | K/V buffers | Each `Engine` owns `keys_`/`values_`, retained across calls and requests. Prefill/decode contexts bind the same allocations. |
 | Committed length | Request-local `committed` in `Pipeline::generate_ids`; accepted prefix length and target verification's next write start. `Engine` has no accepted-length counter. |
 | Pending root | Request-local `root`; an emitted token whose target KV is not yet committed. Its shifted draft conditioning is prepared before the next speculative round. |
-| Proposal IDs and ancestry | CPU vectors `proposal.tokens` / `proposal.parents` (`CandidateTree`), including the root at row zero; retained for one verification round. IDs are uploaded to the engine's GPU `token_id` input buffer for evaluation. |
-| Generated IDs | CPU vector `TextResult::token_ids`; receives accepted candidates and target predictions through `emit()`. Token IDs are separate from KV storage. |
+| Proposal IDs and ancestry | Host policy: CPU `CandidateTree` vectors. Device policy: GPU `DeviceEagle3::tokens_` and topology constants compiled into the policy plans. Both include root row zero. |
+| Generated IDs | CPU `TextResult::token_ids`. The full device policy produces an accepted chunk on GPU and reads it back once per round. Token IDs are separate from KV storage. |
 | Tentative span | Per-call `[s,s+Q)` writes. `key_value_lengths=s+Q` bounds the initialized span; positions and masks are regenerated for each call. It does not commit any token. |
 
 At target verification, `s=committed`: `[0,s)` is the accepted prefix and
@@ -110,7 +110,7 @@ Target prefill emits a root whose target KV is still pending. If generation
 continues, draft prefill pairs `prompt[1:] + root` with the unshifted target
 features at draft positions `0..prompt_length-1`.
 
-The diagram follows one round, starting at `s=committed`. `Q` includes the root
+The diagram shows the host policy for one round, starting at `s=committed`. `Q` includes the root
 and all proposed rows; `L=path.size()` includes the root and accepted candidates.
 Target and draft each own independent GPU `keys_` / `values_` buffers.
 
@@ -154,6 +154,42 @@ next round:      committed = s+3, root = Z   # Z emitted, target KV pending
 The implemented tree expands the best branch and exposes a second-choice sibling
 at each depth; it is not a full beam-search policy. A future target-prefix cache
 hit must also restore or reconstruct compatible draft/feature state.
+
+### Device policy
+
+`--runtime-policy=device_draft|device_full` with `--greedy-selection=device_v1`
+adds family-owned TensorRT policy plans. The default remains `host`; existing
+bundles need no changes. `speculative.json.device_policy` records version 1 and
+the default policy. Target/draft model plans and the attention/KV ABI are unchanged.
+
+| Policy | Device work | Host boundary during decoding |
+|---|---|---|
+| `host` | Models and optional greedy selector. | Each model call returns completed logits or selections. |
+| `device_draft` | Selection, vocabulary mapping, proposal storage, draft/verification positions and masks. | One proposal/target-selection readback per verification; acceptance and feedback use the host policy. |
+| `device_full` | Also acceptance, EOS/output-limit handling, accepted-row KV gather and feature gather for feedback. | One readback per round: `[path_length, emitted_count, stopped, valid]` plus accepted output IDs. |
+
+```mermaid
+flowchart LR
+    Draft["GPU draft + selection"] --> Propose["GPU d2t + proposals"]
+    Propose -->|next depth, stream ordered| Draft
+    Propose --> Verify["GPU target + selection"]
+    Verify --> Accept["GPU acceptance: path, bonus, output IDs, status"]
+    Accept --> Host["CPU reads status + output chunk once<br/>Sets feedback row count L"]
+    Host --> Commit["GPU target KV gather + copy back<br/>GPU accepted-feature gather"]
+    Commit --> Feedback["GPU draft feedback"]
+    Feedback --> Draft
+```
+
+The device path uses explicit stream events instead of blocking between draft
+steps. `DeviceStep` borrows selection/features with a completion stream; consumers
+must finish reading before the producer overwrites them. Scratch/start buffers
+are also ordered against the previous feedback and target commit before reuse.
+Token IDs and metadata bind directly to device buffers; switching back to host
+execution restores owned inputs large enough for that engine's maximum query.
+Acceptance emits a padded path; only its first `path_length` rows may be gathered
+or committed. The host sets dynamic feedback/gather shapes from that length.
+GPU computation uses TensorRT graph primitives, including the separate KV gather;
+there are no custom policy or attention kernels.
 
 ## Execution and value lifetimes
 

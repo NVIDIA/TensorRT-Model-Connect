@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "families/llama/runtime/speculative/device_policy.h"
 #include "families/llama/runtime/speculative/engine.h"
 #include "families/llama/runtime/tokenizer.h"
 #include "trtmc/runtime/family_factory.h"
@@ -16,13 +17,16 @@ class Pipeline final : public ITextGeneration {
     TextResult generate(const std::string& prompt,
                         const TextGenerationConfig& config = {}) override;
     TextResult generate_ids(const std::vector<std::int32_t>& prompt, int count,
-                            bool speculative = true, bool ignore_eos = false, int draft_width = 2);
+                            bool speculative = true, bool ignore_eos = false, int draft_width = 2,
+                            ExecutionPolicy policy = ExecutionPolicy::kDefault);
     int32_t default_max_new_tokens() const override { return 128; }
     const std::vector<int>& accepted_lengths() const { return accepted_lengths_; }
 
   private:
     nlohmann::json manifest_;
     std::unique_ptr<Engine> target_, draft_;
+    std::unique_ptr<DeviceEagle3> device_;
+    ExecutionPolicy default_policy_ = ExecutionPolicy::kHost;
     DeviceTensor prompt_features_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::vector<std::int32_t> mapping_, eos_;

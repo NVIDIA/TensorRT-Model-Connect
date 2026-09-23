@@ -22,6 +22,7 @@ class Eagle3 {
     CandidateTree propose(int root, int committed, int remaining);
     void feedback(const CandidateTree& tree, const std::vector<std::int32_t>& path,
                   FeatureView target_features, int bonus, int committed);
+    FeatureView features() const { return result_.features; }
 
   private:
     Engine& draft_;

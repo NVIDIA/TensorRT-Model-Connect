@@ -11,6 +11,7 @@ add_library(trtmc_model_llama SHARED
   sampler.cpp
   speculative/engine.cpp
   speculative/eagle3.cpp
+  speculative/device_policy.cpp
   speculative/pipeline.cpp
 )
 

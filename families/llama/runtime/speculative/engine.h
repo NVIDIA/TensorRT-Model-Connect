@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace trtmc::llama::speculative {
@@ -49,6 +51,14 @@ struct StepResult {
     std::int32_t token(int row = 0, int rank = 0) const;
 };
 
+// Borrowed outputs with an explicit completion stream. Consumers must order
+// their reads before the producer's next invocation can overwrite the storage.
+struct DeviceStep {
+    const std::int32_t* selection;
+    FeatureView features;
+    cudaStream_t ready;
+};
+
 // Runtime/compiler boundary only. Does not propose or accept tokens.
 class Engine {
   public:
@@ -62,6 +72,12 @@ class Engine {
     // Copy a verified root-to-leaf path out of speculative slots. Two-phase
     // gather avoids overwriting a source slot that a later destination needs.
     void commit(int start, const std::vector<std::int32_t>& rows);
+    DeviceStep run_device(const std::int32_t* tokens, int rows, ITrtModule& metadata,
+                          const std::int32_t* start, bool all_logits,
+                          FeatureView target_features = {}, FeatureView draft_features = {});
+    DeviceStep device_result(FeatureView features) const;
+    void commit_device(int start, const std::int32_t* device_start, const std::int32_t* path,
+                       int length, ITrtModule& gather);
     void reset();
     const Contract& contract() const { return contract_; }
     cudaStream_t stream() const { return module_->stream(); }
@@ -75,6 +91,8 @@ class Engine {
     DeviceTensor target_input_, draft_input_, commit_scratch_;
     std::shared_ptr<void> selection_host_, selection_ready_;
     std::vector<std::int32_t> positions_, mask_, selected_;
+    std::unordered_map<std::string, DeviceTensor> device_inputs_;
+    bool device_bound_ = false;
 };
 
 // Host policy helpers; independent of engine lowering and tested without a GPU.

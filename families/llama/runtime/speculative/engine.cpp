@@ -238,6 +238,27 @@ StepResult Engine::run(Phase phase, const std::vector<std::int32_t>& tokens, int
                        FeatureView target_features, FeatureView draft_features,
                        const std::vector<std::int32_t>& feature_rows) {
     const auto& c = contract_;
+    if (device_bound_) {
+        // Restore owned maximum-sized inputs before a host call. Borrowed
+        // device-policy buffers can be smaller than a subsequent prefill.
+        for (const auto* name : {"token_id", "position_id", "logits_indices", "attention_mask",
+                                 "key_value_lengths", "cache_write_indices"}) {
+            auto it = device_inputs_.find(name);
+            if (it == device_inputs_.end()) {
+                std::vector<std::int64_t> shape{c.max_query};
+                if (std::string(name) == "attention_mask")
+                    shape.push_back(c.capacity);
+                else if (std::string(name) == "key_value_lengths" ||
+                         std::string(name) == "cache_write_indices")
+                    shape = {1};
+                it = device_inputs_.emplace(name, DeviceTensor(shape, DType::kInt32, stream()))
+                         .first;
+                require(it->second.ok(), "host input allocation failed");
+            }
+            module_->bind_external(name, it->second.data());
+        }
+        device_bound_ = false;
+    }
     const int rows = static_cast<int>(tokens.size());
     require(rows > 0 && rows <= c.query_limit(phase) && start >= 0 && start <= c.capacity - rows,
             "query exceeds engine profile or cache bounds");
@@ -341,6 +362,84 @@ StepResult Engine::run(Phase phase, const std::vector<std::int32_t>& tokens, int
     result.features = {static_cast<const std::uint16_t*>(module->device_ptr("features")), rows,
                        c.draft ? c.hidden : c.feature_width};
     return result;
+}
+
+DeviceStep Engine::device_result(FeatureView features) const {
+    require(selection_ != nullptr, "device policy requires a GPU selector");
+    return {static_cast<const std::int32_t*>(selection_->device_ptr("selection")), features,
+            selection_->stream()};
+}
+
+DeviceStep Engine::run_device(const std::int32_t* tokens, int rows, ITrtModule& metadata,
+                              const std::int32_t* start, bool all_logits,
+                              FeatureView target_features, FeatureView draft_features) {
+    const auto& c = contract_;
+    require(selection_ && tokens && start && rows > 0 && rows <= c.query_limit(Phase::kDecode),
+            "invalid device invocation");
+    // The caller orders policy production and protects these borrowed inputs
+    // through the returned completion stream, including before template reuse.
+    auto bind = [&](const char* name, const void* source, std::vector<std::int64_t> shape) {
+        module_->bind_external(name, const_cast<void*>(source), shape);
+    };
+    bind("token_id", tokens, {rows});
+    bind("position_id", metadata.device_ptr("position_id"), {rows});
+    bind("logits_indices", metadata.device_ptr(all_logits ? "logits_all" : "logits_last"),
+         {all_logits ? rows : 1});
+    bind("attention_mask", metadata.device_ptr("attention_mask"), {rows, c.capacity});
+    bind("key_value_lengths", metadata.device_ptr("key_value_lengths"), {1});
+    bind("cache_write_indices", start, {1});
+    device_bound_ = true;
+    if (c.draft) {
+        auto condition = [&](const char* name, FeatureView source, DeviceTensor& destination,
+                             int width) {
+            const auto bytes = std::size_t(rows) * width * sizeof(std::uint16_t);
+            if (source.data) {
+                require(source.rows == rows && source.width == width,
+                        "device conditioning shape mismatch");
+                checked(cudaMemcpyAsync(destination.data(), source.data, bytes,
+                                        cudaMemcpyDeviceToDevice, stream()));
+            } else {
+                checked(cudaMemsetAsync(destination.data(), 0, bytes, stream()));
+            }
+            module_->bind_external(name, destination.data(), {rows, width});
+        };
+        condition("target_features", target_features, target_input_, c.feature_width);
+        condition("draft_features", draft_features, draft_input_, c.hidden);
+    }
+    module_->forward_device_async({});
+    auto event = static_cast<cudaEvent_t>(selection_ready_.get());
+    checked(cudaEventRecord(event, stream()));
+    checked(cudaStreamWaitEvent(selection_->stream(), event, 0));
+    selection_->bind_external("logits", module_->device_ptr("logits"),
+                              {all_logits ? rows : 1, c.vocab});
+    selection_->forward_device_async({});
+    return device_result({static_cast<const std::uint16_t*>(module_->device_ptr("features")), rows,
+                          c.draft ? c.hidden : c.feature_width});
+}
+
+void Engine::commit_device(int start, const std::int32_t* device_start, const std::int32_t* path,
+                           int length, ITrtModule& gather) {
+    const auto& c = contract_;
+    require(start >= 0 && length > 0 && start + length <= c.capacity &&
+                length <= c.query_limit(Phase::kDecode),
+            "invalid device commit span");
+    gather.bind_external("start", const_cast<std::int32_t*>(device_start), {1});
+    gather.bind_external("path", const_cast<std::int32_t*>(path), {length});
+    const auto element_row = std::size_t(c.dim) * sizeof(std::uint16_t);
+    for (int layer = 0; layer < c.layers; ++layer) {
+        gather.bind_external("k", keys_[layer].data());
+        gather.bind_external("v", values_[layer].data());
+        gather.forward_device_async({});
+        // Gather the whole path before overwriting any source. One contiguous
+        // copy per KV head replaces the host's per-path-row copy scheduling.
+        for (const auto* name : {"k_out", "v_out"}) {
+            auto& cache = name[0] == 'k' ? keys_[layer] : values_[layer];
+            checked(cudaMemcpy2DAsync(static_cast<char*>(cache.data()) + start * element_row,
+                                      c.capacity * element_row, gather.device_ptr(name),
+                                      length * element_row, length * element_row, c.heads,
+                                      cudaMemcpyDeviceToDevice, gather.stream()));
+        }
+    }
 }
 
 void Engine::commit(int start, const std::vector<std::int32_t>& rows) {
