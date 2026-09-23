@@ -101,6 +101,40 @@ def test_load_family_imports_only_the_exact_model_module(monkeypatch) -> None:
     assert imported == ["families.exact_family.model"]
 
 
+def test_weight_streaming_requires_family_opt_in(monkeypatch, tmp_path: Path) -> None:
+    request = replace(_request(tmp_path), weight_streaming_budget_bytes=0)
+    family = SimpleNamespace(build=lambda request, writer: pytest.fail("unsupported build ran"))
+    monkeypatch.setattr(build_core, "_load_family", lambda _family: family)
+
+    with pytest.raises(NotImplementedError, match="does not support TensorRT weight streaming"):
+        build_core.build(request)
+
+
+def test_weight_streaming_reaches_opted_in_family(monkeypatch, tmp_path: Path) -> None:
+    captured: list[int | None] = []
+
+    class FakeWriter:
+        def __init__(self, _destination: Path) -> None:
+            pass
+
+        def finish(self) -> None:
+            pass
+
+        def abort(self) -> None:
+            pytest.fail("supported build was aborted")
+
+    def family_build(request: BuildRequest, _writer: FakeWriter) -> None:
+        captured.append(request.weight_streaming_budget_bytes)
+
+    family = SimpleNamespace(SUPPORTS_WEIGHT_STREAMING=True, build=family_build)
+    monkeypatch.setattr(build_core, "BundleWriter", FakeWriter)
+    monkeypatch.setattr(build_core, "_load_family", lambda _family: family)
+
+    build_core.build(replace(_request(tmp_path), weight_streaming_budget_bytes=1024))
+
+    assert captured == [1024]
+
+
 def test_rtx_backend_is_bound_before_family_import(monkeypatch) -> None:
     standard = object()
     rtx = object()

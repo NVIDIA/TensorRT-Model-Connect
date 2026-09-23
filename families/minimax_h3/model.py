@@ -33,6 +33,9 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+SUPPORTS_WEIGHT_STREAMING = True
+
+
 def _read_json_object(path: Path, *, label: str) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))

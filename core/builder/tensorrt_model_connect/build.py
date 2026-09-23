@@ -122,6 +122,18 @@ def _load_family(family: str) -> ModuleType:
         raise
 
 
+def _validate_core_options(request: BuildRequest, family_module: ModuleType) -> None:
+    """Reject shared build options that the selected family did not opt into."""
+
+    if (
+        request.weight_streaming_budget_bytes is not None
+        and getattr(family_module, "SUPPORTS_WEIGHT_STREAMING", False) is not True
+    ):
+        raise NotImplementedError(
+            f"family {request.family!r} does not support TensorRT weight streaming"
+        )
+
+
 def select_backend(backend: str) -> None:
     """Bind the explicit build backend before importing a family builder."""
 
@@ -148,6 +160,7 @@ def build(request: BuildRequest) -> None:
     family = _resolve_family(request)
     _select_backend(request.backend)
     family_module = _load_family(family)
+    _validate_core_options(request, family_module)
     writer = BundleWriter(request.output_path)
     try:
         with graph_transform(request.graph_transform):
