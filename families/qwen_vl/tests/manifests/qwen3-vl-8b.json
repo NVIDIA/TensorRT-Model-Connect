@@ -1,15 +1,15 @@
 {
-  "name": "qwen3-vl-2b",
-  "hf_id": "Qwen/Qwen3-VL-2B-Instruct",
-  "hf_revision": "89644892e4d85e24eaac8bacfd4f463576704203",
-  "bundle": "qwen3-vl-2b.bundle",
+  "name": "qwen3-vl-8b",
+  "hf_id": "Qwen/Qwen3-VL-8B-Instruct",
+  "hf_revision": "0c351dd01ed87e9c1b53cbc748cba10e6187ff3b",
+  "bundle": "qwen3-vl-8b.bundle",
   "family": "qwen_vl",
   "task": "vision_language_generation",
   "precision": "bf16",
   "reference_precision": "bf16",
   "testcases": [
     {
-      "name": "qwen3-vl-2b",
+      "name": "qwen3-vl-8b",
       "premerge": true,
       "prompt": "What color is the vehicle in this image? Answer in one word.",
       "max_new_tokens": 10,
