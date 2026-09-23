@@ -11,7 +11,7 @@ from pathlib import Path
 
 from conan import ConanFile
 from conan.errors import ConanException
-from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import copy
 
 
@@ -59,11 +59,6 @@ class TensorRTModelConnectConan(ConanFile):
         # CMakeToolchain derives install directories from the package layout.
         self.cpp.package.libdirs = ["bin"]
 
-    def requirements(self) -> None:
-        # Linux images provide nlohmann-json3-dev; MSVC builds take it from Conan.
-        if self._windows():
-            self.requires("nlohmann_json/3.11.3")
-
     def generate(self) -> None:
         toolchain = CMakeToolchain(self)
         toolchain.cache_variables["TRTMC_BUILD_TESTS"] = False
@@ -71,6 +66,9 @@ class TensorRTModelConnectConan(ConanFile):
             "TRT_ROOT",
             "CMAKE_CUDA_ARCHITECTURES",
             "TRTMC_FAMILIES",
+            # Windows hosts have no system nlohmann_json; point CMake at an
+            # installed package (for example a conan install --requires output).
+            "CMAKE_PREFIX_PATH",
         ):
             value = os.environ.get(name)
             if value:
@@ -80,7 +78,6 @@ class TensorRTModelConnectConan(ConanFile):
             # families; the server, BYOK bridge, and examples stay ELF-only.
             for option in ("TRTMC_BUILD_SERVER", "TRTMC_ENABLE_BYOK", "TRTMC_BUILD_EXAMPLES"):
                 toolchain.cache_variables[option] = False
-            CMakeDeps(self).generate()
         toolchain.generate()
 
     def build(self) -> None:

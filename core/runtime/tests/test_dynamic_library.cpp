@@ -113,16 +113,24 @@ void test_partial_library(const fs::path& partial) {
           "symbol error names the library: " + message);
 }
 
-void test_module_paths(const char* argv0) {
+void test_module_paths(const char* argv0, const fs::path& partial) {
     const auto executable = trtmc::platform::current_executable_path();
     check(executable.is_absolute(), "executable path is absolute: " + executable.string());
     check(executable.stem() == fs::path(argv0).stem(),
           "current_executable_path is this test: " + executable.string());
-    const auto containing = trtmc::platform::module_path_containing(
-        reinterpret_cast<const void*>(&trtmc::platform::nccl_library));
-    check(containing.filename() == trtmc::platform::shared_library_filename("trtmc_core"),
-          "module_path_containing finds trtmc_core: " + containing.string());
-    check(containing.is_absolute(), "module path is absolute");
+
+    static const char executable_anchor = 0;
+    const auto self = trtmc::platform::module_path_containing(&executable_anchor);
+    check(fs::equivalent(self, executable),
+          "module_path_containing(executable data) is the executable: " + self.string());
+
+    // An address inside a loaded library maps back to that library file.
+    DynamicLibrary library(partial.string(), "Unit test: NCCL");
+    const auto containing =
+        trtmc::platform::module_path_containing(library.find_symbol("ncclGetVersion"));
+    check(containing.is_absolute(), "module path is absolute: " + containing.string());
+    check(fs::equivalent(containing, partial),
+          "module_path_containing(library symbol) is the library: " + containing.string());
 }
 
 } // namespace
@@ -138,7 +146,7 @@ int main(int argc, char** argv) {
         test_nccl_library_override();
         test_missing_library(partial.parent_path());
         test_partial_library(partial);
-        test_module_paths(argv[0]);
+        test_module_paths(argv[0], partial);
     } catch (const std::exception& error) {
         std::cerr << "FAIL: unexpected exception: " << error.what() << '\n';
         return 1;
