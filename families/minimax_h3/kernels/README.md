@@ -48,8 +48,16 @@ changes module residency only; schedules, tensor values, precision, resolution,
 and frame count are unchanged.
 
 TensorRT weight streaming is an optional, build-time memory/latency trade-off.
-Pass `--weight-streaming-budget-bytes BYTES` to make the text encoder and
-monolithic denoiser streamable and cap each component's resident GPU weights at
-that budget. Omit the option for the latency-oriented default. A budget of zero
-maximizes memory savings and usually has the largest latency cost. The budget
-does not apply to split FirstBlockCache plans.
+Choose one of the two user-facing profiles:
+
+- `--weight-streaming-mode full-residency` keeps the latency-oriented default.
+  Omitting the option has the same behavior.
+- `--weight-streaming-mode min-residency` makes the text encoder and monolithic
+  denoiser streamable and selects the lowest supported GPU weight residency.
+
+The profile is fixed when the bundle is built, so deployments that target both
+latency-oriented and memory-constrained devices should build one bundle for
+each profile. Advanced users can instead pass
+`--weight-streaming-budget-bytes BYTES` to cap each streamable component at a
+custom residency budget. The profile and explicit budget options are mutually
+exclusive. Weight streaming does not apply to split FirstBlockCache plans.
