@@ -152,22 +152,21 @@ class Graph:
         return bytes(result)
 
 
-def build_target(config, weights, contract, *, verbose=False):
+def build_target(config, weights, contract, *, feature_indices, verbose=False):
     graph = Graph(contract, config, verbose=verbose)
     embedding = graph.constant(np.asarray(weights["embedding"], dtype=np.float16))
     hidden = graph.network.add_gather(embedding, graph.tokens, 0).get_output(0)
-    features = []
+    features = {}
     # Feature taps index the inputs to layers (embedding is layer 0's input).
-    feature_indices = (2, config.num_hidden_layers // 2, config.num_hidden_layers - 4)
     for layer in range(config.num_hidden_layers):
         if layer in feature_indices:
-            features.append(hidden)
+            features[layer] = hidden
         prefix = f"layer.{layer}"
         normalized = graph.norm(hidden, weights[f"{prefix}.input_norm"])
         hidden = graph.add(hidden, graph.attention(normalized, weights, prefix, layer))
         normalized = graph.norm(hidden, weights[f"{prefix}.post_attn_norm"])
         hidden = graph.add(hidden, graph.mlp(normalized, weights, prefix))
-    concat = graph.network.add_concatenation(features)
+    concat = graph.network.add_concatenation([features[layer] for layer in feature_indices])
     concat.axis = 1
     graph.output(concat.get_output(0), "features")
     graph.logits(hidden, weights)

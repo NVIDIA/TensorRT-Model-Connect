@@ -4,7 +4,6 @@
 """Create a reproducible raw-text/ID fixture for speculative decoding checks."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
@@ -38,7 +37,7 @@ def main():
     (args.output_dir / "input_ids.json").write_bytes(encoded)
     (args.output_dir / "input.txt").write_text(text)
     (args.output_dir / "fixture.json").write_text(json.dumps({
-        "input_tokens": len(ids), "input_ids_sha256": hashlib.sha256(encoded).hexdigest(),
+        "input_tokens": len(ids),
         "add_special_tokens": False, "apply_chat_template": False,
     }, indent=2))
 

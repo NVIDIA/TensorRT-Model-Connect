@@ -15,6 +15,7 @@ from ..checkpoint_mapper import load_standard_weights
 from ..config import ModelConfig
 from ..model import _BUNDLE_FILES, _chat_template, _runtime_config
 from .contract import EngineContract, ExecutionProfile
+from .features import target_feature_indices
 
 
 def load_draft(path: Path, embedding: np.ndarray):
@@ -98,6 +99,7 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
     )
     weights = load_standard_weights(model_dir, config, precision="fp16")
     draft_config, draft_weights, mapping = load_draft(draft_dir, weights["embedding"])
+    feature_indices = target_feature_indices(config.num_hidden_layers, draft_config.raw)
     # Preserve the draft's own RoPE parameters, including its defaults when
     # absent. This checkpoint does not inherit the target's scaled RoPE.
     draft_contract = EngineContract(
@@ -113,7 +115,7 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
         metadata = {
             "version": 1, "method": spec_dec, "draft_depth": draft_depth,
             "target": target_contract.to_dict(), "draft": draft_contract.to_dict(),
-            "target_feature_indices": [2, 16, 28], "d2t": mapping.tolist(),
+            "target_feature_indices": list(feature_indices), "d2t": mapping.tolist(),
             "stop_token_ids": runtime_metadata.get("eos_token_ids", [runtime_metadata["eos_token_id"]]),
             "attention_lowering": "tensorrt_primitives",
             "target_config": config.raw, "draft_config": draft_config.raw,
@@ -121,7 +123,8 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
         metadata["device_policy"] = {"version": 1}
         writer.add_json("speculative.json", metadata)
         print("Compiling speculative target...", flush=True)
-        writer.add_bytes("target.plan", build_target(config, weights, target_contract, verbose=verbose))
+        writer.add_bytes("target.plan", build_target(
+            config, weights, target_contract, feature_indices=feature_indices, verbose=verbose))
         del weights
         print("Compiling EAGLE3 draft...", flush=True)
         writer.add_bytes("draft.plan", build_draft(draft_config, draft_weights, draft_contract, verbose=verbose))

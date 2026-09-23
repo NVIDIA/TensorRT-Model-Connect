@@ -51,7 +51,7 @@ row order and alias requirements are part of the ABI.
 | `cache_k_i`, `cache_v_i` | input FP16 `[1,Hkv,C,D]` | Runtime-owned layer state; cached K has already undergone RoPE. |
 | `present_k_i`, `present_v_i` | output FP16 `[1,Hkv,C,D]` | Alias corresponding cache inputs; only slots `[s,s+Q)` change. |
 | `logits` | output FP32 `[M,V]` | Raw logits predicting the token after each selected query row under its visible history. |
-| `features` (target) | output FP16 `[Q,12288]` | Concatenated inputs to layers 2, 16, 28, before their norms, in query-row order. |
+| `features` (target) | output FP16 `[Q,12288]` | Concatenated inputs to layers 2, 16, 29, before their norms, in query-row order. |
 | `target_features` (draft) | input FP16 `[Q,12288]` | Verified preceding-token target features; zero during recurrent drafting. |
 | `draft_features` (draft) | input FP16 `[Q,4096]` | Previous draft residual; zero when conditioning on target features. |
 | `features` (draft) | output FP16 `[Q,4096]` | Unnormalized draft residual, in query-row order. |
@@ -60,6 +60,13 @@ The target vocabulary has 128256 entries; the draft has 32000. Draft output
 indices must pass through the checkpoint's `d2t` mapping before becoming target
 token IDs. Both draft conditioning inputs have `Q` rows. Each invocation requires
 `1 <= M <= Q`, `s >= 0` and `s+Q <= C`, within its declared profile bounds.
+
+Feature taps use zero-based layer **inputs**: the default final tap is layer
+`L-3`, equivalent to `hidden_states[-4]` in a full Hugging Face tuple of `L+1`
+states. A draft's `eagle_aux_hidden_state_layer_ids` overrides the three taps
+and their concatenation order. The builder records the same indices in
+`speculative.json` and compiles them into the target; changing them requires
+rebuilding the bundle.
 
 The runtime generates `position_id`: on the CPU for prefill/AR and through GPU
 policy graphs for speculation. A root's position is `s` and each child's position
