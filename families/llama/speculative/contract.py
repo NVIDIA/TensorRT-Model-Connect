@@ -48,16 +48,13 @@ class EngineContract:
     cache_update: str = "aliased_contiguous_append"
     alias_contract: str = "engine_required_alias"
     execution_profiles: tuple[ExecutionProfile, ...] = ()
-    greedy_selection: str = "host"
 
     def __post_init__(self):
         if self.version != 1 or self.role not in {"target", "draft"}:
             raise ValueError("unsupported speculative engine contract")
         if self.precision != "fp16":
             raise ValueError("the first speculative ABI supports FP16 only")
-        if self.greedy_selection not in {"host", "device_v1"}:
-            raise ValueError("unsupported greedy selection contract")
-        if self.greedy_selection == "device_v1" and self.role == "draft" and self.vocab_size < 2:
+        if self.role == "draft" and self.vocab_size < 2:
             raise ValueError("draft selection requires at least two vocabulary entries")
         linear = (self.cache_layout == "batch_heads_capacity_dim"
                   and self.cache_update == "aliased_contiguous_append"

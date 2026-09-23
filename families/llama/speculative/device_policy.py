@@ -194,10 +194,8 @@ def build_gather_kv(heads, capacity, dim, max_path):
     return g.finish()
 
 
-def add_device_policy_plans(writer, target, draft, depth, mapping, eos):
-    """Add optional policy plans without rebuilding or modifying model plans."""
-    if target.greedy_selection != "device_v1" or draft.greedy_selection != "device_v1":
-        raise ValueError("device policy requires device_v1 selection for both models")
+def add_device_policy_plans(writer, target, depth, mapping, eos):
+    """Compile EAGLE3 policy separately from the model/attention plans."""
     writer.add_bytes("policy_mapping.plan", build_mapping(mapping))
     for width in (1, 2):
         for level in range(depth + 1):

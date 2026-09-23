@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Optional, stateless greedy selection graph; independent of attention lowering.
+"""Stateless greedy selection graph; independent of attention lowering.
 
-The separate engine consumes existing FP32 logits by device binding, so enabling
-it does not require rebuilding the target/draft graphs or changing their state ABI.
+The separate engine consumes existing FP32 logits by device binding without
+changing the target/draft graphs or their state ABI.
 """
 
 import numpy as np
@@ -35,7 +35,7 @@ def build_selection(vocab: int, max_rows: int, ranks: int, *, verbose=False) -> 
         return network.add_reduce(value, op, 1 << 1, True).get_output(0)
 
     # abs(x) < inf rejects NaN and either infinity. Keep status per row: only
-    # rows consumed by the policy need to be finite, matching the host path.
+    # rows consumed by the policy need to be finite.
     absolute = network.add_unary(logits, trt.UnaryOperation.ABS).get_output(0)
     finite = binary(absolute, constant(np.array([[np.inf]], np.float32)),
                     trt.ElementWiseOperation.LESS)
@@ -68,8 +68,7 @@ def build_selection(vocab: int, max_rows: int, ranks: int, *, verbose=False) -> 
 
 def add_selection_plans(writer, target, draft, *, verbose=False):
     for role, contract, ranks in (("target", target, 1), ("draft", draft, 2)):
-        if contract.greedy_selection == "device_v1":
-            rows = (max(p.logits[2] for p in contract.execution_profiles)
-                    if contract.execution_profiles else contract.max_query)
-            writer.add_bytes(f"{role}_selection.plan",
-                             build_selection(contract.vocab_size, rows, ranks, verbose=verbose))
+        rows = (max(p.logits[2] for p in contract.execution_profiles)
+                if contract.execution_profiles else contract.max_query)
+        writer.add_bytes(f"{role}_selection.plan",
+                         build_selection(contract.vocab_size, rows, ranks, verbose=verbose))

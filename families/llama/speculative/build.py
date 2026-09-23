@@ -64,16 +64,11 @@ def load_draft(path: Path, embedding: np.ndarray):
 def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
                       max_sequence_length: int = 2048, max_query: int = 64,
                       draft_depth: int = 4, spec_dec: str = "eagle3", verbose: bool = False,
-                      execution_profiles: str = "single", prefill_query: int = 64,
-                      greedy_selection: str = "host", runtime_policy: str = "host") -> int:
+                      execution_profiles: str = "single", prefill_query: int = 64) -> int:
     from .graph import build_draft, build_target
 
     if spec_dec != "eagle3":
         raise ValueError("only EAGLE3 is implemented in this prototype")
-    if runtime_policy not in {"host", "device_draft", "device_full"}:
-        raise ValueError("unsupported runtime policy")
-    if runtime_policy != "host" and greedy_selection != "device_v1":
-        raise ValueError("device runtime policy requires --greedy-selection=device_v1")
     config = ModelConfig.from_dir(model_dir)
     if (config.model_type != "llama" or config.hidden_size != 4096
             or config.num_hidden_layers != 32 or config.vocab_size != 128256
@@ -99,7 +94,7 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
     target_contract = EngineContract(
         "target", config.num_hidden_layers, config.hidden_size, config.num_key_value_heads,
         config.head_dim, config.vocab_size, max_sequence_length, target_max, 3 * config.hidden_size,
-        execution_profiles=target_profiles, greedy_selection=greedy_selection,
+        execution_profiles=target_profiles,
     )
     weights = load_standard_weights(model_dir, config, precision="fp16")
     draft_config, draft_weights, mapping = load_draft(draft_dir, weights["embedding"])
@@ -109,7 +104,7 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
         "draft", draft_config.num_hidden_layers, draft_config.hidden_size,
         draft_config.num_key_value_heads, draft_config.head_dim, len(mapping),
         max_sequence_length, draft_max, 3 * config.hidden_size,
-        execution_profiles=draft_profiles, greedy_selection=greedy_selection,
+        execution_profiles=draft_profiles,
     )
     writer = BundleWriter(output)
     runtime_metadata = _runtime_config(model_dir, config)
@@ -123,8 +118,7 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
             "attention_lowering": "tensorrt_primitives",
             "target_config": config.raw, "draft_config": draft_config.raw,
         }
-        if runtime_policy != "host":
-            metadata["device_policy"] = {"version": 1, "default": runtime_policy}
+        metadata["device_policy"] = {"version": 1}
         writer.add_json("speculative.json", metadata)
         print("Compiling speculative target...", flush=True)
         writer.add_bytes("target.plan", build_target(config, weights, target_contract, verbose=verbose))
@@ -133,10 +127,9 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
         writer.add_bytes("draft.plan", build_draft(draft_config, draft_weights, draft_contract, verbose=verbose))
         from .selection import add_selection_plans
         add_selection_plans(writer, target_contract, draft_contract, verbose=verbose)
-        if runtime_policy != "host":
-            from .device_policy import add_device_policy_plans
-            add_device_policy_plans(writer, target_contract, draft_contract, draft_depth,
-                                    mapping, metadata["stop_token_ids"])
+        from .device_policy import add_device_policy_plans
+        add_device_policy_plans(writer, target_contract, draft_depth,
+                                mapping, metadata["stop_token_ids"])
         for filename in _BUNDLE_FILES:
             path = model_dir / filename
             if path.is_file():

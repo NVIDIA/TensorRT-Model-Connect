@@ -26,7 +26,6 @@ struct Contract {
     int layers, hidden, heads, dim, vocab, capacity, max_query, feature_width;
     bool draft;
     std::vector<ExecutionProfile> profiles{};
-    bool device_selection = false;
     int query_limit(Phase phase) const {
         return profiles.empty() ? max_query : profiles[phase == Phase::kPrefill ? 0 : 1].query[2];
     }
@@ -43,8 +42,7 @@ struct FeatureView {
 };
 
 struct StepResult {
-    std::vector<float> logits;
-    // Row-major [best, (second best for draft), all_finite] from device_v1.
+    // Row-major [best, (second best for draft), all_finite].
     std::vector<std::int32_t> selection;
     int vocab = 0, ranks = 0;
     FeatureView features;
@@ -63,15 +61,10 @@ struct DeviceStep {
 class Engine {
   public:
     Engine(std::unique_ptr<ITrtModule> module, Contract contract,
-           std::unique_ptr<ITrtModule> prefill = nullptr,
-           std::unique_ptr<ITrtModule> selection = nullptr);
+           std::unique_ptr<ITrtModule> selection, std::unique_ptr<ITrtModule> prefill = nullptr);
     StepResult run(Phase phase, const std::vector<std::int32_t>& tokens, int start,
                    const std::vector<std::int32_t>& parents, bool all_logits,
-                   FeatureView target_features = {}, FeatureView draft_features = {},
-                   const std::vector<std::int32_t>& feature_rows = {});
-    // Copy a verified root-to-leaf path out of speculative slots. Two-phase
-    // gather avoids overwriting a source slot that a later destination needs.
-    void commit(int start, const std::vector<std::int32_t>& rows);
+                   FeatureView target_features = {}, FeatureView draft_features = {});
     DeviceStep run_device(const std::int32_t* tokens, int rows, ITrtModule& metadata,
                           const std::int32_t* start, bool all_logits,
                           FeatureView target_features = {}, FeatureView draft_features = {});
@@ -88,20 +81,11 @@ class Engine {
     std::unique_ptr<ITrtModule> selection_;
     Contract contract_;
     std::vector<DeviceTensor> keys_, values_;
-    DeviceTensor target_input_, draft_input_, commit_scratch_;
+    DeviceTensor target_input_, draft_input_;
     std::shared_ptr<void> selection_host_, selection_ready_;
     std::vector<std::int32_t> positions_, mask_, selected_;
     std::unordered_map<std::string, DeviceTensor> device_inputs_;
     bool device_bound_ = false;
 };
-
-// Host policy helpers; independent of engine lowering and tested without a GPU.
-std::vector<std::int32_t> greedy_path(const std::vector<std::int32_t>& tokens,
-                                      const std::vector<std::int32_t>& parents,
-                                      const std::vector<float>& logits, int vocab);
-std::vector<std::int32_t> greedy_path(const std::vector<std::int32_t>& tokens,
-                                      const std::vector<std::int32_t>& parents,
-                                      const StepResult& result);
-std::int32_t argmax(const float* values, int count);
 
 } // namespace trtmc::llama::speculative

@@ -26,9 +26,8 @@ def test_contract_rejects_incompatible_precision_and_capacity():
         EngineContract(**fields, precision="bf16")
     with pytest.raises(ValueError):
         EngineContract(**fields, max_query=2049)
-    with pytest.raises(ValueError):
-        EngineContract(**fields, greedy_selection="unknown")
-    assert EngineContract(**fields, greedy_selection="device_v1").to_dict()["greedy_selection"] == "device_v1"
+    with pytest.raises(ValueError, match="at least two"):
+        EngineContract(**{**fields, "role": "draft", "vocab_size": 1})
 
 
 def test_contract_rejects_unsupported_state_semantics():

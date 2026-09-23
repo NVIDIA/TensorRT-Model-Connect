@@ -53,13 +53,6 @@ Pipeline::Pipeline(const FamilyContext& context) {
     if (depth_ < 1 || depth_ >= target.query_limit(Phase::kDecode) ||
         depth_ >= draft.query_limit(Phase::kDecode))
         throw std::invalid_argument("draft depth exceeds compiled query profile");
-    mapping_ = manifest_.at("d2t").get<std::vector<std::int32_t>>();
-    if (mapping_.size() != static_cast<std::size_t>(draft.vocab))
-        throw std::invalid_argument("draft vocabulary mapping has the wrong size");
-    for (auto token : mapping_) {
-        if (token < 0 || token >= target.vocab)
-            throw std::invalid_argument("draft vocabulary mapping is out of range");
-    }
     const auto stop = manifest_.at("target_config").at("eos_token_id");
     eos_ = stop.is_array() ? stop.get<std::vector<std::int32_t>>()
                            : std::vector<std::int32_t>{stop.get<std::int32_t>()};
@@ -67,38 +60,26 @@ Pipeline::Pipeline(const FamilyContext& context) {
         eos_ = manifest_.at("stop_token_ids").get<std::vector<std::int32_t>>();
     auto load = [&](const char* section, Contract contract, const std::string& label) {
         const auto plan = require_section(context.reader, section);
-        std::unique_ptr<ITrtModule> selection;
-        if (contract.device_selection) {
-            const auto selection_plan = require_section(
-                context.reader, contract.draft ? "draft_selection.plan" : "target_selection.plan");
-            selection =
-                load_engine(context.backend, selection_plan, (label + " selection").c_str());
-        }
+        const auto selection_plan = require_section(
+            context.reader, contract.draft ? "draft_selection.plan" : "target_selection.plan");
+        auto selection =
+            load_engine(context.backend, selection_plan, (label + " selection").c_str());
         if (contract.profiles.empty())
             return std::make_unique<Engine>(load_engine(context.backend, plan, label.c_str()),
-                                            contract, nullptr, std::move(selection));
+                                            contract, std::move(selection));
         auto dual = context.backend.create_dual_profile_modules(plan.data(), plan.size(), {});
         if (!dual.prefill || !dual.decode || !dual.prefill->ok() || !dual.decode->ok())
             throw std::runtime_error("could not create prefill/decode contexts for " + label);
         dual.prefill->set_timing_label(label + " prefill");
         dual.decode->set_timing_label(label + " decode");
-        return std::make_unique<Engine>(std::move(dual.decode), contract, std::move(dual.prefill),
-                                        std::move(selection));
+        return std::make_unique<Engine>(std::move(dual.decode), contract, std::move(selection),
+                                        std::move(dual.prefill));
     };
     target_ = load("target.plan", target, "llama target");
     draft_ = load("draft.plan", draft, "eagle3 draft");
-    if (manifest_.contains("device_policy")) {
-        const auto& policy = manifest_.at("device_policy");
-        if (policy.at("version") != 1 || !target.device_selection || !draft.device_selection)
-            throw std::invalid_argument("unsupported device policy contract");
-        const auto mode = policy.at("default").get<std::string>();
-        if (mode != "host" && mode != "device_draft" && mode != "device_full")
-            throw std::invalid_argument("unsupported default execution policy");
-        default_policy_ = mode == "host"           ? ExecutionPolicy::kHost
-                          : mode == "device_draft" ? ExecutionPolicy::kDeviceDraft
-                                                   : ExecutionPolicy::kDeviceFull;
-        device_ = std::make_unique<DeviceEagle3>(context, *target_, *draft_, depth_);
-    }
+    if (!manifest_.contains("device_policy") || manifest_.at("device_policy").at("version") != 1)
+        throw std::invalid_argument("EAGLE3 requires device policy v1; rebuild the bundle");
+    eagle3_ = std::make_unique<Eagle3>(context, *target_, *draft_, depth_);
     prompt_features_ =
         DeviceTensor({target.capacity, target.feature_width}, DType::kFloat16, target_->stream());
     if (!prompt_features_.ok())
@@ -127,18 +108,8 @@ TextResult Pipeline::generate(const std::string& prompt, const TextGenerationCon
 }
 
 TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int count,
-                                  bool speculative, bool ignore_eos, int draft_width,
-                                  ExecutionPolicy policy) {
-    if (policy == ExecutionPolicy::kDefault)
-        policy = default_policy_;
-    if (policy != ExecutionPolicy::kHost && policy != ExecutionPolicy::kDeviceDraft &&
-        policy != ExecutionPolicy::kDeviceFull)
-        throw std::invalid_argument("unsupported execution policy");
-    const bool device = speculative && policy != ExecutionPolicy::kHost;
-    if (device && !device_)
-        throw std::invalid_argument("bundle has no device policy plans");
+                                  bool speculative, bool ignore_eos, int draft_width) {
     const auto& tc = target_->contract();
-    Eagle3 method(*draft_, mapping_, depth_, draft_width);
     if (draft_width < 1 || draft_width > 2 ||
         depth_ * draft_width + 1 > tc.query_limit(Phase::kDecode))
         throw std::invalid_argument(
@@ -185,14 +156,12 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
         // Complete it before a potentially different draft stream reads it.
         checked(cudaStreamSynchronize(target_->stream()));
         if (more)
-            method.prefill(prompt, root,
-                           {static_cast<const std::uint16_t*>(prompt_features_.data()),
-                            static_cast<int>(prompt.size()), tc.feature_width});
+            eagle3_->prefill(prompt, root,
+                             {static_cast<const std::uint16_t*>(prompt_features_.data()),
+                              static_cast<int>(prompt.size()), tc.feature_width});
     }
     result.prefill_ms = elapsed(prefill_start);
     const auto decode_start = std::chrono::steady_clock::now();
-    if (device && more)
-        device_->begin(method.features());
     int committed = static_cast<int>(prompt.size());
     while (more) {
         if (!speculative) {
@@ -201,49 +170,21 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
             more = emit(root);
             continue;
         }
-        CandidateTree proposal;
         const auto remaining = count - static_cast<int>(result.token_ids.size());
-        if (device) {
-            device_->propose_and_verify(root, committed, remaining, draft_width, ignore_eos);
-            if (policy == ExecutionPolicy::kDeviceFull) {
-                const auto accepted = device_->accept(committed);
-                accepted_lengths_.push_back(accepted.length - 1);
-                result.token_ids.insert(result.token_ids.end(), accepted.emitted.begin(),
-                                        accepted.emitted.end());
-                more = !accepted.stopped;
-                if (!more)
-                    break;
-                root = accepted.emitted.back();
-                device_->feedback(accepted.length);
-                committed += accepted.length;
-                continue;
-            }
-            auto verified = device_->read_verification();
-            proposal = std::move(verified.first);
-            target_result = std::move(verified.second);
-        } else {
-            proposal = method.propose(root, committed, remaining);
-            target_result =
-                target_->run(Phase::kDecode, proposal.tokens, committed, proposal.parents, true);
-        }
-        const auto path = greedy_path(proposal.tokens, proposal.parents, target_result);
-        accepted_lengths_.push_back(static_cast<int>(path.size()) - 1);
-        if (draft_width > 1)
-            target_->commit(committed, path);
-        for (std::size_t index = 1; index < path.size() && more; ++index)
-            more = emit(proposal.tokens[path[index]]);
-        root = target_result.token(path.back());
-        if (more)
-            more = emit(root);
+        eagle3_->propose_and_verify(root, committed, remaining, draft_width, ignore_eos);
+        const auto accepted = eagle3_->accept(committed);
+        accepted_lengths_.push_back(accepted.length - 1);
+        result.token_ids.insert(result.token_ids.end(), accepted.emitted.begin(),
+                                accepted.emitted.end());
+        more = !accepted.stopped;
         if (!more)
             break;
-        method.feedback(proposal, path, target_result.features, root, committed);
-        if (device)
-            device_->adopt(method.features());
-        committed += static_cast<int>(path.size());
+        root = accepted.emitted.back();
+        eagle3_->feedback(accepted.length);
+        committed += accepted.length;
     }
-    if (device)
-        device_->finish();
+    if (speculative)
+        eagle3_->finish();
     result.decode_ms = elapsed(decode_start);
     result.text = tokenizer_->decode(result.token_ids);
     return result;

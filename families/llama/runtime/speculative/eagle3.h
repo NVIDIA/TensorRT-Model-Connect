@@ -5,30 +5,39 @@
 #pragma once
 
 #include "families/llama/runtime/speculative/engine.h"
+#include "trtmc/runtime/family_factory.h"
 
 namespace trtmc::llama::speculative {
 
-struct CandidateTree {
-    std::vector<std::int32_t> tokens;
-    std::vector<std::int32_t> parents;
+struct Acceptance {
+    int length;
+    bool stopped;
+    std::vector<std::int32_t> emitted;
 };
 
-// Method-specific draft conditioning and proposal policy. The engine adapter
-// and its compiler/runtime tensor contract know nothing about EAGLE3.
+// EAGLE3 policy, separate from the model/attention Engine ABI.
+// All GPU computation is compiled TensorRT graph computation.
 class Eagle3 {
   public:
-    Eagle3(Engine& draft, const std::vector<std::int32_t>& mapping, int depth, int width);
+    Eagle3(const FamilyContext& context, Engine& target, Engine& draft, int depth);
+    ~Eagle3();
     void prefill(const std::vector<std::int32_t>& prompt, int root, FeatureView target_features);
-    CandidateTree propose(int root, int committed, int remaining);
-    void feedback(const CandidateTree& tree, const std::vector<std::int32_t>& path,
-                  FeatureView target_features, int bonus, int committed);
-    FeatureView features() const { return result_.features; }
+    void propose_and_verify(int root, int committed, int remaining, int width, bool ignore_eos);
+    Acceptance accept(int committed);
+    void feedback(int length);
+    void finish();
 
   private:
-    Engine& draft_;
-    const std::vector<std::int32_t>& mapping_;
-    int depth_, width_;
-    StepResult result_;
+    void order(cudaStream_t consumer, cudaStream_t producer);
+    ITrtModule& prepare(int width, int depth, int offset, cudaStream_t ready);
+    Engine &target_, &draft_;
+    int max_depth_, depth_ = 0, width_ = 1, rows_ = 1;
+    std::unique_ptr<ITrtModule> mapping_, features_, kv_;
+    std::vector<std::unique_ptr<ITrtModule>> prepare_[2], accept_[2];
+    DeviceTensor starts_, tokens_, valid_, limits_, root_;
+    std::shared_ptr<void> upload_, readback_, event_;
+    DeviceStep draft_result_{}, target_result_{};
+    bool root_on_device_ = false;
 };
 
 } // namespace trtmc::llama::speculative
