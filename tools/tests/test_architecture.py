@@ -631,7 +631,15 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "qualification_tests/benchmark_qualification/performance/tests/test_structured_output_contracts.py",
         "qualification_tests/benchmark_qualification/performance/tests/test_timing_contracts.py",
     }
-    expected_cmake = {"cmake/trtmcConfig.cmake.in"}
+    expected_cmake = {
+        "cmake/trtmcConfig.cmake.in",
+        "cmake/edge_llm/EdgeLLM.cmake",
+        "cmake/edge_llm/CheckNative.cmake",
+        "cmake/edge_llm/EdgeLLMConfig.cmake.in",
+        "cmake/edge_llm/Install.cmake.in",
+        "cmake/edge_llm/Prepare.cmake.in",
+        "cmake/edge_llm/README.md",
+    }
     expected_third_party = {
         "third_party/stb/stb_image.h",
         "third_party/stb/stb_image_resize2.h",

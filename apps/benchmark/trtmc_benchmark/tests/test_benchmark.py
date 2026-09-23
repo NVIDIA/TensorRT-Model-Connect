@@ -1032,7 +1032,9 @@ def test_build_command_passes_manifest_backend_and_dynamic_kv_cache(tmp_path: Pa
 
     command = _build_command(model, tmp_path / "checkpoint", tmp_path / "model.bundle", (case,))
 
-    assert command[command.index("--backend") + 1] == "trt_rtx"
+    # Declared family commands serialize scalar flags as --name=value.
+    if "--backend=trt_rtx" not in command:
+        assert command[command.index("--backend") + 1] == "trt_rtx"
     assert command.count("--dynamic-kv-cache") == 1
 
 

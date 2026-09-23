@@ -100,3 +100,22 @@ by design so a team can implement, validate, change, and revert one family
 without modifying another. Shared code is limited to model-agnostic contracts
 and mechanics described in the
 [Architecture](../architecture/ai-native-horizontal-scaling.md).
+
+## Optional Llama Edge execution
+
+Use `trtmc llama build MODEL -o model.bundle` with the owning
+family's options. `trtmc llama build --help` works offline without
+a checkpoint or GPU imports. This uses the existing
+[family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
+
+The Llama family owns an optional native Edge-LLM 0.10.1 route for original
+unquantized sources with FP16 compute. Recorded ordinary Llama 3.1 8B and
+3.2 1B/3B profiles use SM80; the explicit Llama 3.1 8B + EAGLE3 pair uses SM120.
+Other requests retain native behavior, and a failed explicit pair never silently
+becomes base-only decoding. Quantized Llama routes are outside this publication.
+
+These are bounded historical build/inference results, not catalog-wide support
+or an assertion that every profile is registered in CI. Passing engine payloads
+were retired; publication checks are reported separately. See the
+[family-owned recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/llama/edge_llm/README.md)
+for exact revisions, capacities, controls and validation boundaries.
