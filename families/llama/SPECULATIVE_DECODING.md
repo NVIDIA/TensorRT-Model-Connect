@@ -16,12 +16,29 @@ feedback; the pipeline owns verification and request progress. Another method
 can reuse the engine contract if its state and I/O semantics fit. The contract
 does not require token-by-token drafting or claim to cover recurrent-state models.
 
+## Shorthand and layout
+
+These symbols describe dimensions and indices, not additional tensor bindings.
+
+| Symbol | Meaning |
+|---|---|
+| `B` | Batch size; fixed to 1 in this prototype. |
+| `Hkv`, `D` | Number of KV heads and elements per head. |
+| `Q`, `M` | Query rows in one invocation and rows selected for logits. |
+| `C` | Allocated token-slot capacity per layer/cache, set by `--max-sequence-length`; includes committed and tentative rows, not the current valid length. |
+| `V` | Vocabulary size of the engine producing logits. |
+| `s`, `r`, `i` | Physical write-start slot, invocation-local query row and decoder-layer index. |
+
+The native KV layout `[1,Hkv,C,D]` follows `[B,N,S,H]`: batch, heads, sequence,
+head dimension. Here `N=Hkv`, `S=C`, `H=D`; `H` is per-head width, not model hidden
+width. The existing Llama [builder](dual_profile_decoder_builder.py) uses this
+4D layout for native KV but `[cache_rows,Hkv*D]` for its dense-mask path.
+
 ## Engine ABI v1
 
 [EngineContract](speculative/contract.py) is serialized per target/draft engine in
-`speculative.json`. For query rows `Q`, selected logits rows `M`, capacity `C`,
-KV heads `Hkv` and head dimension `D`, bindings are dense, contiguous device
-tensors. Tensor names, row order and alias requirements are part of the ABI.
+`speculative.json`. Bindings are dense, contiguous device tensors. Tensor names,
+row order and alias requirements are part of the ABI.
 
 | Binding | Type/shape | Semantics |
 |---|---|---|
@@ -44,6 +61,12 @@ indices must pass through the checkpoint's `d2t` mapping before becoming target
 token IDs. Both draft conditioning inputs have `Q` rows. Each invocation requires
 `1 <= M <= Q`, `s >= 0` and `s+Q <= C`, within its declared profile bounds.
 
+The runtime generates `position_id`. In speculative `Engine::run`, a root's
+position is `s` and each child's position is its parent's plus one; the graph
+consumes these values for RoPE. Ordinary Llama decoding uses
+`LlamaKvCache::write_position_input` to generate `position_ + r`. Positions are
+therefore sequential for chains, but siblings share a position in trees.
+
 ### State effects and ownership
 
 - The graph must declare KV mutation and required input/output aliases.
@@ -60,11 +83,30 @@ token IDs. Both draft conditioning inputs have `Q` rows. Each invocation require
 - Rejected rows and reset state become inaccessible through lengths/masks.
   Their bytes need not be cleared; subsequent writes may overwrite them.
 
+## Runtime cache state
+
+The speculative runtime owns two independent sets of per-layer K/V allocations,
+one per engine. Request progress belongs to the pipeline, not to those tensors.
+
+| State | Owner and meaning |
+|---|---|
+| K/V buffers | Each `Engine` owns `keys_`/`values_`, retained across calls and requests. Prefill/decode contexts bind the same allocations. |
+| Committed length | Request-local `committed` in `Pipeline::generate_ids`; accepted prefix length and target verification's next write start. `Engine` has no accepted-length counter. |
+| Pending root | Request-local `root`; an emitted token whose target KV is not yet committed. Its shifted draft conditioning is prepared before the next speculative round. |
+| Tentative span | Per-call `[s,s+Q)` writes. `key_value_lengths=s+Q` bounds the initialized span; positions and masks are regenerated for each call. It does not commit any token. |
+
+At target verification, `s=committed`: `[0,s)` is the accepted prefix and
+`[s,s+Q)` contains the root and candidate rows. Retaining a path commits the root
+plus accepted candidates; draft feedback then catches up before the next round.
+Rejected rows remain physically present but invisible. Reset preserves allocation
+contents; a new request prefills from slot zero and reconstructs progress and
+visibility rather than clearing KV bytes.
+
 ## EAGLE3 alignment and transitions
 
-1. Target prefill of `N` prompt tokens emits a root token whose target KV is
+1. Target prefill of `prompt_length` tokens emits a root token whose target KV is
    still pending. Draft prefill pairs `prompt[1:] + root` with the unshifted
-   target features at draft positions `0..N-1`.
+   target features at draft positions `0..prompt_length-1`.
 2. Draft proposals use recurrent residual features. Target verification consumes
    `root + candidates`; a logits row predicts its child, not its own token.
    Tree visibility follows ancestry, and RoPE positions follow depth rather
