@@ -1,0 +1,8 @@
+{
+  "schema_version": "trtmc.family-case-migration/v1",
+  "from_family": "s1_mini",
+  "cases": [
+    "s1-mini-fp16-e2e",
+    "s1-mini-fp16-e2e-tuesday"
+  ]
+}
