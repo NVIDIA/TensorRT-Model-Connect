@@ -32,6 +32,15 @@ def configure_builder(config) -> None:
     config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
 
+def configure_weight_streaming(config, *, enabled: bool) -> None:
+    """Make denoiser weights streamable without selecting a runtime budget."""
+
+    if not isinstance(enabled, bool):
+        raise ValueError("MiniMax-H3 weight streaming flag must be a boolean")
+    if enabled:
+        config.set_flag(trt.BuilderFlag.WEIGHT_STREAMING)
+
+
 def configure_workspace(config, workspace_bytes: int | None, *, default_bytes: int) -> int:
     """Apply and return the exact TensorRT tactic-workspace limit."""
 

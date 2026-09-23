@@ -42,6 +42,7 @@ class BuildRequest:
     dynamic_kv_cache: bool = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
+    weight_streaming_budget_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if not self.precision:
@@ -64,6 +65,12 @@ class BuildRequest:
             raise ValueError("context_parallel_size must be positive")
         if self.quantization is not None and not self.quantization:
             raise ValueError("quantization must be non-empty when provided")
+        if self.weight_streaming_budget_bytes is not None and (
+            isinstance(self.weight_streaming_budget_bytes, bool)
+            or not isinstance(self.weight_streaming_budget_bytes, int)
+            or self.weight_streaming_budget_bytes < 0
+        ):
+            raise ValueError("weight_streaming_budget_bytes must be a non-negative integer")
         if any(layer < 0 for layer in self.fp32_layers):
             raise ValueError("fp32_layers must contain non-negative indices")
         if not isinstance(self.dynamic_kv_cache, bool):

@@ -459,13 +459,14 @@ def _mark_sliced_velocity_outputs(network, hidden, weights, profile: MiniMaxH3Co
     network.mark_output(audio)
 
 
-def _native_builder(verbose: bool, workspace_bytes: int | None):
+def _native_builder(verbose: bool, workspace_bytes: int | None, *, weight_streaming: bool = False):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     op.configure_builder(config)
+    op.configure_weight_streaming(config, enabled=weight_streaming)
     op.configure_workspace(
         config,
         workspace_bytes,
@@ -543,6 +544,7 @@ def build_dit_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
+    weight_streaming: bool = False,
 ) -> bytes:
     """Build the full-sequence single-device H3 TensorRT plan."""
 
@@ -551,7 +553,9 @@ def build_dit_engine(
     if profile.first_block_cache:
         raise ValueError("MiniMax-H3 first_block_cache profile requires the split DiT builders")
     rows = -1
-    logger, builder, network, config = _native_builder(verbose, workspace_bytes)
+    logger, builder, network, config = _native_builder(
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
 
     video = network.add_input(
         "video_hidden_states", trt.float32, (profile.video_rows, profile.video_patch_dim)

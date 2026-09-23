@@ -653,6 +653,7 @@ struct MiniMaxH3Pipeline::ResidentState {
                                std::vector<float>& video_rows_host,
                                std::vector<float>& audio_rows_host, float cache_threshold,
                                cudaStream_t stream);
+    void release_denoiser();
     bool prepare_vae(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
                      bool first_block_cache);
     std::vector<float> decode_vae(bool first_block_cache, const std::vector<float>& latent,
@@ -660,6 +661,8 @@ struct MiniMaxH3Pipeline::ResidentState {
     bool prepare_audio_vae(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
     std::vector<float> decode_audio(const std::vector<float>& audio_rows_host);
     void download_audio_rows(std::vector<float>& audio_rows_host);
+    void release_audio_vae();
+    void release_vae();
 
     bool denoiser_is_resident(bool first_block_cache) const;
     void load_first_block_cache_denoiser(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
@@ -977,6 +980,20 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_denoiser(
                                    audio_rows_host);
 }
 
+void MiniMaxH3Pipeline::ResidentState::release_denoiser() {
+    denoiser.reset();
+    denoiser_head.reset();
+    denoiser_tail.reset();
+    denoiser_finish.reset();
+    head_hidden.reset();
+    head_residual.reset();
+    previous_head_residual.reset();
+    tail_residual.reset();
+    audio_rows.reset();
+    video_velocity.reset();
+    audio_velocity.reset();
+}
+
 bool MiniMaxH3Pipeline::ResidentState::vae_is_resident(bool first_block_cache) const {
     if (!first_block_cache)
         return vae != nullptr;
@@ -1107,6 +1124,19 @@ void MiniMaxH3Pipeline::ResidentState::download_audio_rows(std::vector<float>& a
     if (!audio_rows || audio_rows_host.size() != kAudioCount ||
         !audio_rows->copy_to_host(audio_rows_host.data()))
         throw std::runtime_error("MiniMax-H3 failed to download audio latents");
+}
+
+void MiniMaxH3Pipeline::ResidentState::release_audio_vae() {
+    audio_vae.reset();
+}
+
+void MiniMaxH3Pipeline::ResidentState::release_vae() {
+    vae.reset();
+    video_rows.reset();
+    vae_latent_tiles.reset();
+    vae_decoded_tiles.reset();
+    vae_overlap.reset();
+    frame_major_rgb.reset();
 }
 
 std::vector<float>
@@ -1310,10 +1340,12 @@ internal::AudioVideoResult MiniMaxH3Pipeline::run(const internal::TextToAudioVid
     const auto denoiser_end = Clock::now();
     if (first_block_cache_)
         resident_->download_audio_rows(audio_rows);
+    resident_->release_denoiser();
 
     const auto audio_vae_begin = Clock::now();
     const bool audio_vae_resident_hit = resident_->prepare_audio_vae(loader_, stream_);
     auto audio_samples = resident_->decode_audio(audio_rows);
+    resident_->release_audio_vae();
     const auto audio_vae_end = Clock::now();
     audio_rows.clear();
     audio_rows.shrink_to_fit();
@@ -1330,6 +1362,7 @@ internal::AudioVideoResult MiniMaxH3Pipeline::run(const internal::TextToAudioVid
     const auto vae_begin = Clock::now();
     const bool vae_resident_hit = resident_->prepare_vae(loader_, stream_, first_block_cache_);
     auto pixels = resident_->decode_vae(first_block_cache_, latent, expected_pixels, stream_);
+    resident_->release_vae();
     const auto vae_end = Clock::now();
     latent.clear();
     latent.shrink_to_fit();

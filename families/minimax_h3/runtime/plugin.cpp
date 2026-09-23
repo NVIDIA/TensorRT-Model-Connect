@@ -12,6 +12,7 @@
 #include <cmath>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -55,18 +56,37 @@ PlanMap load_plans(const BundleReader& bundle, bool first_block_cache) {
     return plans;
 }
 
-MiniMaxH3ModuleLoader make_loader(IBackend& backend, PlanMap plans) {
-    return [&backend, plans = std::move(plans)](const std::string& name, cudaStream_t stream) {
+MiniMaxH3ModuleLoader make_loader(IBackend& backend, PlanMap plans,
+                                  std::optional<std::uint64_t> text_encoder_weight_budget,
+                                  std::optional<std::uint64_t> denoiser_weight_budget) {
+    return [&backend, plans = std::move(plans), text_encoder_weight_budget,
+            denoiser_weight_budget](const std::string& name, cudaStream_t stream) {
         const auto found = plans.find(name);
         if (found == plans.end())
             throw std::runtime_error("MiniMax-H3 requested undeclared plan: " + name);
         ModuleCreateOptions options{};
         options.stream = stream;
+        if (name == "text_encoder.plan")
+            options.weight_streaming_budget_bytes = text_encoder_weight_budget;
+        if (name == "denoiser.plan")
+            options.weight_streaming_budget_bytes = denoiser_weight_budget;
         auto module = backend.create_module(found->second.data(), found->second.size(), options);
         if (!module || !module->ok())
             throw std::runtime_error("MiniMax-H3 failed to load plan: " + name);
         return module;
     };
+}
+
+std::optional<std::uint64_t> optional_weight_budget(const nlohmann::json& config,
+                                                    const char* field) {
+    if (!config.contains(field) || config.at(field).is_null())
+        return std::nullopt;
+    const auto& value = config.at(field);
+    if (!value.is_number_unsigned() &&
+        (!value.is_number_integer() || value.get<std::int64_t>() < 0)) {
+        throw std::runtime_error(std::string("MiniMax-H3 ") + field + " must be non-negative");
+    }
+    return value.get<std::uint64_t>();
 }
 
 } // namespace
@@ -93,6 +113,16 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const float threshold = config.at("first_block_cache_threshold").get<float>();
     if (!std::isfinite(threshold) || threshold <= 0.0F)
         throw std::runtime_error("MiniMax-H3 cache threshold must be finite and positive");
+    const auto shared_weight_budget =
+        minimax_h3_factory::optional_weight_budget(config, "weight_streaming_budget_bytes");
+    auto text_encoder_weight_budget = minimax_h3_factory::optional_weight_budget(
+        config, "text_encoder_weight_streaming_budget_bytes");
+    auto denoiser_weight_budget = minimax_h3_factory::optional_weight_budget(
+        config, "denoiser_weight_streaming_budget_bytes");
+    if (!text_encoder_weight_budget)
+        text_encoder_weight_budget = shared_weight_budget;
+    if (!denoiser_weight_budget)
+        denoiser_weight_budget = shared_weight_budget;
     MiniMaxH3GenerationConfig generation;
     generation.profile = config.value("generation_profile", "minimax-h3-base");
     generation.num_inference_steps = config.at("num_inference_steps").get<std::int32_t>();
@@ -123,7 +153,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("MiniMax-H3 transformer forward count is inconsistent");
     return new MiniMaxH3Pipeline(
         minimax_h3_factory::make_loader(context.backend,
-                                        minimax_h3_factory::load_plans(context.reader, cache)),
+                                        minimax_h3_factory::load_plans(context.reader, cache),
+                                        text_encoder_weight_budget, denoiser_weight_budget),
         minimax_h3_factory::load_tokenizer(context.reader), "", std::move(generation), cache,
         threshold);
 }

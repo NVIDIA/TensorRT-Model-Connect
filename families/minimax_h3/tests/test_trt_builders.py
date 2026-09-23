@@ -182,6 +182,25 @@ def test_audio_vae_checkpoint_partition_selects_only_the_decoder() -> None:
     assert not any(name.startswith("encoder.") for name in keys)
 
 
+def test_weight_streaming_is_opt_in_at_engine_build_time() -> None:
+    class FakeConfig:
+        def __init__(self) -> None:
+            self.flags = []
+
+        def set_flag(self, flag) -> None:
+            self.flags.append(flag)
+
+    config = FakeConfig()
+    op.configure_weight_streaming(config, enabled=False)
+    assert config.flags == []
+
+    op.configure_weight_streaming(config, enabled=True)
+    assert config.flags == [trt.BuilderFlag.WEIGHT_STREAMING]
+
+    with pytest.raises(ValueError, match="must be a boolean"):
+        op.configure_weight_streaming(config, enabled=1)
+
+
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "8589934592"])
 def test_workspace_limit_rejects_non_positive_or_non_integer_values(value) -> None:
     with pytest.raises(ValueError, match="positive integer"):

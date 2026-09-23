@@ -38,3 +38,18 @@ cubins do not carry across Blackwell variants. Enabling
 a local compatibility patch for CUDA 13.0's `sm_103a` pass. Every VSA build
 also embeds portable compute-80 PTX, so the same library can JIT the generic
 fallback on newer SM80+ CUDA GPUs.
+
+## Memory profiles
+
+MiniMax-H3 executes the text encoder, denoiser, audio VAE, and video VAE
+sequentially. The runtime releases each TensorRT module after its last use, so
+their weights and execution contexts do not overlap in device memory. This
+changes module residency only; schedules, tensor values, precision, resolution,
+and frame count are unchanged.
+
+TensorRT weight streaming is an optional, build-time memory/latency trade-off.
+Pass `--weight-streaming-budget-bytes BYTES` to make the text encoder and
+monolithic denoiser streamable and cap each component's resident GPU weights at
+that budget. Omit the option for the latency-oriented default. A budget of zero
+maximizes memory savings and usually has the largest latency cost. The budget
+does not apply to split FirstBlockCache plans.

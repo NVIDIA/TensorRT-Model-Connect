@@ -43,6 +43,7 @@ def _parser(prepare_family: object | None = None) -> argparse.ArgumentParser:
     build_parser.add_argument("--tensor-parallel-size", type=int, default=1)
     build_parser.add_argument("--context-parallel-size", type=int, default=1)
     build_parser.add_argument("--quantization")
+    build_parser.add_argument("--weight-streaming-budget-bytes", type=int)
     build_parser.add_argument("--fp32-layer", type=int, action="append", default=[])
     build_parser.add_argument("--dynamic-kv-cache", action="store_true")
     build_parser.add_argument("--verbose", action="store_true")
@@ -127,6 +128,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             tensor_parallel_size=args.tensor_parallel_size,
             context_parallel_size=args.context_parallel_size,
             quantization=args.quantization,
+            weight_streaming_budget_bytes=args.weight_streaming_budget_bytes,
             fp32_layers=tuple(args.fp32_layer),
             dynamic_kv_cache=args.dynamic_kv_cache,
             verbose=args.verbose,

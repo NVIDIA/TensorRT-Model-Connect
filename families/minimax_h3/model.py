@@ -196,6 +196,9 @@ class _MiniMaxH3Model:
         raw = getattr(config, "raw", {})
         profile = _fixed_profile(raw)
         profile.validate()
+        weight_streaming = raw.get("weight_streaming", False)
+        if not isinstance(weight_streaming, bool):
+            raise ValueError("MiniMax-H3 weight_streaming must be a boolean")
         generation_profile = weights["_generation_profile"]
         if generation_profile.uses_vsa and profile.first_block_cache:
             raise ValueError("FastH3 VSA does not support the split FirstBlockCache graph")
@@ -270,6 +273,7 @@ class _MiniMaxH3Model:
             verbose=verbose,
             consume_weights=True,
             workspace_bytes=workspace_limits["text_encoder.plan"],
+            weight_streaming=weight_streaming,
         )
         del text_weights
         gc.collect()
@@ -296,13 +300,18 @@ class _MiniMaxH3Model:
             )
             dit_weights = numpy_state(dit_state)
             del dit_state
+            denoiser_options = {
+                "generation_profile": generation_profile,
+                "verbose": verbose,
+                "consume_weights": True,
+                "workspace_bytes": workspace_limits[filename],
+            }
+            if filename == "denoiser.plan":
+                denoiser_options["weight_streaming"] = weight_streaming
             denoiser_plan = denoiser_builder(
                 dit_weights,
                 profile,
-                generation_profile=generation_profile,
-                verbose=verbose,
-                consume_weights=True,
-                workspace_bytes=workspace_limits[filename],
+                **denoiser_options,
             )
             del dit_weights
             gc.collect()
@@ -422,7 +431,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if int(request.video_num_frames or 124) != 124:
         raise ValueError("MiniMax-H3 requires video_num_frames=124")
 
-    config = SimpleNamespace(raw={})
+    config = SimpleNamespace(
+        raw={"weight_streaming": request.weight_streaming_budget_bytes is not None}
+    )
     model_dir = Path(request.model_dir)
     model = _MiniMaxH3Model()
     weights = model.load_weights(str(model_dir), config)
@@ -469,6 +480,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "first_block_cache": False,
             "denoiser_cache_mode": "monolithic",
             "first_block_cache_threshold": 0.025,
+            "weight_streaming_budget_bytes": request.weight_streaming_budget_bytes,
             "text_rows": profile.text_rows,
             "text_rows_min": profile.min_text_rows,
             "text_rows_opt": profile.opt_text_rows,

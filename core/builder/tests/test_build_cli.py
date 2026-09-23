@@ -58,6 +58,8 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
                 "4",
                 "--quantization",
                 "fp8",
+                "--weight-streaming-budget-bytes",
+                "17179869184",
                 "--fp32-layer",
                 "2",
                 "--fp32-layer",
@@ -83,6 +85,7 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
     assert request.tensor_parallel_size == 2
     assert request.context_parallel_size == 4
     assert request.quantization == "fp8"
+    assert request.weight_streaming_budget_bytes == 17179869184
     assert request.fp32_layers == (2, 5)
     assert request.dynamic_kv_cache is True
     assert request.verbose is True

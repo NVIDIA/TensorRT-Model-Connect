@@ -100,6 +100,7 @@ def build_text_encoder_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
+    weight_streaming: bool = False,
 ) -> bytes:
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -107,6 +108,7 @@ def build_text_encoder_engine(
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     op.configure_builder(config)
+    op.configure_weight_streaming(config, enabled=weight_streaming)
     op.configure_workspace(
         config,
         workspace_bytes,

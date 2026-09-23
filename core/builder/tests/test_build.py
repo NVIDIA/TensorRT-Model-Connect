@@ -40,6 +40,7 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
     assert request.context_parallel_size == 3
     assert request.backend == "trt"
     assert request.dynamic_kv_cache is False
+    assert request.weight_streaming_budget_bytes is None
 
 
 @pytest.mark.parametrize(
@@ -53,6 +54,8 @@ def test_build_request_is_a_plain_frozen_dataclass(tmp_path: Path) -> None:
         ("tensor_parallel_size", 0),
         ("context_parallel_size", 0),
         ("quantization", ""),
+        ("weight_streaming_budget_bytes", -1),
+        ("weight_streaming_budget_bytes", True),
         ("fp32_layers", (-1,)),
         ("dynamic_kv_cache", 1),
         ("graph_transform", object()),
