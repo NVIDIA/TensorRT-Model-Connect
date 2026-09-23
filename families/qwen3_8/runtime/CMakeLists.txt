@@ -21,7 +21,10 @@ target_link_libraries(trtmc_model_qwen3_8 PRIVATE
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
 )
-target_compile_options(trtmc_model_qwen3_8 PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(trtmc_model_qwen3_8 PRIVATE
+  "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>"
+)
 set_target_properties(trtmc_model_qwen3_8 PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
   BUILD_RPATH "\$ORIGIN"
@@ -71,3 +74,5 @@ if(TRTMC_BUILD_TESTS)
     SKIP_RETURN_CODE 77
   )
 endif()
+
+include(edge_llm/Adapter.cmake)

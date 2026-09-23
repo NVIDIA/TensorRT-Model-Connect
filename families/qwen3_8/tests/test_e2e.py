@@ -133,7 +133,7 @@ def _thresholds(case_name: str) -> dict[str, float]:
     return thresholds
 
 
-def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
+def _build_bundle(manifest: dict, model_dir: Path, bundle: Path, *, execution=None) -> None:
     quantization = manifest.get("quantization")
     assert quantization is None or isinstance(quantization, str)
     fp32_layers = tuple(manifest.get("fp32_layers", ()))
@@ -148,7 +148,8 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             tensor_parallel_size=manifest["tensor_parallel_size"],
             quantization=quantization,
             fp32_layers=fp32_layers,
-        )
+        ),
+        execution=execution,
     )
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
 
@@ -227,7 +228,7 @@ def _run_native(
 
     completed = subprocess.run(
         command,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         timeout=600,
@@ -235,6 +236,9 @@ def _run_native(
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
     record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    (tmp_path / "native.stdout.log").write_text(completed.stdout, encoding="utf-8")
+    (tmp_path / "native.stderr.log").write_text(completed.stderr, encoding="utf-8")
+    completed.check_returncode()
     if tp_size == 1:
         return json.loads(completed.stdout)
 
@@ -353,16 +357,102 @@ def _hf_reference(
         "bf16": torch.bfloat16,
     }
     assert reference_precision in dtypes, reference_precision
-    model = (
-        AutoModelForCausalLM.from_pretrained(
+    if case.get("reference_decode_modelopt_mixed", False):
+        # Preserve the declared FP32 oracle; packed bytes are not floating weights.
+        # This does not emulate compiled activation or KV quantization.
+        from modelopt.torch.export.quant_utils import QUANTIZATION_FP8, from_quantized_weight
+        from modelopt.torch.quantization.qtensor import NVFP4QTensor
+        from safetensors.torch import load_file
+        from transformers import AutoConfig, GenerationConfig, Qwen3_5ForCausalLM
+
+        assert not trust_remote_code and reference_precision == "fp32"
+        raw = json.loads((model_dir / "config.json").read_text())
+        quant = json.loads((model_dir / "hf_quant_config.json").read_text())["quantization"]
+        embedded = raw["quantization_config"]
+        assert embedded["quant_method"] == "modelopt"
+        assert embedded["quant_algo"] == quant["quant_algo"] == "MIXED_PRECISION"
+        layers = quant["quantized_layers"]
+        assert layers and embedded["quantized_layers"] == layers
+        assert all(
+            policy["quant_algo"] == "FP8"
+            or (policy["quant_algo"] == "NVFP4" and policy["group_size"] == 16)
+            for policy in layers.values()
+        )
+        state = {}
+        for shard in sorted(model_dir.glob("*.safetensors")):
+            tensors = load_file(str(shard), device="cpu")
+            assert not state.keys() & tensors.keys(), "duplicate checkpoint tensors"
+            state.update(tensors)
+        packed = {key for key, value in state.items() if value.dtype == torch.uint8}
+        fp8 = {
+            key for key, value in state.items()
+            if key.endswith(".weight") and value.dtype == torch.float8_e4m3fn
+        }
+        quantized = packed | fp8
+        assert packed and fp8 and quantized == {key + ".weight" for key in layers}
+        assert all(layers[key.removesuffix(".weight")]["quant_algo"] == "NVFP4" for key in packed)
+        assert all(layers[key.removesuffix(".weight")]["quant_algo"] == "FP8" for key in fp8)
+        for key in packed:
+            weight = state[key]
+            assert key.endswith(".weight") and weight.ndim == 2, key
+            assert weight.shape[-1] % 8 == 0, key
+            prefix = key.removesuffix("weight")
+            scale = state[prefix + "weight_scale"]
+            double_scale = state[prefix + "weight_scale_2"]
+            shape = (weight.shape[0], weight.shape[1] * 2)
+            assert scale.dtype == torch.float8_e4m3fn
+            assert scale.shape == (shape[0], shape[1] // 16), key
+            assert torch.isfinite(scale.float()).all() and (scale.float() >= 0).all(), key
+            assert double_scale.numel() == 1 and torch.isfinite(double_scale).all(), key
+            assert (double_scale > 0).all(), key
+            state[key] = NVFP4QTensor(shape, torch.float32, weight).dequantize(
+                dtype=torch.float32, scale=scale, double_scale=double_scale,
+                block_sizes={-1: 16}, fast=False,
+            )
+            assert state[key].shape == shape and torch.isfinite(state[key]).all(), key
+        for key in fp8:
+            weight = state[key]
+            scale = state[key.removesuffix("weight") + "weight_scale"]
+            assert weight.ndim == 2 and scale.numel() == 1, key
+            assert torch.isfinite(scale).all() and (scale > 0).all(), key
+            state[key] = from_quantized_weight(
+                weight, scale, QUANTIZATION_FP8, torch.float32,
+            )
+            assert state[key].shape == weight.shape and torch.isfinite(state[key]).all(), key
+        for key in list(state):
+            if key.endswith((".weight_scale", ".weight_scale_2", ".input_scale")):
+                assert key.rsplit(".", 1)[0] + ".weight" in quantized, key
+                scale = state.pop(key)
+                assert torch.isfinite(scale.float()).all() and (scale.float() >= 0).all(), key
+        # Use the original official text-only class and checkpoint prefix conversion.
+        # HF owns its declared ignoring of unused visual/MTP keys; do not filter weights.
+        config = AutoConfig.from_pretrained(
+            model_dir, local_files_only=True, trust_remote_code=False,
+        ).get_text_config(decoder=True)
+        assert config.model_type == "qwen3_5_text"
+        assert not getattr(config, "quantization_config", None)
+        model, loading = Qwen3_5ForCausalLM.from_pretrained(
+            None, config=config, state_dict=state, dtype=torch.float32,
+            output_loading_info=True,
+        )
+        assert all(not loading.get(key) for key in (
+            "missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs",
+        )), loading
+        if (model_dir / "generation_config.json").is_file():
+            model.generation_config = GenerationConfig.from_pretrained(
+                model_dir, local_files_only=True,
+            )
+        del state, tensors
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
             model_dir,
             local_files_only=True,
             trust_remote_code=trust_remote_code,
             dtype=dtypes[reference_precision],
         )
-        .eval()
-        .to("cuda")
-    )
+    reference_device = case.get("reference_device", "cuda")
+    assert reference_device in {"cpu", "cuda"}, reference_device
+    model = model.eval().to(reference_device)
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:

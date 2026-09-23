@@ -13,7 +13,8 @@ _ALIASES = family_support(
     default_precision="bf16",
 )
 _SUPPORT = FamilySupport(
-    tasks=("text_generation",), default_task="text_generation", default_precision="bf16")
+    tasks=("text_generation",), default_task="text_generation", default_precision="bf16",
+)
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
