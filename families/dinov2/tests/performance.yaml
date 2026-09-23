@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-suite/v2
+name: dinov2-performance
+entries:
+  - id: dinov2.extract_features
+    family: dinov2
+    operation: extract_features
+    model: dinov2-small
+    workload:
+      testcase: dinov2-small
+    measurement:
+      warmup: 3
+      iterations: 10
+    equivalence_margin_percent: 5.0
+    baseline:
+      runner: task-reference
+      script: tests/performance_reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
+      asset_loading_included: false
+      output_contract: image-features-shape
+additional_profiles:
+  - model: dinov2-base
+    inherit: dinov2.extract_features
+  - model: dinov2-with-registers-small
+    inherit: dinov2.extract_features
