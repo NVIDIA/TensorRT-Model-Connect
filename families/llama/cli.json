@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "commands": [{
+    "name": "build-speculative",
+    "help": "Build the FP16 Llama 3.1 / EAGLE3 prototype bundle",
+    "executor": "python",
+    "handler": "speculative.build:build_speculative",
+    "arguments": [
+      {"name": "model_dir", "flags": ["--model-dir"], "type": "path", "required": true},
+      {"name": "draft_dir", "flags": ["--draft-dir"], "type": "path", "required": true},
+      {"name": "output", "flags": ["--output"], "type": "path", "required": true},
+      {"name": "spec_dec", "flags": ["--spec-dec"], "type": "string", "choices": ["eagle3"], "default": "eagle3"},
+      {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int", "default": 2048},
+      {"name": "max_query", "flags": ["--max-query"], "type": "int", "default": 64},
+      {"name": "execution_profiles", "flags": ["--execution-profiles"], "type": "string", "choices": ["single", "split"], "default": "single"},
+      {"name": "prefill_query", "flags": ["--prefill-query"], "type": "int", "default": 64},
+      {"name": "draft_depth", "flags": ["--draft-depth"], "type": "int", "default": 4},
+      {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+    ]
+  }]
+}
