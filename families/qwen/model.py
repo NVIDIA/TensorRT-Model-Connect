@@ -230,6 +230,11 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _QwenModel, **u
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen bundle through family-owned code."""
+    if request.task == "embedding":
+        from .embedding import build_embedding
+
+        return build_embedding(request, writer)
+
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen does not support dynamic_kv_cache")
 

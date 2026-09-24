@@ -18,6 +18,11 @@ defaults:
     asset_loading_included: false
 
 excluded_profiles:
+  - model: qwen3-embedding-0.6b
+    reason: >-
+      The migrated embedding task has no release-performance workload or receipt
+      yet. Correctness evidence does not establish release-performance
+      qualification; no performance qualification is claimed.
   - model: moge-2-vitl
     reason: >-
       Family-owned accuracy and internal performance qualification are present,
