@@ -104,12 +104,13 @@ def _required_environment(tp_size: int):
 
 
 def _checkpoint(manifest: dict) -> Path:
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import constants, snapshot_download
 
     path = Path(
         snapshot_download(
             repo_id=manifest["hf_id"],
             revision=manifest.get("hf_revision"),
+            local_files_only=constants.HF_HUB_OFFLINE,
         )
     )
     assert (path / "config.json").is_file(), path
