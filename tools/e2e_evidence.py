@@ -17,6 +17,7 @@ import shlex
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,11 @@ _EXTENSIONS = frozenset(
         ".ppm",
     }
 )
+
+
+def render_command(arguments: Sequence[str]) -> str:
+    """Render raw argv values as a copy-pasteable POSIX shell command."""
+    return shlex.join(arguments)
 
 
 def _environment() -> dict[str, str]:
@@ -508,7 +514,7 @@ def _capture_e2e_evidence(request):
     if attempt.isdecimal() and int(attempt) > 0:
         recorder.data["workflow_run_attempt"] = int(attempt)
     recorder.data["repro"] = {
-        "command": shlex.join(
+        "command": render_command(
             ["python", "-m", "pytest", request.node.nodeid, "--e2e-testcase", case, "-q"]
         ),
         "requirements": "Use the matching checkpoint, family dependencies, TRTMC_BINARY and TRTMC_RUNTIME_ROOT.",
