@@ -7,7 +7,7 @@ from tensorrt_model_connect.model_support import family_support
 
 
 describe = family_support(
-    model_types=("gemma", "gemma2", "gemma3", "gemma3_text"),
+    model_types=("gemma", "gemma2", "gemma3", "gemma3_text", "gemma4_unified"),
     tasks=("text_generation",),
     default_task="text_generation",
 )

@@ -27,7 +27,7 @@ from .standard_decoder_builder import build_standard_decoder_engine
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
+    from .build_request import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -361,6 +361,18 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Gemma bundle through family-owned code only."""
+    from .build_request import coerce_request
+
+    request = coerce_request(request)
+    from .edge_llm.config import GemmaBuildRequest
+
+    if isinstance(request, GemmaBuildRequest) and request.execution is not None:
+        from .edge_llm.builder import build as build_pair
+
+        request.execution.validate_local()
+        build_pair(request, writer, request.execution)
+        return
+
     if request.dynamic_kv_cache:
         raise NotImplementedError("gemma does not support dynamic_kv_cache")
 

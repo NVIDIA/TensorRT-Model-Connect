@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Executed only by the explicit CMake dependency build, never by model dispatch.
+cmake_minimum_required(VERSION 3.20)
+# Older CMake can skip a disconnected Git update when the requested pin changes.
+# Never label an old checkout as the newly requested official snapshot.
+find_package(Git REQUIRED)
+execute_process(COMMAND "${GIT_EXECUTABLE}" -C "@_edge_source@" rev-parse HEAD
+  OUTPUT_VARIABLE _edge_checkout_revision OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY)
+if(NOT _edge_checkout_revision STREQUAL "@_edge_revision@")
+  message(FATAL_ERROR "EdgeLLM checkout does not match the pinned revision; use a fresh dependency build directory")
+endif()
+include("@_edge_template_dir@/CheckNative.cmake")
+_edgellm_check_json_headers("@_edge_json_include@" "@_edge_source@/3rdParty/nlohmannJson")
+function(run)
+  execute_process(COMMAND ${ARGV} COMMAND_ERROR_IS_FATAL ANY)
+endfunction()
+set(_pip_options --isolated install --no-user)
+if(NOT "@TRTMC_EDGELLM_WHEELHOUSE@" STREQUAL "")
+  list(APPEND _pip_options --no-index --find-links "@TRTMC_EDGELLM_WHEELHOUSE@")
+endif()
+function(create_environment destination)
+  execute_process(COMMAND "@Python3_EXECUTABLE@" -I -c "import ensurepip"
+    RESULT_VARIABLE _has_ensurepip OUTPUT_QUIET ERROR_QUIET)
+  if(_has_ensurepip EQUAL 0)
+    run("@Python3_EXECUTABLE@" -I -m venv --copies "${destination}")
+  else()
+    run("@Python3_EXECUTABLE@" -I -m virtualenv --copies --no-download --no-periodic-update
+      "${destination}")
+  endif()
+  # Pin even when ensurepip seeds a newer version; offline installs stay offline.
+  run("${destination}/bin/python" -I -m pip ${_pip_options} "pip==26.2.1")
+endfunction()
+create_environment("@_edge_prefix@/libexec/trtmc-edge-llm")
+file(GLOB _trt_wheels "@TRTMC_EDGELLM_TRT_ROOT@/python/tensorrt-@_edge_trt_version@-cp@Python3_VERSION_MAJOR@@Python3_VERSION_MINOR@-none-linux_@CMAKE_SYSTEM_PROCESSOR@.whl")
+list(LENGTH _trt_wheels _wheel_count)
+if(NOT _wheel_count EQUAL 1)
+  message(FATAL_ERROR "Expected the TensorRT @_edge_trt_version@ SDK wheel matching the native Python ABI")
+endif()
+# CUDA 12 CuPy needs NumPy 1.x, while the installed Edge SDK needs NumPy 2.x.
+# Keep its AOT-only environment outside the installed SDK and check both.
+set(_edge_kernel_python "@_edge_python@")
+if("@CUDAToolkit_VERSION_MAJOR@" STREQUAL "12")
+  set(_edge_cuda_python_version 12.9.7)
+  set(_edge_kernel_python "@_edge_root@/kernel-python/bin/python")
+  create_environment("@_edge_root@/kernel-python")
+  run("${_edge_kernel_python}" -I -m pip ${_pip_options}
+    --report "@_edge_root@/kernel-pip-report.json"
+    numpy==1.26.4 cupy-cuda12x==12.3.0 cuda-python==12.9.7
+    "nvidia-cutlass-dsl[cu12]==4.7.0")
+  run("${_edge_kernel_python}" -I -m pip --isolated check)
+  set(_edge_kernel_dependencies "")
+elseif("@CUDAToolkit_VERSION_MAJOR@" STREQUAL "13")
+  set(_edge_cuda_python_version 13.3.1)
+  set(_edge_kernel_dependencies "nvidia-cutlass-dsl[cu13]==4.7.0" cupy-cuda13x==13.6.0)
+else()
+  message(FATAL_ERROR "Pinned EdgeLLM supports CUDA major 12 or 13")
+endif()
+run("@_edge_python@" -I -m pip ${_pip_options} --report "@_edge_prefix@/pip-report.json"
+  ${_trt_wheels} numpy==2.2.6 transformers==5.14.1 jinja2==3.1.6
+  scikit-build-core==0.11.6 wheel==0.45.1 cmake==3.31.10 ninja==1.13.0
+  "cuda-python==${_edge_cuda_python_version}" ${_edge_kernel_dependencies})
+run("@_edge_python@" -I -m pip ${_pip_options} --no-deps --no-build-isolation "@_edge_source@")
+if("@TRTMC_EDGELLM_ONNX@")
+  # Original exporter dependencies, isolated from the caller environment. Export
+  # is CPU-side; native TensorRT compilation still runs on the inference GPU.
+  set(_torch_options ${_pip_options})
+  if("@TRTMC_EDGELLM_WHEELHOUSE@" STREQUAL "")
+    list(APPEND _torch_options --index-url https://download.pytorch.org/whl/cpu)
+  endif()
+  run("@_edge_python@" -I -m pip ${_torch_options} "torch==2.13.0")
+  run("@_edge_python@" -I -m pip ${_pip_options} "tensorrt-edgellm[export]==@_edge_version@")
+endif()
+run("@_edge_python@" -I -m pip --isolated check)
+run("@_edge_python@" -I -c "__import__('sys').exit(0 if __import__('tensorrt').__version__ == '@_edge_trt_version@' else 'TensorRT Python ' + __import__('tensorrt').__version__ + ' differs from native SDK @_edge_trt_version@')")
+set(ENV{PATH} "@CUDAToolkit_BIN_DIR@:$ENV{PATH}")
+run("${_edge_kernel_python}" -I "@_edge_source@/kernelSrcs/build_cutedsl.py"
+  --gpu_arch "sm_@TRTMC_EDGELLM_CUDA_ARCHITECTURE@" --arch "@CMAKE_SYSTEM_PROCESSOR@"
+  --kernels "@_edge_cute_cli_groups@" --cuda-version "@CUDAToolkit_VERSION_MAJOR@.@CUDAToolkit_VERSION_MINOR@" --jobs "@TRTMC_EDGELLM_JOBS@")
