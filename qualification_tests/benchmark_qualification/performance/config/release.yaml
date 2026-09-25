@@ -18,6 +18,11 @@ defaults:
     asset_loading_included: false
 
 excluded_profiles:
+  - model: parakeet-tdt-0.6b-v3
+    reason: >-
+      The family-local migration has no release-performance workload or receipt
+      yet. Target-GPU engine conversion and exact-transcript E2E parity remain
+      unverified; no performance qualification is claimed.
   - model: moge-2-vitl
     reason: >-
       Family-owned accuracy and internal performance qualification are present,

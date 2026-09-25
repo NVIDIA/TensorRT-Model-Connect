@@ -1,0 +1,53 @@
+{
+  "name": "parakeet-tdt-0.6b-v3",
+  "hf_id": "nvidia/parakeet-tdt-0.6b-v3",
+  "hf_revision": "541d1f99c6b0c3cd0b11a95167540bb8edefd82b",
+  "bundle": "parakeet-tdt-0.6b-v3.bundle",
+  "family": "parakeet_tdt",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "parakeet-tdt-0.6b-v3",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/Recording.wav",
+      "premerge": true
+    },
+    {
+      "name": "parakeet-tdt-0.6b-v3-asr-probe01",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_01_clean_48k_stereo_baseline.wav"
+    },
+    {
+      "name": "parakeet-tdt-0.6b-v3-asr-probe02",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_02_clean_16k_mono_no_resample.wav"
+    },
+    {
+      "name": "parakeet-tdt-0.6b-v3-asr-probe03",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_03_clean_48k_mono_resample.wav"
+    },
+    {
+      "name": "parakeet-tdt-0.6b-v3-asr-probe04",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_04_clean_48k_stereo_gain_skew.wav"
+    },
+    {
+      "name": "parakeet-tdt-0.6b-v3-asr-probe05",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_05_low_volume_48k_stereo.wav"
+    },
+    {
+      "name": "parakeet-tdt-0.6b-v3-asr-probe06",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_06_leading_trailing_silence_48k_stereo.wav"
+    },
+    {
+      "name": "parakeet-tdt-0.6b-v3-asr-probe08",
+      "max_new_tokens": 50,
+      "test_input_audio": "data/asr_probes/probe_08_noisy_48k_stereo_snr20.wav"
+    }
+  ],
+  "task": "speech_transcription",
+  "tensor_parallel_size": 1
+}
