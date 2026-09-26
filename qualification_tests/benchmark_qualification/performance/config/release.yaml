@@ -18,6 +18,10 @@ defaults:
     asset_loading_included: false
 
 excluded_profiles:
+  - model: minicpm5-1b
+    reason: >-
+      Checkpoint E2E coverage is declared, but target-GPU parity and a release
+      performance workload/receipt remain unverified.
   - model: moge-2-vitl
     reason: >-
       Family-owned accuracy and internal performance qualification are present,

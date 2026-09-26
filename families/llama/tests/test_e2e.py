@@ -563,6 +563,14 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
                 f"(bundle max={manifest['max_sequence_length']})" in payload["runtime_stderr"]
             )
 
+    if "expected_runtime_prefill_tokens" in case:
+        from families.llama.tests.runtime_receipt import assert_prefill_token_count
+
+        with evidence_stage("compare"):
+            assert_prefill_token_count(
+                payload["runtime_stderr"], int(case["expected_runtime_prefill_tokens"])
+            )
+
     if _NATIVE_KV_FIELDS <= case.keys():
         from families.llama.tests.runtime_receipt import assert_native_kv_receipt
 
