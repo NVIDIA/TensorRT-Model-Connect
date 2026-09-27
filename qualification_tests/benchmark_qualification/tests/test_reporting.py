@@ -133,3 +133,21 @@ def test_archive_rejects_truncated_inventory(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="truncated"):
         _inventory((inventory,), "report/run")
+
+
+def test_archive_rejects_inventory_without_prefix(tmp_path: Path) -> None:
+    import pytest
+
+    summary = tmp_path / "summary.json"
+    results = tmp_path / "results.json"
+    inventory = tmp_path / "inventory.json"
+    summary.write_text(json.dumps({"schema_version": "trtmc.accperf_nas_summary/v1", "run_id": "run", "rows": []}), encoding="utf-8")
+    results.write_text(json.dumps({"cases": []}), encoding="utf-8")
+    inventory.write_text(json.dumps({"data": {"truncated": False, "matches": []}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="--inventory-prefix"):
+        render_archive(
+            summary, results, tmp_path / "out",
+            repository=Path(__file__).resolve().parents[3],
+            inventory_paths=(inventory,),
+        )

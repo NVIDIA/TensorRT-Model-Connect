@@ -140,6 +140,8 @@ def render_archive(
     if not isinstance(results.get("cases"), list):
         raise ValueError("archived results have no cases")
     prefix = inventory_prefix.rstrip("/")
+    if inventory_paths and not prefix:
+        raise ValueError("--inventory-prefix is required with --inventory")
     inventory = _inventory(inventory_paths, prefix)
     datasets = _dataset_definitions(repository)
     rows = summary["rows"]
