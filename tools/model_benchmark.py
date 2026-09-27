@@ -7,9 +7,8 @@
 from __future__ import annotations
 
 import argparse
-import html
-import json
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -29,6 +28,7 @@ from qualification_tests.benchmark_qualification.catalog import (  # noqa: E402
     select,
 )
 from qualification_tests.benchmark_qualification.performance.qualification import run_performance  # noqa: E402
+from qualification_tests.benchmark_qualification.reporting import write_local_summary  # noqa: E402
 from qualification_tests.benchmark_qualification.runtime import context_from_args, write_result  # noqa: E402
 
 
@@ -118,6 +118,22 @@ def _run(cases: Sequence[QualificationCase], arguments: argparse.Namespace) -> i
                 "error": str(error),
             }
             write_result(context.case_artifacts(case), result)
+        except Exception as error:
+            # A single family must not prevent the campaign from producing a
+            # complete report for every other model.
+            output = context.case_artifacts(case)
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "execution.stderr.log").write_text(traceback.format_exc(), encoding="utf-8")
+            result = {
+                "schema_version": "trtmc.qualification-result/v1",
+                "case": case.id,
+                "kind": case.kind,
+                "model": case.model,
+                "benchmark": case.benchmark,
+                "status": "error",
+                "error": f"unexpected {type(error).__name__}: {error}",
+            }
+            write_result(output, result)
         results.append(result)
         print(f"  {result['status']}", flush=True)
     summary = {
@@ -132,25 +148,7 @@ def _run(cases: Sequence[QualificationCase], arguments: argparse.Namespace) -> i
 
 
 def _write_summary(output: Path, summary: Mapping[str, Any]) -> None:
-    (output / "report.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    rows = []
-    for case in summary["cases"]:
-        rows.append(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-                html.escape(str(case.get("model", ""))),
-                html.escape(str(case.get("kind", ""))),
-                html.escape(str(case.get("case", ""))),
-                html.escape(str(case.get("status", ""))),
-            )
-        )
-    document = """<!doctype html><meta charset=\"utf-8\"><title>TRTMC model benchmark</title>
-<h1>Internal model benchmark</h1><p>Status: <strong>{status}</strong></p>
-<table><thead><tr><th>Model</th><th>Kind</th><th>Case</th><th>Status</th></tr></thead>
-<tbody>{rows}</tbody></table><p><a href=\"report.json\">report.json</a></p>
-""".format(status=html.escape(str(summary["status"])), rows="".join(rows))
-    (output / "report.html").write_text(document, encoding="utf-8")
+    write_local_summary(output, summary)
 
 
 if __name__ == "__main__":

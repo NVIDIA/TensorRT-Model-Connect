@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import os
 import site
@@ -366,18 +365,9 @@ def write_result(output: Path, result: Mapping[str, Any]) -> None:
     (output / "result.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    rows = []
-    for name, value in result.get("metrics", {}).items():
-        rows.append(f"<tr><th>{html.escape(str(name))}</th><td>{html.escape(str(value))}</td></tr>")
-    document = """<!doctype html><meta charset=\"utf-8\"><title>TRTMC qualification</title>
-<h1>{case}</h1><p>Status: <strong>{status}</strong></p><table>{rows}</table>
-<p>Machine-readable evidence: <a href=\"result.json\">result.json</a></p>
-""".format(
-        case=html.escape(str(result.get("case", "qualification"))),
-        status=html.escape(str(result.get("status", "unknown"))),
-        rows="".join(rows),
-    )
-    (output / "report.html").write_text(document, encoding="utf-8")
+    from .reporting import write_case_report
+
+    write_case_report(output, result)
 
 
 def _path_assignments(values: Sequence[str], option: str) -> dict[str, Path]:
