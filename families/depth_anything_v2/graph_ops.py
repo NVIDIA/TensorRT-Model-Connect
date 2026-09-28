@@ -199,7 +199,7 @@ def resize_bilinear(network, tensor, output_shape: tuple[int, int, int, int], *,
     """Resize the trailing two (H, W) dims of an NCHW tensor."""
     layer = network.add_resize(tensor)
     layer.shape = output_shape
-    layer.resize_mode = trt.ResizeMode.LINEAR
+    layer.resize_mode = trt.InterpolationMode.LINEAR
     layer.coordinate_transformation = (
         trt.ResizeCoordinateTransformation.ALIGN_CORNERS
         if align_corners
