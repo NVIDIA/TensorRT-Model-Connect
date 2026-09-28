@@ -1,7 +1,7 @@
 {
   "threshold_overrides": {
-    "depth_absrel_mean": 0.05,
-    "depth_rel_l2": 0.05,
-    "depth_pearson_correlation": 0.98
+    "depth_mae_normalized": 0.01,
+    "depth_rel_l2": 0.02,
+    "depth_pearson_correlation": 0.999
   }
 }

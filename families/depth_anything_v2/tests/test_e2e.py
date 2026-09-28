@@ -30,7 +30,7 @@ from tensorrt_model_connect import BuildRequest, build
 _TEST_DIR = Path(__file__).resolve().parent
 _FAMILY = _TEST_DIR.parent.name
 _OPERATORS = {
-    "depth_absrel_mean": "<=",
+    "depth_mae_normalized": "<=",
     "depth_rel_l2": "<=",
     "depth_pearson_correlation": ">=",
 }
@@ -184,14 +184,25 @@ def _reference_depth(model_dir: Path, image: Path, image_size: int) -> np.ndarra
 
 
 def _metrics(actual: np.ndarray, reference: np.ndarray) -> dict[str, float]:
+    """Depth-map error metrics that stay meaningful when much of the frame is
+    background at (or near) zero relative depth.
+
+    A per-pixel relative error (`|delta| / |reference|`) blows up on this
+    output: Depth Anything's "relative" depth is ReLU-clipped, so roughly a
+    quarter of a typical frame's reference pixels sit near zero, and dividing
+    a tiny absolute difference by a near-zero reference produces a huge ratio
+    that reflects the metric's denominator, not the model. MAE normalized by
+    the reference's own dynamic range, the global L2 ratio, and correlation
+    all stay well-behaved under that distribution.
+    """
     assert actual.shape == reference.shape
     actual64 = actual.astype(np.float64).ravel()
     reference64 = reference.astype(np.float64).ravel()
     delta = actual64 - reference64
-    denominator = np.maximum(np.abs(reference64), 1.0e-6)
+    depth_range = max(float(reference64.max() - reference64.min()), 1.0e-6)
     correlation = float(np.corrcoef(actual64, reference64)[0, 1])
     return {
-        "depth_absrel_mean": float(np.mean(np.abs(delta) / denominator)),
+        "depth_mae_normalized": float(np.mean(np.abs(delta)) / depth_range),
         "depth_rel_l2": float(np.linalg.norm(delta) / max(float(np.linalg.norm(reference64)), 1.0e-12)),
         "depth_pearson_correlation": correlation,
     }
