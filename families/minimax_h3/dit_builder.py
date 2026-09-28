@@ -44,9 +44,9 @@ def _dense_modality_change(
     denominator = network.add_elementwise(
         denominator, epsilon, trt.ElementWiseOperation.MAX
     ).get_output(0)
-    return network.add_elementwise(
-        numerator, denominator, trt.ElementWiseOperation.DIV
-    ).get_output(0)
+    return network.add_elementwise(numerator, denominator, trt.ElementWiseOperation.DIV).get_output(
+        0
+    )
 
 
 def _guard_dense_cache_metric(
@@ -78,9 +78,11 @@ def _guard_dense_cache_metric(
         is_nan = network.add_unary(change, trt.UnaryOperation.ISNAN).get_output(0)
         is_inf = network.add_unary(change, trt.UnaryOperation.ISINF).get_output(0)
         bad = network.add_elementwise(is_nan, is_inf, trt.ElementWiseOperation.OR).get_output(0)
-        invalid = bad if invalid is None else network.add_elementwise(
-            invalid, bad, trt.ElementWiseOperation.OR
-        ).get_output(0)
+        invalid = (
+            bad
+            if invalid is None
+            else network.add_elementwise(invalid, bad, trt.ElementWiseOperation.OR).get_output(0)
+        )
     infinity = op.constant(network, np.full((1, 1), np.inf, dtype=np.float32))
     return network.add_select(invalid, infinity, metric).get_output(0)
 
@@ -141,12 +143,26 @@ def head_checkpoint_keys(
     )
 
 
+def _tail_block_range(profile: MiniMaxH3Config, start: int, end: int | None) -> range:
+    end = profile.num_layers if end is None else end
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in (start, end)):
+        raise ValueError("MiniMax-H3 tail block bounds must be integers")
+    if not 1 <= start < end <= profile.num_layers:
+        raise ValueError("MiniMax-H3 tail block range is invalid")
+    if not profile.turbo and (start != 1 or end != profile.num_layers):
+        raise ValueError("MiniMax-H3 partitioned tails require Turbo")
+    return range(start, end)
+
+
 def tail_checkpoint_keys(
     profile: MiniMaxH3Config = SOL_ENGINE_1344X768_124F,
+    *,
+    block_start: int = 1,
+    block_end: int | None = None,
 ) -> tuple[str, ...]:
     """Weights used by transformer blocks one through the final block."""
 
-    return _block_checkpoint_keys(range(1, profile.num_layers))
+    return _block_checkpoint_keys(_tail_block_range(profile, block_start, block_end))
 
 
 def finish_checkpoint_keys() -> tuple[str, ...]:
@@ -304,7 +320,8 @@ def _refine_text(
     *,
     consume_weights: bool = False,
 ):
-    hidden = op.linear(
+    context_linear = op.bf16_linear_with_fused_bias if profile.turbo else op.linear
+    hidden = context_linear(
         network, text, weights["context_embedder.weight"], weights["context_embedder.bias"]
     )
     rows = -1
@@ -624,12 +641,8 @@ def build_dit_head_engine(
     logger, builder, network, config = _native_builder(
         verbose, workspace_bytes, weight_streaming=weight_streaming
     )
-    video = network.add_input(
-        "video_hidden_states", trt.float32, (-1, profile.video_patch_dim)
-    )
-    audio = network.add_input(
-        "audio_hidden_states", trt.float32, (-1, profile.audio_in_channels)
-    )
+    video = network.add_input("video_hidden_states", trt.float32, (-1, profile.video_patch_dim))
+    audio = network.add_input("audio_hidden_states", trt.float32, (-1, profile.audio_in_channels))
     text = network.add_input("encoder_hidden_states", trt.float32, (-1, profile.text_dim))
     positions = network.add_input("position_ids", trt.float32, (-1, 3))
     adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
@@ -746,10 +759,13 @@ def build_dit_tail_engine(
     workspace_bytes: int | None = None,
     weight_streaming: bool = False,
     output_path: str | Path | None = None,
+    block_start: int = 1,
+    block_end: int | None = None,
 ) -> bytes | dict[str, int | str]:
     """Build blocks one through 49 and expose their reusable total residual."""
 
     _require_first_block_cache_profile(profile)
+    blocks = _tail_block_range(profile, block_start, block_end)
     logger, builder, network, config = _native_builder(
         verbose, workspace_bytes, weight_streaming=weight_streaming
     )
@@ -768,11 +784,11 @@ def build_dit_tail_engine(
             trt.bfloat16,
             (profile.adaln_table_rows, 6, profile.hidden_size),
         )
-        for index in range(1, profile.num_layers)
+        for index in blocks
     }
     cos, sin = _rope_tables(network, positions, profile)
     hidden = head_hidden
-    for index in range(1, profile.num_layers):
+    for index in blocks:
         hidden = _transformer_block(
             network,
             hidden,
@@ -785,18 +801,25 @@ def build_dit_tail_engine(
             index,
             consume_weights=consume_weights,
         )
-    tail_residual = network.add_elementwise(
-        hidden, head_hidden, trt.ElementWiseOperation.SUB
-    ).get_output(0)
+    # Turbo never reuses a tail. Preserve the split-plan binding name, but
+    # transfer the final hidden state directly, avoiding a BF16 subtract/add
+    # round trip that belongs only to FirstBlockCache reconstruction.
+    tail_residual = (
+        hidden
+        if profile.turbo
+        else network.add_elementwise(hidden, head_hidden, trt.ElementWiseOperation.SUB).get_output(
+            0
+        )
+    )
     tail_residual.name = "tail_residual"
     network.mark_output(tail_residual)
     op.validate_native_network(
         network,
-        expected_attentions=profile.num_layers - 1,
+        expected_attentions=len(blocks),
         label="DiT FirstBlockCache tail",
     )
     print(
-        f"[minimax-h3] building native DiT cache tail: blocks=1-{profile.num_layers - 1}, "
+        f"[minimax-h3] building native DiT cache tail: blocks={blocks.start}-{blocks.stop - 1}, "
         f"packed={profile.min_sequence_length}..{profile.sequence_length}, devices=1",
         file=sys.stderr,
     )
@@ -832,12 +855,8 @@ def build_dit_finish_engine(
     head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
     tail_residual = network.add_input("tail_residual", trt.bfloat16, (-1, profile.hidden_size))
     timestep_indices = network.add_input("timestep_indices", trt.int32, (-1,))
-    video = network.add_input(
-        "video_hidden_states", trt.float32, (-1, profile.video_patch_dim)
-    )
-    audio = network.add_input(
-        "audio_hidden_states", trt.float32, (-1, profile.audio_in_channels)
-    )
+    video = network.add_input("video_hidden_states", trt.float32, (-1, profile.video_patch_dim))
+    audio = network.add_input("audio_hidden_states", trt.float32, (-1, profile.audio_in_channels))
     _add_first_block_cache_profiles(
         builder,
         config,
@@ -849,9 +868,13 @@ def build_dit_finish_engine(
     final_modulation = network.add_input(
         "final_modulation", trt.bfloat16, (profile.max_timestep_count, 2, profile.hidden_size)
     )
-    hidden = network.add_elementwise(
-        head_hidden, tail_residual, trt.ElementWiseOperation.SUM
-    ).get_output(0)
+    hidden = (
+        tail_residual
+        if profile.turbo
+        else network.add_elementwise(
+            head_hidden, tail_residual, trt.ElementWiseOperation.SUM
+        ).get_output(0)
+    )
     hidden = _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile)
     _mark_sliced_velocity_outputs(network, hidden, weights, video, audio)
     op.validate_native_network(

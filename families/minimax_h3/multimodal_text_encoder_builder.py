@@ -8,6 +8,10 @@ T2VA binds one disabled dummy visual row; FL2VA and Ref2VA bind compact vision
 features plus their presentation-row indices.  The engine scatters the main
 features before layer zero, injects DeepStack features after layers 0..2, and
 emits ``hidden_states[50]`` before the full model's final normalization.
+
+Turbo may partition the same stack into contiguous layer ranges. Only the
+first range owns the embedding, and FP32 states connect all ranges without
+extra rounding. The family runtime rounds final conditioning to BF16.
 """
 
 from __future__ import annotations
@@ -104,11 +108,17 @@ ROPE_INV_FREQ_BITS = (
 )
 
 
-def checkpoint_keys() -> tuple[str, ...]:
-    """Return the exhaustive shared language-weight partition."""
+def checkpoint_keys(layer_start: int = 0, layer_end: int = NUM_LAYERS) -> tuple[str, ...]:
+    """Return weights for ``[layer_start, layer_end)``, embedding only at zero."""
 
-    names = ["model.language_model.embed_tokens.weight"]
-    for index in range(NUM_LAYERS):
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) for value in (layer_start, layer_end)
+    ):
+        raise ValueError("MiniMax-H3 text layer bounds must be integers")
+    if not 0 <= layer_start < layer_end <= NUM_LAYERS:
+        raise ValueError("MiniMax-H3 text layer bounds must satisfy 0 <= start < end <= 50")
+    names = ["model.language_model.embed_tokens.weight"] if layer_start == 0 else []
+    for index in range(layer_start, layer_end):
         prefix = f"model.language_model.layers.{index}"
         names.extend(
             [
@@ -155,7 +165,7 @@ def _repeat_kv(network, tensor):
     return concatenation.get_output(0)
 
 
-def _mrope_cache(network, position_ids):
+def _mrope_cache(network, position_ids, *, turbo_fp32: bool = False):
     """Build Qwen3-VL interleaved ``[T,H,W]`` MRoPE in FP32."""
 
     positions = op.cast(network, position_ids, trt.float32)
@@ -194,7 +204,8 @@ def _mrope_cache(network, position_ids):
     ).get_output(0)
     cos = network.add_unary(frequency, trt.UnaryOperation.COS).get_output(0)
     sin = network.add_unary(frequency, trt.UnaryOperation.SIN).get_output(0)
-    return op.cast(network, cos, trt.bfloat16), op.cast(network, sin, trt.bfloat16)
+    dtype = trt.float32 if turbo_fp32 else trt.bfloat16
+    return op.cast(network, cos, dtype), op.cast(network, sin, dtype)
 
 
 def _visual_count_active(network, vision_count):
@@ -228,7 +239,7 @@ def _scatter_visual_rows(network, base_like, row_indices, compact, active):
     return scatter.get_output(0)
 
 
-def _linear(network, hidden, weights, name: str):
+def _linear(network, hidden, weights, name: str, *, turbo_fp32: bool = False):
     prescale = weights.get(f"{name}.pre_quant_scale")
     if prescale is not None:
         prescale = op.weight_constant(network, np.asarray(prescale).reshape(1, -1))
@@ -236,7 +247,14 @@ def _linear(network, hidden, weights, name: str):
         hidden = network.add_elementwise(
             hidden, prescale, trt.ElementWiseOperation.PROD
         ).get_output(0)
-    return op.linear(network, hidden, weights[f"{name}.weight"])
+    if not turbo_fp32:
+        return op.linear(network, hidden, weights[f"{name}.weight"])
+    return op.linear(
+        network,
+        hidden,
+        weights[f"{name}.weight"],
+        compute_dtype=trt.float32,
+    )
 
 
 @op.cleanup_failed_build
@@ -249,14 +267,28 @@ def build_multimodal_text_encoder_engine(
     workspace_bytes: int | None = None,
     weight_streaming: bool = False,
     output_path: str | Path | None = None,
+    turbo_fp32: bool = False,
+    layer_start: int = 0,
+    layer_end: int = NUM_LAYERS,
 ) -> bytes | dict[str, int | str]:
-    """Build the unified T2VA/FL2VA/Ref2VA Qwen language plan."""
+    """Build the shared language plan, optionally one contiguous Turbo stage.
 
+    Sequential Turbo stages compose the unchanged FP32 layer computation.
+    Stages after zero accept ``hidden_states`` in addition to the existing
+    nine inputs; positions and any global-layer DeepStack inputs are shared.
+    All stages expose physical FP32 outputs. The family runtime rounds the
+    last stage's conditioning to BF16 before passing it to the DiT.
+    """
+
+    if not isinstance(turbo_fp32, bool):
+        raise ValueError("MiniMax-H3 Turbo text precision selector must be a boolean")
     profile.validate()
-    expected_keys = set(checkpoint_keys())
+    expected_keys = set(checkpoint_keys(layer_start, layer_end))
+    if not turbo_fp32 and (layer_start != 0 or layer_end != NUM_LAYERS):
+        raise ValueError("MiniMax-H3 text layer partitioning requires Turbo FP32 computation")
     optional_keys = {
         f"model.language_model.layers.{index}.{name}.pre_quant_scale"
-        for index in range(NUM_LAYERS)
+        for index in range(layer_start, layer_end)
         for name in ("self_attn.o_proj", "mlp.down_proj")
     }
     missing = sorted(expected_keys - set(weights))
@@ -266,6 +298,8 @@ def build_multimodal_text_encoder_engine(
             "MiniMax-H3 multimodal text checkpoint partition mismatch: "
             f"missing={missing[:8]}, unexpected={unexpected[:8]}"
         )
+    if turbo_fp32 and optional_keys & set(weights):
+        raise ValueError("Turbo FP32 text computation requires the unquantized BF16 checkpoint")
     for name in optional_keys & set(weights):
         width = np.asarray(weights[f"{name.removesuffix('.pre_quant_scale')}.weight"]).shape[1]
         value = np.asarray(weights[name])
@@ -278,6 +312,9 @@ def build_multimodal_text_encoder_engine(
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     op.configure_builder(config, weight_streaming=weight_streaming)
+    if turbo_fp32:
+        # The author's Comfy TE computes FP32, without TF32 input rounding.
+        config.clear_flag(trt.BuilderFlag.TF32)
     op.configure_workspace(
         config,
         workspace_bytes,
@@ -298,28 +335,46 @@ def build_multimodal_text_encoder_engine(
             optimization.set_shape(
                 binding.name, binding.min_shape, binding.opt_shape, binding.max_shape
             )
+    if layer_start:
+        sequence = (
+            profile.min_sequence_length
+            if profile.min_sequence_length == profile.max_sequence_length
+            else -1
+        )
+        inputs["hidden_states"] = network.add_input(
+            "hidden_states", trt.float32, (sequence, HIDDEN_SIZE)
+        )
+        if sequence == -1:
+            optimization.set_shape(
+                "hidden_states",
+                (profile.min_sequence_length, HIDDEN_SIZE),
+                (profile.opt_sequence_length, HIDDEN_SIZE),
+                (profile.max_sequence_length, HIDDEN_SIZE),
+            )
     config.add_optimization_profile(optimization)
 
-    table = op.weight_constant(network, weights["model.language_model.embed_tokens.weight"])
-    table = op.cast(network, table, trt.bfloat16)
-    hidden = network.add_gather(table, inputs["input_ids"], 0).get_output(0)
-
     active = _visual_count_active(network, inputs["vision_count"])
-    visual = _scatter_visual_rows(
-        network,
-        hidden,
-        inputs["vision_row_indices"],
-        inputs["vision_embeds"],
-        active,
-    )
-    zero_mask = op.constant(network, np.zeros((1, 1), dtype=np.float32))
-    visual_mask = network.add_elementwise(
-        inputs["vision_mask"], zero_mask, trt.ElementWiseOperation.GREATER
-    ).get_output(0)
-    hidden = network.add_select(visual_mask, visual, hidden).get_output(0)
-    cos, sin = _mrope_cache(network, inputs["mrope_position_ids"])
+    if layer_start == 0:
+        table = op.weight_constant(network, weights["model.language_model.embed_tokens.weight"])
+        table = op.cast(network, table, trt.float32 if turbo_fp32 else trt.bfloat16)
+        hidden = network.add_gather(table, inputs["input_ids"], 0).get_output(0)
+        visual = _scatter_visual_rows(
+            network,
+            hidden,
+            inputs["vision_row_indices"],
+            inputs["vision_embeds"],
+            active,
+        )
+        zero_mask = op.constant(network, np.zeros((1, 1), dtype=np.float32))
+        visual_mask = network.add_elementwise(
+            inputs["vision_mask"], zero_mask, trt.ElementWiseOperation.GREATER
+        ).get_output(0)
+        hidden = network.add_select(visual_mask, visual, hidden).get_output(0)
+    else:
+        hidden = inputs["hidden_states"]
+    cos, sin = _mrope_cache(network, inputs["mrope_position_ids"], turbo_fp32=turbo_fp32)
 
-    for index in range(NUM_LAYERS):
+    for index in range(layer_start, layer_end):
         prefix = f"model.language_model.layers.{index}"
         normalized = op.rms_norm(
             network,
@@ -328,9 +383,15 @@ def build_multimodal_text_encoder_engine(
             HIDDEN_SIZE,
             NORM_EPS,
         )
-        query = _linear(network, normalized, weights, f"{prefix}.self_attn.q_proj")
-        key = _linear(network, normalized, weights, f"{prefix}.self_attn.k_proj")
-        value = _linear(network, normalized, weights, f"{prefix}.self_attn.v_proj")
+        query = _linear(
+            network, normalized, weights, f"{prefix}.self_attn.q_proj", turbo_fp32=turbo_fp32
+        )
+        key = _linear(
+            network, normalized, weights, f"{prefix}.self_attn.k_proj", turbo_fp32=turbo_fp32
+        )
+        value = _linear(
+            network, normalized, weights, f"{prefix}.self_attn.v_proj", turbo_fp32=turbo_fp32
+        )
         query = _per_head_norm(
             network, query, weights[f"{prefix}.self_attn.q_norm.weight"], NUM_HEADS
         )
@@ -380,13 +441,17 @@ def build_multimodal_text_encoder_engine(
         attention.name = f"{prefix}.self_attn.native_attention"
         attention.metadata = f"trtmc.native_op=IAttention;source={attention.name}"
         attention.get_output(0).name = f"{attention.name}.output"
-        attention.decomposable = False
+        # Keep native IAttention, permitting its FP32 constituent lowering
+        # when TensorRT has no matching fused FP32 tactic.
+        attention.decomposable = turbo_fp32
         update = op.heads_to_rows(
             network,
             attention.get_output(0),
             NUM_HEADS * HEAD_DIM,
         )
-        update = _linear(network, update, weights, f"{prefix}.self_attn.o_proj")
+        update = _linear(
+            network, update, weights, f"{prefix}.self_attn.o_proj", turbo_fp32=turbo_fp32
+        )
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 
         normalized = op.rms_norm(
@@ -396,11 +461,13 @@ def build_multimodal_text_encoder_engine(
             HIDDEN_SIZE,
             NORM_EPS,
         )
-        gate = _linear(network, normalized, weights, f"{prefix}.mlp.gate_proj")
-        up = _linear(network, normalized, weights, f"{prefix}.mlp.up_proj")
+        gate = _linear(
+            network, normalized, weights, f"{prefix}.mlp.gate_proj", turbo_fp32=turbo_fp32
+        )
+        up = _linear(network, normalized, weights, f"{prefix}.mlp.up_proj", turbo_fp32=turbo_fp32)
         gate = op.silu(network, gate)
         gated = network.add_elementwise(gate, up, trt.ElementWiseOperation.PROD).get_output(0)
-        update = _linear(network, gated, weights, f"{prefix}.mlp.down_proj")
+        update = _linear(network, gated, weights, f"{prefix}.mlp.down_proj", turbo_fp32=turbo_fp32)
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 
         if index < 3:
@@ -415,15 +482,19 @@ def build_multimodal_text_encoder_engine(
                 hidden, deepstack, trt.ElementWiseOperation.SUM
             ).get_output(0)
 
+    # Keep the Turbo output FP32 through the engine boundary. A terminal
+    # FP32->BF16->FP32 cast pair can be lowered to a packed BF16 output while
+    # the runtime expects FP32 storage. The family runtime performs the
+    # author's final BF16 conditioning round after the last stage instead.
     output = op.cast(network, hidden, trt.float32)
     output.name = abi.outputs[0].name
     network.mark_output(output)
     op.validate_native_network(
-        network, expected_attentions=NUM_LAYERS, label="multimodal text encoder"
+        network, expected_attentions=layer_end - layer_start, label="multimodal text encoder"
     )
     print(
         "[minimax-h3] building shared Qwen3-VL language stack: "
-        f"layers={NUM_LAYERS}, sequence={profile.min_sequence_length}.."
+        f"layers={layer_start}:{layer_end}, sequence={profile.min_sequence_length}.."
         f"{profile.max_sequence_length}, compact_vision={profile.min_vision_rows}.."
         f"{profile.max_vision_rows}",
         file=sys.stderr,

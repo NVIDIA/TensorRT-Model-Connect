@@ -56,7 +56,8 @@ enum class Fl2vaPlanKind {
 
 // Validates the exact FL2VA-only or Ref2VA-superset Qwen envelope before enqueue,
 // including compatible bundles built before the compact canvas was added.
-void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind);
+void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind,
+                           bool text_continuation = false);
 
 using Fl2vaPlanLoader = std::function<std::unique_ptr<ITrtModule>(const std::string& section)>;
 
@@ -74,11 +75,17 @@ struct Fl2vaConditioningResult {
 Fl2vaConditioningResult run_fl2va_conditioning(const VideoGenerationRequest& request,
                                                int32_t output_height, int32_t output_width,
                                                int32_t output_frames, ITokenizer& tokenizer,
-                                               const Fl2vaPlanLoader& loader);
+                                               const Fl2vaPlanLoader& loader,
+                                               const std::vector<std::string>& text_sections =
+                                                   {"text_encoder_plan"},
+                                               bool posterior_mean = false);
 Fl2vaConditioningResult run_fl2va_conditioning(const std::string& prompt,
                                                const MiniMaxH3PreparedKeyframes& keyframes,
                                                ITokenizer& tokenizer,
-                                               const Fl2vaPlanLoader& loader);
+                                               const Fl2vaPlanLoader& loader,
+                                               const std::vector<std::string>& text_sections =
+                                                   {"text_encoder_plan"},
+                                               bool posterior_mean = false);
 
 Fl2vaTextPresentation make_fl2va_text_presentation(const std::string& prompt,
                                                    int32_t keyframe_count, int32_t height,
@@ -87,21 +94,27 @@ Fl2vaVisionInputs make_fl2va_vision_inputs(const VideoImageInput& image);
 Fl2vaVisionFeatures run_fl2va_vision_encoder(ITrtModule& module, const Fl2vaVisionInputs& inputs);
 std::vector<float> run_fl2va_text_encoder(ITrtModule& module,
                                           const Fl2vaTextPresentation& presentation,
-                                          const Fl2vaVisionFeatures& features);
+                                          const Fl2vaVisionFeatures& features,
+                                          const std::vector<float>* hidden_states = nullptr);
 
 // Returns one normalized keyframe latent in contiguous [24, 1, H/16, W/16]
 // order. The posterior is spatially stitched before sampling. Each call uses
-// a fresh native Torch-compatible generator at seed 42, matching the released
-// FL2VA recipe independently for first and last keyframes.
-std::vector<float> run_fl2va_keyframe_vae_encoder(ITrtModule& module, const VideoImageInput& image);
+// a fresh native Torch-compatible generator at seed 42, preserving the original
+// FL2VA recipe independently for first and last keyframes. posterior_mean uses
+// the stitched mean and FP32 normalization instead, without sampling or FP16 rounding.
+std::vector<float> run_fl2va_keyframe_vae_encoder(ITrtModule& module, const VideoImageInput& image,
+                                                  bool posterior_mean = false);
 
 // Pure helpers shared by runtime and mock-plan tests.
 std::vector<float> stitch_fl2va_posterior_tiles(const std::vector<float>& tiles, int32_t height,
-                                                int32_t width);
+                                                int32_t width, bool turbo_canvas = false);
 std::vector<float>
 sample_and_normalize_fl2va_posterior(const std::vector<float>& posterior_parameters,
                                      int32_t latent_height, int32_t latent_width,
                                      const std::vector<float>& standard_normal);
+std::vector<float>
+normalize_fl2va_posterior_mean(const std::vector<float>& posterior_parameters,
+                                int32_t latent_height, int32_t latent_width);
 std::vector<float> patchify_fl2va_keyframe_latent(const std::vector<float>& latent,
                                                   int32_t latent_height, int32_t latent_width);
 

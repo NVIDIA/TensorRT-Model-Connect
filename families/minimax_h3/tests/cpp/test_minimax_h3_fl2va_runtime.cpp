@@ -6,8 +6,10 @@
 #include "families/minimax_h3/runtime/conditioning.h"
 #include "families/minimax_h3/runtime/fl2va_runtime.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -48,7 +50,7 @@ enum class ModuleKind { kVision, kText, kKeyframeVae };
 
 class FakeModule final : public trtmc::ITrtModule {
   public:
-    explicit FakeModule(ModuleKind kind) : kind_(kind) {
+    explicit FakeModule(ModuleKind kind, bool text_continuation = false) : kind_(kind) {
         if (kind == ModuleKind::kVision) {
             add_input("pixel_values", trtmc::DType::kFloat32);
             add_input("interp_indices", trtmc::DType::kInt32);
@@ -63,6 +65,8 @@ class FakeModule final : public trtmc::ITrtModule {
             for (const char* name :
                  {"vision_mask", "vision_embeds", "deepstack_0", "deepstack_1", "deepstack_2"})
                 add_input(name, trtmc::DType::kFloat32);
+            if (text_continuation)
+                add_input("hidden_states", trtmc::DType::kFloat32);
             add_output("encoder_hidden_states", trtmc::DType::kFloat32);
         } else {
             add_input("pixel_tiles", trtmc::DType::kFloat32);
@@ -70,7 +74,14 @@ class FakeModule final : public trtmc::ITrtModule {
         }
     }
 
+    ~FakeModule() override {
+        if (on_destroy)
+            on_destroy();
+    }
+
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        if (on_forward)
+            on_forward(inputs);
         last_inputs = inputs;
         output_storage_.clear();
         trtmc::TensorMap outputs;
@@ -88,9 +99,16 @@ class FakeModule final : public trtmc::ITrtModule {
             const int64_t rows = inputs.at("input_ids").shape.at(0);
             observed_vision_count = *static_cast<const int32_t*>(inputs.at("vision_count").data);
             auto& values = output_storage_["encoder_hidden_states"];
-            values.assign(static_cast<std::size_t>(rows) * 5120, 0.25F);
+            values.assign(static_cast<std::size_t>(rows) * 5120, text_value);
+            if (has_input("hidden_states")) {
+                const auto* previous = static_cast<const float*>(inputs.at("hidden_states").data);
+                for (std::size_t index = 0; index < values.size(); ++index)
+                    values[index] = previous[index] + text_value;
+            }
             outputs.emplace("encoder_hidden_states",
-                            trtmc::Tensor{values.data(), {rows, 5120}, trtmc::DType::kFloat32});
+                            trtmc::Tensor{values.data(), malformed_text_output
+                                ? std::vector<int64_t>{5120, rows}
+                                : std::vector<int64_t>{rows, 5120}, trtmc::DType::kFloat32});
         } else {
             const int64_t tiles = inputs.at("pixel_tiles").shape.at(0);
             auto& values = output_storage_["posterior_parameter_tiles"];
@@ -104,7 +122,10 @@ class FakeModule final : public trtmc::ITrtModule {
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
     void forward_device_async(const trtmc::DeviceTensorMap&) override {}
     void forward_async(const trtmc::TensorMap&) override {}
-    void sync() override {}
+    void sync() override {
+        if (on_sync)
+            on_sync();
+    }
     cudaStream_t stream() const override { return nullptr; }
     void enable_cuda_graph() override {}
     bool cuda_graph_active() const override { return false; }
@@ -128,7 +149,9 @@ class FakeModule final : public trtmc::ITrtModule {
     }
     bool has_input(const std::string& name) const override { return inputs_.count(name) != 0; }
     bool has_output(const std::string& name) const override { return outputs_.count(name) != 0; }
-    trtmc::DType tensor_dtype(const std::string& name) const override { return dtypes_.at(name); }
+    trtmc::DType tensor_dtype(const std::string& name) const override {
+        return name == "hidden_states" ? hidden_dtype : dtypes_.at(name);
+    }
     std::vector<int64_t> tensor_shape(const std::string& name) const override {
         if (kind_ == ModuleKind::kVision) {
             if (outputs_.count(name) != 0)
@@ -169,6 +192,8 @@ class FakeModule final : public trtmc::ITrtModule {
                 return {3, rows[profile]};
             if (name == "vision_mask")
                 return {rows[profile], 1};
+            if (name == "hidden_states")
+                return {rows[profile], hidden_width};
             if (name == "vision_row_indices")
                 return {vision_rows[profile]};
             if (name == "vision_embeds" || name.rfind("deepstack_", 0) == 0)
@@ -197,6 +222,13 @@ class FakeModule final : public trtmc::ITrtModule {
     int32_t observed_vision_count{-1};
     int64_t profile_min_override{0};
     int64_t profile_max_override{0};
+    int64_t hidden_width{5120};
+    trtmc::DType hidden_dtype{trtmc::DType::kFloat32};
+    float text_value{0.25F};
+    bool malformed_text_output{false};
+    std::function<void(const trtmc::TensorMap&)> on_forward;
+    std::function<void()> on_sync;
+    std::function<void()> on_destroy;
 
   private:
     void add_input(const std::string& name, trtmc::DType dtype) {
@@ -362,6 +394,47 @@ void test_keyframe_vae_mock_and_posterior_helpers() {
         trtmc::minimax_h3::patchify_fl2va_keyframe_latent(normalized, latent_height, latent_width);
     check(rows.size() == 96 && rows[0] == normalized[0] && rows[4] == normalized[4],
           "FL2VA posterior normalizes channel-major then patchifies in DiT order");
+
+    std::fill(posterior.begin(), posterior.begin() + epsilon.size(), 1.0003F);
+    const auto mean = trtmc::minimax_h3::normalize_fl2va_posterior_mean(
+        posterior, latent_height, latent_width);
+    const auto sampled = trtmc::minimax_h3::sample_and_normalize_fl2va_posterior(
+        posterior, latent_height, latent_width, epsilon);
+    check(mean.size() == epsilon.size() &&
+              mean[0] == (1.0003F - 0.8580903411F) / 1.2223774195F && mean[0] != sampled[0],
+          "Turbo FL2VA posterior mean keeps FP32 precision without the legacy FP16 round");
+    std::fill(posterior.begin() + epsilon.size(), posterior.end(), 17.0F);
+    check(trtmc::minimax_h3::normalize_fl2va_posterior_mean(
+              posterior, latent_height, latent_width) == mean,
+          "Turbo FL2VA posterior mean is independent of variance and sampling noise");
+    bool rejected_mean_shape = false;
+    try { (void)trtmc::minimax_h3::normalize_fl2va_posterior_mean({}, 2, 2); }
+    catch (const std::invalid_argument&) { rejected_mean_shape = true; }
+    check(rejected_mean_shape, "Turbo FL2VA posterior mean rejects an invalid buffer");
+    const auto mock_mean = trtmc::minimax_h3::run_fl2va_keyframe_vae_encoder(
+        vae, make_image(544, 960), true);
+    check(mock_mean.size() == explicit_latent.size() &&
+              mock_mean[0] == -0.8580903411F / 1.2223774195F &&
+              mock_mean[0] == mock_mean[1] && mock_mean != explicit_latent,
+          "Turbo FL2VA keyframe encoder returns stitched means rather than random posterior samples");
+
+    const auto turbo_mean = trtmc::minimax_h3::run_fl2va_keyframe_vae_encoder(
+        vae, make_image(736, 1280), true);
+    check(turbo_mean.size() == 24U * 46U * 80U &&
+              turbo_mean.front() == -0.8580903411F / 1.2223774195F,
+          "Turbo FL2VA keyframe VAE preserves the 1280x736 canvas");
+    const auto tile_count = static_cast<std::size_t>(vae.last_inputs.at("pixel_tiles").shape[0]);
+    const auto turbo_posterior = trtmc::minimax_h3::stitch_fl2va_posterior_tiles(
+        std::vector<float>(tile_count * 48U * 16U * 16U, 1.25F), 736, 1280, true);
+    check(turbo_posterior.size() == 48U * 46U * 80U &&
+              std::all_of(turbo_posterior.begin(), turbo_posterior.end(),
+                          [](float value) { return std::abs(value - 1.25F) < 1e-6F; }),
+          "Turbo FL2VA posterior stitching covers every pixel of the nonlegacy canvas");
+    FakeTokenizer tokenizer;
+    const auto turbo_presentation = trtmc::minimax_h3::make_fl2va_text_presentation(
+        "prompt", 2, 736, 1280, tokenizer);
+    check(turbo_presentation.vision_row_indices.size() == 2U * 23U * 40U,
+          "Turbo FL2VA text presentation accepts both endpoints on the 1280x736 canvas");
 }
 
 void test_structured_request_keyframe_modes() {
@@ -441,12 +514,143 @@ void test_structured_request_keyframe_modes() {
           "FL2VA guidance-distilled contract rejects negative_prompt before plan loading");
 }
 
+void test_segmented_text_continuation_contract() {
+    using namespace trtmc::minimax_h3;
+    FakeTokenizer tokenizer;
+    const auto presentation = make_fl2va_text_presentation("prompt", 1, 32, 32, tokenizer);
+    Fl2vaVisionFeatures features;
+    features.rows = 1;
+    features.vision_embeds.assign(5120, 1.0F);
+    features.deepstack_0.assign(5120, 2.0F);
+    features.deepstack_1.assign(5120, 3.0F);
+    features.deepstack_2.assign(5120, 4.0F);
+    std::vector<float> states(presentation.input_ids.size() * 5120, 0.2501F);
+    FakeModule continuation(ModuleKind::kText, true);
+    continuation.text_value = 0.0001F;
+    auto encoded = run_fl2va_text_encoder(continuation, presentation, features, &states);
+    check(encoded.front() == states.front() + 0.0001F &&
+              encoded.back() == states.back() + 0.0001F &&
+              continuation.last_inputs.size() == 10 &&
+              continuation.last_inputs.at("hidden_states").dtype == trtmc::DType::kFloat32 &&
+              continuation.last_inputs.at("deepstack_2").data == features.deepstack_2.data(),
+          "FL2VA continuation preserves FP32 states and all compact vision inputs");
+
+    const auto reject = [&](FakeModule& module, const std::vector<float>* previous) {
+        try { (void)run_fl2va_text_encoder(module, presentation, features, previous); }
+        catch (const std::exception&) { return true; }
+        return false;
+    };
+    FakeModule initial(ModuleKind::kText);
+    check(reject(initial, &states), "FL2VA rejects a continuation plan missing hidden_states");
+    check(reject(continuation, nullptr), "FL2VA rejects a continuation plan as the initial segment");
+    continuation.hidden_dtype = trtmc::DType::kBFloat16;
+    check(reject(continuation, &states), "FL2VA rejects non-FP32 continuation bindings");
+    continuation.hidden_dtype = trtmc::DType::kFloat32;
+    continuation.hidden_width = 5119;
+    check(reject(continuation, &states), "FL2VA rejects a malformed continuation profile");
+    continuation.hidden_width = 5120;
+    std::vector<float> short_states(states.size() - 1);
+    check(reject(continuation, &short_states), "FL2VA rejects incorrectly sized continuation states");
+    continuation.malformed_text_output = true;
+    check(reject(continuation, &states), "FL2VA rejects transposed text output despite equal element count");
+}
+
+void test_segmented_conditioning_endpoints_and_lifetimes() {
+    using namespace trtmc::minimax_h3;
+    const std::vector<std::string> text_sections = {"text_encoder_plan", "text_encoder_1_plan",
+        "text_encoder_2_plan", "text_encoder_3_plan", "text_encoder_4_plan"};
+    FakeTokenizer tokenizer;
+    for (const int32_t count : {1, 2}) {
+        trtmc::MiniMaxH3PreparedKeyframes keyframes;
+        keyframes.images.assign(count, make_image(480, 864));
+        keyframes.anchors = count == 1 ? std::vector<int32_t>{123}
+                                      : std::vector<int32_t>{0, 123};
+        int live_text = 0;
+        std::size_t segment = 0;
+        float expected = 0.2501F;
+        std::vector<std::string> loaded;
+        const auto result = run_fl2va_conditioning("prompt", keyframes, tokenizer,
+            [&](const std::string& section) -> std::unique_ptr<trtmc::ITrtModule> {
+                loaded.push_back(section);
+                if (section == "fl2va_keyframe_vae_encoder_plan")
+                    return std::make_unique<FakeModule>(ModuleKind::kKeyframeVae);
+                if (section == "vision_encoder_plan")
+                    return std::make_unique<FakeModule>(ModuleKind::kVision);
+                check(live_text == 0, "FL2VA destroys each text module before loading the next");
+                check(segment < text_sections.size() && section == text_sections[segment],
+                      "FL2VA loads configured text segments in order");
+                const auto current = segment++;
+                auto module = std::make_unique<FakeModule>(ModuleKind::kText, current != 0);
+                module->text_value = current == 0 ? 0.2501F : 0.0001F;
+                auto synced = std::make_shared<bool>(false);
+                module->on_sync = [synced] { *synced = true; };
+                module->on_destroy = [&, synced] {
+                    check(*synced, "FL2VA synchronizes each segment before module destruction");
+                    --live_text;
+                };
+                module->on_forward = [&, current](const trtmc::TensorMap& inputs) {
+                    check(*static_cast<const int32_t*>(inputs.at("vision_count").data) == count * 405,
+                          "FL2VA segmented conditioning keeps all endpoint vision rows");
+                    check(inputs.at("mrope_position_ids").shape[1] == inputs.at("input_ids").shape[0],
+                          "FL2VA segmented conditioning keeps dynamic MRoPE rows");
+                    if (current != 0) {
+                        const auto* previous = static_cast<const float*>(inputs.at("hidden_states").data);
+                        check(previous[0] == expected,
+                              "FL2VA forwards unrounded FP32 state through every text segment");
+                        expected += 0.0001F;
+                    }
+                };
+                ++live_text;
+                return module;
+            }, text_sections, true);
+        check(segment == 5 && live_text == 0 && loaded.size() == 7 &&
+                  result.keyframe_latents.size() == static_cast<std::size_t>(count) &&
+                  result.keyframe_latents.front()[0] == -0.8580903411F / 1.2223774195F &&
+                  result.text_embeddings.size() == result.text_token_tags.size() * 5120U &&
+                  result.text_embeddings.front() == expected && result.text_embeddings.back() == expected,
+              "FL2VA one/two endpoint conditioning completes all five FP32 text segments");
+    }
+
+    trtmc::MiniMaxH3PreparedKeyframes keyframes;
+    keyframes.images.push_back(make_image(480, 864));
+    keyframes.anchors = {0};
+    for (const auto& invalid : {std::vector<std::string>{},
+                               std::vector<std::string>{"text_encoder_plan", "text_encoder_plan"}}) {
+        bool loaded = false;
+        bool rejected = false;
+        try {
+            (void)run_fl2va_conditioning("prompt", keyframes, tokenizer,
+                [&](const std::string&) -> std::unique_ptr<trtmc::ITrtModule> {
+                    loaded = true;
+                    return nullptr;
+                }, invalid);
+        } catch (const std::invalid_argument&) { rejected = true; }
+        check(rejected && !loaded, "FL2VA rejects invalid text section lists before loading any plan");
+    }
+    bool rejected_missing = false;
+    try {
+        (void)run_fl2va_conditioning("prompt", keyframes, tokenizer,
+            [&](const std::string& section) -> std::unique_ptr<trtmc::ITrtModule> {
+                if (section == "fl2va_keyframe_vae_encoder_plan")
+                    return std::make_unique<FakeModule>(ModuleKind::kKeyframeVae);
+                if (section == "vision_encoder_plan")
+                    return std::make_unique<FakeModule>(ModuleKind::kVision);
+                if (section == "text_encoder_plan")
+                    return std::make_unique<FakeModule>(ModuleKind::kText);
+                return nullptr;
+            }, text_sections);
+    } catch (const std::runtime_error&) { rejected_missing = true; }
+    check(rejected_missing, "FL2VA rejects missing continuation plans instead of returning partial text");
+}
+
 } // namespace
 
 int main() {
     test_official_qwen_presentation_and_mock_plans();
     test_keyframe_vae_mock_and_posterior_helpers();
     test_structured_request_keyframe_modes();
+    test_segmented_text_continuation_contract();
+    test_segmented_conditioning_endpoints_and_lifetimes();
     if (failures != 0)
         std::cerr << failures << " MiniMax-H3 FL2VA runtime test(s) failed\n";
     return failures == 0 ? 0 : 1;

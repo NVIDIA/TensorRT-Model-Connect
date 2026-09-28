@@ -29,6 +29,10 @@ using MiniMaxH3ModuleLoader = std::function<std::unique_ptr<ITrtModule>(
 struct MiniMaxH3Schedule {
     std::vector<float> sigmas;
     std::vector<float> timesteps;
+    // Turbo retains the author's independently rounded Python-float deltas
+    // and audio clock slopes instead of subtracting FP32 sigma endpoints.
+    std::vector<float> deltas;
+    std::vector<float> slopes;
 };
 
 struct MiniMaxH3VaeTileLayout {
@@ -56,6 +60,7 @@ struct MiniMaxH3Geometry {
     int32_t vae_tile_rows{0};
     int32_t vae_tile_columns{0};
     int32_t vae_tile_count{0};
+    bool turbo_profile{false};
 };
 
 struct MiniMaxH3ResolvedGeneration {
@@ -66,7 +71,8 @@ struct MiniMaxH3ResolvedGeneration {
 };
 
 MiniMaxH3ResolvedGeneration resolve_minimax_h3_generation(
-    const VideoGenerationRequest& request, const minimax_h3::SuperResolutionConfig& sr = {});
+    const VideoGenerationRequest& request, const minimax_h3::SuperResolutionConfig& sr = {},
+    bool turbo = false);
 
 struct MiniMaxH3DenoiserMetadata {
     std::vector<float> positions;
@@ -80,6 +86,10 @@ enum class MiniMaxH3DenoiserProfileLayout {
     kFiveSecondDynamicThenPublicDynamic,
 };
 
+enum class MiniMaxH3Sampler { kDistilled, kTurboEuler };
+
+MiniMaxH3Sampler parse_minimax_h3_sampler(const std::string& sampler);
+
 struct MiniMaxH3DenoiserConfig {
     int32_t scheduler_grid_points{50};
     int32_t transformer_forwards{49};
@@ -88,7 +98,20 @@ struct MiniMaxH3DenoiserConfig {
     int32_t optimization_profile_count{1};
     MiniMaxH3DenoiserProfileLayout optimization_profile_layout{
         MiniMaxH3DenoiserProfileLayout::kLegacy};
+    MiniMaxH3Sampler sampler{MiniMaxH3Sampler::kDistilled};
+    bool first_block_cache{true};
+    std::vector<std::string> text_encoder_sections{"text_encoder_plan"};
+    std::vector<std::string> adaln_precompute_sections{"adaln_precompute_plan"};
+    std::vector<std::string> denoiser_tail_sections{"denoiser_tail_plan"};
 };
+
+void validate_minimax_h3_sampler_config(const MiniMaxH3DenoiserConfig& config);
+void validate_minimax_h3_plan_sections(const std::vector<std::string>& sections);
+std::array<int32_t, 2> minimax_h3_tail_layer_range(std::size_t segment, std::size_t count);
+using MiniMaxH3AdalnCoverage = std::array<bool, 51>;
+int32_t claim_minimax_h3_adaln_output(MiniMaxH3AdalnCoverage& coverage,
+                                     const std::string& output_name, bool allow_final = true);
+void validate_minimax_h3_adaln_coverage(const MiniMaxH3AdalnCoverage& coverage);
 
 struct MiniMaxH3Ref2VAConfig {
     bool enabled{false};
@@ -103,14 +126,28 @@ struct MiniMaxH3Ref2VAConfig {
     float first_block_cache_threshold{0.08F};
     std::array<float, 32> audio_latent_mean{};
     std::array<float, 32> audio_latent_std{};
+    std::vector<std::string> text_encoder_sections{"text_encoder_plan"};
+    std::vector<std::string> adaln_precompute_sections{"ref2va_adaln_precompute_plan"};
+    std::vector<std::string> denoiser_tail_sections{"ref2va_dit_tail_plan"};
 };
 
+void validate_minimax_h3_ref2va_sampler_config(const MiniMaxH3Ref2VAConfig& config,
+                                               const MiniMaxH3DenoiserConfig& denoiser);
+
 MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift);
+MiniMaxH3Schedule make_minimax_h3_turbo_schedule(int32_t transformer_forwards, float shift);
+float minimax_h3_round_bfloat16(float value);
+std::vector<float> pack_minimax_h3_turbo_audio_noise(const std::vector<float>& channel_major_noise,
+                                                   int32_t audio_latent_frames);
+void minimax_h3_turbo_scheduler_step(float* sample, const float* raw_velocity, std::size_t count,
+                                    float delta, float audio_slope = 1.0F,
+                                    bool audio = false);
 bool should_compute_minimax_h3_tail(std::size_t step, std::size_t transformer_forwards,
                                     float metric, float cache_threshold);
-MiniMaxH3VaeTileLayout make_minimax_h3_vae_tile_layout(int32_t output_height, int32_t output_width);
+MiniMaxH3VaeTileLayout make_minimax_h3_vae_tile_layout(int32_t output_height, int32_t output_width,
+                                                    bool turbo = false);
 MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output_height,
-                                           int32_t output_width);
+                                           int32_t output_width, bool turbo = false);
 MiniMaxH3Geometry make_minimax_h3_fl2va_geometry(const MiniMaxH3Geometry& target_geometry,
                                                  int32_t keyframe_count);
 // Each of the four BF16 cache tensors follows the current request, not profile MAX.

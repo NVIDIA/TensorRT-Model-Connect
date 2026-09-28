@@ -9,6 +9,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   plugin.cpp
   ref2va_runtime.cpp
   super_resolution_runtime.cpp
+  turbo_noise.cpp
   torch_cuda_normal.cu
 )
 
@@ -88,7 +89,7 @@ if(TRTMC_BUILD_TESTS)
     SKIP_RETURN_CODE 77
   )
 
-  foreach(_trtmc_minimax_test IN ITEMS conditioning fl2va_runtime ref2va_runtime)
+  foreach(_trtmc_minimax_test IN ITEMS conditioning fl2va_runtime ref2va_runtime turbo_noise)
     add_executable(test_minimax_h3_${_trtmc_minimax_test}
       ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_minimax_h3_${_trtmc_minimax_test}.cpp
     )
@@ -111,6 +112,13 @@ if(TRTMC_BUILD_TESTS)
       COMMAND test_minimax_h3_${_trtmc_minimax_test})
   endforeach()
 
+  # The implementation is host-only, but its launch-layout parity depends on
+  # querying CUDA device properties.
+  set_tests_properties(minimax_h3_turbo_noise PROPERTIES
+    LABELS gpu
+    SKIP_RETURN_CODE 77
+  )
+
   if(WIN32)
     set(_trtmc_minimax_test_path
       "$<TARGET_FILE_DIR:trtmc_model_minimax_h3>;$ENV{PATH}")
@@ -120,7 +128,8 @@ if(TRTMC_BUILD_TESTS)
         test_minimax_h3_cuda_rng
         minimax_h3_conditioning
         minimax_h3_fl2va_runtime
-        minimax_h3_ref2va_runtime)
+        minimax_h3_ref2va_runtime
+        minimax_h3_turbo_noise)
       set_tests_properties(${_trtmc_minimax_test_target} PROPERTIES
         ENVIRONMENT "PATH=${_trtmc_minimax_test_path}")
     endforeach()

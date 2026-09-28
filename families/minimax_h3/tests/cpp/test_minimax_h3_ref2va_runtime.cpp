@@ -68,7 +68,7 @@ struct TensorSpec {
     std::vector<int64_t> maximum;
 };
 
-enum class ForwardKind { kNone, kText, kAdaln, kDenoiser, kVideoVae, kAudioVae };
+enum class ForwardKind { kNone, kText, kAdaln, kDenoiser, kVideoVae, kAudioVae, kImageVae };
 
 class FakeModule final : public trtmc::ITrtModule {
   public:
@@ -77,6 +77,9 @@ class FakeModule final : public trtmc::ITrtModule {
     std::unordered_map<std::string, TensorSpec> tensors;
     int32_t selected_profile{0};
     int32_t profile_count{1};
+    int32_t forward_calls{0};
+    float text_value{0.125F};
+    float posterior_mean_value{0.0F};
 
     void add_dynamic(const std::string& name, trtmc::DType dtype, std::vector<int64_t> minimum,
                      std::vector<int64_t> optimum, std::vector<int64_t> maximum) {
@@ -91,15 +94,21 @@ class FakeModule final : public trtmc::ITrtModule {
     }
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        ++forward_calls;
         if (kind_ == ForwardKind::kText) {
-            require(inputs.size() == 9 && inputs.count("vision_count") == 1,
+            require(inputs.size() == (has_input("hidden_states") ? 10U : 9U) && inputs.count("vision_count") == 1,
                     "fake text encoder did not receive its exact inputs");
             require(*static_cast<const int32_t*>(inputs.at("vision_count").data) == 0 &&
                         inputs.at("vision_row_indices").shape == std::vector<int64_t>({1}) &&
                         inputs.at("vision_embeds").shape == std::vector<int64_t>({1, 5120}),
                     "audio-only text path did not bind the dummy vision ABI");
             const int64_t rows = inputs.at("input_ids").shape.at(0);
-            text_.assign(static_cast<std::size_t>(rows) * 5120U, 0.125F);
+            text_.assign(static_cast<std::size_t>(rows) * 5120U, text_value);
+            if (has_input("hidden_states")) {
+                const auto* previous = static_cast<const float*>(inputs.at("hidden_states").data);
+                for (std::size_t index = 0; index < text_.size(); ++index)
+                    text_[index] += previous[index];
+            }
             return {{"encoder_hidden_states",
                      trtmc::Tensor{text_.data(), {rows, 5120}, trtmc::DType::kFloat32}}};
         }
@@ -110,12 +119,15 @@ class FakeModule final : public trtmc::ITrtModule {
             final_.assign(4U * 2U * 5376U, 0);
             trtmc::TensorMap outputs;
             for (int32_t layer = 0; layer < 50; ++layer) {
+                if (!has_output("block_modulation_" + std::to_string(layer)))
+                    continue;
                 outputs.emplace(
                     "block_modulation_" + std::to_string(layer),
                     trtmc::Tensor{block_.data(), {12, 6, 5376}, trtmc::DType::kBFloat16});
             }
-            outputs.emplace("final_modulation",
-                            trtmc::Tensor{final_.data(), {4, 2, 5376}, trtmc::DType::kBFloat16});
+            if (has_output("final_modulation"))
+                outputs.emplace("final_modulation",
+                                trtmc::Tensor{final_.data(), {4, 2, 5376}, trtmc::DType::kBFloat16});
             return outputs;
         }
         if (kind_ == ForwardKind::kDenoiser) {
@@ -133,8 +145,19 @@ class FakeModule final : public trtmc::ITrtModule {
             require(inputs.size() == 1 && inputs.count("pixel_tile_clip") == 1,
                     "fake VideoVAE did not receive its static clip");
             posterior_.assign(48U * 5U * 16U * 16U, 0.0F);
+            std::fill(posterior_.begin(), posterior_.begin() + posterior_.size() / 2, posterior_mean_value);
             return {{"posterior_parameter_tile_clip",
                      trtmc::Tensor{posterior_.data(), {1, 48, 5, 16, 16}, trtmc::DType::kFloat32}}};
+        }
+        if (kind_ == ForwardKind::kImageVae) {
+            const auto tiles = inputs.at("pixel_tiles").shape.at(0);
+            posterior_.assign(static_cast<std::size_t>(tiles) * 48U * 16U * 16U, 0.0F);
+            for (int64_t tile = 0; tile < tiles; ++tile)
+                std::fill(posterior_.begin() + tile * 48U * 16U * 16U,
+                          posterior_.begin() + tile * 48U * 16U * 16U + 24U * 16U * 16U,
+                          posterior_mean_value);
+            return {{"posterior_parameter_tiles",
+                trtmc::Tensor{posterior_.data(), {tiles, 48, 1, 16, 16}, trtmc::DType::kFloat32}}};
         }
         if (kind_ == ForwardKind::kAudioVae) {
             require(inputs.size() == 1 && inputs.count("audio_samples") == 1,
@@ -741,6 +764,172 @@ void test_request_sized_cache_capacity() {
                 "request cache accepted an invalid profile selection");
 }
 
+void test_turbo_segmented_text_and_capacity() {
+    using namespace trtmc::minimax_h3;
+    Ref2vaMaterializedPresentation presentation;
+    presentation.input_ids = {1, 2};
+    presentation.h3_token_tags = {1, 1};
+    presentation.mrope_position_ids.assign(6, 0);
+    Ref2vaVisionFeatures features;
+    std::vector<float> hidden;
+    float expected = 0.2501F;
+    for (int segment = 0; segment < 5; ++segment) {
+        auto module = make_text_module();
+        for (auto& [name, spec] : module.tensors) {
+            const bool compact_vision = name == "vision_row_indices" || name == "vision_embeds" ||
+                                        name.rfind("deepstack_", 0) == 0;
+            for (auto* dimensions : {&spec.shape, &spec.maximum})
+                for (auto& dim : *dimensions)
+                    if (dim == 262144)
+                        dim = compact_vision ? 2088 : 2641;
+        }
+        module.text_value = segment == 0 ? expected : 0.0001F;
+        if (segment != 0)
+            module.add_dynamic("hidden_states", trtmc::DType::kFloat32,
+                               {1, 5120}, {1144, 5120}, {2641, 5120});
+        require(rejects([&] { validate_ref2va_plan(module, Ref2vaPlanKind::kTextEncoder); }),
+                "legacy Ref2VA unexpectedly accepted compact Turbo text ABI");
+        const auto next = run_ref2va_text_encoder(module, presentation, features,
+                                                 segment == 0 ? nullptr : &hidden, true);
+        if (segment != 0)
+            expected += 0.0001F;
+        require(next.size() == 2U * 5120U && next.front() == expected && next.back() == expected,
+                "Turbo Ref2VA changed FP32 text states between language segments");
+        hidden = next;
+        const auto calls = module.forward_calls;
+        if (segment != 0) {
+            auto short_hidden = hidden;
+            short_hidden.pop_back();
+            require(rejects([&] { (void)run_ref2va_text_encoder(module, presentation, features,
+                                                              &short_hidden, true); }),
+                    "Turbo Ref2VA accepted short continuation state");
+            module.tensors.at("hidden_states").dtype = trtmc::DType::kBFloat16;
+            require(rejects([&] { (void)run_ref2va_text_encoder(module, presentation, features,
+                                                              &hidden, true); }),
+                    "Turbo Ref2VA accepted BF16 intermediate text states");
+            module.tensors.at("hidden_states").dtype = trtmc::DType::kFloat32;
+        }
+        auto oversized = presentation;
+        oversized.input_ids.resize(2642);
+        require(rejects([&] { (void)run_ref2va_text_encoder(module, oversized, features,
+                                                          segment == 0 ? nullptr : &hidden, true); }) &&
+                    module.forward_calls == calls,
+                "Turbo Ref2VA enqueued an out-of-profile multimodal prompt");
+    }
+}
+
+void test_turbo_text_uses_actual_profile_capacity() {
+    using namespace trtmc::minimax_h3;
+    Ref2vaMaterializedPresentation presentation;
+    presentation.input_ids.assign(2642, 1);
+    presentation.h3_token_tags.assign(2642, 1);
+    presentation.mrope_position_ids.assign(3U * 2642U, 0);
+    Ref2vaVisionFeatures no_vision;
+    auto full = make_text_module();
+    const auto output = run_ref2va_text_encoder(full, presentation, no_vision, nullptr, true);
+    require(full.forward_calls == 1 && output.size() == 2642U * 5120U &&
+                output.front() == 0.125F && output.back() == 0.125F,
+            "Turbo Ref2VA rejected a valid presentation above compact capacity on a full-profile engine");
+    auto compact = make_text_module();
+    for (auto& [name, spec] : compact.tensors) {
+        const bool vision = name == "vision_row_indices" || name == "vision_embeds" ||
+                            name.rfind("deepstack_", 0) == 0;
+        for (auto* dimensions : {&spec.shape, &spec.maximum})
+            for (auto& dim : *dimensions)
+                if (dim == 262144)
+                    dim = vision ? 2088 : 2641;
+    }
+    require(rejects([&] {
+                (void)run_ref2va_text_encoder(compact, presentation, no_vision, nullptr, true);
+            }) && compact.forward_calls == 0,
+            "Turbo Ref2VA enqueued the same oversized presentation on a compact engine");
+}
+
+void test_turbo_reference_mean_and_segmented_plans() {
+    using namespace trtmc::minimax_h3;
+    FakeModule image_module(ForwardKind::kImageVae);
+    image_module.add_dynamic("pixel_tiles", trtmc::DType::kFloat32,
+        {1, 3, 1, 256, 256}, {28, 3, 1, 256, 256}, {33, 3, 1, 256, 256});
+    image_module.add_output("posterior_parameter_tiles", trtmc::DType::kFloat32, {33, 48, 1, 16, 16});
+    image_module.posterior_mean_value = 1.0003F;
+    trtmc::VideoImageInput image;
+    image.height = image.width = 256;
+    image.channels = 3;
+    image.pixels.assign(256U * 256U * 3U, 0.5F);
+    const auto mean = run_ref2va_image_vae_encoder(image_module, image, true);
+    const auto sampled = run_ref2va_image_vae_encoder(image_module, image);
+    require(mean.geometry.kind == trtmc::VideoReferenceKind::kImage &&
+                mean.video_hidden_states.front() == (1.0003F - 0.8580903411F) / 1.2223774195F &&
+                mean.video_hidden_states.front() == mean.video_hidden_states[1] &&
+                mean.video_hidden_states != sampled.video_hidden_states,
+            "Turbo Ref2VA image posterior did not preserve FP32 mean-only conditioning");
+    for (int segment = 0; segment < 2; ++segment) {
+        auto adaln = make_adaln_module();
+        Ref2vaPlanOptions options;
+        options.block_start = segment * 25;
+        options.block_end = options.block_start + 25;
+        options.include_final = segment == 0;
+        for (int block = 0; block < 50; ++block)
+            if (block < options.block_start || block >= options.block_end)
+                adaln.tensors.erase("block_modulation_" + std::to_string(block));
+        if (!options.include_final)
+            adaln.tensors.erase("final_modulation");
+        const auto result = run_ref2va_adaln_precompute(adaln, pad_ref2va_timesteps({0.0F, 0.999F}), options);
+        for (int block = 0; block < 50; ++block)
+            require(result.blocks[block].bytes.empty() ==
+                        (block < options.block_start || block >= options.block_end),
+                    "Turbo Ref2VA AdaLN segment did not preserve global block indices");
+        require(result.final.bytes.empty() != options.include_final,
+                "Turbo Ref2VA AdaLN final modulation ownership changed");
+        auto tail = make_cached_denoiser_module(Ref2vaPlanKind::kDenoiserTail);
+        const auto range = trtmc::minimax_h3_tail_layer_range(segment, 2);
+        options.block_start = range[0];
+        options.block_end = range[1];
+        for (int block = 1; block < 50; ++block)
+            if (block < range[0] || block >= range[1])
+                tail.tensors.erase("block_modulation_" + std::to_string(block));
+        validate_ref2va_plan(tail, Ref2vaPlanKind::kDenoiserTail, options);
+        require(rejects([&] { validate_ref2va_plan(tail, Ref2vaPlanKind::kDenoiserTail); }),
+                "Turbo Ref2VA tail segment was accepted as a complete legacy tail");
+    }
+}
+
+void test_turbo_reference_sampler_and_fixed_prefix() {
+    trtmc::MiniMaxH3Ref2VAConfig reference;
+    reference.enabled = true;
+    trtmc::MiniMaxH3DenoiserConfig denoiser;
+    trtmc::validate_minimax_h3_ref2va_sampler_config(reference, denoiser);
+    denoiser.sampler = trtmc::MiniMaxH3Sampler::kTurboEuler;
+    denoiser.scheduler_grid_points = 9;
+    denoiser.transformer_forwards = 8;
+    require(rejects([&] { trtmc::validate_minimax_h3_ref2va_sampler_config(reference, denoiser); }),
+            "Turbo Ref2VA accepted the legacy 50/49 schedule");
+    reference.scheduler_grid_points = 9;
+    reference.transformer_forwards = 8;
+    reference.adaln_precompute_sections = {"ref2va_adaln_precompute_plan", "ref2va_adaln_precompute_1_plan"};
+    reference.denoiser_tail_sections = {"ref2va_dit_tail_plan", "ref2va_dit_tail_1_plan"};
+    trtmc::validate_minimax_h3_ref2va_sampler_config(reference, denoiser);
+    reference.first_block_cache = true;
+    require(rejects([&] { trtmc::validate_minimax_h3_ref2va_sampler_config(reference, denoiser); }),
+            "Turbo Ref2VA incorrectly enabled FirstBlockCache");
+    using namespace trtmc::minimax_h3;
+    const auto layout = make_ref2va_packed_layout({1},
+        {{trtmc::VideoReferenceKind::kImage, 1, 4, 4, 0}}, 2, 4, 4, 2);
+    const auto clocks = make_ref2va_row_timesteps(layout, 0.0F, 0.0F);
+    require(clocks.unique_timesteps == std::vector<float>{0.0F, 0.999F} &&
+                layout.position_ids[layout.video_indices[layout.condition_video_rows] * 3U] >
+                    layout.position_ids[layout.video_indices[0] * 3U],
+            "Turbo Ref2VA replaced sequential reference positions with endpoint anchors");
+    std::vector<float> video((layout.condition_video_rows + 8) * 96U, 0.125F);
+    std::vector<float> velocity(video.size(), 0.5F);
+    const auto before = video;
+    trtmc::minimax_h3_turbo_scheduler_step(video.data() + layout.condition_video_rows * 96U,
+        velocity.data() + layout.condition_video_rows * 96U, 8U * 96U, -0.1F);
+    require(std::equal(video.begin(), video.begin() + layout.condition_video_rows * 96U, before.begin()) &&
+                video.back() != before.back(),
+            "Turbo Ref2VA Euler modified fixed reference rows or omitted target rows");
+}
+
 } // namespace
 
 int main() {
@@ -756,6 +945,10 @@ int main() {
         test_strict_plan_abi_and_fake_end_to_end();
         test_first_block_cache_contract();
         test_request_sized_cache_capacity();
+        test_turbo_segmented_text_and_capacity();
+        test_turbo_text_uses_actual_profile_capacity();
+        test_turbo_reference_mean_and_segmented_plans();
+        test_turbo_reference_sampler_and_fixed_prefix();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

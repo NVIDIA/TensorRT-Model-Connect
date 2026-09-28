@@ -150,7 +150,9 @@ run_ref2va_reference_vision_encoder(ITrtModule& module,
                                     const Ref2vaPresentationBlueprint& blueprint);
 std::vector<float> run_ref2va_text_encoder(ITrtModule& module,
                                            const Ref2vaMaterializedPresentation& presentation,
-                                           const Ref2vaVisionFeatures& features);
+                                           const Ref2vaVisionFeatures& features,
+                                           const std::vector<float>* hidden_states = nullptr,
+                                           bool allow_compact_profile = false);
 
 struct Ref2vaEncodedReferenceGeometry {
     VideoReferenceKind kind{VideoReferenceKind::kImage};
@@ -175,9 +177,11 @@ struct Ref2vaEncodedCondition {
 // transformer patchification. The audio path uses posterior mode and applies
 // bundle-provided 32-channel normalization.
 Ref2vaEncodedCondition run_ref2va_image_vae_encoder(ITrtModule& module,
-                                                    const VideoImageInput& image);
+                                                    const VideoImageInput& image,
+                                                    bool posterior_mean = false);
 Ref2vaEncodedCondition run_ref2va_video_vae_encoder(ITrtModule& module,
-                                                    const VideoClipInput& video);
+                                                    const VideoClipInput& video,
+                                                    bool posterior_mean = false);
 Ref2vaEncodedCondition run_ref2va_audio_vae_encoder(ITrtModule& module, const AudioResult& audio,
                                                     const std::array<float, 32>& latent_mean,
                                                     const std::array<float, 32>& latent_std);
@@ -245,7 +249,16 @@ enum class Ref2vaPlanKind {
 
 // Performs strict name/direction/dtype/profile validation. Unknown, legacy,
 // undersized, or fallback-transformer plans fail closed before any enqueue.
-void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind);
+struct Ref2vaPlanOptions {
+    int32_t block_start{0};
+    int32_t block_end{50};
+    bool include_final{true};
+    bool text_continuation{false};
+    bool allow_compact_text{false};
+};
+
+void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind,
+                           const Ref2vaPlanOptions& options = {});
 
 struct Ref2vaOwnedTensor {
     DType dtype{DType::kFloat32};
@@ -261,7 +274,8 @@ struct Ref2vaModulations {
 // Runs the fixed-four-row Ref2VA AdaLN plan. timestep_features are generated
 // natively with the same sinusoidal embedding used by the H3 pipelines.
 Ref2vaModulations run_ref2va_adaln_precompute(ITrtModule& module,
-                                              const Ref2vaTimestepTable& timesteps);
+                                              const Ref2vaTimestepTable& timesteps,
+                                              const Ref2vaPlanOptions& options = {});
 
 struct Ref2vaDenoiserInputs {
     std::vector<float> video_hidden_states;   // [Nv, 96]

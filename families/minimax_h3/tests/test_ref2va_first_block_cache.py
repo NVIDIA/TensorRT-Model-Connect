@@ -49,6 +49,125 @@ def test_cache_checkpoint_partitions_are_disjoint_and_exhaustive() -> None:
     assert "audio_proj_out.weight" in finish
 
 
+def test_turbo_ref_partitions_preserve_complete_reference_weights(builder_module) -> None:
+    first = set(builder_module.tail_checkpoint_keys(turbo=True, block_start=1, block_end=26))
+    second = set(builder_module.tail_checkpoint_keys(turbo=True, block_start=26, block_end=50))
+    assert len(first) == 250 and len(second) == 240
+    assert not first & second
+    assert first | second == set(REF2VA_TAIL_KEYS)
+    adaln0 = set(builder_module.adaln_checkpoint_keys(turbo=True, block_end=25))
+    adaln1 = set(
+        builder_module.adaln_checkpoint_keys(
+            turbo=True,
+            block_start=25,
+            include_final=False,
+        )
+    )
+    assert adaln0 | adaln1 == set(REF2VA_ADALN_KEYS)
+    profile = builder_module.native_profile(turbo=True)
+    assert profile.turbo and profile.max_timestep_count == 4
+    assert profile.video_rows == Ref2VADenoiserProfile().max_video_rows
+    assert profile.text_rows == Ref2VADenoiserProfile().max_text_rows
+    with pytest.raises(ValueError, match="partitioned tails require Turbo"):
+        builder_module.tail_checkpoint_keys(block_end=26)
+
+
+@pytest.mark.parametrize("turbo", (False, True))
+def test_ref_tail_passes_direct_hidden_only_for_turbo(builder_module, monkeypatch, turbo) -> None:
+    class Network:
+        def __init__(self):
+            self.elements = []
+            self.outputs = []
+
+        def add_input(self, name, dtype, shape):
+            return SimpleNamespace(name=name, dtype=dtype, shape=shape)
+
+        def add_elementwise(self, a, b, operation):
+            self.elements.append(operation)
+            return SimpleNamespace(get_output=lambda _index: SimpleNamespace(name="difference"))
+
+        def mark_output(self, tensor):
+            self.outputs.append(tensor)
+
+    network = Network()
+    dense, op = builder_module.dense, builder_module.op
+    monkeypatch.setattr(dense, "_native_builder", lambda *_a, **_kw: (None, None, network, None))
+    monkeypatch.setattr(builder_module, "_add_cache_optimization_profiles", lambda *_a: None)
+    monkeypatch.setattr(dense, "_rope_tables", lambda *_a: (None, None))
+    visited, states = [], []
+
+    def block(*args, **kwargs):
+        assert args[7].turbo is turbo
+        visited.append(args[8])
+        state = SimpleNamespace(name=f"block_{args[8]}")
+        states.append(state)
+        return state
+
+    monkeypatch.setattr(dense, "_transformer_block", block)
+    monkeypatch.setattr(dense, "_serialize", lambda **_kw: b"test-plan")
+    attention_counts = []
+    monkeypatch.setattr(
+        op,
+        "validate_native_network",
+        lambda _net, **kw: attention_counts.append(kw["expected_attentions"]),
+    )
+    end = 26 if turbo else 50
+    keys = builder_module.tail_checkpoint_keys(turbo=turbo, block_end=end)
+    assert (
+        builder_module.build_ref2va_dit_tail_engine(
+            dict.fromkeys(keys),
+            turbo=turbo,
+            block_end=end,
+        )
+        == b"test-plan"
+    )
+    assert visited == list(range(1, end))
+    assert attention_counts == [end - 1]
+    assert (network.outputs[0] is states[-1]) is turbo
+    assert network.outputs[0].name == "tail_residual"
+    assert len(network.elements) == (0 if turbo else 1)
+
+
+@pytest.mark.parametrize("turbo", (False, True))
+def test_ref_finish_uses_direct_hidden_only_for_turbo(builder_module, monkeypatch, turbo) -> None:
+    tensors = {}
+    sums = []
+
+    def add_input(name, dtype, shape):
+        tensors[name] = SimpleNamespace(name=name, dtype=dtype, shape=shape)
+        return tensors[name]
+
+    combined = SimpleNamespace(name="combined")
+
+    def add_elementwise(a, b, operation):
+        sums.append((a, b, operation))
+        return SimpleNamespace(get_output=lambda _index: combined)
+
+    network = SimpleNamespace(add_input=add_input, add_elementwise=add_elementwise)
+    dense, op = builder_module.dense, builder_module.op
+    monkeypatch.setattr(dense, "_native_builder", lambda *_a, **_kw: (None, None, network, None))
+    monkeypatch.setattr(builder_module, "_add_cache_optimization_profiles", lambda *_a: None)
+    observed = []
+
+    def final(_net, hidden, *_args):
+        observed.append(hidden)
+        return hidden
+
+    monkeypatch.setattr(dense, "_final_hidden", final)
+    monkeypatch.setattr(builder_module, "_mark_gathered_outputs", lambda *_a: None)
+    monkeypatch.setattr(op, "validate_native_network", lambda *_a, **_kw: None)
+    monkeypatch.setattr(dense, "_serialize", lambda **_kw: b"test-plan")
+    assert (
+        builder_module.build_ref2va_dit_finish_engine(
+            dict.fromkeys(REF2VA_FINISH_KEYS),
+            turbo=turbo,
+        )
+        == b"test-plan"
+    )
+    assert observed[0] is (tensors["tail_residual"] if turbo else combined)
+    assert len(sums) == (0 if turbo else 1)
+
+
 @pytest.mark.parametrize("index", (0, 1, 49))
 def test_ref2va_transformer_routes_packed_int8_weights_without_dequantizing(
     builder_module, monkeypatch, index

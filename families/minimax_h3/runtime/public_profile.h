@@ -25,6 +25,9 @@ inline constexpr int32_t kMiniMaxH3ExplicitCanvasWidth = 960;
 // compact canvas before preserving its 1.8:1 composition at 720x1296.
 inline constexpr int32_t kMiniMaxH3SuperResolutionCanvasHeight = 480;
 inline constexpr int32_t kMiniMaxH3SuperResolutionCanvasWidth = 864;
+inline constexpr int32_t kMiniMaxH3TurboMaxOutputFrames = 362;
+inline constexpr int32_t kMiniMaxH3TurboCanvasHeight = 736;
+inline constexpr int32_t kMiniMaxH3TurboCanvasWidth = 1280;
 
 struct MiniMaxH3Canvas {
     int32_t height{0};
@@ -68,11 +71,13 @@ inline bool landscape_canvas_is_official(int32_t height, int32_t width) {
 
 } // namespace minimax_h3_profile_detail
 
-inline bool is_minimax_h3_native_canvas(int32_t height, int32_t width) {
+inline bool is_minimax_h3_native_canvas(int32_t height, int32_t width, bool turbo = false) {
     if (height <= 0 || width <= 0 || height % kMiniMaxH3CanvasMultiple != 0 ||
         width % kMiniMaxH3CanvasMultiple != 0) {
         return false;
     }
+    if (turbo && height == kMiniMaxH3TurboCanvasHeight && width == kMiniMaxH3TurboCanvasWidth)
+        return true;
     if ((height == kMiniMaxH3ExplicitCanvasHeight && width == kMiniMaxH3ExplicitCanvasWidth) ||
         (height == kMiniMaxH3ExplicitCanvasWidth && width == kMiniMaxH3ExplicitCanvasHeight)) {
         return true;
@@ -123,7 +128,7 @@ inline MiniMaxH3Canvas resolve_minimax_h3_canvas(double aspect_width, double asp
     return result;
 }
 
-inline int32_t align_minimax_h3_num_frames(int32_t requested_frames) {
+inline int32_t align_minimax_h3_num_frames(int32_t requested_frames, bool turbo = false) {
     if (requested_frames <= 0)
         throw std::invalid_argument("MiniMax-H3 requested frame count must be positive");
     int32_t aligned = requested_frames;
@@ -132,7 +137,7 @@ inline int32_t align_minimax_h3_num_frames(int32_t requested_frames) {
             throw std::overflow_error("MiniMax-H3 frame alignment overflow");
         ++aligned;
     }
-    if (aligned < 5 * 24 || aligned > 15 * 24)
+    if (aligned < 5 * 24 || aligned > (turbo ? kMiniMaxH3TurboMaxOutputFrames : 15 * 24))
         throw std::invalid_argument(
             "MiniMax-H3 released local profile supports aligned durations from 5 to 15 seconds");
     return aligned;

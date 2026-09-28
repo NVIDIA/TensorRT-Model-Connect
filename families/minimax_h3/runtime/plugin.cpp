@@ -73,11 +73,24 @@ void require_declared_plan(const BundleReader& bundle, PlanMap& plans, const cha
     plans.emplace(name, *section);
 }
 
+std::vector<std::string> load_plan_sections(const nlohmann::json& config, const char* key,
+                                           const char* default_section) {
+    const auto sections = config.value(key, std::vector<std::string>{default_section});
+    validate_minimax_h3_plan_sections(sections);
+    return sections;
+}
+
 PlanMap index_plans(const BundleReader& bundle, const nlohmann::json& config,
                     const minimax_h3::SuperResolutionConfig& sr) {
     PlanMap plans;
+    for (const auto& section : load_plan_sections(config, "text_encoder_sections", "text_encoder_plan"))
+        require_declared_plan(bundle, plans, section.c_str());
+    for (const auto& section : load_plan_sections(config, "adaln_precompute_sections", "adaln_precompute_plan"))
+        require_declared_plan(bundle, plans, section.c_str());
+    for (const auto& section : load_plan_sections(config, "denoiser_tail_sections", "denoiser_tail_plan"))
+        require_declared_plan(bundle, plans, section.c_str());
     for (const char* name :
-         {"text_encoder_plan", "adaln_precompute_plan", "denoiser_head_plan", "denoiser_tail_plan",
+         {"denoiser_head_plan",
           "denoiser_finish_plan", "vae_tile_decoder_plan", "audio_vae_decoder_plan"}) {
         require_declared_plan(bundle, plans, name);
     }
@@ -86,14 +99,25 @@ PlanMap index_plans(const BundleReader& bundle, const nlohmann::json& config,
         require_declared_plan(bundle, plans, "fl2va_keyframe_vae_encoder_plan");
     }
     if (declares_workflow(config, "ref2va")) {
-        for (const char* name : {"ref2va_adaln_precompute_plan", "ref2va_video_vae_encoder_plan",
+        const auto sections = config.value("ref2va", nlohmann::json::object());
+        for (const auto& section : load_plan_sections(
+                 sections, "text_encoder_sections", "text_encoder_plan"))
+            require_declared_plan(bundle, plans, section.c_str());
+        for (const auto& section : load_plan_sections(
+                 sections, "adaln_precompute_sections", "ref2va_adaln_precompute_plan"))
+            require_declared_plan(bundle, plans, section.c_str());
+        for (const char* name : {"vision_encoder_plan", "fl2va_keyframe_vae_encoder_plan", "ref2va_video_vae_encoder_plan",
                                  "ref2va_audio_vae_encoder_plan"}) {
             require_declared_plan(bundle, plans, name);
         }
         const auto cache = config.value("ref2va_first_block_cache", nlohmann::json::object());
-        if (cache.value("enabled", false)) {
+        if (cache.value("enabled", false) ||
+            config.value("sampler", std::string{}) == "turbo_euler") {
+            for (const auto& section : load_plan_sections(
+                     sections, "denoiser_tail_sections", "ref2va_dit_tail_plan"))
+                require_declared_plan(bundle, plans, section.c_str());
             for (const char* name :
-                 {"ref2va_dit_head_plan", "ref2va_dit_tail_plan", "ref2va_dit_finish_plan"})
+                 {"ref2va_dit_head_plan", "ref2va_dit_finish_plan"})
                 require_declared_plan(bundle, plans, name);
         } else {
             require_declared_plan(bundle, plans, "ref2va_denoiser_plan");
@@ -255,6 +279,13 @@ MiniMaxH3Ref2VAConfig load_ref2va_config(const nlohmann::json& config) {
     result.guidance_scale = scheduler.at("guidance_scale").get<float>();
     result.guidance_distilled = scheduler.at("guidance_distilled").get<bool>();
     result.denoiser_profile_count = config.value("ref2va_denoiser_profile_count", 1);
+    const auto sections = config.value("ref2va", nlohmann::json::object());
+    result.text_encoder_sections = load_plan_sections(
+        sections, "text_encoder_sections", "text_encoder_plan");
+    result.adaln_precompute_sections = load_plan_sections(
+        sections, "adaln_precompute_sections", "ref2va_adaln_precompute_plan");
+    result.denoiser_tail_sections = load_plan_sections(
+        sections, "denoiser_tail_sections", "ref2va_dit_tail_plan");
     const auto cache = config.value("ref2va_first_block_cache", nlohmann::json::object());
     result.first_block_cache = cache.value("enabled", false);
     result.first_block_cache_threshold = cache.value("threshold", 0.08F);
@@ -295,6 +326,18 @@ minimax_h3::SuperResolutionConfig load_super_resolution_config(const nlohmann::j
 
 MiniMaxH3DenoiserConfig load_denoiser_config(const nlohmann::json& config) {
     MiniMaxH3DenoiserConfig result;
+    result.sampler = parse_minimax_h3_sampler(config.value("sampler", std::string("distilled")));
+    result.first_block_cache = config.value("first_block_cache", true);
+    result.text_encoder_sections = load_plan_sections(config, "text_encoder_sections", "text_encoder_plan");
+    result.adaln_precompute_sections = load_plan_sections(config, "adaln_precompute_sections", "adaln_precompute_plan");
+    result.denoiser_tail_sections = load_plan_sections(config, "denoiser_tail_sections", "denoiser_tail_plan");
+    if (config.contains("denoiser_tail_layer_ranges")) {
+        std::vector<std::array<int32_t, 2>> expected;
+        for (std::size_t segment = 0; segment < result.denoiser_tail_sections.size(); ++segment)
+            expected.push_back(minimax_h3_tail_layer_range(segment, result.denoiser_tail_sections.size()));
+        if (config.at("denoiser_tail_layer_ranges") != nlohmann::json(expected))
+            throw std::invalid_argument("MiniMax-H3 tail layer ranges do not match its segment contract");
+    }
     result.scheduler_grid_points = config.value("scheduler_grid_points", 50);
     result.transformer_forwards = config.value("transformer_forwards", 49);
     result.guidance_scale = config.value("guidance_scale", 1.0F);
@@ -317,13 +360,15 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         const auto runtime = require_section(context.reader, "runtime.json");
         const auto config = nlohmann::json::parse(runtime.begin(), runtime.end());
         if (!config.is_object() || config.value("context_parallel_size", 1) != 1 ||
-            !config.value("first_block_cache", true) ||
             config.value("denoiser_cache_mode", std::string("first_block")) != "first_block") {
             throw std::runtime_error("MiniMax-H3 runtime.json declares an unsupported profile");
         }
+        const auto denoiser = load_denoiser_config(config);
+        validate_minimax_h3_sampler_config(denoiser);
         const float threshold = config.value("first_block_cache_threshold", 0.08F);
-        if (!std::isfinite(threshold) || threshold <= 0.0F)
-            throw std::runtime_error("MiniMax-H3 cache threshold must be finite and positive");
+        if (!std::isfinite(threshold) || threshold < 0.0F ||
+            (threshold == 0.0F && denoiser.sampler != MiniMaxH3Sampler::kTurboEuler))
+            throw std::runtime_error("MiniMax-H3 cache threshold is invalid for its sampler");
         const auto sr = load_super_resolution_config(config);
         auto plans = index_plans(context.reader, config, sr);
         const auto memory = load_runtime_memory_config(config, context.reader, context.cuda_graphs);
@@ -337,7 +382,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
             cache_finalizer = [cache_lease = std::move(cache_lease)] { cache_lease->finalize(); };
         }
         return new MiniMaxH3Pipeline(std::move(loader), load_tokenizer(context.reader),
-                                     "minimax_h3", threshold, load_denoiser_config(config),
+                                     "minimax_h3", threshold, denoiser,
                                      load_ref2va_config(config), sr, std::move(cache_finalizer));
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("Invalid MiniMax-H3 runtime.json: ") + error.what());

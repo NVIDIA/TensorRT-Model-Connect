@@ -33,7 +33,8 @@ void test_shared_conditioning_activation_policy() {
     using namespace trtmc::minimax_h3;
     constexpr std::int64_t bundle_budget = 32LL << 30;
     constexpr std::int64_t tail_budget = 24LL << 30;
-    for (const char* name : {"text_encoder_plan", "vision_encoder_plan"}) {
+    for (const char* name : {"text_encoder_plan", "vision_encoder_plan", "text_encoder_1_plan",
+                            "text_encoder_2_plan", "text_encoder_3_plan", "text_encoder_4_plan"}) {
         check(uses_serial_execution_context(name),
               "H3 shared conditioning uses live-shape activation memory");
         for (bool retain : {false, true}) {
@@ -44,20 +45,28 @@ void test_shared_conditioning_activation_policy() {
                   "H3 conditioning activation policy preserves the weight-streaming budget");
         }
     }
-    for (const char* name : {"denoiser_head_plan", "denoiser_tail_plan", "denoiser_finish_plan",
+    for (const char* name : {"denoiser_head_plan", "denoiser_tail_plan", "denoiser_tail_1_plan", "denoiser_finish_plan",
                             "ref2va_denoiser_plan", "ref2va_dit_head_plan", "ref2va_dit_tail_plan",
                             "ref2va_dit_finish_plan"}) {
         check(uses_serial_execution_context(name),
               "H3 existing denoiser live-shape activation policy is unchanged");
     }
-    for (const char* name : {"adaln_precompute_plan", "ref2va_adaln_precompute_plan",
+    for (const char* name : {"adaln_precompute_plan", "adaln_precompute_1_plan", "ref2va_adaln_precompute_plan",
                             "fl2va_keyframe_vae_encoder_plan", "vae_tile_decoder_plan",
                             "audio_vae_decoder_plan", "video_super_resolution_plan",
                             "ref2va_shared_text_encoder_plan", "ref2va_shared_vision_encoder_plan",
-                            "unknown_plan"}) {
+                            "unknown_plan", "text_encoder_5_plan", "text_encoder_1_plan_extra"}) {
         check(!uses_serial_execution_context(name),
               "H3 activation policy selects exact plan names, not timing labels or other stages");
     }
+    check(should_retain_hot_engine("denoiser_tail_1_plan", true) &&
+              staged_plan_weight_streaming_budget("denoiser_tail_1_plan", bundle_budget, true,
+                                                   tail_budget) == tail_budget,
+          "H3 second tail retains the same serial streaming policy as the first");
+    check(!should_retain_hot_engine("adaln_precompute_1_plan", true) &&
+              staged_plan_weight_streaming_budget("adaln_precompute_1_plan", bundle_budget, true,
+                                                   tail_budget) == bundle_budget,
+          "H3 AdaLN segments are released between stages with the portable budget");
 }
 
 void test_pinned_schedules() {
@@ -173,6 +182,202 @@ void test_data_ward_euler_sign() {
                                      0.5F);
     check_near(sample[0], 1.125F, 1.0e-7F, "H3 Euler uses positive data-ward velocity");
     check_near(sample[1], -1.9375F, 1.0e-7F, "H3 Euler blend matches reference");
+}
+
+void test_turbo_sampler_contract() {
+    using trtmc::MiniMaxH3Sampler;
+    check(trtmc::parse_minimax_h3_sampler("") == MiniMaxH3Sampler::kDistilled &&
+              trtmc::parse_minimax_h3_sampler("distilled") == MiniMaxH3Sampler::kDistilled,
+          "H3 absent/explicit distilled sampler preserves the original schedule");
+    check(trtmc::parse_minimax_h3_sampler("turbo_euler") == MiniMaxH3Sampler::kTurboEuler,
+          "H3 Turbo sampler requires an explicit bundle contract");
+    bool rejected = false;
+    try { (void)trtmc::parse_minimax_h3_sampler("turbo"); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    check(rejected, "H3 rejects unknown sampler aliases");
+    trtmc::MiniMaxH3DenoiserConfig original;
+    trtmc::validate_minimax_h3_sampler_config(original);
+    auto turbo = original;
+    turbo.sampler = MiniMaxH3Sampler::kTurboEuler;
+    turbo.first_block_cache = false;
+    turbo.scheduler_grid_points = 9;
+    turbo.transformer_forwards = 8;
+    trtmc::validate_minimax_h3_sampler_config(turbo);
+    for (int invalid = 0; invalid < 5; ++invalid) {
+        auto config = turbo;
+        if (invalid == 0) config.first_block_cache = true;
+        if (invalid == 1) config.scheduler_grid_points = 8;
+        if (invalid == 2) config.transformer_forwards = 7;
+        if (invalid == 3) config.guidance_scale = 2.0F;
+        if (invalid == 4) config.sampler = MiniMaxH3Sampler::kDistilled;
+        rejected = false;
+        try { trtmc::validate_minimax_h3_sampler_config(config); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        check(rejected, "H3 rejects inconsistent Turbo or original sampler contracts");
+    }
+}
+
+void test_segmented_plan_contracts() {
+    using namespace trtmc;
+    MiniMaxH3DenoiserConfig config;
+    check(config.text_encoder_sections == std::vector<std::string>{"text_encoder_plan"} &&
+              config.adaln_precompute_sections == std::vector<std::string>{"adaln_precompute_plan"} &&
+              config.denoiser_tail_sections == std::vector<std::string>{"denoiser_tail_plan"},
+          "Original bundles retain their single-plan defaults");
+    validate_minimax_h3_plan_sections({"text_encoder_plan", "text_encoder_1_plan"});
+    for (const auto& invalid : std::vector<std::vector<std::string>>{
+             {}, {""}, {"_plan"}, {"a_plan", "a_plan"}, {"../a_plan"}, {"a.b_plan"}, {"a b_plan"}}) {
+        bool rejected = false;
+        try { validate_minimax_h3_plan_sections(invalid); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        check(rejected, "Plan section lists reject empty, duplicate or unsafe names");
+    }
+    MiniMaxH3AdalnCoverage coverage{};
+    for (int segment = 0; segment < 2; ++segment) {
+        for (int layer = segment * 25; layer < (segment + 1) * 25; ++layer)
+            check(claim_minimax_h3_adaln_output(coverage, "block_modulation_" + std::to_string(layer),
+                                                segment == 0) == layer,
+                  "AdaLN segments claim globally named outputs exactly once");
+        if (segment == 0)
+            check(claim_minimax_h3_adaln_output(coverage, "final_modulation") == 50,
+                  "Only the first AdaLN segment produces final modulation");
+    }
+    validate_minimax_h3_adaln_coverage(coverage);
+    for (const char* name : {"block_modulation_0", "block_modulation_50", "block_modulation_00",
+                            "unknown", "final_modulation"}) {
+        bool rejected = false;
+        try { (void)claim_minimax_h3_adaln_output(coverage, name); }
+        catch (const std::runtime_error&) { rejected = true; }
+        check(rejected, "AdaLN rejects duplicate and unknown output names");
+    }
+    for (int missing : {0, 24, 25, 49, 50}) {
+        auto incomplete = coverage;
+        incomplete[missing] = false;
+        bool rejected = false;
+        try { validate_minimax_h3_adaln_coverage(incomplete); }
+        catch (const std::runtime_error&) { rejected = true; }
+        check(rejected, "AdaLN rejects incomplete per-step coverage across segments");
+    }
+    bool rejected = false;
+    try {
+        MiniMaxH3AdalnCoverage empty{};
+        (void)claim_minimax_h3_adaln_output(empty, "final_modulation", false);
+    } catch (const std::runtime_error&) { rejected = true; }
+    check(rejected, "AdaLN rejects final modulation in a later segment");
+    for (std::size_t count : {1U, 2U}) {
+        std::array<int, 50> visits{};
+        for (std::size_t segment = 0; segment < count; ++segment) {
+            const auto range = minimax_h3_tail_layer_range(segment, count);
+            for (int layer = range[0]; layer < range[1]; ++layer)
+                ++visits[layer];
+        }
+        check(visits[0] == 0, "Tail segments never execute the head block");
+        for (int layer = 1; layer < 50; ++layer)
+            check(visits[layer] == 1, "Tail segments cover blocks one through 49 once");
+    }
+    for (const auto [segment, count] : {std::pair<std::size_t, std::size_t>{0, 0}, {0, 3}, {2, 2}}) {
+        rejected = false;
+        try { (void)minimax_h3_tail_layer_range(segment, count); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        check(rejected, "Unsupported tail segment indices and counts are rejected");
+    }
+    config.denoiser_tail_sections.push_back("denoiser_tail_1_plan");
+    rejected = false;
+    try { validate_minimax_h3_sampler_config(config); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    check(rejected, "Original residual-cache bundles cannot select direct-hidden split tails");
+    config.sampler = MiniMaxH3Sampler::kTurboEuler;
+    config.first_block_cache = false;
+    config.scheduler_grid_points = 9;
+    config.transformer_forwards = 8;
+    validate_minimax_h3_sampler_config(config);
+    config.adaln_precompute_sections = {"denoiser_tail_1_plan"};
+    rejected = false;
+    try { validate_minimax_h3_sampler_config(config); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    check(rejected, "A plan section cannot be reused across runtime stage roles");
+}
+
+void test_turbo_dual_clock_bfloat16_euler() {
+    const auto video = trtmc::make_minimax_h3_turbo_schedule(8, 12.0F);
+    const auto audio = trtmc::make_minimax_h3_turbo_schedule(8, 3.0F);
+    const std::array<double, 9> expected_video =
+        {1.0, 84.0/85.0, 36.0/37.0, 20.0/21.0, 12.0/13.0, 36.0/41.0, 0.8, 12.0/19.0, 0.0};
+    const std::array<double, 9> expected_audio =
+        {1.0, 21.0/22.0, 0.9, 5.0/6.0, 0.75, 9.0/14.0, 0.5, 0.3, 0.0};
+    check(video.sigmas.size() == 9 && video.timesteps.size() == 8 &&
+              audio.sigmas.size() == 9 && audio.timesteps.size() == 8,
+          "Turbo eight forwards use nine sigma endpoints for both clocks");
+    for (std::size_t index = 0; index < 9; ++index) {
+        check(video.sigmas[index] == static_cast<float>(expected_video[index]) &&
+                  audio.sigmas[index] == static_cast<float>(expected_audio[index]),
+              "Turbo dual clock sigma grid matches authored double-precision schedule");
+        if (index < 8) {
+            check_near(video.timesteps[index], static_cast<float>(1.0 - expected_video[index]),
+                       1.0e-7F, "Turbo video timestep uses the data-ward clock");
+            check_near(audio.timesteps[index], static_cast<float>(1.0 - expected_audio[index]),
+                       1.0e-7F, "Turbo audio timestep uses its independent data-ward clock");
+        }
+    }
+    check_near(audio.slopes.front(), 4.0F, 0.0F, "Turbo initial audio clock slope is four");
+    check_near(audio.slopes.back(), 0.9025F, 0.0F, "Turbo final audio clock slope is retained");
+    check(trtmc::minimax_h3_round_bfloat16(1.0F + 1.0F/256.0F) == 1.0F &&
+              trtmc::minimax_h3_round_bfloat16(1.0F + 3.0F/256.0F) == 1.0F + 2.0F/128.0F,
+          "Turbo BF16 conversion rounds ties to even");
+
+    // Recorded from the author's eager expression with CPU PyTorch BF16
+    // tensors; this checks arithmetic boundaries, not a CUDA engine oracle.
+    const std::vector<float> initial = {1.0F, -2.0F, 0.003921F, 123.4F, -0.75F, 9.99F};
+    const std::vector<float> velocity = {0.5011F, 0.2499F, -2.71828F, 7.003F, 1.003F, 12.73F};
+    const std::vector<float> expected =
+        {1.078125F, -1.9609375F, -0.404296875F, 124.5F, -0.6015625F, 11.9375F};
+    for (bool is_audio : {false, true}) {
+        auto result = initial;
+        trtmc::minimax_h3_turbo_scheduler_step(result.data(), velocity.data(), result.size(),
+                                              -0.15F, 0.9025F, is_audio);
+        check(result == expected, "Turbo eager BF16 multiply/add matches the recorded oracle");
+    }
+    float audio_value = 0.0F;
+    float video_value = 0.0F;
+    const float distinguishing_velocity = -9.5F;
+    trtmc::minimax_h3_turbo_scheduler_step(&audio_value, &distinguishing_velocity, 1,
+                                          -0.017123456F, 1.927413F, true);
+    trtmc::minimax_h3_turbo_scheduler_step(&video_value, &distinguishing_velocity, 1,
+                                          -0.017123456F);
+    check(audio_value == -0.1611328125F && video_value == -0.1630859375F,
+          "Turbo audio retains BF16 slope multiply/divide rather than cancelling them");
+}
+
+void test_turbo_geometry_and_audio_packing() {
+    const auto geometry = trtmc::make_minimax_h3_geometry(362, 736, 1280, true);
+    check(geometry.turbo_profile && geometry.video_latent_frames == 107 &&
+              geometry.audio_latent_frames == 603 && geometry.audio_rows == 1206 &&
+              geometry.video_rows == 98440,
+          "Turbo 362-frame reference geometry keeps all audio and video latents");
+    check(trtmc::align_minimax_h3_num_frames(360, true) == 362,
+          "Turbo aligns a 360-frame request to its native 362-frame output");
+    check(!trtmc::is_minimax_h3_native_canvas(736, 1280) &&
+              trtmc::is_minimax_h3_native_canvas(736, 1280, true),
+          "Turbo canvas does not silently widen the original public profile");
+    for (bool turbo : {false, true}) {
+        bool rejected = false;
+        try { (void)trtmc::make_minimax_h3_geometry(turbo ? 379 : 362, 768, 1344, turbo); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        check(rejected, "Original and Turbo profiles retain their own frame maxima");
+    }
+    const auto largest = trtmc::make_minimax_h3_geometry(362, 576, 1856, true);
+    check(largest.video_rows == 111708 &&
+              trtmc::minimax_h3_cache_tensor_bytes(2641, largest) ==
+                  static_cast<std::size_t>(115555) * 5376U * sizeof(uint16_t),
+          "Turbo dynamic prompt and media rows fit the widened engine ABI");
+    std::vector<float> source(32 * 2 * 3);
+    for (std::size_t index = 0; index < source.size(); ++index)
+        source[index] = static_cast<float>(index);
+    const auto packed = trtmc::pack_minimax_h3_turbo_audio_noise(source, 3);
+    for (std::size_t row = 0; row < 6; ++row)
+        for (std::size_t channel = 0; channel < 32; ++channel)
+            check(packed[row * 32 + channel] == source[channel * 6 + row],
+                  "Turbo audio noise preserves authored [32,2,T] generator ordering");
 }
 
 void test_variable_text_position_layout() {
@@ -589,6 +794,40 @@ void test_fl2va_full_public_geometry_and_rotary_contract() {
           "H3 FL2VA validates 95 resolver canvases, both 544x960 orientations, and 480x864");
 }
 
+void test_turbo_fl2va_geometry() {
+    for (const auto canvas : {std::array<int32_t, 2>{768, 1344}, {736, 1280}, {1856, 576}}) {
+        for (int32_t frames : {124, 345, 362}) {
+            const auto base = trtmc::make_minimax_h3_geometry(frames, canvas[0], canvas[1], true);
+            for (int32_t count : {1, 2}) {
+                const auto geometry = trtmc::make_minimax_h3_fl2va_geometry(base, count);
+                check(geometry.turbo_profile && geometry.output_frames == frames &&
+                          geometry.target_video_rows == base.target_video_rows &&
+                          geometry.video_rows == base.target_video_rows + geometry.condition_video_rows &&
+                          geometry.video_rows <= 113796,
+                      "Turbo FL2VA preserves its dynamic canvas and 362-frame envelope");
+                const std::vector<int32_t> tags(2641, 1);
+                const auto anchors = count == 1 ? std::vector<int32_t>{frames - 1}
+                                                : std::vector<int32_t>{0, frames - 1};
+                const auto metadata = trtmc::make_minimax_h3_fl2va_denoiser_metadata(
+                    tags, anchors, geometry);
+                const auto condition_begin = tags.size() + geometry.audio_rows;
+                check(metadata.positions.size() ==
+                          (tags.size() + geometry.audio_rows + geometry.video_rows) * 3 &&
+                          metadata.positions.size() <= 117643U * 3 &&
+                          metadata.timestep_indices[condition_begin] == 2 &&
+                          metadata.adaln_indices[condition_begin] == 6 &&
+                          metadata.timestep_indices[condition_begin + geometry.condition_video_rows] == 0,
+                      "Turbo FL2VA keeps fixed conditions and generated rows on separate clocks");
+            }
+        }
+    }
+    std::vector<float> packed{9.0F, 8.0F, 1.0F, 2.0F};
+    const std::vector<float> velocity{100.0F, 200.0F, 0.5F, 0.25F};
+    trtmc::minimax_h3_turbo_scheduler_step(packed.data() + 2, velocity.data() + 2, 2, -0.5F);
+    check(packed[0] == 9.0F && packed[1] == 8.0F && packed[2] == 1.25F && packed[3] == 2.125F,
+          "Turbo Euler updates the generated suffix without changing keyframe rows");
+}
+
 void test_audio_latent_unpack_and_denormalize() {
     constexpr int32_t frames = 2;
     std::vector<float> rows(static_cast<std::size_t>(2 * frames * 32), 0.0F);
@@ -644,10 +883,14 @@ void test_audio_decoder_channel_duplication() {
 
 int main() {
     test_shared_conditioning_activation_policy();
+    test_segmented_plan_contracts();
     test_pinned_schedules();
     test_first_block_cache_tail_schedule();
     test_first_block_cache_request_capacity();
     test_data_ward_euler_sign();
+    test_turbo_sampler_contract();
+    test_turbo_dual_clock_bfloat16_euler();
+    test_turbo_geometry_and_audio_packing();
     test_variable_text_position_layout();
     test_prompt_token_profile_boundaries();
     test_denoiser_optimization_profile_selection();
@@ -656,6 +899,7 @@ int main() {
     test_public_canvas_resolver_and_vae_tiles();
     test_variable_duration_position_layout();
     test_fl2va_full_public_geometry_and_rotary_contract();
+    test_turbo_fl2va_geometry();
     test_audio_latent_unpack_and_denormalize();
     test_audio_decoder_channel_duplication();
     return failures == 0 ? 0 : 1;

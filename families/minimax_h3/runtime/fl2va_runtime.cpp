@@ -171,7 +171,9 @@ float half_round(float value) {
 
 } // namespace
 
-void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind) {
+void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind, bool text_continuation) {
+    if (text_continuation && kind != Fl2vaPlanKind::kTextEncoder)
+        throw std::invalid_argument("MiniMax-H3 continuation is only valid for text plans");
     if (kind == Fl2vaPlanKind::kVisionEncoder) {
         require_io_counts(module, 4, 4, "vision encoder");
         constexpr int64_t kSmallMaxPatches = 4176;
@@ -206,7 +208,9 @@ void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind) {
         return;
     }
     if (kind == Fl2vaPlanKind::kTextEncoder) {
-        require_io_counts(module, 9, 1, "text encoder");
+        require_io_counts(module, text_continuation ? 10 : 9, 1, "text encoder");
+        if (module.has_input("hidden_states") != text_continuation)
+            throw std::runtime_error("MiniMax-H3 FL2VA text continuation ABI mismatch");
         constexpr int64_t kSmallMaxRows = 2641;
         constexpr int64_t kSmallMaxVisionRows = 2088;
         constexpr int64_t kSupersetMaxRows = 262144;
@@ -235,6 +239,9 @@ void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind) {
                                   {maximum_vision, kTextDim});
         require_profile_output(module, "encoder_hidden_states", DType::kFloat32,
                                {maximum, kTextDim});
+        if (text_continuation)
+            require_dynamic_input(module, "hidden_states", DType::kFloat32, {1, kTextDim},
+                                  {1144, kTextDim}, {maximum, kTextDim});
         return;
     }
     if (kind == Fl2vaPlanKind::kKeyframeVaeEncoder) {
@@ -252,7 +259,9 @@ void validate_fl2va_plan(ITrtModule& module, Fl2vaPlanKind kind) {
 Fl2vaConditioningResult run_fl2va_conditioning(const VideoGenerationRequest& request,
                                                int32_t output_height, int32_t output_width,
                                                int32_t output_frames, ITokenizer& tokenizer,
-                                               const Fl2vaPlanLoader& loader) {
+                                               const Fl2vaPlanLoader& loader,
+                                               const std::vector<std::string>& text_sections,
+                                               bool posterior_mean) {
     if (request.mode != VideoGenerationMode::kFirstLastFrameToVideoAudio ||
         (!request.first_frame && !request.last_frame) || !request.references.empty()) {
         throw std::invalid_argument(
@@ -265,7 +274,8 @@ Fl2vaConditioningResult run_fl2va_conditioning(const VideoGenerationRequest& req
             "MiniMax-H3 is guidance-distilled and does not accept negative_prompt");
     auto keyframes = prepare_minimax_h3_keyframes(request.first_frame, request.last_frame,
                                                   output_height, output_width, output_frames);
-    auto result = run_fl2va_conditioning(request.prompt, keyframes, tokenizer, loader);
+    auto result = run_fl2va_conditioning(request.prompt, keyframes, tokenizer, loader,
+                                        text_sections, posterior_mean);
     result.keyframes = std::move(keyframes);
     return result;
 }
@@ -273,9 +283,12 @@ Fl2vaConditioningResult run_fl2va_conditioning(const VideoGenerationRequest& req
 Fl2vaConditioningResult run_fl2va_conditioning(const std::string& prompt,
                                                const MiniMaxH3PreparedKeyframes& keyframes,
                                                ITokenizer& tokenizer,
-                                               const Fl2vaPlanLoader& loader) {
+                                               const Fl2vaPlanLoader& loader,
+                                               const std::vector<std::string>& text_sections,
+                                               bool posterior_mean) {
     if (!loader)
         throw std::invalid_argument("MiniMax-H3 FL2VA plan loader is missing");
+    validate_minimax_h3_plan_sections(text_sections);
     if (keyframes.images.empty() || keyframes.images.size() > 2U ||
         keyframes.images.size() != keyframes.anchors.size()) {
         throw std::invalid_argument("MiniMax-H3 FL2VA prepared keyframes are inconsistent");
@@ -300,7 +313,8 @@ Fl2vaConditioningResult run_fl2va_conditioning(const std::string& prompt,
             throw std::runtime_error("MiniMax-H3 FL2VA keyframe VAE plan is missing");
         module->set_timing_label("fl2va_keyframe_vae_encoder_plan");
         for (const auto& image : keyframes.images)
-            result.keyframe_latents.push_back(run_fl2va_keyframe_vae_encoder(*module, image));
+            result.keyframe_latents.push_back(
+                run_fl2va_keyframe_vae_encoder(*module, image, posterior_mean));
         module->sync();
     }
 
@@ -323,13 +337,19 @@ Fl2vaConditioningResult run_fl2va_conditioning(const std::string& prompt,
         }
         module->sync();
     }
-    {
-        auto module = loader("text_encoder_plan");
+    for (std::size_t segment = 0; segment < text_sections.size(); ++segment) {
+        const auto& section = text_sections[segment];
+        auto module = loader(section);
         if (!module)
             throw std::runtime_error("MiniMax-H3 FL2VA text plan is missing");
-        module->set_timing_label("text_encoder_plan");
-        result.text_embeddings = run_fl2va_text_encoder(*module, presentation, compact_features);
+        module->set_timing_label(section);
+        // Preserve FP32 states between segments. The pipeline owns any final
+        // sampler-specific conditioning cast after the complete text encoder.
+        auto next = run_fl2va_text_encoder(*module, presentation, compact_features,
+                                          segment == 0 ? nullptr : &result.text_embeddings);
         module->sync();
+        result.text_embeddings = std::move(next);
+        // Destroy each module before loading the next segment's weights.
     }
     result.text_token_tags = std::move(presentation.token_tags);
     return result;
@@ -527,7 +547,8 @@ Fl2vaVisionFeatures run_fl2va_vision_encoder(ITrtModule& module, const Fl2vaVisi
 
 std::vector<float> run_fl2va_text_encoder(ITrtModule& module,
                                           const Fl2vaTextPresentation& presentation,
-                                          const Fl2vaVisionFeatures& features) {
+                                          const Fl2vaVisionFeatures& features,
+                                          const std::vector<float>* hidden_states) {
     const int32_t text_rows = static_cast<int32_t>(presentation.input_ids.size());
     const int32_t vision_rows = static_cast<int32_t>(presentation.vision_row_indices.size());
     if (text_rows <= 0 || text_rows > 2641 || features.rows != vision_rows ||
@@ -543,7 +564,10 @@ std::vector<float> run_fl2va_text_encoder(ITrtModule& module,
         features.deepstack_2.size() != feature_count) {
         throw std::invalid_argument("MiniMax-H3 FL2VA compact vision features are inconsistent");
     }
-    validate_fl2va_plan(module, Fl2vaPlanKind::kTextEncoder);
+    const std::size_t hidden_count = static_cast<std::size_t>(text_rows) * kTextDim;
+    if (hidden_states && hidden_states->size() != hidden_count)
+        throw std::invalid_argument("MiniMax-H3 FL2VA text continuation state size mismatch");
+    validate_fl2va_plan(module, Fl2vaPlanKind::kTextEncoder, hidden_states != nullptr);
     for (const char* name :
          {"input_ids", "mrope_position_ids", "vision_mask", "vision_count", "vision_row_indices",
           "vision_embeds", "deepstack_0", "deepstack_1", "deepstack_2"}) {
@@ -583,16 +607,22 @@ std::vector<float> run_fl2va_text_encoder(ITrtModule& module,
                                          {vision_rows, kTextDim},
                                          DType::kFloat32});
     inputs.emplace("deepstack_2", Tensor{const_cast<float*>(features.deepstack_2.data()),
-                                         {vision_rows, kTextDim},
-                                         DType::kFloat32});
+                                          {vision_rows, kTextDim},
+                                          DType::kFloat32});
+    if (hidden_states)
+        inputs.emplace("hidden_states", Tensor{const_cast<float*>(hidden_states->data()),
+                                               {text_rows, kTextDim}, DType::kFloat32});
     const auto outputs = module.forward(inputs);
+    if (require_output(outputs, "encoder_hidden_states").shape !=
+        std::vector<int64_t>{text_rows, kTextDim})
+        throw std::runtime_error("MiniMax-H3 FL2VA text output shape mismatch");
     return copy_float_output(outputs, "encoder_hidden_states",
-                             static_cast<std::size_t>(text_rows) * kTextDim);
+                              hidden_count);
 }
 
 std::vector<float> stitch_fl2va_posterior_tiles(const std::vector<float>& tiles, int32_t height,
-                                                int32_t width) {
-    const MiniMaxH3VaeTileLayout layout = make_minimax_h3_vae_tile_layout(height, width);
+                                                int32_t width, bool turbo_canvas) {
+    const MiniMaxH3VaeTileLayout layout = make_minimax_h3_vae_tile_layout(height, width, turbo_canvas);
     const int32_t tile_rows = static_cast<int32_t>(layout.y_starts.size());
     const int32_t tile_columns = static_cast<int32_t>(layout.x_starts.size());
     const int32_t tile_count = tile_rows * tile_columns;
@@ -707,14 +737,38 @@ std::vector<float> patchify_fl2va_keyframe_latent(const std::vector<float>& late
     return rows;
 }
 
+std::vector<float>
+normalize_fl2va_posterior_mean(const std::vector<float>& posterior_parameters,
+                                int32_t latent_height, int32_t latent_width) {
+    if (latent_height <= 0 || latent_width <= 0)
+        throw std::invalid_argument("MiniMax-H3 FL2VA latent geometry is invalid");
+    const std::size_t plane = checked_product(
+        {static_cast<std::size_t>(latent_height), static_cast<std::size_t>(latent_width)},
+        "FL2VA posterior mean plane");
+    const std::size_t sample_count = checked_product(
+        {static_cast<std::size_t>(kLatentChannels), plane}, "FL2VA posterior mean");
+    if (posterior_parameters.size() != checked_product({2U, sample_count}, "FL2VA posterior"))
+        throw std::invalid_argument("MiniMax-H3 FL2VA posterior mean buffer is invalid");
+    std::vector<float> result(sample_count);
+    for (int32_t channel = 0; channel < kLatentChannels; ++channel) {
+        for (std::size_t index = 0; index < plane; ++index) {
+            const auto sample = static_cast<std::size_t>(channel) * plane + index;
+            result[sample] = (posterior_parameters[sample] - kLatentMean[channel]) /
+                            kLatentStd[channel];
+        }
+    }
+    return result;
+}
+
 std::vector<float> run_fl2va_keyframe_vae_encoder(ITrtModule& module,
-                                                  const VideoImageInput& image) {
+                                                  const VideoImageInput& image,
+                                                  bool posterior_mean) {
     validate_image(image);
     validate_fl2va_plan(module, Fl2vaPlanKind::kKeyframeVaeEncoder);
     require_binding(module, "pixel_tiles", true, DType::kFloat32);
     require_binding(module, "posterior_parameter_tiles", false, DType::kFloat32);
     const MiniMaxH3VaeTileLayout layout =
-        make_minimax_h3_vae_tile_layout(image.height, image.width);
+        make_minimax_h3_vae_tile_layout(image.height, image.width, posterior_mean);
     const int32_t tile_rows = static_cast<int32_t>(layout.y_starts.size());
     const int32_t tile_columns = static_cast<int32_t>(layout.x_starts.size());
     const int32_t tile_count = tile_rows * tile_columns;
@@ -754,9 +808,12 @@ std::vector<float> run_fl2va_keyframe_vae_encoder(ITrtModule& module,
         copy_float_output(outputs, "posterior_parameter_tiles",
                           static_cast<std::size_t>(tile_count) * kPosteriorChannels *
                               kLatentTileSize * kLatentTileSize);
-    auto posterior = stitch_fl2va_posterior_tiles(posterior_tiles, image.height, image.width);
+    auto posterior = stitch_fl2va_posterior_tiles(posterior_tiles, image.height, image.width,
+                                                 posterior_mean);
     const int32_t latent_height = image.height / 16;
     const int32_t latent_width = image.width / 16;
+    if (posterior_mean)
+        return normalize_fl2va_posterior_mean(posterior, latent_height, latent_width);
     auto epsilon = torch_cuda_normal(
         static_cast<std::size_t>(kLatentChannels) * latent_height * latent_width, kKeyframeSeed);
     return sample_and_normalize_fl2va_posterior(posterior, latent_height, latent_width, epsilon);

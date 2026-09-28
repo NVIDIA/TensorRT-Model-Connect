@@ -9,6 +9,7 @@
 #include "families/minimax_h3/runtime/fl2va_runtime.h"
 #include "families/minimax_h3/runtime/ref2va_runtime.h"
 #include "families/minimax_h3/runtime/torch_cuda_normal.h"
+#include "families/minimax_h3/runtime/turbo_noise.h"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +26,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -84,12 +86,29 @@ constexpr int32_t kMinAudioRows = 414;
 constexpr int32_t kMinPackedRows = kMinVideoRows + kMinAudioRows + kMinTextRows;
 constexpr int32_t kOptPackedRows = 37838;
 constexpr int32_t kMaxPackedRows = 112367;
+constexpr int32_t kTurboMaxTargetVideoRows = 107 * kMaxVideoSpatialRows;
+constexpr int32_t kTurboMaxVideoRows = kTurboMaxTargetVideoRows + kMaxConditionVideoRows;
+constexpr int32_t kTurboMaxAudioRows = 603 * 2;
+constexpr int32_t kTurboMaxPackedRows = kMaxTextRows + kTurboMaxVideoRows + kTurboMaxAudioRows;
+static_assert(kTurboMaxPackedRows == 117643);
 static_assert(((kMaxOutputFrames - 5) / 17) * 5 + 2 == kMaxVideoLatentFrames);
 static_assert(kMaxTargetVideoRows == 106488);
 static_assert(kMaxVideoRows == 108576);
 static_assert(kMaxSequenceRows == kMaxPackedRows);
 static_assert(kMinVideoRows == 14985);
 static_assert(kMinPackedRows == 15400);
+
+int32_t max_video_rows(const MiniMaxH3Geometry& geometry) {
+    return geometry.turbo_profile ? kTurboMaxVideoRows : kMaxVideoRows;
+}
+
+int32_t max_audio_rows(const MiniMaxH3Geometry& geometry) {
+    return geometry.turbo_profile ? kTurboMaxAudioRows : kMaxAudioRows;
+}
+
+int32_t max_packed_rows(const MiniMaxH3Geometry& geometry) {
+    return geometry.turbo_profile ? kTurboMaxPackedRows : kMaxPackedRows;
+}
 
 void validate_denoiser_profile_layout(MiniMaxH3DenoiserProfileLayout layout, int32_t count) {
     if ((layout == MiniMaxH3DenoiserProfileLayout::kLegacy && count >= 1 && count <= 3) ||
@@ -415,27 +434,48 @@ MiniMaxH3DenoiserMetadata make_base_denoiser_metadata(int32_t text_rows,
     return result;
 }
 
-std::vector<StepModulation> precompute_modulations(ITrtModule& module,
-                                                   const MiniMaxH3Schedule& video_schedule,
-                                                   const MiniMaxH3Schedule& audio_schedule) {
+std::vector<StepModulation> precompute_modulations(
+    const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
+    const std::vector<std::string>& sections, const MiniMaxH3Schedule& video_schedule,
+    const MiniMaxH3Schedule& audio_schedule) {
+    validate_minimax_h3_plan_sections(sections);
+    if (video_schedule.timesteps.empty() ||
+        video_schedule.timesteps.size() != audio_schedule.timesteps.size())
+        throw std::invalid_argument("MiniMax-H3 AdaLN schedule sizes do not match");
     std::vector<StepModulation> result(video_schedule.timesteps.size());
-    for (std::size_t step = 0; step < result.size(); ++step) {
-        auto features =
-            make_adaln_features(video_schedule.timesteps[step], audio_schedule.timesteps[step]);
-        TensorMap inputs;
-        inputs.emplace("timestep_features",
-                       Tensor{features.data(), {kTimestepSlots, 256}, DType::kFloat32});
-        const auto outputs = module.forward(inputs);
-        for (int32_t layer = 0; layer < kLayers; ++layer) {
-            const std::string name = "block_modulation_" + std::to_string(layer);
-            result[step].blocks[layer] =
-                copy_raw(require_output(outputs, name), DType::kBFloat16,
-                         static_cast<std::size_t>(kAdalnRows) * 6 * kHidden, name.c_str());
+    std::vector<MiniMaxH3AdalnCoverage> coverage(result.size());
+    // Load each weight segment once, evaluate every clock, then release it
+    // before the next segment is loaded. Only small modulation outputs persist.
+    for (std::size_t segment = 0; segment < sections.size(); ++segment) {
+        const auto& section = sections[segment];
+        auto module = loader(section, stream, {}, 0);
+        module->set_timing_label(section);
+        for (std::size_t step = 0; step < result.size(); ++step) {
+            auto features =
+                make_adaln_features(video_schedule.timesteps[step], audio_schedule.timesteps[step]);
+            TensorMap inputs;
+            inputs.emplace("timestep_features",
+                           Tensor{features.data(), {kTimestepSlots, 256}, DType::kFloat32});
+            const auto outputs = module->forward(inputs);
+            if (outputs.empty())
+                throw std::runtime_error("MiniMax-H3 AdaLN segment returned no outputs");
+            for (const auto& [name, tensor] : outputs) {
+                const auto index = claim_minimax_h3_adaln_output(coverage[step], name, segment == 0);
+                if (index == kLayers) {
+                    result[step].final = copy_raw(
+                        tensor, DType::kBFloat16,
+                        static_cast<std::size_t>(kTimestepSlots) * 2 * kHidden, name.c_str());
+                } else {
+                    result[step].blocks[index] = copy_raw(
+                        tensor, DType::kBFloat16,
+                        static_cast<std::size_t>(kAdalnRows) * 6 * kHidden, name.c_str());
+                }
+            }
         }
-        result[step].final =
-            copy_raw(require_output(outputs, "final_modulation"), DType::kBFloat16,
-                     static_cast<std::size_t>(kTimestepSlots) * 2 * kHidden, "final_modulation");
+        module->sync();
     }
+    for (const auto& step : coverage)
+        validate_minimax_h3_adaln_coverage(step);
     return result;
 }
 
@@ -616,7 +656,8 @@ void denormalize_latents(std::vector<float>& latent, const MiniMaxH3Geometry& ge
 std::vector<float> extract_tiles(const std::vector<float>& latent, int32_t clip,
                                  const MiniMaxH3Geometry& geometry) {
     const auto layout =
-        make_minimax_h3_vae_tile_layout(geometry.output_height, geometry.output_width);
+        make_minimax_h3_vae_tile_layout(geometry.output_height, geometry.output_width,
+                                       geometry.turbo_profile);
     const std::size_t one_tile = static_cast<std::size_t>(kLatentChannels) * kTileInputFrames *
                                  kTileLatentSize * kTileLatentSize;
     std::vector<float> result(static_cast<std::size_t>(geometry.vae_tile_count) * one_tile);
@@ -705,7 +746,8 @@ void stitch_one_spatial_tile(const float* tiles, std::vector<float>& clip, int32
 void stitch_spatial_tiles(const Tensor& tiles, std::vector<float>& clip,
                           const MiniMaxH3Geometry& geometry) {
     const auto layout =
-        make_minimax_h3_vae_tile_layout(geometry.output_height, geometry.output_width);
+        make_minimax_h3_vae_tile_layout(geometry.output_height, geometry.output_width,
+                                       geometry.turbo_profile);
     const std::size_t one_tile = static_cast<std::size_t>(3) * kTileFrames * kTileSize * kTileSize;
     if (tiles.dtype != DType::kFloat32 || tiles.data == nullptr ||
         tiles.numel() != static_cast<std::size_t>(geometry.vae_tile_count) * one_tile)
@@ -822,15 +864,15 @@ std::vector<float> to_frame_major_rgb(const std::vector<float>& video,
     return pixels;
 }
 
-MiniMaxH3Geometry resolve_generate_geometry(const ImageGenerationConfig& cfg) {
+MiniMaxH3Geometry resolve_generate_geometry(const ImageGenerationConfig& cfg, bool turbo) {
     if ((cfg.height > 0) != (cfg.width > 0))
         throw std::invalid_argument("MiniMax-H3 height and width must be supplied together");
     const int32_t output_height = cfg.height > 0 ? cfg.height : kDefaultOutputHeight;
     const int32_t output_width = cfg.width > 0 ? cfg.width : kDefaultOutputWidth;
     const int32_t requested_frames =
         cfg.video_num_frames > 0 ? cfg.video_num_frames : kDefaultOutputFrames;
-    const int32_t output_frames = align_minimax_h3_num_frames(requested_frames);
-    return make_minimax_h3_geometry(output_frames, output_height, output_width);
+    const int32_t output_frames = align_minimax_h3_num_frames(requested_frames, turbo);
+    return make_minimax_h3_geometry(output_frames, output_height, output_width, turbo);
 }
 
 struct DenoiserStats {
@@ -858,8 +900,10 @@ class Ref2vaFirstBlockCache {
   public:
     Ref2vaFirstBlockCache(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
                           const minimax_h3::Ref2vaPackedLayout& layout, int32_t profile_index,
-                          int32_t profile_count)
+                          int32_t profile_count, bool turbo = false,
+                          const std::vector<std::string>& tail_sections = {"ref2va_dit_tail_plan"})
         : stream_(stream), sequence_rows_(layout.sequence_length()),
+          turbo_(turbo), tail_sections_(tail_sections),
           cache_indices_(minimax_h3::make_ref2va_cache_indices(layout)),
           max_rows_(profile_count == 2 && profile_index == 0
                         ? minimax_h3::kRef2vaFiveSecondMaxPackedRows
@@ -870,7 +914,16 @@ class Ref2vaFirstBlockCache {
           head_residual_({sequence_rows_, kHidden}, DType::kBFloat16, stream),
           previous_head_residual_({sequence_rows_, kHidden}, DType::kBFloat16, stream),
           tail_residual_({sequence_rows_, kHidden}, DType::kBFloat16, stream), synchronize_(stream) {
+        validate_minimax_h3_plan_sections(tail_sections_);
+        if (tail_sections_.size() > 2 || (!turbo_ && tail_sections_.size() != 1))
+            throw std::invalid_argument("MiniMax-H3 Ref2VA tail segmentation requires Turbo");
+        if (tail_sections_.size() == 2)
+            tail_intermediate_ = std::make_unique<DeviceTensor>(
+                std::vector<int64_t>{sequence_rows_, kHidden}, DType::kBFloat16, stream);
         const std::vector<int64_t> cache_shape{sequence_rows_, kHidden};
+        if (tail_intermediate_ && (!tail_intermediate_->ok() ||
+            tail_intermediate_->shape() != cache_shape || tail_intermediate_->nbytes() != cache_tensor_bytes_))
+            throw std::runtime_error("MiniMax-H3 Ref2VA intermediate allocation is invalid");
         for (const DeviceTensor* buffer :
              {&head_hidden_, &head_residual_, &previous_head_residual_, &tail_residual_}) {
             if (!buffer->ok() || buffer->dtype() != DType::kBFloat16 ||
@@ -883,23 +936,41 @@ class Ref2vaFirstBlockCache {
         // is allocated. No enqueue occurs until forward inputs and cache
         // shapes have been bound.
         head_ = loader("ref2va_dit_head_plan", stream, {}, profile_index);
-        tail_ = loader("ref2va_dit_tail_plan", stream, {}, profile_index);
+        tail_ = loader(tail_sections_[0], stream, {}, profile_index);
+        if (tail_intermediate_)
+            tail_second_ = loader(tail_sections_[1], stream, {}, profile_index);
         finish_ = loader("ref2va_dit_finish_plan", stream, {}, profile_index);
+        if (!head_ || !tail_ || !finish_ || (tail_intermediate_ && !tail_second_))
+            throw std::runtime_error("MiniMax-H3 Ref2VA denoiser plan is missing");
         head_->set_timing_label("ref2va_dit_head_plan");
-        tail_->set_timing_label("ref2va_dit_tail_plan");
+        tail_->set_timing_label(tail_sections_[0]);
+        if (tail_second_)
+            tail_second_->set_timing_label(tail_sections_[1]);
         finish_->set_timing_label("ref2va_dit_finish_plan");
-        for (ITrtModule* module : {head_.get(), tail_.get(), finish_.get()})
-            minimax_h3::validate_ref2va_denoiser_profile_selection(*module, profile_count,
-                                                                   profile_index);
+        for (ITrtModule* module : {head_.get(), tail_.get(), tail_second_.get(), finish_.get()})
+            if (module)
+                minimax_h3::validate_ref2va_denoiser_profile_selection(*module, profile_count,
+                                                                       profile_index);
         minimax_h3::validate_ref2va_plan(*head_, minimax_h3::Ref2vaPlanKind::kDenoiserHead);
-        minimax_h3::validate_ref2va_plan(*tail_, minimax_h3::Ref2vaPlanKind::kDenoiserTail);
+        for (std::size_t segment = 0; segment < tail_sections_.size(); ++segment) {
+            const auto range = minimax_h3_tail_layer_range(segment, tail_sections_.size());
+            minimax_h3::Ref2vaPlanOptions options;
+            options.block_start = range[0];
+            options.block_end = range[1];
+            minimax_h3::validate_ref2va_plan(segment == 0 ? *tail_ : *tail_second_,
+                minimax_h3::Ref2vaPlanKind::kDenoiserTail, options);
+        }
         minimax_h3::validate_ref2va_plan(*finish_, minimax_h3::Ref2vaPlanKind::kDenoiserFinish);
         bind_external_dynamic_output_checked(*head_, "head_hidden", head_hidden_.data(),
                                              DType::kBFloat16, {max_rows_, kHidden});
         bind_external_dynamic_output_checked(*head_, "head_residual", head_residual_.data(),
                                              DType::kBFloat16, {max_rows_, kHidden});
-        bind_external_dynamic_output_checked(*tail_, "tail_residual", tail_residual_.data(),
+        bind_external_dynamic_output_checked(*tail_, "tail_residual",
+                                             tail_intermediate_ ? tail_intermediate_->data() : tail_residual_.data(),
                                              DType::kBFloat16, {max_rows_, kHidden});
+        if (tail_second_)
+            bind_external_dynamic_output_checked(*tail_second_, "tail_residual", tail_residual_.data(),
+                                                 DType::kBFloat16, {max_rows_, kHidden});
         const auto bind = [&](ITrtModule& module, const char* name, DeviceTensor& buffer) {
             bind_external_dynamic_input_checked(module, name, buffer.data(), DType::kBFloat16,
                                                 {sequence_rows_, kHidden}, {max_rows_, kHidden},
@@ -907,10 +978,14 @@ class Ref2vaFirstBlockCache {
         };
         bind(*head_, "previous_head_residual", previous_head_residual_);
         bind(*tail_, "head_hidden", head_hidden_);
+        if (tail_second_)
+            bind(*tail_second_, "head_hidden", *tail_intermediate_);
         bind(*finish_, "head_hidden", head_hidden_);
         bind(*finish_, "tail_residual", tail_residual_);
         head_->reset_execution_context();
         tail_->reset_execution_context();
+        if (tail_second_)
+            tail_second_->reset_execution_context();
         finish_->reset_execution_context();
         if (cudaMemsetAsync(previous_head_residual_.data(), 0, sequence_bytes(), stream_) !=
             cudaSuccess)
@@ -956,16 +1031,26 @@ class Ref2vaFirstBlockCache {
         const auto head_outputs = head_->forward(head_inputs);
         const float metric =
             copy_float(require_output(head_outputs, "cache_metric"), 1, "Ref2VA cache metric")[0];
-        const bool compute_tail = should_compute_minimax_h3_tail(step, steps, metric, threshold);
+        const bool compute_tail = turbo_ || should_compute_minimax_h3_tail(step, steps, metric, threshold);
         if (compute_tail) {
             TensorMap tail_inputs{
                 {"position_ids",
                  {inputs.layout.position_ids.data(), {sequence_rows_, 3}, DType::kFloat32}},
                 {"adaln_indices", index_tensor(inputs.adaln_indices)},
             };
-            append_block_modulation_inputs(tail_inputs, modulation, 1, kLayers);
+            const auto first_range = minimax_h3_tail_layer_range(0, tail_sections_.size());
+            append_block_modulation_inputs(tail_inputs, modulation, first_range[0], first_range[1]);
             tail_->forward_async(tail_inputs);
-            if (cudaMemcpyAsync(previous_head_residual_.data(), head_residual_.data(),
+            if (tail_second_) {
+                TensorMap second_inputs{
+                    {"position_ids", {inputs.layout.position_ids.data(), {sequence_rows_, 3}, DType::kFloat32}},
+                    {"adaln_indices", index_tensor(inputs.adaln_indices)},
+                };
+                const auto range = minimax_h3_tail_layer_range(1, tail_sections_.size());
+                append_block_modulation_inputs(second_inputs, modulation, range[0], range[1]);
+                tail_second_->forward_async(second_inputs);
+            }
+            if (!turbo_ && cudaMemcpyAsync(previous_head_residual_.data(), head_residual_.data(),
                                 sequence_bytes(), cudaMemcpyDeviceToDevice, stream_) != cudaSuccess)
                 throw std::runtime_error("MiniMax-H3 Ref2VA failed to update cache state");
             ++stats.full_steps;
@@ -995,6 +1080,8 @@ class Ref2vaFirstBlockCache {
 
     cudaStream_t stream_;
     int64_t sequence_rows_;
+    bool turbo_;
+    std::vector<std::string> tail_sections_;
     minimax_h3::Ref2vaCacheIndices cache_indices_;
     int64_t max_rows_;
     std::size_t cache_tensor_bytes_;
@@ -1002,9 +1089,11 @@ class Ref2vaFirstBlockCache {
     DeviceTensor head_residual_;
     DeviceTensor previous_head_residual_;
     DeviceTensor tail_residual_;
+    std::unique_ptr<DeviceTensor> tail_intermediate_;
     // Contexts are destroyed before their externally bound device storage.
     std::unique_ptr<ITrtModule> head_;
     std::unique_ptr<ITrtModule> tail_;
+    std::unique_ptr<ITrtModule> tail_second_;
     std::unique_ptr<ITrtModule> finish_;
     StreamScopeSynchronizer synchronize_;
 };
@@ -1033,8 +1122,8 @@ int32_t select_minimax_h3_denoiser_profile(
     MiniMaxH3DenoiserProfileLayout layout) {
     validate_denoiser_profile_layout(layout, optimization_profile_count);
     validate_text_rows(text_rows);
-    if (geometry.video_rows < kMinVideoRows || geometry.video_rows > kMaxVideoRows ||
-        geometry.audio_rows < kMinAudioRows || geometry.audio_rows > kMaxAudioRows)
+    if (geometry.video_rows < kMinVideoRows || geometry.video_rows > max_video_rows(geometry) ||
+        geometry.audio_rows < kMinAudioRows || geometry.audio_rows > max_audio_rows(geometry))
         throw std::invalid_argument("MiniMax-H3 denoiser request exceeds dynamic profile bounds");
     // Every supported layout ends with the broad public dynamic profile.
     // Retain compatibility without executing older fixed or short profiles.
@@ -1044,19 +1133,19 @@ int32_t select_minimax_h3_denoiser_profile(
 std::size_t minimax_h3_cache_tensor_bytes(int32_t text_rows,
                                            const MiniMaxH3Geometry& geometry) {
     validate_text_rows(text_rows);
-    if (geometry.video_rows < kMinVideoRows || geometry.video_rows > kMaxVideoRows ||
-        geometry.audio_rows < kMinAudioRows || geometry.audio_rows > kMaxAudioRows)
+    if (geometry.video_rows < kMinVideoRows || geometry.video_rows > max_video_rows(geometry) ||
+        geometry.audio_rows < kMinAudioRows || geometry.audio_rows > max_audio_rows(geometry))
         throw std::invalid_argument("MiniMax-H3 cache request exceeds dynamic profile bounds");
     const int64_t sequence_rows =
         static_cast<int64_t>(text_rows) + geometry.audio_rows + geometry.video_rows;
-    if (sequence_rows < kMinPackedRows || sequence_rows > kMaxSequenceRows)
+    if (sequence_rows < kMinPackedRows || sequence_rows > max_packed_rows(geometry))
         throw std::invalid_argument("MiniMax-H3 cache rows exceed the dynamic profile");
     return static_cast<std::size_t>(sequence_rows) * kHidden * sizeof(uint16_t);
 }
 
 MiniMaxH3VaeTileLayout make_minimax_h3_vae_tile_layout(int32_t output_height,
-                                                       int32_t output_width) {
-    if (!is_minimax_h3_native_canvas(output_height, output_width))
+                                                       int32_t output_width, bool turbo) {
+    if (!is_minimax_h3_native_canvas(output_height, output_width, turbo))
         throw std::invalid_argument(
             "MiniMax-H3 VAE tiling supports the public 768p resolver canvases plus the explicit "
             "544x960 native profile (both orientations) and landscape 480x864 SR source");
@@ -1071,19 +1160,21 @@ MiniMaxH3VaeTileLayout make_minimax_h3_vae_tile_layout(int32_t output_height,
 }
 
 MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output_height,
-                                           int32_t output_width) {
+                                           int32_t output_width, bool turbo) {
     if (output_frames % 17 != 5)
         throw std::invalid_argument("MiniMax-H3 output frames must have the form 17*n+5");
-    if (output_frames < 5 * 24 || output_frames > 15 * 24)
+    if (output_frames < 5 * 24 ||
+        output_frames > (turbo ? kMiniMaxH3TurboMaxOutputFrames : 15 * 24))
         throw std::invalid_argument(
             "MiniMax-H3 released local profile supports output durations from 5 to 15 seconds");
-    if (!is_minimax_h3_native_canvas(output_height, output_width))
+    if (!is_minimax_h3_native_canvas(output_height, output_width, turbo))
         throw std::invalid_argument(
             "MiniMax-H3 output canvas must come from the public 768p resolver or be the explicit "
             "544x960 profile (both orientations) or landscape 480x864 SR source; other "
             "multiple-of-32 canvases are not in the finite TensorRT profile");
 
     MiniMaxH3Geometry result;
+    result.turbo_profile = turbo;
     result.output_frames = output_frames;
     result.output_height = output_height;
     result.output_width = output_width;
@@ -1097,12 +1188,12 @@ MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output
                                (result.latent_height / 2) * (result.latent_width / 2);
     if (video_rows < kMinVideoRows)
         throw std::invalid_argument("MiniMax-H3 video rows are below the finite native profile");
-    if (video_rows > kMaxTargetVideoRows)
+    if (video_rows > (turbo ? kTurboMaxTargetVideoRows : kMaxTargetVideoRows))
         throw std::overflow_error("MiniMax-H3 packed video rows exceed the finite native profile");
     result.target_video_rows = static_cast<int32_t>(video_rows);
     result.video_rows = result.target_video_rows;
 
-    const auto tile_layout = make_minimax_h3_vae_tile_layout(output_height, output_width);
+    const auto tile_layout = make_minimax_h3_vae_tile_layout(output_height, output_width, turbo);
     result.vae_tile_rows = static_cast<int32_t>(tile_layout.y_starts.size());
     result.vae_tile_columns = static_cast<int32_t>(tile_layout.x_starts.size());
     result.vae_tile_count = result.vae_tile_rows * result.vae_tile_columns;
@@ -1113,7 +1204,8 @@ MiniMaxH3Geometry make_minimax_h3_geometry(int32_t output_frames, int32_t output
 }
 
 MiniMaxH3ResolvedGeneration resolve_minimax_h3_generation(
-    const VideoGenerationRequest& request, const minimax_h3::SuperResolutionConfig& sr) {
+    const VideoGenerationRequest& request, const minimax_h3::SuperResolutionConfig& sr,
+    bool turbo) {
     minimax_h3::validate_super_resolution_config(sr);
     ImageGenerationConfig config = request.config;
     if (sr.enabled) {
@@ -1133,7 +1225,7 @@ MiniMaxH3ResolvedGeneration resolve_minimax_h3_generation(
         config.height = canvas.height;
         config.width = canvas.width;
     }
-    const auto geometry = resolve_generate_geometry(config);
+    const auto geometry = resolve_generate_geometry(config, turbo);
     return {geometry, sr.enabled ? sr.target_height : geometry.output_height,
             sr.enabled ? sr.target_width : geometry.output_width, sr.enabled};
 }
@@ -1145,13 +1237,15 @@ MiniMaxH3Geometry make_minimax_h3_fl2va_geometry(const MiniMaxH3Geometry& target
     // Re-resolve the base geometry so callers cannot smuggle mutually
     // inconsistent public canvas/duration fields into the frozen plan ABI.
     MiniMaxH3Geometry result = make_minimax_h3_geometry(
-        target_geometry.output_frames, target_geometry.output_height, target_geometry.output_width);
+        target_geometry.output_frames, target_geometry.output_height, target_geometry.output_width,
+        target_geometry.turbo_profile);
     const int32_t rows_per_frame =
         (result.latent_height / kPatchHeight) * (result.latent_width / kPatchWidth);
     result.condition_video_frames = keyframe_count;
     result.condition_video_rows = keyframe_count * rows_per_frame;
     result.video_rows = result.condition_video_rows + result.target_video_rows;
-    if (result.condition_video_rows > kMaxConditionVideoRows || result.video_rows > kMaxVideoRows)
+    if (result.condition_video_rows > kMaxConditionVideoRows ||
+        result.video_rows > max_video_rows(result))
         throw std::overflow_error("MiniMax-H3 FL2VA video rows exceed the frozen plan profile");
 
     return result;
@@ -1246,6 +1340,7 @@ struct MiniMaxH3Pipeline::ResidentState {
     std::unique_ptr<DeviceTensor> head_residual;
     std::unique_ptr<DeviceTensor> previous_head_residual;
     std::unique_ptr<DeviceTensor> tail_residual;
+    std::unique_ptr<DeviceTensor> tail_intermediate;
     std::unique_ptr<DeviceTensor> video_rows;
     std::unique_ptr<DeviceTensor> audio_rows;
     std::unique_ptr<DeviceTensor> video_velocity;
@@ -1256,25 +1351,29 @@ struct MiniMaxH3Pipeline::ResidentState {
     std::unique_ptr<DeviceTensor> frame_major_rgb;
     std::unique_ptr<ITrtModule> denoiser_head;
     std::unique_ptr<ITrtModule> denoiser_tail;
+    std::unique_ptr<ITrtModule> denoiser_tail_second;
     std::unique_ptr<ITrtModule> denoiser_finish;
     std::unique_ptr<ITrtModule> vae;
 
     void load_text_embeddings(const std::string& requested_prompt, ITokenizer& tokenizer,
                               const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
-                              int32_t max_text_rows);
+                              const MiniMaxH3DenoiserConfig& config);
     std::vector<std::vector<float>>
     load_fl2va_conditioning(const std::string& requested_prompt,
                             const MiniMaxH3PreparedKeyframes& keyframes, ITokenizer& tokenizer,
-                            const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
+                            const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
+                            const MiniMaxH3DenoiserConfig& config);
     void load_modulations(const MiniMaxH3Schedule& video_schedule,
                           const MiniMaxH3Schedule& audio_schedule,
-                          const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
+                          const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
+                          const std::vector<std::string>& sections);
     bool prepare_denoiser(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
                           const MiniMaxH3DenoiserConfig& config, const MiniMaxH3Geometry& geometry);
     DenoiserStats
     run_denoiser(MiniMaxH3DenoiserMetadata& metadata, const MiniMaxH3Schedule& video_schedule,
                  const MiniMaxH3Schedule& audio_schedule, std::vector<float>& video_rows_host,
-                 std::vector<float>& audio_rows_host, float cache_threshold, cudaStream_t stream);
+                 std::vector<float>& audio_rows_host, float cache_threshold, cudaStream_t stream,
+                 bool turbo);
     bool prepare_vae(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
                      const MiniMaxH3Geometry& geometry);
     std::vector<float> decode_vae(std::size_t expected_pixels, const MiniMaxH3Geometry& geometry,
@@ -1293,7 +1392,7 @@ struct MiniMaxH3Pipeline::ResidentState {
     bool denoiser_is_resident(int32_t profile_index, std::size_t cache_bytes) const;
     void load_first_block_cache_denoiser(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
                                          const MiniMaxH3Geometry& geometry, int32_t profile_index,
-                                         int32_t profile_count);
+                                         const MiniMaxH3DenoiserConfig& config);
     void bind_first_block_cache_shapes(const MiniMaxH3Geometry& geometry);
     bool vae_is_resident() const;
     void load_first_block_cache_vae(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
@@ -1312,6 +1411,7 @@ void sync_and_reset(std::unique_ptr<ITrtModule>& module) {
 
 void MiniMaxH3Pipeline::ResidentState::release_denoiser_stage(bool preserve_video_rows) {
     // Contexts must be destroyed before buffers prebound into them.
+    sync_and_reset(denoiser_tail_second);
     sync_and_reset(denoiser_tail);
     sync_and_reset(denoiser_head);
     sync_and_reset(denoiser_finish);
@@ -1319,6 +1419,7 @@ void MiniMaxH3Pipeline::ResidentState::release_denoiser_stage(bool preserve_vide
     head_residual.reset();
     previous_head_residual.reset();
     tail_residual.reset();
+    tail_intermediate.reset();
     if (!preserve_video_rows)
         video_rows.reset();
     audio_rows.reset();
@@ -1340,7 +1441,7 @@ void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& r
                                                             ITokenizer& tokenizer,
                                                             const MiniMaxH3ModuleLoader& loader,
                                                             cudaStream_t stream,
-                                                            int32_t max_text_rows) {
+                                                            const MiniMaxH3DenoiserConfig& config) {
     // The text encoder is the largest plan. Drop resident execution modules
     // before loading it so prompt changes retain the previous peak-memory
     // behavior on smaller devices.
@@ -1351,20 +1452,14 @@ void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& r
     text_token_tags.clear();
     text_rows = 0;
     const auto ids = tokenizer.encode(requested_prompt);
-    validate_prompt_token_count(ids.size(), max_text_rows);
+    validate_prompt_token_count(ids.size(), config.max_text_rows);
     const int32_t requested_text_rows = static_cast<int32_t>(ids.size());
     std::vector<int32_t> position_ids(ids.size());
     for (int32_t index = 0; index < requested_text_rows; ++index)
         position_ids[static_cast<std::size_t>(index)] = index;
-    auto module = loader("text_encoder_plan", stream, {}, 0);
-    module->set_timing_label("text_encoder_plan");
     TensorMap inputs;
     inputs.emplace("input_ids",
                    Tensor{const_cast<int32_t*>(ids.data()), {requested_text_rows}, DType::kInt32});
-    if (!module->has_input("mrope_position_ids") || module->input_info().size() != 9U ||
-        module->has_input("position_ids")) {
-        throw std::runtime_error("MiniMax-H3 unified text plan input ABI mismatch");
-    }
     std::vector<int32_t> mrope_positions(static_cast<std::size_t>(3) * requested_text_rows);
     for (int32_t axis = 0; axis < 3; ++axis) {
         std::copy(position_ids.begin(), position_ids.end(),
@@ -1384,11 +1479,39 @@ void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& r
     for (const char* name : {"vision_embeds", "deepstack_0", "deepstack_1", "deepstack_2"}) {
         inputs.emplace(name, Tensor{dummy_vision.data(), {1, kTextDim}, DType::kFloat32});
     }
-    const auto outputs = module->forward(inputs);
-    text_embeddings =
-        copy_float(require_output(outputs, "encoder_hidden_states"),
-                   static_cast<std::size_t>(requested_text_rows) * kTextDim, "text encoder");
-    module->sync();
+    for (std::size_t segment = 0; segment < config.text_encoder_sections.size(); ++segment) {
+        const auto& section = config.text_encoder_sections[segment];
+        auto module = loader(section, stream, {}, 0);
+        module->set_timing_label(section);
+        const bool continuation = segment != 0;
+        if (!module->has_input("mrope_position_ids") ||
+            module->input_info().size() != (continuation ? 10U : 9U) ||
+            module->has_input("position_ids") ||
+            module->has_input("hidden_states") != continuation)
+            throw std::runtime_error("MiniMax-H3 text segment input ABI mismatch");
+        if (continuation) {
+            if (module->tensor_dtype("hidden_states") != DType::kFloat32)
+                throw std::runtime_error("MiniMax-H3 text continuation must consume FP32 states");
+            inputs["hidden_states"] = Tensor{text_embeddings.data(),
+                {requested_text_rows, kTextDim}, DType::kFloat32};
+        }
+        const auto outputs = module->forward(inputs);
+        const auto& encoded = require_output(outputs, "encoder_hidden_states");
+        if (encoded.shape != std::vector<int64_t>{requested_text_rows, kTextDim})
+            throw std::runtime_error("MiniMax-H3 text segment output shape mismatch");
+        auto next = copy_float(encoded,
+                               static_cast<std::size_t>(requested_text_rows) * kTextDim,
+                               "text encoder segment");
+        module->sync();
+        text_embeddings = std::move(next);
+        // module is destroyed here before the next segment's weights load.
+    }
+    if (config.sampler == MiniMaxH3Sampler::kTurboEuler) {
+        // Keep the author's BF16 conditioning boundary even if an engine
+        // optimizes adjacent BF16/FP32 casts into its FP32 output binding.
+        for (float& value : text_embeddings)
+            value = minimax_h3_round_bfloat16(value);
+    }
     text_rows = requested_text_rows;
     text_token_tags.assign(static_cast<std::size_t>(text_rows), 1);
     prompt = requested_prompt;
@@ -1396,7 +1519,8 @@ void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& r
 
 std::vector<std::vector<float>> MiniMaxH3Pipeline::ResidentState::load_fl2va_conditioning(
     const std::string& requested_prompt, const MiniMaxH3PreparedKeyframes& keyframes,
-    ITokenizer& tokenizer, const MiniMaxH3ModuleLoader& loader, cudaStream_t stream) {
+    ITokenizer& tokenizer, const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
+    const MiniMaxH3DenoiserConfig& config) {
     if (keyframes.images.empty() || keyframes.images.size() > 2U ||
         keyframes.images.size() != keyframes.anchors.size())
         throw std::invalid_argument("MiniMax-H3 FL2VA prepared keyframes are inconsistent");
@@ -1409,8 +1533,15 @@ std::vector<std::vector<float>> MiniMaxH3Pipeline::ResidentState::load_fl2va_con
 
     auto conditioning = minimax_h3::run_fl2va_conditioning(
         requested_prompt, keyframes, tokenizer,
-        [&](const std::string& section) { return loader(section, stream, {}, 0); });
+        [&](const std::string& section) { return loader(section, stream, {}, 0); },
+        config.text_encoder_sections, config.sampler == MiniMaxH3Sampler::kTurboEuler);
     text_embeddings = std::move(conditioning.text_embeddings);
+    if (config.sampler == MiniMaxH3Sampler::kTurboEuler) {
+        // Match T2VA: preserve FP32 states between language segments and round
+        // only the complete multimodal conditioning at the DiT boundary.
+        for (float& value : text_embeddings)
+            value = minimax_h3_round_bfloat16(value);
+    }
     text_token_tags = std::move(conditioning.text_token_tags);
     text_rows = static_cast<int32_t>(text_token_tags.size());
     // Media participates in the conditioning cache key; until an explicit
@@ -1423,11 +1554,9 @@ std::vector<std::vector<float>> MiniMaxH3Pipeline::ResidentState::load_fl2va_con
 void MiniMaxH3Pipeline::ResidentState::load_modulations(const MiniMaxH3Schedule& video_schedule,
                                                         const MiniMaxH3Schedule& audio_schedule,
                                                         const MiniMaxH3ModuleLoader& loader,
-                                                        cudaStream_t stream) {
-    auto module = loader("adaln_precompute_plan", stream, {}, 0);
-    module->set_timing_label("adaln_precompute_plan");
-    modulations = precompute_modulations(*module, video_schedule, audio_schedule);
-    module->sync();
+                                                        cudaStream_t stream,
+                                                        const std::vector<std::string>& sections) {
+    modulations = precompute_modulations(loader, stream, sections, video_schedule, audio_schedule);
 }
 
 bool MiniMaxH3Pipeline::ResidentState::denoiser_is_resident(int32_t profile_index,
@@ -1436,19 +1565,22 @@ bool MiniMaxH3Pipeline::ResidentState::denoiser_is_resident(int32_t profile_inde
            denoiser_tail != nullptr && denoiser_finish != nullptr &&
            cache_tensors_fit({head_hidden.get(), head_residual.get(),
                                previous_head_residual.get(), tail_residual.get()}, cache_bytes) &&
+           (!denoiser_tail_second || cache_tensors_fit({tail_intermediate.get()}, cache_bytes)) &&
            device_tensors_ready({video_rows.get(), audio_rows.get(), video_velocity.get(),
                                  audio_velocity.get()});
 }
 
 void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     const MiniMaxH3ModuleLoader& loader, cudaStream_t stream, const MiniMaxH3Geometry& geometry,
-    int32_t profile_index, int32_t profile_count) {
+    int32_t profile_index, const MiniMaxH3DenoiserConfig& config) {
+    const auto profile_count = config.optimization_profile_count;
+    const bool split_tail = config.denoiser_tail_sections.size() == 2;
     const std::size_t cache_bytes = minimax_h3_cache_tensor_bytes(text_rows, geometry);
     const int64_t sequence_rows =
         static_cast<int64_t>(text_rows) + geometry.audio_rows + geometry.video_rows;
-    constexpr int64_t profile_sequence_rows = kMaxSequenceRows;
-    constexpr int64_t profile_video_rows = kMaxVideoRows;
-    constexpr int64_t profile_audio_rows = kMaxAudioRows;
+    const int64_t profile_sequence_rows = max_packed_rows(geometry);
+    const int64_t profile_video_rows = max_video_rows(geometry);
+    const int64_t profile_audio_rows = max_audio_rows(geometry);
     std::cerr << "[minimax-h3] denoiser optimization_profile=" << profile_index << '/'
               << profile_count << " packed_rows=" << profile_sequence_rows << '\n';
 
@@ -1471,6 +1603,13 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     auto resident_previous_head_residual =
         std::make_unique<DeviceTensor>(std::move(new_previous_head_residual));
     auto resident_tail_residual = std::make_unique<DeviceTensor>(std::move(new_tail_residual));
+    std::unique_ptr<DeviceTensor> resident_intermediate;
+    if (split_tail) {
+        resident_intermediate = std::make_unique<DeviceTensor>(
+            std::vector<int64_t>{sequence_rows, kHidden}, DType::kBFloat16, stream);
+        if (!cache_tensors_fit({resident_intermediate.get()}, cache_bytes))
+            throw std::runtime_error("MiniMax-H3 failed to allocate the split-tail intermediate");
+    }
     auto resident_video_rows = std::make_unique<DeviceTensor>(std::move(new_video_rows));
     auto resident_audio_rows = std::make_unique<DeviceTensor>(std::move(new_audio_rows));
     auto resident_video_velocity = std::make_unique<DeviceTensor>(std::move(new_video_velocity));
@@ -1490,18 +1629,28 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
         external_binding("audio_velocity", *resident_audio_velocity),
     };
     auto head = loader("denoiser_head_plan", stream, head_bindings, profile_index);
-    auto tail = loader("denoiser_tail_plan", stream, {}, profile_index);
+    auto tail = loader(config.denoiser_tail_sections[0], stream, {}, profile_index);
+    auto second_tail = split_tail
+        ? loader(config.denoiser_tail_sections[1], stream, {}, profile_index) : nullptr;
     auto finish = loader("denoiser_finish_plan", stream, finish_bindings, profile_index);
     head->set_timing_label("denoiser_head_plan");
-    tail->set_timing_label("denoiser_tail_plan");
+    tail->set_timing_label(config.denoiser_tail_sections[0]);
+    if (second_tail)
+        second_tail->set_timing_label(config.denoiser_tail_sections[1]);
     finish->set_timing_label("denoiser_finish_plan");
 
     bind_external_dynamic_output_checked(*head, "head_hidden", resident_head_hidden->data(),
                                          DType::kBFloat16, {profile_sequence_rows, kHidden});
     bind_external_dynamic_output_checked(*head, "head_residual", resident_head_residual->data(),
                                          DType::kBFloat16, {profile_sequence_rows, kHidden});
-    bind_external_dynamic_output_checked(*tail, "tail_residual", resident_tail_residual->data(),
+    bind_external_dynamic_output_checked(*tail, "tail_residual",
+                                         split_tail ? resident_intermediate->data()
+                                                    : resident_tail_residual->data(),
                                          DType::kBFloat16, {profile_sequence_rows, kHidden});
+    if (second_tail)
+        bind_external_dynamic_output_checked(*second_tail, "tail_residual",
+                                             resident_tail_residual->data(), DType::kBFloat16,
+                                             {profile_sequence_rows, kHidden});
     bind_external_dynamic_output_checked(*finish, "video_velocity", resident_video_velocity->data(),
                                          DType::kFloat32, {profile_video_rows, kPatchDim});
     bind_external_dynamic_output_checked(*finish, "audio_velocity", resident_audio_velocity->data(),
@@ -1509,11 +1658,13 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
 
     denoiser_head = std::move(head);
     denoiser_tail = std::move(tail);
+    denoiser_tail_second = std::move(second_tail);
     denoiser_finish = std::move(finish);
     head_hidden = std::move(resident_head_hidden);
     head_residual = std::move(resident_head_residual);
     previous_head_residual = std::move(resident_previous_head_residual);
     tail_residual = std::move(resident_tail_residual);
+    tail_intermediate = std::move(resident_intermediate);
     video_rows = std::move(resident_video_rows);
     audio_rows = std::move(resident_audio_rows);
     video_velocity = std::move(resident_video_velocity);
@@ -1523,6 +1674,7 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     std::cerr << "[minimax-h3.cache_memory] requested_rows=" << sequence_rows
               << " profile_max_rows=" << profile_sequence_rows
               << " requested_cache_bytes=" << cache_bytes * 4U
+              << " tail_intermediate_bytes=" << (split_tail ? cache_bytes : 0U)
               << " profile_max_cache_bytes="
               << static_cast<std::size_t>(profile_sequence_rows) * kHidden * sizeof(uint16_t) * 4U
               << '\n';
@@ -1536,12 +1688,14 @@ void MiniMaxH3Pipeline::ResidentState::bind_first_block_cache_shapes(
     if (!cache_tensors_fit({head_hidden.get(), head_residual.get(),
                             previous_head_residual.get(), tail_residual.get()}, cache_bytes))
         throw std::logic_error("MiniMax-H3 cache buffers are smaller than the current request");
+    if (denoiser_tail_second && !cache_tensors_fit({tail_intermediate.get()}, cache_bytes))
+        throw std::logic_error("MiniMax-H3 split-tail intermediate is smaller than this request");
     const int64_t sequence_rows =
         static_cast<int64_t>(text_rows) + geometry.audio_rows + geometry.video_rows;
     const int32_t profile_count = denoiser_head->optimization_profile_count();
-    constexpr int64_t profile_sequence_rows = kMaxSequenceRows;
-    constexpr int64_t profile_video_rows = kMaxVideoRows;
-    constexpr int64_t profile_audio_rows = kMaxAudioRows;
+    const int64_t profile_sequence_rows = max_packed_rows(geometry);
+    const int64_t profile_video_rows = max_video_rows(geometry);
+    const int64_t profile_audio_rows = max_audio_rows(geometry);
     bind_external_dynamic_input_checked(*denoiser_head, "previous_head_residual",
                                         previous_head_residual->data(), DType::kBFloat16,
                                         {sequence_rows, kHidden}, {profile_sequence_rows, kHidden},
@@ -1558,6 +1712,12 @@ void MiniMaxH3Pipeline::ResidentState::bind_first_block_cache_shapes(
                                         DType::kBFloat16, {sequence_rows, kHidden},
                                         {profile_sequence_rows, kHidden}, denoiser_profile_index,
                                         profile_count);
+    if (denoiser_tail_second)
+        bind_external_dynamic_input_checked(*denoiser_tail_second, "head_hidden",
+                                            tail_intermediate->data(), DType::kBFloat16,
+                                            {sequence_rows, kHidden},
+                                            {profile_sequence_rows, kHidden}, denoiser_profile_index,
+                                            profile_count);
     bind_external_dynamic_input_checked(*denoiser_finish, "head_hidden", head_hidden->data(),
                                         DType::kBFloat16, {sequence_rows, kHidden},
                                         {profile_sequence_rows, kHidden}, denoiser_profile_index,
@@ -1597,15 +1757,14 @@ bool MiniMaxH3Pipeline::ResidentState::prepare_denoiser(const MiniMaxH3ModuleLoa
         bind_first_block_cache_shapes(geometry);
         return true;
     }
-    load_first_block_cache_denoiser(loader, stream, geometry, profile_index,
-                                    config.optimization_profile_count);
+    load_first_block_cache_denoiser(loader, stream, geometry, profile_index, config);
     return false;
 }
 
 DenoiserStats MiniMaxH3Pipeline::ResidentState::run_denoiser(
     MiniMaxH3DenoiserMetadata& metadata, const MiniMaxH3Schedule& video_schedule,
     const MiniMaxH3Schedule& audio_schedule, std::vector<float>& video_rows_host,
-    std::vector<float>& audio_rows_host, float cache_threshold, cudaStream_t stream) {
+    std::vector<float>& audio_rows_host, float cache_threshold, cudaStream_t stream, bool turbo) {
     DenoiserStats stats;
     auto& head = *denoiser_head;
     auto& tail = *denoiser_tail;
@@ -1620,13 +1779,15 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_denoiser(
                                            denoiser_geometry.audio_rows +
                                            denoiser_geometry.video_rows;
     if (sequence_rows != expected_sequence_rows || sequence_rows < kMinPackedRows ||
-        sequence_rows > kMaxPackedRows ||
+        sequence_rows > max_packed_rows(denoiser_geometry) ||
         metadata.positions.size() != static_cast<std::size_t>(sequence_rows) * 3U ||
         metadata.timestep_indices.size() != static_cast<std::size_t>(sequence_rows)) {
         throw std::invalid_argument("MiniMax-H3 FirstBlockCache metadata does not match geometry");
     }
     head.reset_execution_context();
     tail.reset_execution_context();
+    if (denoiser_tail_second)
+        denoiser_tail_second->reset_execution_context();
     finish.reset_execution_context();
     const std::size_t sequence_bytes =
         static_cast<std::size_t>(sequence_rows) * kHidden * sizeof(uint16_t);
@@ -1639,6 +1800,13 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_denoiser(
         cudaMemcpyAsync(audio_rows->data(), audio_rows_host.data(), audio_bytes,
                         cudaMemcpyHostToDevice, stream) != cudaSuccess)
         throw std::runtime_error("MiniMax-H3 failed to upload FirstBlockCache latents");
+
+    std::vector<float> turbo_video_velocity(turbo ? video_rows_host.size() : 0);
+    std::vector<float> turbo_audio_velocity(turbo ? audio_rows_host.size() : 0);
+    if (turbo && (video_schedule.deltas.size() != video_schedule.timesteps.size() ||
+                  audio_schedule.deltas.size() != video_schedule.timesteps.size() ||
+                  audio_schedule.slopes.size() != video_schedule.timesteps.size()))
+        throw std::invalid_argument("MiniMax-H3 Turbo clock metadata does not match its schedule");
 
     for (std::size_t step = 0; step < video_schedule.timesteps.size(); ++step) {
         auto& modulation = modulations[step];
@@ -1653,7 +1821,7 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_denoiser(
         const auto head_outputs = head.forward(head_inputs);
         const float metric =
             copy_float(require_output(head_outputs, "cache_metric"), 1, "cache metric")[0];
-        const bool compute_tail = should_compute_minimax_h3_tail(
+        const bool compute_tail = turbo || should_compute_minimax_h3_tail(
             step, video_schedule.timesteps.size(), metric, cache_threshold);
 
         if (compute_tail) {
@@ -1664,8 +1832,21 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_denoiser(
             tail_inputs.emplace(
                 "adaln_indices",
                 Tensor{metadata.adaln_indices.data(), {sequence_rows}, DType::kInt32});
-            append_block_modulation_inputs(tail_inputs, modulation, 1, kLayers);
+            const auto first_range = minimax_h3_tail_layer_range(
+                0, denoiser_tail_second ? 2 : 1);
+            append_block_modulation_inputs(tail_inputs, modulation, first_range[0], first_range[1]);
             tail.forward_async(tail_inputs);
+            if (denoiser_tail_second) {
+                TensorMap second_inputs;
+                second_inputs.emplace("position_ids",
+                    Tensor{metadata.positions.data(), {sequence_rows, 3}, DType::kFloat32});
+                second_inputs.emplace("adaln_indices",
+                    Tensor{metadata.adaln_indices.data(), {sequence_rows}, DType::kInt32});
+                const auto second_range = minimax_h3_tail_layer_range(1, 2);
+                append_block_modulation_inputs(second_inputs, modulation,
+                                               second_range[0], second_range[1]);
+                denoiser_tail_second->forward_async(second_inputs);
+            }
             if (cudaMemcpyAsync(previous_head_residual->data(), head_residual->data(),
                                 sequence_bytes, cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
                 throw std::runtime_error("MiniMax-H3 failed to update FirstBlockCache state");
@@ -1684,16 +1865,39 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_denoiser(
             static_cast<std::size_t>(denoiser_geometry.condition_video_rows) * kPatchDim;
         const std::size_t target_elements =
             static_cast<std::size_t>(denoiser_geometry.target_video_rows) * kPatchDim;
-        minimax_h3::scheduler_step_cuda_async(
-            static_cast<float*>(video_rows->data()) + condition_elements,
-            static_cast<const float*>(video_velocity->data()) + condition_elements, target_elements,
-            video_schedule.timesteps[step], video_schedule.sigmas[step],
-            video_schedule.sigmas[step + 1], stream);
-        minimax_h3::scheduler_step_cuda_async(
-            static_cast<float*>(audio_rows->data()),
-            static_cast<const float*>(audio_velocity->data()), audio_rows_host.size(),
-            audio_schedule.timesteps[step], audio_schedule.sigmas[step],
-            audio_schedule.sigmas[step + 1], stream);
+        if (turbo) {
+            // The authored sampler rounds BF16 at every eager arithmetic boundary.
+            // Host orchestration preserves those boundaries without a custom kernel.
+            finish.sync();
+            if (cudaMemcpy(turbo_video_velocity.data(), video_velocity->data(), video_bytes,
+                           cudaMemcpyDeviceToHost) != cudaSuccess ||
+                cudaMemcpy(turbo_audio_velocity.data(), audio_velocity->data(), audio_bytes,
+                           cudaMemcpyDeviceToHost) != cudaSuccess)
+                throw std::runtime_error("MiniMax-H3 failed to download Turbo velocities");
+            minimax_h3_turbo_scheduler_step(
+                video_rows_host.data() + condition_elements,
+                turbo_video_velocity.data() + condition_elements, target_elements,
+                video_schedule.deltas[step]);
+            minimax_h3_turbo_scheduler_step(
+                audio_rows_host.data(), turbo_audio_velocity.data(), audio_rows_host.size(),
+                audio_schedule.deltas[step], audio_schedule.slopes[step], true);
+            if (cudaMemcpyAsync(video_rows->data(), video_rows_host.data(), video_bytes,
+                                cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+                cudaMemcpyAsync(audio_rows->data(), audio_rows_host.data(), audio_bytes,
+                                cudaMemcpyHostToDevice, stream) != cudaSuccess)
+                throw std::runtime_error("MiniMax-H3 failed to upload Turbo Euler latents");
+        } else {
+            minimax_h3::scheduler_step_cuda_async(
+                static_cast<float*>(video_rows->data()) + condition_elements,
+                static_cast<const float*>(video_velocity->data()) + condition_elements,
+                target_elements, video_schedule.timesteps[step], video_schedule.sigmas[step],
+                video_schedule.sigmas[step + 1], stream);
+            minimax_h3::scheduler_step_cuda_async(
+                static_cast<float*>(audio_rows->data()),
+                static_cast<const float*>(audio_velocity->data()), audio_rows_host.size(),
+                audio_schedule.timesteps[step], audio_schedule.sigmas[step],
+                audio_schedule.sigmas[step + 1], stream);
+        }
         std::cerr << "[minimax-h3] denoiser " << (step + 1) << '/'
                   << video_schedule.timesteps.size() << " cache_metric=" << metric
                   << " compute_tail=" << static_cast<int>(compute_tail) << '\n';
@@ -1920,6 +2124,165 @@ MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift) {
     return result;
 }
 
+MiniMaxH3Sampler parse_minimax_h3_sampler(const std::string& sampler) {
+    if (sampler.empty() || sampler == "distilled")
+        return MiniMaxH3Sampler::kDistilled;
+    if (sampler == "turbo_euler")
+        return MiniMaxH3Sampler::kTurboEuler;
+    throw std::invalid_argument("MiniMax-H3 sampler is unsupported");
+}
+
+void validate_minimax_h3_plan_sections(const std::vector<std::string>& sections) {
+    if (sections.empty())
+        throw std::invalid_argument("MiniMax-H3 plan section list must not be empty");
+    std::unordered_set<std::string> seen;
+    for (const auto& name : sections) {
+        const bool valid_characters = std::all_of(name.begin(), name.end(), [](char value) {
+            return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == '_';
+        });
+        if (name.size() <= 5 || name.size() > 128 || name.substr(name.size() - 5) != "_plan" ||
+            !valid_characters || !seen.insert(name).second)
+            throw std::invalid_argument("MiniMax-H3 plan sections must be valid unique names");
+    }
+}
+
+std::array<int32_t, 2> minimax_h3_tail_layer_range(std::size_t segment, std::size_t count) {
+    if (count == 0 || count > 2 || segment >= count)
+        throw std::invalid_argument("MiniMax-H3 tail segmentation is unsupported");
+    if (count == 1)
+        return {1, kLayers};
+    return segment == 0 ? std::array<int32_t, 2>{1, 26}
+                        : std::array<int32_t, 2>{26, kLayers};
+}
+
+int32_t claim_minimax_h3_adaln_output(MiniMaxH3AdalnCoverage& coverage,
+                                     const std::string& output_name, bool allow_final) {
+    int32_t index = -1;
+    if (output_name == "final_modulation") {
+        if (!allow_final)
+            throw std::runtime_error("MiniMax-H3 final modulation must belong to the first segment");
+        index = kLayers;
+    } else {
+        for (int32_t layer = 0; layer < kLayers; ++layer) {
+            if (output_name == "block_modulation_" + std::to_string(layer)) {
+                index = layer;
+                break;
+            }
+        }
+    }
+    if (index < 0 || coverage[index])
+        throw std::runtime_error("MiniMax-H3 AdaLN segment has an unknown or duplicate output");
+    coverage[index] = true;
+    return index;
+}
+
+void validate_minimax_h3_adaln_coverage(const MiniMaxH3AdalnCoverage& coverage) {
+    if (!std::all_of(coverage.begin(), coverage.end(), [](bool found) { return found; }))
+        throw std::runtime_error("MiniMax-H3 AdaLN segments must cover 50 blocks and final exactly once");
+}
+
+void validate_minimax_h3_sampler_config(const MiniMaxH3DenoiserConfig& config) {
+    validate_minimax_h3_plan_sections(config.text_encoder_sections);
+    validate_minimax_h3_plan_sections(config.adaln_precompute_sections);
+    validate_minimax_h3_plan_sections(config.denoiser_tail_sections);
+    if (config.denoiser_tail_sections.size() > 2 ||
+        (config.sampler != MiniMaxH3Sampler::kTurboEuler &&
+         config.denoiser_tail_sections.size() != 1))
+        throw std::invalid_argument("MiniMax-H3 only supports two tail segments for Turbo");
+    std::unordered_set<std::string> all_sections;
+    for (const auto* sections : {&config.text_encoder_sections, &config.adaln_precompute_sections,
+                                 &config.denoiser_tail_sections}) {
+        for (const auto& name : *sections) {
+            if (!all_sections.insert(name).second)
+                throw std::invalid_argument("MiniMax-H3 stage sections must not overlap");
+        }
+    }
+    if (!std::isfinite(config.guidance_scale) || config.guidance_scale != 1.0F)
+        throw std::invalid_argument("MiniMax-H3 requires guidance_scale=1 (no CFG)");
+    if (config.sampler == MiniMaxH3Sampler::kTurboEuler) {
+        if (config.scheduler_grid_points != 9 || config.transformer_forwards != 8 ||
+            config.first_block_cache)
+            throw std::invalid_argument(
+                "MiniMax-H3 Turbo requires 9 sigma points, 8 forwards and disabled FBC");
+    } else if (config.sampler != MiniMaxH3Sampler::kDistilled ||
+               config.scheduler_grid_points != 50 || config.transformer_forwards != 49 ||
+               !config.first_block_cache) {
+        throw std::invalid_argument(
+            "MiniMax-H3 distilled execution requires its 50-point FirstBlockCache schedule");
+    }
+}
+
+MiniMaxH3Schedule make_minimax_h3_turbo_schedule(int32_t transformer_forwards, float shift) {
+    if (transformer_forwards <= 0 || (shift != 12.0F && shift != 3.0F))
+        throw std::invalid_argument("MiniMax-H3 Turbo schedule arguments are invalid");
+    MiniMaxH3Schedule result;
+    double previous_sigma = 0.0;
+    for (int32_t index = 0; index <= transformer_forwards; ++index) {
+        const double base = 1.0 - static_cast<double>(index) / transformer_forwards;
+        const double video_sigma = 12.0 * base / (1.0 + 11.0 * base);
+        // Preserve the authored closed-form video-to-audio mapping in double.
+        const double recovered_base = video_sigma / (12.0 - 11.0 * video_sigma);
+        const double sigma = shift == 12.0F
+                                 ? video_sigma
+                                 : 3.0 * recovered_base / (1.0 + 2.0 * recovered_base);
+        result.sigmas.push_back(static_cast<float>(sigma));
+        if (index > 0)
+            result.deltas.push_back(static_cast<float>(sigma - previous_sigma));
+        if (index < transformer_forwards) {
+            result.timesteps.push_back(static_cast<float>(1.0 - sigma));
+            const double numerator = 1.0 + 11.0 * recovered_base;
+            const double denominator = 1.0 + 2.0 * recovered_base;
+            result.slopes.push_back(static_cast<float>(
+                3.0 * numerator * numerator / (12.0 * denominator * denominator)));
+        }
+        previous_sigma = sigma;
+    }
+    return result;
+}
+
+float minimax_h3_round_bfloat16(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    if ((bits & 0x7fffffffU) > 0x7f800000U)
+        bits = 0x7fc00000U;
+    else
+        bits = (bits + 0x7fffU + ((bits >> 16U) & 1U)) & 0xffff0000U;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+std::vector<float> pack_minimax_h3_turbo_audio_noise(const std::vector<float>& channel_major_noise,
+                                                   int32_t audio_latent_frames) {
+    if (audio_latent_frames <= 0 || channel_major_noise.size() !=
+            static_cast<std::size_t>(kAudioChannels) * 2U * audio_latent_frames)
+        throw std::invalid_argument("MiniMax-H3 Turbo audio noise shape is invalid");
+    const std::size_t rows = static_cast<std::size_t>(2) * audio_latent_frames;
+    std::vector<float> packed(channel_major_noise.size());
+    for (std::size_t row = 0; row < rows; ++row)
+        for (std::size_t channel = 0; channel < kAudioChannels; ++channel)
+            packed[row * kAudioChannels + channel] = channel_major_noise[channel * rows + row];
+    return packed;
+}
+
+void minimax_h3_turbo_scheduler_step(float* sample, const float* raw_velocity, std::size_t count,
+                                    float delta, float audio_slope, bool audio) {
+    if (sample == nullptr || raw_velocity == nullptr || !std::isfinite(delta) || delta >= 0.0F ||
+        !std::isfinite(audio_slope) || audio_slope <= 0.0F)
+        throw std::invalid_argument("MiniMax-H3 Turbo Euler inputs are invalid");
+    for (std::size_t index = 0; index < count; ++index) {
+        const float raw = minimax_h3_round_bfloat16(raw_velocity[index]);
+        float velocity = -raw;
+        if (audio) {
+            velocity = minimax_h3_round_bfloat16(-audio_slope * raw);
+            // Match the eager scalar division's FP32 reciprocal and BF16 output.
+            velocity = minimax_h3_round_bfloat16(velocity * (1.0F / audio_slope));
+        }
+        const float increment = minimax_h3_round_bfloat16(delta * velocity);
+        sample[index] = minimax_h3_round_bfloat16(
+            minimax_h3_round_bfloat16(sample[index]) + increment);
+    }
+}
+
 bool should_compute_minimax_h3_tail(std::size_t step, std::size_t transformer_forwards,
                                     float metric, float cache_threshold) {
     // The final Euler update takes sigma to zero, so its velocity directly determines the
@@ -1942,6 +2305,27 @@ void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t
     }
 }
 
+void validate_minimax_h3_ref2va_sampler_config(const MiniMaxH3Ref2VAConfig& config,
+                                               const MiniMaxH3DenoiserConfig& denoiser) {
+    if (!config.enabled)
+        return;
+    validate_minimax_h3_plan_sections(config.text_encoder_sections);
+    validate_minimax_h3_plan_sections(config.adaln_precompute_sections);
+    validate_minimax_h3_plan_sections(config.denoiser_tail_sections);
+    const bool turbo = denoiser.sampler == MiniMaxH3Sampler::kTurboEuler;
+    if (config.scheduler_grid_points != (turbo ? denoiser.scheduler_grid_points : 50) ||
+        config.transformer_forwards != (turbo ? denoiser.transformer_forwards : 49) ||
+        config.video_shift != 12.0F || config.audio_shift != 3.0F ||
+        config.guidance_scale != 1.0F || !config.guidance_distilled ||
+        (turbo && config.first_block_cache) || config.denoiser_profile_count < 1 ||
+        config.denoiser_profile_count > 2 || config.adaln_precompute_sections.size() > 2 ||
+        config.denoiser_tail_sections.size() > 2 ||
+        (!turbo && (config.text_encoder_sections.size() != 1 ||
+                    config.adaln_precompute_sections.size() != 1 ||
+                    config.denoiser_tail_sections.size() != 1)))
+        throw std::invalid_argument("MiniMax-H3 Ref2VA sampler and engine segmentation disagree");
+}
+
 MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
                                      std::unique_ptr<ITokenizer> tokenizer, std::string model_id,
                                      float cache_threshold, MiniMaxH3DenoiserConfig denoiser_config,
@@ -1957,36 +2341,19 @@ MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
         throw std::invalid_argument("MiniMax-H3 pipeline requires a loader and tokenizer");
     validate_denoiser_profile_layout(denoiser_config_.optimization_profile_layout,
                                      denoiser_config_.optimization_profile_count);
-    if (!std::isfinite(cache_threshold_) || cache_threshold_ <= 0.0F)
-        throw std::invalid_argument("MiniMax-H3 cache threshold must be finite and positive");
+    if (!std::isfinite(cache_threshold_) || cache_threshold_ < 0.0F ||
+        (cache_threshold_ == 0.0F && denoiser_config_.sampler != MiniMaxH3Sampler::kTurboEuler))
+        throw std::invalid_argument("MiniMax-H3 cache threshold is invalid for its sampler");
     if (denoiser_config_.max_text_rows < kMinTextRows ||
         denoiser_config_.max_text_rows > kMaxTextRows) {
         throw std::invalid_argument("MiniMax-H3 denoiser text profile is invalid");
     }
-    if (denoiser_config_.scheduler_grid_points < 2 ||
-        denoiser_config_.transformer_forwards != denoiser_config_.scheduler_grid_points - 1 ||
-        !std::isfinite(denoiser_config_.guidance_scale) ||
-        denoiser_config_.guidance_scale != 1.0F) {
-        throw std::invalid_argument("MiniMax-H3 denoiser schedule contract is invalid");
-    }
-    if (denoiser_config_.scheduler_grid_points != 50 ||
-        denoiser_config_.transformer_forwards != 49) {
-        throw std::invalid_argument("MiniMax-H3 dense execution requires its 50-point schedule");
-    }
+    validate_minimax_h3_sampler_config(denoiser_config_);
+    validate_minimax_h3_ref2va_sampler_config(ref2va_config_, denoiser_config_);
     if (ref2va_config_.enabled) {
         if (!std::isfinite(ref2va_config_.first_block_cache_threshold) ||
             ref2va_config_.first_block_cache_threshold < 0.0F)
             throw std::invalid_argument("MiniMax-H3 Ref2VA cache threshold must be nonnegative");
-        if (ref2va_config_.scheduler_grid_points != 50 ||
-            ref2va_config_.transformer_forwards != 49 ||
-            !std::isfinite(ref2va_config_.video_shift) || ref2va_config_.video_shift != 12.0F ||
-            !std::isfinite(ref2va_config_.audio_shift) || ref2va_config_.audio_shift != 3.0F ||
-            !std::isfinite(ref2va_config_.guidance_scale) ||
-            ref2va_config_.guidance_scale != 1.0F || !ref2va_config_.guidance_distilled) {
-            throw std::invalid_argument(
-                "MiniMax-H3 Ref2VA requires its dedicated 50-point, shift-12/3 distilled "
-                "schedule");
-        }
         for (std::size_t index = 0; index < ref2va_config_.audio_latent_std.size(); ++index) {
             if (!std::isfinite(ref2va_config_.audio_latent_mean[index]) ||
                 !std::isfinite(ref2va_config_.audio_latent_std[index]) ||
@@ -2070,15 +2437,17 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
                                                             bool include_audio) {
     if (request.mode != VideoGenerationMode::kReferenceToVideoAudio)
         throw std::invalid_argument("MiniMax-H3 Ref2VA dispatch received the wrong mode");
-    if (request.config.num_steps > 0 && request.config.num_steps != 50)
-        throw std::invalid_argument(
-            "MiniMax-H3 Ref2VA requires 50 sigma grid points and 49 transformer forwards");
+    const bool turbo = denoiser_config_.sampler == MiniMaxH3Sampler::kTurboEuler;
+    const int32_t requested_steps = turbo ? ref2va_config_.transformer_forwards
+                                         : ref2va_config_.scheduler_grid_points;
+    if (request.config.num_steps > 0 && request.config.num_steps != requested_steps)
+        throw std::invalid_argument("MiniMax-H3 Ref2VA request steps do not match its sampler");
     if (request.config.guidance_scale >= 0.0F && request.config.guidance_scale != 1.0F)
         throw std::invalid_argument(
             "MiniMax-H3 Ref2VA is guidance-distilled and requires guidance_scale=1");
 
     // Target geometry never changes reference-conditioning normalization.
-    const auto generation = resolve_minimax_h3_generation(request, super_resolution_config_);
+    const auto generation = resolve_minimax_h3_generation(request, super_resolution_config_, turbo);
     const auto& geometry = generation.geometry;
     auto prepared = minimax_h3::prepare_ref2va_request(request, geometry.output_frames);
     const int64_t seed = request.config.seed >= 0 ? request.config.seed : 0;
@@ -2091,6 +2460,8 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     const auto blueprint =
         minimax_h3::make_ref2va_presentation_blueprint(request.prompt, prepared.references);
     const auto presentation = minimax_h3::materialize_ref2va_presentation(blueprint, *tokenizer_);
+    // Each text segment validates this presentation against its actual engine
+    // profile before enqueue, including larger dedicated reference profiles.
     minimax_h3::Ref2vaVisionFeatures vision_features;
     if (!blueprint.vision_invocations.empty()) {
         auto vision_module = loader_("vision_encoder_plan", stream_, {}, 0);
@@ -2101,12 +2472,21 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     }
     if (vision_features.rows != presentation.vision_rows)
         throw std::runtime_error("MiniMax-H3 Ref2VA Qwen vision/presentation row counts disagree");
-    auto text_module = loader_("text_encoder_plan", stream_, {}, 0);
-    text_module->set_timing_label("ref2va_shared_text_encoder_plan");
-    auto text_embeddings =
-        minimax_h3::run_ref2va_text_encoder(*text_module, presentation, vision_features);
-    text_module->sync();
-    text_module.reset();
+    std::vector<float> text_embeddings;
+    for (std::size_t segment = 0; segment < ref2va_config_.text_encoder_sections.size(); ++segment) {
+        const auto& section = ref2va_config_.text_encoder_sections[segment];
+        auto text_module = loader_(section, stream_, {}, 0);
+        if (!text_module)
+            throw std::runtime_error("MiniMax-H3 Ref2VA text segment is missing");
+        text_module->set_timing_label(section);
+        auto next = minimax_h3::run_ref2va_text_encoder(*text_module, presentation, vision_features,
+            segment == 0 ? nullptr : &text_embeddings, turbo);
+        text_module->sync();
+        text_embeddings = std::move(next);
+    }
+    if (turbo)
+        for (float& value : text_embeddings)
+            value = minimax_h3_round_bfloat16(value);
     vision_features = {};
     const auto text_end = Clock::now();
 
@@ -2118,7 +2498,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
         for (std::size_t index = 0; index < prepared.references.size(); ++index) {
             if (prepared.references[index].kind == VideoReferenceKind::kImage)
                 conditions[index] = minimax_h3::run_ref2va_image_vae_encoder(
-                    *module, prepared.references[index].image);
+                    *module, prepared.references[index].image, turbo);
         }
         module->sync();
     }
@@ -2128,7 +2508,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
         for (std::size_t index = 0; index < prepared.references.size(); ++index) {
             if (prepared.references[index].kind == VideoReferenceKind::kVideo)
                 conditions[index] = minimax_h3::run_ref2va_video_vae_encoder(
-                    *module, prepared.references[index].video);
+                    *module, prepared.references[index].video, turbo);
         }
         module->sync();
     }
@@ -2162,6 +2542,17 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     for (auto& condition : conditions) {
         if (condition.video_hidden_states.empty())
             continue;
+        if (turbo) {
+            // Reference augmentation is FP32 in packed order, with a fresh
+            // CPU generator per visual reference. It does not advance either
+            // independently seeded Turbo target-noise generator.
+            const auto noise = minimax_h3::torch_cuda_normal(condition.video_hidden_states.size(),
+                                                             static_cast<uint64_t>(seed), 0);
+            for (std::size_t index = 0; index < noise.size(); ++index)
+                condition.video_hidden_states[index] =
+                    0.999F * condition.video_hidden_states[index] + 0.001F * noise[index];
+            continue;
+        }
         MiniMaxH3Geometry condition_geometry;
         condition_geometry.video_latent_frames = condition.geometry.latent_frames;
         condition_geometry.latent_height = condition.geometry.latent_height;
@@ -2178,14 +2569,18 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     }
     const auto condition_end = Clock::now();
 
-    auto target_video_latent = minimax_h3::torch_cuda_normal(
-        video_latent_count(geometry), static_cast<uint64_t>(seed), generator_offset);
-    generator_offset += minimax_h3::torch_cuda_normal_consumed_offset(target_video_latent.size());
+    auto target_video_latent = turbo
+        ? minimax_h3::make_minimax_h3_turbo_noise(video_latent_count(geometry), static_cast<uint64_t>(seed))
+        : minimax_h3::torch_cuda_normal(video_latent_count(geometry), static_cast<uint64_t>(seed), generator_offset);
+    if (!turbo)
+        generator_offset += minimax_h3::torch_cuda_normal_consumed_offset(target_video_latent.size());
     auto target_video_rows = patchify_video(target_video_latent, geometry);
     target_video_latent.clear();
     target_video_latent.shrink_to_fit();
-    auto target_audio_rows = minimax_h3::torch_cuda_normal(
-        audio_latent_count(geometry), static_cast<uint64_t>(seed), generator_offset);
+    auto target_audio_rows = turbo
+        ? pack_minimax_h3_turbo_audio_noise(minimax_h3::make_minimax_h3_turbo_noise(
+            audio_latent_count(geometry), static_cast<uint64_t>(seed) + 1U), geometry.audio_latent_frames)
+        : minimax_h3::torch_cuda_normal(audio_latent_count(geometry), static_cast<uint64_t>(seed), generator_offset);
 
     minimax_h3::Ref2vaDenoiserInputs denoiser_inputs;
     std::vector<minimax_h3::Ref2vaEncodedReferenceGeometry> reference_geometries;
@@ -2212,25 +2607,41 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     prepared.references.clear();
     prepared.references.shrink_to_fit();
 
-    const auto video_schedule =
-        make_minimax_h3_schedule(ref2va_config_.scheduler_grid_points, ref2va_config_.video_shift);
-    const auto audio_schedule =
-        make_minimax_h3_schedule(ref2va_config_.scheduler_grid_points, ref2va_config_.audio_shift);
-    if (video_schedule.timesteps.size() != 49U || audio_schedule.timesteps.size() != 49U)
-        throw std::logic_error("MiniMax-H3 Ref2VA scheduler did not produce 49 forwards");
+    const auto video_schedule = turbo
+        ? make_minimax_h3_turbo_schedule(ref2va_config_.transformer_forwards, ref2va_config_.video_shift)
+        : make_minimax_h3_schedule(ref2va_config_.scheduler_grid_points, ref2va_config_.video_shift);
+    const auto audio_schedule = turbo
+        ? make_minimax_h3_turbo_schedule(ref2va_config_.transformer_forwards, ref2va_config_.audio_shift)
+        : make_minimax_h3_schedule(ref2va_config_.scheduler_grid_points, ref2va_config_.audio_shift);
+    if (video_schedule.timesteps.size() != static_cast<std::size_t>(ref2va_config_.transformer_forwards) ||
+        audio_schedule.timesteps.size() != video_schedule.timesteps.size())
+        throw std::logic_error("MiniMax-H3 Ref2VA scheduler forward count disagrees with metadata");
     const auto adaln_begin = Clock::now();
-    auto adaln_module = loader_("ref2va_adaln_precompute_plan", stream_, {}, 0);
-    adaln_module->set_timing_label("ref2va_adaln_precompute_plan");
-    std::vector<minimax_h3::Ref2vaModulations> modulations;
-    modulations.reserve(video_schedule.timesteps.size());
-    for (std::size_t step = 0; step < video_schedule.timesteps.size(); ++step) {
-        const auto row_timesteps = minimax_h3::make_ref2va_row_timesteps(
-            denoiser_inputs.layout, video_schedule.timesteps[step], audio_schedule.timesteps[step]);
-        const auto table = minimax_h3::pad_ref2va_timesteps(row_timesteps.unique_timesteps);
-        modulations.push_back(minimax_h3::run_ref2va_adaln_precompute(*adaln_module, table));
+    std::vector<minimax_h3::Ref2vaModulations> modulations(video_schedule.timesteps.size());
+    for (std::size_t segment = 0; segment < ref2va_config_.adaln_precompute_sections.size(); ++segment) {
+        const auto& section = ref2va_config_.adaln_precompute_sections[segment];
+        auto adaln_module = loader_(section, stream_, {}, 0);
+        if (!adaln_module)
+            throw std::runtime_error("MiniMax-H3 Ref2VA AdaLN segment is missing");
+        adaln_module->set_timing_label(section);
+        minimax_h3::Ref2vaPlanOptions options;
+        if (ref2va_config_.adaln_precompute_sections.size() == 2) {
+            options.block_start = static_cast<int32_t>(segment) * 25;
+            options.block_end = options.block_start + 25;
+            options.include_final = segment == 0;
+        }
+        for (std::size_t step = 0; step < video_schedule.timesteps.size(); ++step) {
+            const auto row_timesteps = minimax_h3::make_ref2va_row_timesteps(
+                denoiser_inputs.layout, video_schedule.timesteps[step], audio_schedule.timesteps[step]);
+            const auto table = minimax_h3::pad_ref2va_timesteps(row_timesteps.unique_timesteps);
+            auto partial = minimax_h3::run_ref2va_adaln_precompute(*adaln_module, table, options);
+            for (int32_t layer = options.block_start; layer < options.block_end; ++layer)
+                modulations[step].blocks[layer] = std::move(partial.blocks[layer]);
+            if (options.include_final)
+                modulations[step].final = std::move(partial.final);
+        }
+        adaln_module->sync();
     }
-    adaln_module->sync();
-    adaln_module.reset();
     const auto adaln_end = Clock::now();
 
     const auto denoiser_begin = Clock::now();
@@ -2245,10 +2656,10 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
     std::unique_ptr<ITrtModule> denoiser;
     std::unique_ptr<Ref2vaFirstBlockCache> cached_denoiser;
     DenoiserStats denoiser_stats;
-    if (ref2va_config_.first_block_cache) {
+    if (turbo || ref2va_config_.first_block_cache) {
         cached_denoiser = std::make_unique<Ref2vaFirstBlockCache>(
             loader_, stream_, denoiser_inputs.layout, ref2va_profile_index,
-            ref2va_config_.denoiser_profile_count);
+            ref2va_config_.denoiser_profile_count, turbo, ref2va_config_.denoiser_tail_sections);
     } else {
         denoiser = loader_("ref2va_denoiser_plan", stream_, {}, ref2va_profile_index);
         denoiser->set_timing_label("ref2va_denoiser_plan");
@@ -2272,6 +2683,16 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
                       denoiser_inputs, modulations[step], step, video_schedule.timesteps.size(),
                       ref2va_config_.first_block_cache_threshold, denoiser_stats)
                 : minimax_h3::run_ref2va_denoiser(*denoiser, denoiser_inputs, modulations[step]);
+        if (turbo) {
+            minimax_h3_turbo_scheduler_step(
+                denoiser_inputs.video_hidden_states.data() + condition_video_values,
+                velocity.video.data() + condition_video_values, target_video_rows.size(),
+                video_schedule.deltas[step]);
+            minimax_h3_turbo_scheduler_step(
+                denoiser_inputs.audio_hidden_states.data() + condition_audio_values,
+                velocity.audio.data() + condition_audio_values, target_audio_rows.size(),
+                audio_schedule.deltas[step], audio_schedule.slopes[step], true);
+        } else {
         minimax_h3_scheduler_step(denoiser_inputs.video_hidden_states.data() +
                                       condition_video_values,
                                   velocity.video.data() + condition_video_values,
@@ -2282,6 +2703,7 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
                                   velocity.audio.data() + condition_audio_values,
                                   target_audio_rows.size(), audio_schedule.timesteps[step],
                                   audio_schedule.sigmas[step], audio_schedule.sigmas[step + 1]);
+        }
         if (!cached_denoiser) {
             ++denoiser_stats.full_steps;
             std::cerr << "[minimax-h3.ref2va] denoiser " << (step + 1) << '/'
@@ -2337,7 +2759,10 @@ VideoResult MiniMaxH3Pipeline::generate_ref2va_request_impl(const VideoGeneratio
               << " super_resolution_ms="
               << milliseconds(super_resolution_begin, super_resolution_end)
               << " audio_vae_decoder_ms=" << milliseconds(audio_vae_begin, audio_vae_end)
-              << " total_ms=" << milliseconds(total_begin, total_end) << " transformer_forwards=49"
+              << " total_ms=" << milliseconds(total_begin, total_end)
+              << " sampler=" << (turbo ? "turbo_euler" : "distilled")
+              << " transformer_forwards=" << video_schedule.timesteps.size()
+              << " tail_segments=" << ref2va_config_.denoiser_tail_sections.size()
               << " first_block_cache=" << static_cast<int>(ref2va_config_.first_block_cache)
               << " cache_threshold=" << ref2va_config_.first_block_cache_threshold
               << " full_steps=" << denoiser_stats.full_steps
@@ -2371,6 +2796,7 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
         if (!request.config.negative_prompt.empty())
             throw std::invalid_argument(
                 "MiniMax-H3 is guidance-distilled and does not accept negative_prompt");
+        const bool turbo = denoiser_config_.sampler == MiniMaxH3Sampler::kTurboEuler;
         if (request.mode == VideoGenerationMode::kReferenceToVideoAudio) {
             if (!ref2va_config_.enabled)
                 throw std::runtime_error(
@@ -2390,7 +2816,8 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
         }
 
         const ImageGenerationConfig& cfg = request.config;
-        const auto generation = resolve_minimax_h3_generation(request, super_resolution_config_);
+        const auto generation =
+            resolve_minimax_h3_generation(request, super_resolution_config_, turbo);
         const auto& target_geometry = generation.geometry;
         MiniMaxH3PreparedKeyframes prepared_keyframes;
         MiniMaxH3Geometry geometry = target_geometry;
@@ -2401,7 +2828,8 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
             geometry = make_minimax_h3_fl2va_geometry(
                 target_geometry, static_cast<int32_t>(prepared_keyframes.images.size()));
         }
-        const int32_t requested_steps = denoiser_config_.scheduler_grid_points;
+        const int32_t requested_steps = turbo ? denoiser_config_.transformer_forwards
+                                             : denoiser_config_.scheduler_grid_points;
         if (cfg.num_steps > 0 && cfg.num_steps != requested_steps) {
             throw std::invalid_argument("MiniMax-H3 request num_steps does not match the bundle");
         }
@@ -2418,21 +2846,24 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
         std::vector<std::vector<float>> keyframe_latents;
         if (fl2va) {
             keyframe_latents = resident_->load_fl2va_conditioning(
-                request.prompt, prepared_keyframes, *tokenizer_, loader_, stream_);
+                request.prompt, prepared_keyframes, *tokenizer_, loader_, stream_, denoiser_config_);
         } else if (!text_cache_hit) {
             resident_->load_text_embeddings(request.prompt, *tokenizer_, loader_, stream_,
-                                            denoiser_config_.max_text_rows);
+                                            denoiser_config_);
         }
         const auto text_end = Clock::now();
 
-        const auto video_schedule =
-            make_minimax_h3_schedule(denoiser_config_.scheduler_grid_points, 12.0F);
-        const auto audio_schedule =
-            make_minimax_h3_schedule(denoiser_config_.scheduler_grid_points, 3.0F);
+        const auto video_schedule = turbo
+            ? make_minimax_h3_turbo_schedule(denoiser_config_.transformer_forwards, 12.0F)
+            : make_minimax_h3_schedule(denoiser_config_.scheduler_grid_points, 12.0F);
+        const auto audio_schedule = turbo
+            ? make_minimax_h3_turbo_schedule(denoiser_config_.transformer_forwards, 3.0F)
+            : make_minimax_h3_schedule(denoiser_config_.scheduler_grid_points, 3.0F);
         const bool adaln_cache_hit = !resident_->modulations.empty();
         const auto adaln_begin = Clock::now();
         if (!adaln_cache_hit)
-            resident_->load_modulations(video_schedule, audio_schedule, loader_, stream_);
+            resident_->load_modulations(video_schedule, audio_schedule, loader_, stream_,
+                                        denoiser_config_.adaln_precompute_sections);
         const auto adaln_end = Clock::now();
 
         uint64_t generator_offset = 0;
@@ -2446,24 +2877,45 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
                 if (latent.size() != expected_keyframe_latent_count)
                     throw std::runtime_error(
                         "MiniMax-H3 keyframe encoder returned the wrong latent geometry");
-                auto noise = minimax_h3::torch_cuda_normal(
-                    latent.size(), static_cast<uint64_t>(seed), generator_offset);
-                generator_offset += minimax_h3::torch_cuda_normal_consumed_offset(latent.size());
-                for (std::size_t index = 0; index < latent.size(); ++index)
-                    latent[index] = 0.999F * latent[index] + 0.001F * noise[index];
-                auto rows = minimax_h3::patchify_fl2va_keyframe_latent(
-                    latent, geometry.latent_height, geometry.latent_width);
+                std::vector<float> rows;
+                if (turbo) {
+                    // The released image-conditioning path samples FP32 CPU
+                    // noise in packed order with a fresh generator per image.
+                    // It is independent of Turbo's video/audio BF16 noise.
+                    rows = minimax_h3::patchify_fl2va_keyframe_latent(
+                        latent, geometry.latent_height, geometry.latent_width);
+                    const auto noise = minimax_h3::torch_cuda_normal(
+                        rows.size(), static_cast<uint64_t>(seed), 0);
+                    for (std::size_t index = 0; index < rows.size(); ++index)
+                        rows[index] = 0.999F * rows[index] + 0.001F * noise[index];
+                } else {
+                    auto noise = minimax_h3::torch_cuda_normal(
+                        latent.size(), static_cast<uint64_t>(seed), generator_offset);
+                    generator_offset += minimax_h3::torch_cuda_normal_consumed_offset(latent.size());
+                    for (std::size_t index = 0; index < latent.size(); ++index)
+                        latent[index] = 0.999F * latent[index] + 0.001F * noise[index];
+                    rows = minimax_h3::patchify_fl2va_keyframe_latent(
+                        latent, geometry.latent_height, geometry.latent_width);
+                }
                 video_rows.insert(video_rows.end(), rows.begin(), rows.end());
             }
         }
 
         const std::size_t current_video_latent_count = video_latent_count(geometry);
-        auto video_tensor = minimax_h3::torch_cuda_normal(
-            current_video_latent_count, static_cast<uint64_t>(seed), generator_offset);
+        auto video_tensor = turbo
+            ? minimax_h3::make_minimax_h3_turbo_noise(current_video_latent_count,
+                                                    static_cast<uint64_t>(seed))
+            : minimax_h3::torch_cuda_normal(current_video_latent_count,
+                                           static_cast<uint64_t>(seed), generator_offset);
         generator_offset +=
             minimax_h3::torch_cuda_normal_consumed_offset(current_video_latent_count);
-        auto audio_rows = minimax_h3::torch_cuda_normal(
-            audio_latent_count(geometry), static_cast<uint64_t>(seed), generator_offset);
+        auto audio_rows = turbo
+            ? pack_minimax_h3_turbo_audio_noise(
+                  minimax_h3::make_minimax_h3_turbo_noise(audio_latent_count(geometry),
+                                                        static_cast<uint64_t>(seed) + 1U),
+                  geometry.audio_latent_frames)
+            : minimax_h3::torch_cuda_normal(audio_latent_count(geometry),
+                                           static_cast<uint64_t>(seed), generator_offset);
         auto target_video_rows = patchify_video(video_tensor, geometry);
         video_rows.insert(video_rows.end(), target_video_rows.begin(), target_video_rows.end());
         if (video_rows.size() != static_cast<std::size_t>(geometry.video_rows) * kPatchDim)
@@ -2480,15 +2932,35 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
             loader_, stream_, denoiser_config_, geometry);
         const DenoiserStats denoiser_stats =
             resident_->run_denoiser(metadata, video_schedule, audio_schedule, video_rows,
-                                    audio_rows, cache_threshold_, stream_);
+                                    audio_rows, cache_threshold_, stream_, turbo);
         const auto denoiser_end = Clock::now();
-        video_rows.clear();
-        video_rows.shrink_to_fit();
         const std::size_t expected_pixels = static_cast<std::size_t>(3) * geometry.output_frames *
                                             geometry.output_height * geometry.output_width;
         const auto vae_begin = Clock::now();
-        const bool vae_resident_hit = resident_->prepare_vae(loader_, stream_, geometry);
-        auto pixels = resident_->decode_vae(expected_pixels, geometry, stream_);
+        bool vae_resident_hit = false;
+        std::vector<float> pixels;
+        if (turbo) {
+            // The denoiser consumes [fixed keyframe rows | generated rows].
+            // Only the generated suffix belongs to the output video VAE.
+            const auto condition_elements =
+                static_cast<std::size_t>(geometry.condition_video_rows) * kPatchDim;
+            if (condition_elements != 0)
+                video_rows.erase(video_rows.begin(),
+                                 video_rows.begin() + static_cast<std::ptrdiff_t>(condition_elements));
+            auto latent = unpatchify_video(video_rows, geometry);
+            denormalize_latents(latent, geometry);
+            video_rows.clear();
+            video_rows.shrink_to_fit();
+            // The host tiling path supports all 21 temporal clips at 362 frames
+            // and invokes only the existing TensorRT VAE engine for decoding.
+            resident_->prepare_ref2va_vae(loader_, stream_, geometry);
+            pixels = resident_->decode_ref2va_vae(latent, expected_pixels, geometry);
+        } else {
+            video_rows.clear();
+            video_rows.shrink_to_fit();
+            vae_resident_hit = resident_->prepare_vae(loader_, stream_, geometry);
+            pixels = resident_->decode_vae(expected_pixels, geometry, stream_);
+        }
         const auto vae_end = Clock::now();
 
         const auto super_resolution_begin = Clock::now();
@@ -2519,7 +2991,8 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
                   << " adaln_cache_hit=" << static_cast<int>(adaln_cache_hit)
                   << " denoiser_resident_hit=" << static_cast<int>(denoiser_resident_hit)
                   << " vae_resident_hit=" << static_cast<int>(vae_resident_hit)
-                  << " first_block_cache=1"
+                  << " sampler=" << (turbo ? "turbo_euler" : "distilled")
+                  << " first_block_cache=" << static_cast<int>(denoiser_config_.first_block_cache)
                   << " workflow=" << (fl2va ? "fl2va" : "t2va")
                   << " condition_video_rows=" << geometry.condition_video_rows
                   << " output_frames=" << geometry.output_frames
@@ -2530,7 +3003,11 @@ VideoResult MiniMaxH3Pipeline::generate_video_request_impl(const VideoGeneration
                   << " transformer_forwards=" << denoiser_config_.transformer_forwards
                   << " cache_threshold=" << cache_threshold_
                   << " full_denoiser_steps=" << denoiser_stats.full_steps
-                  << " skipped_denoiser_steps=" << denoiser_stats.skipped_steps << '\n';
+                  << " skipped_denoiser_steps=" << denoiser_stats.skipped_steps
+                  << " tail_segments=" << denoiser_config_.denoiser_tail_sections.size()
+                  << " tail_engine_launches="
+                  << denoiser_stats.full_steps * denoiser_config_.denoiser_tail_sections.size()
+                  << '\n';
         VideoResult result;
         result.frames.height = result_height;
         result.frames.width = result_width;

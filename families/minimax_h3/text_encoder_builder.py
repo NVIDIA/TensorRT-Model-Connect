@@ -22,6 +22,7 @@ import tensorrt as trt
 from . import graph_ops as op
 from . import trt_compat
 from .config import TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES
+from .multimodal_text_encoder_builder import ROPE_INV_FREQ_BITS
 
 
 HIDDEN_SIZE = 5120
@@ -77,8 +78,11 @@ def _repeat_kv(network, tensor):
     return concat.get_output(0)
 
 
-def _rope_cache(network, position_ids):
-    inverse = 1.0 / (ROPE_THETA ** (np.arange(0, HEAD_DIM, 2, dtype=np.float32) / HEAD_DIM))
+def _rope_cache(network, position_ids, *, turbo_fp32: bool = False):
+    if turbo_fp32:
+        inverse = np.asarray(ROPE_INV_FREQ_BITS, dtype=np.uint32).view(np.float32)
+    else:
+        inverse = 1.0 / (ROPE_THETA ** (np.arange(0, HEAD_DIM, 2, dtype=np.float32) / HEAD_DIM))
     positions = op.cast(network, position_ids, trt.float32)
     position_shape = network.add_shuffle(positions)
     position_shape.reshape_dims = (1, -1, 1)
@@ -88,11 +92,19 @@ def _rope_cache(network, position_ids):
     ).get_output(0)
     cos = network.add_unary(frequency, trt.UnaryOperation.COS).get_output(0)
     sin = network.add_unary(frequency, trt.UnaryOperation.SIN).get_output(0)
-    return op.cast(network, cos, trt.bfloat16), op.cast(network, sin, trt.bfloat16)
+    dtype = trt.float32 if turbo_fp32 else trt.bfloat16
+    return op.cast(network, cos, dtype), op.cast(network, sin, dtype)
 
 
-def _linear(network, hidden, weights, name: str):
-    return op.linear(network, hidden, weights[f"{name}.weight"])
+def _linear(network, hidden, weights, name: str, *, turbo_fp32: bool = False):
+    if not turbo_fp32:
+        return op.linear(network, hidden, weights[f"{name}.weight"])
+    return op.linear(
+        network,
+        hidden,
+        weights[f"{name}.weight"],
+        compute_dtype=trt.float32,
+    )
 
 
 @op.cleanup_failed_build
@@ -105,13 +117,20 @@ def build_text_encoder_engine(
     workspace_bytes: int | None = None,
     weight_streaming: bool = False,
     output_path: str | Path | None = None,
+    turbo_fp32: bool = False,
 ) -> bytes | dict[str, int | str]:
+    if not isinstance(turbo_fp32, bool):
+        raise ValueError("MiniMax-H3 Turbo text precision selector must be a boolean")
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     op.configure_builder(config, weight_streaming=weight_streaming)
+    if turbo_fp32:
+        # Comfy's BF16 checkpoint is manually cast for FP32 text computation.
+        # Do not allow TF32 to round those FP32 activations to a 10-bit mantissa.
+        config.clear_flag(trt.BuilderFlag.TF32)
     op.configure_workspace(
         config,
         workspace_bytes,
@@ -130,22 +149,26 @@ def build_text_encoder_engine(
         )
     config.add_optimization_profile(profile)
     table = op.weight_constant(network, weights["model.language_model.embed_tokens.weight"])
-    table = op.cast(network, table, trt.bfloat16)
+    table = op.cast(network, table, trt.float32 if turbo_fp32 else trt.bfloat16)
     hidden = network.add_gather(table, input_ids, 0).get_output(0)
-    cos, sin = _rope_cache(network, position_ids)
+    cos, sin = _rope_cache(network, position_ids, turbo_fp32=turbo_fp32)
 
     for index in range(NUM_LAYERS):
         prefix = f"model.language_model.layers.{index}"
         normalized = op.rms_norm(
             network, hidden, weights[f"{prefix}.input_layernorm.weight"], HIDDEN_SIZE, NORM_EPS
         )
-        q = _linear(network, normalized, weights, f"{prefix}.self_attn.q_proj")
-        k = _linear(network, normalized, weights, f"{prefix}.self_attn.k_proj")
-        v = _linear(network, normalized, weights, f"{prefix}.self_attn.v_proj")
-        q = _per_head_norm(network, q, weights[f"{prefix}.self_attn.q_norm.weight"], NUM_HEADS)
-        k = _per_head_norm(
-            network, k, weights[f"{prefix}.self_attn.k_norm.weight"], NUM_KV_HEADS
+        q = _linear(
+            network, normalized, weights, f"{prefix}.self_attn.q_proj", turbo_fp32=turbo_fp32
         )
+        k = _linear(
+            network, normalized, weights, f"{prefix}.self_attn.k_proj", turbo_fp32=turbo_fp32
+        )
+        v = _linear(
+            network, normalized, weights, f"{prefix}.self_attn.v_proj", turbo_fp32=turbo_fp32
+        )
+        q = _per_head_norm(network, q, weights[f"{prefix}.self_attn.q_norm.weight"], NUM_HEADS)
+        k = _per_head_norm(network, k, weights[f"{prefix}.self_attn.k_norm.weight"], NUM_KV_HEADS)
         q = op.partial_rope(
             network,
             q,
@@ -181,9 +204,13 @@ def build_text_encoder_engine(
         attention.name = f"{prefix}.self_attn.native_attention"
         attention.metadata = f"trtmc.native_op=IAttention;source={attention.name}"
         attention.get_output(0).name = f"{attention.name}.output"
-        attention.decomposable = False
+        # FLOAT is accepted by IAttention. Let TensorRT lower it to native
+        # constituent operations if no fused FP32 tactic supports the shape.
+        attention.decomposable = turbo_fp32
         update = op.heads_to_rows(network, attention.get_output(0), NUM_HEADS * HEAD_DIM)
-        update = _linear(network, update, weights, f"{prefix}.self_attn.o_proj")
+        update = _linear(
+            network, update, weights, f"{prefix}.self_attn.o_proj", turbo_fp32=turbo_fp32
+        )
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 
         normalized = op.rms_norm(
@@ -193,13 +220,18 @@ def build_text_encoder_engine(
             HIDDEN_SIZE,
             NORM_EPS,
         )
-        gate = _linear(network, normalized, weights, f"{prefix}.mlp.gate_proj")
-        up = _linear(network, normalized, weights, f"{prefix}.mlp.up_proj")
+        gate = _linear(
+            network, normalized, weights, f"{prefix}.mlp.gate_proj", turbo_fp32=turbo_fp32
+        )
+        up = _linear(network, normalized, weights, f"{prefix}.mlp.up_proj", turbo_fp32=turbo_fp32)
         gate = op.silu(network, gate)
         gated = network.add_elementwise(gate, up, trt.ElementWiseOperation.PROD).get_output(0)
-        update = _linear(network, gated, weights, f"{prefix}.mlp.down_proj")
+        update = _linear(network, gated, weights, f"{prefix}.mlp.down_proj", turbo_fp32=turbo_fp32)
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 
+    # Turbo remains physically FP32 at the engine boundary. The family
+    # runtime applies the author's final BF16 conditioning round; an adjacent
+    # BF16->FP32 output cast pair does not reliably preserve FP32 storage.
     output = op.cast(network, hidden, trt.float32)
     output.name = "encoder_hidden_states"
     network.mark_output(output)

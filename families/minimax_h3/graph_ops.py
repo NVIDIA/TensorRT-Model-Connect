@@ -21,6 +21,7 @@ import tensorrt as trt
 
 from .config import resolve_workspace_bytes
 from .quantized_checkpoint import ConvRotInt8Weight
+from .turbo_checkpoint import TurboLoraWeight, pack_turbo_qkv
 
 
 # TensorRT's explicit BF16 ``Weights`` constructor stores a pointer rather
@@ -193,9 +194,7 @@ def _regular_hadamard(group_size: int) -> np.ndarray:
         matrix = np.kron(matrix, basis)
     if matrix.shape != (group_size, group_size):
         raise ValueError("MiniMax-H3 ConvRot group_size must be a power of four")
-    return np.ascontiguousarray(
-        matrix / math.sqrt(float(group_size)), dtype=ml_dtypes.bfloat16
-    )
+    return np.ascontiguousarray(matrix / math.sqrt(float(group_size)), dtype=ml_dtypes.bfloat16)
 
 
 def _convrot_activation(network, tensor, *, in_features: int, group_size: int):
@@ -232,8 +231,7 @@ def _convrot_activation(network, tensor, *, in_features: int, group_size: int):
         raise RuntimeError("TensorRT rejected the MiniMax-H3 ConvRot activation rotation")
     _name_convrot_layer(network, rotation, f"group_{group_size}")
     rotation.metadata = (
-        "trtmc.quantization=int8_tensorwise_convrot;"
-        f"activation=bf16;group_size={group_size}"
+        f"trtmc.quantization=int8_tensorwise_convrot;activation=bf16;group_size={group_size}"
     )
     restored = network.add_shuffle(rotation.get_output(0))
     restored.reshape_dims = (-1, in_features)
@@ -402,6 +400,19 @@ def _convrot_int8_linear(network, tensor, weight: ConvRotInt8Weight, bias=None):
     return cast(network, output, trt.bfloat16)
 
 
+def bf16_linear_with_fused_bias(network, tensor, weight, bias):
+    """Round a BF16-input linear only after FP32 accumulation and bias.
+
+    An ordinary BF16 MatMul followed by Add rounds twice, unlike CUDA
+    F.linear's bias epilogue. Native FP32 math preserves that epilogue without
+    introducing a custom kernel. Callers must leave TensorRT TF32 disabled.
+    """
+
+    tensor = cast(network, tensor, trt.bfloat16)
+    result = linear(network, tensor, weight, bias, bf16=False, compute_dtype=trt.float32)
+    return cast(network, result, trt.bfloat16)
+
+
 def linear(
     network,
     tensor,
@@ -412,6 +423,29 @@ def linear(
     compute_dtype=None,
 ):
     """PyTorch ``[out, in]`` linear expressed as native TensorRT GEMM."""
+
+    if isinstance(weight, TurboLoraWeight):
+        if compute_dtype not in (None, trt.bfloat16) or not bf16:
+            raise ValueError("MiniMax-H3 Turbo LoRA linears require BF16 compute")
+        # Keep the author's three separately rounded linears. Merging B @ A
+        # into the base checkpoint would discard small updates on BF16 rounding.
+        if isinstance(weight.base, ConvRotInt8Weight):
+            # Rotate/quantize only the base branch. The authored LoRA A factor
+            # acts on the original activation, not ConvRot's rotated coordinates.
+            base = _convrot_int8_linear(network, tensor, weight.base, bias)
+        else:
+            base = (
+                bf16_linear_with_fused_bias(network, tensor, weight.base, bias)
+                if bias is not None
+                else linear(network, tensor, weight.base)
+            )
+        low_rank = linear(network, tensor, weight.lora_a)
+        delta = linear(network, low_rank, weight.lora_b)
+        zero = constant(network, np.zeros((1,) * len(tuple(base.shape)), dtype=np.float32))
+        zero = cast(network, zero, trt.bfloat16)
+        base = network.add_elementwise(base, zero, trt.ElementWiseOperation.SUM).get_output(0)
+        delta = network.add_elementwise(delta, zero, trt.ElementWiseOperation.SUM).get_output(0)
+        return network.add_elementwise(base, delta, trt.ElementWiseOperation.SUM).get_output(0)
 
     if isinstance(weight, ConvRotInt8Weight):
         if compute_dtype not in (None, trt.bfloat16) or not bf16:
@@ -518,9 +552,7 @@ def dynamic_slice(network, tensor, starts: tuple[int, ...], sizes: tuple[int | N
             runtime_sizes.append(size)
             continue
         static_size = int(tensor.shape[axis])
-        runtime_sizes.append(
-            static_size if static_size >= 0 else _shape_dim(network, tensor, axis)
-        )
+        runtime_sizes.append(static_size if static_size >= 0 else _shape_dim(network, tensor, axis))
     if all(isinstance(size, (int, np.integer)) for size in runtime_sizes):
         return network.add_slice(
             tensor,
@@ -613,12 +645,14 @@ def fused_qkv(
 
     keys = tuple(f"{prefix}.to_{name}.weight" for name in ("q", "k", "v"))
     sources = tuple(weights[key] for key in keys)
-    if all(isinstance(source, ConvRotInt8Weight) for source in sources):
+    if all(isinstance(source, TurboLoraWeight) for source in sources):
+        packed_weight = pack_turbo_qkv(sources)
+    elif any(isinstance(source, TurboLoraWeight) for source in sources):
+        raise ValueError("MiniMax-H3 fused QKV cannot mix Turbo and ordinary weights")
+    elif all(isinstance(source, ConvRotInt8Weight) for source in sources):
         parents = tuple(source.packed_parent for source in sources)
         if parents[0] is None or not all(parent is parents[0] for parent in parents):
-            raise ValueError(
-                "MiniMax-H3 quantized Q/K/V must share one packed parent"
-            )
+            raise ValueError("MiniMax-H3 quantized Q/K/V must share one packed parent")
         packed_weight = parents[0]
         if not packed_weight.is_full_fused_qkv:
             raise ValueError("MiniMax-H3 quantized QKV parent is not marked as full fused QKV")

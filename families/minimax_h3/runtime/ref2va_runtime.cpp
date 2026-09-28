@@ -512,7 +512,8 @@ std::vector<float> stitch_ref_posterior_tiles(const std::vector<float>& tiles, i
 }
 
 std::vector<float> sample_ref_posterior(const std::vector<float>& posterior, int32_t latent_frames,
-                                        int32_t latent_height, int32_t latent_width) {
+                                        int32_t latent_height, int32_t latent_width,
+                                        bool posterior_mean = false) {
     if (latent_frames <= 0 || latent_height <= 0 || latent_width <= 0)
         throw std::invalid_argument("MiniMax-H3 Ref2VA posterior geometry is invalid");
     const std::size_t plane = checked_product({static_cast<std::size_t>(latent_frames),
@@ -521,13 +522,18 @@ std::vector<float> sample_ref_posterior(const std::vector<float>& posterior, int
                                               "posterior plane");
     if (posterior.size() != static_cast<std::size_t>(kPosteriorChannels) * plane)
         throw std::invalid_argument("MiniMax-H3 Ref2VA posterior buffer is invalid");
-    const auto epsilon =
+    const auto epsilon = posterior_mean ? std::vector<float>{} :
         torch_cuda_normal(static_cast<std::size_t>(kLatentChannels) * plane, kPosteriorSeed);
     std::vector<float> result(static_cast<std::size_t>(kLatentChannels) * plane);
     for (int32_t channel = 0; channel < kLatentChannels; ++channel) {
         for (std::size_t index = 0; index < plane; ++index) {
             const std::size_t sample = static_cast<std::size_t>(channel) * plane + index;
             const float mean = posterior[sample];
+            if (posterior_mean) {
+                result[sample] = (mean - kLatentMean[static_cast<std::size_t>(channel)]) /
+                                kLatentStd[static_cast<std::size_t>(channel)];
+                continue;
+            }
             const float logvar = std::clamp(
                 posterior[static_cast<std::size_t>(channel + kLatentChannels) * plane + index],
                 -30.0F, 20.0F);
@@ -991,12 +997,22 @@ run_ref2va_reference_vision_encoder(ITrtModule& module,
 
 std::vector<float> run_ref2va_text_encoder(ITrtModule& module,
                                            const Ref2vaMaterializedPresentation& presentation,
-                                           const Ref2vaVisionFeatures& features) {
-    validate_ref2va_plan(module, Ref2vaPlanKind::kTextEncoder);
+                                           const Ref2vaVisionFeatures& features,
+                                           const std::vector<float>* hidden_states,
+                                           bool allow_compact_profile) {
+    Ref2vaPlanOptions options;
+    options.text_continuation = hidden_states != nullptr;
+    options.allow_compact_text = allow_compact_profile;
+    validate_ref2va_plan(module, Ref2vaPlanKind::kTextEncoder, options);
     const int32_t text_rows = checked_i32(presentation.input_ids.size(), "Qwen text rows");
     const int32_t vision_rows =
         checked_i32(presentation.vision_row_indices.size(), "Qwen vision rows");
     const std::size_t feature_values = static_cast<std::size_t>(vision_rows) * 5120U;
+    const auto text_max = module.input_profile_shape("input_ids", 0, ProfileShapeSelector::kMax)[0];
+    const auto vision_max = module.input_profile_shape("vision_row_indices", 0, ProfileShapeSelector::kMax)[0];
+    if (text_rows > text_max || vision_rows > vision_max ||
+        (hidden_states && hidden_states->size() != static_cast<std::size_t>(text_rows) * 5120U))
+        throw std::invalid_argument("MiniMax-H3 Ref2VA text exceeds the selected engine or continuation capacity");
     if (text_rows <= 0 || text_rows > kRef2vaMaxTextRows || features.rows != vision_rows ||
         presentation.mrope_position_ids.size() != static_cast<std::size_t>(text_rows) * 3U ||
         presentation.h3_token_tags.size() != static_cast<std::size_t>(text_rows) ||
@@ -1038,13 +1054,19 @@ std::vector<float> run_ref2va_text_encoder(ITrtModule& module,
         float* data = vision_rows == 0 ? dummy_vision.data() : const_cast<float*>(values->data());
         inputs.emplace(name, Tensor{data, {bound_vision_rows, 5120}, DType::kFloat32});
     }
+    if (hidden_states)
+        inputs.emplace("hidden_states", Tensor{const_cast<float*>(hidden_states->data()),
+                                                {text_rows, 5120}, DType::kFloat32});
     const auto outputs = module.forward(inputs);
+    if (find_output(outputs, "encoder_hidden_states").shape != std::vector<int64_t>{text_rows, 5120})
+        throw std::runtime_error("MiniMax-H3 Ref2VA text output shape mismatch");
     return copy_float_output(find_output(outputs, "encoder_hidden_states"),
                              static_cast<std::size_t>(text_rows) * 5120U, "encoder_hidden_states");
 }
 
 Ref2vaEncodedCondition run_ref2va_image_vae_encoder(ITrtModule& module,
-                                                    const VideoImageInput& image) {
+                                                    const VideoImageInput& image,
+                                                    bool posterior_mean) {
     validate_ref2va_plan(module, Ref2vaPlanKind::kKeyframeVaeEncoder);
     validate_image_metadata(image, "normalized reference image");
     if (image.channels != 3 || image.height % 32 || image.width % 32)
@@ -1095,7 +1117,7 @@ Ref2vaEncodedCondition run_ref2va_image_vae_encoder(ITrtModule& module,
     const auto posterior = stitch_ref_posterior_tiles(posterior_tiles, image.height, image.width);
     const int32_t latent_height = image.height / 16;
     const int32_t latent_width = image.width / 16;
-    const auto latent = sample_ref_posterior(posterior, 1, latent_height, latent_width);
+    const auto latent = sample_ref_posterior(posterior, 1, latent_height, latent_width, posterior_mean);
     Ref2vaEncodedCondition result;
     result.geometry = {VideoReferenceKind::kImage, 1, latent_height, latent_width, 0};
     result.video_hidden_states = patchify_ref_video(latent, 1, latent_height, latent_width);
@@ -1103,7 +1125,8 @@ Ref2vaEncodedCondition run_ref2va_image_vae_encoder(ITrtModule& module,
 }
 
 Ref2vaEncodedCondition run_ref2va_video_vae_encoder(ITrtModule& module,
-                                                    const VideoClipInput& video) {
+                                                    const VideoClipInput& video,
+                                                    bool posterior_mean) {
     validate_ref2va_plan(module, Ref2vaPlanKind::kVideoVaeEncoder);
     if (video.num_frames <= 0 || video.height < kVaeTile || video.width < kVaeTile ||
         video.channels != 3 || video.height % 32 || video.width % 32 || video.fps_numerator != 24 ||
@@ -1208,7 +1231,8 @@ Ref2vaEncodedCondition run_ref2va_video_vae_encoder(ITrtModule& module,
                     posterior.begin() + static_cast<std::ptrdiff_t>(target));
     }
     const auto latent =
-        sample_ref_posterior(posterior, schedule.output_latent_frames, latent_height, latent_width);
+        sample_ref_posterior(posterior, schedule.output_latent_frames, latent_height, latent_width,
+                             posterior_mean);
     Ref2vaEncodedCondition result;
     result.geometry = {VideoReferenceKind::kVideo, schedule.output_latent_frames, latent_height,
                        latent_width, 0};
@@ -1506,7 +1530,12 @@ void validate_ref2va_denoiser_profile_selection(ITrtModule& module, int32_t expe
     }
 }
 
-void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
+void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind,
+                           const Ref2vaPlanOptions& options) {
+    if (options.block_start < 0 || options.block_end > 50 || options.block_start >= options.block_end)
+        throw std::invalid_argument("MiniMax-H3 Ref2VA plan block range is invalid");
+    if (options.text_continuation && kind != Ref2vaPlanKind::kTextEncoder)
+        throw std::invalid_argument("MiniMax-H3 Ref2VA continuation is only valid for text plans");
     switch (kind) {
     case Ref2vaPlanKind::kVisionEncoder: {
         require_counts(module, 4, 4, "vision encoder");
@@ -1529,20 +1558,31 @@ void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
             require_output(module, name, DType::kFloat32, {16384, 5120});
         return;
     }
-    case Ref2vaPlanKind::kTextEncoder:
-        require_counts(module, 9, 1, "text encoder");
-        require_dynamic_input(module, "input_ids", DType::kInt32, {1}, {1144}, {262144});
+    case Ref2vaPlanKind::kTextEncoder: {
+        require_counts(module, options.text_continuation ? 10 : 9, 1, "text encoder");
+        if (module.has_input("hidden_states") != options.text_continuation)
+            throw std::runtime_error("MiniMax-H3 Ref2VA text continuation ABI mismatch");
+        const bool compact = options.allow_compact_text &&
+            module.input_profile_shape("input_ids", 0, ProfileShapeSelector::kMax) ==
+                std::vector<int64_t>{2641};
+        const int64_t max_text = compact ? 2641 : 262144;
+        const int64_t max_vision = compact ? 2088 : 262144;
+        require_dynamic_input(module, "input_ids", DType::kInt32, {1}, {1144}, {max_text});
         require_dynamic_input(module, "mrope_position_ids", DType::kInt32, {3, 1}, {3, 1144},
-                              {3, 262144});
+                              {3, max_text});
         require_dynamic_input(module, "vision_mask", DType::kFloat32, {1, 1}, {1144, 1},
-                              {262144, 1});
+                              {max_text, 1});
         require_static_input(module, "vision_count", DType::kInt32, {1});
-        require_dynamic_input(module, "vision_row_indices", DType::kInt32, {1}, {1008}, {262144});
+        require_dynamic_input(module, "vision_row_indices", DType::kInt32, {1}, {1008}, {max_vision});
         for (const char* name : {"vision_embeds", "deepstack_0", "deepstack_1", "deepstack_2"})
             require_dynamic_input(module, name, DType::kFloat32, {1, 5120}, {1008, 5120},
-                                  {262144, 5120});
-        require_output(module, "encoder_hidden_states", DType::kFloat32, {262144, 5120});
+                                  {max_vision, 5120});
+        if (options.text_continuation)
+            require_dynamic_input(module, "hidden_states", DType::kFloat32, {1, 5120},
+                                  {1144, 5120}, {max_text, 5120});
+        require_output(module, "encoder_hidden_states", DType::kFloat32, {max_text, 5120});
         return;
+    }
     case Ref2vaPlanKind::kKeyframeVaeEncoder:
         require_counts(module, 1, 1, "keyframe VAE encoder");
         require_dynamic_input(module, "pixel_tiles", DType::kFloat32, {1, 3, 1, 256, 256},
@@ -1562,12 +1602,14 @@ void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
         require_output(module, "posterior_mean", DType::kFloat32, {2, 32, 600});
         return;
     case Ref2vaPlanKind::kAdalnPrecompute:
-        require_counts(module, 1, 51, "AdaLN precompute");
+        require_counts(module, 1, options.block_end - options.block_start +
+                           static_cast<int32_t>(options.include_final), "AdaLN precompute");
         require_static_input(module, "timestep_features", DType::kFloat32, {4, 256});
-        for (int32_t layer = 0; layer < 50; ++layer)
+        for (int32_t layer = options.block_start; layer < options.block_end; ++layer)
             require_output(module, "block_modulation_" + std::to_string(layer), DType::kBFloat16,
                            {12, 6, 5376});
-        require_output(module, "final_modulation", DType::kBFloat16, {4, 2, 5376});
+        if (options.include_final)
+            require_output(module, "final_modulation", DType::kBFloat16, {4, 2, 5376});
         return;
     case Ref2vaPlanKind::kDenoiser:
     case Ref2vaPlanKind::kDenoiserHead:
@@ -1584,7 +1626,7 @@ void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
         require_counts(module,
                        dense  ? 60
                        : head ? 12
-                       : tail ? 52
+                       : tail ? options.block_end - std::max(1, options.block_start) + 3
                               : 6,
                        head   ? 3
                        : tail ? 1
@@ -1661,7 +1703,8 @@ void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
                         kMinAudioRows, kOptAudioRows, kRef2vaMaxAudioRows, kMinTextRows,
                         kOptTextRows, kRef2vaMaxTextRows, kMinPackedRows, kOptPackedRows,
                         kRef2vaMaxPackedRows);
-        for (int32_t layer = tail ? 1 : 0; layer < (finish ? 0 : head ? 1 : 50); ++layer)
+        for (int32_t layer = tail ? std::max(1, options.block_start) : 0;
+             layer < (finish ? 0 : head ? 1 : tail ? options.block_end : 50); ++layer)
             require_static_input(module, "block_modulation_" + std::to_string(layer),
                                  DType::kBFloat16, {12, 6, 5376});
         if (dense || finish)
@@ -1694,8 +1737,9 @@ void validate_ref2va_plan(ITrtModule& module, Ref2vaPlanKind kind) {
 }
 
 Ref2vaModulations run_ref2va_adaln_precompute(ITrtModule& module,
-                                              const Ref2vaTimestepTable& timesteps) {
-    validate_ref2va_plan(module, Ref2vaPlanKind::kAdalnPrecompute);
+                                              const Ref2vaTimestepTable& timesteps,
+                                              const Ref2vaPlanOptions& options) {
+    validate_ref2va_plan(module, Ref2vaPlanKind::kAdalnPrecompute, options);
     if (timesteps.live_count < 1 || timesteps.live_count > 4)
         throw std::invalid_argument("MiniMax-H3 Ref2VA AdaLN live timestep count is invalid");
     std::vector<float> features(4U * 256U);
@@ -1714,13 +1758,14 @@ Ref2vaModulations run_ref2va_adaln_precompute(ITrtModule& module,
     const TensorMap outputs = module.forward(inputs);
     Ref2vaModulations result;
     constexpr std::size_t block_values = 12U * 6U * 5376U;
-    for (int32_t layer = 0; layer < 50; ++layer) {
+    for (int32_t layer = options.block_start; layer < options.block_end; ++layer) {
         const std::string name = "block_modulation_" + std::to_string(layer);
         result.blocks[static_cast<std::size_t>(layer)] =
             copy_owned(find_output(outputs, name), DType::kBFloat16, block_values, name);
     }
-    result.final = copy_owned(find_output(outputs, "final_modulation"), DType::kBFloat16,
-                              4U * 2U * 5376U, "final_modulation");
+    if (options.include_final)
+        result.final = copy_owned(find_output(outputs, "final_modulation"), DType::kBFloat16,
+                                  4U * 2U * 5376U, "final_modulation");
     return result;
 }
 

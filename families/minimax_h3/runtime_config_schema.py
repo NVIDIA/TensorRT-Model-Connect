@@ -9,6 +9,12 @@ import math
 
 
 _VALIDATORS = {
+    "turbo": lambda value: isinstance(value, bool),
+    "turbo_base_precision": lambda value: isinstance(value, str) and value in {"bf16", "int8"},
+    "turbo_transformer": lambda value: isinstance(value, str),
+    "turbo_ref_transformer": lambda value: isinstance(value, str) and bool(value),
+    "turbo_text_encoder": lambda value: isinstance(value, str),
+    "turbo_lora": lambda value: isinstance(value, str),
     "first_block_cache": lambda value: isinstance(value, bool),
     "ref2va_first_block_cache": lambda value: isinstance(value, bool),
     "ref2va_first_block_cache_threshold": lambda value: (
@@ -49,6 +55,35 @@ def normalize_build_options(values: dict[str, object]) -> dict[str, object]:
     disallowed = sorted(set(values) & _RUNTIME_ONLY)
     if disallowed:
         raise ValueError(f"MiniMax-H3 option(s) are runtime-only: {', '.join(disallowed)}")
+    if values.get("turbo", False):
+        conflicts = sorted(
+            set(values)
+            & {
+                "quantized_transformer",
+                "quantized_ref_transformer",
+                "quantized_text_encoder",
+                "first_block_cache_threshold",
+                "ref2va_first_block_cache",
+                "ref2va_first_block_cache_threshold",
+            }
+        )
+        if conflicts or values.get("first_block_cache", False):
+            raise ValueError(
+                "MiniMax-H3 Turbo requires explicit Turbo sources without FirstBlockCache"
+            )
+        if values.get("super_resolution", False):
+            raise ValueError("MiniMax-H3 Turbo does not support super-resolution")
+    elif any(
+        name in values
+        for name in (
+            "turbo_transformer",
+            "turbo_ref_transformer",
+            "turbo_text_encoder",
+            "turbo_lora",
+            "turbo_base_precision",
+        )
+    ):
+        raise ValueError("MiniMax-H3 Turbo checkpoint overrides require turbo=true")
     if not values.get("super_resolution", False) and any(
         values.get(name) for name in ("super_resolution_model", "super_resolution_weak_model")
     ):

@@ -85,6 +85,25 @@ does not imply that the family retains every engine or every conditioning result
 
 ## Timing and evidence
 
+For a prepared Turbo bundle, set `num_steps` explicitly to `8` and
+`guidance_scale` to `1` in each request; the tool's default 50-step setting is
+for the original sampler. Keep the same `IVideoGeneration` task alive across
+requests and keep a stable `runtime_cache` path across process restarts. This
+reuses eligible engines and compiled TensorRT kernels, not a previous generated
+video. A changed prompt still requires text encoding. Turbo FL2VA additionally
+requires a bundle containing the native vision/keyframe-VAE plans and all text
+segments; T2VA-only bundles cannot accept endpoints. Experimental Turbo Ref2VA
+requires its distinct reference checkpoint and matching REF plans; a T2VA/FL2VA
+bundle cannot substitute for them. See [the Turbo contract](../TURBO.md) for
+build options and the remaining packed-bundle qualification gaps.
+
+To measure service latency honestly, use two **different** prompts (including
+different token counts), retain `text_cache_hit=0` as evidence, and include
+`write_mp4_ms` in the reported request time. Report the first request separately
+from a resident request; neither should be advertised as a faster denoising
+algorithm. Do not change step count, checkpoint precision, LoRA strength, or
+output shape when attributing a gain to runtime reuse.
+
 - `task_load_ms_once` is the single initial `load_task` duration, repeated as
   context in receipts; do not sum it per request. Lazy engine loading remains
   inside the corresponding generation call.

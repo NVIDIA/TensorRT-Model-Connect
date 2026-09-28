@@ -21,6 +21,9 @@ from .config import (
     CANVAS_SHORT_EDGE,
     NATIVE_EXPLICIT_CANVAS_SIZES,
     SOL_ENGINE_1344X768_124_TO_345F,
+    TURBO_124_TO_362F,
+    TURBO_NUM_FRAMES_MAX,
+    TURBO_EXPLICIT_CANVAS_SIZE,
     VIDEO_NUM_FRAMES_MAX,
     VIDEO_NUM_FRAMES_MIN,
     VIDEO_NUM_FRAMES_OPT,
@@ -42,7 +45,8 @@ def _effective_build_config(raw: dict) -> dict:
 
 
 def _public_dynamic_profile(raw: dict):
-    profile = SOL_ENGINE_1344X768_124_TO_345F
+    turbo = raw.get("turbo", False)
+    profile = TURBO_124_TO_362F if turbo else SOL_ENGINE_1344X768_124_TO_345F
     expected = {
         "text_rows": profile.text_rows,
         "text_rows_min": profile.min_text_rows,
@@ -68,8 +72,10 @@ def _public_dynamic_profile(raw: dict):
     }
     if mismatches:
         raise ValueError(f"Unsupported MiniMax-H3 packed-row profile: {mismatches}")
-    explicit_flag = raw.get("first_block_cache", True)
-    if explicit_flag is not True:
+    explicit_flag = raw.get("first_block_cache", not turbo)
+    if turbo and explicit_flag:
+        raise ValueError("MiniMax-H3 Turbo does not use FirstBlockCache")
+    if not turbo and explicit_flag is not True:
         raise ValueError("MiniMax-H3 only supports the dense FirstBlockCache build")
     mode = raw.get("denoiser_cache_mode", "first_block")
     if mode != "first_block":
@@ -87,7 +93,8 @@ def _default_num_frames(raw: dict) -> int:
         raise ValueError(
             "MiniMax-H3 video_num_frames must be a valid 5--15 second geometry"
         ) from error
-    if not VIDEO_NUM_FRAMES_MIN <= frames <= VIDEO_NUM_FRAMES_MAX or frames % 17 != 5:
+    maximum = TURBO_NUM_FRAMES_MAX if raw.get("turbo", False) else VIDEO_NUM_FRAMES_MAX
+    if not VIDEO_NUM_FRAMES_MIN <= frames <= maximum or frames % 17 != 5:
         raise ValueError("MiniMax-H3 video_num_frames must be a valid 5--15 second geometry")
     return frames
 
@@ -176,6 +183,7 @@ def _default_canvas_size(raw: dict) -> tuple[int, int]:
         or width <= 0
         or (
             (height, width) not in NATIVE_EXPLICIT_CANVAS_SIZES
+            and not (raw.get("turbo", False) and (height, width) == TURBO_EXPLICIT_CANVAS_SIZE)
             and (height, width) != _resolve_canvas_size(width, height)
         )
     ):
@@ -251,15 +259,20 @@ class MiniMaxH3Plugin:
         raw = _effective_build_config(getattr(config, "raw", {}))
         if raw.get("_fp32_layers"):
             raise ValueError("MiniMax-H3 TensorRT-RTX staged builds do not support FP32 layers")
-        from .delivery import resolve_quantized_sources, resolve_super_resolution_sources
+        from .delivery import (
+            resolve_quantized_sources,
+            resolve_super_resolution_sources,
+            resolve_turbo_sources,
+        )
 
         root = Path(weights.get("_model_dir", model_dir))
         staged_raw = dict(raw)
-        staged_raw.setdefault("first_block_cache", True)
+        turbo = raw.get("turbo", False)
+        staged_raw.setdefault("first_block_cache", not turbo)
         staged_raw.setdefault("denoiser_cache_mode", "first_block")
         _public_dynamic_profile(staged_raw)
         expected_request = {
-            "num_inference_steps": 50,
+            "num_inference_steps": 8 if turbo else 50,
             "seed": 0,
         }
         mismatches = {
@@ -274,9 +287,14 @@ class MiniMaxH3Plugin:
 
         from .staged_build import build_staged_bundle
 
-        # All public builds use the same quantized checkpoints for all three
-        # workflows. Only the explicit SR flag changes the delivery mode.
-        staged_options = {"verbose": verbose, **resolve_quantized_sources(root, raw)}
+        # The standard delivery shares quantized sources across all three
+        # workflows. Turbo selects a full BF16 or INT8 base with BF16 LoRA/text.
+        sources = (
+            resolve_turbo_sources(root, raw) if turbo else resolve_quantized_sources(root, raw)
+        )
+        staged_options = {"verbose": verbose, **sources}
+        if turbo:
+            staged_options["turbo_base_precision"] = raw.get("turbo_base_precision", "bf16")
         super_resolution_model, super_resolution_weak_model = resolve_super_resolution_sources(raw)
         staged_options["runtime_defaults"] = {
             "height": _default_canvas_size(raw)[0],
@@ -319,8 +337,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("MiniMax-H3 does not support fp32_layers")
 
     family_options = validate_build_options(dict(getattr(request, "family_options", ())))
+    turbo = family_options.get("turbo", False)
+    if turbo and request.quantization is not None:
+        raise ValueError("Select Turbo base precision with minimax_h3.turbo_base_precision")
     if request.quantization not in {None, "int8_tensorwise_convrot"}:
-        raise ValueError("MiniMax-H3 delivery requires Comfy INT8 denoisers and the NVFP4 text checkpoint")
+        raise ValueError(
+            "MiniMax-H3 delivery requires Comfy INT8 denoisers and the NVFP4 text checkpoint"
+        )
     if (request.image_height is None) != (request.image_width is None):
         raise ValueError("MiniMax-H3 requires both image height and width, or neither")
     sr = family_options.get("super_resolution", False)
@@ -331,12 +354,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "height": int(request.image_height or default_height),
         "width": int(request.image_width or default_width),
         "video_num_frames": int(request.video_num_frames or VIDEO_NUM_FRAMES_OPT),
-        "num_inference_steps": 50,
+        "num_inference_steps": 8 if turbo else 50,
         "seed": 0,
     }
     config = SimpleNamespace(raw=raw)
-    _default_canvas_size(_effective_build_config(raw))
-    _default_num_frames(raw)
+    effective = _effective_build_config(raw)
+    _default_canvas_size(effective)
+    _default_num_frames(effective)
     weights = plugin.load_weights(str(request.model_dir), config)
 
     writer.set_header(family="minimax_h3", task=request.task, backend=request.backend)

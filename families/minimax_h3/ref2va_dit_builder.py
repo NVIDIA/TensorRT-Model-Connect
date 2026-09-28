@@ -24,6 +24,7 @@ from . import trt_compat
 
 from . import dit_builder as dense
 from . import graph_ops as op
+from . import adaln_builder
 from .adaln_builder import build_adaln_precompute_engine
 from .config import MiniMaxH3Config
 from .ref2va_checkpoint import (
@@ -47,16 +48,40 @@ def checkpoint_keys() -> tuple[str, ...]:
     return REF2VA_DENOISER_KEYS
 
 
-def adaln_checkpoint_keys() -> tuple[str, ...]:
-    return REF2VA_ADALN_KEYS
+def adaln_checkpoint_keys(
+    capacity: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+    *,
+    turbo: bool = False,
+    block_start: int = 0,
+    block_end: int | None = None,
+    include_final: bool = True,
+) -> tuple[str, ...]:
+    keys = adaln_builder.checkpoint_keys(
+        native_profile(capacity, turbo=turbo),
+        block_start=block_start,
+        block_end=block_end,
+        include_final=include_final,
+    )
+    return keys if turbo else REF2VA_ADALN_KEYS
 
 
 def head_checkpoint_keys() -> tuple[str, ...]:
     return REF2VA_HEAD_KEYS
 
 
-def tail_checkpoint_keys() -> tuple[str, ...]:
-    return REF2VA_TAIL_KEYS
+def tail_checkpoint_keys(
+    capacity: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+    *,
+    turbo: bool = False,
+    block_start: int = 1,
+    block_end: int | None = None,
+) -> tuple[str, ...]:
+    keys = dense.tail_checkpoint_keys(
+        native_profile(capacity, first_block_cache=True, turbo=turbo),
+        block_start=block_start,
+        block_end=block_end,
+    )
+    return keys if turbo else REF2VA_TAIL_KEYS
 
 
 def finish_checkpoint_keys() -> tuple[str, ...]:
@@ -67,6 +92,7 @@ def native_profile(
     capacity: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
     *,
     first_block_cache: bool = False,
+    turbo: bool = False,
 ) -> MiniMaxH3Config:
     """Translate the public scatter/gather capacity to the shared H3 graph profile."""
 
@@ -84,6 +110,7 @@ def native_profile(
         padded_sequence_length=capacity.max_packed_rows,
         max_timestep_count=4,
         first_block_cache=first_block_cache,
+        turbo=turbo,
     )
     profile.validate()
     return profile
@@ -401,11 +428,21 @@ def build_ref2va_dit_engine(
 def build_ref2va_adaln_precompute_engine(
     weights: dict,
     capacity: Ref2VADenoiserProfile = Ref2VADenoiserProfile(),
+    *,
+    turbo: bool = False,
     **kwargs,
 ) -> bytes | dict[str, int | str]:
     """Build the separate AdaLN plan from ``transformer_ref`` only."""
 
-    expected = set(adaln_checkpoint_keys())
+    expected = set(
+        adaln_checkpoint_keys(
+            capacity,
+            turbo=turbo,
+            block_start=kwargs.get("block_start", 0),
+            block_end=kwargs.get("block_end"),
+            include_final=kwargs.get("include_final", True),
+        )
+    )
     missing = sorted(expected - set(weights))
     unexpected = sorted(set(weights) - expected)
     if missing or unexpected:
@@ -413,7 +450,7 @@ def build_ref2va_adaln_precompute_engine(
             "MiniMax-H3 transformer_ref AdaLN checkpoint partition mismatch: "
             f"missing={missing[:8]}, unexpected={unexpected[:8]}"
         )
-    return build_adaln_precompute_engine(weights, native_profile(capacity), **kwargs)
+    return build_adaln_precompute_engine(weights, native_profile(capacity, turbo=turbo), **kwargs)
 
 
 def _target_relative_change(network, current, previous, indices):
@@ -466,11 +503,12 @@ def build_ref2va_dit_head_engine(
     workspace_bytes: int | None = None,
     weight_streaming: bool = False,
     output_path: str | Path | None = None,
+    turbo: bool = False,
 ) -> bytes | dict[str, int | str]:
     """Build Ref2VA scatter packing, block zero and a target-only cache metric."""
 
     _require_checkpoint_partition(weights, REF2VA_HEAD_KEYS, "cache head")
-    profile = native_profile(capacity, first_block_cache=True)
+    profile = native_profile(capacity, first_block_cache=True, turbo=turbo)
     logger, builder, network, config = dense._native_builder(  # noqa: SLF001
         verbose, workspace_bytes, weight_streaming=weight_streaming
     )
@@ -551,11 +589,19 @@ def build_ref2va_dit_tail_engine(
     workspace_bytes: int | None = None,
     weight_streaming: bool = False,
     output_path: str | Path | None = None,
+    turbo: bool = False,
+    block_start: int = 1,
+    block_end: int | None = None,
 ) -> bytes | dict[str, int | str]:
     """Build Ref2VA blocks one through 49 and their reusable packed residual."""
 
-    _require_checkpoint_partition(weights, REF2VA_TAIL_KEYS, "cache tail")
-    profile = native_profile(capacity, first_block_cache=True)
+    profile = native_profile(capacity, first_block_cache=True, turbo=turbo)
+    blocks = dense._tail_block_range(profile, block_start, block_end)  # noqa: SLF001
+    _require_checkpoint_partition(
+        weights,
+        tail_checkpoint_keys(capacity, turbo=turbo, block_start=block_start, block_end=block_end),
+        "cache tail",
+    )
     logger, builder, network, config = dense._native_builder(  # noqa: SLF001
         verbose, workspace_bytes, weight_streaming=weight_streaming
     )
@@ -568,12 +614,12 @@ def build_ref2va_dit_tail_engine(
             trt.bfloat16,
             (profile.adaln_table_rows, 6, profile.hidden_size),
         )
-        for index in range(1, profile.num_layers)
+        for index in blocks
     }
     _add_cache_optimization_profiles(builder, config, capacity, "ref2va_dit_tail")
     cos, sin = dense._rope_tables(network, positions, profile)  # noqa: SLF001
     hidden = head_hidden
-    for index in range(1, profile.num_layers):
+    for index in blocks:
         hidden = dense._transformer_block(  # noqa: SLF001
             network,
             hidden,
@@ -586,14 +632,18 @@ def build_ref2va_dit_tail_engine(
             index,
             consume_weights=consume_weights,
         )
-    residual = network.add_elementwise(
-        hidden, head_hidden, trt.ElementWiseOperation.SUB
-    ).get_output(0)
+    # Turbo runs every block. Transfer the hidden state directly between
+    # segments, without the lossy BF16 subtract/add used only for FBC reuse.
+    residual = (
+        hidden
+        if turbo
+        else network.add_elementwise(hidden, head_hidden, trt.ElementWiseOperation.SUB).get_output(
+            0
+        )
+    )
     residual.name = "tail_residual"
     network.mark_output(residual)
-    op.validate_native_network(
-        network, expected_attentions=profile.num_layers - 1, label="Ref2VA cache tail"
-    )
+    op.validate_native_network(network, expected_attentions=len(blocks), label="Ref2VA cache tail")
     return dense._serialize(  # noqa: SLF001
         logger=logger,
         builder=builder,
@@ -616,11 +666,12 @@ def build_ref2va_dit_finish_engine(
     workspace_bytes: int | None = None,
     weight_streaming: bool = False,
     output_path: str | Path | None = None,
+    turbo: bool = False,
 ) -> bytes | dict[str, int | str]:
     """Apply the selected residual and gather both Ref2VA velocity outputs."""
 
     _require_checkpoint_partition(weights, REF2VA_FINISH_KEYS, "cache finish")
-    profile = native_profile(capacity, first_block_cache=True)
+    profile = native_profile(capacity, first_block_cache=True, turbo=turbo)
     logger, builder, network, config = dense._native_builder(  # noqa: SLF001
         verbose, workspace_bytes, weight_streaming=weight_streaming
     )
@@ -633,9 +684,13 @@ def build_ref2va_dit_finish_engine(
         "final_modulation", trt.bfloat16, (profile.max_timestep_count, 2, profile.hidden_size)
     )
     _add_cache_optimization_profiles(builder, config, capacity, "ref2va_dit_finish")
-    hidden = network.add_elementwise(
-        head_hidden, tail_residual, trt.ElementWiseOperation.SUM
-    ).get_output(0)
+    hidden = (
+        tail_residual
+        if turbo
+        else network.add_elementwise(
+            head_hidden, tail_residual, trt.ElementWiseOperation.SUM
+        ).get_output(0)
+    )
     hidden = dense._final_hidden(  # noqa: SLF001
         network, hidden, timestep_indices, final_modulation, weights, profile
     )

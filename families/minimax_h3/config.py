@@ -135,6 +135,7 @@ class MiniMaxH3Config:
     max_timestep_count: int = 4
     context_parallel_size: int = 1
     first_block_cache: bool = True
+    turbo: bool = False
 
     @property
     def sequence_length(self) -> int:
@@ -223,3 +224,18 @@ SOL_ENGINE_1344X768_124_TO_345F = MiniMaxH3Config(
     text_rows=2641,
     padded_sequence_length=112367,
 )
+
+# The Turbo sampler supports the author's 362-frame / 1280x736 request while
+# retaining the existing dynamic prompt and public canvas envelope.
+TURBO_124_TO_362F = MiniMaxH3Config(
+    turbo=True,
+    min_video_rows=VIDEO_ROWS_MIN,
+    opt_video_rows=VIDEO_ROWS_OPT,
+    video_rows=113796,
+    audio_rows=1206,
+    text_rows=2641,
+    padded_sequence_length=117643,
+)
+TURBO_NUM_FRAMES_MAX = 362
+TURBO_AUDIO_LATENT_FRAMES_MAX = 603
+TURBO_EXPLICIT_CANVAS_SIZE = (736, 1280)

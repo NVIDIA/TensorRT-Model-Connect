@@ -15,6 +15,7 @@ inline bool should_retain_hot_engine(std::string_view name, bool retain_engines)
     if (!retain_engines)
         return false;
     return name == "denoiser_head_plan" || name == "denoiser_tail_plan" ||
+           name == "denoiser_tail_1_plan" ||
            name == "denoiser_finish_plan" || name == "vae_tile_decoder_plan" ||
            name == "audio_vae_decoder_plan";
 }
@@ -27,9 +28,13 @@ inline bool uses_serial_execution_context(std::string_view name) {
     // Use the native TRT-RTX arena to size every context from its live shape;
     // the three split contexts additionally share one high-water allocation.
     return name == "denoiser_head_plan" || name == "denoiser_tail_plan" ||
+           name == "denoiser_tail_1_plan" ||
            name == "denoiser_finish_plan" || name == "ref2va_denoiser_plan" ||
            name == "ref2va_dit_head_plan" || name == "ref2va_dit_tail_plan" ||
+           name == "ref2va_dit_tail_1_plan" ||
            name == "ref2va_dit_finish_plan" || name == "text_encoder_plan" ||
+           name == "text_encoder_1_plan" || name == "text_encoder_2_plan" ||
+           name == "text_encoder_3_plan" || name == "text_encoder_4_plan" ||
            name == "vision_encoder_plan";
 }
 
@@ -42,7 +47,7 @@ inline std::int64_t staged_plan_weight_streaming_budget(std::string_view name,
             name == "vae_tile_decoder_plan" || name == "audio_vae_decoder_plan") {
             return std::numeric_limits<std::int64_t>::max();
         }
-        if (name == "denoiser_tail_plan")
+        if (name == "denoiser_tail_plan" || name == "denoiser_tail_1_plan")
             // The explicit retained-tail setting is allowed to exceed the
             // bundle's portable streaming default on high-memory systems.
             // TensorRT-RTX clamps the request to the engine's streamable
