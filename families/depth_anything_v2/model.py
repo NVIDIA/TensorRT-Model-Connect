@@ -374,8 +374,12 @@ def build_engine(cfg: dict, weights: WeightDict, *, precision: str, verbose: boo
                     "supports the checkpoint's native resolution, where every fusion "
                     "residual matches its skip connection without interpolation."
                 )
-            skip = preact_residual(fused, f"neck.fusion.{idx}.residual_layer1")
-            hidden_state = network.add_elementwise(current, skip, trt.ElementWiseOperation.SUM).get_output(0)
+            # DepthAnythingFeatureFusionLayer.forward(hidden_state, residual):
+            # residual_layer1 runs on the *current level's* feature (`residual`
+            # in the reference), and its output adds onto the running fusion
+            # accumulator (`hidden_state` there) -- not the other way around.
+            skip = preact_residual(current, f"neck.fusion.{idx}.residual_layer1")
+            hidden_state = network.add_elementwise(fused, skip, trt.ElementWiseOperation.SUM).get_output(0)
         hidden_state = preact_residual(hidden_state, f"neck.fusion.{idx}.residual_layer2")
 
         if is_last:
