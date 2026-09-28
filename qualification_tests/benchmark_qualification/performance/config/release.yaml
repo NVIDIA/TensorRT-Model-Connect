@@ -22,6 +22,12 @@ excluded_profiles:
     reason: >-
       Family-owned accuracy and internal performance qualification are present,
       but no user-facing release-performance workload or receipt has been added.
+  - model: depth-anything-v2-small
+    reason: >-
+      Fixed-resolution E2E build and Hugging Face reference-parity
+      qualification (relative-depth-map comparison against the official
+      checkpoint) are present, but no matching release-performance workload
+      or receipt has been collected.
   - model: s1-mini-fp16
     reason: >-
       families/s1_mini has no release-performance workload or receipt yet;

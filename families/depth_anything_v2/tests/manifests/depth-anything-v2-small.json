@@ -1,0 +1,17 @@
+{
+  "name": "depth-anything-v2-small",
+  "hf_id": "depth-anything/Depth-Anything-V2-Small-hf",
+  "hf_revision": "5426e4f0f36572d16453bbda7a8389317b1bef99",
+  "bundle": "depth-anything-v2-small.bundle",
+  "family": "depth_anything_v2",
+  "task": "monocular_geometry",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "depth-anything-v2-small",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1
+}
