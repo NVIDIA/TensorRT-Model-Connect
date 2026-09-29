@@ -6,12 +6,15 @@
 from tensorrt_model_connect.model_support import family_support
 
 
-# Depth Anything V2's transformers config.json carries a standard model_type
-# and architectures list, unlike YOLOX or the Ultralytics YOLO releases -
-# this is the ordinary Hugging Face identity path.
+# Depth Anything V2 requires the standard Hugging Face model_type identity.
+# An architectures-only fallback (as families/dinov3 uses for its timm
+# mirror) is deliberately not added here: unlike that mirror, no known
+# depth_anything checkpoint omits model_type, and model.py's build() rejects
+# anything but model_type == "depth_anything" outright, so advertising
+# support on architectures alone would let describe() accept a checkpoint
+# build() then immediately raises on.
 describe = family_support(
     model_types=("depth_anything",),
-    architectures=("DepthAnythingForDepthEstimation",),
     tasks=("monocular_geometry",),
     default_task="monocular_geometry",
 )

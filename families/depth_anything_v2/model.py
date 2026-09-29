@@ -106,8 +106,7 @@ def resolve_config(raw: dict, readers) -> dict:
     }
 
 
-def load_weights(model_dir: str, cfg: dict, precision: str) -> WeightDict:
-    readers = open_checkpoint(model_dir)
+def load_weights(readers, cfg: dict, precision: str) -> WeightDict:
     dtype = _target_dtype(precision)
     weights = WeightDict()
 
@@ -464,7 +463,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     readers = open_checkpoint(model_dir)
     cfg = resolve_config(raw, readers)
-    weights = load_weights(str(model_dir), cfg, precision)
+    weights = load_weights(readers, cfg, precision)
 
     writer.set_header(family="depth_anything_v2", task=request.task, backend=request.backend)
     plan = build_engine(cfg, weights, precision=precision, verbose=bool(request.verbose))

@@ -167,14 +167,23 @@ def _reference_depth(model_dir: Path, image: Path, image_size: int) -> np.ndarra
     model = AutoModelForDepthEstimation.from_pretrained(model_dir)
     model.eval()
 
+    # Match model.py's own convention (preprocessor_config.json, ImageNet
+    # fallback) rather than hardcoding ImageNet here: the pinned Small
+    # checkpoint happens to use ImageNet stats, but a differently-normalized
+    # checkpoint would otherwise silently compare against the wrong reference.
+    preprocessor_path = model_dir / "preprocessor_config.json"
+    preprocessor = (
+        json.loads(preprocessor_path.read_text(encoding="utf-8")) if preprocessor_path.is_file() else {}
+    )
+    mean = np.array(preprocessor.get("image_mean", [0.485, 0.456, 0.406]), dtype=np.float32)
+    std = np.array(preprocessor.get("image_std", [0.229, 0.224, 0.225]), dtype=np.float32)
+
     source = Image.open(image).convert("RGB")
     resized = functional_transforms.resize(
         source, [image_size, image_size],
         interpolation=functional_transforms.InterpolationMode.BILINEAR, antialias=True,
     )
     array = np.asarray(resized).astype(np.float32) / 255.0
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
     array = (array - mean) / std
     pixel_values = torch.from_numpy(array.transpose(2, 0, 1)[None]).float()
 
