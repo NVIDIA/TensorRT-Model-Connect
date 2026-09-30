@@ -994,7 +994,9 @@ jobs:
             # steps, which key off it, still find and delete this instance.
             echo "Instance $INSTANCE_NAME appears unusable (e.g. InsufficientCapacity); reserving a fresh one with the same name..."
             brev delete "$INSTANCE_NAME" || true
-            brev create "$INSTANCE_NAME" -g "$GPU_TYPE" --timeout 600
+            # Brev deletion is asynchronous: an immediate re-create can race
+            # the backend and fail with "workspace already exists".
+            retry brev create "$INSTANCE_NAME" -g "$GPU_TYPE" --timeout 600
             instance_attempt=$((instance_attempt + 1))
           done
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
