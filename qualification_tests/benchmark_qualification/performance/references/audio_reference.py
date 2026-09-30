@@ -39,6 +39,24 @@ def read_wav_float32(path: str) -> tuple[Any, int]:
     return audio, sample_rate
 
 
+def load_audio_mono(path: str) -> tuple[Any, int]:
+    """Mono float32 samples and the sample rate of an audio file.
+
+    PCM WAV is read directly; other formats (and float WAV) go through soundfile.
+    """
+    if str(path).lower().endswith(".wav"):
+        try:
+            return read_wav_float32(path)
+        except (wave.Error, RuntimeError):
+            pass
+    import soundfile
+
+    audio, sample_rate = soundfile.read(path, dtype="float32", always_2d=False)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    return audio, sample_rate
+
+
 def resample_audio(audio: Any, source_rate: int, target_rate: int) -> Any:
     if source_rate == target_rate:
         return audio
@@ -50,6 +68,10 @@ def resample_audio(audio: Any, source_rate: int, target_rate: int) -> Any:
     source = np.arange(len(audio), dtype=np.float32)
     target = np.linspace(0, len(audio) - 1, length, dtype=np.float32)
     return np.interp(target, source, audio).astype(np.float32)
+
+
+# Name the family ASR references import (linear interpolation, same signature).
+resample_linear = resample_audio
 
 
 def write_wav_pcm16(path: Path, audio: Any, sample_rate: int) -> None:
