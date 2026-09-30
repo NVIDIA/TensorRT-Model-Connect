@@ -495,6 +495,50 @@ def calibrate_qwen3_8_fp8(
     not recomputed -- that is the one part of this whole scheme that is not
     cheap to redo on every build.
 
+    The bundled scales are hand-collected rather than produced by Model
+    Optimizer. That looks like a gap, so it was measured; the summary below is
+    so nobody repeats the experiment expecting a different answer.
+
+    Model Optimizer produces the same statistic. Running
+    `mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)` over the same 64
+    prompts and reading `input_quantizer._amax / 448` reproduces the bundled
+    file almost exactly: 349 of 416 entries bit-identical, mean relative
+    difference 0.2%. Its activation calibration is plain max, which is what
+    the forward hooks already compute.
+
+    More calibration data made accuracy worse, not better. Recalibrating on
+    2048 real chat conversations (nvidia/Nemotron-Post-Training-Dataset-v2,
+    rendered through the chat template) raised 384 of 416 scales, one by
+    10.5x. Measured as perplexity over 1024 held-out conversations from the
+    same corpus, with weights and everything else held fixed (PyTorch
+    fake-quantisation, not an engine build, so the absolute values are only
+    meaningful relative to each other):
+
+        bf16                    51.77
+        bundled scales          50.76   (-2.0% vs bf16)
+        2048-sample recalib     56.15   (+8.5% vs bf16)
+
+    The cause is the estimator, not the corpus. e4m3 is floating point, so a
+    larger scale buys no precision -- it only trades clipping for underflow.
+    Instrumenting 1.7e11 activation values showed the recalibrated scales
+    removed clipping (0.00024% -> 0) but doubled underflow (0.45% -> 0.93%)
+    at identical mean relative error. A single outlier in 2048 samples is
+    enough to inflate one projection's amax and flush that projection's
+    normal-range values to zero.
+
+    The robust estimators Model Optimizer ships do not apply here.
+    `MseCalibConfig` and `LocalHessianCalibConfig` both calibrate weights only
+    ("input quantizers untouched"), and Local-Hessian is NVFP4-only.
+    Percentile and entropy calibration exist as `HistogramCalibrator`, but
+    nothing in the public calibration path passes the `method` argument
+    `compute_amax()` requires, so they cannot be driven for activations in
+    0.46.1.
+
+    So: max calibration on a modest prompt set is what this format supports,
+    and the bundled file is the best-measured version of it. Revisit if a
+    newer Model Optimizer exposes percentile or entropy calibration for
+    activations.
+
     Sets `disable_dual_gemm_fusion=True` on the returned context so
     `engine_builder.py` disables TRT's dual-GEMM auto-fusion at build
     time (see `_FP8_SELF_QUANTIZED_MLP_PROJECTIONS`'s comment above for why).
