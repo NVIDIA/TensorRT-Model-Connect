@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from . import openai
 from .backends.base import Backend, BackendError, BackendUnavailable, Invocation
 from .digests import add_media_digests
-from .files import materialize_files
+from .files import materialize_files, server_path_fields
 
 # Request IDs name a per-request directory under the scratch root: one path component that is never
 # "." or ".." (leading alphanumeric, no separators).
@@ -176,6 +176,10 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             body = await request.json()
             if set(body) - {"request", "model"} or not isinstance(body.get("request", {}), dict):
                 raise openai.RequestError("body must be {\"request\": {...operation request...}}")
+            local = server_path_fields(body.get("request", {}))
+            if local:  # only the server's own base request may name server files
+                raise openai.RequestError(f"send {', '.join(sorted(set(local)))} inline as "
+                                          '{"$file": {"suffix": ..., "b64": ...}}, not as a server path')
             result = await execute(request_id, f"/v1/tasks/{name}", {**config.base_request, **body.get("request", {})})
             # Generic clients (aiperf `raw` endpoint) need a text field to count a response as valid.
             text = str(result["observation"].get("text", operation))

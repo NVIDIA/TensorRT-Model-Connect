@@ -72,6 +72,19 @@ def test_task_route_merges_base_request_materializes_files_and_records_request_i
     assert not (config.scratch / "req-1").exists()  # artifacts are not kept by default
 
 
+@pytest.mark.parametrize("payload", [{"image_path": "/etc/hostname"},
+                                     {"image_paths": ["/etc/hostname"]},
+                                     {"inputs": {"audio_path": "../secret.wav"}}])
+def test_task_route_rejects_server_paths_from_clients(tmp_path, payload):
+    backend = FakeBackend()
+    client, config = client_for(tmp_path, backend)
+
+    response = client.post("/v1/tasks/classify", json={"request": payload})
+
+    assert response.status_code == 400 and "$file" in response.json()["error"]["message"]
+    assert backend.requests == []
+
+
 @pytest.mark.parametrize("request_id", ["..", ".", ".hidden"])
 def test_request_id_cannot_name_a_directory_outside_scratch(tmp_path, request_id):
     sentinel = tmp_path / "keep.txt"
@@ -101,12 +114,13 @@ def test_backend_rejection_and_bad_body_map_to_client_errors(tmp_path):
 
 def test_long_arrays_are_compacted_unless_full_observations(tmp_path):
     client, config = client_for(tmp_path, FakeBackend("segment"))
-    compacted = client.post("/v1/tasks/segment", json={"request": {"image_path": "/dev/null"}}).json()
+    image = {"$file": {"suffix": ".png", "b64": base64.b64encode(b"img").decode()}}
+    compacted = client.post("/v1/tasks/segment", json={"request": {"image_path": image}}).json()
     assert compacted["trtmc_observation"] == {"mask": {"$array_length": 100}, "classes": [1, 2]}
     assert json.loads(config.records.read_text())["observation"]["mask"] == {"$array_length": 100}
 
     full_client, _ = client_for(tmp_path / "full", FakeBackend("segment"), full_observations=True)
-    full = full_client.post("/v1/tasks/segment", json={"request": {"image_path": "/dev/null"}}).json()
+    full = full_client.post("/v1/tasks/segment", json={"request": {"image_path": image}}).json()
     assert full["trtmc_observation"]["mask"] == list(range(100))
 
 

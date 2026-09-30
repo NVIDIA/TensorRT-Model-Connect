@@ -40,6 +40,16 @@ def inline_files(value: Any, *, field: str = "") -> Any:
     return value
 
 
+def server_path_fields(value: Any, *, field: str = "") -> list[str]:
+    """``*_path``/``*_paths`` fields holding plain strings: server-side paths that a client must not
+    make the server read (clients send files inline as ``$file``)."""
+    if isinstance(value, dict):
+        return [name for key, item in value.items() for name in server_path_fields(item, field=key)]
+    if isinstance(value, list):
+        return [name for item in value for name in server_path_fields(item, field=field)]
+    return [field] if isinstance(value, str) and _is_path_field(field) else []
+
+
 def materialize_files(value: Any, directory: Path) -> Any:
     """Write inline references below ``directory`` and substitute their paths."""
     counter = iter(range(1_000_000))
