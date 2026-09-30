@@ -993,9 +993,21 @@ jobs:
             # Reuse the same deterministic name so the existing teardown
             # steps, which key off it, still find and delete this instance.
             echo "Instance $INSTANCE_NAME appears unusable (e.g. InsufficientCapacity); reserving a fresh one with the same name..."
+            # Brev deletion is asynchronous ("This can take a few minutes"
+            # per brev delete --help), so poll until the name actually
+            # clears instead of guessing at a fixed delay.
             brev delete "$INSTANCE_NAME" || true
-            # Brev deletion is asynchronous: an immediate re-create can race
-            # the backend and fail with "workspace already exists".
+            delete_deadline=$((SECONDS + 180))
+            while brev ls 2>/dev/null | grep -qx "$INSTANCE_NAME"; do
+              if [ "$SECONDS" -ge "$delete_deadline" ]; then
+                echo "::warning::$INSTANCE_NAME still listed after 180s; attempting create anyway" >&2
+                break
+              fi
+              sleep 10
+            done
+            if ! brev ls 2>/dev/null | grep -qx "$INSTANCE_NAME"; then
+              echo "$INSTANCE_NAME cleared after $((SECONDS - (delete_deadline - 180)))s, proceeding with re-create"
+            fi
             retry brev create "$INSTANCE_NAME" -g "$GPU_TYPE" --timeout 600
             instance_attempt=$((instance_attempt + 1))
           done
