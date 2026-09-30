@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Beans leaf images (the DINOv3 kNN bank, class-ordered) around each model's catalog request.
+suite: beans-features-12
+version: 1
+base: catalog
+source:
+  kind: json_manifest
+  path: dinov3-beans-knn-v1/bank.json
+  sha256: d17d21afd01fb6ba3bc7a2e2847085f10137e0203a92798b0401a1d5acde1897
+  records: samples
+  file_fields: [image]
+selection: {method: stride, count: 12}
+fields: {image: image_path}

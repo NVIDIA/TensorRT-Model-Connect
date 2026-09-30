@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Data comes from AIPerf's librispeech entry (pinned in trtmc-aiperf-plugins); labels feed the
+# corpus WER gate against ground truth.
+suite: librispeech-aiperf-10
+version: 1
+source:
+  kind: aiperf_public
+  dataset: librispeech
+  label_column: text
+selection: {method: stride, count: 10}
+fields: {audio: audio_path}
+request:
+  max_new_tokens: 120
+  language: en

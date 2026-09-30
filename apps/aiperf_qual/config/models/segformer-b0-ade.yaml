@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Match the family's accepted reference preprocessing (slow image processor).
+reference:
+  options: {processor_kwargs: {use_fast: false}}

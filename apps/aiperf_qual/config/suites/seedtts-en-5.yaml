@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Five SeedTTS English test sentences around each model's catalog request (length budget, seed).
+suite: seedtts-en-5
+version: 1
+base: catalog
+source:
+  kind: json_manifest
+  path: SeedTTS_en_meta/seedtts_en_meta.json
+  sha256: 0a18775d14389109cd91df379daa2c90e431fd90566d002af875a541e60e4ba3
+  records: requests
+selection: {method: stride, count: 5}
+fields: {reference: prompt}

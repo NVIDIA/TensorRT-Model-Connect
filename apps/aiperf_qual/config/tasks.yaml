@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Qualification defaults per catalog Task. Every catalog model inherits the entry of its Task;
+# config/models/<profile>.yaml holds only the exceptions (deep-merged over this).
+#
+# Acc: per-sample parity of the TRTMC output with the native Hugging Face model (fp32 golden),
+# gated per suite and relaxed to the reference's own precision noise (noise_floor).
+# Perf: server model-call p50 over repeated identical requests against the native model at the
+# candidate precision, eager and (where listed) torch.compile.
+#
+# Suite "catalog" is the profile's catalog testcase request (model-specific shapes and settings).
+
+defaults:
+  reference:
+    backend: auto              # generic HF adapter when one serves the Task, else the family script
+  noise_floor: true
+  performance:
+    l1:
+      suite: catalog
+      reference_modes: [eager]
+      measurement: {warmup: 3, requests: 20, runs: 3}
+      aggregation: {candidate: mean, eager: mean, compile: best}
+      margin_percent: 5
+      max_ci_percent: 5
+
+tasks:
+  text_generation:
+    accuracy:
+      - {suite: mmlu-0shot-10, grader: parity_answer_line, max_new_tokens: 8, gate: {min_pass_rate: 0.9}}
+      - {suite: humaneval-10, grader: parity_token_exact, max_new_tokens: 32, gate: {min_pass_rate: 0.9}}
+    performance: {l1: {reference_modes: [eager, compile], output_grader: parity_token_exact,
+                       output_grader_params: {min_prefix: 8, accept_equal_text: true}}}
+    # Quantized weights (FP8, MXFP4, ...) legitimately move late tokens: the answer and the first eight
+    # generated tokens must still agree on 8 of 10 samples, which a broken quantization does not meet.
+    quantized:
+      accuracy:
+        - {suite: mmlu-0shot-10, grader: parity_answer_line, max_new_tokens: 8, gate: {min_pass_rate: 0.8}}
+        - {suite: humaneval-10, grader: parity_token_exact, grader_params: {min_prefix: 8}, max_new_tokens: 32,
+           gate: {min_pass_rate: 0.8}}
+
+  vision_language_generation:
+    accuracy:
+      - {suite: imagenette-vlm-10, grader: parity_edit_distance, grader_params: {max_distance: 0.15},
+         gate: {min_pass_rate: 0.9}}
+    performance: {l1: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}}
+
+  classification: &classify
+    accuracy: [{suite: imagenette-classify-100, grader: parity_top1, gate: {min_pass_rate: 0.98}}]
+    performance: {l1: {output_grader: parity_top1, output_grader_params: {tie_cosine: 0.999}}}
+  image_to_class_scores: *classify
+
+  encoding: &encode
+    accuracy: [{suite: stsbenchmark-sentences-50, grader: parity_vector, grader_params: {min_cosine: 0.999},
+                gate: {min_pass_rate: 1.0}}]
+    performance: {l1: {reference_modes: [eager, compile], output_grader: parity_vector}}
+  embedding: *encode
+
+  image_features:
+    accuracy: [{suite: beans-features-12, grader: parity_numeric, grader_params: {min_cosine: 0.99},
+                gate: {min_pass_rate: 1.0}}]
+    performance: {l1: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}}
+
+  object_detection:
+    accuracy: [{suite: coco2017-detect-100, grader: parity_boxes, gate: {min_pass_rate: 0.9}}]
+    performance: {l1: {output_grader: parity_boxes}}
+
+  segmentation:
+    accuracy: [{suite: imagenette-segment-10, grader: parity_mask,
+                grader_params: {min_pixel_accuracy: 0.99, min_mean_iou: 0.94}, gate: {min_pass_rate: 0.9}}]
+    performance: {l1: {output_grader: parity_mask}}
+  prompted_segmentation:
+    accuracy: [{suite: imagenette-prompted-10, grader: parity_mask, grader_params: {min_mask_iou: 0.7},
+                gate: {min_pass_rate: 0.9}}]
+    performance: {l1: {output_grader: parity_mask, output_grader_params: {min_mask_iou: 0.7}}}
+  text_prompted_segmentation:
+    accuracy: [{suite: catalog, grader: parity_numeric, gate: {min_pass_rate: 1.0}}]
+    performance: {l1: {output_grader: parity_numeric}}
+
+  transcription: &transcribe
+    accuracy: [{suite: librispeech-aiperf-10, grader: parity_wer, grader_params: {max_wer: 0.1},
+                gate: {min_pass_rate: 0.9, max_wer_increase_from_reference: 0.02}}]
+    performance: {l1: {output_grader: parity_wer}}
+  transcription_streaming: *transcribe
+
+  # Generative media are slow per request: fewer requests per run, still three runs for the CI.
+  audio_generation:
+    accuracy: [{suite: seedtts-en-5, grader: parity_audio, gate: {min_pass_rate: 1.0}}]
+    performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
+  speech_to_speech:
+    accuracy: [{suite: catalog, grader: parity_audio, gate: {min_pass_rate: 1.0}}]
+    performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
+
+  # Perf only checks that both sides generate the same geometry (frames, height, width): diffusion
+  # content diverges across precisions, and content parity is the Acc suites' job.
+  image_generation:
+    reference: {precision: bf16}
+    accuracy: [{suite: partiprompts-3, grader: parity_image, gate: {min_pass_rate: 1.0}}]
+    performance: &media_perf {l1: {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
+                                   measurement: {warmup: 1, requests: 1, runs: 3}}}
+  image_edit: &media  # edit and world-model inputs are model-specific: the catalog testcase
+    reference: {precision: bf16}
+    accuracy: [{suite: catalog, grader: parity_image, gate: {min_pass_rate: 1.0}}]
+    performance: *media_perf
+  world_model_generation: *media
+
+  time_series_forecast:
+    accuracy: [{suite: etth1-windows-10, grader: parity_numeric, grader_params: {min_cosine: 0.999, rtol: 0.02},
+                gate: {min_pass_rate: 1.0}}]
+    performance: {l1: {output_grader: parity_numeric}}
+  reranking:
+    accuracy: [{suite: beir-scifact-10, grader: parity_scores, gate: {min_pass_rate: 0.9}}]
+    performance: {l1: {output_grader: parity_scores}}
+
+  robot_control: &numeric
+    accuracy: [{suite: catalog, grader: parity_numeric, gate: {min_pass_rate: 1.0}}]
+    performance: {l1: {output_grader: parity_numeric}}
+  stereo_disparity: *numeric
+  monocular_geometry: *numeric

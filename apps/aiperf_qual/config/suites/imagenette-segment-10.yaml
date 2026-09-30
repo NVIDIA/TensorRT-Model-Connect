@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: imagenette-segment-10
+version: 2
+source:
+  kind: json_manifest
+  path: Imagenette/imagenette2-320_task_eval.json
+  sha256: 07cd93194d148b8b68d89ba537b7a43741810e02a22429578a60bb85aeab5ea3
+  records: requests
+  file_fields: [image]
+selection: {method: stride, count: 10}
+fields: {image: image_path}

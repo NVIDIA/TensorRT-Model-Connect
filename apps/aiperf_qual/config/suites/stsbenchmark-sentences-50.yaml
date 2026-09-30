@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Each STS pair contributes both sentences.
+suite: stsbenchmark-sentences-50
+version: 1
+source:
+  kind: json_manifest
+  path: STSBenchmark/stsbenchmark_test.jsonl
+  sha256: 7c8927eef1ac4e256cae9768afc76232f79c39d19cb05d16bef92e11cecbe5bb
+  explode: [sentence1, sentence2]
+selection: {method: first, count: 50}
+fields: {text: prompt}

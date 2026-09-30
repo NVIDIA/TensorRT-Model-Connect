@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Three PartiPrompts of different categories (animals, outdoor scene, food) around each model's
+# catalog request (size, steps, guidance, seed).
+suite: partiprompts-3
+version: 1
+base: catalog
+source:
+  kind: json_manifest
+  path: PartiPrompts/PartiPrompts.tsv
+  sha256: fab29e41bb512a169b56acab4cf2a41dcb675e285df2efcde6640c7dd3c440eb
+selection: {method: indices, indices: [312, 362, 367]}
+fields: {Prompt: prompt}

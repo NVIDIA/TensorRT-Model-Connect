@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# An OCR model: OCRBench v2 with the family qualification's request (greedy as top-k 1, 300 new tokens)
+# and edit-distance gate.
+accuracy:
+  - suite: ocrbench-v2-10
+    grader: parity_edit_distance
+    grader_params: {max_distance: 0.5}
+    max_new_tokens: 300
+    request: {temperature: 1.0, top_k: 1}
+    gate: {min_pass_rate: 0.9}
+performance:
+  l1: {output_grader_params: {max_distance: 0.5}}   # the family's OCR output contract

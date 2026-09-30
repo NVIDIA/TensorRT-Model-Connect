@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# TRTMC plugins for AIPerf 0.13.0 (see trtmc_aiperf_plugins/__init__.py for deployment notes).
+
+endpoint:
+  trtmc_task:
+    class: trtmc_aiperf_plugins.endpoint:TrtmcTaskEndpoint
+    description: |
+      Generic TRTMC operation endpoint. The turn text is a JSON operation request
+      ({"request": {...}}); the observation is returned as canonical JSON text and the
+      server-reported model-call time is exposed as the trtmc_model_call_time metric.
+    metadata:
+      endpoint_path: null
+      supports_streaming: false
+      produces_tokens: false
+      tokenizes_input: false
+      metrics_title: TRTMC Task Metrics
+
+# Public datasets pinned to fixed revisions. Same-name entries with a higher
+# priority replace the unpinned built-ins so a run cannot silently float.
+public_dataset_loader:
+  librispeech:
+    class: trtmc_aiperf_plugins.datasets:PinnedLibriSpeech
+    priority: 10
+    description: LibriSpeech test.clean pinned to a fixed Hugging Face revision.
+    metadata:
+      hf_dataset_name: openslr/librispeech_asr
+      hf_split: test
+      hf_subset: clean
+      streaming: true
+      audio_column: audio
+
+  mmstar:
+    class: trtmc_aiperf_plugins.datasets:PinnedMMStar
+    priority: 10
+    description: MMStar visual QA (val) pinned to a fixed Hugging Face revision.
+    metadata:
+      hf_dataset_name: Lin-Chen/MMStar
+      hf_split: val
+      prompt_column: question
+      image_column: image
+
+  sharegpt:
+    class: trtmc_aiperf_plugins.datasets:PinnedShareGPT
+    priority: 10
+    description: ShareGPT V3 cleaned split pinned to a fixed Hugging Face revision.
+
+accuracy_benchmark:
+  trtmc_parity:
+    class: trtmc_aiperf_plugins.accuracy:ParityBenchmark
+    description: Candidate-vs-reference parity on a suite file carrying reference goldens.
+    metadata:
+      default_grader: parity_token_exact
+      default_n_shots: 0
+
+accuracy_grader:
+  parity_token_exact:
+    class: trtmc_aiperf_plugins.accuracy:TokenExactGrader
+    description: Generated token IDs must equal the reference golden (text if IDs are absent).
+  parity_answer_line:
+    class: trtmc_aiperf_plugins.accuracy:AnswerLineGrader
+    description: Answer text up to the first newline must equal the reference golden (MMLU-style).
+  parity_text:
+    class: trtmc_aiperf_plugins.accuracy:TextGrader
+    description: Normalized output text must equal the reference golden.
+  parity_wer:
+    class: trtmc_aiperf_plugins.accuracy:WerGrader
+    description: Word error rate of the transcript against the reference transcript must not exceed max_wer.
+  parity_edit_distance:
+    class: trtmc_aiperf_plugins.accuracy:EditDistanceGrader
+    description: Normalized character edit distance to the reference text must not exceed max_distance.
+  parity_boxes:
+    class: trtmc_aiperf_plugins.accuracy:BoxesGrader
+    description: Same-class boxes matched at IoU >= min_iou; precision and recall must reach thresholds.
+  parity_mask:
+    class: trtmc_aiperf_plugins.accuracy:MaskGrader
+    description: Semantic label map (pixel accuracy, mean IoU) or binary masks (per-mask IoU) versus reference.
+  parity_top1:
+    class: trtmc_aiperf_plugins.accuracy:Top1Grader
+    description: Classification top-1 must match the reference; logit cosine is reported.
+  parity_vector:
+    class: trtmc_aiperf_plugins.accuracy:VectorGrader
+    description: Output vector cosine against the reference must reach the threshold.
+  parity_scores:
+    class: trtmc_aiperf_plugins.accuracy:ScoresGrader
+    description: Reranking document order must match the reference.
+  parity_numeric:
+    class: trtmc_aiperf_plugins.accuracy:NumericGrader
+    description: Common numeric output fields must match the reference (shapes exactly, vectors by cosine).
+  parity_image:
+    class: trtmc_aiperf_plugins.accuracy:ImageGrader
+    description: Generated media geometry must match; thumbnail PSNR and SSIM must reach the bounds.
+  parity_audio:
+    class: trtmc_aiperf_plugins.accuracy:AudioGrader
+    description: Generated audio duration, loudness, and spectrum must stay close to the reference.

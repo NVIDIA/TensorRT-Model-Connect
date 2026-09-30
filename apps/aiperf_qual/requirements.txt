@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The trtmc-aiperf-qual orchestrator environment (no torch): AIPerf, suite building, prompt truncation.
+aiperf==0.13.0
+datasets
+huggingface_hub
+numpy
+pillow
+pyyaml
+soundfile
+transformers

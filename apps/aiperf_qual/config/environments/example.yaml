@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Template of a machine's environment: copy to <machine>.yaml, replace the paths, then run
+#   trtmc-aiperf-qual doctor --environment config/environments/<machine>.yaml
+# Docker and bare metal differ only in these paths (inside a container, use the container's paths).
+repo: /path/to/TensorRT-Model-Connect                   # this checkout
+data_root: /path/to/datasets                            # datasets mirror (Imagenette, COCO2017, ETTh1, ...)
+bundle_root: /path/to/engines                           # bundles are built here on demand (<name>/<bundle>)
+runtime_root: /path/to/runtime                          # TRTMC runtime libraries
+worker: /path/to/runtime/trtmc_benchmark_worker         # built with --serve support
+serve_python: /path/to/trtmc-venv/bin/python            # torch, transformers, TRTMC runtime, perf_serving reqs
+aiperf: /path/to/aiperf-venv/bin/aiperf                 # apps/aiperf_qual/setup.sh creates this environment
+golden_store:
+  root: /path/to/state/golden-store                     # reference goldens (<suite>/<platform>/<key>)
+  # read_url: <HTTP root of a shared golden store>     # optional: fetch goldens missing locally
+hf_datasets_cache: /path/to/state/hf-datasets
+hf_hub_cache: /path/to/huggingface/hub                  # checkpoint cache of builds and references
+reference_env_root: /path/to/state/ref-envs             # per-family reference environments
+ports: {reference: 8900, candidate: 8901}
+gpu_lock: /path/to/state/gpu.lock                       # optional: serializes timing with builds on this GPU
+build_env: {}                                           # optional extra environment of bundle builds
+
+models:                                                 # this machine's model list (run-all, plan)
+  include: all                                          # all | [profile names or glob patterns]
+  exclude: []                                           # [{profile: <name or glob>, reason: <why>}]
+  # max_checkpoint_gib: 30                              # optional: also exclude larger checkpoints
+
+retention:                                              # disk: both keep everything by default
+  bundle: retain                                        # retain | delete_on_pass | delete_unless_error
+  hf_cache: retain                                      # retain | delete_unused (run-all)
