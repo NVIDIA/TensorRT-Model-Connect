@@ -102,6 +102,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
          {CommandKind::kPredictStructure,
           {"--input", "--input-encoding", "--output", "--output-json", "--num-steps", "--seed"}}},
         {"disparity", {CommandKind::kDisparity, {"--left", "--right"}}},
+        {"depth", {CommandKind::kDepth, {"--image"}}},
         {"geometry", {CommandKind::kGeometry, {"--image", "--output"}}},
         {"segment", {CommandKind::kSegment, {"--image"}}},
         {"segment-prompted",
@@ -1012,6 +1013,15 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
             {{"disparity", result.disparity}, {"height", result.height}, {"width", result.width}});
         return EXIT_SUCCESS;
     }
+    case CommandKind::kDepth: {
+        const io::LoadedImage image = read_image(require_option(command, "--image"));
+        const auto result = require_interface<IMonocularDepth>(task).estimate_depth(
+            image.pixels.data(), image.height, image.width);
+        require_finite(result.depth, "depth");
+        write_json(output,
+                   {{"depth", result.depth}, {"height", result.height}, {"width", result.width}});
+        return EXIT_SUCCESS;
+    }
     case CommandKind::kGeometry: {
         const io::LoadedImage image = read_image(require_option(command, "--image"));
         const auto result = require_interface<IMonocularGeometry>(task).estimate_geometry(
@@ -1599,7 +1609,7 @@ void print_usage(std::ostream& output) {
               "  trtmc COMMAND BUNDLE [--runtime-root DIR] [OPTIONS]\n\n"
               "Execution commands:\n"
               "  run, encode, embed, rerank, classify, detect, extract-features,\n"
-              "  predict-structure, disparity, geometry,\n"
+              "  predict-structure, disparity, depth, geometry,\n"
               "  segment,\n"
               "  segment-prompted, video-segment, generate-audio, transcribe,\n"
               "  transcribe-batch, transcribe-streaming, speak, speech-session, generate-image,\n"

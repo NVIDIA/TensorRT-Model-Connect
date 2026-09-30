@@ -128,6 +128,15 @@ struct StereoDisparityResult {
     std::int32_t width{0};
 };
 
+struct MonocularDepthResult {
+    // One value per pixel. A family states nothing here about scale: a relative
+    // model returns its own units, a metric one returns metres. Geometry that
+    // needs camera intrinsics belongs in GeometryResult instead.
+    std::vector<float> depth;
+    std::int32_t height{0};
+    std::int32_t width{0};
+};
+
 enum class StructureFormat {
     kMmcif,
     kPdb,
@@ -701,6 +710,14 @@ class IStereoDisparity : public virtual ITask {
     virtual StereoDisparityResult estimate_disparity(const float* left_pixels,
                                                      const float* right_pixels, std::int32_t height,
                                                      std::int32_t width) = 0;
+};
+
+class IMonocularDepth : public virtual ITask {
+  public:
+    static constexpr const char* kTask = "monocular_depth";
+    const char* task() const noexcept override { return kTask; }
+    virtual MonocularDepthResult estimate_depth(const float* pixels, std::int32_t height,
+                                                std::int32_t width) = 0;
 };
 
 class IMonocularGeometry : public virtual ITask {
