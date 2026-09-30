@@ -1008,13 +1008,10 @@ jobs:
             if ! brev ls 2>/dev/null | grep -qx "$INSTANCE_NAME"; then
               echo "$INSTANCE_NAME cleared after $((SECONDS - (delete_deadline - 180)))s, proceeding with re-create"
             fi
-            # Brev's own fallback list sticks to the same cheapest-recognized
-            # type across retries, since InsufficientCapacity surfaces after
-            # "Success! Created" already printed. Force different capacity
-            # pools on retry instead of hammering the same troubled type.
-            retry brev create "$INSTANCE_NAME" \
-              --type gpu-l40s-a.1gpu-8vcpu-32gb,scaleway_L40S,gpu-l40s-a.1gpu-16vcpu-64gb,g6e.xlarge,gpu-l40s-a.1gpu-24vcpu-96gb,gpu-l40s-a.1gpu-32vcpu-128gb \
-              --timeout 600
+            # Brev confirmed (2026-09-30) this is a Nebius regional capacity
+            # constraint; their suggested workaround is to steer retries to
+            # a different provider until Nebius capacity frees up.
+            retry brev create "$INSTANCE_NAME" -g "$GPU_TYPE" --provider aws --timeout 600
             instance_attempt=$((instance_attempt + 1))
           done
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
