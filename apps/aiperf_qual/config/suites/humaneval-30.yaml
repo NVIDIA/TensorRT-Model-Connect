@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # HumanEval prompts from the datasets mirror's manifest; greedy continuation compared token by token.
-suite: humaneval-10
+suite: humaneval-30
 version: 1
 source:
   kind: json_manifest
@@ -10,7 +10,7 @@ source:
   sha256: 68eece17bfa17f4513fcd13b0919fd1a672bf58178224ed3cada1c26f6b97cc9
   records: requests
   id_field: id
-selection: {method: first, count: 10}
+selection: {method: first, count: 30}
 fields: {prompt: prompt}
 request:
   temperature: 0.0

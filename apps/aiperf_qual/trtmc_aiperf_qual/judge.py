@@ -40,43 +40,48 @@ def label_metrics(records: Sequence[Mapping[str, Any]], labels_by_reference: Map
             "unmatched": unmatched}
 
 
-def noise_slack(total: int) -> int:
-    """Samples the candidate may trail the reference's own precision noise by (1, or 2% of large suites)."""
-    return max(1, round(0.02 * total))
-
-
-def required_passes(gate: Mapping[str, Any], expected: int, noise: Mapping[str, Any] | None) -> int:
-    """Samples that must pass. When the native model itself diverges at the candidate precision
-    (the suite is precision sensitive), the candidate may trail that result by the slack."""
+def required_passes(gate: Mapping[str, Any], expected: int) -> int:
+    """Samples that must pass: the gate as declared (the native noise floor never lowers it)."""
     required = math.ceil(float(gate.get("min_pass_rate", 1.0)) * expected - 1e-9)
     if "allowed_failures" in gate:
         required = max(required, expected - int(gate["allowed_failures"]))
-    if noise and noise.get("total") == expected and int(noise["passed"]) < expected:
-        required = max(min(required, int(noise["passed"]) - noise_slack(expected)), 0)
     return required
+
+
+def sample_index(conversation_id: Any) -> int | None:
+    """Suite position of an AIPerf record (``session_000004`` is the fifth sample)."""
+    tail = str(conversation_id or "").rsplit("_", 1)[-1]
+    return int(tail) if tail.isdigit() else None
+
+
+def precision_sensitive(failed: Sequence[int], noise: Mapping[str, Any] | None) -> bool:
+    """Every failing sample also fails for the native model at the candidate precision."""
+    native = (noise or {}).get("failed_indices")
+    return bool(failed) and native is not None and set(failed) <= set(native)
 
 
 def judge_accuracy(records: Sequence[Mapping[str, Any]], gate: Mapping[str, Any], expected: int,
                    labels: Mapping[str, Any] | None = None, noise: Mapping[str, Any] | None = None,
                    sampled: bool = False) -> dict[str, Any]:
-    """Pass when the candidate reaches the gate's pass rate, or (noise floor) when it trails the
-    native model's own result at the candidate precision by at most ``noise_slack`` samples."""
+    """Pass when the candidate meets the declared gate. A failure is ``inconclusive`` (not an issue)
+    only when every failing sample also fails for the native model at the candidate precision, or
+    when the model always samples; the native noise floor is otherwise diagnostic."""
     passed = sum(bool(record.get("passed")) for record in records)
+    failed = [index for index in (sample_index(r.get("conversation_id")) for r in records if not r.get("passed"))
+              if index is not None]
     failures = [{"conversation_id": r.get("conversation_id"), "task": r.get("task"),
                  "explanation": r.get("explanation"), "actual": str(r.get("actual"))[:200],
                  "expected": str(r.get("expected"))[:200]} for r in records if not r.get("passed")]
     total = len(records)
-    rate = passed / total if total else 0.0
-    original, required = required_passes(gate, expected, None), required_passes(gate, expected, noise)
-    relaxed = required if required < original else None
+    required = required_passes(gate, expected)
     ok = total == expected and passed >= required
     unparsed = sum(bool(record.get("unparsed")) for record in records)
-    result = {"samples": total, "expected_samples": expected, "passed": passed, "pass_rate": rate, "unparsed": unparsed,
-              "required_passes": required, "gate": dict(gate), "failures": failures[:10]}
+    result = {"samples": total, "expected_samples": expected, "passed": passed, "pass_rate": passed / total if total
+              else 0.0, "unparsed": unparsed, "required_passes": required, "gate": dict(gate),
+              "failed_indices": failed, "failures": failures[:10]}
     if noise:
         result["noise_floor"] = {"passed": noise.get("passed"), "total": noise.get("total"),
-                                 "precision": noise.get("precision"), "relaxed_gate": relaxed is not None,
-                                 "slack": noise_slack(expected)}
+                                 "precision": noise.get("precision")}
     if "max_wer_increase_from_reference" in gate:
         metrics = label_metrics(records, labels or {})
         result["label_metrics"] = metrics
@@ -84,18 +89,22 @@ def judge_accuracy(records: Sequence[Mapping[str, Any]], gate: Mapping[str, Any]
               and metrics["wer_increase_from_reference"] <= float(gate["max_wer_increase_from_reference"]))
     # Outputs the grader cannot compare at all (different fields) say nothing about accuracy.
     status = "pass" if ok else ("not-comparable" if total and unparsed == total else "fail")
-    if status == "pass" and expected and required == 0 and passed < original:
-        # Only the relaxed gate passes, and it requires nothing: the native model itself does not
-        # reproduce its outputs at the candidate precision (for example sampled generation), so
-        # per-sample parity cannot gate this suite.
-        status = "inconclusive"
+    return {"status": settle(status, failed, noise, sampled, result), **result}
+
+
+def settle(status: str, failed: Sequence[int], noise: Mapping[str, Any] | None, sampled: bool,
+           result: dict[str, Any]) -> str:
+    """A failing suite becomes inconclusive when the mismatch cannot be attributed to TRTMC."""
+    if status != "fail":
+        return status
     if sampled:
-        # The model always samples and TRTMC does not replay PyTorch's random stream: a sample-level
-        # mismatch says nothing about accuracy.
+        # The model always samples and TRTMC does not replay PyTorch's random stream.
         result["sampled"] = True
-        if status == "fail":
-            status = "inconclusive"
-    return {"status": status, **result}
+        return "inconclusive"
+    if precision_sensitive(failed, noise):
+        result["precision_sensitive"] = True
+        return "inconclusive"
+    return status
 
 
 def verdict(result: Mapping[str, Any], *, expected_suites: int, expected_modes: int) -> dict[str, Any]:
@@ -105,7 +114,7 @@ def verdict(result: Mapping[str, Any], *, expected_suites: int, expected_modes: 
         acc = "error"
     else:
         statuses = {item["status"] for item in accuracy}
-        acc = ("pass" if statuses == {"pass"} else "fail" if "fail" in statuses else
+        acc = ("pass" if statuses == {"pass"} else "error" if "error" in statuses else "fail" if "fail" in statuses else
                "not-comparable" if "not-comparable" in statuses else "inconclusive")
     session_state = any(item.get("isolated_check", {}).get("status") == "pass" for item in accuracy)
     lights = {item["reference_mode"]: item["light"] for item in result.get("performance_l1", [])}
@@ -138,6 +147,8 @@ _T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8
 AGGREGATIONS = ("mean", "best")
 # Run-to-run spread below this is timer and scheduling jitter, not instability (sub-ms models).
 MIN_CI_MS = 0.05
+# GPU utilization before a timed run (our servers idle) at or above this means another process shares it.
+GPU_BUSY_PERCENT = 20
 
 
 def across_runs(p50_values: Sequence[float | None], aggregation: str = "mean") -> dict[str, Any]:
@@ -197,6 +208,13 @@ def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any]
             reasons += [f"{item}: {' or '.join(sorted(extremes))} within the interval" for item in wide]
     else:
         reasons += wide
+    for side, stats in (("candidate", candidate), ("reference", reference)):
+        if (stats.get("gpu_busy_percent") or 0) >= GPU_BUSY_PERCENT:
+            reasons.append(f"GPU {stats['gpu_busy_percent']:.0f}% busy with other processes before the {side} timing")
+    if reference.get("precision_fallback"):
+        # The native model could not run at the candidate precision: a slower precision is no baseline.
+        reasons.append(f"reference timed at {reference.get('precision')} (candidate precision failed: "
+                       f"{str(reference['precision_fallback'])[:120]})")
     result = {"candidate": dict(candidate), "reference": dict(reference), "margin_percent": margin_percent,
               "output_check": {"match": outputs_match, "reason": output_reason}, "notes": notes}
     if candidate.get("p50_ms") and reference.get("p50_ms"):

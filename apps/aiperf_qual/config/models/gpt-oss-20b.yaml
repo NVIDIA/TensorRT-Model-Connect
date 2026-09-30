@@ -1,6 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-# The checkpoint itself is MXFP4 (its config's quantization_config), which the catalog does not declare.
-candidate:
-  quantization: mxfp4

@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Zero-shot MMLU (lighteval's prompt format, the dataset AIPerf's MMLU benchmark pins) read through the
+# public datasets API: the first test question of thirty subjects, graded on the answer line. Zero-shot
+# keeps prompts inside the bundles' sequence limits (still left-truncated per model when shorter).
+suite: mmlu-0shot-30
+version: 1
+source:
+  kind: mmlu
+  dataset: lighteval/mmlu
+  revision: 31d46ab06e6934bb0d95f6918668716d1db6f921
+  per_subject: 1
+  subjects:
+    - abstract_algebra
+    - anatomy
+    - astronomy
+    - business_ethics
+    - clinical_knowledge
+    - college_biology
+    - college_chemistry
+    - college_computer_science
+    - college_mathematics
+    - college_physics
+    - computer_security
+    - econometrics
+    - electrical_engineering
+    - formal_logic
+    - global_facts
+    - high_school_geography
+    - high_school_world_history
+    - human_aging
+    - international_law
+    - jurisprudence
+    - logical_fallacies
+    - machine_learning
+    - marketing
+    - medical_genetics
+    - nutrition
+    - philosophy
+    - prehistory
+    - professional_law
+    - sociology
+    - world_religions
+selection: {method: first, count: 30}
+fields: {prompt: prompt}
+request:
+  temperature: 0.0
+  top_k: 1
+  top_p: 1.0
+  seed: -1
+  use_chat_template: false
+  enable_thinking: false

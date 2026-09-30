@@ -37,8 +37,12 @@ def _absolute_assets(value: Any, root: Path) -> Any:
         return {key: _absolute_assets(item, root) for key, item in value.items()}
     if isinstance(value, list):
         return [_absolute_assets(item, root) for item in value]
-    if isinstance(value, str) and value and not value.startswith("/") and (root / value).exists():
-        return str((root / value).resolve())
+    if isinstance(value, str) and value and not value.startswith("/") and len(value) < 256 and "\n" not in value:
+        try:
+            if (root / value).exists():
+                return str((root / value).resolve())
+        except OSError:  # not a path (for example a long prompt)
+            pass
     return value
 
 

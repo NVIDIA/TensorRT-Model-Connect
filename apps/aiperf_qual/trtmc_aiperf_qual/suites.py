@@ -87,27 +87,23 @@ def select(records: Sequence[dict[str, Any]], selection: Mapping[str, Any]) -> l
     raise ConfigError(f"unknown selection method {method!r}")
 
 
-def _aiperf_accuracy_records(source: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Problems from an AIPerf accuracy benchmark, loaded at a pinned dataset revision."""
-    benchmark = require(source, "benchmark", "source")
-    if benchmark != "mmlu":
-        raise ConfigError(f"aiperf_accuracy source supports mmlu only (got {benchmark!r})")
-    from aiperf.accuracy.benchmarks import mmlu
-    from aiperf.accuracy.benchmarks._datasets_compat import load_dataset
-
-    from datasets import DatasetDict
+def _mmlu_records(source: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Zero-shot MMLU questions in lighteval's prompt format from a pinned dataset revision, read with
+    the public ``datasets`` API; the answer letter is the label."""
+    import datasets
 
     revision = require(source, "revision", "source")
-    loader = mmlu.MMLUBenchmark(run=None)
     records = []
-    for task in require(source, "tasks", "source"):
-        # Only the few-shot (dev) and evaluation (test) splits; the full config also prepares the
-        # ~100k-row auxiliary_train split for every subject.
-        dev, test = load_dataset(mmlu.DATASET_NAME, task, split=["dev", "test"], revision=revision)
-        dataset = DatasetDict({"dev": dev, "test": test})
-        problems = loader._build_subject_problems(dataset, task, int(source.get("n_shots", 5)), False)
-        records += [{"id": f"{task}/{index}", "task": task, "prompt": problem.prompt}
-                    for index, problem in enumerate(problems)]
+    for subject in require(source, "subjects", "source"):
+        table = datasets.load_dataset(source.get("dataset", "lighteval/mmlu"), subject, split="test", revision=revision)
+        for index in range(min(int(source.get("per_subject", 1)), len(table))):
+            row = table[index]
+            choices = "".join(f"\n{letter}. {text}" for letter, text in zip("ABCD", row["choices"]))
+            prompt = (f"The following are multiple choice questions (with answers) about {subject.replace('_', ' ')}."
+                      f"\n\n{row['question'].strip()}{choices}\nAnswer:")
+            answer = row["answer"]
+            records.append({"id": f"{subject}/{index}", "task": subject, "prompt": prompt,
+                            "label": "ABCD"[answer] if isinstance(answer, int) else str(answer)})
     return records
 
 
@@ -236,8 +232,29 @@ def _etth1_window_records(source: Mapping[str, Any], environment: Environment) -
     return records
 
 
+def _qualification_perf_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """The request the family's performance qualification times, resolved like a catalog testcase."""
+    from .models import _import_repository
+
+    repo = environment.path("repo")
+    _import_repository(repo)
+    from qualification_tests.benchmark_qualification import accuracy, catalog, runtime
+
+    profile = require(source, "profile", "source")
+    case = next((case for case in catalog.discover(repo) if case.model == profile and case.kind == "performance"),
+                None)
+    if case is None or not isinstance(case.values.get("request"), Mapping):
+        raise ConfigError(f"{profile} has no family performance request")
+    request = accuracy._resolve_task_assets(case, case.values["request"])
+    with tempfile.TemporaryDirectory() as scratch:
+        descriptor = runtime.write_model_descriptor(case, Path(scratch), request)
+        records = _catalog_testcase_records({"profile": str(descriptor)}, environment)
+    return [{**records[0], "id": f"{profile}:{case.name}"}]
+
+
 def _catalog_testcase_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
-    """The catalog testcase request, resolved by trtmc-perf-serve exactly as trtmc-bench does."""
+    """The catalog testcase request (``profile`` is a catalog name or a model descriptor file),
+    resolved by trtmc-perf-serve exactly as trtmc-bench does."""
     repo = environment.path("repo")
     env = {**os.environ, "HF_HUB_OFFLINE": "1",
            "PYTHONPATH": f"{repo}/apps/perf_serving:{repo}/apps/benchmark:{repo}/core/builder:{repo}"}
@@ -283,8 +300,8 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
     source = definition["source"]
     kind = require(source, "kind", "source")
     selection = definition["selection"]
-    if kind == "aiperf_accuracy":
-        records = _aiperf_accuracy_records(source)
+    if kind == "mmlu":
+        records = _mmlu_records(source)
     elif kind == "aiperf_public":
         records = _aiperf_public_records(source, selection)
         selection = {"method": "first", "count": len(records)}  # already selected before decoding
@@ -292,6 +309,8 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
         records = _json_manifest_records(source, environment)
     elif kind == "catalog_testcase":
         records = _catalog_testcase_records(source, environment)
+    elif kind == "qualification_perf":
+        records = _qualification_perf_records(source, environment)
     elif kind == "etth1_windows":
         records = _etth1_window_records(source, environment)
     elif kind == "inline":

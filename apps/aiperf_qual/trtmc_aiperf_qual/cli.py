@@ -174,30 +174,33 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
             result["performance_l1"] += [
                 unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"))
                 for mode in l1.get("reference_modes", []) if mode not in measured]
-        for item in result.get("accuracy", []):
+        from .family import refresh
+
+        result["accuracy"] = [refresh(item) for item in result.get("accuracy", [])]
+        for item in result["accuracy"]:
+            if item.get("source") == "family" or item.get("suite") == "tts-intelligibility":
+                continue  # the family's own metric and gate, or the ASR round trip, decided it
             declared = next((entry for entry in model["accuracy"] if entry["suite"]["suite"] == item["suite"]), {})
             if environment is not None and "gate" in declared:
                 item["gate"] = dict(declared["gate"])
-            noise = item.get("noise_floor")
-            if item["status"] in ("pass", "fail") and item.get("samples") == item.get("expected_samples"):
-                item["required_passes"] = judge.required_passes(item.get("gate", {}), item["samples"], noise)
+            item.pop("precision_sensitive", None)
+            if item["status"] in ("pass", "fail", "inconclusive") and item.get("samples") == item.get("expected_samples"):
+                item["required_passes"] = judge.required_passes(item.get("gate", {}), item["samples"])
                 labels_ok = "label_metrics" not in item or (
                     item["label_metrics"].get("unmatched") == 0 and item["label_metrics"]["wer_increase_from_reference"]
                     <= float(item["gate"].get("max_wer_increase_from_reference", 1.0)))
-                item["status"] = "pass" if item["passed"] >= item["required_passes"] and labels_ok else "fail"
-                if (item["status"] == "pass" and item["samples"] and item["required_passes"] == 0
-                        and item["passed"] < judge.required_passes(item.get("gate", {}), item["samples"], None)):
-                    item["status"] = "inconclusive"
-                if noise:
-                    noise["relaxed_gate"] = item["required_passes"] < judge.required_passes(
-                        item.get("gate", {}), item["samples"], None)
-            if declared.get("sampled") and item["status"] == "fail":
-                item.update(status="inconclusive", sampled=True)
+                status = "pass" if item["passed"] >= item["required_passes"] and labels_ok else "fail"
+                failed = item.get("failed_indices") or [
+                    index for index in (judge.sample_index(f.get("conversation_id")) for f in item.get("failures", []))
+                    if index is not None]
+                item["status"] = judge.settle(status, failed, item.get("noise_floor"),
+                                              bool(declared.get("sampled")), item)
             reasons = [str(failure.get("explanation", "")) for failure in item.get("failures", [])]
             if (item["status"] == "fail" and item.get("passed") == 0 and reasons
                     and all(any(marker in reason for marker in NOT_COMPARABLE) for reason in reasons)):
                 item["status"] = "not-comparable"
-        result["verdict"] = judge.verdict(result, expected_suites=len(model["accuracy"]),
+        result["verdict"] = judge.verdict(result, expected_suites=len(model["accuracy"])
+                                          + len(model.get("family_accuracy", [])) + len(model.get("supplementary", [])),
                                           expected_modes=len(l1.get("reference_modes", [])))
         write_report(out, result)
         print(json.dumps({"out": str(out), **result["verdict"]}))
@@ -225,6 +228,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                        help="result roots: local paths or [NAME=][USER@]HOST:/PATH (fetched over ssh)")
     merge.add_argument("--output", type=Path, help="write here instead of stdout")
     merge.add_argument("--ssh", default="ssh", help="ssh command for remote roots (options such as -J or -i)")
+    merge.add_argument("--baseline", action="append", default=[],
+                       help="result roots of a previous run: TRTMC p50 slower by >5%% is noted as a regression")
+    merge.add_argument("--html", type=Path, help="also write a failure-first HTML report here (remote evidence "
+                                                   "is fetched next to it)")
     plan = commands.add_parser("plan", help="print the derived configuration of this machine's models "
                                             "(and its exclusions)")
     plan.add_argument("--environment", type=Path, required=True)
@@ -261,7 +268,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .campaign import fetch_roots, summary
 
             with tempfile.TemporaryDirectory(prefix="trtmc-aiperf-summary-") as fetched:
-                text, counts = summary(fetch_roots(arguments.roots, arguments.ssh, Path(fetched)))
+                store = arguments.html.parent / f"{arguments.html.stem}-evidence" if arguments.html else Path(fetched)
+                roots = fetch_roots(arguments.roots, arguments.ssh, store, evidence=bool(arguments.html))
+                baseline = fetch_roots(arguments.baseline, arguments.ssh, Path(fetched) / "baseline")
+                text, counts = summary(roots, baseline)
+                if arguments.html:
+                    from .campaign import annotate_regressions, collect
+                    from .report_html import render
+
+                    rows, _, rank = collect(roots)
+                    if baseline:
+                        annotate_regressions(rows, collect(baseline)[0])
+                    render(rows, counts, rank, arguments.html)
             if arguments.output:
                 arguments.output.write_text(text)
                 print(json.dumps(dict(counts)))
@@ -269,6 +287,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(text, end="")
             return 0
         environment = load_environment(arguments.environment)
+        environment.values["environment_file"] = str(arguments.environment.resolve())  # for reproduction commands
         if environment.values.get("hf_hub_cache"):  # tokenizers loaded here use the managed cache too
             os.environ["HF_HUB_CACHE"] = str(environment["hf_hub_cache"])
         from .models import resolve_model
@@ -283,23 +302,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             return [profile.name for profile in selected], excluded
 
         if arguments.command == "run-all":
-            from .campaign import parse_shard, run_all, shard, write_exclusions
+            from .campaign import exit_code, parse_shard, run_all, shard, write_exclusions, write_plan
 
             names, excluded = machine_list()
             write_exclusions(arguments.out_root, excluded)
             for item in excluded:
                 print(json.dumps({**item, "category": "excluded"}), flush=True)
-            models = []
+            models, config_errors = [], []
             for name in names:
                 try:
                     models.append(resolve_model(name, environment))
                 except ConfigError as error:
+                    config_errors.append({"profile": name, "reason": str(error)})
                     print(json.dumps({"profile": name, "category": "config-error", "reason": str(error)}), flush=True)
             if arguments.shard:
                 models = shard(models, *parse_shard(arguments.shard))
-            run_all(environment, models, arguments.out_root, rerun=arguments.rerun,
-                    prefetch_next=not arguments.no_prefetch)
-            return 0
+            write_plan(arguments.out_root, [model["model"] for model in models], config_errors)
+            records = run_all(environment, models, arguments.out_root, rerun=arguments.rerun,
+                              prefetch_next=not arguments.no_prefetch)
+            return exit_code(records, config_errors)
         if arguments.command == "plan":
             names, excluded = machine_list()
             for item in excluded:
@@ -310,7 +331,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(json.dumps({"profile": name, "task": model["task"], "operation": model["operation"],
                                       "backend": model["reference"]["backend"],
                                       "fallback": model["reference"]["fallback"],
+                                      "accuracy_source": model["accuracy_source"],
+                                      "family_cases": model["family_accuracy"],
                                       "suites": [item["suite"]["suite"] for item in model["accuracy"]],
+                                      "supplementary": [item["check"] for item in model["supplementary"]],
+                                      "perf_request": model["performance"]["l1"]["suite"]["source"]["kind"],
+                                      "bundle": model["candidate"]["bundle"],
                                       "modes": model["performance"]["l1"]["reference_modes"]}))
                 except ConfigError as error:
                     print(json.dumps({"profile": name, "error": str(error)}))

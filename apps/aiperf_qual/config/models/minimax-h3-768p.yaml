@@ -1,6 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-# Its prompts are structured text-to-video-and-audio descriptions (prompt_file): the catalog testcase.
-accuracy:
-  - {suite: catalog, grader: parity_image, gate: {min_pass_rate: 1.0}}

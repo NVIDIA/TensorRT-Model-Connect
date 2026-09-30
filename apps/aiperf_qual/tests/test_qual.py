@@ -217,20 +217,21 @@ def test_json_manifest_jsonl_explode_and_file_fields(tmp_path):
 REPOSITORY = __import__("pathlib").Path(__file__).resolve().parents[3]
 
 
-def test_noise_floor_relaxes_the_gate_only_when_the_reference_misses_it():
-    records = [{"passed": True}] * 7 + [{"passed": False}] * 3
+
+def _records(outcomes):
+    return [{"passed": ok, "conversation_id": f"session_{index:06d}"} for index, ok in enumerate(outcomes)]
+
+
+def test_the_native_noise_floor_never_lowers_the_gate():
     gate = {"min_pass_rate": 0.9}
-    assert judge.judge_accuracy(records, gate, 10)["status"] == "fail"
-    noisy = judge.judge_accuracy(records, gate, 10, noise={"passed": 8, "total": 10, "precision": "fp16"})
-    assert noisy["status"] == "pass" and noisy["required_passes"] == 7 and noisy["noise_floor"]["relaxed_gate"]
-    sensitive = judge.judge_accuracy([{"passed": True}] * 8 + [{"passed": False}] * 2, gate, 10,
-                                     noise={"passed": 9, "total": 10})
-    assert sensitive["status"] == "pass" and sensitive["required_passes"] == 8
-    clean = judge.judge_accuracy(records, gate, 10, noise={"passed": 10, "total": 10})
-    assert clean["status"] == "fail" and clean["required_passes"] == 9 and not clean["noise_floor"]["relaxed_gate"]
-    exact = judge.judge_accuracy([{"passed": True}] * 4 + [{"passed": False}], {"min_pass_rate": 1.0}, 5,
-                                 noise={"passed": 5, "total": 5})
-    assert exact["status"] == "fail"
+    candidate = _records([True] * 7 + [False] * 3)  # samples 7, 8, 9 fail
+    assert judge.judge_accuracy(candidate, gate, 10)["status"] == "fail"
+    noisy = judge.judge_accuracy(candidate, gate, 10, noise={"passed": 8, "total": 10, "failed_indices": [8, 9]})
+    assert noisy["status"] == "fail" and noisy["required_passes"] == 9  # sample 7 fails only for TRTMC
+    same = judge.judge_accuracy(candidate, gate, 10, noise={"passed": 7, "total": 10, "failed_indices": [7, 8, 9]})
+    assert same["status"] == "inconclusive" and same["precision_sensitive"]  # the native model fails them too
+    assert judge.judge_accuracy(candidate, gate, 10, noise={"passed": 10, "total": 10, "failed_indices": []}
+                                )["status"] == "fail"
 
 
 @pytest.mark.parametrize("accuracy, lights, category", [
@@ -259,6 +260,9 @@ def test_numeric_parity_matches_shapes_exactly_and_vectors_by_cosine():
     assert compare_numeric({"shape": [1, 3], "values": [1.0, 2.0, 3.001], "runtime_ms": 99.0}, reference)[0]
     assert not compare_numeric({"shape": [3, 1], "values": [1.0, 2.0, 3.0]}, reference)[0]
     assert not compare_numeric({"shape": [1, 3], "values": [3.0, 2.0, -1.0]}, reference)[0]
+    assert not compare_numeric({"valid_pixels": 188255}, {"valid_pixels": 188139})[0]
+    assert compare_numeric({"valid_pixels": 188255}, {"valid_pixels": 188139}, count_rtol=0.01)[0]
+    assert not compare_numeric({"shape": [1, 3]}, {"shape": [1, 4]}, count_rtol=0.5)[0]
     with pytest.raises(ValueError):
         compare_numeric({"text": "a"}, {"text": "b"})
 
@@ -279,22 +283,25 @@ def test_scores_image_and_audio_parity():
     assert not compare_audio({"audio_digest": audio_digest(tone[:4000], 16000)}, {"audio_digest": audio_digest(tone, 16000)})[0]
 
 
-def test_models_are_derived_from_the_catalog_and_task_defaults():
+
+def test_models_are_derived_from_the_catalog_the_family_cases_and_task_defaults():
     from trtmc_aiperf_qual.config import Environment
     from trtmc_aiperf_qual.models import resolve_model
 
     environment = Environment({"repo": str(REPOSITORY)})
     qwen = resolve_model("qwen3-0.6b-fp16", environment)
-    assert qwen["task"] == "text_generation" and qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16/qwen3-0.6b-fp16.bundle"
-    assert [item["suite"]["suite"] for item in qwen["accuracy"]] == ["mmlu-0shot-10", "humaneval-10"]
-    mmlu = qwen["accuracy"][0]["suite"]
-    assert mmlu["request"]["max_new_tokens"] == 8 and mmlu["truncate_prompt"]["max_tokens"] == 256 - 8 - 8
-    assert qwen["reference"]["precision"] == "fp32" and qwen["reference"]["perf_precision"] == "fp16"
-    assert qwen["noise_floor"] and qwen["performance"]["l1"]["reference_modes"] == ["eager", "compile"]
-    assert qwen["performance"]["l1"]["suite"]["source"] == {"kind": "catalog_testcase", "profile": "qwen3-0.6b-fp16"}
+    # The family's MMLU continuation case owns Acc; its build (one more position) owns the bundle.
+    assert qwen["accuracy_source"] == "family" and qwen["accuracy"] == [] and qwen["family_accuracy"]
+    assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16-qual/qwen3-0.6b-fp16.bundle"
+    assert qwen["candidate"]["build"]["max_sequence_length"] == 257
+    assert qwen["performance"]["l1"]["suite"]["source"] == {"kind": "qualification_perf", "profile": "qwen3-0.6b-fp16"}
     detr = resolve_model("detr-resnet-50", environment)
-    assert detr["candidate"]["bundle"].startswith("detr-resnet-50-q1333/")
+    assert detr["candidate"]["build"]["image_height"] == 1333 and detr["family_accuracy"]
     assert (detr["reference"]["backend"], detr["reference"]["fallback"]) == ("reference", "script")
+    tiny = resolve_model("tinyllama-1.1b", environment)  # no family case: the Task suites
+    assert tiny["accuracy_source"] == "tasks" and [item["suite"]["suite"] for item in tiny["accuracy"]] == [
+        "mmlu-0shot-30", "humaneval-30"]
+    assert tiny["performance"]["l1"]["suite"]["source"]["kind"] == "catalog_testcase"
     assert resolve_model("qwen-image-edit-2511", environment)["reference"]["backend"] == "script"
 
 
@@ -388,10 +395,11 @@ def test_perf_output_check_falls_back_to_the_eager_reference():
     assert not output_check(l1, candidate, {"eager": {"token_ids": [7]}}, "eager")[0]
 
 
-def test_zero_required_passes_is_inconclusive():
-    result = judge.judge_accuracy([{"passed": True}, {"passed": False}, {"passed": False}], {"min_pass_rate": 1.0}, 3,
-                                  noise={"passed": 1, "total": 3})
-    assert result["required_passes"] == 0 and result["status"] == "inconclusive"
+
+def test_errors_in_a_suite_make_the_accuracy_an_error():
+    verdict = judge.verdict({"accuracy": [{"status": "pass"}, {"status": "error"}], "performance_l1": [
+        {"reference_mode": "eager", "light": "green"}]}, expected_suites=2, expected_modes=1)
+    assert (verdict["acc"], verdict["category"]) == ("error", "error")
 
 
 def test_wer_ignores_markup_tags():
@@ -410,10 +418,11 @@ def test_sampled_perf_requests_compare_generated_length():
     assert not output_check(l1, {"token_ids": [1, 2]}, refs, "eager", sampled=True)[0]
 
 
-def test_a_candidate_meeting_the_original_gate_passes_even_when_the_native_model_diverges():
-    noise = {"passed": 0, "total": 1}  # the native model at the candidate precision misses its own golden
-    assert judge.judge_accuracy([{"passed": True}], {"min_pass_rate": 1.0}, 1, noise=noise)["status"] == "pass"
-    assert judge.judge_accuracy([{"passed": False}], {"min_pass_rate": 1.0}, 1, noise=noise)["status"] == "inconclusive"
+
+def test_a_candidate_meeting_the_gate_passes_even_when_the_native_model_diverges():
+    noise = {"passed": 0, "total": 1, "failed_indices": [0]}
+    assert judge.judge_accuracy(_records([True]), {"min_pass_rate": 1.0}, 1, noise=noise)["status"] == "pass"
+    assert judge.judge_accuracy(_records([False]), {"min_pass_rate": 1.0}, 1, noise=noise)["status"] == "inconclusive"
 
 
 def _environment(tmp_path=None):
@@ -484,33 +493,36 @@ def test_suites_can_take_the_catalog_request_as_their_base(tmp_path, monkeypatch
         {"prompt": "a red cube", "num_steps": 28, "seed": 42}, {"prompt": "a blue ball", "num_steps": 28, "seed": 42}]
 
 
-def test_task_suites_fit_the_models():
+
+def test_task_suites_fit_the_models_without_family_cases():
     from trtmc_aiperf_qual.models import resolve_model
 
-    environment = _environment()
-    suite = lambda profile: resolve_model(profile, environment)["accuracy"][0]["suite"]  # noqa: E731
-    timesfm, patchtst = suite("timesfm-2.0-500m-official"), suite("patchtst-granite-official")
-    assert timesfm["source"]["kind"] == "etth1_windows" and timesfm["source"]["window"]["context_length"] == 2048
-    assert patchtst["source"]["window"]["columns"] == ["HUFL", "HULL", "MUFL", "MULL", "LUFL", "LULL", "OT"]
-    assert suite("deepseek-ocr")["suite"].startswith("ocrbench-v2")
-    assert suite("internvl3-2b")["suite"] == "imagenette-vlm-10" and "tench" in suite("internvl3-2b")["request"]["prompt"]
-    assert suite("nemotron-rerank-vl-1b-v2")["suite"].startswith("beir-scifact")
-    flux = suite("flux-2-dev")
-    assert flux["suite"].startswith("partiprompts") and flux["base_profile"] == "flux-2-dev"
-    assert suite("minimax-h3-768p")["source"]["kind"] == "catalog_testcase"  # structured prompts: its own testcase
-    assert suite("bark-small")["suite"].startswith("seedtts") and suite("bark-small")["base_profile"] == "bark-small"
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT, load_suite
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    vlm = load_suite(tasks["vision_language_generation"]["accuracy"][0]["suite"])
+    assert vlm["suite"] == "imagenette-vlm-30" and "tench" in vlm["request"]["prompt"]
+    assert tasks["object_detection"]["accuracy"][0]["suite"] == "coco2017-detect-100"
+    timesfm = resolve_model("timesfm-2.0-500m-official", _environment())
+    assert timesfm["accuracy"] == [] and timesfm["family_accuracy"]  # the family's ETTh1 case
 
 
-def test_quantized_candidates_get_the_quantization_tolerance():
+
+def test_quantized_candidates_get_the_quantization_tolerance_on_task_suites(tmp_path):
+    import shutil
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
     from trtmc_aiperf_qual.models import resolve_model
 
-    environment = _environment()
-    fp8, fp16 = resolve_model("qwen3-0.6b-fp8", environment), resolve_model("qwen3-0.6b-fp16", environment)
-    assert fp8["candidate"]["quantization"] == "fp8" and fp16["candidate"].get("quantization") is None
+    root = tmp_path / "config"
+    shutil.copytree(CONFIG_ROOT, root)
+    (root / "models/qwen3-0.6b-fp8.yaml").write_text("accuracy_source: tasks\n")
+    fp8 = resolve_model("qwen3-0.6b-fp8", _environment(), root=root)
+    assert fp8["candidate"]["quantization"] == "fp8"
     assert [item["gate"]["min_pass_rate"] for item in fp8["accuracy"]] == [0.8, 0.8]
     assert fp8["accuracy"][1]["grader_params"]["min_prefix"] == 8
-    assert [item["gate"]["min_pass_rate"] for item in fp16["accuracy"]] == [0.9, 0.9]
-    assert resolve_model("gpt-oss-20b", environment)["candidate"]["quantization"] == "mxfp4"
 
 
 def test_timing_reference_precision_can_differ_from_the_noise_floor_precision():
@@ -520,6 +532,8 @@ def test_timing_reference_precision_can_differ_from_the_noise_floor_precision():
     z_image = resolve_model("z-image-turbo", _environment())["reference"]
     assert z_image["perf_precision"] == "fp16" and timing_precisions(z_image) == ["bf16"]
     assert timing_precisions({"perf_precision": "fp16", "precision": "fp32"}) == ["fp16", "fp32"]
+    assert timing_precisions({"perf_precision": "fp16", "precision": "fp32", "declared_precision": "bf16"}) == [
+        "fp16", "bf16", "fp32"]
 
 
 def test_sampled_generation_failures_are_inconclusive():
@@ -530,10 +544,13 @@ def test_sampled_generation_failures_are_inconclusive():
     assert judge.judge_accuracy(failing, {"min_pass_rate": 1.0}, 5)["status"] == "fail"
 
 
-def test_always_sampling_tts_models_are_declared_sampled():
+
+def test_always_sampling_tts_models_compare_duration_in_perf():
     from trtmc_aiperf_qual.models import resolve_model
 
     for profile in ("bark-small", "bark-large", "magpie-tts-357m"):
         model = resolve_model(profile, _environment())
-        assert model["accuracy"][0]["sampled"] and model["accuracy"][0]["suite"]["suite"] == "seedtts-en-5"
+        assert model["family_accuracy"]  # the family's own case judges Acc
         assert model["performance"]["l1"]["output_grader_params"]["max_log_spectral_distance"] > 100
+
+

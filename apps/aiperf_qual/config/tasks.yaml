@@ -27,21 +27,23 @@ defaults:
 tasks:
   text_generation:
     accuracy:
-      - {suite: mmlu-0shot-10, grader: parity_answer_line, max_new_tokens: 8, gate: {min_pass_rate: 0.9}}
-      - {suite: humaneval-10, grader: parity_token_exact, max_new_tokens: 32, gate: {min_pass_rate: 0.9}}
+      - {suite: mmlu-0shot-30, grader: parity_answer_line, max_new_tokens: 8, gate: {min_pass_rate: 0.9}}
+      - {suite: humaneval-30, grader: parity_token_exact, max_new_tokens: 32, gate: {min_pass_rate: 0.9}}
     performance: {l1: {reference_modes: [eager, compile], output_grader: parity_token_exact,
-                       output_grader_params: {min_prefix: 8, accept_equal_text: true}}}
+                       output_grader_params: {min_prefix: 8, accept_equal_text: true}},
+                  # L2 serving sweep (informational): synthetic prompts through /v1/completions.
+                  l2: {concurrency: [1, 4], requests: 32, isl: 96, osl: 32, margin_percent: 5}}
     # Quantized weights (FP8, MXFP4, ...) legitimately move late tokens: the answer and the first eight
     # generated tokens must still agree on 8 of 10 samples, which a broken quantization does not meet.
     quantized:
       accuracy:
-        - {suite: mmlu-0shot-10, grader: parity_answer_line, max_new_tokens: 8, gate: {min_pass_rate: 0.8}}
-        - {suite: humaneval-10, grader: parity_token_exact, grader_params: {min_prefix: 8}, max_new_tokens: 32,
+        - {suite: mmlu-0shot-30, grader: parity_answer_line, max_new_tokens: 8, gate: {min_pass_rate: 0.8}}
+        - {suite: humaneval-30, grader: parity_token_exact, grader_params: {min_prefix: 8}, max_new_tokens: 32,
            gate: {min_pass_rate: 0.8}}
 
   vision_language_generation:
     accuracy:
-      - {suite: imagenette-vlm-10, grader: parity_edit_distance, grader_params: {max_distance: 0.15},
+      - {suite: imagenette-vlm-30, grader: parity_edit_distance, grader_params: {max_distance: 0.15},
          gate: {min_pass_rate: 0.9}}
     performance: {l1: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}}
 
@@ -78,7 +80,7 @@ tasks:
     performance: {l1: {output_grader: parity_numeric}}
 
   transcription: &transcribe
-    accuracy: [{suite: librispeech-aiperf-10, grader: parity_wer, grader_params: {max_wer: 0.1},
+    accuracy: [{suite: librispeech-aiperf-30, grader: parity_wer, grader_params: {max_wer: 0.1},
                 gate: {min_pass_rate: 0.9, max_wer_increase_from_reference: 0.02}}]
     performance: {l1: {output_grader: parity_wer}}
   transcription_streaming: *transcribe
@@ -86,6 +88,10 @@ tasks:
   # Generative media are slow per request: fewer requests per run, still three runs for the CI.
   audio_generation:
     accuracy: [{suite: seedtts-en-5, grader: parity_audio, gate: {min_pass_rate: 1.0}}]
+    # Also for models with a family case: sampling models cannot be judged per sample, but what they
+    # say can (ASR round trip, TRTMC WER within 0.1 of the native model's).
+    supplementary: [{check: tts_intelligibility, suite: seedtts-en-5, asr_model: openai/whisper-tiny,
+                     max_wer_increase: 0.1}]
     performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
   speech_to_speech:
     accuracy: [{suite: catalog, grader: parity_audio, gate: {min_pass_rate: 1.0}}]
@@ -114,6 +120,8 @@ tasks:
 
   robot_control: &numeric
     accuracy: [{suite: catalog, grader: parity_numeric, gate: {min_pass_rate: 1.0}}]
-    performance: {l1: {output_grader: parity_numeric}}
+    # Perf only checks that both sides computed the same output: counts may differ slightly across
+    # precisions (for example valid pixels), which is the Acc cases' concern.
+    performance: {l1: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}}
   stereo_disparity: *numeric
   monocular_geometry: *numeric

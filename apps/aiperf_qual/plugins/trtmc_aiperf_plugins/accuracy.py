@@ -302,11 +302,13 @@ def _numeric_fields(value: Any, prefix: str = "") -> dict[str, list[float]]:
 
 
 def compare_numeric(candidate: dict, reference: dict, min_cosine: float = 0.999, rtol: float = 0.05,
-                    fields: Sequence[str] | None = None, **_: Any) -> tuple[bool, str, str, str]:
+                    fields: Sequence[str] | None = None, count_rtol: float = 0.0,
+                    **_: Any) -> tuple[bool, str, str, str]:
     """Generic tensor parity over the numeric fields both observations report.
 
-    Short integer lists (shapes, counts) must match exactly; other vectors need cosine similarity of
-    at least ``min_cosine``; scalars must agree within ``rtol``.
+    Short integer lists (shapes, counts) must match exactly, except that a single count may differ by
+    ``count_rtol`` (e.g. pixels above a threshold); other vectors need cosine similarity of at least
+    ``min_cosine``; scalars must agree within ``rtol``.
     """
     left, right = _numeric_fields(candidate), _numeric_fields(reference)
     names = [name for name in (fields or sorted(left.keys() & right.keys()))]
@@ -321,6 +323,9 @@ def compare_numeric(candidate: dict, reference: dict, min_cosine: float = 0.999,
         integral = all(v.is_integer() for v in a + b) and len(a) <= 8
         if len(a) != len(b):
             problems.append(f"{name} length {len(a)} vs {len(b)}")
+        elif integral and len(a) == 1 and count_rtol:
+            if abs(a[0] - b[0]) > count_rtol * max(abs(b[0]), 1.0):
+                problems.append(f"{name} {a} vs {b}")
         elif integral:
             if a != b:
                 problems.append(f"{name} {a} vs {b}")

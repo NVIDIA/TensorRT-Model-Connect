@@ -3,49 +3,56 @@
 Accuracy and performance qualification of every ready catalog model against its native
 (unconverted) Hugging Face / PyTorch model, driven by [AIPerf](https://github.com/ai-dynamo/aiperf).
 
-- **Acc**: the TRTMC output must match the native model's output for the same input, sample by
-  sample, within Task-specific tolerances.
+- **Acc**: the TRTMC output must match the native model's for the same inputs. A family's own
+  benchmark qualification accuracy cases (dataset, native reference, metric, gate, including task
+  metrics against labels such as COCO mAP or top-1 accuracy) judge its models; Task suites cover
+  models without one.
 - **Perf**: TRTMC must be faster than the native model (eager and, where listed, `torch.compile`)
-  at the candidate's precision.
+  at the candidate's precision, timed over the whole Task call on both sides.
 
 ## Design
 
 | Layer | What | Model-specific? |
 |---|---|---|
 | Execution | Two HTTP servers speaking the same `/v1/tasks/{operation}` protocol: TRTMC (`trtmc-perf-serve --backend trtmc`, later `trtmc-server`) and the native reference (`--backend reference` generic adapters, or `--backend script` for the family's declared reference). AIPerf sends every request and computes the statistics. | No |
-| Task | `config/tasks.yaml`: per catalog Task, the Acc suites, grader, gate, and Perf settings. | No |
-| Model | Derived from the catalog (checkpoint, revision, precision, bundle, Task, sequence limit). `config/models/<profile>.yaml` holds only exceptions. | Only exceptions |
+| Family cases | `families/<family>/tests/benchmark/*.yaml`: the family's accuracy cases, its candidate build, and its performance workload request. | Family-owned |
+| Task | `config/tasks.yaml`: per catalog Task, fallback Acc suites, checks for every model of the Task, and Perf settings. | No |
+| Model | Derived from the catalog and the family cases. `config/models/<profile>.yaml` holds only exceptions. | Only exceptions |
 
 `trtmc-aiperf-qual plan` prints the derived configuration of every model.
 
 ### Accuracy
 
+**Family cases.** Each accuracy case of the family runs its own evaluation
+(`qualification_tests.benchmark_qualification.accuracy.run_accuracy`: dataset, selection, native
+reference, metric, gate) unchanged; only the TRTMC side is replaced: its requests go through AIPerf
+to a persistent trtmc-perf-serve session. A failing case is re-run on an isolated session (a fresh
+worker per request): passing there means state leaks across requests (`acc-session-state`). The
+candidate bundle follows the family's candidate build (a `<profile>-qual` bundle when it differs
+from the catalog manifest).
+
+**Task suites** (models without a family case):
+
 1. **Goldens**: the native model at the golden precision (fp32 unless the Task says otherwise),
-   deterministic numerics (no TF32). Stored per suite, reference identity, and reference platform
-   (GPU architecture plus the reference environment's framework versions) under
-   `<golden_store>/<suite>/<platform>/<key>/`; `publish-goldens` copies them to a shared golden store.
-2. **Noise floor**: the native model at the candidate precision (fp16/bf16) graded against the
-   goldens. When the native model itself misses the gate at that precision, the gate becomes its
-   own result minus a slack of one sample (2% for large suites); otherwise the gate stands. A
-   candidate that meets the original gate passes; one that passes only because the relaxed gate
-   requires nothing is `acc-inconclusive`.
-3. **Candidate**: the suites run on a persistent TRTMC session. Failing suites are re-run on an
-   isolated session (fresh worker per request): passing there means state leaks across requests
-   (`acc-session-state`), failing there too means a numerical problem (`acc-issue`).
+   deterministic numerics (no TF32). Keyed by suite, reference identity (adapter and family reference
+   code, checkpoint and revision), and reference platform (GPU architecture plus the reference
+   environment's framework versions) under `<golden_store>/<suite>/<platform>/<key>/`;
+   `publish-goldens` copies them to a shared golden store.
+2. **Noise floor** (diagnostic): the native model at the candidate precision graded against the
+   goldens. The declared gate always applies; a failing suite is `acc-inconclusive` only when every
+   failing sample also fails for the native model at the candidate precision.
+3. **Candidate**: the suites on a persistent TRTMC session, with the same isolated re-check.
 
-Text prompts are left-truncated with the model's tokenizer so prompt plus generated tokens fit the
-bundle's sequence limit; both sides receive the same text.
-
-| Task | Suite | Grader |
+| Task | Fallback suite | Grader |
 |---|---|---|
-| text generation | MMLU zero-shot (10 subjects, answer line); HumanEval (10, token IDs) | `parity_answer_line`, `parity_token_exact` |
-| vision-language | Imagenette, one image per class, answer chosen from the ten class names; OCR models: OCRBench v2 (10 task types) | `parity_edit_distance` |
+| text generation | MMLU zero-shot (30 subjects, answer line); HumanEval (30, token IDs) | `parity_answer_line`, `parity_token_exact` |
+| vision-language | Imagenette, three images per class, answer chosen from the ten class names | `parity_edit_distance` |
 | classification | Imagenette 100 (stride over all classes) | `parity_top1` |
 | encoding / embedding | STS-B 50 sentences | `parity_vector` (cosine >= 0.999) |
 | image features | Beans 12 (DINOv3 kNN bank) | `parity_numeric` |
 | detection | COCO 2017, 100 images | `parity_boxes` |
 | segmentation / prompted segmentation | Imagenette 10 | `parity_mask` |
-| transcription | LibriSpeech 10 (AIPerf dataset) + corpus WER vs labels | `parity_wer` |
+| transcription | LibriSpeech 30 (AIPerf dataset) + corpus WER vs labels | `parity_wer` |
 | audio generation | SeedTTS English 5 around the catalog request | `parity_audio` (duration, RMS, spectrum) |
 | image / video generation | PartiPrompts 3 around the catalog request | `parity_image` (geometry, thumbnail PSNR/SSIM) |
 | image edit, world model, text-prompted segmentation | catalog testcase | `parity_image`, `parity_numeric` |
@@ -53,32 +60,41 @@ bundle's sequence limit; both sides receive the same text.
 | time series | ETTh1 10 seeded windows (the family qualification's window) | `parity_numeric` |
 | robot control, stereo, geometry | catalog testcase | `parity_numeric` (shapes exact, vectors by cosine) |
 
-A suite with `base: catalog` overrides the profile's catalog request (size, steps, seed, ...) with
-its dataset fields. Exceptions stay in `config/models/<profile>.yaml`:
+**Checks for every model of a Task** (`supplementary`): text-to-speech models also pass an ASR
+round trip (`tts_intelligibility`): TRTMC and the native model speak the SeedTTS sentences, an ASR
+model transcribes both, and TRTMC's word error rate must stay within 0.1 of the native model's.
+Sampling models (Bark, MagpieTTS) cannot be judged per sample, but what they say can.
 
-- **Quantized candidates** (catalog `quantization`, or `candidate.quantization` for a quantized
-  checkpoint) use the Task's `quantized` block: for text generation, the answer and the first eight
-  generated tokens must agree on 8 of 10 samples instead of exact parity.
-- **Sampled generation** (`sampled: true` on a suite, for example Bark): the model always samples
-  and TRTMC does not replay PyTorch's random stream, so a failing suite is `acc-inconclusive`.
-- **Timing precision** (`reference.timing_precision`): when the native model does not produce a
-  valid output at the candidate precision, Perf times it at this precision (the noise floor stays
-  at the candidate precision).
+A suite with `base: catalog` overrides the profile's catalog request (size, steps, seed, ...) with
+its dataset fields. Exceptions stay in `config/models/<profile>.yaml`: `accuracy_source: tasks`
+(Task suites despite a family case), quantization tolerance (`candidate.quantization`, the Task's
+`quantized` block), `sampled: true` suites, `reference.timing_precision` (time the native model at
+another precision when it is invalid at the candidate's), reference options, and build overrides.
 
 Generated media leave the servers as digests (`trtmc_perf_serving.digests`): 64x64 thumbnails of
 the first/middle/last frame and a banded log spectrum for audio, so goldens stay small.
 
-### Performance (L1)
+### Performance
 
-The catalog testcase request is sent repeatedly to each server (warmup, then N requests, R runs).
-The metric is the server-side model-call time (`trtmc_model_call_time`: `public_task_call_wall`
-for TRTMC, the model call after input preparation for references). Per side, the per-run p50
-values give a mean and a 95% Student-t CI; `torch.compile` is credited with its best run. Lights
-follow the perf matrix rule: green faster by more than 5%, red slower by more than 5%. For generated
-media the output check compares geometry only (diffusion content diverges across precisions;
-content parity is the Acc suites' job). A run is
-white when outputs differ from the reference or a mean side's CI exceeds 5% (and 0.05 ms).
-Timing phases hold the host GPU lock (`gpu_lock`), which bundle builds on the same host also take.
+**L1** sends one request repeatedly to each server (warmup, then N requests, R runs): the family's
+performance workload request when it declares one, else the catalog testcase. The metric is the
+server-side time of the whole Task call on both sides (`trtmc_model_call_time`: TRTMC
+`public_task_call_wall`; references including input preparation and output decoding, with the
+model-only time kept as `model_only_ms`). Per side, the per-run p50 values give a mean and a 95%
+Student-t CI; `torch.compile` is credited with its best run, and compiled causal-LM references use a
+static KV cache when the architecture supports one. Lights follow the perf matrix rule: green faster
+by more than 5%, red slower by more than 5%. A comparison is white when outputs differ, a mean side's
+CI exceeds 5% (and 0.05 ms), the native model had to be timed at another precision than the
+candidate's (it failed there), or the GPU was busy (>= 20% utilization) with other processes right
+before a timed run. For generated media the output check compares geometry only. Family script
+references built on the shared harness are loaded once and timed per request like the adapters;
+other scripts time themselves in their own process (noted in the report). Timing phases hold the
+host GPU lock (`gpu_lock`), which bundle builds on the same host also take.
+
+**L2** (text generation, informational): an AIPerf sweep over `/v1/completions` with synthetic
+prompts of a fixed length at each concurrency level, for TRTMC and the native model; the report
+compares request throughput and latency percentiles. trtmc-perf-serve serializes requests, so higher
+concurrency measures queueing rather than batching; L2 does not change the category.
 
 ### Reference environments
 
@@ -94,8 +110,9 @@ and AIPerf run in their own environment; the TRTMC server needs no Python model 
 `reference` (generic adapters, persistent, eager/compile) serves every operation it supports; if it
 cannot load or run a model, the family's declared qualification reference (`script`) takes over.
 Image editing, world-model generation, and text-prompted segmentation always use the family
-reference, because the generic adapters would ignore their extra inputs. A `script` reference
-starts one process per request and reports its own warmup/iteration p50.
+reference, because the generic adapters would ignore their extra inputs. A `script` reference built
+on the shared harness is loaded once per server; other scripts start one process per request and
+report their own warmup/iteration p50.
 
 ## Setup
 
@@ -113,8 +130,9 @@ trtmc-aiperf-qual plan --environment $E
 trtmc-aiperf-qual run --profile qwen3-0.6b-fp16 --environment $E --out out/qwen3-0.6b-fp16
 trtmc-aiperf-qual run-all --environment $E --out-root out/ --shard 0/2      # host 1 of 2
 trtmc-aiperf-qual summary gb300-1=nvidia@host1:/runs/out gb300-2=nvidia@host2:/runs/out \
-    --ssh "ssh -J jump" --output qualification.md                              # remote roots over ssh
-trtmc-aiperf-qual rejudge out/*/                                            # re-apply the judge, no model runs
+    --ssh "ssh -J jump" --output qualification.md --html qualification.html   # remote roots over ssh
+trtmc-aiperf-qual rejudge --environment $E out/*/                           # re-apply the judge, no model runs
+python tools/model_benchmark.py aiperf --environment $E --aiperf-python <venv>/bin/python --out-root out/
 trtmc-aiperf-qual publish-goldens --source /state/golden-store --store-cli "<storage CLI>"
 ```
 
@@ -122,15 +140,24 @@ trtmc-aiperf-qual publish-goldens --source /state/golden-store --store-cli "<sto
 family environment, under the GPU lock), qualifies, and applies the bundle retention policy.
 `report.md` / `report.json` in the output directory hold the verdict: `pass`, `acc-issue`,
 `acc-session-state`, `acc-inconclusive`, `perf-issue` (red/yellow), `perf-inconclusive` (white),
-`not-comparable`, or `error` (a phase failed; see "Phase errors" and `phase-errors.log`);
-`build.json` records the build (`build-failed` when it failed).
+`not-comparable`, or `error` (a phase or case failed; see "Phase errors" and `phase-errors.log`);
+`build.json` records the build (`build-failed` when it failed); `report.json` carries a
+reproduction command.
 
 `run-all` runs profiles one after another (profiles sharing a checkpoint back to back), appends one
 line per profile to `<out-root>/campaign.jsonl`, and skips profiles that already have a result
 (`--rerun` keeps the old directory as `<profile>.<timestamp>`). `--shard INDEX/COUNT` splits the
-catalog across hosts; `summary` merges the result roots afterwards. A remote root
-`[NAME=][USER@]HOST:/PATH` is fetched over `--ssh` (result files only: `report.json`, `build.json`,
-`error.json`, `excluded.json`); local paths are read in place.
+catalog across hosts. `run-all` writes `plan.json` (every profile it must report, and configuration
+errors) and exits 2 on configuration errors, 1 when a profile ended in `error` or `build-failed`,
+else 0 (qualification outcomes such as `acc-issue` are results, not failures).
+
+`summary` merges result roots: the latest run of each profile wins; planned profiles without a
+result are `not-run`, configuration errors `config-error`. A remote root `[NAME=][USER@]HOST:/PATH`
+is fetched over `--ssh`; local paths are read in place. `--html report.html` also writes a
+self-contained, failure-first report (per model: Acc suites with failing samples, TRTMC and native
+outputs side by side, Perf lights with labelled p50 values and reasons, L2, evidence links, and the
+reproduction command), fetching logs and family results next to it. `--baseline ROOT` notes TRTMC
+p50 regressions (> 5%) against a previous run.
 
 ### Per-machine model list
 
@@ -169,7 +196,7 @@ it).
 - New Task: one entry in `config/tasks.yaml` (suite, grader, gate); add a grader to
   `plugins/trtmc_aiperf_plugins/accuracy.py` only if no existing one fits.
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
-- Model needing a differently built bundle: `candidate.build` in `config/models/<profile>.yaml`
-  overrides catalog manifest fields (give it its own `name` and `bundle`; see `detr-resnet-50.yaml`).
+- Model needing a differently built bundle: declare it in the family qualification case's
+  `candidate.build` (used automatically), or `candidate.build` in `config/models/<profile>.yaml`.
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
   retention); Docker or bare metal only differ in these paths.

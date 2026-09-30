@@ -77,8 +77,19 @@ def _qualification_cases(repository: Path, profile: str, kind: str) -> list[Mapp
     _import_repository(repository)
     from qualification_tests.benchmark_qualification.catalog import discover
 
-    return [{**dict(case.values), "candidate": dict(case.candidate)}
+    return [{**dict(case.values), "candidate": dict(case.candidate), "name": case.name, "benchmark": case.benchmark}
             for case in discover(repository) if case.model == profile and case.kind == kind]
+
+
+def _qualified_build(profile: str, manifest: Mapping[str, Any], case: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Manifest overrides of the family qualification's candidate (its own bundle when they differ)."""
+    if not case:
+        return {}
+    candidate = case["candidate"]
+    changed = {key: value for key, value in (candidate.get("build") or {}).items() if manifest.get(key) != value}
+    if not changed and candidate.get("bundle", manifest.get("bundle")) == manifest.get("bundle"):
+        return {}
+    return {"name": f"{profile}-qual", "bundle": candidate.get("bundle", manifest.get("bundle")), **changed}
 
 
 def _qualification_case(repository: Path, profile: str) -> Mapping[str, Any] | None:
@@ -171,8 +182,12 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     golden_precision = reference.get("precision") or "fp32"
     declared_precision = (declared or {}).get("precision")
 
+    # A family's own accuracy cases (dataset, reference, metric, gate) qualify its models; the Task
+    # suites cover models without one.
+    family_cases = _qualification_cases(repository, profile, "accuracy")
+    accuracy_source = config.get("accuracy_source") or ("family" if family_cases else "tasks")
     accuracy = []
-    for item in config.get("accuracy", []):
+    for item in config.get("accuracy", []) if accuracy_source == "tasks" else []:
         suite = _suite(item["suite"], profile, repository)
         if item.get("request"):  # per-model request settings, e.g. a runtime's decoding convention
             suite = {**suite, "request": {**suite.get("request", {}), **item["request"]}}
@@ -180,6 +195,11 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         accuracy.append({**{key: value for key, value in item.items() if key not in ("max_new_tokens", "request")},
                          "suite": suite, "reference_mode": "eager"})
     l1 = dict(config["performance"]["l1"])
+    if l1["suite"] == "catalog" and case and case.get("request") and not case["candidate"].get("model_directory"):
+        # The family's performance workload (the request benchmark qualification times).
+        l1["suite"] = {"suite": f"{profile}-qualification-perf", "version": 1,
+                       "source": {"kind": "qualification_perf", "profile": profile},
+                       "selection": {"method": "first", "count": 1}}
     l1["suite"] = _suite(l1["suite"], profile, repository)
     size = checkpoint_bytes(catalog_model.hf_id, catalog_model.hf_revision or None)
     if size and size > LARGE_CHECKPOINT_BYTES and l1["measurement"]["requests"] > LARGE_MODEL_MEASUREMENT["requests"]:
@@ -191,12 +211,13 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         extra = {key: value for key, value in (case.get("request") or {}).items()
                  if not key.endswith("_path") and not isinstance(value, (dict, list))}
         for item in [*accuracy, l1]:
-            if item["suite"]["source"].get("kind") == "catalog_testcase":
+            if item["suite"]["source"].get("kind") in ("catalog_testcase", "qualification_perf"):
                 item["suite"] = {**item["suite"], "request": {**extra, **item["suite"].get("request", {})}}
     # candidate.build overrides catalog manifest fields for the qualified bundle (a new name keeps it
     # apart from the catalog bundle); a family-prepared model directory replaces the checkpoint.
     candidate = dict(config.get("candidate", {}))
-    build = dict(candidate.pop("build", None) or {})
+    build = dict(candidate.pop("build", None) or _qualified_build(
+        profile, manifest, family_cases[0] if family_cases else case))
     bundle = f"{build.get('name', profile)}/{build.get('bundle', catalog_model.bundle_name)}"
     return {
         "model": profile, "catalog_profile": profile, "operation": operation, "family": catalog_model.family,
@@ -204,14 +225,20 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         "candidate": {"bundle": bundle, "precision": candidate_precision, "build": build,
                       "manifest": str(catalog_model.manifest_path), "checkpoint": catalog_model.hf_id,
                       "revision": catalog_model.hf_revision or None, "quantization": quantization,
+                      "max_sequence_length": build.get("max_sequence_length")
+                      or catalog_model.build_settings.get("max_sequence_length"),
                       "model_directory": (case or {}).get("candidate", {}).get("model_directory"), **candidate},
         "reference": {**{key: value for key, value in reference.items() if key not in ("backend", "fallback")},
                       "backend": backend, "fallback": fallback, "precision": golden_precision,
                       "declared_precision": declared_precision if declared_precision != golden_precision else None,
                       "perf_precision": perf_precision, "trust_remote_code": trust_remote_code},
         "noise_floor": bool(config.get("noise_floor", True)) and perf_precision != golden_precision,
+        "accuracy_source": accuracy_source,
+        "family_accuracy": [item["name"] for item in family_cases] if accuracy_source == "family" else [],
         "accuracy": accuracy,
-        "performance": {"l1": l1},
+        "supplementary": [dict(item) for item in config.get("supplementary", [])],
+        "performance": {"l1": l1, **({"l2": dict(config["performance"]["l2"])}
+                                     if config["performance"].get("l2") else {})},
     }
 
 

@@ -24,19 +24,19 @@ def test_build_uses_the_catalog_manifest_or_a_descriptor_with_build_overrides(tm
 
     environment = Environment({"repo": str(REPOSITORY), "bundle_root": str(tmp_path / "engines"),
                                "runtime_root": "/rt", "worker": "/rt/worker"})
-    qwen = resolve_model("qwen3-0.6b-fp16", environment)
-    command = bundles.build_command(environment, qwen, "/py", tmp_path / "qwen")
+    tiny = resolve_model("tinyllama-1.1b", environment)  # no family build: the catalog manifest as is
+    command = bundles.build_command(environment, tiny, "/py", tmp_path / "tiny")
     assert command[:4] == ["/py", "-m", "trtmc_benchmark", "run"] and "--prepare-only" in command
-    assert command[command.index("--model") + 1] == "qwen3-0.6b-fp16" and "--manifest-root" in command
+    assert command[command.index("--model") + 1] == "tinyllama-1.1b" and "--manifest-root" in command
     assert command[command.index("--bundle-cache") + 1] == str(tmp_path / "engines")
 
     detr = resolve_model("detr-resnet-50", environment)
-    assert detr["candidate"]["bundle"] == "detr-resnet-50-q1333/detr-resnet-50-q1333.bundle"
+    assert detr["candidate"]["bundle"] == "detr-resnet-50-qual/detr-resnet-50.bundle"
     command = bundles.build_command(environment, detr, "/py", tmp_path / "detr")
     assert "--manifest-root" not in command
     descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
     assert (descriptor["name"], descriptor["bundle"], descriptor["image_height"]) == (
-        "detr-resnet-50-q1333", "detr-resnet-50-q1333.bundle", 1333)
+        "detr-resnet-50-qual", "detr-resnet-50.bundle", 1333)
     image = Path(descriptor["testcases"][0]["test_image"])
     assert image.is_absolute() and image.is_file()  # catalog assets stay reachable from the descriptor
 
@@ -363,3 +363,130 @@ def test_summary_keeps_the_latest_result_of_a_profile_run_on_several_roots(tmp_p
     for order in ([tmp_path / "gb300-1", tmp_path / "gb300-2"], [tmp_path / "gb300-2", tmp_path / "gb300-1"]):
         text, counts = campaign.summary(order)
         assert counts == {"acc-issue": 1} and "| m | image_generation | gb300-1 | acc-issue |" in text
+
+
+def test_summary_counts_every_planned_profile(tmp_path):
+    root = tmp_path / "gb300-1"
+    campaign.write_plan(root, ["a", "b"], [{"profile": "c", "reason": "no Task defaults"}])
+    (root / "a").mkdir()
+    (root / "a/report.json").write_text(json.dumps({"task": "t", "started": 1.0, "verdict": {"category": "pass"}}))
+    text, counts = campaign.summary([root])
+    assert counts == {"pass": 1, "not-run": 1, "config-error": 1}
+    assert "| b | - | gb300-1 | not-run |" in text and "no Task defaults" in text
+
+
+def test_run_all_exit_code_reports_harness_failures():
+    assert campaign.exit_code([{"category": "pass"}, {"category": "acc-issue"}], []) == 0
+    assert campaign.exit_code([{"category": "error"}], []) == 1
+    assert campaign.exit_code([{"category": "build-failed"}], []) == 1
+    assert campaign.exit_code([], [{"profile": "c", "reason": "x"}]) == 2
+
+
+def test_summary_notes_trtmc_regressions_against_a_baseline(tmp_path):
+    for root, p50 in (("now", 11.0), ("before", 10.0)):
+        (tmp_path / root / "m").mkdir(parents=True)
+        (tmp_path / root / "m/report.json").write_text(json.dumps({
+            "task": "t", "started": 1.0, "verdict": {"category": "pass"},
+            "performance_l1": [{"reference_mode": "eager", "light": "green", "candidate": {"p50_ms": p50}}]}))
+    text, _ = campaign.summary([tmp_path / "now"], [tmp_path / "before"])
+    assert "regression: TRTMC eager p50 +10.0% vs baseline" in text
+
+
+def test_html_report_lists_failures_first_with_evidence(tmp_path):
+    from trtmc_aiperf_qual.report_html import render
+
+    root = tmp_path / "gb300-1"
+    for name, category in (("good", "pass"), ("bad", "acc-issue")):
+        (root / name).mkdir(parents=True)
+        (root / name / "report.md").write_text("x")
+        (root / name / "report.json").write_text(json.dumps({
+            "task": "t", "started": 1.0, "verdict": {"category": category}, "repro": f"trtmc-aiperf-qual run --profile {name}",
+            "accuracy": [{"suite": "s", "status": "fail" if name == "bad" else "pass", "passed": 1, "samples": 2,
+                          "required_passes": 2, "failures": [{"conversation_id": "session_000001",
+                                                              "explanation": "answer differs", "actual": "B",
+                                                              "expected": "C"}]}]}))
+    rows, counts, rank = campaign.collect([root])
+    page = render(rows, counts, rank, tmp_path / "report.html").read_text()
+    assert page.index(">bad<") < page.index(">good<") and "answer differs" in page
+    assert 'href="gb300-1/bad/report.md"' in page and "trtmc-aiperf-qual run --profile bad" in page
+
+
+def test_family_results_become_report_entries_with_their_own_gate(tmp_path):
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual import family
+
+    case = SimpleNamespace(name="coco", benchmark="coco2017_object_detection")
+    result = {"status": "failed", "gate": {"max_map_drop": 0.01}, "metrics": {"samples": 3, "map_drop": 0.05},
+              "samples": [{"sample_id": "a", "passed": True},
+                          {"sample_id": "b", "passed": False, "candidate_boxes": [1], "reference_boxes": [2], "iou": 0.1}]}
+    item = family.item(case, result, tmp_path / "result.json")
+    assert (item["status"], item["passed"], item["samples"], item["source"]) == ("fail", 1, 2, "family")
+    assert item["gate"] == {"max_map_drop": 0.01} and item["metrics"]["map_drop"] == 0.05
+    failure = item["failures"][0]
+    assert failure["sample_id"] == "b" and '"iou": 0.1' in failure["explanation"] and "[1]" in failure["actual"]
+
+
+def test_aggregate_family_results_report_metrics_not_a_zero_pass_count(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual import family
+    from trtmc_aiperf_qual.report import counted
+
+    result = {"status": "passed", "gate": {"max_map_50_95_drop": 0.02},
+              "metrics": {"samples": 100, "label_space": "coco", "candidate_map_50_95": 0.471, "map_50_95_drop": -0.0027}}
+    evidence = tmp_path / "result.json"
+    evidence.write_text(json.dumps(result))
+    item = family.item(SimpleNamespace(name="coco", benchmark="coco"), result, evidence)
+    assert item["passed"] is None and item["samples"] == 100 and item["pass_rate"] is None
+    assert counted(item) == "100 samples: candidate_map_50_95 0.471, map_50_95_drop -0.0027"
+    stale = {**item, "passed": 0}  # recorded before aggregate-only results were recognized
+    assert family.refresh(stale)["passed"] is None
+    assert family.refresh({"source": "task", "passed": 3}) == {"source": "task", "passed": 3}
+    ungraded = family.counts({"status": "passed", "samples": [{"sample_id": "a", "candidate_wer": 0.1}]})
+    assert ungraded["passed"] is None and ungraded["failures"] == [] and ungraded["samples"] == 1
+    assert counted({"passed": None, "samples": 0, "metrics": {"min_psnr": 10.1}}) == "min_psnr 10.1"
+
+
+def test_serving_sweep_fits_the_bundle_and_compares_throughput():
+    from trtmc_aiperf_qual import sweep
+
+    assert sweep.lengths({"isl": 96, "osl": 32}, 129) == (81, 32) and sweep.lengths({}, None) == (96, 32)
+    fast = [{"concurrency": 4, "request_throughput_avg": 20.0}]
+    slow = [{"concurrency": 4, "request_throughput_avg": 10.0}]
+    compared = sweep.compare(fast, slow, 5)
+    assert compared["light"] == "green" and compared["throughput_ratio"] == 2.0
+    assert sweep.compare(slow, fast, 5)["light"] == "red"
+    assert sweep.compare([{**fast[0], "request_error_rate_avg": 3.0}], slow, 5)["light"] == "white"
+
+
+def test_perf_is_white_on_a_busy_gpu_or_a_fallback_reference_precision():
+    from trtmc_aiperf_qual import judge
+
+    fast = {"p50_ms": 1.0, "ci_percent": 0.1, "aggregation": "mean"}
+    slow = {"p50_ms": 10.0, "ci_percent": 0.1, "aggregation": "mean"}
+    ok = dict(margin_percent=5, max_ci_percent=5, outputs_match=True, output_reason="")
+    assert judge.judge_performance(fast, slow, **ok)["light"] == "green"
+    busy = judge.judge_performance({**fast, "gpu_busy_percent": 45}, slow, **ok)
+    assert busy["light"] == "white" and "busy" in busy["reasons"][0]
+    fallback = judge.judge_performance(fast, {**slow, "precision": "fp32", "precision_fallback": "fp16: error"}, **ok)
+    assert fallback["light"] == "white" and "fp32" in fallback["reasons"][0] and fallback["speedup"] == 10.0
+
+
+def test_family_artifacts_resolve_inside_the_request_directory(tmp_path):
+    from trtmc_aiperf_qual import family
+
+    (tmp_path / "req").mkdir()
+    (tmp_path / "req/output.image.1.0.png").write_bytes(b"png")
+    resolved = family._resolve_artifacts({"image_artifacts": ["output.image.1.0.png"], "audio_artifact": "a.wav",
+                                          "text": "x"}, tmp_path / "req")
+    assert resolved["image_artifacts"] == [str((tmp_path / "req/output.image.1.0.png").resolve())]
+    assert resolved["audio_artifact"] == str((tmp_path / "req/a.wav").resolve()) and resolved["text"] == "x"
+    with pytest.raises(RuntimeError):
+        family._resolve_artifacts({"image_artifact": "../../etc/passwd"}, tmp_path / "req")
+
+
+def test_long_prompts_are_not_taken_for_asset_paths(tmp_path):
+    long_prompt = "Context filler. " * 100
+    assert bundles._absolute_assets([{"prompt": long_prompt}], tmp_path) == [{"prompt": long_prompt}]

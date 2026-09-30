@@ -1,7 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-# COCO images have arbitrary sizes; the catalog bundle accepts only its fixed resolution, so Acc and
-# Perf use a bundle built with DETR's 1333-pixel processor bound (the family qualification build).
-candidate:
-  build: {name: detr-resnet-50-q1333, bundle: detr-resnet-50-q1333.bundle, image_height: 1333, image_width: 1333}

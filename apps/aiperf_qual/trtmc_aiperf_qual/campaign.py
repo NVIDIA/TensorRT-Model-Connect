@@ -25,6 +25,7 @@ from . import bundles, retention
 from .bundles import prefetch
 from .config import Environment
 from .models import checkpoints
+from .report import counted
 from .services import reference_python
 
 KEPT_ASIDE = re.compile(r"\.\d{10}$")  # <profile>.<unix time> of a previous run
@@ -128,9 +129,26 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
     return records
 
 
-CATEGORIES = ("pass", "acc-issue", "acc-session-state", "acc-inconclusive", "perf-issue", "perf-inconclusive",
-              "not-comparable", "error", "build-failed", "excluded")
+CATEGORIES = ("error", "config-error", "build-failed", "not-run", "acc-issue", "acc-session-state", "perf-issue",
+              "acc-inconclusive", "perf-inconclusive", "not-comparable", "pass", "excluded")
 EXCLUSIONS = "excluded.json"
+PLAN = "plan.json"
+HARNESS_FAILURES = ("error", "build-failed")
+
+
+def write_plan(out_root: Path, selected: Sequence[str], config_errors: Sequence[Mapping[str, Any]]) -> None:
+    """Record every profile a batch must report, so a missing result shows as ``not-run``."""
+    out_root.mkdir(parents=True, exist_ok=True)
+    (out_root / PLAN).write_text(json.dumps({"selected": list(selected), "config_errors": list(config_errors)},
+                                            indent=2) + "\n")
+
+
+def exit_code(records: Sequence[Mapping[str, Any]], config_errors: Sequence[Mapping[str, Any]]) -> int:
+    """2 when profiles could not be configured, 1 when a run failed in the harness (error, build),
+    0 otherwise (qualification outcomes such as acc-issue are results, not failures)."""
+    if config_errors:
+        return 2
+    return 1 if any(record.get("category") in HARNESS_FAILURES for record in records) else 0
 
 
 def write_exclusions(out_root: Path, excluded: Sequence[Mapping[str, Any]]) -> None:
@@ -149,6 +167,7 @@ def _row(directory: Path) -> dict[str, Any] | None:
         value = json.loads(path.read_text())
         if name == "report.json":
             return {"task": value.get("task"), "category": value["verdict"]["category"],
+                    "directory": str(directory), "repro": value.get("repro"), "l2": value.get("performance_l2"),
                     "time": float(value.get("started") or path.stat().st_mtime),
                     "accuracy": value.get("accuracy", []), "perf": value.get("performance_l1", []),
                     "backend": (value.get("reference") or {}).get("backend", ""),
@@ -156,17 +175,28 @@ def _row(directory: Path) -> dict[str, Any] | None:
         if name == "build.json" and value.get("status") != "failed":
             continue
         return {"task": value.get("task"), "category": "build-failed" if name == "build.json" else "error",
+                "directory": str(directory), "repro": value.get("repro"),
                 "time": path.stat().st_mtime,
                 "accuracy": [], "perf": [], "backend": "", "notes": value.get("reason", "")}
     return None
+
+
+def _isolated(check: Mapping[str, Any] | None) -> Any:
+    """The isolated re-check's pass count, else its status (aggregate-only family results)."""
+    if not check:
+        return None
+    return check["passed"] if check.get("passed") is not None else check.get("status")
 
 
 def _accuracy_text(items: Sequence[Mapping[str, Any]]) -> str:
     def one(item: Mapping[str, Any]) -> str:
         extra = "".join(f", {label} {value}" for label, value in (
             ("ref@prec", (item.get("noise_floor") or {}).get("passed")),
-            ("isolated", (item.get("isolated_check") or {}).get("passed"))) if value is not None)
-        return f"{item['suite']} {item['passed']}/{item['samples']} (need {item['required_passes']}{extra})"
+            ("isolated", _isolated(item.get("isolated_check")))) if value is not None)
+        need = (f"need {item['required_passes']}" if item.get("required_passes") is not None
+                else f"family gate {json.dumps(item.get('gate', {}))}")
+        status = f"{item['status']} " if item.get("status") else ""
+        return f"{item['suite']} {status}{counted(item)} ({need}{extra})"
     return "; ".join(one(item) for item in items)
 
 
@@ -175,14 +205,21 @@ def _perf_text(items: Sequence[Mapping[str, Any]]) -> str:
                      + (f" {item['speedup']:.2f}x" if item.get("speedup") else "") for item in items)
 
 
-def summary(roots: Sequence[Path]) -> tuple[str, collections.Counter]:
-    """Markdown summary of the latest result of every profile under the given roots; profiles a root's
-    model list excluded are listed unless another root holds a result for them."""
+def collect(roots: Sequence[Path]) -> tuple[dict[str, dict[str, Any]], collections.Counter, dict[str, int]]:
+    """The latest result of every planned or reported profile under the given roots; profiles a
+    root's model list excluded are listed unless another root holds a result for them."""
     rows = {}
     for root in roots:
         path = root / EXCLUSIONS
         for item in json.loads(path.read_text()) if path.is_file() else []:
             rows[item["profile"]] = {"task": item.get("task"), "category": "excluded", "accuracy": [], "perf": [],
+                                     "backend": "", "notes": item.get("reason", ""), "root": root.name}
+        plan = json.loads((root / PLAN).read_text()) if (root / PLAN).is_file() else {}
+        for name in plan.get("selected", []):
+            rows.setdefault(name, {"task": None, "category": "not-run", "accuracy": [], "perf": [], "backend": "",
+                                   "notes": "planned, no result", "root": root.name})
+        for item in plan.get("config_errors", []):
+            rows[item["profile"]] = {"task": None, "category": "config-error", "accuracy": [], "perf": [],
                                      "backend": "", "notes": item.get("reason", ""), "root": root.name}
     for root in roots:
         for directory in sorted(path for path in root.iterdir() if path.is_dir() and not KEPT_ASIDE.search(path.name)):
@@ -191,7 +228,34 @@ def summary(roots: Sequence[Path]) -> tuple[str, collections.Counter]:
                 rows[directory.name] = {**row, "root": root.name}  # the latest run of a profile wins
     counts = collections.Counter(row["category"] for row in rows.values())
     ordered = [*CATEGORIES, *sorted(set(counts) - set(CATEGORIES))]
-    rank = {category: position for position, category in enumerate(ordered)}
+    return rows, counts, {category: position for position, category in enumerate(ordered)}
+
+
+REGRESSION_MARGIN_PERCENT = 5.0
+
+
+def annotate_regressions(rows: Mapping[str, dict[str, Any]], baseline: Mapping[str, Mapping[str, Any]],
+                         margin_percent: float = REGRESSION_MARGIN_PERCENT) -> None:
+    """Compare TRTMC p50 per profile and native mode with a baseline run (for example the previous
+    release); slower by more than the margin is noted as a regression (the category is unchanged)."""
+    for profile, row in rows.items():
+        previous = {item.get("reference_mode"): item for item in (baseline.get(profile) or {}).get("perf", [])}
+        for item in row.get("perf", []):
+            before = (previous.get(item.get("reference_mode")) or {}).get("candidate", {}).get("p50_ms")
+            now = item.get("candidate", {}).get("p50_ms")
+            if before and now:
+                change = (now / before - 1) * 100
+                row.setdefault("baseline", {})[item["reference_mode"]] = change
+                if change > margin_percent:
+                    row["notes"] = (f"regression: TRTMC {item['reference_mode']} p50 +{change:.1f}% vs baseline; "
+                                    + row.get("notes", "")).strip("; ")
+
+
+def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, collections.Counter]:
+    """Markdown summary of ``collect`` (optionally compared with baseline roots)."""
+    rows, counts, rank = collect(roots)
+    if baseline:
+        annotate_regressions(rows, collect(baseline)[0])
     shown = sorted(counts, key=rank.get)
     by_task: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for row in rows.values():
@@ -206,18 +270,20 @@ def summary(roots: Sequence[Path]) -> tuple[str, collections.Counter]:
     for profile in sorted(rows, key=lambda p: (rank[rows[p]["category"]], rows[p]["task"] or "", p)):
         row = rows[profile]
         notes = row["notes"].replace("|", "/").replace("\n", " ")
-        lines.append(f"| {profile} | {row['task'] or ''} | {row['root']} | {row['category']} | "
+        lines.append(f"| {profile} | {row['task'] or '-'} | {row['root']} | {row['category']} | "
                      f"{_accuracy_text(row['accuracy'])} | {_perf_text(row['perf'])} | {row['backend']} | {notes} |")
     return "\n".join(lines) + "\n", counts
 
 
 REMOTE_ROOT = re.compile(r"^(?:(?P<name>[\w.-]+)=)?(?P<host>[\w.@-]+):(?P<path>/.*)$")
-RESULT_FILES = ("report.json", "build.json", "error.json", EXCLUSIONS)
+RESULT_FILES = ("report.json", "build.json", "error.json", EXCLUSIONS, PLAN)
+EVIDENCE_FILES = ("report.md", "phase-errors.log", "build.log", "error.log", "server.log", "result.json")
+MAX_EVIDENCE_BYTES = "5M"
 
 
-def fetch_roots(specs: Sequence[str], ssh: str, into: Path) -> list[Path]:
+def fetch_roots(specs: Sequence[str], ssh: str, into: Path, *, evidence: bool = False) -> list[Path]:
     """Result roots for ``summary``: local paths as given; ``[NAME=][USER@]HOST:/PATH`` fetched over ssh
-    into ``into/NAME`` (default the host), result files only."""
+    into ``into/NAME`` (default the host): result files, plus logs and family results with ``evidence``."""
     import io
     import shlex
     import subprocess
@@ -234,7 +300,13 @@ def fetch_roots(specs: Sequence[str], ssh: str, into: Path) -> list[Path]:
         target = into / (match["name"] or match["host"].rsplit("@", 1)[-1])
         target.mkdir(parents=True, exist_ok=True)
         names = " -o ".join(f"-name {shlex.quote(name)}" for name in RESULT_FILES)
-        command = (f"cd {shlex.quote(match['path'])} && find . -maxdepth 2 -type f \\( {names} \\) -print0 "
+        if evidence:  # result files up to <profile>/, logs and family results below it
+            logs = " -o ".join(f"-name {shlex.quote(name)}" for name in EVIDENCE_FILES)
+            selection = (f"-maxdepth 7 -type f \\( \\( ! -path './*/*/*' \\( {names} \\) \\) -o "
+                         f"\\( -size -{MAX_EVIDENCE_BYTES} \\( {logs} \\) \\) \\)")
+        else:
+            selection = f"-maxdepth 2 -type f \\( {names} \\)"
+        command = (f"cd {shlex.quote(match['path'])} && find . {selection} -print0 "
                    "| tar --null -T - -cf -")
         fetched = subprocess.run([*shlex.split(ssh), match["host"], command], capture_output=True, timeout=1800)
         if fetched.returncode:

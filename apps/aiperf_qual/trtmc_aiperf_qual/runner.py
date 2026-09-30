@@ -23,7 +23,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import judge
+from . import family, intelligibility, judge, sweep
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
 from .goldens import GoldenStore, golden_key, platform_id
@@ -66,6 +66,13 @@ def _task_url(service: Mapping[str, Any], operation: str) -> list[str]:
     return ["--url", f"{service['url']}/v1/tasks/{operation}"]
 
 
+def family_code_digest(repository: Path, family: str | None) -> str | None:
+    """Digest of the family's qualification reference code: changing it must invalidate goldens."""
+    root = repository / "families" / str(family) / "tests/benchmark"
+    files = sorted(root.glob("*.py")) if family and root.is_dir() else []
+    return hashlib.sha256(b"".join(path.read_bytes() for path in files)).hexdigest()[:16] if files else None
+
+
 def reference_code_digest(repository: Path) -> str:
     """Digest of the generic reference adapters and media digests: changing how references produce
     observations must invalidate their goldens."""
@@ -79,7 +86,8 @@ def _reference_identity(model: Mapping[str, Any], precision: str, deterministic:
     reference = model["reference"]
     identity = {"profile": model["catalog_profile"], "backend": reference["backend"], "precision": precision,
                 "deterministic": deterministic, "reference_model": reference.get("model"),
-                "reference_code": reference.get("code_digest"),
+                "reference_code": reference.get("code_digest"), "family_code": reference.get("family_code"),
+                "checkpoint": model["candidate"].get("checkpoint"), "revision": model["candidate"].get("revision"),
                 "plugins": importlib.metadata.version("trtmc-aiperf-plugins")}
     if reference.get("options"):  # adapter options change reference outputs
         identity["options"] = reference["options"]
@@ -120,30 +128,48 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
         arguments += ["--warmup-request-count", str(measurement["warmup"])]
     # AIPerf 0.13.0's --num-profile-runs breaks endpoints with tokenizes_input: false (trtmc_task);
     # the repetitions run here and use the same t-distribution confidence interval.
-    runs = []
+    runs, busy = [], []
     for index in range(1, int(measurement.get("runs", 1)) + 1):
+        busy.append(gpu_busy_percent())
         runs.append(run_aiperf(environment, out / f"run_{index:02d}", arguments))
         if (runs[-1].summary.get(judge.METRIC) or {}).get("p50") is None:
             break  # nothing succeeded; further runs cannot either
     stats = judge.across_runs([(run.summary.get(judge.METRIC) or {}).get("p50") for run in runs], aggregation)
     stats["client_latency_p50_ms"] = judge.median_client_latency(runs[-1].raw_records())
     stats["aiperf_exit"] = max(run.exit_code for run in runs)
+    measured = [value for value in busy if value is not None]
+    if measured:
+        stats["gpu_busy_percent"] = max(measured)
     return runs[0], stats
+
+
+def gpu_busy_percent() -> float | None:
+    """GPU utilization just before a timed run, while our servers are idle: other processes' load."""
+    import subprocess
+
+    try:
+        completed = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                                   capture_output=True, text=True, timeout=30)
+        values = [float(line) for line in completed.stdout.split() if line.strip().replace(".", "").isdigit()]
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return max(values) if values else None
 
 
 def _grade(grader: str, params: Mapping[str, Any], observed: Mapping[str, Any], goldens: Mapping[str, Any],
            suite: Suite) -> dict[str, Any]:
     compare = COMPARATORS[grader]
-    passed, failures = 0, []
-    for sample in suite.samples:
+    passed, failures, failed = 0, [], []
+    for index, sample in enumerate(suite.samples):
         try:
             ok, reason, _, _ = compare(observed[sample["request_sha"]], goldens[sample["request_sha"]], **params)
         except (KeyError, TypeError, ValueError) as error:
             ok, reason = False, f"not comparable: {error}"
         passed += bool(ok)
         if not ok:
+            failed.append(index)
             failures.append({"sample_id": sample["sample_id"], "reason": str(reason)[:200]})
-    return {"passed": passed, "total": len(suite.samples), "failures": failures[:5]}
+    return {"passed": passed, "total": len(suite.samples), "failed_indices": failed, "failures": failures[:5]}
 
 
 def sampled_request(request: Mapping[str, Any]) -> bool:
@@ -285,45 +311,64 @@ def _run_accuracy(environment: Environment, service: Mapping[str, Any], model: M
 
 def timing_precisions(reference: Mapping[str, Any]) -> list[str]:
     """Precisions to time the native model at, in order: a declared ``timing_precision`` (when the
-    native model does not run correctly at the candidate precision), else the candidate precision
-    with the golden precision as the fallback."""
+    native model does not run correctly at the candidate precision), else the candidate precision,
+    then the family reference's declared precision and the golden precision as fallbacks."""
     if reference.get("timing_precision"):
         return [reference["timing_precision"]]
-    return list(dict.fromkeys([reference["perf_precision"], reference["precision"]]))
+    # The family reference may accept only its declared precision (for example bf16).
+    return list(dict.fromkeys(value for value in (reference["perf_precision"], reference.get("declared_precision"),
+                                                  reference["precision"]) if value))
 
 
 def _reference_perf(environment: Environment, model: Mapping[str, Any], l1: Mapping[str, Any], suite: Suite,
                     python: str, phases: _Phases, out: Path) -> dict[str, tuple[AiperfRun, dict, dict]]:
+    """Time the native model per reference mode; the generic adapter falls back to the family's
+    declared reference (``script``) when it cannot run the model at any precision."""
     reference = model["reference"]
-    script = reference["backend"] == "script"
     results: dict[str, tuple[AiperfRun, dict, dict]] = {}
     precisions = timing_precisions(reference)
     for mode in l1["reference_modes"]:
         def measure(mode: str = mode) -> None:
             errors = []
-            for precision in precisions:
-                try:
-                    with serving(environment, model, reference["backend"], out / f"reference-{mode}-{precision}",
-                                 mode=mode, precision=precision, python=python,
-                                 script_measurement=_script_measurement(l1["measurement"])) as service:
-                        if not script:  # a script reference would run its full measurement for the probe
-                            probe(service, model["operation"], suite.samples[0]["request"])
-                        run, stats = _perf_run(environment, service, model, suite,
-                                               SCRIPT_REFERENCE_RUN if script else l1["measurement"],
-                                               out / f"perf-reference-{mode}-{precision}",
-                                               "best" if script else l1["aggregation"].get(mode, "mean"))
-                    if stats.get("p50_ms") is None:
-                        raise RuntimeError(f"no successful {precision} requests")
-                    stats["precision"] = precision
-                    if errors:
-                        stats["precision_fallback"] = errors[-1][:300]
-                    results[mode] = (run, stats, service["info"])
-                    return
-                except Exception as error:  # noqa: BLE001 - try the next precision
-                    errors.append(f"{precision}: {type(error).__name__}: {error}")
+            for backend in dict.fromkeys([reference["backend"], reference.get("fallback") or reference["backend"]]):
+                for precision in precisions:
+                    try:
+                        results[mode] = _time_reference(environment, model, l1, suite, python, backend, mode,
+                                                        precision, out)
+                        stats = results[mode][1]
+                        if errors and backend == reference["backend"]:
+                            stats["precision_fallback"] = errors[-1][:300]
+                        if backend != reference["backend"]:
+                            stats["backend_fallback"] = "; ".join(errors)[:300]
+                        return
+                    except Exception as error:  # noqa: BLE001 - try the next precision, then the fallback
+                        errors.append(f"{backend} {precision}: {type(error).__name__}: {error}")
             raise RuntimeError("; ".join(errors)[:1500])
         phases.run(f"reference_perf_{mode}", measure)
     return results
+
+
+def _time_reference(environment: Environment, model: Mapping[str, Any], l1: Mapping[str, Any], suite: Suite,
+                    python: str, backend: str, mode: str, precision: str,
+                    out: Path) -> tuple[AiperfRun, dict[str, Any], dict[str, Any]]:
+    tag = f"{mode}-{precision}" if backend == model["reference"]["backend"] else f"{mode}-{backend}-{precision}"
+    with serving(environment, model, backend, out / f"reference-{tag}", mode=mode, precision=precision,
+                 python=python, script_measurement=_script_measurement(l1["measurement"])) as service:
+        # A script reference in its own process measures itself per request; a persistent one
+        # (harness session) is timed per request like the adapters.
+        per_process = backend == "script" and service["info"].get("timing") != "persistent"
+        if not per_process:
+            probe(service, model["operation"], suite.samples[0]["request"])
+        run, stats = _perf_run(environment, service, model, suite,
+                               SCRIPT_REFERENCE_RUN if per_process else l1["measurement"],
+                               out / f"perf-reference-{tag}",
+                               "best" if per_process else l1["aggregation"].get(mode, "mean"))
+        if per_process:
+            stats["timing"] = "reference process (its own warmup and iterations, not AIPerf)"
+    if stats.get("p50_ms") is None:
+        raise RuntimeError(f"no successful {precision} requests")
+    stats["precision"] = precision
+    return run, stats, service["info"]
 
 
 def _candidate(environment: Environment, model: Mapping[str, Any], suites: Mapping[str, Suite],
@@ -345,9 +390,11 @@ def _candidate(environment: Environment, model: Mapping[str, Any], suites: Mappi
             verdict = judge.judge_performance(stats, reference_stats, margin_percent=float(l1["margin_percent"]),
                                               max_ci_percent=float(l1["max_ci_percent"]),
                                               outputs_match=match, output_reason=reason)
-            if reference_stats.get("precision_fallback"):
-                verdict["notes"].append(f"reference measured at {reference_stats['precision']} "
-                                        f"({reference_stats['precision_fallback'][:160]})")
+            if reference_stats.get("timing"):
+                verdict["notes"].append(f"native timed by the {reference_stats['timing']}")
+            if reference_stats.get("backend_fallback"):
+                verdict["notes"].append("native: the family's declared reference (the generic adapter failed: "
+                                        f"{reference_stats['backend_fallback'][:160]})")
             performance.append({"reference_mode": mode, "candidate_timing_scope": service["info"].get("timing_scope"),
                                 "reference_timing_scope": info.get("timing_scope"),
                                 "reference_backend": info.get("backend"), **verdict})
@@ -368,6 +415,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
 
     reference = model["reference"]
     reference["code_digest"] = reference_code_digest(environment.path("repo"))
+    reference["family_code"] = family_code_digest(environment.path("repo"), model.get("family"))
     python = reference_python(environment, model)
     # Goldens are keyed by the reference platform: GPU architecture plus the reference environment's
     # framework versions, so a changed family environment regenerates them.
@@ -377,7 +425,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     if reference["backend"] == "script":
         suites = {name: limit_suite(suite, SCRIPT_MAX_SAMPLES) for name, suite in suites.items()}
     references = phases.run("reference_goldens", lambda: _reference_goldens(
-        environment, model, suites, store, platform, fingerprint, python, out))
+        environment, model, suites, store, platform, fingerprint, python, out)) if suites else ({}, {}, {})
     if references is None and reference.get("declared_precision"):
         # For example fp32 not fitting: use the reference precision the family declares.
         first_error = phases.errors.pop("reference_goldens")
@@ -395,10 +443,26 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     goldens, golden_status, noise = references or ({}, {}, {})
     accuracy: list[dict[str, Any]] = []
     performance_l1: list[dict[str, Any]] = []
+    if model.get("family_accuracy"):
+        phases.run("family_accuracy", lambda: accuracy.extend(family.run(environment, model, out, python)))
+    for check in model.get("supplementary", []):
+        if check.get("check") == "tts_intelligibility":
+            phases.run("tts_intelligibility", lambda check=check: accuracy.append(
+                intelligibility.run(environment, model, check, python, out)))
     with gpu_exclusive(environment):
         reference_perf = _reference_perf(environment, model, l1, perf_suite, python, phases, out) if l1 else {}
         phases.run("candidate", lambda: _candidate(environment, model, suites, goldens, noise, l1, perf_suite,
                                                    reference_perf, accuracy, performance_l1, out))
+        l2 = model["performance"].get("l2")
+        performance_l2: dict[str, Any] = {}
+        if l2 and reference["backend"] == "reference":
+            def serving_sweep() -> None:
+                with serving(environment, model, "trtmc", out / "l2-candidate-server") as candidate, \
+                        serving(environment, model, "reference", out / "l2-reference-server", mode="eager",
+                                precision=timing_precisions(reference)[0], python=python) as native:
+                    performance_l2.update(sweep.run(environment, model, l2, {"candidate": candidate,
+                                                                            "reference": native}, out))
+            phases.run("perf_l2", serving_sweep)
     if performance_l1:  # the candidate was measured: record modes whose native reference could not run
         measured = {item["reference_mode"] for item in performance_l1}
         performance_l1 += [unavailable_mode(mode, phases.errors.get(f"reference_perf_{mode}", "not measured"))
@@ -413,21 +477,34 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
                         if persistent["suite"] == item["suite"]:
                             persistent["isolated_check"] = {key: item[key] for key in ("status", "passed", "pass_rate")}
         phases.run("isolated_check", isolated)
+    failing_family = {item["suite"] for item in accuracy if item.get("source") == "family" and item["status"] == "fail"}
+    if failing_family:
+        def isolated_family() -> None:
+            for item in family.run(environment, model, out, python, isolated=True, only=failing_family):
+                for persistent in accuracy:
+                    if persistent["suite"] == item["suite"] and persistent.get("source") == "family":
+                        persistent["isolated_check"] = {key: item.get(key) for key in ("status", "passed", "pass_rate")}
+        phases.run("isolated_family_check", isolated_family)
     for item in accuracy:
-        item["golden"] = golden_status.get(item["suite"])
+        if item.get("source") != "family":
+            item["golden"] = golden_status.get(item["suite"])
 
     result = {"model": model["model"], "operation": model["operation"], "task": model.get("task"),
+              "repro": f"trtmc-aiperf-qual run --profile {model['catalog_profile']} --environment "
+                       f"{environment.values.get('environment_file', '<environment.yaml>')} --out {out}",
               "family": model.get("family"), "started": started, "platform": {"id": platform, **fingerprint},
               "reference": {key: reference.get(key) for key in ("backend", "precision", "perf_precision",
                                                                  "timing_precision", "fallback_from", "noise_error",
                                                                  "precision_fallback_from")},
               "reference_python": python, "duration_s": time.time() - started, "accuracy": accuracy,
-              "noise_floor": noise, "performance_l1": performance_l1, "errors": phases.errors,
+              "noise_floor": noise, "performance_l1": performance_l1, "performance_l2": performance_l2,
+              "errors": phases.errors,
               "provenance": {"aiperf": importlib.metadata.version("aiperf"),
                              "plugins": importlib.metadata.version("trtmc-aiperf-plugins"),
                              "suites": {name: suite.manifest for name, suite in suites.items()},
                              "perf_suite": perf_suite.manifest if perf_suite else None}}
-    result["verdict"] = judge.verdict(result, expected_suites=len(model["accuracy"]),
+    result["verdict"] = judge.verdict(result, expected_suites=len(model["accuracy"])
+                                      + len(model.get("family_accuracy", [])) + len(model.get("supplementary", [])),
                                       expected_modes=len(l1["reference_modes"]) if l1 else 0)
     write_report(out, result)
     return result
