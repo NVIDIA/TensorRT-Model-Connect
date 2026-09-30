@@ -1,0 +1,22 @@
+{
+  "name": "yolos-small",
+  "hf_id": "hustvl/yolos-small",
+  "hf_revision": "3d8f7130d3ce4907cb206fe1c8485dc8fe8703de",
+  "bundle": "yolos-small.bundle",
+  "family": "yolos",
+  "task": "object_detection",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "yolos-small",
+      "premerge": true,
+      "test_image": "test_img.jpeg",
+      "reference_precision": "fp32",
+      "min_box_iou": 0.5,
+      "max_score_abs_diff": 0.05
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

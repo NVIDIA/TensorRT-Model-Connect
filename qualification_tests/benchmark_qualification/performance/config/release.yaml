@@ -18,6 +18,12 @@ defaults:
     asset_loading_included: false
 
 excluded_profiles:
+  - model: yolos-small
+    reason: >-
+      Functional and Hugging Face reference-parity qualification is present, but
+      this change adds no release-performance workload or receipt. The family
+      builds the checkpoint's native resolution only, so a benchmark workload
+      would need to state that fixed input size.
   - model: moge-2-vitl
     reason: >-
       Family-owned accuracy and internal performance qualification are present,
