@@ -911,6 +911,7 @@ jobs:
         id: test
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+          GPU_TYPE: ${{ vars.TRTMC_COMMUNITY_GPU_TYPE || 'L40' }}
           MERGE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
           PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
           FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
@@ -936,40 +937,66 @@ jobs:
               n=$((n + 1))
             done
           }
-          retry brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
-          # The host coordinator and container entrypoint belong to the chosen
-          # CI commit. Neither imports contributor code outside the container.
-          [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
-          retry brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py"
-          # A freshly created instance's SSH session may not have its Docker
-          # group membership yet. The first live GPU run reached this point
-          # and failed on docker.sock, so do not depend on propagation timing.
-          retry brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements"
-          # Checkpoints are downloaded by the trusted coordinator before the
-          # family container switches Hugging Face into offline mode.
-          # Ubuntu host images do not ship ensurepip by default, so the
-          # staging venv needs python3-venv installed before creation.
-          retry brev exec "$INSTANCE_NAME" "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-venv"
-          retry brev exec "$INSTANCE_NAME" "python3 -m venv /tmp/trtmc-community-stage-venv && /tmp/trtmc-community-stage-venv/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0"
 
-          # Each selected family gets a fresh container on this one VM. The
-          # coordinator waits for its removal before starting the next family,
-          # and aggregates failures after all families have been attempted.
-          # Repository credentials are not forwarded to contributor code.
-          # tools.brev_exec caches its remote result keyed by this run's
-          # result file, so a retry after a dropped connection is safe.
-          echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
-          retry python3 -m tools.brev_exec \
-            --instance "$INSTANCE_NAME" \
-            --log /tmp/gpu-ci-output.log \
-            --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            -- sudo env \
-            "TRTMC_GPU_SCOPE=$SCOPE" \
-            "TRTMC_GPU_FAMILIES=$FAMILIES" \
-            "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
-            "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
-            "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
-            /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect
+          # Some SSH failures mean the instance itself never became usable
+          # (e.g. the provider reports InsufficientCapacity after Brev already
+          # reported success), so retrying the same command against it can
+          # never succeed. Run the whole remote sequence as one unit so a
+          # failure here can fall back to reserving a fresh instance instead.
+          run_on_instance() {
+            retry brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || return 1
+            # The host coordinator and container entrypoint belong to the chosen
+            # CI commit. Neither imports contributor code outside the container.
+            [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
+            retry brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py" || return 1
+            # A freshly created instance's SSH session may not have its Docker
+            # group membership yet. The first live GPU run reached this point
+            # and failed on docker.sock, so do not depend on propagation timing.
+            retry brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements" || return 1
+            # Checkpoints are downloaded by the trusted coordinator before the
+            # family container switches Hugging Face into offline mode.
+            # Ubuntu host images do not ship ensurepip by default, so the
+            # staging venv needs python3-venv installed before creation.
+            retry brev exec "$INSTANCE_NAME" "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-venv" || return 1
+            retry brev exec "$INSTANCE_NAME" "python3 -m venv /tmp/trtmc-community-stage-venv && /tmp/trtmc-community-stage-venv/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0" || return 1
+
+            # Each selected family gets a fresh container on this one VM. The
+            # coordinator waits for its removal before starting the next family,
+            # and aggregates failures after all families have been attempted.
+            # Repository credentials are not forwarded to contributor code.
+            # tools.brev_exec caches its remote result keyed by this run's
+            # result file, so a retry after a dropped connection is safe.
+            echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
+            retry python3 -m tools.brev_exec \
+              --instance "$INSTANCE_NAME" \
+              --log /tmp/gpu-ci-output.log \
+              --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              -- sudo env \
+              "TRTMC_GPU_SCOPE=$SCOPE" \
+              "TRTMC_GPU_FAMILIES=$FAMILIES" \
+              "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
+              "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+              "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
+              /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect || return 1
+          }
+
+          max_instance_attempts=3
+          instance_attempt=1
+          while true; do
+            if run_on_instance; then
+              break
+            fi
+            if [ "$instance_attempt" -ge "$max_instance_attempts" ]; then
+              echo "::error::GPU instance unusable after $max_instance_attempts attempts (including re-creation)"
+              exit 1
+            fi
+            # Reuse the same deterministic name so the existing teardown
+            # steps, which key off it, still find and delete this instance.
+            echo "Instance $INSTANCE_NAME appears unusable (e.g. InsufficientCapacity); reserving a fresh one with the same name..."
+            brev delete "$INSTANCE_NAME" || true
+            brev create "$INSTANCE_NAME" -g "$GPU_TYPE" --timeout 600
+            instance_attempt=$((instance_attempt + 1))
+          done
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
