@@ -15,6 +15,7 @@ const TASKS = {
   image_features: ['Image feature extraction', 'Computer Vision', 'image-feature-extraction', 'extract-features'],
   image_generation: ['Image generation', 'Computer Vision', 'text-to-image', 'generate-image'],
   image_generation_batch: ['Batch image generation', 'Computer Vision', 'text-to-image', 'generate-image-batch'],
+  monocular_depth: ['Depth estimation', 'Computer Vision', 'depth-estimation', 'depth'],
   monocular_geometry: ['Monocular geometry', 'Computer Vision', 'depth-estimation', 'geometry'],
   object_detection: ['Object detection', 'Computer Vision', 'object-detection', 'detect'],
   pose_hypothesis_refinement: ['Pose hypothesis refinement', 'Robotics', 'robotics', null],
