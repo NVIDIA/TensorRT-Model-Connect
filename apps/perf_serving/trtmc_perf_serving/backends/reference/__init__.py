@@ -60,11 +60,23 @@ class ReferenceBackend:
         spec = self._spec
         return {"backend": "reference", "operation": spec.operation, "model": spec.model,
                 "revision": spec.revision, "precision": spec.precision, "mode": spec.mode,
-                "adapter": type(self._adapter).__name__, "timing_scope": "task-model-call-wall",
-                "input_preparation_included": False, "numerics": dict(self._numerics)}
+                "adapter": type(self._adapter).__name__, "timing_scope": "task-call-wall",
+                "input_preparation_included": True, "numerics": dict(self._numerics)}
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
-        return self._adapter.invoke(request, artifact_base)
+        """Timed like the TRTMC public Task call: the whole request (input preparation, model call, and
+        output decoding); the adapter's model-only time stays in ``model_only_ms``."""
+        import time
+
+        from .common import synchronize
+
+        synchronize()
+        started = time.perf_counter()
+        invocation = self._adapter.invoke(request, artifact_base)
+        synchronize()
+        total_ms = (time.perf_counter() - started) * 1000.0
+        return Invocation(invocation.observation, total_ms,
+                          {**dict(invocation.extra or {}), "model_only_ms": invocation.model_call_ms})
 
     def close(self) -> None:
         self._adapter = None

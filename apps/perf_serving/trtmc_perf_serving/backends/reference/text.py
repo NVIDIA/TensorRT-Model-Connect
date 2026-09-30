@@ -32,7 +32,8 @@ def _generation_kwargs(request: Mapping[str, Any]) -> dict[str, Any]:
 class TextGeneration:
     """``generate`` for causal LMs, encoder-decoders, and image-text-to-text models.
 
-    Timed boundary: ``model.generate`` after tokenization/image preprocessing.
+    ``model_only_ms`` is ``model.generate`` after tokenization/image preprocessing; torch.compile
+    references of causal LMs generate with a static KV cache when the architecture supports one.
     """
 
     def __init__(self, spec: ReferenceSpec) -> None:
@@ -52,6 +53,9 @@ class TextGeneration:
                          else transformers.AutoModelForCausalLM)
         self.encoder_decoder = bool(config.is_encoder_decoder)
         self.model = maybe_compile(model_cls.from_pretrained(spec.model, **kwargs).to(spec.device).eval(), spec)
+        # The strong compiled baseline for causal LMs: a static KV cache (fixed shapes the compiled
+        # forward reuses); models that cannot use one fall back to the dynamic cache.
+        self.static_cache = spec.mode == "compile" and not self.encoder_decoder and self.processor is None
 
     def _inputs(self, request: Mapping[str, Any]) -> dict[str, torch.Tensor]:
         prompt = str(required(request, "prompt"))
@@ -79,14 +83,21 @@ class TextGeneration:
         if self.encoder_decoder:
             # Transformers counts the decoder start token in max_new_tokens; TRTMC does not.
             kwargs["max_new_tokens"] += 1
-        output, model_ms = timed(lambda: self.model.generate(**inputs, **kwargs))
+        if self.static_cache:
+            try:
+                output, model_ms = timed(lambda: self.model.generate(**inputs, **kwargs, cache_implementation="static"))
+            except Exception:  # noqa: BLE001 - this architecture has no static cache: keep the dynamic one
+                self.static_cache = False
+        if not self.static_cache:
+            output, model_ms = timed(lambda: self.model.generate(**inputs, **kwargs))
         prompt_tokens = 0 if self.encoder_decoder else int(inputs["input_ids"].shape[1])
         token_ids = output[0, prompt_tokens:].tolist()
         if self.encoder_decoder:
             token_ids = self._strip_start_and_eos(token_ids)[: int(request.get("max_new_tokens", 64))]
         text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
         return invocation({"output_tokens": len(token_ids), "token_ids": token_ids, "text": text},
-                          model_ms, prompt_tokens=int(inputs["input_ids"].shape[1]))
+                          model_ms, prompt_tokens=int(inputs["input_ids"].shape[1]),
+                          kv_cache="static" if self.static_cache else "dynamic")
 
 
     def _strip_start_and_eos(self, token_ids: list[int]) -> list[int]:

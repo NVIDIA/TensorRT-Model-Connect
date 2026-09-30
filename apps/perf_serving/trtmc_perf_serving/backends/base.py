@@ -22,9 +22,9 @@ class BackendUnavailable(RuntimeError):
 class Invocation:
     """One operation call.
 
-    ``model_call_ms`` is the backend's own timed boundary: the public Task call
-    for TRTMC (``public_task_call_wall``) and the model call after input
-    preparation for references (``task-model-call-wall``).
+    ``model_call_ms`` is the backend's timed boundary, the whole Task call on both sides: the public
+    Task call for TRTMC (``public_task_call_wall``) and the adapter call including input
+    preparation and output decoding for references (``task-call-wall``).
     """
 
     observation: Mapping[str, Any]

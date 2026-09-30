@@ -9,9 +9,11 @@ qualification case: a family ``reference.py`` or a shared task adapter. This bac
 declared reference for every request, through the same descriptor and command construction as
 benchmark qualification, so the framework itself holds no family code.
 
-Each request starts one reference process (model load excluded from timing); ``model_call_ms``
-is the reference's own latency p50 over its warmup and iterations, and the observation is its
-output summary.
+A reference built on the shared harness (``reference_harness.run``) is loaded once in this server
+and every request times one ``Session.invoke()`` here (``timing: persistent``), so AIPerf drives the
+measurement as for the generic adapters; the loaded session is reused while requests repeat and
+reloaded when a request changes. Other references start one process per request (model load
+excluded) and report their own latency p50 over warmup and iterations (``timing: process``).
 """
 
 from __future__ import annotations
@@ -19,8 +21,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import runpy
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -85,6 +89,9 @@ class ScriptReferenceBackend:
         self._measurement = {"warmup": warmup, "iterations": iterations}
         self.operation = str(self._case.values["operation"])
         self._profile = profile
+        self._session: Any = None
+        self._session_request: dict[str, Any] | None = None
+        self._persistent = self._harness_script(repository) is not None
 
     def describe(self) -> Mapping[str, Any]:
         baseline = self._baseline
@@ -93,6 +100,7 @@ class ScriptReferenceBackend:
                 "precision": baseline.get("precision"), "modes": self._modes,
                 "adapter": baseline.get("adapter") or baseline.get("script") or baseline.get("runner"),
                 "measurement": dict(self._measurement), "timing_scope": baseline.get("timing_scope"),
+                "timing": "persistent" if self._persistent else "process",
                 "input_preparation_included": baseline.get("input_preparation_included"),
                 "numerics": {"deterministic": False}}
 
@@ -104,9 +112,73 @@ class ScriptReferenceBackend:
                 "measurement": dict(self._measurement), "baseline": dict(self._baseline)}
         return self._matrix.resolve_entries([spec], self._environment)[0]
 
+    def _harness_script(self, repository: Path) -> Path | None:
+        """The family reference script when it runs through the shared harness (a persistent session
+        is possible), else None. Generic runners and self-measuring scripts run per process."""
+        declared = self._baseline.get("script")
+        if not isinstance(declared, str):
+            return None
+        script = repository / "families" / str(self._case.family) / declared
+        text = script.read_text(errors="replace") if script.suffix == ".py" and script.is_file() else ""
+        return script if "reference_harness.run(" in text else None
+
+    def _harness_session(self, request: Mapping[str, Any], work: Path) -> Any:
+        """The loaded harness session for ``request`` (loaded once, reloaded when the request changes)."""
+        if self._session is not None and self._session_request == dict(request):
+            return self._session
+        from qualification_tests.benchmark_qualification.performance import reference_harness as harness
+
+        command = self._matrix._baseline_command(self._entry(request, work), self._environment,
+                                                 work / "persistent.json", mode=self._modes[0])
+        captured: dict[str, Any] = {}
+
+        def capture(argv: Any, *, description: str, load: Any) -> int:
+            arguments = harness.parser(description).parse_args(list(argv) if argv is not None else command[2:])
+            values = harness.flatten_config(harness.json_object(arguments.request_json, "--request-json"))
+            options = harness.json_object(arguments.adapter_options_json, "--adapter-options-json")
+            captured["session"] = load(arguments, values, options)
+            return 0
+
+        original, saved_argv = harness.run, sys.argv
+        harness.run, sys.argv = capture, [command[1], *command[2:]]
+        try:
+            runpy.run_path(command[1], run_name="__main__")
+        except SystemExit:
+            pass
+        finally:
+            harness.run, sys.argv = original, saved_argv
+        if "session" not in captured:
+            raise BackendError(f"{command[1]} did not load a harness session")
+        self._session, self._session_request = captured["session"], dict(request)
+        return self._session
+
+    def _invoke_persistent(self, request: Mapping[str, Any], artifact_base: Path, work: Path) -> Invocation:
+        from qualification_tests.benchmark_qualification.performance import reference_harness as harness
+
+        session = self._harness_session(request, work)
+        harness.synchronize()
+        started = time.perf_counter()
+        summary = dict(session.invoke())
+        harness.synchronize()
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        output = work / "reference-persistent.json"
+        if session.materialize is not None:
+            session.materialize(summary, output)
+        observation = {**summary, "reference_mode": self._modes[0], "reference_timing": "persistent"}
+        _link_media(observation, output, artifact_base)
+        return Invocation(observation=observation, model_call_ms=elapsed_ms,
+                          extra={"reference_mode": self._modes[0], "timing": "persistent"})
+
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         matrix = self._matrix
         work = Path(tempfile.mkdtemp(prefix="script-", dir=self._scratch))
+        if self._persistent:
+            try:
+                return self._invoke_persistent(request, artifact_base, work)
+            except Exception as error:  # noqa: BLE001 - fall back to one process per request
+                print(f"trtmc-perf-serve: persistent reference failed ({type(error).__name__}: {error}); "
+                      "using one reference process per request", file=sys.stderr)
+                self._persistent, self._session = False, None
         try:
             entry = self._entry(request, work)
         except (matrix.PerfMatrixError, self._runtime.QualificationError, ValueError, KeyError) as error:
@@ -124,7 +196,7 @@ class ScriptReferenceBackend:
                 tail = (work / f"{mode}.stderr.log").read_text(errors="replace")[-800:]
                 errors.append(f"{mode}: exit {completed['exit_code']} {result.get('error', '')} {tail}")
                 continue
-            observation = {**result.get("output_summary", {}), "reference_mode": mode}
+            observation = {**result.get("output_summary", {}), "reference_mode": mode, "reference_timing": "process"}
             _link_media(observation, output, artifact_base)
             return Invocation(observation=observation, model_call_ms=matrix._p50(result),
                               extra={"samples_ms": result.get("samples_ms", []), "reference_mode": mode})
