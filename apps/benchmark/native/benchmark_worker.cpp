@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime_api.h>
@@ -39,6 +40,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -52,6 +54,7 @@ using Clock = std::chrono::steady_clock;
 struct Arguments {
     std::string request_path;
     std::string output_path;
+    bool serve{false};
 };
 
 struct Timing {
@@ -69,14 +72,25 @@ Arguments parse_arguments(int argc, char** argv) {
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--help" || argument == "-h") {
-            std::cout << "trtmc_benchmark_worker --request REQUEST.json --output RESULT.json\n";
+            std::cout << "trtmc_benchmark_worker --request REQUEST.json --output RESULT.json\n"
+                         "trtmc_benchmark_worker --serve SESSION.json   (JSONL on stdin/stdout)\n";
             std::exit(0);
         }
-        if (argument != "--request" && argument != "--output")
+        if (argument != "--request" && argument != "--output" && argument != "--serve")
             throw std::invalid_argument("unknown argument: " + argument);
         if (++index >= argc)
             throw std::invalid_argument(argument + " requires a path");
-        (argument == "--request" ? result.request_path : result.output_path) = argv[index];
+        if (argument == "--serve") {
+            result.serve = true;
+            result.request_path = argv[index];
+        } else {
+            (argument == "--request" ? result.request_path : result.output_path) = argv[index];
+        }
+    }
+    if (result.serve) {
+        if (!result.output_path.empty())
+            throw std::invalid_argument("--serve cannot be combined with --output");
+        return result;
     }
     if (result.request_path.empty() || result.output_path.empty())
         throw std::invalid_argument("--request and --output are required");
@@ -3735,13 +3749,8 @@ Json run_solve(const trtmc::Model& model, const Json& request, const Timing& tim
                                 primary + "'");
 }
 
-Json execute(const Json& request, const std::string& output_path) {
-    if (request.at("schema_version").get<int>() != 2)
-        throw std::invalid_argument("unsupported worker request schema");
-    const std::string bundle = request.at("bundle").get<std::string>();
-    const std::string runtime_root = request.value("runtime_root", std::string{});
-    const std::string operation = request.at("operation").get<std::string>();
-    Json operation_request = request.at("request");
+void inject_artifact_paths(const std::string& operation, Json& operation_request,
+                           const std::string& output_path) {
     if (operation == "generate_audio" || operation == "speak" || operation == "generate_image" ||
         operation == "speech_dialogue") {
         std::filesystem::path artifact(output_path);
@@ -3763,7 +3772,27 @@ Json execute(const Json& request, const std::string& output_path) {
         artifact.replace_extension(".structure");
         operation_request["_artifact_prefix"] = artifact.string();
     }
-    const Timing timing = parse_timing(request.at("measurement"));
+}
+
+// A loaded bundle bound to one operation. The one-shot path measures a single
+// request; serve mode keeps the session and dispatches every received request.
+struct Session {
+    std::string operation;
+    std::string primary;
+    std::string selected;
+    std::string runtime_root;
+    double load_ms{0};
+    std::optional<trtmc::Model> model;
+    std::unique_ptr<trtmc::ITask> task;
+};
+
+Session open_session(const Json& request) {
+    if (request.at("schema_version").get<int>() != 2)
+        throw std::invalid_argument("unsupported worker request schema");
+    const std::string bundle = request.at("bundle").get<std::string>();
+    const std::string runtime_root = request.value("runtime_root", std::string{});
+    const std::string operation = request.at("operation").get<std::string>();
+    const Json& operation_request = request.at("request");
 
     const auto info = trtmc::Bundle::open(bundle).info();
     if (request.contains("expected_family") != request.contains("expected_task"))
@@ -3787,14 +3816,16 @@ Json execute(const Json& request, const std::string& output_path) {
             throw std::invalid_argument("selected_task must be a nonempty Task ID");
         selected = request.at("selected_task").get<std::string>();
     }
-    double load_ms = 0;
-    Json measured;
+    Session session;
+    session.operation = operation;
+    session.primary = primary;
+    session.runtime_root = runtime_root;
     if (!trtmc::app::uses_existing_task_runtime(primary)) {
         trtmc::LoadOptions options;
         options.runtime_root = runtime_root;
         const auto load_started = Clock::now();
-        const auto model = trtmc::Model::load(bundle, options);
-        load_ms = elapsed_ms(load_started);
+        const auto& model = session.model.emplace(trtmc::Model::load(bundle, options));
+        session.load_ms = elapsed_ms(load_started);
         if (!explicit_task) {
             // Preserve the established implicit choices once, before dispatch.
             // Explicit selectors never enter this default-selection branch.
@@ -3834,6 +3865,25 @@ Json execute(const Json& request, const std::string& output_path) {
         if (std::none_of(tasks.begin(), tasks.end(),
                          [&](const auto& task) { return task.id == selected; }))
             throw std::invalid_argument("selected Task is not bound by this model: " + selected);
+    } else {
+        if (explicit_task)
+            throw std::invalid_argument("selected_task requires a family migrated to the Task SDK");
+        if (runtime_root.empty())
+            throw std::invalid_argument("runtime_root is required for an existing bundle mode");
+        const auto load_started = Clock::now();
+        session.task = trtmc::load_task(bundle, runtime_root);
+        session.load_ms = elapsed_ms(load_started);
+    }
+    session.selected = selected;
+    return session;
+}
+
+Json dispatch(const Session& session, const Json& operation_request, const Timing& timing) {
+    const std::string& operation = session.operation;
+    const std::string& selected = session.selected;
+    Json measured;
+    if (session.model) {
+        const trtmc::Model& model = *session.model;
         if (operation == "generate")
             measured = run_generate(model, operation_request, timing, selected);
         else if (operation == "translate")
@@ -3892,15 +3942,8 @@ Json execute(const Json& request, const std::string& output_path) {
             throw std::invalid_argument("semantic benchmark operation is not implemented: " +
                                         operation);
     } else {
-        if (explicit_task)
-            throw std::invalid_argument("selected_task requires a family migrated to the Task SDK");
         if (operation_request.contains("token_ids"))
             throw std::invalid_argument("token_ids requires a semantic TextSource Task");
-        if (runtime_root.empty())
-            throw std::invalid_argument("runtime_root is required for an existing bundle mode");
-        const auto load_started = Clock::now();
-        auto task = trtmc::load_task(bundle, runtime_root);
-        load_ms = elapsed_ms(load_started);
 
         using Runner = Json (*)(trtmc::ITask&, const Json&, const Timing&);
         static const std::unordered_map<std::string, Runner> runners = {
@@ -3925,24 +3968,129 @@ Json execute(const Json& request, const std::string& output_path) {
         const auto runner = runners.find(operation);
         if (runner == runners.end())
             throw std::invalid_argument("unsupported operation: " + operation);
-        measured = runner->second(*task, operation_request, timing);
+        measured = runner->second(*session.task, operation_request, timing);
     }
+    return measured;
+}
+
+Json execute(const Json& request, const std::string& output_path) {
+    const Session session = open_session(request);
+    Json operation_request = request.at("request");
+    inject_artifact_paths(session.operation, operation_request, output_path);
+    const Timing timing = parse_timing(request.at("measurement"));
+    Json measured = dispatch(session, operation_request, timing);
     return {
         {"schema_version", "trtmc.benchmark-worker-result/v2"},
         {"status", "completed"},
         {"case_name", request.at("case_name")},
-        {"operation", operation},
-        {"task", primary},
-        {"selected_task", selected},
+        {"operation", session.operation},
+        {"task", session.primary},
+        {"selected_task", session.selected},
         {"timing_scope", "public_task_call_wall"},
         {"observation_serialization_included", false},
         {"asset_loading_included", timing.asset_loading_included},
-        {"load_ms", load_ms},
+        {"load_ms", session.load_ms},
         {"warmup", timing.warmup},
         {"iterations", timing.iterations},
         {"observations", std::move(measured.at("observations"))},
         {"output_summary", std::move(measured.at("output_summary"))},
     };
+}
+
+constexpr std::size_t kServeInlineArrayLimit = 64;
+
+// Replace arrays longer than kServeInlineArrayLimit by their length. Whole masks
+// or feature maps would otherwise dominate per-request serialization cost.
+Json compact_observation(const Json& value) {
+    if (value.is_array()) {
+        if (value.size() > kServeInlineArrayLimit)
+            return Json{{"$array_length", value.size()}};
+        Json result = Json::array();
+        for (const auto& item : value)
+            result.push_back(compact_observation(item));
+        return result;
+    }
+    if (value.is_object()) {
+        Json result = Json::object();
+        for (auto item = value.begin(); item != value.end(); ++item)
+            result[item.key()] = compact_observation(item.value());
+        return result;
+    }
+    return value;
+}
+
+// Persistent serving: load once from SESSION.json (the one-shot request schema;
+// `measurement` is optional), then answer one JSONL request per stdin line:
+//   {"id": "...", "request": {...operation request...}, "artifact_base": "/dir/name",
+//    "full_observation": false}
+//   {"id": "...", "type": "shutdown"}
+// Observations are compacted unless full_observation is true.
+// Every request runs exactly one call (no warmup) through the same dispatch and
+// public_task_call_wall timing as the one-shot benchmark path.
+int serve(const Arguments& arguments) {
+    std::fflush(stdout);
+    const int protocol_fd = ::dup(STDOUT_FILENO);
+    if (protocol_fd < 0 || ::dup2(STDERR_FILENO, STDOUT_FILENO) < 0)
+        throw std::runtime_error("cannot reserve the serve protocol stream");
+    FILE* protocol = ::fdopen(protocol_fd, "w");
+    if (protocol == nullptr)
+        throw std::runtime_error("cannot open the serve protocol stream");
+    const auto emit = [protocol](const Json& value) {
+        const std::string line = value.dump() + "\n";
+        std::fwrite(line.data(), 1, line.size(), protocol);
+        std::fflush(protocol);
+    };
+
+    const Json startup = read_json(arguments.request_path);
+    std::optional<Session> loaded;
+    try {
+        loaded.emplace(open_session(startup));
+    } catch (const std::exception& error) {
+        emit({{"event", "failed"}, {"error", error.what()}});
+        return 1;
+    }
+    const Session& session = *loaded;
+    Timing timing;
+    if (startup.contains("measurement"))
+        timing.asset_loading_included =
+            optional_value<bool>(startup.at("measurement"), "asset_loading_included", false);
+    emit({{"event", "ready"},
+          {"schema_version", "trtmc.benchmark-worker-serve/v1"},
+          {"operation", session.operation},
+          {"task", session.primary},
+          {"selected_task", session.selected},
+          {"timing_scope", "public_task_call_wall"},
+          {"asset_loading_included", timing.asset_loading_included},
+          {"load_ms", session.load_ms}});
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty())
+            continue;
+        std::string id;
+        try {
+            const Json message = Json::parse(line);
+            id = message.at("id").get<std::string>();
+            if (message.value("type", std::string{"infer"}) == "shutdown") {
+                emit({{"id", id}, {"ok", true}, {"event", "shutdown"}});
+                break;
+            }
+            Json operation_request = message.at("request");
+            if (message.contains("artifact_base"))
+                inject_artifact_paths(session.operation, operation_request,
+                                      message.at("artifact_base").get<std::string>());
+            Json measured = dispatch(session, operation_request, timing);
+            Json& observation = measured.at("observations").at(0);
+            emit({{"id", id},
+                  {"ok", true},
+                  {"observation", message.value("full_observation", false)
+                                      ? std::move(observation)
+                                      : compact_observation(observation)}});
+        } catch (const std::exception& error) {
+            emit({{"id", id}, {"ok", false}, {"error", error.what()}});
+        }
+    }
+    return 0;
 }
 
 } // namespace
@@ -3951,6 +4099,8 @@ int main(int argc, char** argv) {
     std::string output_path;
     try {
         const Arguments arguments = parse_arguments(argc, argv);
+        if (arguments.serve)
+            return serve(arguments);
         output_path = arguments.output_path;
         write_json(output_path, execute(read_json(arguments.request_path), output_path));
         return 0;
