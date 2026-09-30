@@ -4081,6 +4081,14 @@ int serve(const Arguments& arguments) {
                                       message.at("artifact_base").get<std::string>());
             Json measured = dispatch(session, operation_request, timing);
             Json& observation = measured.at("observations").at(0);
+            // The request's full output summary (shapes, artifacts, metadata) completes the
+            // per-iteration observation, as the one-shot result carries both.
+            if (measured.contains("output_summary") && measured.at("output_summary").is_object()) {
+                for (const auto& [key, value] : measured.at("output_summary").items()) {
+                    if (!observation.contains(key))
+                        observation[key] = value;
+                }
+            }
             emit({{"id", id},
                   {"ok", true},
                   {"observation", message.value("full_observation", false)
