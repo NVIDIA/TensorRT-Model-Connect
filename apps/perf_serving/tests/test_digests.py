@@ -30,3 +30,17 @@ def test_audio_digest_from_wav_or_array_and_other_operations_untouched(tmp_path)
     digest = add_media_digests({"sample_rate": 24000}, "generate_audio", tmp_path)["audio_digest"]
     assert abs(digest["seconds"] - 1.0) < 1e-6 and abs(digest["rms"] - 0.5 / 2 ** 0.5) < 1e-3
     assert add_media_digests({"text": "x"}, "generate", tmp_path) == {"text": "x"}
+
+
+def test_media_frames_reads_worker_pngs_in_frame_order_or_the_reference_array(tmp_path):
+    from trtmc_perf_serving.digests import media_frames
+
+    worker = tmp_path / "worker"
+    worker.mkdir()
+    for index in (10, 2):
+        Image.fromarray(np.full((4, 6, 3), index, dtype=np.uint8)).save(worker / f"output.{index}.png")
+    assert [int(frame[0, 0, 0]) for frame in media_frames(worker)] == [2, 10]
+    np.save(tmp_path / "output.npy", np.ones((1, 3, 4, 6, 3), dtype=np.float32))
+    frames = media_frames(tmp_path)
+    assert len(frames) == 3 and frames[0].dtype == np.uint8 and frames[0].shape == (4, 6, 3)
+    assert media_frames(tmp_path / "worker" / "missing") == []

@@ -44,6 +44,8 @@ class ServingConfig:
     # Renders multi-message chat into one prompt with the model's chat template (generate only).
     chat_renderer: openai.ChatRenderer | None = None
     info: Mapping[str, Any] = field(default_factory=dict)
+    # gpu_memory.MemoryProbe: report each call's peak GPU memory (peak_memory_mb in the timing).
+    memory_probe: Any = None
 
 
 MAX_INLINE_ITEMS = 64
@@ -118,7 +120,16 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             # Backends write output artifacts below the request directory even without inputs.
             workdir.mkdir(parents=True, exist_ok=True)
             resolved = materialize_files(operation_request, workdir / "inputs")
-            invocation, queue_ms, handler_ms = await lane.run(lambda: backend.invoke(resolved, workdir / "output"))
+            memory: dict[str, float] = {}
+
+            def call() -> Invocation:
+                if config.memory_probe is None:
+                    return backend.invoke(resolved, workdir / "output")
+                result, memory["peak_memory_mb"] = config.memory_probe.measure(
+                    lambda: backend.invoke(resolved, workdir / "output"))
+                return result
+
+            invocation, queue_ms, handler_ms = await lane.run(call)
             # Generated media leave the request as digests (the files are removed below).
             invocation = Invocation(add_media_digests(invocation.observation, operation, workdir),
                                     invocation.model_call_ms, invocation.extra)
@@ -129,7 +140,7 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             if not config.keep_artifacts:
                 shutil.rmtree(workdir, ignore_errors=True)
         timing = {"queue_ms": queue_ms, "model_call_ms": invocation.model_call_ms, "handler_ms": handler_ms,
-                  **{key: value for key, value in invocation.extra.items() if key != "prompt_tokens"}}
+                  **memory, **{key: value for key, value in invocation.extra.items() if key != "prompt_tokens"}}
         reported = invocation.observation if config.full_observations else compact(invocation.observation)
         records.write({"request_id": request_id, "route": route, "operation": operation,
                        "backend": identity.get("backend"), "time": time.time(), "timing": timing,
@@ -244,7 +255,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
         async def handle(request_id: str):
             mapped = openai.image_generation(await request.json(), config.base_request)
             result = await execute(request_id, "/v1/images/generations", mapped)
-            return respond({"created": int(time.time()), "data": [{"url": _artifact_url(result)}]}, result, request_id)
+            return respond({"created": int(time.time()), "data": [{"url": _artifact_url(result)}],
+                            **_media_stats(result["timing"])}, result, request_id)
         return await guarded(request, "/v1/images/generations", ("generate_image",), handle)
 
     @app.post("/v1/videos")
@@ -263,7 +275,7 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
                 try:
                     result = await execute(request_id, "/v1/videos", mapped)
                     job.update(status="completed", url=_artifact_url(result), trtmc_timing=result["timing"],
-                               inference_time_s=result["timing"]["model_call_ms"] / 1000.0)
+                               **_media_stats(result["timing"]))
                 except Exception as error:  # noqa: BLE001 - surfaced through the polled job
                     job.update(status="failed", error={"message": str(error)})
 
@@ -307,6 +319,14 @@ def _error(status: int, code: str, message: str, request_id: str | None) -> JSON
     headers = {"X-Request-ID": request_id} if request_id else None
     return JSONResponse({"error": {"message": message, "type": kind, "code": code}}, status_code=status,
                         headers=headers)
+
+
+def _media_stats(timing: Mapping[str, Any]) -> dict[str, Any]:
+    """SGLang-style generation fields that AIPerf reads (video_inference_time, video_peak_memory)."""
+    stats = {"inference_time_s": float(timing["model_call_ms"]) / 1000.0}
+    if timing.get("peak_memory_mb") is not None:
+        stats["peak_memory_mb"] = timing["peak_memory_mb"]
+    return stats
 
 
 def _artifact_url(result: Mapping[str, Any]) -> str:

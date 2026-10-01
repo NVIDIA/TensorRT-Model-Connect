@@ -70,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--scratch", type=Path, required=True, help="per-request input/output directory")
     serve.add_argument("--max-queue", type=int, default=64, help="waiting requests before 429 (0: none)")
     serve.add_argument("--keep-artifacts", action="store_true", help="keep per-request inputs and outputs")
+    serve.add_argument("--memory-probe", action="store_true",
+                       help="report each call's peak GPU memory (NVML; valid while the server is alone on the GPU)")
     serve.add_argument("--isolate-requests", action="store_true",
                        help="trtmc backend: restart the worker before every request after the first")
     serve.add_argument("--full-observations", action="store_true",
@@ -122,6 +124,12 @@ def serve(arguments: argparse.Namespace) -> int:
         arguments.profile, manifest_root=arguments.manifest_root, testcase=arguments.testcase,
         operation=arguments.operation, selected_task=arguments.selected_task, bundle=arguments.bundle,
         runtime_root=arguments.runtime_root, overrides=_overrides(arguments.sets))
+    # The baseline must be taken before the backend loads its model.
+    memory_probe = None
+    if arguments.memory_probe:
+        from .gpu_memory import open_probe
+
+        memory_probe = open_probe()
     if arguments.backend == "trtmc":
         from .backends.trtmc import TrtmcWorkerBackend
 
@@ -166,7 +174,7 @@ def serve(arguments: argparse.Namespace) -> int:
         base_request=profile.base_request, records=arguments.records, scratch=arguments.scratch,
         model_name=arguments.model_name or profile.model.name, max_queue=arguments.max_queue,
         keep_artifacts=arguments.keep_artifacts, full_observations=arguments.full_observations,
-        info={"profile": profile.model.name, "testcase": profile.testcase, "family": profile.model.family,
+        memory_probe=memory_probe, info={"profile": profile.model.name, "testcase": profile.testcase, "family": profile.model.family,
               "platform": platform.fingerprint(), "host": platform.host_details()})
     try:
         uvicorn.run(create_app(backend, config), host=arguments.host, port=arguments.port, log_level="warning")

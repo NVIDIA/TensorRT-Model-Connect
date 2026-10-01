@@ -176,3 +176,40 @@ def test_lane_rejects_when_busy_and_queue_is_full():
         assert result.model_call_ms == 1.0 and queue_ms >= 0
 
     asyncio.run(scenario())
+
+
+def test_image_and_video_responses_carry_inference_time_and_probed_peak_memory(tmp_path):
+    import time
+
+    from trtmc_perf_serving.gpu_memory import MemoryProbe
+
+    class FakeNvml:
+        used = [1000 * 1024 * 1024]
+
+        def nvmlDeviceGetMemoryInfo(self, handle):
+            return type("Info", (), {"used": self.used[0]})()
+
+    nvml = FakeNvml()
+    probe = MemoryProbe(nvml, handle=None, interval_s=0.001)
+
+    class Generator(FakeBackend):
+        def invoke(self, request, artifact_base):
+            nvml.used[0] = 1600 * 1024 * 1024  # transient memory during the call
+            time.sleep(0.01)
+            nvml.used[0] = 1100 * 1024 * 1024
+            return Invocation({"artifact": "/out.png"}, 250.0)
+
+    client, _ = client_for(tmp_path, Generator(operation="generate_image"), memory_probe=probe)
+    image = client.post("/v1/images/generations", json={"prompt": "cat", "model": "m", "response_format": "b64_json"})
+    assert image.status_code == 200
+    body = image.json()
+    assert body["inference_time_s"] == 0.25 and body["peak_memory_mb"] == 600.0
+    assert body["trtmc_timing"]["peak_memory_mb"] == 600.0
+    with client:  # keeps the event loop (and the background video job) alive between requests
+        job = client.post("/v1/videos", json={"prompt": "cat", "model": "m", "seconds": 4}).json()  # AIPerf sends JSON
+        for _ in range(200):
+            polled = client.get(f"/v1/videos/{job['id']}").json()
+            if polled["status"] != "in_progress":
+                break
+            time.sleep(0.01)
+    assert polled["status"] == "completed" and polled["inference_time_s"] == 0.25 and polled["peak_memory_mb"] == 600.0

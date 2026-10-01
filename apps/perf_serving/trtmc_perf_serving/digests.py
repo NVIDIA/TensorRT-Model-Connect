@@ -90,17 +90,26 @@ def _media_frames(array: np.ndarray) -> list[np.ndarray]:
     return [array]
 
 
+def media_frames(workdir: Path) -> list[np.ndarray]:
+    """Generated frames of one request (uint8 HWC): the worker's PNGs in frame order, else the
+    reference's ``output.npy``; empty when the request wrote neither."""
+    pngs = sorted((path for path in workdir.glob("output*.png") if ".input." not in path.name),
+                  key=lambda path: [(0, int(part), "") if part.isdigit() else (1, 0, part)
+                                    for part in path.name.split(".")])
+    if pngs:
+        return [_read_png(path) for path in pngs]
+    if (workdir / "output.npy").is_file():
+        return [_to_uint8(frame) for frame in _media_frames(np.load(workdir / "output.npy"))]
+    return []
+
+
 def add_media_digests(observation: Mapping[str, Any], operation: str, workdir: Path) -> dict[str, Any]:
     """Attach ``media_digest``/``audio_digest`` from the request's output files, when present."""
     result = dict(observation)
     if operation in IMAGE_OPERATIONS and "media_digest" not in result:
-        pngs = sorted((path for path in workdir.glob("output*.png") if ".input." not in path.name),
-                      key=lambda path: [(0, int(part), "") if part.isdigit() else (1, 0, part)
-                                        for part in path.name.split(".")])
-        if pngs:
-            result["media_digest"] = image_digest([_read_png(path) for path in pngs])
-        elif (workdir / "output.npy").is_file():
-            result["media_digest"] = image_digest(_media_frames(np.load(workdir / "output.npy")))
+        frames = media_frames(workdir)
+        if frames:
+            result["media_digest"] = image_digest(frames)
     if operation in AUDIO_OPERATIONS and "audio_digest" not in result:
         wavs = sorted(workdir.glob("output*.wav"))
         if wavs:
