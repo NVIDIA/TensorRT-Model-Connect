@@ -80,30 +80,81 @@ def required(request: Mapping[str, Any], name: str) -> Any:
     return request[name]
 
 
+# Output evidence is written after the timed call (the TRTMC worker also stops timing before it
+# writes its artifacts); input files are decoded before it (TRTMC excludes asset loading by default).
+_PENDING = "_pending_array"
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff")
+AUDIO_SUFFIXES = (".wav", ".flac", ".mp3", ".ogg")
+_DECODED: dict[tuple[str, str], Any] = {}
+
+
 def tensor_observation(value: Any, artifact_base: Path) -> dict[str, Any]:
-    """Summarize a tensor output and keep the full value as ``<artifact_base>.npy``."""
+    """Summarize a tensor output (copied to host memory, as the Task returns it); ``write_artifacts``
+    keeps the full value as ``<artifact_base>.npy`` with its sha256 once the timed call returned."""
     if isinstance(value, torch.Tensor):
         array = value.detach().float().cpu().numpy()
     else:
         array = np.asarray(value)
-    artifact = artifact_base.with_suffix(".npy")
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    np.save(artifact, array)
-    return {"shape": list(array.shape), "dtype": str(array.dtype), "artifact": str(artifact),
-            "sha256": hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()}
+    return {"shape": list(array.shape), "dtype": str(array.dtype),
+            "artifact": str(artifact_base.with_suffix(".npy")), _PENDING: array}
 
 
-def load_image(path: str):
+def write_artifacts(observation: Any) -> Any:
+    """Write the pending output arrays of an observation (any nesting) and add their sha256."""
+    if isinstance(observation, list):
+        return [write_artifacts(item) for item in observation]
+    if not isinstance(observation, dict):
+        return observation
+    result = {key: write_artifacts(value) for key, value in observation.items() if key != _PENDING}
+    if _PENDING in observation:
+        array, artifact = observation[_PENDING], Path(observation["artifact"])
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        np.save(artifact, array)
+        result["sha256"] = hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()
+    return result
+
+
+def _read_image(path: str):
     from PIL import Image
 
     with Image.open(path) as image:
         return image.convert("RGB")
 
 
-def load_audio(path: str, sample_rate: int) -> np.ndarray:
+def _read_audio(path: str) -> tuple[np.ndarray, int]:
     import soundfile
 
-    audio, rate = soundfile.read(path, dtype="float32", always_2d=False)
+    return soundfile.read(path, dtype="float32", always_2d=False)
+
+
+def preload_inputs(request: Mapping[str, Any]) -> None:
+    """Read and decode the request's image and audio files ahead of the timed call."""
+    _DECODED.clear()
+    for key, value in request.items():
+        if not (key.endswith("_path") or key.endswith("_paths")):
+            continue
+        for path in value if isinstance(value, list) else [value]:
+            if not isinstance(path, str) or not Path(path).is_file():
+                continue
+            suffix = Path(path).suffix.lower()
+            if suffix in IMAGE_SUFFIXES:
+                _DECODED[("image", path)] = _read_image(path)
+            elif suffix in AUDIO_SUFFIXES:
+                _DECODED[("audio", path)] = _read_audio(path)
+
+
+def release_inputs() -> None:
+    _DECODED.clear()
+
+
+def load_image(path: str):
+    cached = _DECODED.get(("image", path))
+    return cached if cached is not None else _read_image(path)
+
+
+def load_audio(path: str, sample_rate: int) -> np.ndarray:
+    cached = _DECODED.get(("audio", path))
+    audio, rate = cached if cached is not None else _read_audio(path)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
     if rate != sample_rate:

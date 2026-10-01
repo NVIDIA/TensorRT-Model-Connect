@@ -34,7 +34,9 @@ class Vision:
         if spec.operation == "classify" and spec.model.startswith("timm/"):
             import timm
 
-            model = timm.create_model(f"hf-hub:{spec.model}", pretrained=True)
+            # timm resolves a pinned Hub checkpoint as "hf-hub:<repo>@<revision>".
+            model = timm.create_model(f"hf-hub:{spec.model}" + (f"@{spec.revision}" if spec.revision else ""),
+                                      pretrained=True)
             config = timm.data.resolve_data_config({}, model=model)
             self.transform = timm.data.create_transform(**config)
             self.processor = None
@@ -220,9 +222,7 @@ class Diffusion:
         if paths:
             if "image" not in self.parameters:
                 raise BackendError(f"{type(self.pipe).__name__} takes no input image to edit")
-            from PIL import Image
-
-            images = [Image.open(path).convert("RGB") for path in paths]
+            images = [load_image(path) for path in paths]
             kwargs["image"] = images if len(images) > 1 else images[0]
         video = request.get("media_type") == "video" or int(request.get("num_frames", 1)) > 1
         if video:

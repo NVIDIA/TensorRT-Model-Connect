@@ -29,3 +29,23 @@ def test_zero_encoder_embeddings_are_tied_back_to_shared_and_loaded_ones_kept():
     assert broken.encoder.embed_tokens.weight is broken.shared.weight
     assert loaded.encoder.embed_tokens.weight is loaded_weight
     assert retie_encoder_embeddings(pipe) == []
+
+
+def test_timm_classifiers_load_the_pinned_revision(monkeypatch):
+    import sys
+
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+    from trtmc_perf_serving.backends.reference.media import Vision
+
+    import importlib.machinery
+    import types
+
+    created = []
+    fake = types.ModuleType("timm")
+    fake.__spec__ = importlib.machinery.ModuleSpec("timm", None)  # transformers probes timm's availability
+    fake.create_model = lambda name, pretrained: created.append(name) or object()
+    fake.data = SimpleNamespace(resolve_data_config=lambda *args, **kwargs: {}, create_transform=lambda **kwargs: None)
+    monkeypatch.setitem(sys.modules, "timm", fake)
+    with pytest.raises(Exception):  # the stand-in model cannot move to a device; the load already happened
+        Vision(ReferenceSpec(operation="classify", model="timm/convnext_tiny", revision="abc123", device="cpu"))
+    assert created == ["hf-hub:timm/convnext_tiny@abc123"]

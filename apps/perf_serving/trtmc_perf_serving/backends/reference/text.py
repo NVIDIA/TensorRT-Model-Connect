@@ -15,7 +15,12 @@ from .common import ReferenceSpec, invocation, load_image, maybe_compile, requir
 
 
 def _generation_kwargs(request: Mapping[str, Any]) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"max_new_tokens": int(request.get("max_new_tokens", 64))}
+    # One beam unless the request asks for more: a checkpoint's generation config may default to beam
+    # search (Marian: four), while TRTMC decodes greedily.
+    kwargs: dict[str, Any] = {"max_new_tokens": int(request.get("max_new_tokens", 64)),
+                              "num_beams": int(request.get("num_beams", 1))}
+    if float(request.get("repetition_penalty", 1.0)) != 1.0:
+        kwargs["repetition_penalty"] = float(request["repetition_penalty"])
     temperature = float(request.get("temperature", 0.0))
     if temperature > 0:
         kwargs.update(do_sample=True, temperature=temperature)
@@ -27,6 +32,43 @@ def _generation_kwargs(request: Mapping[str, Any]) -> dict[str, Any]:
     if int(request.get("seed", -1)) >= 0:
         torch.manual_seed(int(request["seed"]))
     return kwargs
+
+
+def _language_controls(tokenizer: Any, request: Mapping[str, Any]) -> tuple[dict[str, int], int | None]:
+    """NLLB/M2M-style translation controls of a request, applied as the family reference applies them:
+    the tokenizer's source language (else the source token replacing the final unknown token), and the
+    target language as the forced first decoder token. Returns (generate kwargs, manual source id)."""
+    def explicit(name: str) -> int | None:
+        value = request.get(name)
+        return None if value is None or int(value) < 0 else int(value)
+
+    source, target = request.get("source_language"), request.get("target_language")
+    source_id, target_id = explicit("source_language_token_id"), explicit("forced_bos_token_id")
+    manual = None
+    if source_id is not None and source is None:
+        source = tokenizer.convert_ids_to_tokens(source_id)
+    if source is not None:
+        if hasattr(tokenizer, "src_lang"):
+            tokenizer.src_lang = source
+        elif source_id is not None and request.get("source_language_placement") == "replace-final-unk":
+            manual = source_id
+    if target is not None and hasattr(tokenizer, "src_lang"):
+        resolved = tokenizer.convert_tokens_to_ids(target)
+        if target_id is not None and target_id != resolved:
+            raise BackendError("target_language disagrees with forced_bos_token_id")
+        target_id = resolved
+    return ({"forced_bos_token_id": target_id} if target_id is not None else {}), manual
+
+
+def _place_source_language(inputs: Mapping[str, torch.Tensor], token_id: int | None, tokenizer: Any) -> None:
+    if token_id is None:
+        return
+    ids, mask = inputs["input_ids"], inputs.get("attention_mask")
+    for row in range(int(ids.shape[0])):
+        index = int(ids.shape[1]) - 1 if mask is None else int(mask[row].nonzero()[-1].item())
+        if int(ids[row, index]) not in (token_id, getattr(tokenizer, "unk_token_id", None)):
+            raise BackendError("the tokenizer did not emit a source-language placeholder")
+        ids[row, index] = token_id
 
 
 class TextGeneration:
@@ -78,11 +120,13 @@ class TextGeneration:
         return self.tokenizer(prompt, return_tensors="pt")
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
-        inputs = self._inputs(request).to(self.spec.device)
-        kwargs = _generation_kwargs(request)
-        if self.encoder_decoder:
-            # Transformers counts the decoder start token in max_new_tokens; TRTMC does not.
-            kwargs["max_new_tokens"] += 1
+        language, manual_source = (_language_controls(self.tokenizer, request) if self.encoder_decoder
+                                   else ({}, None))
+        inputs = self._inputs(request)
+        _place_source_language(inputs, manual_source, self.tokenizer)
+        inputs = inputs.to(self.spec.device)
+        # max_new_tokens excludes the decoder start token, as TRTMC's budget does: the same work.
+        kwargs = {**_generation_kwargs(request), **language}
         if self.static_cache:
             try:
                 output, model_ms = timed(lambda: self.model.generate(**inputs, **kwargs, cache_implementation="static"))
@@ -93,7 +137,7 @@ class TextGeneration:
         prompt_tokens = 0 if self.encoder_decoder else int(inputs["input_ids"].shape[1])
         token_ids = output[0, prompt_tokens:].tolist()
         if self.encoder_decoder:
-            token_ids = self._strip_start_and_eos(token_ids)[: int(request.get("max_new_tokens", 64))]
+            token_ids = self._strip_start_and_eos(token_ids)
         text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
         return invocation({"output_tokens": len(token_ids), "token_ids": token_ids, "text": text},
                           model_ms, prompt_tokens=int(inputs["input_ids"].shape[1]),

@@ -59,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--mode", choices=("eager", "compile"), default="eager", help="reference execution mode")
     serve.add_argument("--precision", choices=("fp16", "bf16", "fp32"), help="reference precision")
     serve.add_argument("--reference-model", help="override the profile checkpoint for the reference")
+    serve.add_argument("--reference-revision", help="revision of the reference checkpoint (default: --revision)")
+    serve.add_argument("--revision", help="the profile checkpoint's revision when the catalog does not pin one")
     serve.add_argument("--reference-options", default="{}", help="adapter options JSON")
     serve.add_argument("--trust-remote-code", action="store_true")
     serve.add_argument("--deterministic", action="store_true",
@@ -98,11 +100,11 @@ def _reference_precision(profile_precision: str, requested: str | None) -> str:
     return profile_precision if profile_precision in ("fp16", "bf16", "fp32") else "fp16"
 
 
-def _chat_renderer(profile: Any):
+def _chat_renderer(profile: Any, revision: str | None):
     """Chat-template renderer from the profile checkpoint's tokenizer, or None if it has no template."""
     from transformers import AutoTokenizer
 
-    kwargs = {"revision": profile.model.hf_revision} if profile.model.hf_revision else {}
+    kwargs = {"revision": revision} if revision else {}
     tokenizer = AutoTokenizer.from_pretrained(profile.model.hf_id, **kwargs)
     if not getattr(tokenizer, "chat_template", None):
         return None
@@ -124,6 +126,7 @@ def serve(arguments: argparse.Namespace) -> int:
         arguments.profile, manifest_root=arguments.manifest_root, testcase=arguments.testcase,
         operation=arguments.operation, selected_task=arguments.selected_task, bundle=arguments.bundle,
         runtime_root=arguments.runtime_root, overrides=_overrides(arguments.sets))
+    revision = profile.model.hf_revision or arguments.revision or None
     # The baseline must be taken before the backend loads its model.
     memory_probe = None
     if arguments.memory_probe:
@@ -156,7 +159,7 @@ def serve(arguments: argparse.Namespace) -> int:
         backend = ReferenceBackend(ReferenceSpec(
             operation=profile.operation,
             model=arguments.reference_model or profile.model.hf_id,
-            revision=None if arguments.reference_model else (profile.model.hf_revision or None),
+            revision=arguments.reference_revision or (None if arguments.reference_model else revision),
             precision=_reference_precision(profile.model.precision, arguments.precision),
             mode=arguments.mode,
             trust_remote_code=arguments.trust_remote_code,
@@ -166,13 +169,13 @@ def serve(arguments: argparse.Namespace) -> int:
     if profile.operation == "generate_image" and arguments.backend in ("trtmc", "reference"):
         from .latents import Replay, read_checkpoint, snapshot
 
-        model, revision = ((arguments.reference_model, None) if arguments.backend == "reference" and
-                           arguments.reference_model else (profile.model.hf_id, profile.model.hf_revision or None))
-        latent_replay = Replay(lambda: read_checkpoint(snapshot(model, revision)))
+        source = ((arguments.reference_model, arguments.reference_revision)
+                  if arguments.backend == "reference" and arguments.reference_model else (profile.model.hf_id, revision))
+        latent_replay = Replay(lambda: read_checkpoint(snapshot(*source)))
     chat_renderer = None
     if profile.operation == "generate":
         try:
-            chat_renderer = _chat_renderer(profile)
+            chat_renderer = _chat_renderer(profile, revision)
         except Exception as error:  # noqa: BLE001 - only the OpenAI chat route needs it
             print(f"trtmc-perf-serve: chat template unavailable ({type(error).__name__}: {error}); "
                   "/v1/chat/completions will reject multi-message requests", file=sys.stderr)
