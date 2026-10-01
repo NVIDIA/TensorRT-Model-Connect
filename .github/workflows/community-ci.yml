@@ -990,29 +990,24 @@ jobs:
               echo "::error::GPU instance unusable after $max_instance_attempts attempts (including re-creation)"
               exit 1
             fi
-            # Reuse the same deterministic name so the existing teardown
-            # steps, which key off it, still find and delete this instance.
-            echo "Instance $INSTANCE_NAME appears unusable (e.g. InsufficientCapacity); reserving a fresh one with the same name..."
-            # Brev deletion is asynchronous ("This can take a few minutes"
-            # per brev delete --help), so poll until the name actually
-            # clears instead of guessing at a fixed delay.
-            brev delete "$INSTANCE_NAME" || true
-            delete_deadline=$((SECONDS + 180))
-            while brev ls 2>/dev/null | grep -qx "$INSTANCE_NAME"; do
-              if [ "$SECONDS" -ge "$delete_deadline" ]; then
-                echo "::warning::$INSTANCE_NAME still listed after 180s; attempting create anyway" >&2
-                break
-              fi
-              sleep 10
-            done
-            if ! brev ls 2>/dev/null | grep -qx "$INSTANCE_NAME"; then
-              echo "$INSTANCE_NAME cleared after $((SECONDS - (delete_deadline - 180)))s, proceeding with re-create"
-            fi
+            # brev ls and brev create's own duplicate-name check are not
+            # consistent with each other: brev ls can report a name as
+            # cleared while brev create still rejects it as a duplicate
+            # ("workspace already exists"), so waiting on brev ls cannot
+            # reliably avoid a collision. Use a new unique name per retry
+            # instead of reusing and waiting for the old one to clear.
+            old_instance_name="$INSTANCE_NAME"
+            brev delete "$old_instance_name" || true
+            instance_attempt=$((instance_attempt + 1))
+            INSTANCE_NAME="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-r${instance_attempt}"
+            echo "Instance $old_instance_name appears unusable (e.g. InsufficientCapacity); reserving a fresh instance $INSTANCE_NAME..."
             # Brev confirmed (2026-09-30) this is a Nebius regional capacity
             # constraint; their suggested workaround is to steer retries to
             # a different provider until Nebius capacity frees up.
             retry brev create "$INSTANCE_NAME" -g "$GPU_TYPE" --provider aws --timeout 600
-            instance_attempt=$((instance_attempt + 1))
+            # Keep teardown targeting the instance actually in use, even if
+            # this job ultimately fails after exhausting every attempt.
+            echo "instance_name=$INSTANCE_NAME" >> "$GITHUB_OUTPUT"
           done
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
@@ -1038,7 +1033,9 @@ jobs:
       - name: Always tear down the GPU instance
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
         env:
-          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+          # A retry may have replaced the original instance; fall back to
+          # the initial reservation only if no retry ever happened.
+          INSTANCE_NAME: ${{ steps.test.outputs.instance_name || steps.reserve.outputs.instance_name }}
         run: brev delete "$INSTANCE_NAME" || true
 
       - name: Upload the smoke-test log
@@ -1087,7 +1084,14 @@ jobs:
         run: brev login --api-key "$BREV_API_KEY"
 
       - name: Delete the deterministic GPU instance
-        run: brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
+        run: |
+          set -euo pipefail
+          # Backstop for the per-attempt names a retry may have created
+          # (see provision-and-test); harmless if none of them exist.
+          brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
+          for attempt in 2 3; do
+            brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-r${attempt}" || true
+          done
 
   publish:
     name: ${{ github.event_name == 'pull_request' && 'Stable Community CI' || inputs.ci_lane == 'dev' && 'Dev Community CI' || 'Stable Community CI' }} result
