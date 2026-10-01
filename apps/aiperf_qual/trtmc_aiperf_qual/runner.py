@@ -21,7 +21,7 @@ import json
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from . import alignment, family, intelligibility, judge, sweep
 from .aiperf_runner import AiperfRun, run_aiperf
@@ -137,10 +137,33 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
     stats = judge.across_runs([(run.summary.get(judge.METRIC) or {}).get("p50") for run in runs], aggregation)
     stats["client_latency_p50_ms"] = judge.median_client_latency(runs[-1].raw_records())
     stats["aiperf_exit"] = max(run.exit_code for run in runs)
+    expected_runs, problems = int(measurement.get("runs", 1)), []
+    if len(runs) < expected_runs:
+        problems.append(f"{len(runs)} of {expected_runs} runs completed")
+    for run in runs:
+        problem = run_completeness(run, int(measurement["requests"]))
+        if problem:
+            problems.append(f"{getattr(getattr(run, 'directory', None), 'name', 'run')}: {problem}")
+    if problems:
+        stats["incomplete"] = "; ".join(problems)[:600]
+    elif stats["aiperf_exit"]:  # every request succeeded: a late telemetry/export failure only
+        stats["exit_note"] = f"AIPerf exited {stats['aiperf_exit']} after all requests succeeded"
     measured = [value for value in busy if value is not None]
     if measured:
         stats["gpu_busy_percent"] = max(measured)
     return runs[0], stats
+
+
+def run_completeness(run: Any, expected: int) -> str | None:
+    """Why a timed run is not a complete measurement (a request missing, failed, or cancelled), or None."""
+    records = run.raw_records()
+    failed = [record for record in records if record.get("status") != 200 or record.get("error")
+              or (record.get("metadata") or {}).get("was_cancelled")]
+    if len(records) == expected and not failed:
+        return None
+    statuses = sorted({str(record.get("status")) for record in failed})
+    return (f"{len(records) - len(failed)} of {expected} requests succeeded"
+            + (f" (failed with status {', '.join(statuses)})" if failed else ""))
 
 
 # Checks that judge whole outputs per Task (``supplementary``); each returns report entries.
@@ -149,6 +172,28 @@ SUPPLEMENTARY_CHECKS = {"tts_intelligibility": intelligibility.run, "clip_alignm
 # The report entries each check writes (rejudge leaves them; recheck replaces them).
 SUPPLEMENTARY_SUITES = {"tts_intelligibility": ("tts-intelligibility",),
                         "clip_alignment": ("clip-alignment", "replay-parity"), "replay_parity": ("replay-parity",)}
+
+
+def expected_suites(model: Mapping[str, Any]) -> dict[str, str]:
+    """Every Accuracy result the configuration requires, mapped to the phase that produces it."""
+    expected = {item["suite"]["suite"]: "candidate" for item in model.get("accuracy", [])}
+    expected.update({name: "family_accuracy" for name in model.get("family_accuracy", [])})
+    for check in model.get("supplementary", []):
+        replay = model.get("family") in check.get("latent_replay_families", ())
+        names = {"tts_intelligibility": ["tts-intelligibility"],
+                 "clip_alignment": ["clip-alignment"] + (["replay-parity"] if replay else []),
+                 "replay_parity": ["replay-parity"] if replay else []}.get(check.get("check"), [])
+        expected.update({name: check["check"] for name in names})
+    return expected
+
+
+def missing_results(model: Mapping[str, Any], accuracy: Sequence[Mapping[str, Any]],
+                    errors: Mapping[str, str]) -> list[dict[str, Any]]:
+    """Error entries for required results no phase produced (a phase that failed before writing them)."""
+    produced = {item.get("suite") for item in accuracy}
+    return [{"suite": name, "source": "missing", "status": "error", "samples": 0, "passed": None,
+             "required_passes": None, "error": f"not produced ({phase}): {errors.get(phase, 'no result written')}"[:800]}
+            for name, phase in expected_suites(model).items() if name not in produced]
 
 
 def supplementary(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
@@ -415,7 +460,8 @@ def _candidate(environment: Environment, model: Mapping[str, Any], suites: Mappi
                                          sampled_request(perf_suite.samples[0]["request"]))
             verdict = judge.judge_performance(stats, reference_stats, margin_percent=float(l1["margin_percent"]),
                                               max_ci_percent=float(l1["max_ci_percent"]),
-                                              outputs_match=match, output_reason=reason)
+                                              outputs_match=match, output_reason=reason,
+                                              not_equivalent=l1.get("not_equivalent"))
             if reference_stats.get("timing"):
                 verdict["notes"].append(f"native timed by the {reference_stats['timing']}")
             if reference_stats.get("backend_fallback"):
@@ -470,7 +516,11 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     accuracy: list[dict[str, Any]] = []
     performance_l1: list[dict[str, Any]] = []
     if model.get("family_accuracy"):
-        phases.run("family_accuracy", lambda: accuracy.extend(family.run(environment, model, out, python)))
+        def family_phase() -> None:
+            entries = family.run(environment, model, out, python)
+            family.attribute(environment, model, out, python, entries)
+            accuracy.extend(entries)
+        phases.run("family_accuracy", family_phase)
     for check in model.get("supplementary", []):
         if check.get("check") in SUPPLEMENTARY_CHECKS:
             def run_check(check: Mapping[str, Any] = check) -> None:
@@ -525,6 +575,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
               "repro": f"trtmc-aiperf-qual run --profile {model['catalog_profile']} --environment "
                        f"{environment.values.get('environment_file', '<environment.yaml>')} --out {out}",
               "family": model.get("family"), "started": started, "platform": {"id": platform, **fingerprint},
+              **({"coverage": model["coverage"]} if model.get("coverage") else {}),
               "reference": {key: reference.get(key) for key in ("backend", "precision", "perf_precision",
                                                                  "timing_precision", "fallback_from", "noise_error",
                                                                  "precision_fallback_from")},
@@ -535,8 +586,8 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
                              "plugins": importlib.metadata.version("trtmc-aiperf-plugins"),
                              "suites": {name: suite.manifest for name, suite in suites.items()},
                              "perf_suite": perf_suite.manifest if perf_suite else None}}
-    result["verdict"] = judge.verdict(result, expected_suites=len(model["accuracy"])
-                                      + len(model.get("family_accuracy", [])) + len(model.get("supplementary", [])),
+    result["accuracy"] += missing_results(model, result["accuracy"], phases.errors)
+    result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)),
                                       expected_modes=len(l1["reference_modes"]) if l1 else 0)
     write_report(out, result)
     return result

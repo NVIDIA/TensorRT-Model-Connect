@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# One fixed image and action at the family gate (PSNR 5 dB / SSIM 0.1); the reference is the family script
+# (no caller latents, so no pixel parity under replay).
+coverage: one fixed image/action input at PSNR 5 / SSIM 0.1 - smoke coverage, not action-conditional validation

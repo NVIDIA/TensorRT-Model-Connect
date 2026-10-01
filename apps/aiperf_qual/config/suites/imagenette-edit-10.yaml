@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Ten Imagenette images (one per class, evenly spaced), center-cropped to squares, edited with each
+# Ten Imagenette images (one per class, the first of each), center-cropped to squares, edited with each
 # model's catalog request (instruction, size, steps, guidance, seed). Used by the replay_parity
 # check of image edits: square inputs condition fixed-square engines and aspect-preserving
 # pipelines alike, so pixel parity reflects numerics.
@@ -15,5 +15,5 @@ source:
   records: requests
   file_fields: [image]
   square_crop: [image]
-selection: {method: stride, count: 10}
+selection: {method: stratified, field: label, count: 10}
 fields: {image: image_path}

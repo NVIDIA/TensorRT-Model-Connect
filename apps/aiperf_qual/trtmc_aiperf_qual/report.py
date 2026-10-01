@@ -58,6 +58,8 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
              f"{reference.get('timing_precision') or reference.get('perf_precision')}; "
              f"platform `{result.get('platform', {}).get('id')}`; "
              f"aiperf {result['provenance'].get('aiperf')}, plugins {result['provenance'].get('plugins')}.", ""]
+    if result.get("coverage"):
+        lines += [f"Coverage: {result['coverage']}", ""]
     if reference.get("noise_error"):
         lines += [f"Noise floor not available: {reference['noise_error'][:300]}", ""]
     if reference.get("fallback_from"):

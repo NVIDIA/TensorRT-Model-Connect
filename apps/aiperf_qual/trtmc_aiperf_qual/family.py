@@ -19,6 +19,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from .bundles import bundle_path
 from .config import Environment
+from .models import PRECISIONS
 from .services import serving
 from .suites import Suite, request_sha
 
@@ -122,18 +123,19 @@ def _row_evidence(row: Mapping[str, Any]) -> tuple[str, str, str]:
             json.dumps(reference, default=str)[:300])
 
 
-def counts(result: Mapping[str, Any]) -> dict[str, Any]:
+def counts(result: Mapping[str, Any], inputs: int | None = None) -> dict[str, Any]:
     """Sample counts, status, gate, and failing samples of a family result. ``passed`` is None when the
-    family grades aggregate metrics only (for example mAP or corpus WER)."""
+    family grades aggregate metrics only (for example mAP or corpus WER). ``inputs``: how many inputs a
+    case without per-sample rows executed (one request); its media and frame counts stay metrics."""
     rows = [row for row in result.get("samples", []) if isinstance(row, Mapping)]
     metrics = dict(result.get("metrics", {}))
-    total = len(rows) or int(metrics.get("samples", 0))
+    total = len(rows) or int(metrics.get("samples", 0)) or int(inputs or 0)
     graded = [row for row in rows if "passed" in row]
     if graded:
         passed = sum(bool(row["passed"]) for row in graded)
     else:
         passed = int(metrics["passed_samples"]) if "passed_samples" in metrics else None
-    failures = []
+    failures, failed_samples = [], [str(row.get("sample_id")) for row in graded if not row["passed"]]
     for row in graded:
         if not row["passed"] and len(failures) < MAX_FAILURES:
             explanation, actual, expected = _row_evidence(row)
@@ -142,13 +144,29 @@ def counts(result: Mapping[str, Any]) -> dict[str, Any]:
     return {"status": "pass" if result.get("status") == "passed" else "fail", "samples": total,
             "expected_samples": total, "passed": passed,
             "pass_rate": passed / total if total and passed is not None else None,
-            "gate": dict(result.get("gate", {})), "metrics": metrics, "failures": failures}
+            "gate": dict(result.get("gate", {})), "metrics": metrics, "failures": failures,
+            "failed_samples": failed_samples}
+
+
+def executed_inputs(case: Any) -> int | None:
+    """Inputs a case without a dataset sends: its single request."""
+    values = getattr(case, "values", None) or {}
+    return 1 if values.get("request") is not None and not values.get("dataset") else None
+
+
+def sampled(case: Any) -> bool:
+    """The case's request samples (TRTMC does not replay PyTorch's random stream)."""
+    request = (getattr(case, "values", None) or {}).get("request") or {}
+    return bool(request.get("do_sample")) or float(request.get("temperature") or 0.0) > 0.0
 
 
 def item(case: Any, result: Mapping[str, Any], evidence: Path) -> dict[str, Any]:
     """A family result as one accuracy entry of the report (the family's own status and gate)."""
+    inputs = executed_inputs(case)
+    reference = (getattr(case, "values", None) or {}).get("reference") or {}
     return {"suite": case.name, "source": "family", "benchmark": case.benchmark, "required_passes": None,
-            **counts(result), "evidence": str(evidence)}
+            **counts(result, inputs), **({"executed_inputs": inputs} if inputs else {}),
+            "sampled": sampled(case), "reference_precision": reference.get("precision"), "evidence": str(evidence)}
 
 
 def refresh(entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -156,7 +174,9 @@ def refresh(entry: Mapping[str, Any]) -> dict[str, Any]:
     evidence = Path(str(entry.get("evidence") or ""))
     if entry.get("source") != "family" or evidence.suffix != ".json" or not evidence.is_file():
         return dict(entry)
-    refreshed = {**entry, **counts(json.loads(evidence.read_text()))}
+    refreshed = {**entry, **counts(json.loads(evidence.read_text()), entry.get("executed_inputs"))}
+    if refreshed["status"] == "fail" and (entry.get("sampled") or entry.get("precision_sensitive")):
+        refreshed["status"] = "inconclusive"  # settled when it ran (sampling, or the native control)
     isolated = Path(str(evidence).replace("/family-persistent/", "/family-isolated/"))
     if entry.get("isolated_check") and isolated != evidence and isolated.is_file():
         recount = counts(json.loads(isolated.read_text()))
@@ -165,19 +185,25 @@ def refresh(entry: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def run(environment: Environment, model: dict[str, Any], out: Path, reference_python: str, *,
-        isolated: bool = False, only: set[str] | None = None) -> list[dict[str, Any]]:
-    """Run the family's accuracy cases of ``model``; one report entry per case (errors included)."""
+        isolated: bool = False, only: set[str] | None = None,
+        control: tuple[str, str] | None = None) -> list[dict[str, Any]]:
+    """Run the family's accuracy cases of ``model``; one report entry per case (errors included).
+    ``control`` (backend, precision): the native model at that precision stands in for TRTMC, so the
+    case measures how far the native model itself is from the family reference."""
     repository = environment.path("repo")
     accuracy, _, _ = _qualification(repository)
     selected = [case for case in cases(repository, model["catalog_profile"]) if only is None or case.name in only]
     if not selected:
         return []
-    session = "isolated" if isolated else "persistent"
+    session = f"control-{control[0]}-{control[1]}" if control else "isolated" if isolated else "persistent"
     root = out / f"family-{session}"
     context = _context(environment, repository, root)
     entries = []
-    with serving(environment, model, "trtmc", out / f"candidate-family-{session}", isolate_requests=isolated,
-                 keep_artifacts=True) as service, \
+    server = (serving(environment, model, control[0], out / f"native-family-{session}", precision=control[1],
+                      python=reference_python, keep_artifacts=True) if control else
+              serving(environment, model, "trtmc", out / f"candidate-family-{session}", isolate_requests=isolated,
+                      keep_artifacts=True))
+    with server as service, \
             _patched(accuracy, "_candidate_outputs", _candidate_via_aiperf(environment, model, service)), \
             _reference_python(context, reference_python):
         for case in selected:
@@ -215,3 +241,40 @@ def _reference_python(context: Any, python: str) -> Iterator[None]:
 @contextmanager
 def _noop() -> Iterator[None]:
     yield
+
+
+def attribute(environment: Environment, model: dict[str, Any], out: Path, reference_python: str,
+              entries: list[dict[str, Any]]) -> None:
+    """Settle failing family cases the way Task suites settle: a sampling case is ``inconclusive``;
+    when the family reference runs at another precision than the candidate, the native model at the
+    candidate precision repeats the case, and a failure it shares on the same samples (or, for
+    aggregate-only metrics, at all) is ``inconclusive`` and marked ``precision_sensitive``."""
+    candidate_precision = model["candidate"].get("precision")
+    for entry in entries:
+        if entry.get("status") != "fail":
+            continue
+        if entry.get("sampled"):
+            entry["status"] = "inconclusive"
+            continue
+        if entry.get("reference_precision") in (None, candidate_precision) or candidate_precision not in PRECISIONS:
+            continue
+        reference, errors = model["reference"], []
+        for backend in dict.fromkeys([reference["backend"], reference.get("fallback") or reference["backend"]]):
+            try:
+                control = run(environment, model, out, reference_python, only={entry["suite"]},
+                              control=(backend, candidate_precision))[0]
+            except Exception as error:  # noqa: BLE001 - try the fallback; no control is reported
+                errors.append(f"{backend}: {type(error).__name__}: {error}"[:200])
+                continue
+            if control.get("status") == "error":
+                errors.append(f"{backend}: {control.get('error', '')}"[:200])
+                continue
+            entry["native_control"] = {key: control.get(key) for key in ("status", "passed", "samples", "metrics")}
+            entry["native_control"].update(backend=backend, precision=candidate_precision)
+            shared = set(entry.get("failed_samples") or []) <= set(control.get("failed_samples") or []) \
+                if entry.get("failed_samples") else True
+            if control.get("status") == "fail" and shared:
+                entry.update(status="inconclusive", precision_sensitive=True)
+            break
+        else:
+            entry["native_control"] = {"status": "error", "error": "; ".join(errors)[:600]}

@@ -179,24 +179,32 @@ def _iou(a: list[float], b: list[float]) -> float:
 
 
 def compare_boxes(candidate: dict, reference: dict, min_iou: float = 0.5, min_precision: float = 0.9,
-                  min_recall: float = 0.9, **_: Any) -> tuple[bool, str, str, str]:
-    """Greedy same-class matching at IoU >= min_iou; both precision and recall must reach thresholds."""
+                  min_recall: float = 0.9, max_score_delta: float = 0.1, **_: Any) -> tuple[bool, str, str, str]:
+    """Greedy same-class matching at IoU >= min_iou; both precision and recall must reach thresholds, and
+    matched boxes must agree on confidence within ``max_score_delta`` when both sides report scores (a
+    reordered ranking changes COCO mAP while boxes and classes still match)."""
     left, right = _boxes(candidate), _boxes(reference)
     if not left and not right:
         return True, "no detections on either side", "0", "0"
     unmatched = list(range(len(right)))
-    matched = 0
-    for label, box in left:
+    pairs = []
+    for index, (label, box) in enumerate(left):
         best = max(((j, _iou(box, right[j][1])) for j in unmatched if right[j][0] == label),
                    key=lambda item: item[1], default=(None, 0.0))
         if best[0] is not None and best[1] >= min_iou:
             unmatched.remove(best[0])
-            matched += 1
+            pairs.append((index, best[0]))
+    matched = len(pairs)
     precision = matched / len(left) if left else 0.0
     recall = matched / len(right) if right else 0.0
     ok = precision >= min_precision and recall >= min_recall
-    return (ok, f"{matched} matched; precision {precision:.3f} recall {recall:.3f} at IoU {min_iou}",
-            str(len(left)), str(len(right)))
+    detail = f"{matched} matched; precision {precision:.3f} recall {recall:.3f} at IoU {min_iou}"
+    scores = [observation.get("scores") for observation in (candidate, reference)]
+    if pairs and all(isinstance(values, list) and values for values in scores):
+        delta = max(abs(float(scores[0][i]) - float(scores[1][j])) for i, j in pairs)
+        ok = ok and delta <= max_score_delta
+        detail += f"; max score difference {delta:.3f}"
+    return ok, detail, str(len(left)), str(len(right))
 
 
 def _binary_masks(observation: dict) -> list[list[bool]]:

@@ -91,6 +91,7 @@ tasks:
     # Also for models with a family case: sampling models cannot be judged per sample, but what they
     # say can (ASR round trip, TRTMC WER within 0.1 of the native model's).
     supplementary: [{check: tts_intelligibility, suite: seedtts-en-5, asr_model: openai/whisper-tiny,
+                     asr_revision: 169d4a4341b33bc18d8881c4b69c2e104e1cc0af,
                      max_wer_increase: 0.1}]
     performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
   speech_to_speech:
@@ -109,6 +110,7 @@ tasks:
     # pixel: against the native fp32 render of the first 10 prompts, TRTMC may be at most 3 dB PSNR /
     # 0.05 SSIM further away than the native half-precision run (6 dB / 0.1 for quantized weights).
     supplementary: [{check: clip_alignment, suite: partiprompts-30, clip_model: openai/clip-vit-large-patch14,
+                     clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
                      max_mean_clip_drop: 1.0, max_temporal_consistency_drop: 0.02, video_samples: 3,
                      latent_replay_families: [flux, pixart, qwen_image, z_image, wan_t2v],
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,

@@ -528,9 +528,17 @@ def test_replay_parity_compares_both_sides_with_the_full_precision_render(tmp_pa
     check = {"max_psnr_gap_db": 3.0, "max_ssim_gap": 0.05}
     same = [row((25.7, 0.91), (25.8, 0.91)), row((25.5, 0.90), (25.0, 0.90)), row((26.0, 0.92), (26.5, 0.92)),
             row(None, None), row(None, None)]
-    verdict = replay_parity.judge(same, samples, check)
+    verdict = replay_parity.judge(same, samples, check, planned=3)  # beyond the budget: informational only
     assert verdict["status"] == "pass" and verdict["samples"] == 3 and verdict["metrics"]["yardstick"] == "full precision"
     assert abs(verdict["metrics"]["psnr_gap_db"] - 0.1 / 3) < 1e-9  # gaps 0.1, -0.5, 0.5
+    partial = replay_parity.judge(same, samples, check, planned=5)  # two planned renders missing: no silent removal
+    assert partial["metrics"]["yardstick"] == "fallback" and partial["samples"] == 5
+    assert partial["metrics"]["fallback_reason"] == "3 of 5 full-precision renders usable"
+    lost = [dict(r, frames=[1, 0]) if i == 1 else r for i, r in enumerate(same[:3])]
+    assert replay_parity.judge(lost, samples[:3], check)["status"] == "error"  # a native output missing
+    gone = [dict(same[0], candidate=None, frames=[0, 1])] + same[1:3]
+    failed_candidate = replay_parity.judge(gone, samples[:3], check)
+    assert failed_candidate["status"] == "fail" and failed_candidate["failures"][0]["explanation"] == "no TRTMC output"
     worse = [row((13.9, 0.55), (24.7, 0.89)), row((14.5, 0.58), (25.0, 0.90)), row((13.0, 0.50), (24.0, 0.88))]
     failed = replay_parity.judge(worse, samples[:3], check)
     assert failed["status"] == "fail" and failed["passed"] == 0 and "vs full precision" in failed["failures"][0]["explanation"]
@@ -554,7 +562,15 @@ def test_script_reference_frames_missing_natives_and_broken_floors(tmp_path):
     assert media_source(tmp_path, {"observation": {}}) == {"dir": str(tmp_path)}
     samples = [{"sample_id": "0", "request": {"prompt": "p"}}]
     missing = alignment.judge([{"clip_score": 25.0}], [None], samples, {}, video=False)
-    assert missing["status"] == "not-comparable" and "no baseline" in missing["reasons"][0]
+    assert missing["status"] == "error" and "no image for 1 of 1" in missing["reasons"][0]
+    partial = alignment.judge([{"clip_score": 25.0}] * 3, [{"clip_score": 25.0}, None, None], samples * 3, {},
+                              video=False)
+    assert partial["status"] == "error" and "2 of 3" in partial["reasons"][0]  # no shrinking denominator
+    rows = [{"clip_score": 30.0, "temporal_consistency": 0.8}] * 3
+    frozen = alignment.judge([{"clip_score": 30.0, "temporal_consistency": 1.0}] * 3, rows, samples * 3, {}, video=True)
+    assert frozen["status"] == "fail" and "temporal consistency 1.000 vs native 0.800" in frozen["reasons"][0]
+    untimed = alignment.judge([{"clip_score": 30.0}] * 3, [{"clip_score": 30.0}] * 3, samples * 3, {}, video=True)
+    assert untimed["status"] == "error" and "0 of 3 videos" in untimed["reasons"][0]
     rows = [{"candidate": {"psnr": 18.0, "ssim": 0.75}, "candidate_ref": {"psnr": 9.0, "ssim": 0.1},
              "native_ref": {"psnr": 8.0, "ssim": 0.1}}]
     broken = replay_parity.judge(rows, samples, {})  # an 8 dB full-precision render broke: 19 dB / 0.8 instead

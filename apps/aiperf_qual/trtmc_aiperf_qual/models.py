@@ -202,7 +202,13 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
                        "source": {"kind": "qualification_perf", "profile": profile},
                        "selection": {"method": "first", "count": 1}}
     l1["suite"] = _suite(l1["suite"], profile, repository)
-    size = checkpoint_bytes(catalog_model.hf_id, catalog_model.hf_revision or None)
+    # One immutable checkpoint for the bundle, the native reference, and golden identity: the catalog
+    # pin, else the revision the family qualification pins for the same checkpoint.
+    family_candidate = ((family_cases[0] if family_cases else case) or {}).get("candidate", {})
+    revision = catalog_model.hf_revision or (
+        family_candidate.get("revision") if family_candidate.get("checkpoint", catalog_model.hf_id) == catalog_model.hf_id
+        else None) or None
+    size = checkpoint_bytes(catalog_model.hf_id, revision)
     if size and size > LARGE_CHECKPOINT_BYTES and l1["measurement"]["requests"] > LARGE_MODEL_MEASUREMENT["requests"]:
         l1["measurement"] = dict(LARGE_MODEL_MEASUREMENT)
         l1["measurement_reason"] = f"checkpoint {size / 2**30:.0f} GiB > {LARGE_CHECKPOINT_BYTES / 2**30:.0f} GiB"
@@ -219,17 +225,31 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     candidate = dict(config.get("candidate", {}))
     build = dict(candidate.pop("build", None) or _qualified_build(
         profile, manifest, family_cases[0] if family_cases else case))
+    if revision and not manifest.get("hf_revision") and not build.get("hf_revision"):
+        build = {"name": f"{profile}-qual", **build, "hf_revision": revision}  # build the pinned checkpoint
     bundle = f"{build.get('name', profile)}/{build.get('bundle', catalog_model.bundle_name)}"
+    # The native model the family declares (another checkpoint, e.g. a base model, or a Diffusers export)
+    # and its pin; otherwise the candidate's own checkpoint at the candidate's revision.
+    options = (declared or {}).get("adapter_options") or {}
+    declared_model = (declared or {}).get("model") or options.get("model_id")
+    declared_revision = (declared or {}).get("revision") or options.get("model_revision")
+    reference_model = reference.get("model") or (declared_model if declared_model not in (None, catalog_model.hf_id)
+                                                 else None)
+    reference_revision = reference.get("revision") or (
+        declared_revision if reference_model and reference_model == declared_model
+        else None if reference_model else declared_revision if declared_model == catalog_model.hf_id and declared_revision
+        else revision)
     return {
         "model": profile, "catalog_profile": profile, "operation": operation, "family": catalog_model.family,
         "task": catalog_model.task,
         "candidate": {"bundle": bundle, "precision": candidate_precision, "build": build,
                       "manifest": str(catalog_model.manifest_path), "checkpoint": catalog_model.hf_id,
-                      "revision": catalog_model.hf_revision or None, "quantization": quantization,
+                      "revision": revision, "quantization": quantization,
                       "max_sequence_length": build.get("max_sequence_length")
                       or catalog_model.build_settings.get("max_sequence_length"),
                       "model_directory": (case or {}).get("candidate", {}).get("model_directory"), **candidate},
         "reference": {**{key: value for key, value in reference.items() if key not in ("backend", "fallback")},
+                      **({"model": reference_model} if reference_model else {}), "revision": reference_revision,
                       "backend": backend, "fallback": fallback, "precision": golden_precision,
                       "declared_precision": declared_precision if declared_precision != golden_precision else None,
                       "perf_precision": perf_precision, "trust_remote_code": trust_remote_code},
@@ -238,6 +258,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         "family_accuracy": [item["name"] for item in family_cases] if accuracy_source == "family" else [],
         "accuracy": accuracy,
         "supplementary": [dict(item) for item in config.get("supplementary", [])],
+        **({"coverage": str(config["coverage"])} if config.get("coverage") else {}),
         "performance": {"l1": l1, **({"l2": dict(config["performance"]["l2"])}
                                      if config["performance"].get("l2") else {})},
     }

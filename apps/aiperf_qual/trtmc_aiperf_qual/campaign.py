@@ -42,9 +42,24 @@ def _error(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"[:300]
 
 
+def set_aside(out: Path) -> Path | None:
+    """Keep a previous run's directory as ``<name>.<unix time>`` so its results cannot stand in for
+    the new run's (a failed rebuild must not leave an older pass visible)."""
+    if not out.exists() or not any(out.iterdir()):
+        return None
+    kept = out.with_name(f"{out.name}.{int(time.time())}")
+    while kept.exists():  # two runs in the same second: wait for the next (KEPT_ASIDE expects seconds)
+        time.sleep(1)
+        kept = out.with_name(f"{out.name}.{int(time.time())}")
+    out.rename(kept)
+    return kept
+
+
 def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[str, Any]:
-    """Build the bundle when missing, qualify, and apply the bundle retention policy."""
+    """Build the bundle when missing, qualify, and apply the bundle retention policy. A previous run
+    in ``out`` is set aside first."""
     started = time.time()
+    set_aside(out)
     out.mkdir(parents=True, exist_ok=True)
     bundle_policy, _ = retention.policies(environment)
     record: dict[str, Any] = {"profile": model["model"], "task": model.get("task")}
@@ -114,8 +129,7 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
             if finished and not rerun:
                 record = {"profile": profile, "status": "skipped", "category": finished}
             else:
-                if out.exists():
-                    out.rename(out.with_name(f"{profile}.{int(time.time())}"))
+                set_aside(out)
                 record = run_one(environment, model, out)
             for repo in sorted(checkpoints(model)):
                 remaining[repo] -= 1
@@ -171,7 +185,8 @@ def _row(directory: Path) -> dict[str, Any] | None:
                     "time": float(value.get("started") or path.stat().st_mtime),
                     "accuracy": value.get("accuracy", []), "perf": value.get("performance_l1", []),
                     "backend": (value.get("reference") or {}).get("backend", ""),
-                    "notes": "; ".join(f"{key}: {text[:100]}" for key, text in value.get("errors", {}).items())}
+                    "notes": "; ".join([*([f"coverage: {value['coverage']}"] if value.get("coverage") else []),
+                                        *(f"{key}: {text[:100]}" for key, text in value.get("errors", {}).items())])}
         if name == "build.json" and value.get("status") != "failed":
             continue
         return {"task": value.get("task"), "category": "build-failed" if name == "build.json" else "error",

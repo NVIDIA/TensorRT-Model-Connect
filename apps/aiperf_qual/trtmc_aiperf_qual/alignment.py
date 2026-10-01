@@ -30,10 +30,10 @@ import numpy as np, torch
 from transformers import CLIPModel, CLIPProcessor
 from PIL import Image
 from trtmc_perf_serving.digests import media_frames
-model_id, items, max_frames = sys.argv[1], json.loads(sys.argv[2]), int(sys.argv[3])
+model_id, items, max_frames, revision = sys.argv[1], json.loads(sys.argv[2]), int(sys.argv[3]), sys.argv[4] or None
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = CLIPModel.from_pretrained(model_id).to(device).eval()
-processor = CLIPProcessor.from_pretrained(model_id)
+model = CLIPModel.from_pretrained(model_id, revision=revision).to(device).eval()
+processor = CLIPProcessor.from_pretrained(model_id, revision=revision)
 
 def load(source):
     # The request directory holds every frame; a script reference lists a few sampled frame files.
@@ -83,9 +83,10 @@ def is_video(request: Mapping[str, Any]) -> bool:
 
 
 def _score(environment: Environment, clip_model: str, items: Sequence[tuple[Mapping[str, Any], str, list | None]],
-           max_frames: int) -> dict[str, Any]:
+           max_frames: int, revision: str | None = None) -> dict[str, Any]:
     completed = subprocess.run(
-        [str(environment["serve_python"]), "-c", SCORE, clip_model, json.dumps(list(items)), str(max_frames)],
+        [str(environment["serve_python"]), "-c", SCORE, clip_model, json.dumps(list(items)), str(max_frames),
+         revision or ""],
         capture_output=True, text=True, timeout=3600,
         env={key: value for key, value in _serve_env(environment).items() if key != "HF_HUB_OFFLINE"})
     if completed.returncode:
@@ -124,7 +125,8 @@ def judge(candidate: Sequence[Mapping[str, Any] | None], native: Sequence[Mappin
     clip_drop = float(check.get("max_mean_clip_drop", 1.0))
     consistency_drop = float(check.get("max_temporal_consistency_drop", 0.02))
     tolerance = float(check.get("sample_tolerance", 3.0))
-    gate = {"max_mean_clip_drop": clip_drop, **({"max_temporal_consistency_drop": consistency_drop} if video else {})}
+    gate = {"max_mean_clip_drop": clip_drop,
+            **({"max_temporal_consistency_difference": consistency_drop} if video else {})}
     # Means over the samples both sides rendered; a missing TRTMC image fails on its own.
     pairs = [(c, n) for c, n in zip(candidate, native) if c is not None and n is not None]
     metrics: dict[str, Any] = {"candidate_clip_score": _mean([c["clip_score"] for c, _ in pairs]),
@@ -133,9 +135,10 @@ def judge(candidate: Sequence[Mapping[str, Any] | None], native: Sequence[Mappin
     missing = [samples[index]["sample_id"] for index, row in enumerate(candidate) if row is None]
     if missing:
         reasons.append(f"TRTMC wrote no image for {len(missing)} sample(s)")
-    native_missing = not any(row is not None for row in native)
+    # Every planned sample needs its native rendering: a partial baseline is a failed reference run.
+    native_missing = sum(row is None for row in native)
     if native_missing:
-        reasons.append("the native model wrote no image: no baseline")
+        reasons.append(f"the native model wrote no image for {native_missing} of {len(native)} sample(s)")
     if pairs:
         mean, lower, failed = drop([n["clip_score"] - c["clip_score"] for c, n in pairs], clip_drop)
         metrics.update(clip_score_drop=mean, clip_score_drop_lower_bound=lower)
@@ -144,22 +147,26 @@ def judge(candidate: Sequence[Mapping[str, Any] | None], native: Sequence[Mappin
                            f"{metrics['native_clip_score']:.2f} (drop {mean:.2f}, 95% lower bound {lower or mean:.2f})")
     frames = [(c["temporal_consistency"], n["temporal_consistency"]) for c, n in pairs
               if "temporal_consistency" in c and "temporal_consistency" in n]
+    temporal_missing = video and len(frames) < len(pairs)
+    if temporal_missing:
+        reasons.append(f"temporal consistency measured for {len(frames)} of {len(pairs)} videos")
     if video and frames:
         metrics.update(candidate_temporal_consistency=_mean([c for c, _ in frames]),
                        native_temporal_consistency=_mean([n for _, n in frames]))
-        mean, lower, failed = drop([n - c for c, n in frames], consistency_drop)
-        metrics.update(temporal_consistency_drop=mean, temporal_consistency_drop_lower_bound=lower)
+        # Two-sided: frames frozen within a video look more consistent than the native motion.
+        mean, lower, failed = drop([abs(n - c) for c, n in frames], consistency_drop)
+        metrics.update(temporal_consistency_difference=mean, temporal_consistency_difference_lower_bound=lower)
         if failed:
             reasons.append(f"temporal consistency {metrics['candidate_temporal_consistency']:.3f} vs native "
-                           f"{metrics['native_temporal_consistency']:.3f}")
+                           f"{metrics['native_temporal_consistency']:.3f} (mean difference {mean:.3f})")
     cross = dict(cross or {})
     metrics.update(candidate_cross_prompt_cosine=cross.get("candidate"), native_cross_prompt_cosine=cross.get("native"))
     if (cross.get("candidate") or 0) >= MAX_CROSS_PROMPT_COSINE:
         reasons.append(f"TRTMC renders near-identical images for different prompts (cosine {cross['candidate']:.3f})")
     status = "fail" if reasons else "pass"
-    if native_missing:
-        status = "not-comparable"
-    if (cross.get("native") or 0) >= MAX_CROSS_PROMPT_COSINE:  # no baseline to judge TRTMC against
+    if native_missing or temporal_missing:  # incomplete evidence: no judgement
+        status = "error"
+    if status != "error" and (cross.get("native") or 0) >= MAX_CROSS_PROMPT_COSINE:  # no usable baseline
         status = "not-comparable"
         reasons.append(f"the native model renders near-identical images for different prompts (cosine "
                        f"{cross['native']:.3f}): broken reference")
@@ -217,7 +224,8 @@ def _replay_parity(environment: Environment, model: dict[str, Any], check: Mappi
     rows = replay_parity.measure(environment, items, max_frames)
     if model["candidate"].get("quantization"):  # quantized weights deviate more than a native precision change
         check = {**check, **check.get("quantized_gap", {})}
-    return replay_parity.item(suite, replay_parity.judge(rows, suite.samples, check), label, floor_label, outputs)
+    return replay_parity.item(suite, replay_parity.judge(rows, suite.samples, check, len(floor_suite.samples)),
+                              label, floor_label, outputs)
 
 
 def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
@@ -245,7 +253,8 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
     picks = [native.get("indices") for native in sources["native"]]
     scored = {side: _score(environment, clip_model, [
         (source, prompt, pick if side == "candidate" else None)
-        for source, prompt, pick in zip(sources[side], prompts, picks)], max_frames) for side in outputs}
+        for source, prompt, pick in zip(sources[side], prompts, picks)], max_frames, check.get("clip_revision"))
+        for side in outputs}
     scores = {side: result["rows"] for side, result in scored.items()}
     verdict = judge(scores["candidate"], scores["native"], suite.samples, check, video,
                     {side: result["cross_prompt_cosine"] for side, result in scored.items()})
@@ -253,7 +262,8 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
         index = next(i for i, sample in enumerate(suite.samples) if sample["sample_id"] == failure["sample_id"])
         failure.update(actual=str(outputs["candidate"][index][0]), expected=str(outputs["native"][index][0]))
     entries = [{"suite": "clip-alignment", "source": "task",
-                "benchmark": f"CLIP text alignment ({suite.name}, {clip_model}, native {native_backend} "
+                "benchmark": f"CLIP text alignment ({suite.name}, {clip_model}@{check.get('clip_revision', 'main')}, "
+                             f"native {native_backend} "
                              f"{native_precision}{', latent replay' if replay else ''})",
                 "status": verdict["status"], "samples": len(suite.samples), "expected_samples": len(suite.samples),
                 "passed": verdict["passed"], "required_passes": None, "gate": verdict["gate"],

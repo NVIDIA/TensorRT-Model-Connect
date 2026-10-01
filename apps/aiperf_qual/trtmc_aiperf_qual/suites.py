@@ -76,7 +76,8 @@ def limit_suite(suite: Suite, count: int) -> Suite:
 
 
 def select(records: Sequence[dict[str, Any]], selection: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Deterministic selection: first N, every k-th (stride to N), or explicit indices; optionally per task."""
+    """Deterministic selection: first N, every k-th (stride to N), class-balanced (``stratified`` over a
+    field), or explicit indices; optionally per task."""
     if selection.get("per_task"):
         groups: dict[str, list[dict[str, Any]]] = {}
         for record in records:
@@ -90,6 +91,14 @@ def select(records: Sequence[dict[str, Any]], selection: Mapping[str, Any]) -> l
         count = int(require(selection, "count", "selection"))
         step = max(len(records) // count, 1)
         return list(records[::step][:count])
+    if method == "stratified":  # round-robin across the values of a field, in record order
+        count, field = int(require(selection, "count", "selection")), require(selection, "field", "selection")
+        groups = {}
+        for position, record in enumerate(records):
+            groups.setdefault(json.dumps(record.get(field), sort_keys=True), []).append((position, record))
+        chosen = [group[depth] for depth in range(max(map(len, groups.values()), default=0))
+                  for group in groups.values() if depth < len(group)][:count]
+        return [record for _, record in sorted(chosen, key=lambda pair: pair[0])]
     if method == "indices":
         indices = require(selection, "indices", "selection")
         if any(index >= len(records) for index in indices):
@@ -199,8 +208,8 @@ def _json_manifest_records(source: Mapping[str, Any], environment: Environment) 
     """Records from a sha256-verified JSON, JSONL, or TSV manifest under data_root.
 
     ``file_fields`` (dotted names reach nested values) are resolved relative to the manifest
-    directory, so ``*_path`` request fields are inlined; ``square_crop`` replaces those images by
-    their centered square; ``explode`` turns each record into one record per listed text field.
+    directory, so ``*_path`` request fields are inlined (``square_crop`` fields become their centered
+    square once selected); ``explode`` turns each record into one record per listed text field.
     """
     path = _verified(source, environment)
     if path.suffix == ".jsonl":
@@ -216,9 +225,6 @@ def _json_manifest_records(source: Mapping[str, Any], environment: Environment) 
     for field in source.get("file_fields", []):
         for record in records:
             record[field] = str(path.parent / _field(record, field))
-    for field in source.get("square_crop", []):
-        for record in records:
-            record[field] = str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))
     explode = source.get("explode")
     if explode:
         records = [{**record, "id": f"{record['id']}:{field}", "text": record[field]}
@@ -379,6 +385,8 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
             if definition.get("base_profile") else {})
     samples = []
     for record in select(records, selection):
+        for field in source.get("square_crop", []):  # only the selected images
+            record = {**record, field: str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))}
         request = {**base, **(record.get("request") or {})}
         request.update(definition.get("request") or {})
         for source_field, request_field in (definition.get("fields") or {}).items():

@@ -25,7 +25,8 @@ import json, sys
 import numpy as np, soundfile, torch
 from transformers import pipeline
 items = json.loads(sys.argv[2])
-asr = pipeline("automatic-speech-recognition", model=sys.argv[1], device=0 if torch.cuda.is_available() else -1)
+asr = pipeline("automatic-speech-recognition", model=sys.argv[1], revision=sys.argv[3] or None,
+               device=0 if torch.cuda.is_available() else -1)
 texts = []
 for path, rate in items:
     if path.endswith(".npy"):
@@ -64,7 +65,8 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
     for side, items in audio.items():
         present = [item for item in items if item]
         completed = subprocess.run([str(environment["serve_python"]), "-c", TRANSCRIBE, str(check.get(
-            "asr_model", "openai/whisper-tiny")), json.dumps(present)], capture_output=True, text=True,
+            "asr_model", "openai/whisper-tiny")), json.dumps(present), str(check.get("asr_revision") or "")],
+            capture_output=True, text=True,
             env={key: value for key, value in _serve_env(environment).items() if key != "HF_HUB_OFFLINE"},
             timeout=3600)
         if completed.returncode:

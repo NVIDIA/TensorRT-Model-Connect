@@ -134,7 +134,8 @@ def test_accuracy_gate():
     records = [{"passed": True}] * 9 + [{"passed": False, "explanation": "x"}]
     assert judge.judge_accuracy(records, {"min_pass_rate": 0.9, "allowed_failures": 1}, 10)["status"] == "pass"
     assert judge.judge_accuracy(records, {"min_pass_rate": 0.9, "allowed_failures": 0}, 10)["status"] == "fail"
-    assert judge.judge_accuracy(records[:9], {"min_pass_rate": 0.9, "allowed_failures": 1}, 10)["status"] == "fail"
+    # A missing record is a failed or lost request, not a judgement.
+    assert judge.judge_accuracy(records[:9], {"min_pass_rate": 0.9, "allowed_failures": 1}, 10)["status"] == "error"
 
 
 def test_wer_and_edit_distance_comparators():
@@ -248,9 +249,9 @@ def test_the_native_noise_floor_never_lowers_the_gate():
     ([{"status": "inconclusive"}], {"eager": "green", "compile": "green"}, "acc-inconclusive"),
 ])
 def test_verdict_categories(accuracy, lights, category):
-    result = {"accuracy": accuracy,
+    result = {"accuracy": [{"suite": "s", **item} for item in accuracy],
               "performance_l1": [{"reference_mode": mode, "light": light} for mode, light in lights.items()]}
-    assert judge.verdict(result, expected_suites=1, expected_modes=2)["category"] == category
+    assert judge.verdict(result, expected_suites=["s"], expected_modes=2)["category"] == category
 
 
 def test_numeric_parity_matches_shapes_exactly_and_vectors_by_cosine():
@@ -396,10 +397,10 @@ def test_perf_output_check_falls_back_to_the_eager_reference():
     assert not output_check(l1, candidate, {"eager": {"token_ids": [7]}}, "eager")[0]
 
 
-
 def test_errors_in_a_suite_make_the_accuracy_an_error():
-    verdict = judge.verdict({"accuracy": [{"status": "pass"}, {"status": "error"}], "performance_l1": [
-        {"reference_mode": "eager", "light": "green"}]}, expected_suites=2, expected_modes=1)
+    verdict = judge.verdict({"accuracy": [{"suite": "a", "status": "pass"}, {"suite": "b", "status": "error"}],
+                             "performance_l1": [{"reference_mode": "eager", "light": "green"}]},
+                            expected_suites=["a", "b"], expected_modes=1)
     assert (verdict["acc"], verdict["category"]) == ("error", "error")
 
 
@@ -555,3 +556,174 @@ def test_always_sampling_tts_models_compare_duration_in_perf():
         assert model["performance"]["l1"]["output_grader_params"]["max_log_spectral_distance"] > 100
 
 
+def test_a_missing_mandatory_result_is_an_error_even_when_other_checks_add_rows():
+    from trtmc_aiperf_qual.runner import expected_suites, missing_results
+
+    model = {"family": "flux", "accuracy": [], "family_accuracy": ["generated-media-parity"],
+             "supplementary": [{"check": "clip_alignment", "latent_replay_families": ["flux"]}]}
+    assert expected_suites(model) == {"generated-media-parity": "family_accuracy", "clip-alignment": "clip_alignment",
+                                      "replay-parity": "clip_alignment"}
+    produced = [{"suite": "clip-alignment", "status": "pass"}, {"suite": "replay-parity", "status": "pass"}]
+    errors = {"family_accuracy": "RuntimeError: startup failed"}
+    missing = missing_results(model, produced, errors)
+    assert [(m["suite"], m["status"]) for m in missing] == [("generated-media-parity", "error")]
+    assert "startup failed" in missing[0]["error"]
+    lights = [{"reference_mode": "eager", "light": "green"}]
+    assert judge.verdict({"accuracy": produced, "performance_l1": lights}, expected_suites=list(expected_suites(model)),
+                         expected_modes=1)["category"] == "error"
+    assert judge.verdict({"accuracy": produced + missing, "performance_l1": lights},
+                         expected_suites=list(expected_suites(model)), expected_modes=1)["acc"] == "error"
+    other = {**model, "family": "minimax"}  # no caller latents: no replay-parity expected
+    assert "replay-parity" not in expected_suites(other)
+
+
+def test_incomplete_perf_runs_and_missing_exports_are_errors_not_lights():
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual.runner import run_completeness
+
+    ok = {"status": 200, "metadata": {}}
+    partial = SimpleNamespace(raw_records=lambda: [ok] + [{"status": 500, "metadata": {}}] * 19)
+    assert run_completeness(partial, 20) == "1 of 20 requests succeeded (failed with status 500)"
+    assert run_completeness(SimpleNamespace(raw_records=lambda: [ok] * 20), 20) is None
+    assert "19 of 20" in run_completeness(SimpleNamespace(raw_records=lambda: [ok] * 19), 20)
+    fast = {"p50_ms": 1.0, "ci_percent": 0.0, "aggregation": "mean"}
+    slow = {"p50_ms": 2.0, "ci_percent": 0.0, "aggregation": "mean"}
+    common = dict(margin_percent=5, max_ci_percent=5, outputs_match=True, output_reason="identical")
+    broken = judge.judge_performance({**fast, "incomplete": "run_01: 1 of 20 requests succeeded"}, slow, **common)
+    assert broken["light"] == "error" and "1 of 20" in broken["reasons"][0]
+    assert judge.judge_performance({"p50_ms": None}, slow, **common)["light"] == "error"
+    late = judge.judge_performance({**fast, "exit_note": "AIPerf exited 1 after all requests succeeded"}, slow, **common)
+    assert late["light"] == "green" and "exited 1" in late["notes"][0]
+    result = {"accuracy": [{"suite": "s", "status": "pass"}],
+              "performance_l1": [{"reference_mode": "eager", "light": broken["light"]}]}
+    assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["category"] == "error"
+    empty = judge.judge_accuracy([], {"min_pass_rate": 1.0}, 10, sampled=True)
+    assert empty["status"] == "error" and "0 of 10" in empty["error"]
+
+
+def test_one_pinned_checkpoint_serves_the_bundle_the_reference_and_goldens():
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    environment = Environment({"repo": str(REPOSITORY)})
+    albert = resolve_model("albert-base", environment)  # the catalog does not pin it; the family does
+    revision = albert["candidate"]["revision"]
+    assert revision and revision.startswith("8e2f239c5f8a")
+    assert albert["candidate"]["build"]["hf_revision"] == revision
+    assert albert["candidate"]["bundle"].startswith("albert-base-qual/")
+    assert albert["reference"]["revision"] == revision and "model" not in albert["reference"]
+    k2 = resolve_model("k2-horizon-7b-uno", environment)  # the family's native reference is the base model
+    assert (k2["reference"]["model"], k2["reference"]["revision"]) == (
+        "IFM/K2-Horizon-7B", "586b03f0fd1fbbf2f13eeafc33749e95ae34dd10")
+
+
+def test_rejudging_unchanged_evidence_keeps_a_precision_sensitive_result(tmp_path, monkeypatch):
+    import json
+
+    from trtmc_aiperf_qual import cli
+
+    records = [{"conversation_id": f"session_{i:06d}", "passed": i != 9} for i in range(10)]
+    noise = {"precision": "fp16", "passed": 9, "total": 10, "failed_indices": [9]}
+    entry = {"suite": "s", **judge.judge_accuracy(records, {"min_pass_rate": 1.0}, 10, noise=noise)}
+    assert entry["status"] == "inconclusive"  # the native model fails the same sample
+    model = {"catalog_profile": "demo", "task": "text_generation", "family_accuracy": [], "supplementary": [],
+             "accuracy": [{"suite": {"suite": "s"}, "gate": {"min_pass_rate": 1.0}}],
+             "performance": {"l1": {"reference_modes": ["eager"]}}}
+    perf = {"reference_mode": "eager", **judge.judge_performance(
+        {"p50_ms": 1.0, "ci_percent": 0.0}, {"p50_ms": 2.0, "ci_percent": 0.0}, margin_percent=5, max_ci_percent=5,
+        outputs_match=True, output_reason="identical")}
+    (tmp_path / "model.json").write_text(json.dumps(model))
+    (tmp_path / "report.json").write_text(json.dumps({"model": "demo", "task": "text_generation", "accuracy": [entry],
+                                                      "noise_floor": {"s": noise}, "performance_l1": [perf],
+                                                      "provenance": {}}))
+    monkeypatch.setattr(cli, "recheck_output", lambda *args: None)
+    cli.rejudge_reports([tmp_path])
+    after = json.loads((tmp_path / "report.json").read_text())
+    assert after["accuracy"][0]["status"] == "inconclusive" and after["verdict"]["category"] == "acc-inconclusive"
+
+
+def test_a_new_run_sets_the_previous_directory_aside_so_its_pass_cannot_stand(tmp_path, monkeypatch):
+    import json
+    import sys
+
+    from trtmc_aiperf_qual import campaign
+    from trtmc_aiperf_qual.config import Environment
+
+    existing = tmp_path / "results" / "demo"
+    existing.mkdir(parents=True)
+    (existing / "report.json").write_text(json.dumps({"task": "t", "started": 1, "verdict": {"category": "pass"}}))
+    monkeypatch.setattr(campaign, "reference_python", lambda environment, model: sys.executable)
+    monkeypatch.setattr(campaign, "prefetch", lambda environment, model: None)
+    monkeypatch.setattr(campaign.bundles, "ensure_bundle",
+                        lambda *args: {"status": "failed", "reason": "new build failed"})
+    model = {"model": "demo", "catalog_profile": "demo", "task": "t", "reference": {}, "candidate": {}}
+    assert campaign.run_one(Environment({}), model, existing)["category"] == "build-failed"
+    assert campaign.collect([tmp_path / "results"])[0]["demo"]["category"] == "build-failed"
+    assert campaign._finished(existing) == "build-failed"
+    kept = [path for path in (tmp_path / "results").iterdir() if campaign.KEPT_ASIDE.search(path.name)]
+    assert len(kept) == 1 and (kept[0] / "report.json").is_file()  # the old evidence is kept, not shown
+
+
+def test_a_single_request_family_media_case_counts_its_input():
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual import family
+
+    case = SimpleNamespace(name="generated-media-parity", benchmark="task_output_parity",
+                           values={"request": {"prompt": "cat"}})
+    result = {"status": "passed", "gate": {"min_psnr": 5.0},
+              "metrics": {"compared_frames": 3.0, "media_count": 320.0, "min_psnr": 11.4}}
+    entry = family.item(case, result, "result.json")
+    assert (entry["samples"], entry["executed_inputs"], entry["passed"]) == (1, 1, None)
+    assert entry["metrics"]["media_count"] == 320.0
+
+
+def test_failing_family_cases_settle_like_task_suites(tmp_path, monkeypatch):
+    import json
+
+    from trtmc_aiperf_qual import family
+
+    controls = []
+
+    def run(environment, model, out, python, *, only, control):
+        controls.append((sorted(only)[0], control))
+        failed = {"shared": ["a", "b"], "native-ok": []}[sorted(only)[0]]
+        return [{"status": "fail" if failed else "pass", "failed_samples": failed, "passed": 8, "samples": 10}]
+
+    monkeypatch.setattr(family, "run", run)
+    model = {"candidate": {"precision": "fp16"}, "reference": {"backend": "reference", "fallback": "script"}}
+    entries = [{"suite": "sampled", "status": "fail", "sampled": True, "reference_precision": "fp32"},
+               {"suite": "shared", "status": "fail", "failed_samples": ["a"], "reference_precision": "fp32"},
+               {"suite": "native-ok", "status": "fail", "failed_samples": ["a"], "reference_precision": "fp32"},
+               {"suite": "same", "status": "fail", "failed_samples": ["a"], "reference_precision": "fp16"}]
+    family.attribute(None, model, tmp_path, "/py", entries)
+    assert [entry["status"] for entry in entries] == ["inconclusive", "inconclusive", "fail", "fail"]
+    assert entries[1]["precision_sensitive"] and entries[1]["native_control"]["precision"] == "fp16"
+    assert entries[2]["native_control"]["status"] == "pass"
+    assert controls == [("shared", ("reference", "fp16")), ("native-ok", ("reference", "fp16"))]
+    quantized = [{"suite": "shared", "status": "fail", "reference_precision": "bf16"}]
+    family.attribute(None, {**model, "candidate": {"precision": "fp8"}}, tmp_path, "/py", quantized)
+    assert quantized[0]["status"] == "fail" and "native_control" not in quantized[0]
+    evidence = tmp_path / "result.json"
+    evidence.write_text(json.dumps({"status": "failed", "samples": [{"sample_id": "a", "passed": False}]}))
+    kept = family.refresh({**entries[1], "source": "family", "evidence": str(evidence)})
+    assert kept["status"] == "inconclusive"  # rejudge keeps the control's settlement
+
+
+def test_box_parity_holds_matched_boxes_to_their_confidence():
+    from trtmc_aiperf_plugins.accuracy import compare_boxes
+
+    boxes = {"boxes": [[0, 0, 10, 10], [20, 20, 30, 30]], "class_ids": [1, 2]}
+    assert compare_boxes({**boxes, "scores": [0.99, 0.51]}, {**boxes, "scores": [0.98, 0.52]})[0]
+    swapped = compare_boxes({**boxes, "scores": [0.99, 0.51]}, {**boxes, "scores": [0.51, 0.99]})
+    assert not swapped[0] and "max score difference 0.480" in swapped[1]
+    assert compare_boxes(boxes, boxes)[0]  # observations without scores: boxes and classes only
+
+
+def test_stratified_selection_takes_every_class_first_in_record_order():
+    from trtmc_aiperf_qual.suites import select
+
+    records = [{"id": f"{label}-{index}", "label": label} for label in range(10) for index in range(3)]
+    picked = select(records, {"method": "stratified", "field": "label", "count": 10})
+    assert [record["id"] for record in picked] == [f"{label}-0" for label in range(10)]

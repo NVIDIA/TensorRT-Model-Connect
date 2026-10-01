@@ -94,6 +94,8 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
                "--backend", backend, "--port", str(port), "--full-observations",
                "--records", str(out / "records.jsonl"), "--scratch", str(out / "scratch")]
     reference = model["reference"]
+    if model["candidate"].get("revision"):  # the pinned checkpoint (tokenizer, latent replay, reference)
+        command += ["--revision", str(model["candidate"]["revision"])]
     if backend == "trtmc":
         command += ["--bundle", str(environment.path("bundle_root") / model["candidate"]["bundle"]),
                     "--runtime-root", str(environment["runtime_root"]), "--worker", str(environment["worker"])]
@@ -111,6 +113,8 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
                 command.append("--deterministic")
             if reference.get("model"):
                 command += ["--reference-model", reference["model"]]
+            if reference.get("revision"):
+                command += ["--reference-revision", str(reference["revision"])]
             if reference.get("options"):
                 command += ["--reference-options", json.dumps(reference["options"])]
     if keep_artifacts:  # checks that read output artifacts (audio, images) after the run

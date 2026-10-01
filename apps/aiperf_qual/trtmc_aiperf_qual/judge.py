@@ -74,7 +74,11 @@ def judge_accuracy(records: Sequence[Mapping[str, Any]], gate: Mapping[str, Any]
                  "expected": str(r.get("expected"))[:200]} for r in records if not r.get("passed")]
     total = len(records)
     required = required_passes(gate, expected)
-    ok = total == expected and passed >= required
+    if total != expected:  # failed or missing requests: no judgement, sampled or not
+        return {"status": "error", "samples": total, "expected_samples": expected, "passed": passed,
+                "required_passes": required, "gate": dict(gate), "failures": failures[:10],
+                "error": f"exported {total} of {expected} accuracy records"}
+    ok = passed >= required
     unparsed = sum(bool(record.get("unparsed")) for record in records)
     result = {"samples": total, "expected_samples": expected, "passed": passed, "pass_rate": passed / total if total
               else 0.0, "unparsed": unparsed, "required_passes": required, "gate": dict(gate),
@@ -107,10 +111,15 @@ def settle(status: str, failed: Sequence[int], noise: Mapping[str, Any] | None, 
     return status
 
 
-def verdict(result: Mapping[str, Any], *, expected_suites: int, expected_modes: int) -> dict[str, Any]:
-    """Model-level outcome: Acc pass/fail/error, one light per reference mode, and a category."""
+def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expected_modes: int) -> dict[str, Any]:
+    """Model-level outcome: Acc pass/fail/error, one light per reference mode, and a category.
+
+    ``expected_suites`` names every result the configuration requires (Task suites, family cases,
+    and the entries each supplementary check emits); a missing one is an error, whatever else ran.
+    """
     accuracy = result.get("accuracy", [])
-    if len(accuracy) < expected_suites:
+    produced = {item.get("suite") for item in accuracy}
+    if any(name not in produced for name in expected_suites):
         acc = "error"
     else:
         statuses = {item["status"] for item in accuracy}
@@ -120,7 +129,7 @@ def verdict(result: Mapping[str, Any], *, expected_suites: int, expected_modes: 
     lights = {item["reference_mode"]: item["light"] for item in result.get("performance_l1", [])}
     # "n/a": the native model could not run in that mode (for example torch.compile failing).
     measured = [value for value in lights.values() if value != "n/a"]
-    perf = "error" if len(lights) < expected_modes or not measured else (
+    perf = "error" if len(lights) < expected_modes or not measured or "error" in measured else (
         "green" if all(value == "green" for value in measured) else
         "red" if "red" in measured else "white" if "white" in measured else "yellow")
     if acc == "error" or perf == "error":
@@ -183,15 +192,26 @@ def light(candidate_ms: float, reference_ms: float, margin_percent: float) -> st
 
 
 def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any], *, margin_percent: float,
-                      max_ci_percent: float, outputs_match: bool, output_reason: str) -> dict[str, Any]:
+                      max_ci_percent: float, outputs_match: bool, output_reason: str,
+                      not_equivalent: str | None = None) -> dict[str, Any]:
+    """Light of one reference mode. A side whose runs did not complete every request, or that exported
+    no model-call time, is an ``error`` light: a successful subset is not a measurement."""
+    result = {"candidate": dict(candidate), "reference": dict(reference), "margin_percent": margin_percent,
+              "output_check": {"match": outputs_match, "reason": output_reason}}
+    errors = [f"{side}: {stats['incomplete']}" for side, stats in (("candidate", candidate), ("reference", reference))
+              if stats.get("incomplete")]
+    errors += [f"{side} has no {METRIC}" for side, stats in (("candidate", candidate), ("reference", reference))
+               if stats.get("p50_ms") is None]
+    if errors:
+        return {**result, "notes": [], "light": "error", "reasons": errors}
     reasons, notes = [], []
+    if not_equivalent:  # the native reference times a different workload (configured per model)
+        reasons.append(f"not the same workload: {not_equivalent}")
     if not outputs_match:
         reasons.append(f"output check failed: {output_reason}")
     wide = []
     for side, stats in (("candidate", candidate), ("reference", reference)):
-        if stats.get("p50_ms") is None:
-            reasons.append(f"{side} has no {METRIC}")
-        elif (stats.get("aggregation", "mean") == "mean" and stats.get("ci_percent") is not None
+        if (stats.get("aggregation", "mean") == "mean" and stats.get("ci_percent") is not None
               and stats["ci_percent"] > max_ci_percent
               and stats["ci_percent"] / 100 * stats["p50_ms"] > MIN_CI_MS):
             wide.append(f"{side} CI ±{stats['ci_percent']:.2f}% > {max_ci_percent}%")
@@ -215,8 +235,9 @@ def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any]
         # The native model could not run at the candidate precision: a slower precision is no baseline.
         reasons.append(f"reference timed at {reference.get('precision')} (candidate precision failed: "
                        f"{str(reference['precision_fallback'])[:120]})")
-    result = {"candidate": dict(candidate), "reference": dict(reference), "margin_percent": margin_percent,
-              "output_check": {"match": outputs_match, "reason": output_reason}, "notes": notes}
+    notes += [f"{side}: {stats['exit_note']}" for side, stats in (("candidate", candidate), ("reference", reference))
+              if stats.get("exit_note")]
+    result["notes"] = notes
     if candidate.get("p50_ms") and reference.get("p50_ms"):
         result["speedup"] = reference["p50_ms"] / candidate["p50_ms"]  # informative even when white
     if reasons:

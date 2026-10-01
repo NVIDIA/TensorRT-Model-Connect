@@ -87,57 +87,68 @@ def _mean(values: Sequence[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
-def judge(rows: Sequence[Mapping[str, Any]], samples: Sequence[Mapping[str, Any]],
-          check: Mapping[str, Any]) -> dict[str, Any]:
+def judge(rows: Sequence[Mapping[str, Any]], samples: Sequence[Mapping[str, Any]], check: Mapping[str, Any],
+          planned: int | None = None) -> dict[str, Any]:
+    """Judge the first ``planned`` samples (the full-precision budget) and nothing less: a native output
+    missing there is an error, a TRTMC output missing or of another geometry is a failure, and unless
+    every planned full-precision render is usable the whole budget is judged by ``fallback_min``.
+    Samples beyond the budget only report TRTMC against the native output."""
     from .alignment import drop
 
     psnr_gap, ssim_gap = float(check.get("max_psnr_gap_db", 3.0)), float(check.get("max_ssim_gap", 0.05))
-    referenced = [(sample, row) for sample, row in zip(samples, rows) if row.get("candidate_ref") and row.get("native_ref")]
-    valid = [(sample, row) for sample, row in referenced if _valid_floor(row["native_ref"])]
-    missing = [{"sample_id": sample["sample_id"],
-                "explanation": f"geometry differs (frames {row.get('frames')}, shapes {row.get('shapes')})"}
-               for sample, row in zip(samples, rows) if row.get("candidate") is None]
+    planned = min(planned or len(rows), len(rows))
+    budget = list(zip(samples[:planned], rows[:planned]))
     candidates = [row["candidate"] for row in rows if row.get("candidate")]
-    metrics: dict[str, Any] = {"candidate_vs_native_psnr_db": _mean([c["psnr"] for c in candidates]),
-                               "candidate_vs_native_ssim": _mean([c["ssim"] for c in candidates])}
-    per_sample = [{"sample_id": sample["sample_id"], **{key: row.get(key) for key in
-                                                        ("candidate", "candidate_ref", "native_ref")}}
-                  for sample, row in zip(samples, rows)]
-    # A full-precision render that broke for most samples (fp16 overflow renders noise) is no yardstick.
-    if valid and len(valid) * 2 >= len(referenced):
+    metrics: dict[str, Any] = {
+        "candidate_vs_native_psnr_db": _mean([c["psnr"] for c in candidates]),
+        "candidate_vs_native_ssim": _mean([c["ssim"] for c in candidates]), "planned_samples": planned,
+        "per_sample": [{"sample_id": sample["sample_id"], **{key: row.get(key) for key in
+                                                             ("candidate", "candidate_ref", "native_ref")}}
+                       for sample, row in zip(samples, rows)]}
+    native_missing = sum((row.get("frames") or [1, 1])[1] == 0 for _, row in budget)
+    if native_missing:
+        return {"status": "error", "passed": None, "samples": planned, "failures": [], "metrics": metrics,
+                "gate": {"max_psnr_gap_db": psnr_gap, "max_ssim_gap": ssim_gap},
+                "error": f"the native model wrote {planned - native_missing} of {planned} planned outputs"}
+    unmatched = [{"sample_id": sample["sample_id"],
+                  "explanation": "no TRTMC output" if (row.get("frames") or [0])[0] == 0 else
+                  f"geometry differs (frames {row.get('frames')}, shapes {row.get('shapes')})"}
+                 for sample, row in budget if row.get("candidate") is None]
+    usable = [row for _, row in budget if row.get("candidate_ref") and row.get("native_ref")
+              and _valid_floor(row["native_ref"])]
+    if not unmatched and len(usable) == planned:
         gaps = [(row["native_ref"]["psnr"] - row["candidate_ref"]["psnr"],
-                 row["native_ref"]["ssim"] - row["candidate_ref"]["ssim"]) for _, row in valid]
+                 row["native_ref"]["ssim"] - row["candidate_ref"]["ssim"]) for row in usable]
         psnr_mean, psnr_lower, psnr_failed = drop([gap[0] for gap in gaps], psnr_gap)
         ssim_mean, ssim_lower, ssim_failed = drop([gap[1] for gap in gaps], ssim_gap)
-        failures = missing + [
-            {"sample_id": sample["sample_id"],
-             "explanation": f"vs full precision: TRTMC {row['candidate_ref']['psnr']:.2f} dB / "
-                            f"{row['candidate_ref']['ssim']:.3f}, native {row['native_ref']['psnr']:.2f} dB / "
-                            f"{row['native_ref']['ssim']:.3f}"}
-            for (sample, row), gap in zip(valid, gaps) if gap[0] > psnr_gap or gap[1] > ssim_gap]
+        failures = [{"sample_id": sample["sample_id"],
+                     "explanation": f"vs full precision: TRTMC {row['candidate_ref']['psnr']:.2f} dB / "
+                                    f"{row['candidate_ref']['ssim']:.3f}, native {row['native_ref']['psnr']:.2f} dB / "
+                                    f"{row['native_ref']['ssim']:.3f}"}
+                    for (sample, row), gap in zip(budget, gaps) if gap[0] > psnr_gap or gap[1] > ssim_gap]
         metrics.update(
-            candidate_vs_reference_psnr_db=_mean([row["candidate_ref"]["psnr"] for _, row in valid]),
-            native_vs_reference_psnr_db=_mean([row["native_ref"]["psnr"] for _, row in valid]),
-            candidate_vs_reference_ssim=_mean([row["candidate_ref"]["ssim"] for _, row in valid]),
-            native_vs_reference_ssim=_mean([row["native_ref"]["ssim"] for _, row in valid]),
+            candidate_vs_reference_psnr_db=_mean([row["candidate_ref"]["psnr"] for row in usable]),
+            native_vs_reference_psnr_db=_mean([row["native_ref"]["psnr"] for row in usable]),
+            candidate_vs_reference_ssim=_mean([row["candidate_ref"]["ssim"] for row in usable]),
+            native_vs_reference_ssim=_mean([row["native_ref"]["ssim"] for row in usable]),
             psnr_gap_db=psnr_mean, psnr_gap_lower_bound_db=psnr_lower, ssim_gap=ssim_mean,
-            ssim_gap_lower_bound=ssim_lower, reference_samples=len(valid), yardstick="full precision",
-            per_sample=per_sample)
-        return {"status": "fail" if missing or psnr_failed or ssim_failed else "pass",
-                "passed": len(valid) - len(failures) + len(missing), "samples": len(valid), "failures": failures,
-                "metrics": metrics, "gate": {"max_psnr_gap_db": psnr_gap, "max_ssim_gap": ssim_gap}}
+            ssim_gap_lower_bound=ssim_lower, reference_samples=planned, yardstick="full precision")
+        return {"status": "fail" if psnr_failed or ssim_failed else "pass", "passed": planned - len(failures),
+                "samples": planned, "failures": failures, "metrics": metrics,
+                "gate": {"max_psnr_gap_db": psnr_gap, "max_ssim_gap": ssim_gap}}
     floor = check.get("fallback_min", {"psnr_db": 19.0, "ssim": 0.8})
     min_psnr, min_ssim = float(floor["psnr_db"]), float(floor["ssim"])
     min_rate = float(check.get("min_pass_rate", 0.9))
-    failures = missing + [
+    failures = unmatched + [
         {"sample_id": sample["sample_id"],
          "explanation": f"PSNR {row['candidate']['psnr']:.2f} dB / SSIM {row['candidate']['ssim']:.3f} vs native"}
-        for sample, row in zip(samples, rows)
+        for sample, row in budget
         if row.get("candidate") and (row["candidate"]["psnr"] < min_psnr or row["candidate"]["ssim"] < min_ssim)]
-    passed = len(rows) - len(failures)
-    metrics.update(yardstick="fallback", reference_samples=0, per_sample=per_sample)
-    return {"status": "pass" if rows and passed >= min_rate * len(rows) else "fail", "passed": passed,
-            "samples": len(rows), "failures": failures, "metrics": metrics,
+    passed = planned - len(failures)
+    metrics.update(yardstick="fallback", reference_samples=len(usable),
+                   fallback_reason=f"{len(usable)} of {planned} full-precision renders usable")
+    return {"status": "pass" if planned and not unmatched and passed >= min_rate * planned else "fail",
+            "passed": passed, "samples": planned, "failures": failures, "metrics": metrics,
             "gate": {"min_psnr_db": min_psnr, "min_ssim": min_ssim, "min_pass_rate": min_rate}}
 
 
@@ -156,6 +167,7 @@ def item(suite: Any, verdict: Mapping[str, Any], native: str, floor: str | None,
     return {"suite": "replay-parity", "source": "task",
             "benchmark": f"pixel parity under latent replay ({suite.name}, native {native}, full precision {floor or 'none'})",
             "status": "not-comparable" if reasons else verdict["status"],
+            **({"error": verdict["error"]} if verdict.get("error") else {}),
             "samples": verdict.get("samples", len(suite.samples)), "expected_samples": verdict.get("samples", len(suite.samples)),
             "passed": None if reasons else verdict["passed"],
             "required_passes": None, "gate": dict(verdict.get("gate", {})), "metrics": dict(verdict.get("metrics", {})),

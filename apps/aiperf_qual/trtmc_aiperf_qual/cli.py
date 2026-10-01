@@ -125,7 +125,7 @@ def current_settings(model: dict, environment) -> dict:
     declared = {item["suite"]["suite"]: item for item in current["accuracy"]}
     accuracy = [{**item, **{key: declared[item["suite"]["suite"]][key] for key in ("gate", "sampled")
                             if key in declared.get(item["suite"]["suite"], {})}} for item in model["accuracy"]]
-    judging = ("output_grader", "output_grader_params", "margin_percent", "max_ci_percent")
+    judging = ("output_grader", "output_grader_params", "margin_percent", "max_ci_percent", "not_equivalent")
     l1 = {**model["performance"]["l1"],
           **{key: value for key, value in current["performance"]["l1"].items() if key in judging}}
     return {**model, "accuracy": accuracy, "performance": {**model["performance"], "l1": l1}}
@@ -200,7 +200,8 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
                                               margin_percent=float(l1.get("margin_percent", 5)),
                                               max_ci_percent=float(l1.get("max_ci_percent", 5)),
                                               outputs_match=bool(check.get("match")),
-                                              output_reason=str(check.get("reason", "")))
+                                              output_reason=str(check.get("reason", "")),
+                                              not_equivalent=l1.get("not_equivalent"))
             result["performance_l1"][index] = {key: item[key] for key in item
                                                if key in ("reference_mode", "candidate_timing_scope",
                                                           "reference_timing_scope", "reference_backend")} | verdict
@@ -230,15 +231,19 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
                 failed = item.get("failed_indices") or [
                     index for index in (judge.sample_index(f.get("conversation_id")) for f in item.get("failures", []))
                     if index is not None]
-                item["status"] = judge.settle(status, failed, item.get("noise_floor"),
-                                              bool(declared.get("sampled")), item)
+                # The full native record of the suite (its failing indices), not the entry's summary.
+                noise = (result.get("noise_floor") or {}).get(item["suite"]) or item.get("noise_floor")
+                item["status"] = judge.settle(status, failed, noise, bool(declared.get("sampled")), item)
             reasons = [str(failure.get("explanation", "")) for failure in item.get("failures", [])]
             if (item["status"] == "fail" and item.get("passed") == 0 and reasons
                     and all(any(marker in reason for marker in NOT_COMPARABLE) for reason in reasons)):
                 item["status"] = "not-comparable"
-        result["verdict"] = judge.verdict(result, expected_suites=len(model["accuracy"])
-                                          + len(model.get("family_accuracy", [])) + len(model.get("supplementary", [])),
-                                          expected_modes=len(l1.get("reference_modes", [])))
+        from .runner import expected_suites, missing_results
+
+        result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("source") != "missing"]
+        result["accuracy"] += missing_results(model, result["accuracy"], result.get("errors") or {})
+        result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)),
+                                          expected_modes=len(l1.get("reference_modes", [])) if l1 else 0)
         write_report(out, result)
         print(json.dumps({"out": str(out), **result["verdict"]}))
     return 0
