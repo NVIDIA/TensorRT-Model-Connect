@@ -604,6 +604,23 @@ def test_performance_resolves_profile_owned_relative_assets(tmp_path: Path) -> N
     assert resolved == {"image_path": str(image.resolve()), "batch_size": 1}
 
 
+def test_class_sorted_manifests_give_every_class_within_the_same_budget() -> None:
+    select = qualification_accuracy._class_stratified
+    requests = [{"label": label} for label in range(10) for _ in range(5)]
+    selected = select(requests, 10)
+    assert sorted(request["label"] for _, request in selected) == list(range(10))
+    assert [index for index, _ in selected] == sorted(index for index, _ in selected)  # manifest order
+    hundred = select([{"label": label} for label in range(10) for _ in range(20)], 100)
+    assert len(hundred) == 100
+    assert {sum(r["label"] == label for _, r in hundred) for label in range(10)} == {10}
+
+
+def test_requests_without_labels_keep_the_first_n_order() -> None:
+    requests = [{"image": f"{index}.jpg"} for index in range(5)]
+    expected = [(0, requests[0]), (1, requests[1]), (2, requests[2])]
+    assert qualification_accuracy._class_stratified(requests, 3) == expected
+
+
 def test_robot_action_accuracy_compares_complete_action_chunk(tmp_path: Path, monkeypatch) -> None:
     data = tmp_path / "families/example/tests/data"
     data.mkdir(parents=True)
