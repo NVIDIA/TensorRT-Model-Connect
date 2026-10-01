@@ -8,6 +8,7 @@
 #include "cli/sdk_dispatch.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -37,6 +38,15 @@ trtmc::cli::Command parse(std::vector<std::string> arguments) {
     for (auto& argument : arguments)
         argv.push_back(argument.data());
     return trtmc::cli::parse_args(static_cast<int>(argv.size()), argv.data());
+}
+
+// An empty value counts as unset for the runtime-cache {rank} expansion.
+void set_env(const char* name, const std::string& value) {
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
 }
 
 bool parse_throws(std::vector<std::string> arguments) {
@@ -394,6 +404,21 @@ int main() {
                             "--runtime-cache", "kernels.cache", "--cuda-graphs"});
     check(rtx.runtime_cache_path == "kernels.cache" && rtx.cuda_graphs,
           "TensorRT-RTX runtime options are retained directly");
+    {
+        const char* saved = std::getenv("OMPI_COMM_WORLD_RANK");
+        const std::string previous = saved != nullptr ? saved : "";
+        set_env("OMPI_COMM_WORLD_RANK", "");
+        check(parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--runtime-cache",
+                     "k.rank{rank}.cache"})
+                      .runtime_cache_path == "k.rank0.cache",
+              "runtime cache {rank} defaults to rank 0 outside a distributed launch");
+        set_env("OMPI_COMM_WORLD_RANK", "3");
+        check(parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--runtime-cache",
+                     "{rank}/k.{rank}.cache"})
+                      .runtime_cache_path == "3/k.3.cache",
+              "runtime cache {rank} expands to the OpenMPI world rank");
+        set_env("OMPI_COMM_WORLD_RANK", previous);
+    }
     check(parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--cuda-graphs",
                         "--cuda-graphs"}),
           "duplicate TensorRT-RTX graph option is rejected");

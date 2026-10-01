@@ -251,8 +251,20 @@ if(TRTMC_BUILD_BACKEND_RTX)
       "TRTMC_BUILD_BACKEND_RTX=ON requires TRTMC_RTX_LIBRARY_DIR"
     )
   endif()
+  # Windows TensorRT-RTX packages name the import library by version
+  # (tensorrt_rtx_<major>_<minor>.lib); prefer the newest one in the directory.
+  set(_trtmc_rtx_names tensorrt_rtx)
+  if(WIN32)
+    file(GLOB _trtmc_rtx_versioned RELATIVE "${TRTMC_RTX_LIBRARY_DIR}"
+      "${TRTMC_RTX_LIBRARY_DIR}/tensorrt_rtx_*_*.lib")
+    list(SORT _trtmc_rtx_versioned COMPARE NATURAL ORDER DESCENDING)
+    foreach(_trtmc_rtx_lib IN LISTS _trtmc_rtx_versioned)
+      get_filename_component(_trtmc_rtx_name "${_trtmc_rtx_lib}" NAME_WE)
+      list(APPEND _trtmc_rtx_names "${_trtmc_rtx_name}")
+    endforeach()
+  endif()
   find_library(TRTMC_RTX_LIBRARY
-    NAMES tensorrt_rtx
+    NAMES ${_trtmc_rtx_names}
     PATHS "${TRTMC_RTX_LIBRARY_DIR}"
     NO_DEFAULT_PATH
   )

@@ -183,6 +183,20 @@ std::string take_value(int argc, char** argv, int& index, const std::string& opt
     return value;
 }
 
+// Distributed ranks share one command line (mpirun or tools/launch_ranks.py), but
+// each rank needs its own TensorRT-RTX runtime cache file. "{rank}" in the path
+// becomes the OpenMPI world rank, or 0 for a single-process run.
+std::string expand_rank_placeholder(std::string path) {
+    static const std::string placeholder = "{rank}";
+    const char* rank = std::getenv("OMPI_COMM_WORLD_RANK");
+    const std::string value = rank != nullptr && *rank != '\0' ? rank : "0";
+    for (auto at = path.find(placeholder); at != std::string::npos;
+         at = path.find(placeholder, at + value.size())) {
+        path.replace(at, placeholder.size(), value);
+    }
+    return path;
+}
+
 std::uint64_t parse_byte_size(const std::string& text) {
     std::uint64_t multiplier = 1;
     std::string number = text;
@@ -789,7 +803,8 @@ Command parse_args(int argc, char** argv) {
         if (option == "--runtime-cache") {
             if (!command.runtime_cache_path.empty())
                 throw std::invalid_argument("--runtime-cache may be specified only once");
-            command.runtime_cache_path = take_value(argc, argv, index, option);
+            command.runtime_cache_path =
+                expand_rank_placeholder(take_value(argc, argv, index, option));
             continue;
         }
         if (option == "--cuda-graphs") {
