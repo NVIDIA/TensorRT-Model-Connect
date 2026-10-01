@@ -355,6 +355,10 @@ int main(int argc, char** argv) {
                   participant.timestamps_seconds().empty() &&
                   participant.conditioned_prefix_frames() == 0,
               "non-output distributed completion is not decoded media or an inference failure");
+        auto av_participant = load("worker").task<trtmc::TextToAudioVideo>().run({"participate"});
+        check(av_participant.frames().empty() && av_participant.timestamps_seconds().empty() &&
+                  av_participant.audio().samples.empty(),
+              "a distributed worker's audio-video completion carries neither frames nor audio");
         auto none = load("none");
         check(none.tasks().empty() && !none.supports<trtmc::TextToVideo>(),
               "interface inheritance alone does not advertise video support");
