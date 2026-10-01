@@ -157,17 +157,29 @@ def supplementary(environment: Environment, model: dict[str, Any], check: Mappin
     return result if isinstance(result, list) else [result]
 
 
-def gpu_busy_percent() -> float | None:
-    """GPU utilization just before a timed run, while our servers are idle: other processes' load."""
+def gpu_busy_percent(samples: int = 5, interval_s: float = 0.2, settle_s: float = 1.0) -> float | None:
+    """Other processes' GPU load just before a timed run, while our servers are idle.
+
+    nvidia-smi averages utilization over its last sample period, so a reading right after our own
+    request (seconds long for diffusion) still shows that request. The lowest of a few readings taken
+    after a short settle is what persists without us.
+    """
     import subprocess
 
-    try:
-        completed = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                                   capture_output=True, text=True, timeout=30)
-        values = [float(line) for line in completed.stdout.split() if line.strip().replace(".", "").isdigit()]
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
-    return max(values) if values else None
+    time.sleep(settle_s)
+    readings = []
+    for index in range(samples):
+        try:
+            completed = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                                       capture_output=True, text=True, timeout=30)
+            values = [float(line) for line in completed.stdout.split() if line.strip().replace(".", "").isdigit()]
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return None
+        if values:
+            readings.append(max(values))
+        if index + 1 < samples:
+            time.sleep(interval_s)
+    return min(readings) if readings else None
 
 
 def _grade(grader: str, params: Mapping[str, Any], observed: Mapping[str, Any], goldens: Mapping[str, Any],

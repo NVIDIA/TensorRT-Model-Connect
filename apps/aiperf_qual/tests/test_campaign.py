@@ -628,6 +628,23 @@ def test_edit_inputs_are_center_cropped_to_cached_squares(tmp_path):
     assert _square_crop(source, tmp_path / "cache") == square and square.parent == tmp_path / "cache" / "trtmc-derived"
 
 
+def test_gpu_busy_ignores_the_tail_of_our_own_request(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual import runner
+
+    def readings(values):
+        sequence = iter(values)
+        return lambda *args, **kwargs: SimpleNamespace(stdout=f"{next(sequence)}\n")
+
+    monkeypatch.setattr(runner.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(subprocess, "run", readings([71, 40, 0, 0, 0]))
+    assert runner.gpu_busy_percent() == 0  # our own request decayed
+    monkeypatch.setattr(subprocess, "run", readings([62, 66, 60, 64, 61]))
+    assert runner.gpu_busy_percent() == 60  # another process keeps the GPU busy
+
+
 def test_media_sweep_steps_decomposition_and_light(tmp_path):
     from trtmc_aiperf_qual import sweep
     from trtmc_aiperf_qual.report import write_report
