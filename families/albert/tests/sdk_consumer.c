@@ -17,20 +17,18 @@
  *   TRTMC_ALBERT_DOCUMENT   document string for relevance test (default: "AI is intelligence.")
  */
 
-#include <trtmc/features.h>
-#include <trtmc/trtmc.h>
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <trtmc/features.h>
+#include <trtmc/trtmc.h>
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
-static void check(trtmc_status status, const trtmc_core_api_v1* api,
-                  trtmc_error** err, const char* label) {
+static void check(trtmc_status status, const trtmc_core_api_v1* api, trtmc_error** err,
+                  const char* label) {
     if (status != TRTMC_OK) {
-        fprintf(stderr, "%s failed: %s\n", label,
-                api ? api->error_message(*err) : "(no api)");
+        fprintf(stderr, "%s failed: %s\n", label, api ? api->error_message(*err) : "(no api)");
         if (api && *err)
             api->error_release(*err);
         exit(1);
@@ -49,15 +47,18 @@ int main(int argc, char** argv) {
         fprintf(stderr, "usage: %s <bundle_path> <runtime_root>\n", argv[0]);
         return 1;
     }
-    const char* bundle_path  = argv[1];
+    const char* bundle_path = argv[1];
     const char* runtime_root = argv[2];
 
-    const char* text     = getenv("TRTMC_ALBERT_TEXT");
-    const char* query    = getenv("TRTMC_ALBERT_QUERY");
+    const char* text = getenv("TRTMC_ALBERT_TEXT");
+    const char* query = getenv("TRTMC_ALBERT_QUERY");
     const char* document = getenv("TRTMC_ALBERT_DOCUMENT");
-    if (!text)     text     = "hello world";
-    if (!query)    query    = "What is AI?";
-    if (!document) document = "AI is intelligence.";
+    if (!text)
+        text = "hello world";
+    if (!query)
+        query = "What is AI?";
+    if (!document)
+        document = "AI is intelligence.";
 
     /* ── load API ─────────────────────────────────────────────────────────── */
     const trtmc_core_api_v1* api = NULL;
@@ -104,16 +105,15 @@ int main(int argc, char** argv) {
             return 1;
         }
         printf("text_to_token_features: tokens=%llu features=%llu\n",
-               (unsigned long long)view.token_count,
-               (unsigned long long)view.features.count);
+               (unsigned long long)view.token_count, (unsigned long long)view.features.count);
         api->result_release(result);
     }
 
     /* ── text_to_embedding ───────────────────────────────────────────────── */
     {
         const trtmc_api_header* task_header = NULL;
-        check(api->model_get_task_api(model, sv(TRTMC_TASK_TEXT_TO_EMBEDDING), 1, 0,
-                                      &task_header, &err),
+        check(api->model_get_task_api(model, sv(TRTMC_TASK_TEXT_TO_EMBEDDING), 1, 0, &task_header,
+                                      &err),
               api, &err, "get text_to_embedding");
 
         const trtmc_text_to_embedding_api_v1* task =
@@ -141,8 +141,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         printf("text_to_embedding: dim=%llu pooling=%.*s normalization=%.*s\n",
-               (unsigned long long)view.count,
-               (int)view.pooling.length, view.pooling.data,
+               (unsigned long long)view.count, (int)view.pooling.length, view.pooling.data,
                (int)view.normalization.length, view.normalization.data);
         api->result_release(result);
     }
@@ -159,7 +158,7 @@ int main(int argc, char** argv) {
 
         trtmc_text_pair_to_relevance_request_v1 req;
         memset(&req, 0, sizeof(req));
-        req.query    = sv(query);
+        req.query = sv(query);
         req.document = sv(document);
 
         trtmc_config_view_v1 cfg;

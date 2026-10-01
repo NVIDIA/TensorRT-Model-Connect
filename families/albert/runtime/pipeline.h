@@ -24,13 +24,12 @@
 namespace trtmc {
 
 class EncoderPipeline final : public trtmc::internal::IModel,
-                               public trtmc::internal::ITextToTokenFeatures,
-                               public trtmc::internal::ITextToEmbedding,
-                               public trtmc::internal::ITextPairToRelevance {
+                              public trtmc::internal::ITextToTokenFeatures,
+                              public trtmc::internal::ITextToEmbedding,
+                              public trtmc::internal::ITextPairToRelevance {
   public:
     EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string primary_task,
-                    std::shared_ptr<ITokenizer> tokenizer = nullptr,
-                    std::string model_id_str = "");
+                    std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
 
     // ITask (via IModel)
     const char* task() const noexcept override;
@@ -41,21 +40,20 @@ class EncoderPipeline final : public trtmc::internal::IModel,
     // ITextToTokenFeatures — was: encoding
     // Returns per-token hidden states for the full tokenized sequence.
     // The result matrix is [actual_seq_len, hidden_size]; row 0 is the CLS token.
-    trtmc::internal::TokenFeaturesResult run(
-        const trtmc::internal::TextToTokenFeaturesRequest& request,
+    trtmc::internal::TokenFeaturesResult
+    run(const trtmc::internal::TextToTokenFeaturesRequest& request,
         trtmc::internal::ConfigView config) override;
 
     // ITextToEmbedding — was: embedding
     // Mean-pools all token hidden states then L2-normalises the result.
-    trtmc::internal::SemanticEmbeddingResult run(
-        const trtmc::internal::TextToEmbeddingRequest& request,
+    trtmc::internal::SemanticEmbeddingResult
+    run(const trtmc::internal::TextToEmbeddingRequest& request,
         trtmc::internal::ConfigView config) override;
 
     // ITextPairToRelevance — was: reranking
     // Concatenates "question:<query>   passage:<document>", returns first output scalar.
-    trtmc::internal::RelevanceResult run(
-        const trtmc::internal::TextPairToRelevanceRequest& request,
-        trtmc::internal::ConfigView config) override;
+    trtmc::internal::RelevanceResult run(const trtmc::internal::TextPairToRelevanceRequest& request,
+                                         trtmc::internal::ConfigView config) override;
 
     // Token-ID-based encoding helper (for unit tests and internal callers).
     std::vector<float> encode_ids(const std::vector<int32_t>& input_ids);

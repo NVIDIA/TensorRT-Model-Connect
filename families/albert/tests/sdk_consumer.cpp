@@ -17,27 +17,26 @@
  *   TRTMC_ALBERT_DOCUMENT   document string for relevance test (default: "AI is intelligence.")
  */
 
-#include <trtmc/features.hpp>
-#include <trtmc/trtmc.hpp>
-
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <trtmc/features.hpp>
+#include <trtmc/trtmc.hpp>
 
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "usage: " << argv[0] << " <bundle_path> <runtime_root>\n";
         return 1;
     }
-    const std::string bundle_path  = argv[1];
+    const std::string bundle_path = argv[1];
     const std::string runtime_root = argv[2];
 
-    const char* env_text     = std::getenv("TRTMC_ALBERT_TEXT");
-    const char* env_query    = std::getenv("TRTMC_ALBERT_QUERY");
+    const char* env_text = std::getenv("TRTMC_ALBERT_TEXT");
+    const char* env_query = std::getenv("TRTMC_ALBERT_QUERY");
     const char* env_document = std::getenv("TRTMC_ALBERT_DOCUMENT");
-    const std::string text     = env_text     ? env_text     : "hello world";
-    const std::string query    = env_query    ? env_query    : "What is AI?";
+    const std::string text = env_text ? env_text : "hello world";
+    const std::string query = env_query ? env_query : "What is AI?";
     const std::string document = env_document ? env_document : "AI is intelligence.";
 
     try {
@@ -58,8 +57,8 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("text_to_token_features: empty token list");
 
             std::cout << "text_to_token_features: tokens=" << result.tokens().size()
-                      << " rows=" << result.features().rows
-                      << " cols=" << result.features().columns << "\n";
+                      << " rows=" << result.features().rows << " cols=" << result.features().columns
+                      << "\n";
         }
 
         // ── text_to_embedding ───────────────────────────────────────────

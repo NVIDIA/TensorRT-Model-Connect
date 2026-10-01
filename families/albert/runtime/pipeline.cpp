@@ -24,8 +24,7 @@ int32_t infer_output_hidden_dim(const ITrtModule& module) {
 
 // Mean-pool [seq_len, hidden] over actual_len positions then L2-normalise.
 // Returns the pooled vector of size hidden.
-std::vector<float> mean_pool_and_normalize(const float* data, int32_t actual_len,
-                                           int32_t hidden) {
+std::vector<float> mean_pool_and_normalize(const float* data, int32_t actual_len, int32_t hidden) {
     std::vector<float> pooled(static_cast<std::size_t>(hidden), 0.0f);
     const float inv_len = 1.0f / static_cast<float>(actual_len);
     for (int32_t s = 0; s < actual_len; ++s)
@@ -80,14 +79,13 @@ std::vector<trtmc::internal::TaskInstance> EncoderPipeline::task_bindings() {
 // ─── ITextToTokenFeatures (was: encoding) ───
 // Tokenise, run the encoder, extract all valid token hidden states.
 // Returns [actual_seq_len, hidden_size] where row 0 is the CLS token.
-trtmc::internal::TokenFeaturesResult EncoderPipeline::run(
-    const trtmc::internal::TextToTokenFeaturesRequest& request,
-    trtmc::internal::ConfigView /*config*/) {
-    if (!tokenizer_)
-        throw std::runtime_error("EncoderPipeline: no tokenizer configured");
-
+trtmc::internal::TokenFeaturesResult
+EncoderPipeline::run(const trtmc::internal::TextToTokenFeaturesRequest& request,
+                     trtmc::internal::ConfigView /*config*/) {
     std::vector<int32_t> ids;
     if (const auto* sv = std::get_if<std::string_view>(&request.text)) {
+        if (!tokenizer_)
+            throw std::runtime_error("EncoderPipeline: no tokenizer configured");
         ids = tokenizer_->encode(std::string(*sv));
     } else if (const auto* span = std::get_if<Span<const std::int32_t>>(&request.text)) {
         ids.assign(span->begin(), span->end());
@@ -106,8 +104,7 @@ trtmc::internal::TokenFeaturesResult EncoderPipeline::run(
     }
 
     // Build the [actual_len, hidden] feature matrix.
-    result.features.values.assign(raw_floats.begin(),
-                                  raw_floats.begin() + actual_len * hidden);
+    result.features.values.assign(raw_floats.begin(), raw_floats.begin() + actual_len * hidden);
     result.features.rows = static_cast<uint64_t>(actual_len);
     result.features.columns = static_cast<uint64_t>(hidden);
 
@@ -126,9 +123,9 @@ trtmc::internal::TokenFeaturesResult EncoderPipeline::run(
 
 // ─── ITextToEmbedding (was: embedding) ───
 // Mean-pools all token hidden states and L2-normalises the result.
-trtmc::internal::SemanticEmbeddingResult EncoderPipeline::run(
-    const trtmc::internal::TextToEmbeddingRequest& request,
-    trtmc::internal::ConfigView /*config*/) {
+trtmc::internal::SemanticEmbeddingResult
+EncoderPipeline::run(const trtmc::internal::TextToEmbeddingRequest& request,
+                     trtmc::internal::ConfigView /*config*/) {
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
 
@@ -154,9 +151,9 @@ trtmc::internal::SemanticEmbeddingResult EncoderPipeline::run(
 // ─── ITextPairToRelevance (was: reranking) ───
 // Combines query and document with the Nemotron rerank template, returns the
 // first output scalar as a relevance score.
-trtmc::internal::RelevanceResult EncoderPipeline::run(
-    const trtmc::internal::TextPairToRelevanceRequest& request,
-    trtmc::internal::ConfigView /*config*/) {
+trtmc::internal::RelevanceResult
+EncoderPipeline::run(const trtmc::internal::TextPairToRelevanceRequest& request,
+                     trtmc::internal::ConfigView /*config*/) {
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
 
@@ -206,8 +203,7 @@ std::vector<float> EncoderPipeline::encode_ids(const std::vector<int32_t>& input
     std::vector<float> raw_floats;
     for (auto& [name, tensor] : outputs) {
         if (name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
-            name.find("output") != std::string::npos ||
-            name.find("hidden") != std::string::npos ||
+            name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
             name.find("score") != std::string::npos) {
             auto count = tensor.numel();
             raw_floats.resize(static_cast<std::size_t>(count));
