@@ -966,6 +966,13 @@ jobs:
           # never succeed. Run the whole remote sequence as one unit so a
           # failure here can fall back to reserving a fresh instance instead.
           run_on_instance() {
+            # GitHub serves both IPv4 and IPv6; some networks route IPv6
+            # to a dead end instead of falling back to IPv4, which looks
+            # like a hung/timed-out git fetch even though the instance and
+            # its SSH session are both healthy. Try the default resolution
+            # first (works fine on most networks), and only force IPv4 as
+            # a same-attempt fallback if that hangs/fails, instead of
+            # restricting every instance to IPv4 up front.
             # Brev's CLI can report "Success! Created" for an instance that
             # never finished provisioning; such an instance never answers
             # SSH. Probe SSH first so this is caught immediately instead of
@@ -973,11 +980,11 @@ jobs:
             # instance. Confirmed with Brev: this is a known CLI bug where
             # provisioning failures are not propagated to the exit code.
             retry brev exec "$INSTANCE_NAME" "true" || return 1
-            retry_backoff brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || return 1
+            retry_backoff brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA || git fetch -4 --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || return 1
             # The host coordinator and container entrypoint belong to the chosen
             # CI commit. Neither imports contributor code outside the container.
             [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
-            retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py" || return 1
+            retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA || git fetch -4 --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py" || return 1
             # A freshly created instance's SSH session may not have its Docker
             # group membership yet. The first live GPU run reached this point
             # and failed on docker.sock, so do not depend on propagation timing.
