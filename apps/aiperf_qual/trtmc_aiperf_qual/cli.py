@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""trtmc-aiperf-qual: run | run-all | summary | plan | rejudge | doctor | publish-goldens."""
+"""trtmc-aiperf-qual: run | run-all | summary | plan | rejudge | recheck | doctor | publish-goldens."""
 
 from __future__ import annotations
 
@@ -131,6 +131,42 @@ def current_settings(model: dict, environment) -> dict:
     return {**model, "accuracy": accuracy, "performance": {**model["performance"], "l1": l1}}
 
 
+def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (), regenerate: bool = False) -> int:
+    """Run the Task's whole-output checks (``supplementary``) again on finished results and replace
+    their report entries, then rejudge; the rest of the result is kept. Generations that sent the
+    same requests are reused unless ``regenerate``."""
+    from . import models
+    from .runner import SUPPLEMENTARY_SUITES, supplementary
+    from .services import reference_python
+
+    for out in outs:
+        path = out / "report.json"
+        if not path.is_file():
+            continue
+        recorded = json.loads((out / "model.json").read_text())
+        model = {**recorded, "supplementary": models.resolve_model(recorded["catalog_profile"], environment)
+                 ["supplementary"]}
+        checks = [{**check, "reuse_outputs": not regenerate} for check in model["supplementary"]
+                  if not only or check["check"] in only]
+        if not checks:
+            continue
+        python = reference_python(environment, model)
+        entries, suites = [], set()
+        for check in checks:
+            suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
+            try:
+                entries += supplementary(environment, model, check, python, out)
+            except Exception as error:  # noqa: BLE001 - recorded like a run's phase error
+                entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
+                                "samples": 0, "passed": None, "required_passes": None,
+                                "error": f"{type(error).__name__}: {str(error)[-800:]}"})
+        result = json.loads(path.read_text())
+        result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("suite") not in suites] + entries
+        path.write_text(json.dumps(result, indent=2, default=str))
+        (out / "model.json").write_text(json.dumps(model, indent=2, default=str))
+    return rejudge_reports(outs, environment)
+
+
 def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
     """Re-apply the current judge to recorded statistics (no model is run); with an environment, also
     today's judging settings from the configuration."""
@@ -240,6 +276,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     rejudge.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
     rejudge.add_argument("--environment", type=Path,
                          help="also apply today's judging settings (gates, sampled, Perf output check)")
+    recheck = commands.add_parser("recheck", help="run the Task's whole-output checks again on finished results "
+                                                  "(CLIP alignment, latent replay parity, TTS intelligibility)")
+    recheck.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
+    recheck.add_argument("--environment", type=Path, required=True)
+    recheck.add_argument("--check", action="append", default=[], help="only these checks (default: all)")
+    recheck.add_argument("--regenerate", action="store_true",
+                         help="render again instead of reusing generations that sent the same requests")
     check = commands.add_parser("doctor", help="verify AIPerf, plugins, the metric hook, and (--environment) "
                                                "this machine's environment file")
     check.add_argument("--fix", action="store_true")
@@ -259,6 +302,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return code
         if arguments.command == "publish-goldens":
             return publish_goldens(arguments.source, arguments.store_cli, arguments.remote_dir)
+        if arguments.command == "recheck":
+            return recheck_reports(arguments.outs, load_environment(arguments.environment), arguments.check,
+                                   arguments.regenerate)
         if arguments.command == "rejudge":
             return rejudge_reports(arguments.outs, load_environment(arguments.environment)
                                    if arguments.environment else None)

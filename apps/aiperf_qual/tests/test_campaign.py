@@ -516,27 +516,90 @@ def test_latent_seeds_give_each_sample_its_own_replayed_noise():
     assert seeded.key != "key" and seeded.manifest["latent_seed_base"] == 1000 and "latent_seed" not in samples[0]["request"]
 
 
-def test_replay_parity_compares_against_the_native_precision_floor(tmp_path):
+def test_replay_parity_compares_both_sides_with_the_full_precision_render(tmp_path):
     from trtmc_aiperf_qual import replay_parity
 
-    samples = [{"sample_id": str(i), "request": {}} for i in range(4)]
-    floor = {"psnr": 32.0, "ssim": 0.95}
-    rows = [{"candidate": {"psnr": 30.0, "ssim": 0.93}, "floor": floor},
-            {"candidate": {"psnr": 17.6, "ssim": 0.60}, "floor": floor},
-            {"candidate": {"psnr": 28.0, "ssim": 0.90}, "floor": None},  # judged by the mean floor
-            {"candidate": None, "floor": None, "frames": [1, 17], "shapes": [[8, 8, 3], [8, 8, 3]]}]
-    verdict = replay_parity.judge(rows, samples, {"max_psnr_gap_db": 6.0, "max_ssim_gap": 0.1, "min_pass_rate": 0.9})
-    assert verdict["status"] == "fail" and verdict["passed"] == 2
-    assert [f["sample_id"] for f in verdict["failures"]] == ["1", "3"] and "geometry" in verdict["failures"][1]["explanation"]
-    assert verdict["metrics"]["floor_psnr_db"] == 32.0 and verdict["metrics"]["floor_samples"] == 2
-    assert replay_parity.judge(rows[:1] + rows[2:3], samples[:2], {})["status"] == "pass"
-    no_floor = [{"candidate": {"psnr": 24.97, "ssim": 0.899}, "floor": None},
-                {"candidate": {"psnr": 14.1, "ssim": 0.58}, "floor": None}]
-    fallback = replay_parity.judge(no_floor, samples[:2], {"min_pass_rate": 0.5})
-    assert fallback["passed"] == 1 and fallback["metrics"]["floor_source"] == "fallback"
-    assert fallback["metrics"]["floor_psnr_db"] == 25.0 and len(fallback["metrics"]["per_sample"]) == 2
+    def row(candidate_ref, native_ref, candidate=(20.0, 0.8)):
+        return {"candidate": {"psnr": candidate[0], "ssim": candidate[1]},
+                "candidate_ref": candidate_ref and {"psnr": candidate_ref[0], "ssim": candidate_ref[1]},
+                "native_ref": native_ref and {"psnr": native_ref[0], "ssim": native_ref[1]}}
+
+    samples = [{"sample_id": str(i), "request": {}} for i in range(5)]
+    check = {"max_psnr_gap_db": 3.0, "max_ssim_gap": 0.05}
+    same = [row((25.7, 0.91), (25.8, 0.91)), row((25.5, 0.90), (25.0, 0.90)), row((26.0, 0.92), (26.5, 0.92)),
+            row(None, None), row(None, None)]
+    verdict = replay_parity.judge(same, samples, check)
+    assert verdict["status"] == "pass" and verdict["samples"] == 3 and verdict["metrics"]["yardstick"] == "full precision"
+    assert abs(verdict["metrics"]["psnr_gap_db"] - 0.1 / 3) < 1e-9  # gaps 0.1, -0.5, 0.5
+    worse = [row((13.9, 0.55), (24.7, 0.89)), row((14.5, 0.58), (25.0, 0.90)), row((13.0, 0.50), (24.0, 0.88))]
+    failed = replay_parity.judge(worse, samples[:3], check)
+    assert failed["status"] == "fail" and failed["passed"] == 0 and "vs full precision" in failed["failures"][0]["explanation"]
+    noisy = [row((20.0, 0.9), (30.0, 0.9)), row((30.0, 0.9), (22.0, 0.9)), row((24.0, 0.9), (25.0, 0.9))]
+    assert replay_parity.judge(noisy, samples[:3], check)["status"] == "pass"  # gap 1 dB on average
+    overflow = [row((20.0, 0.8), (5.4, 0.0)), row((20.0, 0.8), (12.6, 0.04)), row((20.0, 0.8), (24.0, 0.9))]
+    fallback = replay_parity.judge(overflow, samples[:3], check)  # most full-precision renders broke
+    assert fallback["metrics"]["yardstick"] == "fallback" and fallback["status"] == "pass"
+    assert fallback["gate"] == {"min_psnr_db": 19.0, "min_ssim": 0.8, "min_pass_rate": 0.9}
     record = {"observation": {"latent_replay": True}}
     assert replay_parity.not_replayed({"candidate": [(tmp_path, record)], "native": [(tmp_path, {"observation": {}})]}) == ["native"]
+
+
+def test_script_reference_frames_missing_natives_and_broken_floors(tmp_path):
+    from trtmc_aiperf_qual import alignment, replay_parity
+    from trtmc_aiperf_qual.generation import media_source
+
+    record = {"observation": {"frame_artifacts": ["/x/000000.png", "/x/000062.png"], "artifact_indices": [0, 62]}}
+    assert media_source(tmp_path, record) == {"dir": str(tmp_path), "files": ["/x/000000.png", "/x/000062.png"],
+                                              "indices": [0, 62]}
+    assert media_source(tmp_path, {"observation": {}}) == {"dir": str(tmp_path)}
+    samples = [{"sample_id": "0", "request": {"prompt": "p"}}]
+    missing = alignment.judge([{"clip_score": 25.0}], [None], samples, {}, video=False)
+    assert missing["status"] == "not-comparable" and "no baseline" in missing["reasons"][0]
+    rows = [{"candidate": {"psnr": 18.0, "ssim": 0.75}, "candidate_ref": {"psnr": 9.0, "ssim": 0.1},
+             "native_ref": {"psnr": 8.0, "ssim": 0.1}}]
+    broken = replay_parity.judge(rows, samples, {})  # an 8 dB full-precision render broke: 19 dB / 0.8 instead
+    assert broken["metrics"]["yardstick"] == "fallback" and broken["status"] == "fail"
+
+
+def test_recheck_replaces_only_the_rechecked_entries(tmp_path, monkeypatch):
+    import json
+
+    from trtmc_aiperf_qual import cli, models, runner, services
+
+    out = tmp_path / "m"
+    out.mkdir()
+    (out / "model.json").write_text(json.dumps({"catalog_profile": "m", "supplementary": []}))
+    (out / "report.json").write_text(json.dumps({"accuracy": [
+        {"suite": "family-case", "status": "pass"}, {"suite": "clip-alignment", "status": "fail"},
+        {"suite": "replay-parity", "status": "fail"}]}))
+    check = {"check": "clip_alignment", "suite": "partiprompts-30"}
+    monkeypatch.setattr(models, "resolve_model", lambda profile, environment: {"supplementary": [check]})
+    monkeypatch.setattr(services, "reference_python", lambda environment, model: "/ref/python")
+    monkeypatch.setattr(runner, "supplementary", lambda environment, model, check, python, out: [
+        {"suite": "clip-alignment", "status": "pass"}])
+    judged = []
+    monkeypatch.setattr(cli, "rejudge_reports", lambda outs, environment: judged.append(outs) or 0)
+    assert cli.recheck_reports([out], environment=object()) == 0 and judged == [[out]]
+    suites = {item["suite"]: item["status"] for item in json.loads((out / "report.json").read_text())["accuracy"]}
+    assert suites == {"family-case": "pass", "clip-alignment": "pass"}
+    assert json.loads((out / "model.json").read_text())["supplementary"] == [check]
+
+
+def test_recheck_reuses_a_generation_only_for_the_same_requests(tmp_path):
+    import json
+
+    from trtmc_aiperf_qual import generation
+    from trtmc_aiperf_qual.suites import Suite
+
+    suite = Suite("s", "k", [{"sample_id": "0", "request": {"prompt": "a", "latent_seed": 1000}}], {})
+    out = tmp_path / "clip-candidate"
+    (out / "scratch" / "r1").mkdir(parents=True)
+    (out / "aiperf.inputs.jsonl").write_text(json.dumps({"text": json.dumps({"request": suite.samples[0]["request"]})}) + "\n")
+    (out / "records.jsonl").write_text(json.dumps({"route": "/v1/tasks/generate_image", "request_id": "r1"}) + "\n")
+    assert generation._earlier(out, suite) == [(out / "scratch" / "r1", {"route": "/v1/tasks/generate_image",
+                                                                            "request_id": "r1"})]
+    other = Suite("s", "k", [{"sample_id": "0", "request": {"prompt": "b"}}], {})
+    assert generation._earlier(out, other) is None
 
 
 def test_media_sweep_steps_decomposition_and_light(tmp_path):

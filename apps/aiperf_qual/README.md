@@ -68,8 +68,17 @@ video generation models also pass a CLIP text-alignment check (`clip_alignment`)
 PartiPrompts 30 (3 for videos) at the catalog request, CLIP ViT-L/14 scores every image (8 evenly
 sampled frames of a video) against its prompt, and the check fails when TRTMC's mean CLIPScore is more
 than 1 point below the native model's and the paired drop is significant (one-sided 95%); videos also
-keep the temporal consistency of adjacent frames (mean CLIP cosine) within 0.02 by the same rule. Pixel parity only catches gross failures, since diffusion output drifts across
-precisions; the report lists each sample's scores and the two rendering directories.
+keep the temporal consistency of adjacent frames (mean CLIP cosine) within 0.02 by the same rule. A
+native reference that renders the same image for different prompts makes it not-comparable.
+
+Families whose TRTMC runtime accepts caller initial latents (Flux, PixArt, Qwen-Image, Z-Image, Wan
+2.1) render with the same initial noise on both sides (latent replay, `trtmc_perf_serving.latents`),
+so they are also compared pixel by pixel (`replay-parity`): the native model renders the first 10
+prompts once more at fp32 (else the other half precision), and TRTMC may be on average at most 3 dB
+PSNR / 0.05 SSIM further from that full-precision render than the native half-precision run is
+(6 dB / 0.1 for quantized weights), failing only on a significant gap. Without a usable
+full-precision render, each sample needs 19 dB / 0.8 against the native output. `recheck` runs these
+checks again on finished results (reusing generations that sent the same requests).
 
 A suite with `base: catalog` overrides the profile's catalog request (size, steps, seed, ...) with
 its dataset fields. Exceptions stay in `config/models/<profile>.yaml`: `accuracy_source: tasks`

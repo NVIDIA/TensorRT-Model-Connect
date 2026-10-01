@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .config import Environment
-from .generation import generate, generate_native
+from .generation import generate, generate_native, media_source
 from .services import _serve_env
 from .suites import build_suite, limit_suite, with_latent_seeds
 
@@ -28,19 +28,33 @@ import json, sys
 from pathlib import Path
 import numpy as np, torch
 from transformers import CLIPModel, CLIPProcessor
+from PIL import Image
 from trtmc_perf_serving.digests import media_frames
 model_id, items, max_frames = sys.argv[1], json.loads(sys.argv[2]), int(sys.argv[3])
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = CLIPModel.from_pretrained(model_id).to(device).eval()
 processor = CLIPProcessor.from_pretrained(model_id)
+
+def load(source):
+    # The request directory holds every frame; a script reference lists a few sampled frame files.
+    frames = media_frames(Path(source["dir"]))
+    if frames or not source.get("files"):
+        return frames, False
+    return [np.asarray(Image.open(path).convert("RGB")) for path in source["files"] if Path(path).is_file()], True
+
 rows, firsts = [], []
 with torch.no_grad():
-    for workdir, prompt in items:
-        frames = media_frames(Path(workdir))
+    for source, prompt, pick in items:
+        frames, sampled = load(source)
         if not frames:
             rows.append(None)
             continue
-        picks = sorted({int(i) for i in np.linspace(0, len(frames) - 1, min(max_frames, len(frames))).round()})
+        if sampled:  # already the sampled frames
+            picks = list(range(len(frames)))
+        elif pick:  # the other side's sampled frame indices
+            picks = [index for index in pick if index < len(frames)] or [0]
+        else:
+            picks = sorted({int(i) for i in np.linspace(0, len(frames) - 1, min(max_frames, len(frames))).round()})
         inputs = processor(text=[prompt], images=[frames[i] for i in picks], return_tensors="pt", padding=True,
                            truncation=True, max_length=77).to(device)
         output = model(**inputs)  # image_embeds and text_embeds come out L2-normalized
@@ -68,7 +82,7 @@ def is_video(request: Mapping[str, Any]) -> bool:
     return request.get("media_type") == "video" or int(request.get("num_frames") or 1) > 1
 
 
-def _score(environment: Environment, clip_model: str, items: Sequence[tuple[str, str]],
+def _score(environment: Environment, clip_model: str, items: Sequence[tuple[Mapping[str, Any], str, list | None]],
            max_frames: int) -> dict[str, Any]:
     completed = subprocess.run(
         [str(environment["serve_python"]), "-c", SCORE, clip_model, json.dumps(list(items)), str(max_frames)],
@@ -119,8 +133,9 @@ def judge(candidate: Sequence[Mapping[str, Any] | None], native: Sequence[Mappin
     missing = [samples[index]["sample_id"] for index, row in enumerate(candidate) if row is None]
     if missing:
         reasons.append(f"TRTMC wrote no image for {len(missing)} sample(s)")
-    if not any(row is not None for row in native):
-        reasons.append("the native model wrote no image")
+    native_missing = not any(row is not None for row in native)
+    if native_missing:
+        reasons.append("the native model wrote no image: no baseline")
     if pairs:
         mean, lower, failed = drop([n["clip_score"] - c["clip_score"] for c, n in pairs], clip_drop)
         metrics.update(clip_score_drop=mean, clip_score_drop_lower_bound=lower)
@@ -142,6 +157,8 @@ def judge(candidate: Sequence[Mapping[str, Any] | None], native: Sequence[Mappin
     if (cross.get("candidate") or 0) >= MAX_CROSS_PROMPT_COSINE:
         reasons.append(f"TRTMC renders near-identical images for different prompts (cosine {cross['candidate']:.3f})")
     status = "fail" if reasons else "pass"
+    if native_missing:
+        status = "not-comparable"
     if (cross.get("native") or 0) >= MAX_CROSS_PROMPT_COSINE:  # no baseline to judge TRTMC against
         status = "not-comparable"
         reasons.append(f"the native model renders near-identical images for different prompts (cosine "
@@ -161,16 +178,19 @@ def judge(candidate: Sequence[Mapping[str, Any] | None], native: Sequence[Mappin
 
 
 def _floor(environment: Environment, model: dict[str, Any], suite: Any, python: str, out: Path, backend: str,
-           precision: str) -> tuple[list[tuple[Path, dict[str, Any]]], str] | tuple[None, None]:
+           precision: str, reuse: bool = False) -> tuple[list[tuple[Path, dict[str, Any]]], str] | tuple[None, None]:
     """The same backend at the next native precision (a script reference does not replay the noise)."""
     from .runner import timing_precisions
 
-    for other in dict.fromkeys(timing_precisions(model["reference"])):
+    # fp32 first (how far the native half-precision run is from full precision; it never overflows),
+    # then the other half precision where fp32 does not fit.
+    preferred = {"bf16": ["fp32", "fp16"], "fp16": ["fp32", "bf16"]}.get(precision, ["bf16", "fp16"])
+    for other in dict.fromkeys([*preferred, *timing_precisions(model["reference"])]):
         if other == precision:
             continue
         try:
             return generate(environment, model, backend, out / f"replay-floor-{backend}-{other}", suite, python,
-                            other), f"{backend} {other}"
+                            other, reuse), f"{backend} {other}"
         except Exception:  # noqa: BLE001 - try the next precision; no floor at all is reported
             continue
     return None, None
@@ -187,13 +207,16 @@ def _replay_parity(environment: Environment, model: dict[str, Any], check: Mappi
         return replay_parity.item(suite, {}, label, None, outputs,
                                   [f"the initial noise was not replayed on {', '.join(missing)}"])
     floor_suite = limit_suite(suite, int(check.get("parity_floor_samples", 10)))
-    floor, floor_label = _floor(environment, model, floor_suite, python, out, *native)
+    floor, floor_label = _floor(environment, model, floor_suite, python, out, *native,
+                                reuse=bool(check.get("reuse_outputs")))
     if floor is not None and replay_parity.not_replayed({"floor": floor}):
         floor, floor_label = None, None
     items = [(str(outputs["candidate"][index][0]), str(outputs["native"][index][0]),
               str(floor[index][0]) if floor is not None and index < len(floor) else None)
              for index in range(len(suite.samples))]
     rows = replay_parity.measure(environment, items, max_frames)
+    if model["candidate"].get("quantization"):  # quantized weights deviate more than a native precision change
+        check = {**check, **check.get("quantized_gap", {})}
     return replay_parity.item(suite, replay_parity.judge(rows, suite.samples, check), label, floor_label, outputs)
 
 
@@ -211,12 +234,18 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
         suite = with_latent_seeds(suite)
     clip_model = str(check.get("clip_model", "openai/clip-vit-large-patch14"))
     max_frames = int(check.get("max_frames", 8))
-    native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "clip")
-    outputs = {"candidate": generate(environment, model, "trtmc", out / "clip-candidate", suite), "native": native}
+    reuse = bool(check.get("reuse_outputs"))
+    native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "clip",
+                                                               reuse=reuse)
+    outputs = {"candidate": generate(environment, model, "trtmc", out / "clip-candidate", suite, reuse=reuse),
+               "native": native}
     prompts = [str(sample["request"]["prompt"]) for sample in suite.samples]
-    scored = {side: _score(environment, clip_model, [(str(workdir), prompt) for (workdir, _), prompt
-                                                     in zip(rows, prompts)], max_frames)
-              for side, rows in outputs.items()}
+    sources = {side: [media_source(workdir, record) for workdir, record in rows] for side, rows in outputs.items()}
+    # Where the native reference kept only sampled frames, TRTMC is scored on the same frames.
+    picks = [native.get("indices") for native in sources["native"]]
+    scored = {side: _score(environment, clip_model, [
+        (source, prompt, pick if side == "candidate" else None)
+        for source, prompt, pick in zip(sources[side], prompts, picks)], max_frames) for side in outputs}
     scores = {side: result["rows"] for side, result in scored.items()}
     verdict = judge(scores["candidate"], scores["native"], suite.samples, check, video,
                     {side: result["cross_prompt_cosine"] for side, result in scored.items()})

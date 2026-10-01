@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .config import Environment
 from .services import serving
@@ -20,22 +20,43 @@ Outputs = list[tuple[Path, dict[str, Any]]]
 
 
 def generate(environment: Environment, model: dict[str, Any], backend: str, out: Path, suite: Any,
-             python: str | None = None, precision: str | None = None) -> Outputs:
+             python: str | None = None, precision: str | None = None, reuse: bool = False) -> Outputs:
+    """``reuse``: return an earlier generation in ``out`` when it sent exactly these requests and its
+    outputs are still there (rechecking finished results)."""
     from .runner import _observations
 
+    if reuse and (earlier := _earlier(out, suite)) is not None:
+        return earlier
     kwargs = {"precision": precision, "python": python} if backend != "trtmc" else {}
     with serving(environment, model, backend, out, keep_artifacts=True, **kwargs) as service:
         _observations(environment, service, model, suite, out / "aiperf")
+    outputs = _answered(out, suite)
+    if outputs is None:
+        raise RuntimeError(f"{backend} did not answer all {len(suite.samples)} requests")
+    return outputs
+
+
+def _answered(out: Path, suite: Any) -> Outputs | None:
     # AIPerf sends the samples in order, one at a time: the last records are the suite's.
-    records = [json.loads(line) for line in (out / "records.jsonl").read_text().splitlines() if line.strip()]
+    path = out / "records.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.is_file() else []
     ordered = [record for record in records if record.get("route", "").startswith("/v1/tasks/")]
     if len(ordered) < len(suite.samples):
-        raise RuntimeError(f"{backend} answered {len(ordered)} of {len(suite.samples)} requests")
+        return None
     return [(out / "scratch" / str(record["request_id"]), record) for record in ordered[-len(suite.samples):]]
 
 
+def _earlier(out: Path, suite: Any) -> Outputs | None:
+    inputs = out / "aiperf.inputs.jsonl"
+    expected = "".join(json.dumps({"text": json.dumps({"request": sample["request"]})}) + "\n" for sample in suite.samples)
+    if not inputs.is_file() or inputs.read_text() != expected:
+        return None
+    outputs = _answered(out, suite)
+    return outputs if outputs is not None and all(workdir.is_dir() for workdir, _ in outputs) else None
+
+
 def generate_native(environment: Environment, model: dict[str, Any], suite: Any, python: str, out: Path,
-                    label: str, skip: tuple[str, str] | None = None) -> tuple[Outputs, str, str]:
+                    label: str, skip: tuple[str, str] | None = None, reuse: bool = False) -> tuple[Outputs, str, str]:
     """The native model's outputs and the (backend, precision) that produced them: the generic adapter,
     else the family's declared reference, at the Perf precisions in order (``skip`` excluded)."""
     from .runner import timing_precisions
@@ -47,7 +68,20 @@ def generate_native(environment: Environment, model: dict[str, Any], suite: Any,
                 continue
             try:
                 return (generate(environment, model, backend, out / f"{label}-native-{backend}-{precision}", suite,
-                                 python, precision), backend, precision)
+                                 python, precision, reuse), backend, precision)
             except Exception as error:  # noqa: BLE001 - try the next precision, then the fallback
                 errors.append(f"{backend} {precision}: {type(error).__name__}: {str(error)[-200:]}")
     raise RuntimeError("; ".join(errors)[-1500:] or "no other native precision")
+
+
+def media_source(workdir: Path, record: Mapping[str, Any]) -> dict[str, Any]:
+    """Where a request's generated frames are: its request directory, plus (family script references,
+    which keep a few sampled frames elsewhere) the frame files the observation lists and their
+    frame indices."""
+    observation = record.get("observation") or {}
+    files = [str(path) for path in (observation.get("frame_artifacts") or observation.get("image_artifacts") or [])
+             if isinstance(path, str)]
+    source: dict[str, Any] = {"dir": str(workdir)}
+    if files:
+        source.update(files=files, indices=observation.get("artifact_indices"))
+    return source

@@ -143,6 +143,19 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
     return runs[0], stats
 
 
+# Checks that judge whole outputs per Task (``supplementary``); each returns report entries.
+SUPPLEMENTARY_CHECKS = {"tts_intelligibility": intelligibility.run, "clip_alignment": alignment.run}
+# The report entries each check writes (rejudge leaves them; recheck replaces them).
+SUPPLEMENTARY_SUITES = {"tts_intelligibility": ("tts-intelligibility",),
+                        "clip_alignment": ("clip-alignment", "replay-parity")}
+
+
+def supplementary(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
+                  out: Path) -> list[dict[str, Any]]:
+    result = SUPPLEMENTARY_CHECKS[check["check"]](environment, model, check, python, out)
+    return result if isinstance(result, list) else [result]
+
+
 def gpu_busy_percent() -> float | None:
     """GPU utilization just before a timed run, while our servers are idle: other processes' load."""
     import subprocess
@@ -445,12 +458,10 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     performance_l1: list[dict[str, Any]] = []
     if model.get("family_accuracy"):
         phases.run("family_accuracy", lambda: accuracy.extend(family.run(environment, model, out, python)))
-    checks = {"tts_intelligibility": intelligibility.run, "clip_alignment": alignment.run}
     for check in model.get("supplementary", []):
-        if check.get("check") in checks:
+        if check.get("check") in SUPPLEMENTARY_CHECKS:
             def run_check(check: Mapping[str, Any] = check) -> None:
-                result = checks[check["check"]](environment, model, check, python, out)
-                accuracy.extend(result if isinstance(result, list) else [result])
+                accuracy.extend(supplementary(environment, model, check, python, out))
             phases.run(check["check"], run_check)
     with gpu_exclusive(environment):
         reference_perf = _reference_perf(environment, model, l1, perf_suite, python, phases, out) if l1 else {}
@@ -458,10 +469,12 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
                                                    reference_perf, accuracy, performance_l1, out))
         l2 = model["performance"].get("l2")
         performance_l2: dict[str, Any] = {}
-        if l2 and l2.get("kind") == "media" and reference["backend"] == "reference":
+        # The sweeps start the generic adapter: only where L1 could time it (not a script fallback).
+        generic = any(item.get("reference_backend") == "reference" for item in performance_l1)
+        if l2 and l2.get("kind") == "media" and generic:
             phases.run("perf_l2", lambda: performance_l2.update(sweep.run_media(
                 environment, model, l2, out, python, timing_precisions(reference)[0])))
-        elif l2 and reference["backend"] == "reference":
+        elif l2 and generic:
             def serving_sweep() -> None:
                 with serving(environment, model, "trtmc", out / "l2-candidate-server") as candidate, \
                         serving(environment, model, "reference", out / "l2-reference-server", mode="eager",
