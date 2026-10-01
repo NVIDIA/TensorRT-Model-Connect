@@ -214,9 +214,28 @@ class Diffusion:
         if video:
             kwargs["num_frames"] = int(request.get("num_frames", 1))
         kwargs["generator"] = torch.Generator(self.spec.device).manual_seed(max(int(request.get("seed", 0)), 0))
+        if request.get("initial_latents_path"):
+            kwargs["latents"] = self._replayed_latents(request)
         result, model_ms = timed(lambda: self.pipe(**kwargs))
         media = np.asarray(result.frames if video else result.images)
         return invocation(tensor_observation(media, artifact_base), model_ms)
+
+    def _replayed_latents(self, request: Mapping[str, Any]) -> Any:
+        """The replayed noise file (``latents.Replay``) in the form this pipeline takes as ``latents``."""
+        from ...latents import LAYOUTS, canonical_shape
+
+        name = type(self.pipe).__name__
+        shape = canonical_shape(name, self.pipe.transformer.config, self.pipe.vae.config, request)
+        if shape is None:
+            raise BackendError(f"no latent replay layout for {name}")
+        flat = np.fromfile(str(request["initial_latents_path"]), dtype=np.float32)
+        if flat.size != math.prod(shape):
+            raise BackendError(f"initial latents hold {flat.size} floats; {name} expects {shape}")
+        latents = torch.from_numpy(flat.reshape(shape)).to(self.spec.device)
+        layout = LAYOUTS[name]
+        if layout.pack:  # [1, (1,) C, H, W] -> [1, H/2 * W/2, C * 4]
+            latents = self.pipe._pack_latents(latents, 1, shape[-3], shape[-2], shape[-1])
+        return latents.to(self.spec.dtype) if layout.cast_to_pipeline_dtype else latents
 
 
 class TimeSeries:

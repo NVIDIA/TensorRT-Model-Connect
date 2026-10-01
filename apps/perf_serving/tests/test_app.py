@@ -213,3 +213,27 @@ def test_image_and_video_responses_carry_inference_time_and_probed_peak_memory(t
                 break
             time.sleep(0.01)
     assert polled["status"] == "completed" and polled["inference_time_s"] == 0.25 and polled["peak_memory_mb"] == 600.0
+
+
+def test_latent_seed_becomes_a_noise_file_or_is_dropped_and_reported(tmp_path):
+    class Generator(FakeBackend):
+        def invoke(self, request, artifact_base):
+            self.requests.append(dict(request))
+            return Invocation({"artifact": "/out.png"}, 1.0)
+
+    def replay(request, directory):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "noise.f32").write_bytes(b"\0" * 8)
+        return {**{k: v for k, v in request.items() if k != "latent_seed"},
+                "initial_latents_path": str(directory / "noise.f32")}, True
+
+    backend = Generator(operation="generate_image")
+    client, _ = client_for(tmp_path / "with", backend, latent_replay=replay)
+    body = client.post("/v1/tasks/generate_image", json={"request": {"prompt": "cat", "latent_seed": 3}}).json()
+    assert body["trtmc_observation"]["latent_replay"] is True
+    assert "latent_seed" not in backend.requests[0] and backend.requests[0]["initial_latents_path"].endswith("noise.f32")
+    plain = Generator(operation="generate_image")
+    client, _ = client_for(tmp_path / "without", plain)
+    body = client.post("/v1/tasks/generate_image", json={"request": {"prompt": "cat", "latent_seed": 3}}).json()
+    assert body["trtmc_observation"]["latent_replay"] is False and "latent_seed" not in plain.requests[0]
+    assert "latent_replay" not in client.post("/v1/tasks/generate_image", json={"request": {"prompt": "c"}}).json()["trtmc_observation"]

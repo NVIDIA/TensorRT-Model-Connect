@@ -46,6 +46,9 @@ class ServingConfig:
     info: Mapping[str, Any] = field(default_factory=dict)
     # gpu_memory.MemoryProbe: report each call's peak GPU memory (peak_memory_mb in the timing).
     memory_probe: Any = None
+    # latents.Replay: turn a request's latent_seed into initial-noise file (latent replay); without
+    # one, the seed is dropped and the observation says the noise was not replayed.
+    latent_replay: Any = None
 
 
 MAX_INLINE_ITEMS = 64
@@ -120,6 +123,12 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             # Backends write output artifacts below the request directory even without inputs.
             workdir.mkdir(parents=True, exist_ok=True)
             resolved = materialize_files(operation_request, workdir / "inputs")
+            replayed = None
+            if "latent_seed" in resolved:
+                if config.latent_replay is None:
+                    resolved, replayed = {key: value for key, value in resolved.items() if key != "latent_seed"}, False
+                else:
+                    resolved, replayed = config.latent_replay(resolved, workdir / "inputs")
             memory: dict[str, float] = {}
 
             def call() -> Invocation:
@@ -131,8 +140,10 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
 
             invocation, queue_ms, handler_ms = await lane.run(call)
             # Generated media leave the request as digests (the files are removed below).
-            invocation = Invocation(add_media_digests(invocation.observation, operation, workdir),
-                                    invocation.model_call_ms, invocation.extra)
+            observation = add_media_digests(invocation.observation, operation, workdir)
+            if replayed is not None:
+                observation["latent_replay"] = replayed
+            invocation = Invocation(observation, invocation.model_call_ms, invocation.extra)
         except BackendUnavailable:
             state["available"] = False
             raise

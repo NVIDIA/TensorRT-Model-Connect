@@ -162,6 +162,13 @@ def serve(arguments: argparse.Namespace) -> int:
             trust_remote_code=arguments.trust_remote_code,
             deterministic=arguments.deterministic,
             options=_json_object(arguments.reference_options, "--reference-options")))
+    latent_replay = None
+    if profile.operation == "generate_image" and arguments.backend in ("trtmc", "reference"):
+        from .latents import Replay, read_checkpoint, snapshot
+
+        model, revision = ((arguments.reference_model, None) if arguments.backend == "reference" and
+                           arguments.reference_model else (profile.model.hf_id, profile.model.hf_revision or None))
+        latent_replay = Replay(lambda: read_checkpoint(snapshot(model, revision)))
     chat_renderer = None
     if profile.operation == "generate":
         try:
@@ -174,7 +181,7 @@ def serve(arguments: argparse.Namespace) -> int:
         base_request=profile.base_request, records=arguments.records, scratch=arguments.scratch,
         model_name=arguments.model_name or profile.model.name, max_queue=arguments.max_queue,
         keep_artifacts=arguments.keep_artifacts, full_observations=arguments.full_observations,
-        memory_probe=memory_probe, info={"profile": profile.model.name, "testcase": profile.testcase, "family": profile.model.family,
+        memory_probe=memory_probe, latent_replay=latent_replay, info={"profile": profile.model.name, "testcase": profile.testcase, "family": profile.model.family,
               "platform": platform.fingerprint(), "host": platform.host_details()})
     try:
         uvicorn.run(create_app(backend, config), host=arguments.host, port=arguments.port, log_level="warning")
