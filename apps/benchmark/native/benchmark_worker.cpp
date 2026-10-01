@@ -201,6 +201,14 @@ trtmc::ImageGenerationConfig image_config(const Json& request) {
     config.negative_prompt = optional_value<std::string>(request, "negative_prompt", "");
     config.height = optional_value<std::int32_t>(request, "height", 0);
     config.width = optional_value<std::int32_t>(request, "width", 0);
+    // Latent replay, as the CLI's --initial-latents-raw: raw float32 in the loaded family's latent
+    // layout; without it the family draws its own noise.
+    if (request.contains("initial_latents_path")) {
+        const auto path = request.at("initial_latents_path").get<std::string>();
+        if (path.empty())
+            throw std::invalid_argument("initial_latents_path must name a raw float32 file");
+        config.initial_latents = read_float32(path);
+    }
     return config;
 }
 
@@ -328,6 +336,8 @@ Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& t
     std::optional<Image> cached;
 
     if (batch_request) {
+        if (request.contains("initial_latents_path"))
+            throw std::invalid_argument("a scalar replay path does not define batch replay inputs");
         auto& batch =
             require_interface<trtmc::IImageBatchGeneration>(task, "IImageBatchGeneration");
         const auto prompts = request.at("prompt").get<std::vector<std::string>>();
