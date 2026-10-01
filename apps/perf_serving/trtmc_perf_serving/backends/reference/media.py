@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -164,6 +165,25 @@ class SpeechSynthesis:
                           realtime_factor=seconds / (model_ms / 1000.0))
 
 
+def retie_encoder_embeddings(pipe: Any) -> list[str]:
+    """Tie T5-style text encoders' token embeddings back to ``shared`` when loading left them zero.
+
+    Transformers 5.2 does not tie ``encoder.embed_tokens`` of ``UMT5EncoderModel`` (Wan) to
+    ``shared``: the weight loads as missing and stays zero, so every prompt encodes to zeros and the
+    pipeline renders the same output whatever the prompt. Returns the components it repaired.
+    """
+    repaired = []
+    for name, component in getattr(pipe, "components", {}).items():
+        shared = getattr(component, "shared", None)
+        embed = getattr(getattr(component, "encoder", None), "embed_tokens", None)
+        if shared is None or embed is None or embed.weight is shared.weight:
+            continue
+        if embed.weight.shape == shared.weight.shape and not bool(embed.weight.any()):
+            embed.weight = shared.weight
+            repaired.append(name)
+    return repaired
+
+
 class Diffusion:
     """``generate_image`` (image or video) through a Diffusers pipeline; timed pipeline call."""
 
@@ -171,8 +191,11 @@ class Diffusion:
         import diffusers
 
         self.spec = spec
-        self.pipe = diffusers.DiffusionPipeline.from_pretrained(
-            spec.model, torch_dtype=spec.dtype, **spec.pretrained_kwargs()).to(spec.device)
+        pipe = diffusers.DiffusionPipeline.from_pretrained(spec.model, torch_dtype=spec.dtype, **spec.pretrained_kwargs())
+        for name in retie_encoder_embeddings(pipe):
+            print(f"trtmc-perf-serve: tied {name}.encoder.embed_tokens to {name}.shared (zero after loading)",
+                  file=sys.stderr)
+        self.pipe = pipe.to(spec.device)
         self.pipe.set_progress_bar_config(disable=True)
         denoiser = getattr(self.pipe, "transformer", None) or getattr(self.pipe, "unet", None)
         if spec.mode == "compile":
