@@ -944,6 +944,13 @@ jobs:
           # never succeed. Run the whole remote sequence as one unit so a
           # failure here can fall back to reserving a fresh instance instead.
           run_on_instance() {
+            # Brev's CLI can report "Success! Created" for an instance that
+            # never finished provisioning; such an instance never answers
+            # SSH. Probe SSH first so this is caught immediately instead of
+            # spending the full git fetch retry budget against a dead
+            # instance. Confirmed with Brev: this is a known CLI bug where
+            # provisioning failures are not propagated to the exit code.
+            retry brev exec "$INSTANCE_NAME" "true" || return 1
             retry brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || return 1
             # The host coordinator and container entrypoint belong to the chosen
             # CI commit. Neither imports contributor code outside the container.
