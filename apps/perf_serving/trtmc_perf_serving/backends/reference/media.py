@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import sys
 from pathlib import Path
@@ -185,7 +186,8 @@ def retie_encoder_embeddings(pipe: Any) -> list[str]:
 
 
 class Diffusion:
-    """``generate_image`` (image or video) through a Diffusers pipeline; timed pipeline call."""
+    """``generate_image`` (image or video, or an edit of ``image_path``/``image_paths``) through a
+    Diffusers pipeline; timed pipeline call."""
 
     def __init__(self, spec: ReferenceSpec) -> None:
         import diffusers
@@ -197,6 +199,7 @@ class Diffusion:
                   file=sys.stderr)
         self.pipe = pipe.to(spec.device)
         self.pipe.set_progress_bar_config(disable=True)
+        self.parameters = set(inspect.signature(self.pipe.__call__).parameters)
         denoiser = getattr(self.pipe, "transformer", None) or getattr(self.pipe, "unet", None)
         if spec.mode == "compile":
             if denoiser is None:
@@ -210,6 +213,17 @@ class Diffusion:
             value = request.get(source)
             if value not in (None, "", 0, -1):
                 kwargs[target] = value
+        # Qwen-Image pipelines take the classifier-free guidance scale as true_cfg_scale.
+        if "true_cfg_scale" in self.parameters and float(request.get("cfg_scale") or -1) > 0:
+            kwargs["true_cfg_scale"] = float(request["cfg_scale"])
+        paths = request.get("image_paths") or ([request["image_path"]] if request.get("image_path") else [])
+        if paths:
+            if "image" not in self.parameters:
+                raise BackendError(f"{type(self.pipe).__name__} takes no input image to edit")
+            from PIL import Image
+
+            images = [Image.open(path).convert("RGB") for path in paths]
+            kwargs["image"] = images if len(images) > 1 else images[0]
         video = request.get("media_type") == "video" or int(request.get("num_frames", 1)) > 1
         if video:
             kwargs["num_frames"] = int(request.get("num_frames", 1))

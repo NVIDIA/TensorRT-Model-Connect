@@ -70,7 +70,8 @@ def _wan(transformer: Mapping[str, Any], vae: Mapping[str, Any], height: int, wi
 
 LAYOUTS = {"FluxPipeline": Layout(_flux_like, pack=True), "Flux2Pipeline": Layout(_flux2),
            "PixArtSigmaPipeline": Layout(_pixart, cast_to_pipeline_dtype=True),
-           "QwenImagePipeline": Layout(_qwen_image, pack=True), "ZImagePipeline": Layout(_z_image),
+           "QwenImagePipeline": Layout(_qwen_image, pack=True), "QwenImageEditPipeline": Layout(_qwen_image, pack=True),
+           "QwenImageEditPlusPipeline": Layout(_qwen_image, pack=True), "ZImagePipeline": Layout(_z_image),
            "WanPipeline": Layout(_wan)}
 
 
