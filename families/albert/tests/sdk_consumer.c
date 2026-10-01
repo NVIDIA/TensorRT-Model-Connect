@@ -84,8 +84,8 @@ int main(int argc, char** argv) {
 
         trtmc_text_to_token_features_request_v1 req;
         memset(&req, 0, sizeof(req));
-        req.text.kind = 0; /* TRTMC_TEXT_SOURCE_STRING */
-        req.text.as.string = sv(text);
+        req.text.kind = TRTMC_TEXT_UTF8;
+        req.text.as.text = sv(text);
 
         trtmc_config_view_v1 cfg;
         memset(&cfg, 0, sizeof(cfg));

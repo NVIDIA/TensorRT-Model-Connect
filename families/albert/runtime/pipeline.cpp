@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <variant>
 
 namespace trtmc {
 
@@ -85,8 +86,14 @@ trtmc::internal::TokenFeaturesResult EncoderPipeline::run(
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
 
-    const std::string text_str(request.text.as_string_view());
-    auto ids = tokenizer_->encode(text_str);
+    std::vector<int32_t> ids;
+    if (const auto* sv = std::get_if<std::string_view>(&request.text)) {
+        ids = tokenizer_->encode(std::string(*sv));
+    } else if (const auto* span = std::get_if<Span<const std::int32_t>>(&request.text)) {
+        ids.assign(span->begin(), span->end());
+    } else {
+        throw std::runtime_error("EncoderPipeline: unsupported text source");
+    }
     const auto raw_floats = encode_ids(ids);
 
     const int32_t hidden = infer_output_hidden_dim(*encoder_);
