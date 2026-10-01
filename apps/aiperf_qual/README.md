@@ -77,8 +77,9 @@ so they are also compared pixel by pixel (`replay-parity`): the native model ren
 prompts once more at fp32 (else the other half precision), and TRTMC may be on average at most 3 dB
 PSNR / 0.05 SSIM further from that full-precision render than the native half-precision run is
 (6 dB / 0.1 for quantized weights), failing only on a significant gap. Without a usable
-full-precision render, each sample needs 19 dB / 0.8 against the native output. `recheck` runs these
-checks again on finished results (reusing generations that sent the same requests).
+full-precision render, each sample needs 19 dB / 0.8 against the native output. Image edits get the
+same pixel parity alone (`replay_parity`): ten Imagenette images edited with the catalog instruction.
+`recheck` runs these checks again on finished results (reusing generations that sent the same requests).
 
 A suite with `base: catalog` overrides the profile's catalog request (size, steps, seed, ...) with
 its dataset fields. Exceptions stay in `config/models/<profile>.yaml`: `accuracy_source: tasks`
@@ -134,8 +135,9 @@ and AIPerf run in their own environment; the TRTMC server needs no Python model 
 
 `reference` (generic adapters, persistent, eager/compile) serves every operation it supports; if it
 cannot load or run a model, the family's declared qualification reference (`script`) takes over.
-Image editing, world-model generation, and text-prompted segmentation always use the family
-reference, because the generic adapters would ignore their extra inputs. A `script` reference built
+World-model generation and text-prompted segmentation always use the family reference, because
+the generic adapters would ignore their extra inputs; image edits run on the Diffusers adapter (input
+images, Qwen-Image's true CFG scale) and fall back to the family reference. A `script` reference built
 on the shared harness is loaded once per server; other scripts start one process per request and
 report their own warmup/iteration p50.
 

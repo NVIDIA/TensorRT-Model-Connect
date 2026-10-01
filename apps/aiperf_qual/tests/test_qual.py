@@ -302,7 +302,8 @@ def test_models_are_derived_from_the_catalog_the_family_cases_and_task_defaults(
     assert tiny["accuracy_source"] == "tasks" and [item["suite"]["suite"] for item in tiny["accuracy"]] == [
         "mmlu-0shot-30", "humaneval-30"]
     assert tiny["performance"]["l1"]["suite"]["source"]["kind"] == "catalog_testcase"
-    assert resolve_model("qwen-image-edit-2511", environment)["reference"]["backend"] == "script"
+    edit = resolve_model("qwen-image-edit-2511", environment)["reference"]  # Diffusers edit, family fallback
+    assert (edit["backend"], edit["fallback"]) == ("reference", "script")
 
 
 def test_inline_suite_and_prompt_truncation(monkeypatch):

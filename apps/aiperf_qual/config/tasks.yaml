@@ -118,11 +118,20 @@ tasks:
       l1: &media_l1 {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
                      measurement: {warmup: 1, requests: 1, runs: 3}}
       l2: {kind: media, suite: partiprompts-30, prompts: 3, requests: 3, video_requests: 1, margin_percent: 5}
-  image_edit: &media  # edit and world-model inputs are model-specific: the catalog testcase
+  image_edit:  # edit inputs are model-specific: the catalog testcase
+    reference: {precision: bf16}
+    accuracy: [{suite: catalog, grader: parity_image, gate: {min_pass_rate: 1.0}}]
+    # Edits of ten Imagenette images with the same initial noise on both sides (latent replay),
+    # judged like image generation's replay parity.
+    supplementary: [{check: replay_parity, suite: imagenette-edit-10, latent_replay_families: [qwen_image],
+                     parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
+                     quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
+                     fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9}]
+    performance: {l1: *media_l1}
+  world_model_generation:  # world-model inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
     accuracy: [{suite: catalog, grader: parity_image, gate: {min_pass_rate: 1.0}}]
     performance: {l1: *media_l1}
-  world_model_generation: *media
 
   time_series_forecast:
     accuracy: [{suite: etth1-windows-10, grader: parity_numeric, grader_params: {min_cosine: 0.999, rtol: 0.02},

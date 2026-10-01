@@ -24,9 +24,10 @@ from .config import CONFIG_ROOT, ConfigError, Environment, load_suite
 HF_OPERATIONS = {"generate", "translate", "encode", "embed", "rerank", "classify", "detect", "segment",
                  "segment_prompted", "extract_features", "transcribe", "generate_audio", "generate_image",
                  "solve", "regress"}
-# Tasks whose inputs the generic adapters would silently ignore (an edit image, a world-model
-# context, a text prompt for masks): only the family's declared reference is valid for them.
-SCRIPT_ONLY_TASKS = {"image_edit", "world_model_generation", "text_prompted_segmentation"}
+# Tasks whose inputs the generic adapters would silently ignore (a world-model context, a text
+# prompt for masks): only the family's declared reference is valid for them. Image edits run on the
+# Diffusers adapter (it rejects an edit pipeline-less checkpoint, and the family reference takes over).
+SCRIPT_ONLY_TASKS = {"world_model_generation", "text_prompted_segmentation"}
 PRECISIONS = ("fp16", "bf16", "fp32")
 # Checkpoints above this size (bytes) measure fewer requests per run: native references of large models
 # take seconds per request, and three runs still give the confidence interval.

@@ -144,10 +144,11 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
 
 
 # Checks that judge whole outputs per Task (``supplementary``); each returns report entries.
-SUPPLEMENTARY_CHECKS = {"tts_intelligibility": intelligibility.run, "clip_alignment": alignment.run}
+SUPPLEMENTARY_CHECKS = {"tts_intelligibility": intelligibility.run, "clip_alignment": alignment.run,
+                        "replay_parity": alignment.run_replay}
 # The report entries each check writes (rejudge leaves them; recheck replaces them).
 SUPPLEMENTARY_SUITES = {"tts_intelligibility": ("tts-intelligibility",),
-                        "clip_alignment": ("clip-alignment", "replay-parity")}
+                        "clip_alignment": ("clip-alignment", "replay-parity"), "replay_parity": ("replay-parity",)}
 
 
 def supplementary(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,

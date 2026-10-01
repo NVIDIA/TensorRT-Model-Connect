@@ -199,8 +199,8 @@ def _json_manifest_records(source: Mapping[str, Any], environment: Environment) 
     """Records from a sha256-verified JSON, JSONL, or TSV manifest under data_root.
 
     ``file_fields`` (dotted names reach nested values) are resolved relative to the manifest
-    directory, so ``*_path`` request fields are inlined; ``explode`` turns each record into one
-    record per listed text field.
+    directory, so ``*_path`` request fields are inlined; ``square_crop`` replaces those images by
+    their centered square; ``explode`` turns each record into one record per listed text field.
     """
     path = _verified(source, environment)
     if path.suffix == ".jsonl":
@@ -216,11 +216,30 @@ def _json_manifest_records(source: Mapping[str, Any], environment: Environment) 
     for field in source.get("file_fields", []):
         for record in records:
             record[field] = str(path.parent / _field(record, field))
+    for field in source.get("square_crop", []):
+        for record in records:
+            record[field] = str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))
     explode = source.get("explode")
     if explode:
         records = [{**record, "id": f"{record['id']}:{field}", "text": record[field]}
                    for record in records for field in explode]
     return records
+
+
+def _square_crop(path: Path, cache: Path) -> Path:
+    """The centered square of an image (cached by content), so models that resize their condition
+    image to a fixed square and models that keep its aspect ratio see the same input."""
+    from PIL import Image
+
+    target = cache / "trtmc-derived" / f"{hashlib.sha256(path.read_bytes()).hexdigest()[:24]}-square.png"
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(path) as image:
+            rgb = image.convert("RGB")
+            side = min(rgb.size)
+            left, top = (rgb.width - side) // 2, (rgb.height - side) // 2
+            rgb.crop((left, top, left + side, top + side)).save(target)
+    return target
 
 
 def _etth1_window_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:

@@ -144,8 +144,9 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
         if not path.is_file():
             continue
         recorded = json.loads((out / "model.json").read_text())
-        model = {**recorded, "supplementary": models.resolve_model(recorded["catalog_profile"], environment)
-                 ["supplementary"]}
+        current = models.resolve_model(recorded["catalog_profile"], environment)
+        # Today's checks against today's native reference (which backend, which precisions).
+        model = {**recorded, "supplementary": current["supplementary"], "reference": current["reference"]}
         checks = [{**check, "reuse_outputs": not regenerate} for check in model["supplementary"]
                   if not only or check["check"] in only]
         if not checks:

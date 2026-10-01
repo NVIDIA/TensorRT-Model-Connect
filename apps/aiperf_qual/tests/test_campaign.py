@@ -573,7 +573,8 @@ def test_recheck_replaces_only_the_rechecked_entries(tmp_path, monkeypatch):
         {"suite": "family-case", "status": "pass"}, {"suite": "clip-alignment", "status": "fail"},
         {"suite": "replay-parity", "status": "fail"}]}))
     check = {"check": "clip_alignment", "suite": "partiprompts-30"}
-    monkeypatch.setattr(models, "resolve_model", lambda profile, environment: {"supplementary": [check]})
+    monkeypatch.setattr(models, "resolve_model", lambda profile, environment: {"supplementary": [check],
+                                                                                "reference": {"backend": "reference"}})
     monkeypatch.setattr(services, "reference_python", lambda environment, model: "/ref/python")
     monkeypatch.setattr(runner, "supplementary", lambda environment, model, check, python, out: [
         {"suite": "clip-alignment", "status": "pass"}])
@@ -600,6 +601,31 @@ def test_recheck_reuses_a_generation_only_for_the_same_requests(tmp_path):
                                                                             "request_id": "r1"})]
     other = Suite("s", "k", [{"sample_id": "0", "request": {"prompt": "b"}}], {})
     assert generation._earlier(out, other) is None
+
+
+def test_edit_replay_parity_runs_only_for_families_that_take_caller_latents(tmp_path):
+    from trtmc_aiperf_qual import alignment, runner
+
+    assert alignment.run_replay(None, {"family": "sana_wm"}, {"latent_replay_families": ["qwen_image"]}, "py",
+                                tmp_path) == []
+    assert runner.SUPPLEMENTARY_SUITES["replay_parity"] == ("replay-parity",)
+    assert runner.SUPPLEMENTARY_CHECKS["replay_parity"] is alignment.run_replay
+
+
+def test_edit_inputs_are_center_cropped_to_cached_squares(tmp_path):
+    import pytest
+
+    Image = pytest.importorskip("PIL.Image")
+    from trtmc_aiperf_qual.suites import _square_crop
+
+    source = tmp_path / "wide.png"
+    pixels = Image.new("RGB", (426, 320), (0, 0, 255))
+    pixels.paste((255, 0, 0), (53, 0, 373, 320))  # the centered 320x320 square is red
+    pixels.save(source)
+    square = _square_crop(source, tmp_path / "cache")
+    with Image.open(square) as image:
+        assert image.size == (320, 320) and image.getpixel((0, 0)) == (255, 0, 0)
+    assert _square_crop(source, tmp_path / "cache") == square and square.parent == tmp_path / "cache" / "trtmc-derived"
 
 
 def test_media_sweep_steps_decomposition_and_light(tmp_path):

@@ -266,3 +266,22 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
         entries.append(_replay_parity(environment, model, check, python, out, suite, outputs,
                                       (native_backend, native_precision), max_frames))
     return entries
+
+
+def run_replay(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
+               out: Path) -> list[dict[str, Any]]:
+    """Pixel parity under latent replay alone (``replay_parity``: image edits, where CLIP text
+    alignment of an edit instruction says little); nothing when the family takes no caller latents."""
+    from .models import _suite
+
+    if model.get("family") not in check.get("latent_replay_families", ()):
+        return []
+    suite = with_latent_seeds(build_suite(_suite(check["suite"], model["catalog_profile"],
+                                                 environment.path("repo")), environment))
+    reuse = bool(check.get("reuse_outputs"))
+    native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "replay",
+                                                               reuse=reuse)
+    outputs = {"candidate": generate(environment, model, "trtmc", out / "replay-candidate", suite, reuse=reuse),
+               "native": native}
+    return [_replay_parity(environment, model, check, python, out, suite, outputs,
+                           (native_backend, native_precision), int(check.get("max_frames", 8)))]
