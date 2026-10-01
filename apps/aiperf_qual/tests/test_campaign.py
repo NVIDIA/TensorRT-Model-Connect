@@ -461,6 +461,77 @@ def test_serving_sweep_fits_the_bundle_and_compares_throughput():
     assert sweep.compare([{**fast[0], "request_error_rate_avg": 3.0}], slow, 5)["light"] == "white"
 
 
+def test_clip_alignment_fails_only_a_significant_mean_drop_and_video_temporal_consistency():
+    from trtmc_aiperf_qual import alignment
+
+    samples = [{"sample_id": str(index), "request": {"prompt": f"p{index}"}} for index in range(6)]
+    native = [{"clip_score": value} for value in (30.0, 28.0, 32.0, 30.0, 29.0, 31.0)]
+    check = {"max_mean_clip_drop": 1.0, "sample_tolerance": 3.0}
+
+    def rows(drops):
+        return [None if d is None else {"clip_score": n["clip_score"] - d} for n, d in zip(native, drops)]
+
+    close = alignment.judge(rows([0.5, -0.4, 1.0, -0.2, 0.5, 0.4]), native, samples, check, video=False)
+    assert close["status"] == "pass" and close["passed"] == 6 and close["gate"] == {"max_mean_clip_drop": 1.0}
+    assert abs(close["metrics"]["clip_score_drop"] - 0.3) < 1e-9
+    worse = alignment.judge(rows([5.0, None, 5.0, 5.0, 5.0, 5.0]), native, samples, check, video=False)
+    assert worse["status"] == "fail" and worse["passed"] == 0
+    assert any("no image" in reason for reason in worse["reasons"]) and any("mean CLIP" in r for r in worse["reasons"])
+    assert "no TRTMC image" in worse["failures"][1]["explanation"]
+    noisy = alignment.judge(rows([9.0, -6.0, 8.0, -5.0, 7.0, -4.0]), native, samples, check, video=False)
+    assert noisy["metrics"]["clip_score_drop"] == 1.5 and noisy["metrics"]["clip_score_drop_lower_bound"] < 0
+    assert noisy["status"] == "pass" and noisy["passed"] == 3
+    flicker = alignment.judge([{**row, "temporal_consistency": 0.80} for row in native],
+                              [{**row, "temporal_consistency": 0.95} for row in native], samples, check, video=True)
+    assert flicker["status"] == "fail" and "temporal consistency 0.800" in flicker["reasons"][0]
+    assert alignment.drop([2.0], 1.0) == (2.0, None, True)
+    ignored = alignment.judge(rows([0.0] * 6), native, samples, check, video=False,
+                              cross={"candidate": 0.99, "native": 0.6})
+    assert ignored["status"] == "fail" and "near-identical" in ignored["reasons"][0]
+    broken = alignment.judge(rows([0.0] * 6), native, samples, check, video=False,
+                             cross={"candidate": 0.6, "native": 0.995})
+    assert broken["status"] == "not-comparable" and "broken reference" in broken["reasons"][0]
+    assert alignment.is_video({"media_type": "video"}) and alignment.is_video({"num_frames": 17})
+    assert not alignment.is_video({"num_frames": 1})
+
+
+def test_family_perf_requests_take_explicit_generation_controls_from_the_catalog():
+    from trtmc_aiperf_qual.suites import fill_model_defaults
+
+    resolved = {"prompt": "cat", "num_steps": -1, "guidance_scale": -1.0, "cfg_scale": -1.0, "num_frames": 17}
+    family = {"prompt": "cat", "num_steps": 4, "video_num_frames": 33}
+    catalog = {"prompt": "dog", "num_steps": 8, "guidance_scale": 3.5, "cfg_scale": -1.0}
+    assert fill_model_defaults(resolved, family, catalog) == {**resolved, "num_steps": 4, "guidance_scale": 3.5}
+    assert fill_model_defaults({"num_steps": -1}, {"num_inference_steps": 6}) == {"num_steps": 6}
+    assert fill_model_defaults({"num_steps": 8}, catalog) == {"num_steps": 8}
+
+
+def test_media_sweep_steps_decomposition_and_light(tmp_path):
+    from trtmc_aiperf_qual import sweep
+    from trtmc_aiperf_qual.report import write_report
+
+    assert sweep.media_variants({"num_steps": 30}) == [15, 30] and sweep.media_variants({"num_steps": 1}) == [None]
+    assert sweep.media_variants({"num_steps": 4}) == [2, 4] and sweep.media_variants({}) == [None]
+    stats = sweep.media_stats([{"timing": {"model_call_ms": 300.0, "peak_memory_mb": 900.0}},
+                               {"timing": {"model_call_ms": 100.0, "peak_memory_mb": 1000.0}},
+                               {"timing": {"model_call_ms": 200.0}}])
+    assert stats == {"measured": 3, "model_call_p50_ms": 200.0, "peak_memory_mb": 1000.0}
+    candidate = [{"steps": 2, "model_call_p50_ms": 300.0}, {"steps": 4, "model_call_p50_ms": 500.0, "peak_memory_mb": 800.0}]
+    reference = [{"steps": 2, "model_call_p50_ms": 900.0}, {"steps": 4, "model_call_p50_ms": 1500.0, "peak_memory_mb": 1600.0}]
+    assert sweep.decompose(candidate) == {"per_step_ms": 100.0, "fixed_ms": 100.0}
+    assert sweep.decompose(candidate[:1]) == {}
+    compared = sweep.compare_media(candidate, reference, 5)
+    assert compared["light"] == "green" and compared["speedup"] == 3.0 and compared["memory_ratio"] == 0.5
+    assert sweep.compare_media(candidate, [{"steps": 4}], 5)["light"] == "white"
+    l2 = {"kind": "media", "endpoint": "image_generation", "prompts": 3, "requests": 3, "candidate": candidate,
+          "reference": reference, "decomposition": {"candidate": sweep.decompose(candidate), "reference": {}},
+          **compared}
+    write_report(tmp_path, {"model": "m", "provenance": {}, "performance_l2": l2})
+    text = (tmp_path / "report.md").read_text()
+    assert "AIPerf image_generation" in text and "100.0 ms per denoising step + 100.0 ms fixed" in text
+    assert "| TRTMC | 4 | 500.000 |" in text
+
+
 def test_perf_is_white_on_a_busy_gpu_or_a_fallback_reference_precision():
     from trtmc_aiperf_qual import judge
 

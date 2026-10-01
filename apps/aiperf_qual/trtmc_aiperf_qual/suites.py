@@ -232,6 +232,28 @@ def _etth1_window_records(source: Mapping[str, Any], environment: Environment) -
     return records
 
 
+# Generation controls that resolve to -1 ("model default") unless stated under the name the testcase
+# resolver reads: the descriptor of a family request keeps ``num_steps``, while image-generation
+# testcases read ``num_inference_steps``. TRTMC then applies the family's default and a Diffusers
+# reference the pipeline's (FLUX.1-schnell: 4 vs 28 steps), so both would time different work.
+MODEL_DEFAULT_FIELDS = {"num_steps": ("num_steps", "num_inference_steps", "num_sampling_steps"),
+                        "guidance_scale": ("guidance_scale",), "cfg_scale": ("cfg_scale",),
+                        "num_frames": ("num_frames", "video_num_frames")}
+
+
+def fill_model_defaults(request: Mapping[str, Any], *sources: Mapping[str, Any]) -> dict[str, Any]:
+    """``request`` with each -1 generation control taken from the first source that states it."""
+    unset = (-1, -1.0)
+    filled = dict(request)
+    for field, names in MODEL_DEFAULT_FIELDS.items():
+        if request.get(field) not in unset:
+            continue
+        stated = [source[name] for source in sources for name in names if source.get(name) not in (None, *unset)]
+        if stated:
+            filled[field] = stated[0]
+    return filled
+
+
 def _qualification_perf_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
     """The request the family's performance qualification times, resolved like a catalog testcase."""
     from .models import _import_repository
@@ -249,7 +271,11 @@ def _qualification_perf_records(source: Mapping[str, Any], environment: Environm
     with tempfile.TemporaryDirectory() as scratch:
         descriptor = runtime.write_model_descriptor(case, Path(scratch), request)
         records = _catalog_testcase_records({"profile": str(descriptor)}, environment)
-    return [{**records[0], "id": f"{profile}:{case.name}"}]
+    resolved = records[0]["request"]
+    if any(resolved.get(field) in (-1, -1.0) for field in MODEL_DEFAULT_FIELDS):
+        catalog_request = _catalog_testcase_records({"profile": profile}, environment)[0]["request"]
+        resolved = fill_model_defaults(resolved, request, catalog_request)
+    return [{**records[0], "request": resolved, "id": f"{profile}:{case.name}"}]
 
 
 def _catalog_testcase_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:

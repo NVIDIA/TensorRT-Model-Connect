@@ -73,7 +73,8 @@ def _accuracy(items: Sequence[Mapping[str, Any]]) -> str:
             f"<tr><td>{_e(f.get('sample_id') or f.get('conversation_id'))}</td><td>{_e(f.get('explanation'))}</td>"
             f"<td><pre>{_e(f.get('actual'))}</pre></td><td><pre>{_e(f.get('expected'))}</pre></td></tr>"
             for f in item.get("failures", []))
-        error = f"<pre>{_e(item['error'])}</pre>" if item.get("error") else ""
+        error = "".join(f"<pre>{_e(text)}</pre>" for text in (item.get("error"), "; ".join(item.get("reasons", [])))
+                        if text)
         table = (f"<table><tr><th>sample</th><th>reason</th><th>TRTMC</th><th>native</th></tr>{rows}</table>"
                  if rows else "")
         parts.append(f"<div>{head}{error}{table}</div>")
@@ -97,9 +98,24 @@ def _performance(items: Sequence[Mapping[str, Any]]) -> str:
             f"<th>reasons / notes</th></tr>{''.join(rows)}</table>")
 
 
+def _media_sweep(l2: Mapping[str, Any]) -> str:
+    rows = "".join(f"<tr><td>{'TRTMC' if side == 'candidate' else 'native eager'}</td><td>{_e(level.get('steps') or 'catalog')}"
+                   f"</td><td>{_e(_ms(level.get('model_call_p50_ms')))}</td><td>{_e(_ms(level.get('request_latency_p50')))}"
+                   f"</td><td>{_e(_ms(level.get('peak_memory_mb')))}</td></tr>"
+                   for side in ("candidate", "reference") for level in l2.get(side, []))
+    parts = "; ".join(f"{'TRTMC' if side == 'candidate' else 'native'} {value['per_step_ms']:.1f} ms/step + "
+                      f"{value['fixed_ms']:.1f} ms fixed" for side, value in (l2.get("decomposition") or {}).items()
+                      if value)
+    return (f"<p>L2 {_e(l2.get('endpoint'))} (informational): light {_e(l2.get('light'))} "
+            f"{_e('; '.join(l2.get('reasons', [])))} {_e(parts)}</p><table><tr><th>side</th><th>steps</th>"
+            f"<th>model call p50 ms</th><th>request latency p50 ms</th><th>peak GPU memory MiB</th></tr>{rows}</table>")
+
+
 def _sweep(l2: Mapping[str, Any]) -> str:
     if not l2:
         return ""
+    if l2.get("kind") == "media":
+        return _media_sweep(l2)
     rows = "".join(f"<tr><td>{'TRTMC' if side == 'candidate' else 'native eager'}</td><td>{_e(level.get('concurrency'))}"
                    f"</td><td>{_e(_ms(level.get('request_throughput_avg')))}</td>"
                    f"<td>{_e(_ms(level.get('request_latency_p50')))}</td><td>{_e(_ms(level.get('request_latency_p99')))}</td>"

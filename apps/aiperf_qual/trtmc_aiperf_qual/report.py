@@ -23,6 +23,27 @@ def counted(item: Mapping[str, Any], limit: int = 3) -> str:
     return ": ".join(part for part in (samples, ", ".join(values)) if part) or "—"
 
 
+def _media_l2(l2: Mapping[str, Any]) -> list[str]:
+    speedup = f" · TRTMC {l2['speedup']:.2f}x faster per call" if l2.get("speedup") else ""
+    memory = f", peak memory {l2['memory_ratio']:.2f}x native" if l2.get("memory_ratio") else ""
+    lines = ["", f"## Performance L2 (AIPerf {l2.get('endpoint')}, informational; {l2.get('prompts')} prompts, "
+             f"{l2.get('requests')} requests per level)", "",
+             f"Light {l2.get('light')} {'; '.join(l2.get('reasons', []))}{speedup}{memory}. {l2.get('note', '')}", "",
+             "| side | steps | model call p50 ms | request latency p50 ms | peak GPU memory MiB | measured |",
+             "|---|---|---|---|---|---|"]
+    for side in ("candidate", "reference"):
+        name = "TRTMC" if side == "candidate" else f"native eager {l2.get('reference_precision', '')}".strip()
+        for level in l2.get(side, []):
+            lines.append(f"| {name} | {level.get('steps') or 'catalog'} | {_fmt(level.get('model_call_p50_ms'))} | "
+                         f"{_fmt(level.get('request_latency_p50'))} | {_fmt(level.get('peak_memory_mb'), 0)} | "
+                         f"{level.get('measured')} |")
+    for side, parts in (l2.get("decomposition") or {}).items():
+        if parts:
+            lines.append(f"\n{'TRTMC' if side == 'candidate' else 'native'}: {parts['per_step_ms']:.1f} ms per "
+                         f"denoising step + {parts['fixed_ms']:.1f} ms fixed (text encoders, VAE decode).")
+    return lines
+
+
 def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
     json_path = out / "report.json"
     json_path.write_text(json.dumps(result, indent=2, default=str))
@@ -57,9 +78,11 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
         source = f"{item.get('benchmark')} (family)" if family else item.get("benchmark") or "Task suite"
         lines.append(f"| {item['suite']} | {source} | "
                      f"{item['status']} | {count} | {gate} | {noise_text} | "
-                     f"{isolated['status'] + ' ' + str(isolated['passed']) if isolated else '—'} | {evidence} |")
+                     f"{' '.join(str(part) for part in (isolated['status'], isolated.get('passed')) if part is not None) if isolated else '—'} | {evidence} |")
         if item.get("error"):
             lines.append(f"|  | error: {item['error'][:300].replace('|', '/')} |  |  |  |  |  |  |")
+        if item.get("reasons"):
+            lines.append(f"|  | {'; '.join(item['reasons'])[:300].replace('|', '/')} |  |  |  |  |  |  |")
     lines += ["", "## Performance L1 (server model-call time, p50)", "",
               "| reference mode | light | TRTMC ms | CI % | reference ms (aggregation) | CI % | speedup | notes |",
               "|---|---|---|---|---|---|---|---|"]
@@ -70,7 +93,9 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
                      f"{_fmt(ref.get('ci_percent'), 2)} | "
                      f"{_fmt(item.get('speedup'), 2)} | {'; '.join(item.get('reasons', []) + item.get('notes', []))} |")
     l2 = result.get("performance_l2") or {}
-    if l2:
+    if l2.get("kind") == "media":
+        lines += _media_l2(l2)
+    elif l2:
         lines += ["", f"## Performance L2 (serving sweep, informational; ISL {l2.get('isl')}, OSL {l2.get('osl')})", "",
                   f"Light {l2.get('light')} {'; '.join(l2.get('reasons', []))}"
                   + (f" · TRTMC/native throughput {l2['throughput_ratio']:.2f}x at concurrency {l2.get('concurrency')}"

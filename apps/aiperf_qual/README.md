@@ -54,7 +54,7 @@ from the catalog manifest).
 | segmentation / prompted segmentation | Imagenette 10 | `parity_mask` |
 | transcription | LibriSpeech 30 (AIPerf dataset) + corpus WER vs labels | `parity_wer` |
 | audio generation | SeedTTS English 5 around the catalog request | `parity_audio` (duration, RMS, spectrum) |
-| image / video generation | PartiPrompts 3 around the catalog request | `parity_image` (geometry, thumbnail PSNR/SSIM) |
+| image / video generation | PartiPrompts 3 around the catalog request (plus `clip_alignment`) | `parity_image` (geometry, thumbnail PSNR/SSIM) |
 | image edit, world model, text-prompted segmentation | catalog testcase | `parity_image`, `parity_numeric` |
 | reranking | BEIR SciFact 10 queries x 5 abstracts | `parity_scores` (document order) |
 | time series | ETTh1 10 seeded windows (the family qualification's window) | `parity_numeric` |
@@ -63,7 +63,13 @@ from the catalog manifest).
 **Checks for every model of a Task** (`supplementary`): text-to-speech models also pass an ASR
 round trip (`tts_intelligibility`): TRTMC and the native model speak the SeedTTS sentences, an ASR
 model transcribes both, and TRTMC's word error rate must stay within 0.1 of the native model's.
-Sampling models (Bark, MagpieTTS) cannot be judged per sample, but what they say can.
+Sampling models (Bark, MagpieTTS) cannot be judged per sample, but what they say can. Image and
+video generation models also pass a CLIP text-alignment check (`clip_alignment`): both sides render
+PartiPrompts 30 (5 for videos) at the catalog request, CLIP ViT-L/14 scores every image (8 evenly
+sampled frames of a video) against its prompt, and the check fails when TRTMC's mean CLIPScore is more
+than 1 point below the native model's and the paired drop is significant (one-sided 95%); videos also
+keep the temporal consistency of adjacent frames (mean CLIP cosine) within 0.02 by the same rule. Pixel parity only catches gross failures, since diffusion output drifts across
+precisions; the report lists each sample's scores and the two rendering directories.
 
 A suite with `base: catalog` overrides the profile's catalog request (size, steps, seed, ...) with
 its dataset fields. Exceptions stay in `config/models/<profile>.yaml`: `accuracy_source: tasks`
@@ -91,10 +97,20 @@ references built on the shared harness are loaded once and timed per request lik
 other scripts time themselves in their own process (noted in the report). Timing phases hold the
 host GPU lock (`gpu_lock`), which bundle builds on the same host also take.
 
-**L2** (text generation, informational): an AIPerf sweep over `/v1/completions` with synthetic
-prompts of a fixed length at each concurrency level, for TRTMC and the native model; the report
-compares request throughput and latency percentiles. trtmc-perf-serve serializes requests, so higher
-concurrency measures queueing rather than batching; L2 does not change the category.
+**L2** (informational; it never changes the category):
+
+- Text generation: an AIPerf sweep over `/v1/completions` with synthetic prompts of a fixed length at
+  each concurrency level, for TRTMC and the native model; the report compares request throughput and
+  latency percentiles. trtmc-perf-serve serializes requests, so higher concurrency measures queueing
+  rather than batching.
+- Image and video generation: AIPerf's `image_generation` / `video_generation` endpoints (the OpenAI
+  Images and Videos APIs, polled) send three PartiPrompts at the catalog request with the denoising
+  steps at half and at the catalog count. Each server runs alone on the GPU with `--memory-probe`
+  (NVML peak device memory during each call, minus the use before the model loaded); the server
+  records give the model-call p50 and peak memory, and the two step counts split the call into a
+  per-step (denoiser) and a fixed part (text encoders, VAE decode). The light compares the
+  model-call p50 at the catalog steps. The servers also return SGLang's `inference_time_s` and
+  `peak_memory_mb`, which AIPerf reports as video inference time and peak memory.
 
 ### Reference environments
 
@@ -113,6 +129,12 @@ Image editing, world-model generation, and text-prompted segmentation always use
 reference, because the generic adapters would ignore their extra inputs. A `script` reference built
 on the shared harness is loaded once per server; other scripts start one process per request and
 report their own warmup/iteration p50.
+
+The Diffusers adapter ties a T5-style text encoder's `encoder.embed_tokens` back to `shared` when
+loading left it zero: Transformers 5.2 does not tie it for `UMT5EncoderModel` (Wan), every prompt
+then encodes to zeros, and the pipeline renders the same output for any prompt (the server log notes
+the repair). A perf request that leaves `num_steps`, guidance, CFG, or frames at -1 takes the value
+the family request or the catalog states, since TRTMC and Diffusers apply different defaults.
 
 ## Setup
 

@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .config import Environment
-from .services import _serve_env, serving
+from .generation import generate, generate_native
+from .services import _serve_env
 from .suites import build_suite
 
 TRANSCRIBE = r"""
@@ -37,9 +38,8 @@ print(json.dumps(texts))
 """
 
 
-def _audio(scratch: Path, record: Mapping[str, Any]) -> tuple[str, int] | None:
+def _audio(workdir: Path, record: Mapping[str, Any]) -> tuple[str, int] | None:
     """The generated audio of one request: the WAV the server wrote, else the saved sample array."""
-    workdir = scratch / str(record["request_id"])
     wavs = sorted(workdir.glob("output*.wav"))
     if wavs:
         return str(wavs[0]), 0
@@ -50,36 +50,6 @@ def _audio(scratch: Path, record: Mapping[str, Any]) -> tuple[str, int] | None:
     return None
 
 
-def _generate(environment: Environment, model: dict[str, Any], backend: str, out: Path, suite: Any,
-              python: str | None, precision: str | None) -> list[tuple[str, int] | None]:
-    from .runner import _observations
-
-    kwargs = {"precision": precision, "python": python} if backend != "trtmc" else {}
-    with serving(environment, model, backend, out, keep_artifacts=True, **kwargs) as service:
-        _observations(environment, service, model, suite, out / "aiperf")
-    # AIPerf sends the samples in order, one at a time: the last records are the suite's.
-    records = [json.loads(line) for line in (out / "records.jsonl").read_text().splitlines() if line.strip()]
-    ordered = [record for record in records if record.get("route", "").startswith("/v1/tasks/")]
-    return [_audio(out / "scratch", record) for record in ordered[-len(suite.samples):]]
-
-
-def _native_audio(environment: Environment, model: dict[str, Any], suite: Any, python: str,
-                  out: Path) -> list[tuple[str, int] | None]:
-    """The native model's audio: the generic adapter, else the family's declared reference, at the
-    Perf precisions in order."""
-    from .runner import timing_precisions
-
-    reference, errors = model["reference"], []
-    for backend in dict.fromkeys([reference["backend"], reference.get("fallback") or reference["backend"]]):
-        for precision in timing_precisions(reference):
-            try:
-                return _generate(environment, model, backend, out / f"tts-native-{backend}-{precision}", suite,
-                                 python, precision)
-            except Exception as error:  # noqa: BLE001 - try the next precision, then the fallback
-                errors.append(f"{backend} {precision}: {type(error).__name__}: {str(error)[-200:]}")
-    raise RuntimeError("; ".join(errors)[-1500:])
-
-
 def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
         out: Path) -> dict[str, Any]:
     from trtmc_aiperf_plugins.accuracy import word_error_rate
@@ -87,8 +57,9 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
     from .models import _suite
 
     suite = build_suite(_suite(check["suite"], model["catalog_profile"], environment.path("repo")), environment)
-    audio = {"candidate": _generate(environment, model, "trtmc", out / "tts-candidate", suite, None, None),
-             "native": _native_audio(environment, model, suite, python, out)}
+    native, _ = generate_native(environment, model, suite, python, out, "tts")
+    audio = {side: [_audio(workdir, record) for workdir, record in outputs] for side, outputs in (
+        ("candidate", generate(environment, model, "trtmc", out / "tts-candidate", suite)), ("native", native))}
     texts = {}
     for side, items in audio.items():
         present = [item for item in items if item]

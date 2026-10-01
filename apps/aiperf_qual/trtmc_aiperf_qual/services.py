@@ -80,7 +80,7 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             mode: str = "eager", precision: str | None = None, deterministic: bool = False,
             isolate_requests: bool = False, python: str | None = None,
             script_measurement: Mapping[str, int] | None = None,
-            keep_artifacts: bool = False) -> Iterator[dict[str, Any]]:
+            keep_artifacts: bool = False, memory_probe: bool = False) -> Iterator[dict[str, Any]]:
     """Run one server for the model; yields its URL and /v1/serving/info.
 
     backend: ``trtmc`` (candidate), ``reference`` (generic HF adapters), or ``script`` (the family's
@@ -115,6 +115,8 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
                 command += ["--reference-options", json.dumps(reference["options"])]
     if keep_artifacts:  # checks that read output artifacts (audio, images) after the run
         command.append("--keep-artifacts")
+    if memory_probe:  # peak GPU memory per call; only meaningful while this server is alone on the GPU
+        command.append("--memory-probe")
     env = _serve_env(environment)
     if backend != "trtmc":
         # References may fetch what their checkpoint does not carry (pipeline parts, remote code).

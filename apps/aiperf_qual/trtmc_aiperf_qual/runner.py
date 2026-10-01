@@ -23,7 +23,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import family, intelligibility, judge, sweep
+from . import alignment, family, intelligibility, judge, sweep
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
 from .goldens import GoldenStore, golden_key, platform_id
@@ -445,17 +445,21 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     performance_l1: list[dict[str, Any]] = []
     if model.get("family_accuracy"):
         phases.run("family_accuracy", lambda: accuracy.extend(family.run(environment, model, out, python)))
+    checks = {"tts_intelligibility": intelligibility.run, "clip_alignment": alignment.run}
     for check in model.get("supplementary", []):
-        if check.get("check") == "tts_intelligibility":
-            phases.run("tts_intelligibility", lambda check=check: accuracy.append(
-                intelligibility.run(environment, model, check, python, out)))
+        if check.get("check") in checks:
+            phases.run(check["check"], lambda check=check: accuracy.append(
+                checks[check["check"]](environment, model, check, python, out)))
     with gpu_exclusive(environment):
         reference_perf = _reference_perf(environment, model, l1, perf_suite, python, phases, out) if l1 else {}
         phases.run("candidate", lambda: _candidate(environment, model, suites, goldens, noise, l1, perf_suite,
                                                    reference_perf, accuracy, performance_l1, out))
         l2 = model["performance"].get("l2")
         performance_l2: dict[str, Any] = {}
-        if l2 and reference["backend"] == "reference":
+        if l2 and l2.get("kind") == "media" and reference["backend"] == "reference":
+            phases.run("perf_l2", lambda: performance_l2.update(sweep.run_media(
+                environment, model, l2, out, python, timing_precisions(reference)[0])))
+        elif l2 and reference["backend"] == "reference":
             def serving_sweep() -> None:
                 with serving(environment, model, "trtmc", out / "l2-candidate-server") as candidate, \
                         serving(environment, model, "reference", out / "l2-reference-server", mode="eager",
