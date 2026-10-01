@@ -1,7 +1,9 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
- *
+ */
+
+/*
  * Minimal C++ SDK consumer for the albert family.
  * Exercises text_to_token_features, text_to_embedding, and text_pair_to_relevance
  * through the public C++ convenience wrappers (trtmc/trtmc.hpp + trtmc/features.hpp).
