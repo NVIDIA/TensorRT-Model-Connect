@@ -448,8 +448,10 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     checks = {"tts_intelligibility": intelligibility.run, "clip_alignment": alignment.run}
     for check in model.get("supplementary", []):
         if check.get("check") in checks:
-            phases.run(check["check"], lambda check=check: accuracy.append(
-                checks[check["check"]](environment, model, check, python, out)))
+            def run_check(check: Mapping[str, Any] = check) -> None:
+                result = checks[check["check"]](environment, model, check, python, out)
+                accuracy.extend(result if isinstance(result, list) else [result])
+            phases.run(check["check"], run_check)
     with gpu_exclusive(environment):
         reference_perf = _reference_perf(environment, model, l1, perf_suite, python, phases, out) if l1 else {}
         phases.run("candidate", lambda: _candidate(environment, model, suites, goldens, noise, l1, perf_suite,

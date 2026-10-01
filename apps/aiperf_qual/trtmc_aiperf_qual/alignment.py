@@ -20,7 +20,7 @@ from typing import Any, Mapping, Sequence
 from .config import Environment
 from .generation import generate, generate_native
 from .services import _serve_env
-from .suites import build_suite, limit_suite
+from .suites import build_suite, limit_suite, with_latent_seeds
 
 # CLIPScore (Hessel et al. 2021, as torchmetrics computes it): 100 * max(cosine(image, text), 0).
 SCORE = r"""
@@ -160,17 +160,58 @@ def judge(candidate: Sequence[Mapping[str, Any] | None], native: Sequence[Mappin
             "failures": failures}
 
 
+def _floor(environment: Environment, model: dict[str, Any], suite: Any, python: str, out: Path, backend: str,
+           precision: str) -> tuple[list[tuple[Path, dict[str, Any]]], str] | tuple[None, None]:
+    """The same backend at the next native precision (a script reference does not replay the noise)."""
+    from .runner import timing_precisions
+
+    for other in dict.fromkeys(timing_precisions(model["reference"])):
+        if other == precision:
+            continue
+        try:
+            return generate(environment, model, backend, out / f"replay-floor-{backend}-{other}", suite, python,
+                            other), f"{backend} {other}"
+        except Exception:  # noqa: BLE001 - try the next precision; no floor at all is reported
+            continue
+    return None, None
+
+
+def _replay_parity(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
+                   out: Path, suite: Any, outputs: Mapping[str, Any], native: tuple[str, str],
+                   max_frames: int) -> dict[str, Any]:
+    from . import replay_parity
+
+    label = " ".join(native)
+    missing = replay_parity.not_replayed(outputs)
+    if missing:
+        return replay_parity.item(suite, {}, label, None, outputs,
+                                  [f"the initial noise was not replayed on {', '.join(missing)}"])
+    floor_suite = limit_suite(suite, int(check.get("parity_floor_samples", 10)))
+    floor, floor_label = _floor(environment, model, floor_suite, python, out, *native)
+    if floor is not None and replay_parity.not_replayed({"floor": floor}):
+        floor, floor_label = None, None
+    items = [(str(outputs["candidate"][index][0]), str(outputs["native"][index][0]),
+              str(floor[index][0]) if floor is not None and index < len(floor) else None)
+             for index in range(len(suite.samples))]
+    rows = replay_parity.measure(environment, items, max_frames)
+    return replay_parity.item(suite, replay_parity.judge(rows, suite.samples, check), label, floor_label, outputs)
+
+
 def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
-        out: Path) -> dict[str, Any]:
+        out: Path) -> list[dict[str, Any]]:
+    """The CLIP alignment entry, plus the pixel parity entry when the family takes replayed noise."""
     from .models import _suite
 
     suite = build_suite(_suite(check["suite"], model["catalog_profile"], environment.path("repo")), environment)
     video = is_video(suite.samples[0]["request"])
     if video:  # videos take minutes each
         suite = limit_suite(suite, int(check.get("video_samples", 5)))
+    replay = model.get("family") in check.get("latent_replay_families", ())
+    if replay:
+        suite = with_latent_seeds(suite)
     clip_model = str(check.get("clip_model", "openai/clip-vit-large-patch14"))
     max_frames = int(check.get("max_frames", 8))
-    native, native_reference = generate_native(environment, model, suite, python, out, "clip")
+    native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "clip")
     outputs = {"candidate": generate(environment, model, "trtmc", out / "clip-candidate", suite), "native": native}
     prompts = [str(sample["request"]["prompt"]) for sample in suite.samples]
     scored = {side: _score(environment, clip_model, [(str(workdir), prompt) for (workdir, _), prompt
@@ -182,12 +223,17 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
     for failure in verdict["failures"]:  # where to look at the two renderings
         index = next(i for i, sample in enumerate(suite.samples) if sample["sample_id"] == failure["sample_id"])
         failure.update(actual=str(outputs["candidate"][index][0]), expected=str(outputs["native"][index][0]))
-    return {"suite": "clip-alignment", "source": "task",
-            "benchmark": f"CLIP text alignment ({suite.name}, {clip_model}, native {native_reference})",
-            "status": verdict["status"], "samples": len(suite.samples), "expected_samples": len(suite.samples),
-            "passed": verdict["passed"], "required_passes": None, "gate": verdict["gate"],
-            "metrics": {**verdict["metrics"], "per_sample": [
-                {"sample_id": sample["sample_id"], "candidate": c, "native": n}
-                for sample, c, n in zip(suite.samples, scores["candidate"], scores["native"])]},
-            "failures": verdict["failures"][:10],
-            **({"reasons": verdict["reasons"]} if verdict["reasons"] else {})}
+    entries = [{"suite": "clip-alignment", "source": "task",
+                "benchmark": f"CLIP text alignment ({suite.name}, {clip_model}, native {native_backend} "
+                             f"{native_precision}{', latent replay' if replay else ''})",
+                "status": verdict["status"], "samples": len(suite.samples), "expected_samples": len(suite.samples),
+                "passed": verdict["passed"], "required_passes": None, "gate": verdict["gate"],
+                "metrics": {**verdict["metrics"], "per_sample": [
+                    {"sample_id": sample["sample_id"], "candidate": c, "native": n}
+                    for sample, c, n in zip(suite.samples, scores["candidate"], scores["native"])]},
+                "failures": verdict["failures"][:10],
+                **({"reasons": verdict["reasons"]} if verdict["reasons"] else {})}]
+    if replay:
+        entries.append(_replay_parity(environment, model, check, python, out, suite, outputs,
+                                      (native_backend, native_precision), max_frames))
+    return entries

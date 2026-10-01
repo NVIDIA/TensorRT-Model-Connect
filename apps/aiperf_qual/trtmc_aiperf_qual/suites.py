@@ -55,6 +55,17 @@ class Suite:
         return path
 
 
+def with_latent_seeds(suite: Suite, base: int = 1000) -> Suite:
+    """Each sample with its own ``latent_seed`` (base + index): trtmc-perf-serve then gives TRTMC and
+    the native model the same initial diffusion noise (latent replay)."""
+    samples = []
+    for index, sample in enumerate(suite.samples):
+        request = {**sample["request"], "latent_seed": base + index}
+        samples.append({**sample, "request": request, "request_sha": request_sha(request)})
+    key = sha256_text(canonical({"suite": suite.key, "latent_seed_base": base}))
+    return Suite(suite.name, key, samples, {**suite.manifest, "key": key, "latent_seed_base": base})
+
+
 def limit_suite(suite: Suite, count: int) -> Suite:
     """The first ``count`` samples (a new suite key, so goldens stay separate)."""
     if len(suite.samples) <= count:

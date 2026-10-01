@@ -141,7 +141,8 @@ def _media_level(environment: Environment, service: Mapping[str, Any], endpoint:
 def decompose(levels: Sequence[Mapping[str, Any]]) -> dict[str, float]:
     """Per-step and fixed model-call time from two step counts (linear in the steps)."""
     points = [(level["steps"], level["model_call_p50_ms"]) for level in levels
-              if level.get("steps") and level.get("model_call_p50_ms") is not None]
+              if level.get("steps") and level.get("model_call_p50_ms") is not None
+              and not level.get("request_error_rate_avg")]
     if len(points) < 2 or points[0][0] == points[-1][0]:
         return {}
     (low_steps, low_ms), (high_steps, high_ms) = points[0], points[-1]
@@ -152,17 +153,21 @@ def decompose(levels: Sequence[Mapping[str, Any]]) -> dict[str, float]:
 def compare_media(candidate: Sequence[Mapping[str, Any]], reference: Sequence[Mapping[str, Any]],
                   margin_percent: float) -> dict[str, Any]:
     """Light on the model-call p50 at the catalog steps (the last level)."""
-    reasons = []
+    reasons, notes = [], []
     for side, levels in (("candidate", candidate), ("reference", reference)):
         if not levels or levels[-1].get("model_call_p50_ms") is None:
             reasons.append(f"{side} has no measured request")
-        elif any(level.get("request_error_rate_avg") for level in levels):
+        elif levels[-1].get("request_error_rate_avg"):
             reasons.append(f"{side} had request errors")
+        # Some families accept only their qualified step counts (Wan2.2-TI2V): the other levels may fail.
+        notes += [f"{side} failed at {level.get('steps')} steps" for level in levels[:-1]
+                  if level.get("request_error_rate_avg") or level.get("model_call_p50_ms") is None]
     if reasons:
-        return {"light": "white", "reasons": reasons}
+        return {"light": "white", "reasons": reasons, "notes": notes}
     top_candidate, top_reference = candidate[-1], reference[-1]
     result = {"light": light(top_candidate["model_call_p50_ms"], top_reference["model_call_p50_ms"], margin_percent),
-              "reasons": [], "speedup": top_reference["model_call_p50_ms"] / top_candidate["model_call_p50_ms"]}
+              "reasons": [], "notes": notes,
+              "speedup": top_reference["model_call_p50_ms"] / top_candidate["model_call_p50_ms"]}
     if top_candidate.get("peak_memory_mb") and top_reference.get("peak_memory_mb"):
         result["memory_ratio"] = top_candidate["peak_memory_mb"] / top_reference["peak_memory_mb"]
     return result

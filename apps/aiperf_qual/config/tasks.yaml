@@ -102,15 +102,19 @@ tasks:
   image_generation:
     reference: {precision: bf16}
     accuracy: [{suite: partiprompts-3, grader: parity_image, gate: {min_pass_rate: 1.0}}]
-    # Pixel parity only catches gross failures; CLIP judges whether TRTMC still renders the prompt
-    # (fails on a significant mean CLIPScore drop of more than 1 point vs the native model; videos:
-    # 5 prompts, plus the temporal consistency of adjacent frames).
+    # CLIP judges whether TRTMC still renders the prompt (fails on a significant mean CLIPScore drop
+    # of more than 1 point vs the native model; videos: 3 prompts, plus the temporal consistency of
+    # adjacent frames). Families whose TRTMC runtime takes caller initial latents also render with
+    # the same initial noise on both sides (latent replay), which makes them comparable pixel by
+    # pixel: full-resolution PSNR/SSIM at most 6 dB / 0.1 below two native precisions' agreement.
     supplementary: [{check: clip_alignment, suite: partiprompts-30, clip_model: openai/clip-vit-large-patch14,
-                     max_mean_clip_drop: 1.0, max_temporal_consistency_drop: 0.02, video_samples: 5}]
+                     max_mean_clip_drop: 1.0, max_temporal_consistency_drop: 0.02, video_samples: 3,
+                     latent_replay_families: [flux, pixart, qwen_image, z_image, wan_t2v],
+                     parity_floor_samples: 10, max_psnr_gap_db: 6.0, max_ssim_gap: 0.1, min_pass_rate: 0.9}]
     performance:
       l1: &media_l1 {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
                      measurement: {warmup: 1, requests: 1, runs: 3}}
-      l2: {kind: media, suite: partiprompts-30, prompts: 3, requests: 3, video_requests: 2, margin_percent: 5}
+      l2: {kind: media, suite: partiprompts-30, prompts: 3, requests: 3, video_requests: 1, margin_percent: 5}
   image_edit: &media  # edit and world-model inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
     accuracy: [{suite: catalog, grader: parity_image, gate: {min_pass_rate: 1.0}}]

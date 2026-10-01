@@ -28,7 +28,8 @@ def _media_l2(l2: Mapping[str, Any]) -> list[str]:
     memory = f", peak memory {l2['memory_ratio']:.2f}x native" if l2.get("memory_ratio") else ""
     lines = ["", f"## Performance L2 (AIPerf {l2.get('endpoint')}, informational; {l2.get('prompts')} prompts, "
              f"{l2.get('requests')} requests per level)", "",
-             f"Light {l2.get('light')} {'; '.join(l2.get('reasons', []))}{speedup}{memory}. {l2.get('note', '')}", "",
+             f"Light {l2.get('light')} {'; '.join(l2.get('reasons', []) + l2.get('notes', []))}{speedup}{memory}. "
+             f"{l2.get('note', '')}", "",
              "| side | steps | model call p50 ms | request latency p50 ms | peak GPU memory MiB | measured |",
              "|---|---|---|---|---|---|"]
     for side in ("candidate", "reference"):

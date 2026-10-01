@@ -506,6 +506,39 @@ def test_family_perf_requests_take_explicit_generation_controls_from_the_catalog
     assert fill_model_defaults({"num_steps": 8}, catalog) == {"num_steps": 8}
 
 
+def test_latent_seeds_give_each_sample_its_own_replayed_noise():
+    from trtmc_aiperf_qual.suites import Suite, request_sha, with_latent_seeds
+
+    samples = [{"sample_id": str(i), "request": {"prompt": f"p{i}"}, "request_sha": "old"} for i in range(3)]
+    seeded = with_latent_seeds(Suite("s", "key", samples, {"key": "key"}))
+    assert [sample["request"]["latent_seed"] for sample in seeded.samples] == [1000, 1001, 1002]
+    assert seeded.samples[1]["request_sha"] == request_sha({"prompt": "p1", "latent_seed": 1001})
+    assert seeded.key != "key" and seeded.manifest["latent_seed_base"] == 1000 and "latent_seed" not in samples[0]["request"]
+
+
+def test_replay_parity_compares_against_the_native_precision_floor(tmp_path):
+    from trtmc_aiperf_qual import replay_parity
+
+    samples = [{"sample_id": str(i), "request": {}} for i in range(4)]
+    floor = {"psnr": 32.0, "ssim": 0.95}
+    rows = [{"candidate": {"psnr": 30.0, "ssim": 0.93}, "floor": floor},
+            {"candidate": {"psnr": 17.6, "ssim": 0.60}, "floor": floor},
+            {"candidate": {"psnr": 28.0, "ssim": 0.90}, "floor": None},  # judged by the mean floor
+            {"candidate": None, "floor": None, "frames": [1, 17], "shapes": [[8, 8, 3], [8, 8, 3]]}]
+    verdict = replay_parity.judge(rows, samples, {"max_psnr_gap_db": 6.0, "max_ssim_gap": 0.1, "min_pass_rate": 0.9})
+    assert verdict["status"] == "fail" and verdict["passed"] == 2
+    assert [f["sample_id"] for f in verdict["failures"]] == ["1", "3"] and "geometry" in verdict["failures"][1]["explanation"]
+    assert verdict["metrics"]["floor_psnr_db"] == 32.0 and verdict["metrics"]["floor_samples"] == 2
+    assert replay_parity.judge(rows[:1] + rows[2:3], samples[:2], {})["status"] == "pass"
+    no_floor = [{"candidate": {"psnr": 24.97, "ssim": 0.899}, "floor": None},
+                {"candidate": {"psnr": 14.1, "ssim": 0.58}, "floor": None}]
+    fallback = replay_parity.judge(no_floor, samples[:2], {"min_pass_rate": 0.5})
+    assert fallback["passed"] == 1 and fallback["metrics"]["floor_source"] == "fallback"
+    assert fallback["metrics"]["floor_psnr_db"] == 25.0 and len(fallback["metrics"]["per_sample"]) == 2
+    record = {"observation": {"latent_replay": True}}
+    assert replay_parity.not_replayed({"candidate": [(tmp_path, record)], "native": [(tmp_path, {"observation": {}})]}) == ["native"]
+
+
 def test_media_sweep_steps_decomposition_and_light(tmp_path):
     from trtmc_aiperf_qual import sweep
     from trtmc_aiperf_qual.report import write_report
@@ -523,6 +556,10 @@ def test_media_sweep_steps_decomposition_and_light(tmp_path):
     compared = sweep.compare_media(candidate, reference, 5)
     assert compared["light"] == "green" and compared["speedup"] == 3.0 and compared["memory_ratio"] == 0.5
     assert sweep.compare_media(candidate, [{"steps": 4}], 5)["light"] == "white"
+    rejected = [{"steps": 2, "model_call_p50_ms": None, "request_error_rate_avg": 100.0}, candidate[1]]
+    partial = sweep.compare_media(rejected, reference, 5)
+    assert partial["light"] == "green" and partial["notes"] == ["candidate failed at 2 steps"]
+    assert sweep.decompose(rejected) == {}
     l2 = {"kind": "media", "endpoint": "image_generation", "prompts": 3, "requests": 3, "candidate": candidate,
           "reference": reference, "decomposition": {"candidate": sweep.decompose(candidate), "reference": {}},
           **compared}

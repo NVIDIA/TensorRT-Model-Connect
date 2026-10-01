@@ -35,17 +35,19 @@ def generate(environment: Environment, model: dict[str, Any], backend: str, out:
 
 
 def generate_native(environment: Environment, model: dict[str, Any], suite: Any, python: str, out: Path,
-                    label: str) -> tuple[Outputs, str]:
-    """The native model's outputs and which reference produced them: the generic adapter, else the
-    family's declared reference, at the Perf precisions in order."""
+                    label: str, skip: tuple[str, str] | None = None) -> tuple[Outputs, str, str]:
+    """The native model's outputs and the (backend, precision) that produced them: the generic adapter,
+    else the family's declared reference, at the Perf precisions in order (``skip`` excluded)."""
     from .runner import timing_precisions
 
     reference, errors = model["reference"], []
     for backend in dict.fromkeys([reference["backend"], reference.get("fallback") or reference["backend"]]):
         for precision in timing_precisions(reference):
+            if (backend, precision) == skip:
+                continue
             try:
                 return (generate(environment, model, backend, out / f"{label}-native-{backend}-{precision}", suite,
-                                 python, precision), f"{backend} {precision}")
+                                 python, precision), backend, precision)
             except Exception as error:  # noqa: BLE001 - try the next precision, then the fallback
                 errors.append(f"{backend} {precision}: {type(error).__name__}: {str(error)[-200:]}")
-    raise RuntimeError("; ".join(errors)[-1500:])
+    raise RuntimeError("; ".join(errors)[-1500:] or "no other native precision")

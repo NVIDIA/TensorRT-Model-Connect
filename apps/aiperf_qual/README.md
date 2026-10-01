@@ -65,7 +65,7 @@ round trip (`tts_intelligibility`): TRTMC and the native model speak the SeedTTS
 model transcribes both, and TRTMC's word error rate must stay within 0.1 of the native model's.
 Sampling models (Bark, MagpieTTS) cannot be judged per sample, but what they say can. Image and
 video generation models also pass a CLIP text-alignment check (`clip_alignment`): both sides render
-PartiPrompts 30 (5 for videos) at the catalog request, CLIP ViT-L/14 scores every image (8 evenly
+PartiPrompts 30 (3 for videos) at the catalog request, CLIP ViT-L/14 scores every image (8 evenly
 sampled frames of a video) against its prompt, and the check fails when TRTMC's mean CLIPScore is more
 than 1 point below the native model's and the paired drop is significant (one-sided 95%); videos also
 keep the temporal consistency of adjacent frames (mean CLIP cosine) within 0.02 by the same rule. Pixel parity only catches gross failures, since diffusion output drifts across

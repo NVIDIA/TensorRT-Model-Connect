@@ -57,7 +57,7 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
     from .models import _suite
 
     suite = build_suite(_suite(check["suite"], model["catalog_profile"], environment.path("repo")), environment)
-    native, _ = generate_native(environment, model, suite, python, out, "tts")
+    native, _, _ = generate_native(environment, model, suite, python, out, "tts")
     audio = {side: [_audio(workdir, record) for workdir, record in outputs] for side, outputs in (
         ("candidate", generate(environment, model, "trtmc", out / "tts-candidate", suite)), ("native", native))}
     texts = {}

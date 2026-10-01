@@ -178,7 +178,7 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
 
         result["accuracy"] = [refresh(item) for item in result.get("accuracy", [])]
         for item in result["accuracy"]:
-            if item.get("source") == "family" or item.get("suite") in ("tts-intelligibility", "clip-alignment"):
+            if item.get("source") == "family" or item.get("suite") in ("tts-intelligibility", "clip-alignment", "replay-parity"):
                 continue  # the family's own metric and gate, or a whole-output check, decided it
             declared = next((entry for entry in model["accuracy"] if entry["suite"]["suite"] == item["suite"]), {})
             if environment is not None and "gate" in declared:
