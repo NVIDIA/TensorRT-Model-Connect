@@ -363,3 +363,27 @@ def test_model_id_override_and_missing_local_snapshot_keep_load_contract(recordi
     with pytest.raises(FileNotFoundError, match="cached Diffusers snapshot is missing"):
         generic_reference._diffusion_pipeline(arguments, recorded.torch, {})
     assert len(recorded.loads) == 1
+
+
+def test_zero_umt5_token_embeddings_are_tied_back_to_shared():
+    torch = pytest.importorskip("torch")
+    from qualification_tests.benchmark_qualification.performance.references.generic_reference import (
+        _retie_encoder_embeddings,
+    )
+
+    def text_encoder(zero_embeddings):
+        module = torch.nn.Module()
+        module.shared = torch.nn.Embedding(8, 4)
+        module.encoder = torch.nn.Module()
+        module.encoder.embed_tokens = torch.nn.Embedding(8, 4)
+        if zero_embeddings:
+            torch.nn.init.zeros_(module.encoder.embed_tokens.weight)
+        return module
+
+    broken, loaded = text_encoder(True), text_encoder(False)
+    loaded_weight = loaded.encoder.embed_tokens.weight
+    pipeline = SimpleNamespace(components={"text_encoder": broken, "text_encoder_2": loaded, "scheduler": object()})
+    assert _retie_encoder_embeddings(pipeline) == ["text_encoder"]
+    assert broken.encoder.embed_tokens.weight is broken.shared.weight
+    assert loaded.encoder.embed_tokens.weight is loaded_weight
+    assert _retie_encoder_embeddings(SimpleNamespace()) == []
