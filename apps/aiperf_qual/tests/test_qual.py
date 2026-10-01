@@ -420,6 +420,18 @@ def test_sampled_perf_requests_compare_generated_length():
     assert not output_check(l1, {"token_ids": [1, 2]}, refs, "eager", sampled=True)[0]
 
 
+def test_family_cases_with_top_k_one_are_greedy_and_judged_strictly():
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual import family
+
+    def case(request):
+        return SimpleNamespace(values={"request": request})
+    assert not family.sampled(case({"temperature": 1.0, "top_k": 1}))  # Qwen2.5-VL's family request
+    assert not family.sampled(case({"do_sample": True, "top_k": 1}))
+    assert family.sampled(case({"do_sample": True})) and family.sampled(case({"temperature": 0.7}))
+
+
 
 def test_a_candidate_meeting_the_gate_passes_even_when_the_native_model_diverges():
     noise = {"passed": 0, "total": 1, "failed_indices": [0]}

@@ -154,10 +154,14 @@ def executed_inputs(case: Any) -> int | None:
     return 1 if values.get("request") is not None and not values.get("dataset") else None
 
 
+def sampled_request(request: Mapping[str, Any]) -> bool:
+    """The request samples (TRTMC does not replay PyTorch's random stream); top_k 1 is greedy."""
+    stochastic = bool(request.get("do_sample")) or float(request.get("temperature") or 0.0) > 0.0
+    return stochastic and int(request.get("top_k") or 0) != 1
+
+
 def sampled(case: Any) -> bool:
-    """The case's request samples (TRTMC does not replay PyTorch's random stream)."""
-    request = (getattr(case, "values", None) or {}).get("request") or {}
-    return bool(request.get("do_sample")) or float(request.get("temperature") or 0.0) > 0.0
+    return sampled_request((getattr(case, "values", None) or {}).get("request") or {})
 
 
 def item(case: Any, result: Mapping[str, Any], evidence: Path) -> dict[str, Any]:

@@ -26,6 +26,7 @@ from typing import Any, Mapping, Sequence
 from . import alignment, family, intelligibility, judge, sweep
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
+from .family import sampled_request
 from .goldens import GoldenStore, golden_key, platform_id
 from .report import write_report
 from .services import gpu_exclusive, platform_fingerprint, reference_python, serving
@@ -241,10 +242,6 @@ def _grade(grader: str, params: Mapping[str, Any], observed: Mapping[str, Any], 
             failed.append(index)
             failures.append({"sample_id": sample["sample_id"], "reason": str(reason)[:200]})
     return {"passed": passed, "total": len(suite.samples), "failed_indices": failed, "failures": failures[:5]}
-
-
-def sampled_request(request: Mapping[str, Any]) -> bool:
-    return float(request.get("temperature", 0.0) or 0.0) > 0.0 and int(request.get("top_k", 0) or 0) != 1
 
 
 def output_check(l1: Mapping[str, Any], candidate: Any, references: Mapping[str, Any], mode: str,
