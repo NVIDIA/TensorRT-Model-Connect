@@ -24,6 +24,7 @@
 namespace trtmc {
 
 class EncoderPipeline final : public trtmc::internal::IModel,
+                              public trtmc::internal::ITextToPooledFeatures,
                               public trtmc::internal::ITextToTokenFeatures,
                               public trtmc::internal::ITextToEmbedding,
                               public trtmc::internal::ITextPairToRelevance {
@@ -36,6 +37,12 @@ class EncoderPipeline final : public trtmc::internal::IModel,
 
     // IModel
     std::vector<trtmc::internal::TaskInstance> task_bindings() override;
+
+    // ITextToPooledFeatures — preserves legacy encoding CLS output
+    // Returns single [hidden_size] pooled vector (CLS token) without normalization.
+    trtmc::internal::PooledFeaturesResult
+    run(const trtmc::internal::TextToPooledFeaturesRequest& request,
+        trtmc::internal::ConfigView config) override;
 
     // ITextToTokenFeatures — was: encoding
     // Returns per-token hidden states for the full tokenized sequence.

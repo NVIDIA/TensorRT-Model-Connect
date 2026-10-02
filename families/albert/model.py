@@ -274,10 +274,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {"text_to_token_features", "text_to_embedding", "text_pair_to_relevance"}:
+    task = "text_to_pooled_features" if request.task == "encoding" else request.task
+    if task not in {
+        "text_to_pooled_features",
+        "text_to_token_features",
+        "text_to_embedding",
+        "text_pair_to_relevance",
+    }:
         raise ValueError(
-            "albert task must be text_to_token_features, text_to_embedding,"
-            " or text_pair_to_relevance"
+            "albert task must be text_to_pooled_features, text_to_token_features,"
+            " text_to_embedding, or text_pair_to_relevance"
         )
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
@@ -304,7 +310,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     model = _AlbertModel()
     weights = model.load_weights(str(model_dir), config)
-    writer.set_header(family="albert", task=request.task, backend=request.backend)
+    writer.set_header(family="albert", task=task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(

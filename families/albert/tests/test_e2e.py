@@ -16,7 +16,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "albert"
-TASKS = frozenset({"text_to_token_features"})
+TASKS = frozenset({"text_to_pooled_features", "text_to_token_features"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -261,7 +261,7 @@ def _native(
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
-    manifest["task"]
+    del tmp_path
     import torch
     from transformers import AutoModel, AutoTokenizer
 
@@ -279,7 +279,11 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     with torch.no_grad():
         outputs = model(**encoded)
     hidden = outputs.last_hidden_state
-    values = hidden[0, 0]
+    if manifest["task"] == "text_to_token_features":
+        seq_len = int(encoded["input_ids"].shape[1])
+        values = hidden[0, :seq_len]
+    else:
+        values = hidden[0, 0]
     return {"values": values.float().cpu().numpy()}
 
 

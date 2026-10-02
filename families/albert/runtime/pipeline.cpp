@@ -70,10 +70,42 @@ const char* EncoderPipeline::task() const noexcept {
 
 std::vector<trtmc::internal::TaskInstance> EncoderPipeline::task_bindings() {
     return {
+        trtmc::internal::bind<trtmc::internal::ITextToPooledFeatures>(*this),
         trtmc::internal::bind<trtmc::internal::ITextToTokenFeatures>(*this),
         trtmc::internal::bind<trtmc::internal::ITextToEmbedding>(*this),
         trtmc::internal::bind<trtmc::internal::ITextPairToRelevance>(*this),
     };
+}
+
+// ─── ITextToPooledFeatures (preserves legacy encoding CLS output) ───
+// Extracts the CLS token representation (first hidden dimension elements).
+trtmc::internal::PooledFeaturesResult
+EncoderPipeline::run(const trtmc::internal::TextToPooledFeaturesRequest& request,
+                     trtmc::internal::ConfigView /*config*/) {
+    std::vector<int32_t> ids;
+    if (const auto* sv = std::get_if<std::string_view>(&request.text)) {
+        if (!tokenizer_)
+            throw std::runtime_error("EncoderPipeline: no tokenizer configured");
+        ids = tokenizer_->encode(std::string(*sv));
+    } else if (const auto* span = std::get_if<Span<const std::int32_t>>(&request.text)) {
+        ids.assign(span->begin(), span->end());
+    } else {
+        throw std::runtime_error("EncoderPipeline: unsupported text source");
+    }
+    const auto raw_floats = encode_ids(ids);
+
+    trtmc::internal::PooledFeaturesResult result;
+    result.pooling = "cls";
+    result.normalization = "none";
+
+    const int32_t hidden = infer_output_hidden_dim(*encoder_);
+    const auto actual_len = static_cast<int32_t>(ids.size());
+    if (hidden <= 0 || actual_len <= 0 || static_cast<int32_t>(raw_floats.size()) < hidden) {
+        return result;
+    }
+
+    result.values.assign(raw_floats.begin(), raw_floats.begin() + hidden);
+    return result;
 }
 
 // ─── ITextToTokenFeatures (was: encoding) ───

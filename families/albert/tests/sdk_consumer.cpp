@@ -5,14 +5,14 @@
 
 /*
  * Minimal C++ SDK consumer for the albert family.
- * Exercises text_to_token_features, text_to_embedding, and text_pair_to_relevance
+ * Exercises text_to_pooled_features, text_to_token_features, text_to_embedding, and text_pair_to_relevance
  * through the public C++ convenience wrappers (trtmc/trtmc.hpp + trtmc/features.hpp).
  *
  * Usage:
  *   sdk_consumer_albert_cpp <bundle_path> <runtime_root>
  *
  * Environment:
- *   TRTMC_ALBERT_TEXT       input text for token-features and embedding (default: "hello world")
+ *   TRTMC_ALBERT_TEXT       input text for pooled/token-features and embedding (default: "hello world")
  *   TRTMC_ALBERT_QUERY      query string for relevance test (default: "What is AI?")
  *   TRTMC_ALBERT_DOCUMENT   document string for relevance test (default: "AI is intelligence.")
  */
@@ -43,12 +43,26 @@ int main(int argc, char** argv) {
         // ── load model ────────────────────────────────────────────────────
         trtmc::LoadOptions opts;
         opts.runtime_root = runtime_root;
-        auto model = trtmc::load_task(bundle_path, opts);
+        auto model = trtmc::Model::load(bundle_path, opts);
+
+        // ── text_to_pooled_features ───────────────────────────────────────
+        {
+            auto pooled_task = model.task<trtmc::TextToPooledFeatures>();
+            trtmc::TextToPooledFeaturesRequest req{text};
+            auto result = pooled_task.run(req);
+
+            if (result.values().empty())
+                throw std::runtime_error("text_to_pooled_features: empty values");
+
+            std::cout << "text_to_pooled_features: dim=" << result.values().size()
+                      << " pooling=" << result.pooling()
+                      << " normalization=" << result.normalization() << "\n";
+        }
 
         // ── text_to_token_features ─────────────────────────────────────────
         {
-            auto& tok_task = model->get<trtmc::TextToTokenFeatures>();
-            trtmc::TextToTokenFeaturesRequest req{{trtmc::TextSource{text}}};
+            auto tok_task = model.task<trtmc::TextToTokenFeatures>();
+            trtmc::TextToTokenFeaturesRequest req{text};
             auto result = tok_task.run(req);
 
             if (result.features().count == 0)
@@ -63,7 +77,7 @@ int main(int argc, char** argv) {
 
         // ── text_to_embedding ───────────────────────────────────────────
         {
-            auto& emb_task = model->get<trtmc::TextToEmbedding>();
+            auto emb_task = model.task<trtmc::TextToEmbedding>();
             trtmc::TextToEmbeddingRequest req{text, trtmc::EmbeddingRole::Default};
             auto result = emb_task.run(req);
 
@@ -77,7 +91,7 @@ int main(int argc, char** argv) {
 
         // ── text_pair_to_relevance ──────────────────────────────────────
         {
-            auto& rel_task = model->get<trtmc::TextPairToRelevance>();
+            auto rel_task = model.task<trtmc::TextPairToRelevance>();
             trtmc::TextPairToRelevanceRequest req{query, document};
             auto result = rel_task.run(req);
 
