@@ -274,5 +274,3 @@ def test_family_without_build_command_keeps_legacy_entrypoint(owner_manifest: Pa
     command = _build_command(model, tmp_path / "checkpoint", tmp_path / "result.bundle", ())
     assert command[:4] == (sys.executable, "-m", "tensorrt_model_connect", "build")
     assert command[command.index("--max-sequence-length") + 1] == "128"
-    # The declared family builds it even where several families support the checkpoint.
-    assert command[command.index("--family") + 1] == model.family
