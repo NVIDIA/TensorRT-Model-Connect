@@ -30,7 +30,7 @@ problems and each side is scored against the gold answers. An entry passes when 
 differ by at most `max_delta_points` (or `max_relative` of the native score): "close" is a size; the
 paired McNemar test (right/wrong metrics) or bootstrap interval (corpus metrics) is a note. A model
 whose catalog request samples answers once per seed on each side (mean scores compared). Benchmarks
-whose prompts need a longer bundle than the catalog's (`sequence_length`) build `<profile>-qual`;
+whose prompts need a longer bundle than the catalog's (`sequence_length`) build `<profile>-qual-<length>`;
 problems that still do not fit are dropped for both sides. Every entry also reports the model-call
 time of both sides on the benchmark's own requests (informational). With `native_replicas` in the
 environment, the native side runs as that many copies of the adapter (as many as fit the GPU), each

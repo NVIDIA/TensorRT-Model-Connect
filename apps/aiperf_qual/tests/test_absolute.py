@@ -510,3 +510,24 @@ def test_a_benchmark_bundle_that_does_not_build_is_built_shorter(tmp_path, monke
     assert record["category"] == "pass" and built == ["m-qual/m.bundle", "m-qual-2048/m.bundle"]
     assert qualified[0]["candidate"]["max_sequence_length"] == 2048
     assert "did not build" in qualified[0]["candidate"]["sequence_fallback"]
+
+
+def test_a_native_model_with_no_right_answer_is_not_comparable():
+    metrics = {"trtmc_accuracy": 0.0, "native_accuracy": 0.0, "delta_points": 0.0}
+    status, reasons = absolute.status(metrics, {"max_delta_points": 1.0}, expected=10, paired=10)
+    assert status == "not-comparable" and "does not fit" in reasons[0]
+    wer = {"trtmc_score": 0.0, "native_score": 0.0, "delta_points": 0.0}  # a corpus metric: 0 is a score
+    assert absolute.status(wer, {"max_delta_points": 0.2}, expected=10, paired=10)[0] == "pass"
+
+
+def test_unmerged_raw_records_still_show_failed_requests(tmp_path):
+    import json
+
+    from trtmc_aiperf_qual.aiperf_runner import AiperfRun
+
+    (tmp_path / "raw_records").mkdir()
+    record = {"metadata": {"benchmark_phase": "profiling", "session_num": 0}, "status": 400,
+              "error": {"message": "multi-message chat requires a chat-template renderer"}}
+    (tmp_path / "raw_records" / "raw_records_processor_a.jsonl").write_text(json.dumps(record) + "\n")
+    records = AiperfRun(tmp_path, 1, []).raw_records()  # AIPerf merged no export: every request failed
+    assert len(records) == 1 and absolute.unanswered(records[0])

@@ -218,7 +218,8 @@ def test_models_are_derived_from_the_catalog_the_family_cases_and_task_defaults(
     # Gold-scored MMLU replaces the parity cases; its prompts need a 4096-token bundle.
     assert qwen["accuracy_source"] == "absolute" and not qwen["family_accuracy"]
     assert [(item["suite"], item["endpoint"]) for item in qwen["absolute"]] == [("mmlu-5shot", "chat")]
-    assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16-qual/qwen3-0.6b-fp16.bundle"
+    # The benchmark bundle's name carries its length: an earlier shorter `-qual` bundle is never reused.
+    assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16-qual-4096/qwen3-0.6b-fp16.bundle"
     assert qwen["candidate"]["build"]["max_sequence_length"] == 4096
     assert qwen["performance"]["l1"]["suite"]["source"] == {"kind": "qualification_perf", "profile": "qwen3-0.6b-fp16"}
     small = resolve_model("falcon-rw-1b", environment)  # MMLU is near chance: LAMBADA on the catalog length

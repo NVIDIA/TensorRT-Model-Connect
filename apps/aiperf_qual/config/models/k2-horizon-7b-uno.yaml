@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A LoRA adapter on IFM/K2-Horizon-7B without tokenizer files: no chat template renders the 5-shot
+# conversation, so MMLU goes through the completions route (lighteval's plain prompt).
+absolute: [{name: mmlu, endpoint: completions}]

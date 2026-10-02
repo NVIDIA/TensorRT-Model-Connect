@@ -252,9 +252,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         needed = min(needed, int(config["absolute_sequence_length"]))
     current = build.get("max_sequence_length") or catalog_model.build_settings.get("max_sequence_length")
     if needed and (not current or int(current) < needed):
-        # A capped length gets its own name: bundles are reused by path, whatever their length.
-        name = f"{profile}-qual-{needed}" if config.get("absolute_sequence_length") else f"{profile}-qual"
-        build = {**build, "name": name, "max_sequence_length": needed}
+        # Bundles are reused by path, whatever their length: the name carries the length, so a shorter
+        # bundle of the same profile (an earlier campaign's `-qual`) is never served instead.
+        build = {**build, "name": f"{profile}-qual-{needed}", "max_sequence_length": needed}
     bundle = f"{build.get('name', profile)}/{build.get('bundle', catalog_model.bundle_name)}"
     # The native model the family declares (another checkpoint, e.g. a base model, or a Diffusers export)
     # and its pin; otherwise the candidate's own checkpoint at the candidate's revision.

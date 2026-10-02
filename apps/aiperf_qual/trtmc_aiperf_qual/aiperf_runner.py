@@ -34,8 +34,11 @@ class AiperfRun:
         return self.json("profile_export_aiperf.json")
 
     def raw_records(self, phase: str = "profiling") -> list[dict[str, Any]]:
+        """The per-request records: the merged export, else the per-processor files AIPerf leaves
+        unmerged (for example when every request failed)."""
         records = []
-        for path in sorted(self.directory.glob(f"**/{RAW_EXPORT}")):
+        paths = sorted(self.directory.glob(f"**/{RAW_EXPORT}")) or sorted(self.directory.glob("**/raw_records/*.jsonl"))
+        for path in paths:
             for line in path.read_text().splitlines():
                 item = json.loads(line)
                 if item["metadata"].get("benchmark_phase") == phase:

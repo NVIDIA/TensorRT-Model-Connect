@@ -27,7 +27,7 @@ defaults:
 # Absolute accuracy: AIPerf's own benchmarks (trtmc_aiperf_plugins.benchmarks, pinned revisions), answered
 # by TRTMC and by the native model at the candidate precision and scored against the gold answers on both
 # sides. Fails when the accuracies differ by more than max_delta_points (the paired McNemar test is a
-# note). sequence_length is the bundle length the prompts and answers need (a shorter catalog bundle is rebuilt as <profile>-qual); problems that still do not fit are dropped
+# note). sequence_length is the bundle length the prompts and answers need (a shorter catalog bundle is rebuilt as <profile>-qual-<length>); problems that still do not fit are dropped
 # for both sides alike.
 benchmarks:
   mmlu: {plugin: trtmc_mmlu, suite: mmlu-5shot, n_shots: 5, per_task: 20, sequence_length: 4096,

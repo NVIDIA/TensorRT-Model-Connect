@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A reasoning model: through its chat template it thinks aloud first ("Okay, let's ...") and never
+# reaches the answer letter within MMLU's few tokens; the completions route asks for the letter.
+absolute: [{name: mmlu, endpoint: completions}]
