@@ -9,11 +9,14 @@
 // All model execution goes through TensorRT component engines:
 //   text_encoder.plan  Gemma 4 + LTX2TextConnectors -> video/audio text contexts
 //   denoiser.plan      joint audio/video DiT (single device or context parallel)
-//   vae.plan           video VAE decoder -> RGB frames
+//   vae.plan           video VAE decoder -> RGB frames (whole video, or one tile shape when the
+//                      bundle carries a tile plan; context-parallel ranks decode disjoint tiles)
 //   audio.plan         audio VAE decoder + vocoder with BWE -> 48 kHz stereo
 
+#include "families/ltx2/runtime/distributed_runtime.h"
 #include "families/ltx2/runtime/progress_log.h"
 #include "families/ltx2/runtime/tokenizer.h"
+#include "families/ltx2/runtime/vae_tiling.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/internal/video.h"
 #include "trtmc/runtime/trt_module.h"
@@ -43,19 +46,32 @@ struct LTX2Options {
     std::vector<float> sigmas;
     int32_t audio_sample_rate{48000};
     int32_t audio_channels{2};
+    // Tiled video decode (empty: vae.plan decodes the whole video on rank 0).
+    ltx2::VaeTilePlan vae_tiling;
+    // Waveform shape of audio.plan; lets another rank decode the audio for rank 0.
+    std::vector<int64_t> audio_waveform_shape;
 
     int64_t video_tokens() const { return int64_t(latent_frames) * latent_height * latent_width; }
+    // Rank that decodes the audio: the last context-parallel rank when the tiles spread the
+    // video decode over every rank, else rank 0.
+    int32_t audio_rank(int32_t world_size) const {
+        return world_size > 1 && vae_tiling.enabled() && !audio_waveform_shape.empty()
+                   ? world_size - 1
+                   : 0;
+    }
 };
 
-LTX2Options parse_ltx2_options(const std::string& runtime_json);
+LTX2Options parse_ltx2_options(const std::string& runtime_json, int32_t world_size = 1);
 
 // Context-parallel participation. The owner keeps the NCCL communicator used by the
-// denoiser engine alive for the pipeline lifetime. Rank 0 decodes and returns media;
-// other ranks return the worker completion.
+// denoiser engine alive for the pipeline lifetime. Rank 0 returns the media; other ranks
+// return the worker completion. With a tile plan every rank decodes its video tiles and sends
+// them (and, on the audio rank, the waveform) to rank 0 over `channel`.
 struct LTX2DistributedContext {
     std::shared_ptr<void> owner;
     int32_t rank{0};
     int32_t world_size{1};
+    std::shared_ptr<ltx2::PeerChannel> channel;
 };
 
 class LTX2Pipeline final : public internal::IModel, public internal::ITextToAudioVideo {
@@ -76,6 +92,17 @@ class LTX2Pipeline final : public internal::IModel, public internal::ITextToAudi
         std::vector<uint16_t> audio; // [1, L, 2048] bf16 bits
     };
 
+    // Decoded media (rank 0) and the decode phase timings of this rank.
+    struct Decoded {
+        std::vector<float> frames;
+        std::vector<float> wave;
+        double tiles_ms{0.0};
+        double audio_ms{0.0};
+        double exchange_ms{0.0};
+        double blend_ms{0.0};
+        int32_t tiles{0};
+    };
+
   private:
     TextContext encode(const std::string& text);
     void run_dit(const std::vector<float>& video, const std::vector<float>& audio,
@@ -83,6 +110,12 @@ class LTX2Pipeline final : public internal::IModel, public internal::ITextToAudi
                  std::vector<float>& audio_out);
     std::vector<float> decode_video(const std::vector<float>& video_latents);
     std::vector<float> decode_audio(const std::vector<float>& audio_latents);
+    Decoded decode_untiled(const std::vector<float>& video, const std::vector<float>& audio);
+    Decoded decode_tiled(const std::vector<float>& video, const std::vector<float>& audio);
+    void decode_own_tiles(const std::vector<float>& video, uint8_t* host, void* device,
+                          Decoded& out);
+    void receive_peer_tiles(uint8_t* host, Decoded& out);
+    uint8_t* tile_host_buffer(std::size_t bytes);
 
     // Declared first so the communicator outlives every engine that uses it.
     LTX2DistributedContext distributed_;
@@ -93,6 +126,8 @@ class LTX2Pipeline final : public internal::IModel, public internal::ITextToAudi
     LTX2Options options_;
     std::shared_ptr<ITokenizer> tokenizer_;
     LTX2ProgressLog progress_;
+    std::shared_ptr<uint8_t> tile_host_; // pinned decoded tiles on rank 0
+    std::size_t tile_host_bytes_{0};
 };
 
 } // namespace trtmc

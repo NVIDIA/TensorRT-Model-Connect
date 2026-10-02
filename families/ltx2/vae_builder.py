@@ -8,7 +8,9 @@ Engine I/O:
         latents   [1, S, 128]  fp32  packed, normalized video latents (DiT layout, S = F*H*W tokens)
     Outputs:
         frames    [T, H*32, W*32, 3]  fp16  RGB in [0, 1] (``(x + 1) / 2`` clamped, the pipeline's
-                                       ``postprocess_video``)
+                                       ``postprocess_video``). Tile plans (``clamp_output=False``)
+                                       leave ``(x + 1) / 2`` unclamped: the runtime clamps after
+                                       blending the tiles (``vae_tiling.py``).
 
 The engine denormalizes with the VAE's ``latents_mean`` / ``latents_std`` (``scaling_factor``),
 unpacks the tokens to ``[1, C, F, H, W]`` and runs the non-causal ``LTX2VideoDecoder3d``:
@@ -114,7 +116,7 @@ def _count(ck: Checkpoint, fmt: str) -> int:
 
 
 def build_vae_decoder_engine(vae_dir: str | Path, *, latent_frames: int, latent_height: int, latent_width: int,
-                             verbose: bool = False, precision: str = "bf16") -> bytes:
+                             verbose: bool = False, precision: str = "bf16", clamp_output: bool = True) -> bytes:
     ck = Checkpoint(vae_dir)
     cfg = ck.config()
     if cfg.get("timestep_conditioning"):
@@ -176,11 +178,12 @@ def build_vae_decoder_engine(vae_dir: str | Path, *, latent_frames: int, latent_
     x = g.reshape(x, (c, t, hh * patch, ww * patch), first=(0, 1, 5, 2, 6, 4, 7, 3))
     x = g.cast(x, trt.float32)
     x = g.mul(g.add(x, g.scalar(1.0, trt.float32, 4)), g.scalar(0.5, trt.float32, 4))
-    x = g.maximum(g.minimum(x, g.scalar(1.0, trt.float32, 4)), g.scalar(0.0, trt.float32, 4))
+    if clamp_output:
+        x = g.maximum(g.minimum(x, g.scalar(1.0, trt.float32, 4)), g.scalar(0.0, trt.float32, 4))
     frames = g.transpose(x, (1, 2, 3, 0))  # [T, H, W, 3]
     g.mark_output(frames, "frames", trt.float16)
     print(f"[ltx2] Building video VAE decoder engine (latent {f}x{h}x{w} -> {t}x{hh * patch}x{ww * patch}, "
-          f"{precision}) ...", file=sys.stderr)
+          f"{precision}{'' if clamp_output else ', tile'}) ...", file=sys.stderr)
     return build_plan(builder, network, label="video VAE decoder")
 
 

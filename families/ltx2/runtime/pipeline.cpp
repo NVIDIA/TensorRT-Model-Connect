@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <cuda_runtime_api.h>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -21,6 +23,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -116,6 +119,9 @@ std::string trim(const std::string& text) {
 //   TRTMC_LTX2_INITIAL_LATENTS  raw fp32 file: packed video [S, C] then audio [Sa, Ca] noise
 //                               (replaces the seeded noise, e.g. a reference pipeline's draw)
 //   TRTMC_LTX2_DUMP_LATENTS     raw fp32 file written with the final video then audio latents
+//   TRTMC_LTX2_DECODE_LATENTS   raw fp32 file in the TRTMC_LTX2_DUMP_LATENTS layout; replaces the
+//                               denoised latents before the decode (decoder checks, e.g. the
+//                               single-GPU vs tile-parallel decode of identical latents)
 std::vector<float> read_f32_file(const char* path) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input)
@@ -142,6 +148,20 @@ void maybe_dump(const std::vector<float>& video, const std::vector<float>& audio
               << " fp32) to " << path << "\n";
 }
 
+void replace_final_latents(std::vector<float>& video, std::vector<float>& audio) {
+    const char* path = std::getenv("TRTMC_LTX2_DECODE_LATENTS");
+    if (path == nullptr || *path == '\0')
+        return;
+    const auto values = read_f32_file(path);
+    if (values.size() != video.size() + audio.size())
+        throw std::runtime_error(
+            "TRTMC_LTX2_DECODE_LATENTS must hold the packed final video then audio latents");
+    std::copy_n(values.begin(), video.size(), video.begin());
+    std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(video.size()), audio.size(),
+                audio.begin());
+    std::cerr << "[ltx2] decoding the latents of " << path << "\n";
+}
+
 const std::array<internal::ConfigField, 1>& config_fields() {
     static const std::array<internal::ConfigField, 1> fields{{
         {"seed", internal::ConfigKind::I64, internal::ConfigValue{std::int64_t{0}},
@@ -149,6 +169,56 @@ const std::array<internal::ConfigField, 1>& config_fields() {
     }};
     return fields;
 }
+
+ltx2::VaeTilePlan parse_tile_plan(const nlohmann::json& doc) {
+    ltx2::VaeTilePlan plan;
+    plan.tile_latent = doc.at("tile_latent").get<std::array<int32_t, 3>>();
+    plan.tile_pixels = doc.at("tile_pixels").get<std::array<int32_t, 3>>();
+    for (const auto& item : doc.at("tiles")) {
+        ltx2::VaeTile tile;
+        tile.latent_start = item.at("latent_start").get<std::array<int32_t, 3>>();
+        tile.pixel_start = item.at("pixel_start").get<std::array<int32_t, 3>>();
+        tile.ramps = item.at("ramps").get<std::array<std::array<int32_t, 2>, 3>>();
+        tile.rank = item.at("rank").get<int32_t>();
+        plan.tiles.push_back(tile);
+    }
+    return plan;
+}
+
+// Device scratch for one decode (tiles a worker rank sends or rank 0 receives).
+class DeviceBuffer {
+  public:
+    explicit DeviceBuffer(std::size_t bytes) {
+        if (bytes != 0 && cudaMalloc(&ptr_, bytes) != cudaSuccess)
+            throw std::runtime_error("LTX-2.5 tiled decode: cudaMalloc failed");
+    }
+    ~DeviceBuffer() {
+        if (ptr_ != nullptr)
+            cudaFree(ptr_);
+    }
+    DeviceBuffer(const DeviceBuffer&) = delete;
+    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+    uint8_t* get() const { return static_cast<uint8_t*>(ptr_); }
+
+  private:
+    void* ptr_{nullptr};
+};
+
+void cuda_copy(void* dst, const void* src, std::size_t bytes, cudaMemcpyKind kind) {
+    const auto status = cudaMemcpy(dst, src, bytes, kind);
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("LTX-2.5 tiled decode: cudaMemcpy failed: ") +
+                                 cudaGetErrorString(status));
+}
+
+std::size_t numel(const std::vector<int64_t>& shape) {
+    std::size_t count = 1;
+    for (const auto dim : shape)
+        count *= static_cast<std::size_t>(dim);
+    return count;
+}
+
+constexpr std::chrono::minutes kPeerTimeout{10};
 
 internal::AudioVideoResult worker_completion(const LTX2Options& options) {
     internal::AudioVideoResult result;
@@ -163,7 +233,7 @@ internal::AudioVideoResult worker_completion(const LTX2Options& options) {
 
 } // namespace
 
-LTX2Options parse_ltx2_options(const std::string& runtime_json) {
+LTX2Options parse_ltx2_options(const std::string& runtime_json, int32_t world_size) {
     const auto doc = nlohmann::json::parse(runtime_json);
     LTX2Options o;
     o.video_frames = doc.at("video_frames").get<int32_t>();
@@ -187,6 +257,16 @@ LTX2Options parse_ltx2_options(const std::string& runtime_json) {
         throw std::runtime_error("LTX-2.5 runtime runs the distilled (batch 1) denoiser");
     if (o.video_tokens() <= 0 || o.audio_frames <= 0 || o.text_seq_len <= 0)
         throw std::runtime_error("LTX-2.5 runtime.json has invalid shapes");
+    if (doc.contains("audio_waveform_shape"))
+        o.audio_waveform_shape = doc.at("audio_waveform_shape").get<std::vector<int64_t>>();
+    if (doc.contains("vae_tiling")) {
+        const auto& tiling = doc.at("vae_tiling");
+        if (tiling.at("world_size").get<int32_t>() != world_size)
+            throw std::runtime_error("LTX-2.5 VAE tile plan was built for another world size");
+        o.vae_tiling = parse_tile_plan(tiling);
+        ltx2::vae_validate_plan(o.vae_tiling, {o.latent_frames, o.latent_height, o.latent_width},
+                                {o.video_frames, o.video_height, o.video_width}, world_size);
+    }
     return o;
 }
 
@@ -278,6 +358,179 @@ std::vector<float> LTX2Pipeline::decode_audio(const std::vector<float>& audio_la
     return float_output(outputs, "waveform", count);
 }
 
+uint8_t* LTX2Pipeline::tile_host_buffer(std::size_t bytes) {
+    if (tile_host_bytes_ < bytes) {
+        tile_host_.reset();
+        tile_host_bytes_ = 0;
+        void* ptr = nullptr;
+        if (cudaMallocHost(&ptr, bytes) != cudaSuccess)
+            throw std::runtime_error("LTX-2.5 tiled decode: cudaMallocHost failed");
+        tile_host_ = std::shared_ptr<uint8_t>(static_cast<uint8_t*>(ptr),
+                                              [](uint8_t* p) { cudaFreeHost(p); });
+        tile_host_bytes_ = bytes;
+    }
+    return tile_host_.get();
+}
+
+LTX2Pipeline::Decoded LTX2Pipeline::decode_untiled(const std::vector<float>& video,
+                                                   const std::vector<float>& audio) {
+    Decoded out;
+    auto start = Clock::now();
+    out.frames = decode_video(video);
+    out.tiles_ms = elapsed_ms(start, Clock::now());
+    start = Clock::now();
+    out.wave = decode_audio(audio);
+    out.audio_ms = elapsed_ms(start, Clock::now());
+    return out;
+}
+
+// Decodes this rank's tiles in tile order: into host slot k on rank 0, else packed into the
+// device send buffer.
+void LTX2Pipeline::decode_own_tiles(const std::vector<float>& video, uint8_t* host, void* device,
+                                    Decoded& out) {
+    const auto& plan = options_.vae_tiling;
+    const auto bytes = plan.tile_values() * sizeof(uint16_t);
+    const std::array<int32_t, 3> latent{options_.latent_frames, options_.latent_height,
+                                        options_.latent_width};
+    std::vector<float> tile_latents;
+    std::size_t packed = 0;
+    const auto start = Clock::now();
+    for (std::size_t k = 0; k < plan.tiles.size(); ++k) {
+        if (plan.tiles[k].rank != distributed_.rank)
+            continue;
+        const auto tile_start = Clock::now();
+        ltx2::vae_gather_tile_latents(video, latent, options_.latent_channels, plan, plan.tiles[k],
+                                      tile_latents);
+        TensorMap inputs;
+        inputs["latents"] =
+            Tensor{tile_latents.data(),
+                   {1, static_cast<int64_t>(tile_latents.size()) / options_.latent_channels,
+                    options_.latent_channels},
+                   DType::kFloat32};
+        vae_->forward_async(inputs);
+        vae_->sync();
+        const void* frames = vae_->device_ptr("frames");
+        if (host != nullptr)
+            cuda_copy(host + k * bytes, frames, bytes, cudaMemcpyDeviceToHost);
+        else
+            cuda_copy(static_cast<uint8_t*>(device) + (packed++) * bytes, frames, bytes,
+                      cudaMemcpyDeviceToDevice);
+        ++out.tiles;
+        if (progress_.enabled()) {
+            std::ostringstream detail;
+            detail << "tile=" << k << " tile_ms=" << std::fixed << std::setprecision(3)
+                   << elapsed_ms(tile_start, Clock::now());
+            progress_.emit("vae_tile", detail.str());
+        }
+    }
+    out.tiles_ms = elapsed_ms(start, Clock::now());
+}
+
+// Rank 0: receives every worker's tiles (in their tile order) and the audio rank's waveform.
+void LTX2Pipeline::receive_peer_tiles(uint8_t* host, Decoded& out) {
+    const auto& plan = options_.vae_tiling;
+    const auto bytes = plan.tile_values() * sizeof(uint16_t);
+    const auto world = static_cast<std::size_t>(distributed_.world_size);
+    const auto audio_rank = static_cast<std::size_t>(options_.audio_rank(distributed_.world_size));
+    const auto wave_count = numel(options_.audio_waveform_shape);
+    std::vector<std::size_t> peer_bytes(world, 0);
+    for (const auto& tile : plan.tiles)
+        peer_bytes[static_cast<std::size_t>(tile.rank)] += bytes;
+    if (audio_rank != 0)
+        peer_bytes[audio_rank] += wave_count * sizeof(float);
+    std::vector<std::size_t> cursor(world, 0);
+    std::size_t total = 0;
+    for (std::size_t p = 1; p < world; ++p) {
+        cursor[p] = total;
+        total += peer_bytes[p];
+    }
+    DeviceBuffer recv(total);
+    std::vector<ltx2::PeerTransfer> transfers;
+    for (std::size_t p = 1; p < world; ++p) {
+        if (peer_bytes[p] != 0)
+            transfers.push_back(
+                {static_cast<int>(p), recv.get() + cursor[p], peer_bytes[p], false});
+    }
+    const auto start = Clock::now();
+    distributed_.channel->run(transfers, kPeerTimeout);
+    for (std::size_t k = 0; k < plan.tiles.size(); ++k) {
+        const auto rank = static_cast<std::size_t>(plan.tiles[k].rank);
+        if (rank == 0)
+            continue;
+        cuda_copy(host + k * bytes, recv.get() + cursor[rank], bytes, cudaMemcpyDeviceToHost);
+        cursor[rank] += bytes;
+    }
+    if (audio_rank != 0) {
+        out.wave.resize(wave_count);
+        cuda_copy(out.wave.data(), recv.get() + cursor[audio_rank], wave_count * sizeof(float),
+                  cudaMemcpyDeviceToHost);
+    }
+    out.exchange_ms = elapsed_ms(start, Clock::now());
+}
+
+LTX2Pipeline::Decoded LTX2Pipeline::decode_tiled(const std::vector<float>& video,
+                                                 const std::vector<float>& audio) {
+    const auto& plan = options_.vae_tiling;
+    const auto bytes = plan.tile_values() * sizeof(uint16_t);
+    const int32_t audio_rank = options_.audio_rank(distributed_.world_size);
+    Decoded out;
+    if (distributed_.rank != 0) {
+        std::size_t mine = 0;
+        for (const auto& tile : plan.tiles)
+            mine += tile.rank == distributed_.rank ? 1U : 0U;
+        const auto wave_bytes = numel(options_.audio_waveform_shape) * sizeof(float);
+        const bool sends_audio = distributed_.rank == audio_rank;
+        DeviceBuffer send(mine * bytes + (sends_audio ? wave_bytes : 0));
+        decode_own_tiles(video, nullptr, send.get(), out);
+        if (sends_audio) {
+            const auto start = Clock::now();
+            (void)decode_audio(audio);
+            cuda_copy(send.get() + mine * bytes, audio_->device_ptr("waveform"), wave_bytes,
+                      cudaMemcpyDeviceToDevice);
+            out.audio_ms = elapsed_ms(start, Clock::now());
+        }
+        const auto start = Clock::now();
+        const auto total = mine * bytes + (sends_audio ? wave_bytes : 0);
+        if (total != 0) // rank 0 posts a receive only for peers with data
+            distributed_.channel->run({{0, send.get(), total, true}}, kPeerTimeout);
+        out.exchange_ms = elapsed_ms(start, Clock::now());
+        return out;
+    }
+    uint8_t* host = tile_host_buffer(plan.tiles.size() * bytes);
+    decode_own_tiles(video, host, nullptr, out);
+    if (distributed_.world_size > 1)
+        receive_peer_tiles(host, out);
+    std::vector<const uint16_t*> tiles(plan.tiles.size());
+    for (std::size_t k = 0; k < tiles.size(); ++k)
+        tiles[k] = reinterpret_cast<const uint16_t*>(host + k * bytes);
+    // The host blend overlaps the audio decode when rank 0 decodes the audio.
+    std::exception_ptr blend_error;
+    std::thread blend([&] {
+        try {
+            const auto start = Clock::now();
+            ltx2::vae_blend_tiles(plan, tiles, options_.video_frames, options_.video_height,
+                                  options_.video_width, out.frames);
+            out.blend_ms = elapsed_ms(start, Clock::now());
+        } catch (...) {
+            blend_error = std::current_exception();
+        }
+    });
+    if (audio_rank == 0) {
+        try {
+            const auto start = Clock::now();
+            out.wave = decode_audio(audio);
+            out.audio_ms = elapsed_ms(start, Clock::now());
+        } catch (...) {
+            blend.join();
+            throw;
+        }
+    }
+    blend.join();
+    if (blend_error)
+        std::rethrow_exception(blend_error);
+    return out;
+}
+
 internal::AudioVideoResult LTX2Pipeline::run(const internal::TextToAudioVideoRequest& request,
                                              internal::ConfigView config) {
     const auto& fields = config_fields();
@@ -291,6 +544,10 @@ internal::AudioVideoResult LTX2Pipeline::run(const internal::TextToAudioVideoReq
     const auto audio_count =
         static_cast<std::size_t>(options_.audio_frames) * options_.audio_latent_channels;
 
+    // Ranks finish loading their engines at different times (the ranks load different decoders);
+    // start together so the first collective does not charge one rank's load to the generation.
+    if (distributed_.channel)
+        distributed_.channel->barrier(kPeerTimeout);
     const auto t_start = Clock::now();
     if (progress_.enabled()) {
         std::ostringstream detail;
@@ -345,24 +602,35 @@ internal::AudioVideoResult LTX2Pipeline::run(const internal::TextToAudioVideoReq
     }
     const auto t_denoise = Clock::now();
     progress_.emit("denoise_end");
+    replace_final_latents(video, audio);
 
-    if (distributed_.world_size > 1 && distributed_.rank != 0) {
+    const bool tiled = options_.vae_tiling.enabled();
+    if (distributed_.world_size > 1 && distributed_.rank != 0 && !tiled) {
         std::cerr << "[ltx2] context-parallel rank " << distributed_.rank
                   << " finished denoising in " << elapsed_ms(t_text, t_denoise)
                   << " ms; rank 0 decodes the video and audio\n";
         progress_.emit("worker_done");
         return worker_completion(options_);
     }
-    maybe_dump(video, audio);
+    if (distributed_.rank == 0)
+        maybe_dump(video, audio);
 
-    progress_.emit("vae_begin");
-    auto frames = decode_video(video);
-    const auto t_vae = Clock::now();
-    progress_.emit("vae_end");
-    progress_.emit("audio_begin");
-    const auto wave = decode_audio(audio);
+    progress_.emit("decode_begin");
+    auto decoded = tiled ? decode_tiled(video, audio) : decode_untiled(video, audio);
     const auto t_audio = Clock::now();
-    progress_.emit("audio_end");
+    progress_.emit("decode_end");
+    if (distributed_.rank != 0) {
+        std::cerr << std::fixed << std::setprecision(3)
+                  << "[ltx2-worker-perf-json] {\"rank\":" << distributed_.rank
+                  << ",\"denoise_ms\":" << elapsed_ms(t_text, t_denoise)
+                  << ",\"vae_tiles\":" << decoded.tiles << ",\"vae_tiles_ms\":" << decoded.tiles_ms
+                  << ",\"audio_decode_ms\":" << decoded.audio_ms
+                  << ",\"vae_send_ms\":" << decoded.exchange_ms << "}\n";
+        progress_.emit("worker_done");
+        return worker_completion(options_);
+    }
+    auto frames = std::move(decoded.frames);
+    const auto& wave = decoded.wave;
 
     internal::AudioVideoResult result;
     result.video.frames.pixels = std::move(frames);
@@ -386,9 +654,17 @@ internal::AudioVideoResult LTX2Pipeline::run(const internal::TextToAudioVideoReq
               << "[ltx2-perf-json] {\"world_size\":" << distributed_.world_size
               << ",\"text_encode_ms\":" << elapsed_ms(t_start, t_text)
               << ",\"denoise_ms\":" << elapsed_ms(t_text, t_denoise)
-              << ",\"median_step_ms\":" << median
-              << ",\"vae_decode_ms\":" << elapsed_ms(t_denoise, t_vae)
-              << ",\"audio_decode_ms\":" << elapsed_ms(t_vae, t_audio)
+              << ",\"median_step_ms\":" << median << ",\"decode_ms\":"
+              << elapsed_ms(t_denoise, t_audio)
+              // Untiled: the video then the audio decode. Tiled: the audio overlaps the blend
+              // (one device) or runs on the audio rank, so the video path spans the phase.
+              << ",\"vae_decode_ms\":"
+              << (tiled ? elapsed_ms(t_denoise, t_audio) : decoded.tiles_ms)
+              << ",\"audio_decode_ms\":" << decoded.audio_ms << ",\"vae_tiles\":" << decoded.tiles
+              << ",\"vae_tiles_ms\":" << decoded.tiles_ms
+              << ",\"vae_exchange_ms\":" << decoded.exchange_ms
+              << ",\"vae_blend_ms\":" << decoded.blend_ms
+              << ",\"audio_rank\":" << options_.audio_rank(distributed_.world_size)
               << ",\"generate_ms\":" << elapsed_ms(t_start, t_audio) << ",\"num_steps\":" << steps
               << "}\n";
     if (progress_.enabled()) {

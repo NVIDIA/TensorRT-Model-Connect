@@ -33,6 +33,11 @@ using NcclCommInitRankFn = NcclResult (*)(NcclComm*, int, NcclUniqueId, int);
 using NcclCommDestroyFn = NcclResult (*)(NcclComm);
 using NcclGetErrorStringFn = const char* (*)(NcclResult);
 using NcclGetVersionFn = NcclResult (*)(int*);
+using NcclSendFn = NcclResult (*)(const void*, std::size_t, int, int, NcclComm, cudaStream_t);
+using NcclRecvFn = NcclResult (*)(void*, std::size_t, int, int, NcclComm, cudaStream_t);
+using NcclGroupFn = NcclResult (*)();
+using NcclCommAbortFn = NcclResult (*)(NcclComm);
+constexpr int kNcclUint8 = 1; // ncclUint8: transfers are byte copies
 
 int require_env_int(const char* name) {
     const char* raw = std::getenv(name);
@@ -64,7 +69,7 @@ std::filesystem::path rendezvous_path() {
     return path;
 }
 
-class NcclRuntime {
+class NcclRuntime final : public PeerChannel {
   public:
     NcclRuntime() {
         // NCCL is resolved at run time: TRTMC_NCCL_LIBRARY, else libnccl.so.2
@@ -81,6 +86,11 @@ class NcclRuntime {
         comm_init_rank_ = load<NcclCommInitRankFn>("ncclCommInitRank");
         comm_destroy_ = load<NcclCommDestroyFn>("ncclCommDestroy");
         get_error_string_ = load<NcclGetErrorStringFn>("ncclGetErrorString");
+        send_ = load<NcclSendFn>("ncclSend");
+        recv_ = load<NcclRecvFn>("ncclRecv");
+        group_start_ = load<NcclGroupFn>("ncclGroupStart");
+        group_end_ = load<NcclGroupFn>("ncclGroupEnd");
+        comm_abort_ = load<NcclCommAbortFn>("ncclCommAbort");
         int version = 0;
         const auto get_version =
             reinterpret_cast<NcclGetVersionFn>(library_->find_symbol("ncclGetVersion"));
@@ -90,15 +100,72 @@ class NcclRuntime {
                   << std::endl;
     }
 
-    ~NcclRuntime() {
+    ~NcclRuntime() override {
+        if (token_ != nullptr)
+            cudaFree(token_);
+        if (stream_ != nullptr)
+            cudaStreamDestroy(stream_);
         if (comm_ != nullptr) {
             comm_destroy_(comm_);
             comm_ = nullptr;
         }
     }
 
+    void run(const std::vector<PeerTransfer>& transfers,
+             std::chrono::milliseconds timeout) override {
+        if (comm_ == nullptr)
+            throw std::runtime_error("LTX-2.5 peer transfer: the NCCL communicator was aborted");
+        if (stream_ == nullptr &&
+            cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking) != cudaSuccess)
+            throw std::runtime_error("LTX-2.5 peer transfer: cudaStreamCreate failed");
+        enqueue(transfers);
+        // Poll instead of blocking, so a missing peer aborts the communicator rather than
+        // leaving NCCL kernels spinning on the GPU.
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        for (;;) {
+            const auto status = cudaStreamQuery(stream_);
+            if (status == cudaSuccess)
+                return;
+            if (status != cudaErrorNotReady)
+                throw std::runtime_error(std::string("LTX-2.5 peer transfer failed: ") +
+                                         cudaGetErrorString(status));
+            if (std::chrono::steady_clock::now() > deadline) {
+                comm_abort_(comm_);
+                comm_ = nullptr;
+                throw std::runtime_error(
+                    "LTX-2.5 peer transfer timed out; the NCCL communicator was aborted");
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    }
+
+    // Rank 0 hears from every rank, then answers each: nobody leaves before all arrived. The
+    // token is 64 KiB: with the Windows NCCL build used for the RTX PRO 6000 host, point-to-point
+    // transfers below 32 KiB never complete (a 1-byte barrier hangs), larger ones do.
+    void barrier(std::chrono::milliseconds timeout) override {
+        constexpr std::size_t kToken = 64 * 1024;
+        if (token_ == nullptr &&
+            cudaMalloc(&token_, kToken * static_cast<std::size_t>(size_)) != cudaSuccess)
+            throw std::runtime_error("LTX-2.5 rank barrier: cudaMalloc failed");
+        auto* token = static_cast<char*>(token_);
+        std::vector<PeerTransfer> gather;
+        std::vector<PeerTransfer> release;
+        for (int peer = 1; rank_ == 0 && peer < size_; ++peer) {
+            gather.push_back({peer, token + kToken * peer, kToken, false});
+            release.push_back({peer, token + kToken * peer, kToken, true});
+        }
+        if (rank_ != 0) {
+            gather.push_back({0, token, kToken, true});
+            release.push_back({0, token, kToken, false});
+        }
+        run(gather, timeout);
+        run(release, timeout);
+    }
+
     void init(int size, int rank, const NcclUniqueId& id) {
         check(comm_init_rank_(&comm_, size, id, rank), "ncclCommInitRank");
+        size_ = size;
+        rank_ = rank;
     }
 
     NcclUniqueId unique_id() {
@@ -115,6 +182,20 @@ class NcclRuntime {
         return library_->require<T>(symbol);
     }
 
+    void enqueue(const std::vector<PeerTransfer>& transfers) {
+        check(group_start_(), "ncclGroupStart");
+        for (const auto& t : transfers) {
+            const auto status = t.send
+                                    ? send_(t.device, t.bytes, kNcclUint8, t.peer, comm_, stream_)
+                                    : recv_(t.device, t.bytes, kNcclUint8, t.peer, comm_, stream_);
+            if (status != 0) {
+                (void)group_end_();
+                check(status, t.send ? "ncclSend" : "ncclRecv");
+            }
+        }
+        check(group_end_(), "ncclGroupEnd");
+    }
+
     void check(NcclResult result, const char* operation) const {
         if (result == 0)
             return;
@@ -128,6 +209,15 @@ class NcclRuntime {
     NcclCommInitRankFn comm_init_rank_{nullptr};
     NcclCommDestroyFn comm_destroy_{nullptr};
     NcclGetErrorStringFn get_error_string_{nullptr};
+    NcclSendFn send_{nullptr};
+    NcclRecvFn recv_{nullptr};
+    NcclGroupFn group_start_{nullptr};
+    NcclGroupFn group_end_{nullptr};
+    NcclCommAbortFn comm_abort_{nullptr};
+    cudaStream_t stream_{nullptr};
+    void* token_{nullptr};
+    int size_{1};
+    int rank_{0};
 };
 
 void write_unique_id(const std::filesystem::path& path, const NcclUniqueId& id) {
@@ -216,6 +306,7 @@ DistributedRuntimeGroup initialize_parallel_group(int parallel_size) {
         std::filesystem::remove(path, ignored);
     }
     group.communicator = runtime->communicator();
+    group.channel = runtime;
     group.owner = std::move(runtime);
     return group;
 }

@@ -51,10 +51,13 @@ TINY_VAE = {
 F, H, W = 3, 2, 3
 
 
-def test_vae_decoder_tiny_parity(tmp_path) -> None:
-    from diffusers import AutoencoderKLLTX2Video
+TILE_GRID = (7, 6, 7)  # latent frames, rows, columns: 2 x 1 x 2 tiles of 5 x 6 x 5 latents
+TILE_CONFIG = dict(tile_pixels=192, overlap_pixels=64, tile_frames=40, overlap_frames=8)
 
-    from families.ltx2.vae_builder import build_vae_decoder_engine
+
+def tiny_vae(folder):
+    """Tiny random VAE saved under ``folder``; returns it and its (advanced) generator."""
+    from diffusers import AutoencoderKLLTX2Video
 
     vae = AutoencoderKLLTX2Video(**TINY_VAE).eval()
     gen = torch.Generator().manual_seed(9)
@@ -67,12 +70,74 @@ def test_vae_decoder_tiny_parity(tmp_path) -> None:
                         else 0.05 * torch.randn(p.shape, generator=gen))
         vae.latents_mean.copy_(0.3 * torch.randn(16, generator=gen))
         vae.latents_std.copy_(0.5 + torch.rand(16, generator=gen))
-    folder = tmp_path / "vae"
-    folder.mkdir()
+    folder.mkdir(parents=True, exist_ok=True)
     state = {k: (v.to(torch.bfloat16) if k not in ("latents_mean", "latents_std") else v).contiguous()
              for k, v in vae.state_dict().items()}
     safetensors_torch.save_file(state, str(folder / "diffusion_pytorch_model.safetensors"))
     (folder / "config.json").write_text(json.dumps(TINY_VAE), encoding="utf-8")
+    return vae, gen
+
+
+def diffusers_tile(vae, packed, grid, plan, tile, dtype=torch.float32):
+    """diffusers decode of one tile's latents, ``(x + 1) / 2`` unclamped: ``[T, H, W, 3]``."""
+    f, h, w = grid
+    tf, th, tw = plan["tile_latent"]
+    f0, h0, w0 = tile["latent_start"]
+    z = packed.reshape(1, f, h, w, 16)[:, f0:f0 + tf, h0:h0 + th, w0:w0 + tw].permute(0, 4, 1, 2, 3).cuda()
+    z = z * vae.latents_std.view(1, -1, 1, 1, 1).float() + vae.latents_mean.view(1, -1, 1, 1, 1).float()
+    with torch.no_grad():
+        video = vae.decode(z.to(dtype), return_dict=False)[0].float()
+    return (video / 2 + 0.5)[0].permute(1, 2, 3, 0).cpu()
+
+
+def tile_latents(packed, grid, plan, tile):
+    """Packed ``[1, tf*th*tw, C]`` latents of one tile."""
+    f, h, w = grid
+    tf, th, tw = plan["tile_latent"]
+    f0, h0, w0 = tile["latent_start"]
+    part = packed.reshape(1, f, h, w, -1)[:, f0:f0 + tf, h0:h0 + th, w0:w0 + tw]
+    return part.reshape(1, tf * th * tw, -1)
+
+
+def test_vae_tile_engine_tiny_parity(tmp_path) -> None:
+    """Every tile of a tile plan vs diffusers on the same latents, and the blended video."""
+    import numpy as np
+
+    from families.ltx2.tests.engine_runner import Engine
+    from families.ltx2.vae_builder import build_vae_decoder_engine
+    from families.ltx2.vae_tiling import TileConfig, blend_tiles, plan_tiles
+
+    vae, _ = tiny_vae(tmp_path / "vae")
+    ref_vae = vae.to("cuda", torch.float32)
+    f, h, w = TILE_GRID
+    plan = plan_tiles(f, h, w, TileConfig(**TILE_CONFIG))
+    tf, th, tw = plan["tile_latent"]
+    assert len(plan["tiles"]) == 4 and plan["tile_latent"] == [5, 6, 5]
+    engine = Engine(build_vae_decoder_engine(tmp_path / "vae", latent_frames=tf, latent_height=th, latent_width=tw,
+                                             clamp_output=False))
+    packed = torch.randn(1, f * h * w, 16, generator=torch.Generator().manual_seed(4))
+    got, ref = [], []
+    for tile in plan["tiles"]:
+        out = engine({"latents": tile_latents(packed, TILE_GRID, plan, tile)})["frames"].float().cpu()
+        expected = diffusers_tile(ref_vae, packed, TILE_GRID, plan, tile)
+        c = cosine(out - 0.5, expected - 0.5)
+        print(f"tile {tile['latent_start']}: cos(centered) {c:.6f}")
+        assert c > 0.999
+        got.append(out.numpy().astype(np.float16))
+        ref.append(expected.numpy())
+    frames, height, width = (f - 1) * 8 + 1, h * 32, w * 32
+    blended = blend_tiles(plan, got, frames, height, width)
+    expected = blend_tiles(plan, ref, frames, height, width)
+    c = cosine(torch.from_numpy(blended) - 0.5, torch.from_numpy(expected) - 0.5)
+    print(f"blended tiles vs blended diffusers tiles: cos(centered) {c:.6f}")
+    assert c > 0.999
+
+
+def test_vae_decoder_tiny_parity(tmp_path) -> None:
+    from families.ltx2.vae_builder import build_vae_decoder_engine
+
+    vae, gen = tiny_vae(tmp_path / "vae")
+    folder = tmp_path / "vae"
 
     packed = torch.randn(1, F * H * W, 16, generator=gen)
     plan = build_vae_decoder_engine(folder, latent_frames=F, latent_height=H, latent_width=W)

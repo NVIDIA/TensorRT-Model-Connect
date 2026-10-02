@@ -8,7 +8,8 @@ Builds a native TRTMC bundle from a diffusers LTX-2.5 checkpoint (distilled ``tr
   - ``text_encoder.plan``: Gemma 4 text tower + ``LTX2TextConnectors``
   - ``denoiser.plan``: the joint audio/video DiT, single device (``context_parallel_size=1``)
     or context parallel over the video tokens (``context_parallel_size=2``, one rank-dynamic plan)
-  - ``vae.plan``: the video VAE decoder
+  - ``vae.plan``: the video VAE decoder, by default one tile-shaped plan for the tiled decode
+    (``vae_tiling.py``; context-parallel ranks decode disjoint tiles, rank 0 blends them)
   - ``audio.plan``: the audio VAE decoder + vocoder with bandwidth extension (48 kHz stereo)
   - ``tokenizer.json`` and ``runtime.json``
 
@@ -24,13 +25,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .cli import TASK, BuildRequest, coerce_request
 from .parallel import ParallelConfig, validate_context_parallel_layout
+from .vae_tiling import plan_tiles
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
-TASK = "text_to_audio_video"
 PIPELINE_CLASS = "LTX2Pipeline"
 
 # diffusers ``pipelines/ltx2/utils.py`` DISTILLED_SIGMA_VALUES: the distilled checkpoint's
@@ -100,20 +101,11 @@ def _write_plan(writer: "BundleWriter", name: str, plan) -> None:
         section.write(memoryview(plan))
 
 
-def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one LTX-2.5 text-to-audio-video bundle."""
+def build(request: BuildRequest, writer: "BundleWriter") -> None:
+    """Build one LTX-2.5 text-to-audio-video bundle (``trtmc ltx2 build`` or the shared ``trtmc build``)."""
+    request = coerce_request(request)
     if request.task != TASK:
         raise ValueError(f"ltx2 supports only task={TASK}")
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("ltx2 does not support dynamic_kv_cache")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("ltx2 requires tensor_parallel_size=1 (it shards the video tokens)")
-    if request.max_batch_size != 1:
-        raise NotImplementedError("ltx2 requires max_batch_size=1")
-    if request.quantization not in (None, "none"):
-        raise NotImplementedError("ltx2 does not support quantization")
-    if request.fp32_layers:
-        raise NotImplementedError("ltx2 does not support fp32_layers (its fp32 islands are fixed in the graph)")
     if request.precision != "bf16":
         raise ValueError("ltx2 builds bf16 engines (precision=bf16), the precision LTX-2.5 runs in")
     parallel = ParallelConfig(cp_size=int(request.context_parallel_size))
@@ -176,17 +168,23 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     _log(f"DiT engine built in {time.perf_counter() - started:.1f} s (cp={parallel.cp_size}, "
          f"{shape.video_tokens} video + {shape.audio_frames} audio tokens)")
     started = time.perf_counter()
-    _write_plan(writer, "vae.plan", build_vae_decoder_engine(model_dir / "vae", latent_frames=shape.latent_frames,
-                                                             latent_height=shape.latent_height,
-                                                             latent_width=shape.latent_width,
-                                                             verbose=request.verbose))
-    _log(f"video VAE engine built in {time.perf_counter() - started:.1f} s")
+    tiling = None
+    vae_grid = (shape.latent_frames, shape.latent_height, shape.latent_width)
+    if request.vae_tiles.enabled:
+        tiling = plan_tiles(*vae_grid, request.vae_tiles, world=parallel.world_size)
+        vae_grid = tuple(tiling["tile_latent"])
+    _write_plan(writer, "vae.plan", build_vae_decoder_engine(model_dir / "vae", latent_frames=vae_grid[0],
+                                                             latent_height=vae_grid[1], latent_width=vae_grid[2],
+                                                             clamp_output=tiling is None, verbose=request.verbose))
+    _log(f"video VAE engine built in {time.perf_counter() - started:.1f} s"
+         + (f" ({len(tiling['tiles'])} tiles of {vae_grid} latents)" if tiling else " (untiled)"))
     started = time.perf_counter()
+    audio_shapes: dict = {}
     _write_plan(writer, "audio.plan", build_audio_decoder_engine(model_dir, audio_frames=shape.audio_frames,
-                                                                 verbose=request.verbose))
+                                                                 verbose=request.verbose, shapes=audio_shapes))
     _log(f"audio decoder engine built in {time.perf_counter() - started:.1f} s")
     writer.add_bytes("tokenizer.json", (model_dir / "tokenizer" / "tokenizer.json").read_bytes())
-    writer.add_json("runtime.json", {
+    runtime = {
         "video_frames": frames,
         "video_height": height,
         "video_width": width,
@@ -205,4 +203,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "audio_channels": int(vocoder_cfg.get("out_channels", 2)),
         "parallel_mode": parallel.mode,
         "parallel_size": parallel.world_size,
-    })
+        "audio_waveform_shape": audio_shapes["waveform"],
+    }
+    if tiling is not None:
+        runtime["vae_tiling"] = tiling
+    writer.add_json("runtime.json", runtime)

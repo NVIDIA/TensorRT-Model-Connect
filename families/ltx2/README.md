@@ -13,8 +13,9 @@ Text-to-audio-video for Lightricks LTX-2.5 diffusers checkpoints (`LTX2Pipeline`
   `--video-num-frames`). Height and width must be multiples of 32, and the frame count must
   be `8n+1`. The default is 960x544, 121 frames at 24 fps.
 - `--context-parallel-size 1` runs on one GPU. `--context-parallel-size 2` splits the
-  video tokens of the DiT across two GPUs. The text encoder, video VAE and audio decoder
-  run on rank 0 only.
+  video tokens of the DiT across two GPUs. The text encoder runs on every rank. The video
+  VAE decodes in tiles that the ranks share, and the last rank decodes the audio
+  (see [Tiled video decode](#tiled-video-decode)).
 
 ## Bundle
 
@@ -22,7 +23,7 @@ Text-to-audio-video for Lightricks LTX-2.5 diffusers checkpoints (`LTX2Pipeline`
 |---|---|
 | `text_encoder.plan` | Gemma 4 text tower and the LTX-2 text connectors (video and audio context) |
 | `denoiser.plan` | Joint audio/video DiT. With CP=2, one plan serves both ranks. |
-| `vae.plan` | Video VAE decoder |
+| `vae.plan` | Video VAE decoder for one tile shape (whole video with `--vae-tile-pixels 0 --vae-tile-frames 0`) |
 | `audio.plan` | Audio VAE decoder and vocoder with bandwidth extension |
 | `tokenizer.json`, `runtime.json` | Tokenizer, shapes and schedule |
 
@@ -30,6 +31,28 @@ Context parallelism keeps the audio stream and text replicated and shards the vi
 tokens. Video self-attention all-gathers each rank's normed and rotated keys and values.
 Video-to-audio attention merges per-rank softmax statistics through one small all-gather.
 The network uses no all-to-all collective.
+
+## Tiled video decode
+
+The video VAE decodes the latent video as overlapping tiles of one shape, so one static plan serves
+every tile. The tiles are blended with linear ramps over their overlaps and normalized by the summed
+weights, as in the Lightricks and TensorRT-LLM `tiled_decode`. Tiles are at most 512 pixels with at
+least 64 pixels of overlap; clips longer than 257 frames also split in time, into tiles of up to
+256 frames that overlap by at least 24 frames. `families/ltx2/vae_tiling.py` computes the tile plan
+and writes it into `runtime.json`.
+
+- With context parallelism, the ranks decode disjoint tiles. The worker ranks send their decoded
+  tiles to rank 0 over NCCL point-to-point on the engines' communicator, and rank 0 blends every
+  tile in tile order. The blended video is the same bit for bit as the single-GPU tiled decode.
+- The last rank decodes the audio while rank 0 decodes its tiles. On one GPU, the host blend runs
+  while the GPU decodes the audio.
+- A transfer that does not finish within 10 minutes aborts the NCCL communicator instead of
+  leaving NCCL kernels running.
+
+`trtmc ltx2 build` (`python -m tensorrt_model_connect ltx2 build`) takes the tile options
+`--vae-tile-pixels`, `--vae-tile-overlap-pixels`, `--vae-tile-frames` and
+`--vae-tile-overlap-frames`. A size of 0 leaves that axis untiled, and setting both sizes to 0
+builds the untiled decoder. The shared `trtmc build --family ltx2` uses the defaults.
 
 ## Build and run
 
@@ -80,7 +103,9 @@ To give each rank its own TensorRT-RTX runtime cache, put `{rank}` in the path, 
 - `tests/test_*_parity.py` build each engine from tiny random weights and compare it
   with diffusers.
 - `tests/test_context_parallel.py` runs the CP=2 DiT on two GPUs (torch-free ranks) against
-  the single-device plan and diffusers. It needs `TRTMC_NCCL_LIBRARY`.
+  the single-device plan and diffusers. It also runs the tile-parallel VAE decode and checks that
+  it matches the single-GPU tiled decode bit for bit. It needs `TRTMC_NCCL_LIBRARY`.
+- `tests/test_vae_tiling.py` checks the tile plan (coverage, ramps, rank assignment) without a GPU.
 - `tests/test_e2e.py` builds the real checkpoint and runs the native CLI. It compares the
   output with `LTX2Pipeline` started from the same noise. Select it with `--e2e-model ltx2`.
 

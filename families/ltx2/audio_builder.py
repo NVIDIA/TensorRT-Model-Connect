@@ -307,7 +307,8 @@ def add_audio_vae_decoder(g: Graph, ck: Checkpoint, cfg: dict, z):
 
 
 def build_audio_decoder_engine(model_dir: str | Path, *, audio_frames: int, debug_mel: bool = False,
-                               verbose: bool = False, tf32: bool = True):
+                               verbose: bool = False, tf32: bool = True, shapes: dict | None = None):
+    """Serialized plan; ``shapes`` (optional) receives the ``waveform`` output shape."""
     model_dir = Path(model_dir)
     vae = Checkpoint(model_dir / "audio_vae")
     voc = Checkpoint(model_dir / "vocoder")
@@ -332,6 +333,8 @@ def build_audio_decoder_engine(model_dir: str | Path, *, audio_frames: int, debu
         g.mark_output(mel, "mel", trt.float32)
     wave = _bwe_vocoder(g, voc, ocfg, mel, debug=debug_mel)
     g.mark_output(wave, "waveform", trt.float32)
+    if shapes is not None:
+        shapes["waveform"] = [int(v) for v in wave.shape]
     print(f"[ltx2] Building audio decoder engine (audio latents {audio_frames} -> mel {int(mel.shape[2])} frames -> "
           f"{int(wave.shape[2])} samples @ {ocfg['output_sampling_rate']} Hz) ...", file=sys.stderr)
     return build_plan(builder, network, label="audio decoder", tf32=tf32)
