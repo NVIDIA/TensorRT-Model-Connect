@@ -894,6 +894,19 @@ entries:
         # Match the Accuracy/TRTMC component contract: FP32 T5 encoder,
         # FP16 DiT inputs, and FP32 DiT outputs/scheduler bindings.
         component_precision_contract: pixart_fp16_dit_fp32_t5
+  - id: stable_diffusion.generate_image
+    family: stable_diffusion
+    operation: generate_image
+    model: stable-diffusion-v1-5
+    workload:
+      testcase: stable-diffusion-v1-5
+    baseline:
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers
+      timing_scope: task-pipeline-call-wall
+      output_contract: media-shape
   - id: qwen.generate
     family: qwen
     operation: generate
