@@ -391,10 +391,15 @@ class CliLibrary {
   public:
     explicit CliLibrary(const fs::path& path) {
 #if defined(_WIN32)
+        // Report a missing dependent DLL as an error instead of a modal loader
+        // dialog that would block unattended runs.
+        const UINT previous_mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
         handle_ = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        const DWORD error = handle_ == nullptr ? GetLastError() : ERROR_SUCCESS;
+        SetErrorMode(previous_mode);
         if (handle_ == nullptr) {
             throw std::runtime_error("cannot load family CLI: " + path.string() +
-                                     " (Windows error " + std::to_string(GetLastError()) + ")");
+                                     " (Windows error " + std::to_string(error) + ")");
         }
 #else
         handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -450,9 +455,14 @@ int invoke(const fs::path& executable, const std::string& family, const Json& co
 #if defined(_WIN32)
         // Windows has no exec: run the Python command as a child process and
         // return its exit status. The launcher is "python" on Windows.
-        std::vector<const char*> arguments{"python", "-m", "tensorrt_model_connect"};
+        // _spawnvp joins the arguments with spaces without quoting them, so
+        // quote each one to keep values with spaces or quotes intact.
+        std::vector<std::string> quoted;
         for (int i = 1; i < argc; ++i)
-            arguments.push_back(argv[i]);
+            quoted.push_back(quote_windows_argument(argv[i]));
+        std::vector<const char*> arguments{"python", "-m", "tensorrt_model_connect"};
+        for (const auto& argument : quoted)
+            arguments.push_back(argument.c_str());
         arguments.push_back(nullptr);
         output.flush();
         error.flush();
@@ -498,6 +508,27 @@ int invoke(const fs::path& executable, const std::string& family, const Json& co
     return result;
 }
 } // namespace
+
+std::string quote_windows_argument(const std::string& argument) {
+    if (!argument.empty() && argument.find_first_of(" \t\n\v\"") == std::string::npos)
+        return argument;
+    // Backslashes are literal unless they precede a quote: double those before
+    // an embedded quote (which is then escaped) and before the closing quote.
+    std::string quoted = "\"";
+    std::size_t backslashes = 0;
+    for (const char c : argument) {
+        if (c == '\\') {
+            ++backslashes;
+            continue;
+        }
+        quoted.append(c == '"' ? backslashes * 2 + 1 : backslashes, '\\');
+        quoted.push_back(c);
+        backslashes = 0;
+    }
+    quoted.append(backslashes * 2, '\\');
+    quoted.push_back('"');
+    return quoted;
+}
 
 std::optional<int> run_family_cli(int argc, char** argv, std::ostream& output, std::ostream& error,
                                   const fs::path& executable_override) {
