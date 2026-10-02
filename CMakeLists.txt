@@ -1191,10 +1191,39 @@ install(FILES
   COMPONENT sdk
 )
 
-# GCC/Clang warning flags are spelled inline on each target. MSVC does not
-# understand them (and nvcc forwards them to cl.exe), so translate every
-# target's options once, after all targets exist.
+# GCC/Clang warning and optimization flags are spelled inline on each target.
+# MSVC does not understand them (and nvcc forwards them to cl.exe), so
+# translate every target's options once, after all targets exist.
 if(MSVC)
+  # Translates one option that applies to `language`: CUDA, HOST (C/C++ only),
+  # or ANY. Sets `result` to the MSVC option, or to "" to drop it.
+  function(_trtmc_msvc_translate_option option language result)
+    set(_value "${option}")
+    if(option MATCHES "^-W")
+      set(_value "")
+    elseif(option MATCHES "^(-Xcompiler=|--compiler-options=)(.*)$")
+      # nvcc host-compiler pass-through: drop the GCC entries and keep the
+      # option only when cl.exe entries remain.
+      set(_prefix "${CMAKE_MATCH_1}")
+      string(REPLACE "," ";" _host "${CMAKE_MATCH_2}")
+      list(FILTER _host EXCLUDE REGEX "^-[WO]")
+      list(JOIN _host "," _host)
+      set(_value "")
+      if(NOT _host STREQUAL "")
+        set(_value "${_prefix}${_host}")
+      endif()
+    elseif(option MATCHES "^-O[0-9s]?$")
+      # nvcc accepts -O<n>; cl.exe does not, and the MSVC build type already
+      # selects /O2 or /Od for C and C++.
+      if(language STREQUAL "HOST")
+        set(_value "")
+      elseif(language STREQUAL "ANY")
+        set(_value "$<$<COMPILE_LANGUAGE:CUDA>:${option}>")
+      endif()
+    endif()
+    set(${result} "${_value}" PARENT_SCOPE)
+  endfunction()
+
   function(_trtmc_msvc_translate_warning_flags directory)
     get_property(_targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
     foreach(_target IN LISTS _targets)
@@ -1206,18 +1235,50 @@ if(MSVC)
       if(NOT _options)
         continue()
       endif()
+      # Generator expressions such as $<$<COMPILE_LANGUAGE:CXX>:-O3;-Wall>
+      # arrive split on ';'. Collect the options inside one, translate them
+      # for its language, and rebuild it only when options remain.
       set(_translated)
+      set(_open "")
+      set(_language ANY)
       foreach(_option IN LISTS _options)
-        if(_option MATCHES "^-W" OR _option MATCHES "^-Werror")
+        if(_open STREQUAL "" AND _option MATCHES "^(\\$<\\$<COMPILE_LANGUAGE:([A-Za-z_,]+)>:)(.*)$")
+          set(_open "${CMAKE_MATCH_1}")
+          set(_languages "${CMAKE_MATCH_2}")
+          set(_option "${CMAKE_MATCH_3}")
+          set(_inner)
+          if(_languages STREQUAL "CUDA")
+            set(_language CUDA)
+          elseif(_languages MATCHES "CUDA")
+            set(_language ANY)
+          else()
+            set(_language HOST)
+          endif()
+        endif()
+        set(_close FALSE)
+        if(NOT _open STREQUAL "" AND _option MATCHES "^(.*)>$")
+          set(_option "${CMAKE_MATCH_1}")
+          set(_close TRUE)
+        endif()
+        _trtmc_msvc_translate_option("${_option}" ${_language} _option)
+        if(_open STREQUAL "")
+          if(NOT _option STREQUAL "")
+            list(APPEND _translated "${_option}")
+          endif()
           continue()
         endif()
-        # Generator expressions such as $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra>
-        # arrive split on ';'; drop GCC flags inside them and keep the rest.
-        string(REGEX REPLACE "-W[A-Za-z0-9=_-]+" "" _option "${_option}")
-        if(_option MATCHES "^\\$<\\$<COMPILE_LANGUAGE:[A-Z,]+>:>?$" OR _option STREQUAL "" OR _option STREQUAL ">")
-          continue()
+        if(NOT _option STREQUAL "")
+          list(APPEND _inner "${_option}")
         endif()
-        list(APPEND _translated "${_option}")
+        if(_close)
+          list(LENGTH _inner _count)
+          if(_count GREATER 0)
+            list(JOIN _inner ";" _inner)
+            list(APPEND _translated "${_open}${_inner}>")
+          endif()
+          set(_open "")
+          set(_language ANY)
+        endif()
       endforeach()
       list(APPEND _translated "$<$<COMPILE_LANGUAGE:C,CXX>:/W3>")
       set_property(TARGET ${_target} PROPERTY COMPILE_OPTIONS "${_translated}")
