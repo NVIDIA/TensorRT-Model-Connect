@@ -434,6 +434,10 @@ def _build_command(
         model.task,
         "--precision",
         model.precision,
+        # A checkpoint several families support (for example a Qwen-architecture fine-tune with its
+        # own family) is built by the family the catalog declares.
+        "--family",
+        model.family,
     ]
     flags = (
         ("max_sequence_length", "--max-sequence-length"),
