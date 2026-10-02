@@ -64,6 +64,20 @@ def test_build_rejects_unsupported_requests(overrides: dict, error: type) -> Non
         model.build(_request(**overrides), writer=None)
 
 
+def test_stage_two_schedule_is_the_distilled_refinement_tail() -> None:
+    # diffusers STAGE_2_DISTILLED_SIGMA_VALUES: the last three distilled sigmas.
+    assert model.STAGE_2_DISTILLED_SIGMAS == (0.909375, 0.725, 0.421875)
+    assert model.STAGE_2_DISTILLED_SIGMAS == model.DISTILLED_SIGMAS[-3:]
+
+
+def test_two_stage_grid_needs_64_aligned_sizes_and_the_upsampler(tmp_path) -> None:
+    shape = SimpleNamespace(latent_height=22, latent_width=40)
+    with pytest.raises(ValueError, match="divisible by 64"):
+        model._stage1_shape(tmp_path, shape, 672, 1280, 32)
+    with pytest.raises(FileNotFoundError, match="latent_upsampler"):
+        model._stage1_shape(tmp_path, shape, 704, 1280, 32)
+
+
 def test_distilled_schedule_is_the_eight_step_checkpoint_schedule() -> None:
     assert len(model.DISTILLED_SIGMAS) == 8
     assert model.DISTILLED_SIGMAS[0] == 1.0

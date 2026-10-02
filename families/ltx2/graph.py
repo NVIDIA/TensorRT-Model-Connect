@@ -137,6 +137,34 @@ class Graph:
     def select(self, cond, a, b):
         return self.net.add_select(cond, a, b).get_output(0)
 
+    # ------------------------------------------------------------------ run-time shapes
+
+    def dim(self, x, axis: int):
+        """int32 ``[1]`` run-time size of ``x`` along ``axis``."""
+        shape = self.cast(self.net.add_shape(x).get_output(0), trt.int32)
+        return self.slice(shape, (axis,), (1,))
+
+    def arange(self, length, start):
+        """int32 ``[length]`` values ``start, start + 1, ...`` for int32 ``[1]`` tensors ``length`` / ``start``.
+
+        The fill only depends on the (shape) length; ``start`` may be a device value, e.g. derived from
+        a collective, and is added afterwards.
+        """
+        layer = self.net.add_fill((1,), trt.FillOperation.LINSPACE, trt.int32)
+        layer.set_input(0, length)
+        layer.set_input(1, self.const(np.zeros((), np.int32), trt.int32, shape=()))
+        layer.set_input(2, self.const(np.ones(1, np.int32), trt.int32))
+        return self.add(layer.get_output(0), start)
+
+    def take(self, x, axis: int, index: int):
+        """``x[..., index:index + 1, ...]`` along ``axis``; also when other axes are only known at run time."""
+        if all(int(s) >= 0 for s in x.shape):
+            start = [0] * len(x.shape)
+            size = [int(s) for s in x.shape]
+            start[axis], size[axis] = index, 1
+            return self.slice(x, start, size)
+        return self.gather(x, self.const(np.array([index], np.int32), trt.int32), axis)
+
     def mark_output(self, x, name: str, dtype: "trt.DataType | None" = None):
         if dtype is not None:
             x = self.cast(x, dtype)
@@ -245,16 +273,22 @@ def new_network(logger: "trt.ILogger"):
     return builder, network
 
 
-def build_plan(builder, network, *, label: str = "engine", tf32: bool = True):
+def build_plan(builder, network, *, label: str = "engine", tf32: bool = True, profile: dict | None = None):
     """Serialized plan (a bytes-like ``IHostMemory``; multi-GB plans are not copied again).
 
     ``tf32=False`` keeps fp32 convolutions / matrix multiplies in full fp32 (TensorRT allows
-    TF32 for fp32 layers by default).
+    TF32 for fp32 layers by default). ``profile`` maps each run-time shaped input to its
+    ``(min, opt, max)`` shapes (one optimization profile).
     """
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
     if not tf32:
         config.clear_flag(trt.BuilderFlag.TF32)
+    if profile:
+        shapes = builder.create_optimization_profile()
+        for name, (low, opt, high) in profile.items():
+            shapes.set_shape(name, low, opt, high)
+        config.add_optimization_profile(shapes)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError(f"TensorRT failed to build the LTX-2.5 {label}")

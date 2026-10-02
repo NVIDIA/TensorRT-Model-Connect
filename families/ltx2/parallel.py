@@ -73,13 +73,24 @@ def rank_selector_values(cp_size: int) -> np.ndarray:
     return (np.arange(cp_size, dtype=np.float32) / np.float32(cp_size)).reshape(cp_size, 1)
 
 
-def local_row_indices(g, *, cp: int, local_rows: int):
-    """int32 ``[local_rows]`` indices of the contiguous token shard owned by this rank."""
+def rank_index(g, *, cp: int):
+    """int32 ``[1]`` index of this rank (one tiny REDUCE_SCATTER of replicated values)."""
     import tensorrt as trt
 
     selector = g.const(rank_selector_values(cp), trt.float32)
     rank_f = add_collective(g.net, selector, trt.CollectiveOperation.REDUCE_SCATTER, cp,
                             reduce_operation=trt.ReduceOperation.SUM)
-    rank_i = g.reshape(g.cast(rank_f, trt.int32), (1,))
-    start = g.mul(rank_i, g.const(np.array([local_rows], np.int32), trt.int32))
+    return g.reshape(g.cast(rank_f, trt.int32), (1,))
+
+
+def local_row_indices(g, *, cp: int, local_rows: int):
+    """int32 ``[local_rows]`` indices of the contiguous token shard owned by this rank."""
+    import tensorrt as trt
+
+    start = g.mul(rank_index(g, cp=cp), g.const(np.array([local_rows], np.int32), trt.int32))
     return g.add(g.const(np.arange(local_rows, dtype=np.int32), trt.int32), start)
+
+
+def local_row_start(g, *, cp: int, local_rows):
+    """int32 ``[1]`` first row of this rank's shard for a run-time shard length ``local_rows`` (int32 ``[1]``)."""
+    return g.mul(rank_index(g, cp=cp), local_rows)

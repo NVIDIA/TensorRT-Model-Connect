@@ -54,6 +54,16 @@ def main() -> int:
         arrays[f"{case}_ref_audio"] = ra.numpy()
         arrays[f"{case}_stg_keep"] = np.asarray(stg, np.float32)
         arrays[f"{case}_av_keep"] = np.asarray(av, np.float32)
+    # Two-stage plans: one CP plan serving the full grid and the half-resolution stage 1 grid.
+    small = tp.half_grid(shape)
+    (out / "single_small.plan").write_bytes(build_dit_engine(folder, small, cp_size=1, stg_blocks=(tp.STG_BLOCK,)))
+    (out / f"cp{cp}_two_grid.plan").write_bytes(build_dit_engine(folder, shape, cp_size=cp, stg_blocks=(tp.STG_BLOCK,),
+                                                                 extra_shapes=(small,)))
+    small_inp = tp._inputs(small, seed=7)
+    rv, ra = tp._reference(model, small, small_inp, torch.float32)
+    arrays.update({f"small_{k}": v.float().numpy() for k, v in small_inp.items()})
+    arrays["small_ref_video"] = rv.numpy()
+    arrays["small_ref_audio"] = ra.numpy()
     np.savez(out / "reference.npz", **arrays)
     print(f"prepared {out} (video tokens {shape.video_tokens}, audio {sa}, cp {cp})", flush=True)
     return 0

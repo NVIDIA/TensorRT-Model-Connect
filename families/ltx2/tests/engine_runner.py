@@ -43,18 +43,22 @@ def run_plan(plan: bytes, inputs: dict[str, torch.Tensor], communicator=None) ->
 def _execute(engine, context, inputs, stream) -> dict[str, torch.Tensor]:
     keep = []
     outputs: dict[str, torch.Tensor] = {}
-    for i in range(engine.num_io_tensors):
-        name = engine.get_tensor_name(i)
+    names = [engine.get_tensor_name(i) for i in range(engine.num_io_tensors)]
+    is_input = {name: engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT for name in names}
+    for name in (n for n in names if is_input[n]):  # inputs first: they fix run-time dimensions
         dtype = _TORCH[engine.get_tensor_dtype(name)]
         shape = tuple(engine.get_tensor_shape(name))
-        if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
-            t = inputs[name].to(device="cuda", dtype=dtype).contiguous()
-            if tuple(t.shape) != shape:
-                raise ValueError(f"{name}: shape {tuple(t.shape)} != engine {shape}")
-            keep.append(t)
-        else:
-            t = torch.empty(shape, dtype=dtype, device="cuda")
-            outputs[name] = t
+        t = inputs[name].to(device="cuda", dtype=dtype).contiguous()
+        if -1 in shape:
+            context.set_input_shape(name, tuple(t.shape))
+        elif tuple(t.shape) != shape:
+            raise ValueError(f"{name}: shape {tuple(t.shape)} != engine {shape}")
+        keep.append(t)
+        context.set_tensor_address(name, t.data_ptr())
+    for name in (n for n in names if not is_input[n]):
+        t = torch.empty(tuple(context.get_tensor_shape(name)), dtype=_TORCH[engine.get_tensor_dtype(name)],
+                        device="cuda")
+        outputs[name] = t
         context.set_tensor_address(name, t.data_ptr())
     torch.cuda.current_stream().synchronize()
     if not context.execute_async_v3(stream.cuda_stream):

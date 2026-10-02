@@ -12,6 +12,7 @@
 //   vae.plan           video VAE decoder -> RGB frames (whole video, or one tile shape when the
 //                      bundle carries a tile plan; context-parallel ranks decode disjoint tiles)
 //   audio.plan         audio VAE decoder + vocoder with BWE -> 48 kHz stereo
+//   latent_upsampler.plan  (two-stage bundles) 2x spatial latent upsampler between the stages
 
 #include "families/ltx2/runtime/distributed_runtime.h"
 #include "families/ltx2/runtime/progress_log.h"
@@ -28,6 +29,22 @@
 #include <vector>
 
 namespace trtmc {
+
+// Two-stage pipeline of a bundle built with `trtmc ltx2 build --two-stage`: stage 1 denoises the
+// half-resolution grid, latent_upsampler.plan doubles it, stage 2 re-noises the video and audio
+// latents to noise_scale and refines at full resolution.
+struct LTX2TwoStage {
+    int32_t latent_height{0};
+    int32_t latent_width{0};
+    std::vector<float> sigmas;        // stage 1 schedule including the terminal 0
+    std::vector<float> stage2_sigmas; // stage 2 schedule including the terminal 0
+    float noise_scale{0.0F};
+
+    bool enabled() const { return latent_height > 0; }
+    int64_t video_tokens(int32_t latent_frames) const {
+        return int64_t(latent_frames) * latent_height * latent_width;
+    }
+};
 
 struct LTX2Options {
     int32_t video_frames{121};
@@ -50,6 +67,7 @@ struct LTX2Options {
     ltx2::VaeTilePlan vae_tiling;
     // Waveform shape of audio.plan; lets another rank decode the audio for rank 0.
     std::vector<int64_t> audio_waveform_shape;
+    LTX2TwoStage two_stage;
 
     int64_t video_tokens() const { return int64_t(latent_frames) * latent_height * latent_width; }
     // Rank that decodes the audio: the last context-parallel rank when the tiles spread the
@@ -79,7 +97,8 @@ class LTX2Pipeline final : public internal::IModel, public internal::ITextToAudi
     LTX2Pipeline(std::unique_ptr<ITrtModule> text_encoder, std::unique_ptr<ITrtModule> denoiser,
                  std::unique_ptr<ITrtModule> vae, std::unique_ptr<ITrtModule> audio,
                  LTX2Options options, std::shared_ptr<ITokenizer> tokenizer,
-                 LTX2DistributedContext distributed = {});
+                 LTX2DistributedContext distributed = {},
+                 std::unique_ptr<ITrtModule> upsampler = nullptr);
     ~LTX2Pipeline() override;
 
     const char* task() const noexcept override { return ITextToAudioVideo::kTask.data(); }
@@ -103,11 +122,31 @@ class LTX2Pipeline final : public internal::IModel, public internal::ITextToAudi
         int32_t tiles{0};
     };
 
+    // Initial noise: stage 1 video then audio; for two-stage runs the stage 2 re-noise draws
+    // (video at full resolution, then audio) continue the same stream.
+    struct Noise {
+        std::vector<float> video;
+        std::vector<float> audio;
+        std::vector<float> video_stage2;
+        std::vector<float> audio_stage2;
+    };
+
+    struct StageTimes {
+        std::vector<double> step_ms;
+        double total_ms{0.0};
+        double median_ms() const;
+    };
+
   private:
     TextContext encode(const std::string& text);
     void run_dit(const std::vector<float>& video, const std::vector<float>& audio,
-                 const TextContext& text, float timestep, std::vector<float>& video_out,
-                 std::vector<float>& audio_out);
+                 const TextContext& text, float timestep, int64_t video_tokens,
+                 std::vector<float>& video_out, std::vector<float>& audio_out);
+    Noise initial_noise(int64_t seed, bool two_stage) const;
+    void denoise(std::vector<float>& video, std::vector<float>& audio, const TextContext& text,
+                 const std::vector<float>& sigmas, int64_t video_tokens, const char* stage,
+                 StageTimes& times);
+    std::vector<float> upsample(const std::vector<float>& video, int64_t video_tokens);
     std::vector<float> decode_video(const std::vector<float>& video_latents);
     std::vector<float> decode_audio(const std::vector<float>& audio_latents);
     Decoded decode_untiled(const std::vector<float>& video, const std::vector<float>& audio);
@@ -123,6 +162,7 @@ class LTX2Pipeline final : public internal::IModel, public internal::ITextToAudi
     std::unique_ptr<ITrtModule> denoiser_;
     std::unique_ptr<ITrtModule> vae_;
     std::unique_ptr<ITrtModule> audio_;
+    std::unique_ptr<ITrtModule> upsampler_;
     LTX2Options options_;
     std::shared_ptr<ITokenizer> tokenizer_;
     LTX2ProgressLog progress_;

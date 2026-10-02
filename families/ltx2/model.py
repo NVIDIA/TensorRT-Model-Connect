@@ -11,6 +11,8 @@ Builds a native TRTMC bundle from a diffusers LTX-2.5 checkpoint (distilled ``tr
   - ``vae.plan``: the video VAE decoder, by default one tile-shaped plan for the tiled decode
     (``vae_tiling.py``; context-parallel ranks decode disjoint tiles, rank 0 blends them)
   - ``audio.plan``: the audio VAE decoder + vocoder with bandwidth extension (48 kHz stereo)
+  - ``latent_upsampler.plan`` (two-stage bundles): the 2x spatial latent upsampler; the DiT plan
+    then also serves the half-resolution stage 1 grid
   - ``tokenizer.json`` and ``runtime.json``
 
 Every engine is built directly with the TensorRT network API in bf16 (the precision LTX-2.5 is
@@ -22,6 +24,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,6 +41,10 @@ PIPELINE_CLASS = "LTX2Pipeline"
 # 8-step schedule. LTX-2.5's shipped scheduler config disables dynamic shifting, so the
 # pipeline uses these values unshifted (timesteps = sigma * 1000), then the terminal 0.
 DISTILLED_SIGMAS = (1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875)
+# diffusers ``pipelines/ltx2/utils.py`` STAGE_2_DISTILLED_SIGMA_VALUES: the two-stage refinement
+# schedule at full resolution. Stage 2 re-noises the upsampled stage 1 latents (video and audio)
+# to its first sigma and runs the same distilled transformer (no LoRA).
+STAGE_2_DISTILLED_SIGMAS = (0.909375, 0.725, 0.421875)
 
 DEFAULT_HEIGHT = 544  # the LTX-2.5 model card's 960x544, 121 frames at 24 fps
 DEFAULT_WIDTH = 960
@@ -101,6 +108,15 @@ def _write_plan(writer: "BundleWriter", name: str, plan) -> None:
         section.write(memoryview(plan))
 
 
+def _stage1_shape(model_dir: Path, shape, height: int, width: int, spatial: int):
+    """Half-resolution stage 1 grid of the two-stage pipeline (diffusers: ``width // 2``, ``height // 2``)."""
+    if height % (2 * spatial) or width % (2 * spatial):
+        raise ValueError(f"ltx2 two-stage bundles need image_height/image_width divisible by {2 * spatial}")
+    if not (model_dir / "latent_upsampler" / "config.json").is_file():
+        raise FileNotFoundError(f"ltx2 two-stage bundles need the checkpoint's latent_upsampler/ ({model_dir})")
+    return replace(shape, latent_height=shape.latent_height // 2, latent_width=shape.latent_width // 2)
+
+
 def build(request: BuildRequest, writer: "BundleWriter") -> None:
     """Build one LTX-2.5 text-to-audio-video bundle (``trtmc ltx2 build`` or the shared ``trtmc build``)."""
     request = coerce_request(request)
@@ -156,6 +172,10 @@ def build(request: BuildRequest, writer: "BundleWriter") -> None:
     )
     validate_context_parallel_layout(parallel, video_tokens=shape.video_tokens, video_heads=dit_cfg.heads,
                                      audio_heads=dit_cfg.audio_heads)
+    stage1 = _stage1_shape(model_dir, shape, height, width, spatial) if request.two_stage else None
+    if stage1 is not None:
+        validate_context_parallel_layout(parallel, video_tokens=stage1.video_tokens, video_heads=dit_cfg.heads,
+                                         audio_heads=dit_cfg.audio_heads)
 
     writer.set_header(family="ltx2", task=request.task, backend=request.backend)
     started = time.perf_counter()
@@ -164,9 +184,19 @@ def build(request: BuildRequest, writer: "BundleWriter") -> None:
     _log(f"text encoder engine built in {time.perf_counter() - started:.1f} s")
     started = time.perf_counter()
     _write_plan(writer, "denoiser.plan", build_dit_engine(model_dir / "transformer", shape, cp_size=parallel.cp_size,
-                                                          verbose=request.verbose))
+                                                          verbose=request.verbose,
+                                                          extra_shapes=(stage1,) if stage1 else ()))
     _log(f"DiT engine built in {time.perf_counter() - started:.1f} s (cp={parallel.cp_size}, "
-         f"{shape.video_tokens} video + {shape.audio_frames} audio tokens)")
+         f"{shape.video_tokens}{f' / {stage1.video_tokens}' if stage1 else ''} video + "
+         f"{shape.audio_frames} audio tokens)")
+    if stage1 is not None:
+        from .upsampler_builder import build_latent_upsampler_engine
+
+        started = time.perf_counter()
+        _write_plan(writer, "latent_upsampler.plan", build_latent_upsampler_engine(
+            model_dir / "latent_upsampler", model_dir / "vae", latent_frames=stage1.latent_frames,
+            latent_height=stage1.latent_height, latent_width=stage1.latent_width, verbose=request.verbose))
+        _log(f"latent upsampler engine built in {time.perf_counter() - started:.1f} s")
     started = time.perf_counter()
     tiling = None
     vae_grid = (shape.latent_frames, shape.latent_height, shape.latent_width)
@@ -207,4 +237,12 @@ def build(request: BuildRequest, writer: "BundleWriter") -> None:
     }
     if tiling is not None:
         runtime["vae_tiling"] = tiling
+    if stage1 is not None:
+        runtime["two_stage"] = {
+            "latent_height": stage1.latent_height,
+            "latent_width": stage1.latent_width,
+            "sigmas": [*DISTILLED_SIGMAS, 0.0],
+            "stage2_sigmas": [*STAGE_2_DISTILLED_SIGMAS, 0.0],
+            "noise_scale": STAGE_2_DISTILLED_SIGMAS[0],
+        }
     writer.add_json("runtime.json", runtime)

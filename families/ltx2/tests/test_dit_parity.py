@@ -75,7 +75,7 @@ def tiny(tmp_path_factory):
     shape = DiTShape(batch=2, latent_frames=FRAMES, latent_height=LH, latent_width=LW, audio_frames=sa,
                      text_len=TEXT, fps=FPS)
     plan = build_dit_engine(folder, shape, stg_blocks=(STG_BLOCK,))
-    return model, plan, shape
+    return model, plan, shape, folder
 
 
 def _inputs(shape, seed=0):
@@ -111,7 +111,7 @@ def _reference(model, shape, inp, dtype, *, stg_mask=None, isolate=False):
 
 @pytest.mark.parametrize("case", ["plain", "stg_mixed", "isolated"])
 def test_dit_tiny_parity(tiny, case) -> None:
-    model, plan, shape = tiny
+    model, plan, shape, _ = tiny
     inp = _inputs(shape)
     stg = torch.ones(shape.batch)
     av = torch.ones(shape.batch)
@@ -158,3 +158,36 @@ def test_rope_grids_match_diffusers() -> None:
         # diffusers: [B, H, T, r]; ours: [T, H, r]
         assert torch.allclose(torch.from_numpy(cos).permute(1, 0, 2), cos_ref[0], atol=2e-6), key
         assert torch.allclose(torch.from_numpy(sin).permute(1, 0, 2), sin_ref[0], atol=2e-6), key
+
+
+def half_grid(shape):
+    """The two-stage stage 1 grid: half the latent rows and columns."""
+    from dataclasses import replace
+
+    return replace(shape, latent_height=shape.latent_height // 2, latent_width=shape.latent_width // 2)
+
+
+def test_dit_two_grid_plan_tiny_parity(tiny) -> None:
+    """One plan serving the full grid and the half-resolution stage 1 grid (run-time token count)."""
+    from families.ltx2.dit_builder import build_dit_engine
+    from families.ltx2.tests.engine_runner import Engine
+
+    model, static_plan, shape, folder = tiny
+    small = half_grid(shape)
+    assert small.video_tokens != shape.video_tokens
+    engine = Engine(build_dit_engine(folder, shape, stg_blocks=(STG_BLOCK,), extra_shapes=(small,)))
+    keep = {"stg_keep": torch.ones(shape.batch), "av_keep": torch.ones(shape.batch)}
+    static = run_plan(static_plan, {**_inputs(shape), **keep})
+    for grid in (shape, small, shape):  # switch grids back and forth on one context
+        inp = _inputs(grid, seed=grid.video_tokens)
+        got = engine({**inp, **keep})
+        assert tuple(got["video_velocity"].shape) == (grid.batch, grid.video_tokens, 16)
+        rv, ra = _reference(model, grid, inp, torch.float32)
+        cv = cosine(got["video_velocity"].cpu(), rv)
+        ca = cosine(got["audio_velocity"].cpu(), ra)
+        print(f"two-grid plan at {grid.video_tokens} tokens vs fp32: video cos {cv:.6f} | audio cos {ca:.6f}")
+        assert cv > 0.999 and ca > 0.999
+    got = engine({**_inputs(shape), **keep})
+    c = cosine(got["video_velocity"].cpu(), static["video_velocity"].cpu())
+    print(f"two-grid plan vs the static plan on the full grid: video cos {c:.6f}")
+    assert c > 0.9999

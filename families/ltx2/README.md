@@ -22,9 +22,10 @@ Text-to-audio-video for Lightricks LTX-2.5 diffusers checkpoints (`LTX2Pipeline`
 | Section | Contents |
 |---|---|
 | `text_encoder.plan` | Gemma 4 text tower and the LTX-2 text connectors (video and audio context) |
-| `denoiser.plan` | Joint audio/video DiT. With CP=2, one plan serves both ranks. |
+| `denoiser.plan` | Joint audio/video DiT. With CP=2, one plan serves both ranks. Two-stage bundles serve the full and the half-resolution grid. |
 | `vae.plan` | Video VAE decoder for one tile shape (whole video with `--vae-tile-pixels 0 --vae-tile-frames 0`) |
 | `audio.plan` | Audio VAE decoder and vocoder with bandwidth extension |
+| `latent_upsampler.plan` | Two-stage bundles only: the 2x spatial latent upsampler |
 | `tokenizer.json`, `runtime.json` | Tokenizer, shapes and schedule |
 
 Context parallelism keeps the audio stream and text replicated and shards the video
@@ -53,6 +54,26 @@ and writes it into `runtime.json`.
 `--vae-tile-pixels`, `--vae-tile-overlap-pixels`, `--vae-tile-frames` and
 `--vae-tile-overlap-frames`. A size of 0 leaves that axis untiled, and setting both sizes to 0
 builds the untiled decoder. The shared `trtmc build --family ltx2` uses the defaults.
+
+## Two-stage pipeline
+
+`trtmc ltx2 build --two-stage` builds a bundle that also runs the two-stage recipe of the diffusers
+LTX-2.5 documentation (distilled checkpoint in both stages, no LoRA). Run it with
+`--set two_stage=true`; single-stage generation stays the default, also on two-stage bundles.
+
+1. Stage 1 denoises at half the width and height with the 8 distilled sigmas.
+2. The latent upsampler (`latent_upsampler/`) doubles the latent grid.
+3. The video and audio latents are re-noised to the first stage 2 sigma
+   (`noise_scale * noise + (1 - noise_scale) * latents`, noise_scale 0.909375). The noise draws
+   continue the seeded stream after the stage 1 noise.
+4. Stage 2 refines at full resolution with `STAGE_2_DISTILLED_SIGMA_VALUES`
+   (0.909375, 0.725, 0.421875), then the video and audio are decoded.
+
+Width and height must be multiples of 64, and the checkpoint must include `latent_upsampler/`. One
+DiT plan serves both grids: the video token count is a run-time dimension, and the RoPE tables of
+both grids are constants that the plan selects by token count. Stage 1 runs about a quarter of the
+full-resolution tokens, so the two-stage run does 8 small steps and 3 full steps instead of 8 full
+steps. Context parallelism applies to both stages, and every rank upsamples the latents itself.
 
 ## Build and run
 
@@ -101,7 +122,7 @@ To give each rank its own TensorRT-RTX runtime cache, put `{rank}` in the path, 
 ## Tests
 
 - `tests/test_*_parity.py` build each engine from tiny random weights and compare it
-  with diffusers.
+  with diffusers, including the latent upsampler and the two-grid DiT plan.
 - `tests/test_context_parallel.py` runs the CP=2 DiT on two GPUs (torch-free ranks) against
   the single-device plan and diffusers. It also runs the tile-parallel VAE decode and checks that
   it matches the single-GPU tiled decode bit for bit. It needs `TRTMC_NCCL_LIBRARY`.

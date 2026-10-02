@@ -29,6 +29,7 @@ class BuildRequest:
     video_num_frames: int | None = None
     context_parallel_size: int = 1
     vae_tiles: TileConfig = field(default_factory=TileConfig)
+    two_stage: bool = False
     verbose: bool = False
 
     def __post_init__(self) -> None:
@@ -78,12 +79,14 @@ def build(*, model: str, output: Path, revision: str | None = None, precision: s
           backend: str = "trt", image_height: int | None = None, image_width: int | None = None,
           video_num_frames: int | None = None, max_sequence_length: int | None = None,
           context_parallel_size: int = 1, vae_tile_pixels: int = 512, vae_tile_overlap_pixels: int = 64,
-          vae_tile_frames: int = 256, vae_tile_overlap_frames: int = 24, verbose: bool = False) -> int:
+          vae_tile_frames: int = 256, vae_tile_overlap_frames: int = 24, two_stage: bool = False,
+          verbose: bool = False) -> int:
     tiles = TileConfig(tile_pixels=vae_tile_pixels, overlap_pixels=vae_tile_overlap_pixels,
                        tile_frames=vae_tile_frames, overlap_frames=vae_tile_overlap_frames)
     request = BuildRequest(model_dir=resolve_model(model, revision), precision=precision, backend=backend,
                            max_sequence_length=max_sequence_length, image_height=image_height,
                            image_width=image_width, video_num_frames=video_num_frames,
-                           context_parallel_size=context_parallel_size, vae_tiles=tiles, verbose=verbose)
+                           context_parallel_size=context_parallel_size, vae_tiles=tiles,
+                           two_stage=two_stage, verbose=verbose)
     build_bundle(request, output)
     return 0

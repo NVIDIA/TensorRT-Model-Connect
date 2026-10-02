@@ -117,8 +117,12 @@ std::string trim(const std::string& text) {
 
 // Optional family diagnostics (all off by default):
 //   TRTMC_LTX2_INITIAL_LATENTS  raw fp32 file: packed video [S, C] then audio [Sa, Ca] noise
-//                               (replaces the seeded noise, e.g. a reference pipeline's draw)
-//   TRTMC_LTX2_DUMP_LATENTS     raw fp32 file written with the final video then audio latents
+//                               (replaces the seeded noise, e.g. a reference pipeline's draw).
+//                               Two-stage runs append the stage 2 re-noise draws: packed
+//                               full-resolution video [S2, C] then audio [Sa, Ca].
+//   TRTMC_LTX2_DUMP_LATENTS     raw fp32 file written with the final video then audio latents;
+//                               two-stage runs also write <file>.stage1 (stage 1 video, audio) and
+//                               <file>.upsampled (upsampled video, audio)
 //   TRTMC_LTX2_DECODE_LATENTS   raw fp32 file in the TRTMC_LTX2_DUMP_LATENTS layout; replaces the
 //                               denoised latents before the decode (decoder checks, e.g. the
 //                               single-GPU vs tile-parallel decode of identical latents)
@@ -135,10 +139,12 @@ std::vector<float> read_f32_file(const char* path) {
     return values;
 }
 
-void maybe_dump(const std::vector<float>& video, const std::vector<float>& audio) {
-    const char* path = std::getenv("TRTMC_LTX2_DUMP_LATENTS");
-    if (path == nullptr || *path == '\0')
+void maybe_dump(const std::vector<float>& video, const std::vector<float>& audio,
+                const char* suffix = "") {
+    const char* base = std::getenv("TRTMC_LTX2_DUMP_LATENTS");
+    if (base == nullptr || *base == '\0')
         return;
+    const std::string path = std::string(base) + suffix;
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output.write(reinterpret_cast<const char*>(video.data()),
                  static_cast<std::streamsize>(video.size() * 4));
@@ -162,12 +168,31 @@ void replace_final_latents(std::vector<float>& video, std::vector<float>& audio)
     std::cerr << "[ltx2] decoding the latents of " << path << "\n";
 }
 
-const std::array<internal::ConfigField, 1>& config_fields() {
-    static const std::array<internal::ConfigField, 1> fields{{
+const std::array<internal::ConfigField, 2>& config_fields() {
+    static const std::array<internal::ConfigField, 2> fields{{
         {"seed", internal::ConfigKind::I64, internal::ConfigValue{std::int64_t{0}},
          "Seed of the initial video and audio noise (portable std::mt19937 + normal draws)."},
+        {"two_stage", internal::ConfigKind::Bool, internal::ConfigValue{false},
+         "Two-stage pipeline: half-resolution stage 1, latent upsampler, full-resolution "
+         "refinement (bundles built with trtmc ltx2 build --two-stage)."},
     }};
     return fields;
+}
+
+LTX2TwoStage parse_two_stage(const nlohmann::json& doc) {
+    LTX2TwoStage two;
+    two.latent_height = doc.at("latent_height").get<int32_t>();
+    two.latent_width = doc.at("latent_width").get<int32_t>();
+    two.sigmas = doc.at("sigmas").get<std::vector<float>>();
+    two.stage2_sigmas = doc.at("stage2_sigmas").get<std::vector<float>>();
+    two.noise_scale = doc.at("noise_scale").get<float>();
+    for (const auto* schedule : {&two.sigmas, &two.stage2_sigmas}) {
+        if (schedule->size() < 2 || schedule->back() != 0.0F)
+            throw std::runtime_error("LTX-2.5 two-stage sigmas must end with the terminal 0");
+    }
+    if (two.latent_height <= 0 || two.latent_width <= 0)
+        throw std::runtime_error("LTX-2.5 runtime.json has an invalid two-stage grid");
+    return two;
 }
 
 ltx2::VaeTilePlan parse_tile_plan(const nlohmann::json& doc) {
@@ -259,6 +284,12 @@ LTX2Options parse_ltx2_options(const std::string& runtime_json, int32_t world_si
         throw std::runtime_error("LTX-2.5 runtime.json has invalid shapes");
     if (doc.contains("audio_waveform_shape"))
         o.audio_waveform_shape = doc.at("audio_waveform_shape").get<std::vector<int64_t>>();
+    if (doc.contains("two_stage")) {
+        o.two_stage = parse_two_stage(doc.at("two_stage"));
+        if (o.two_stage.latent_height * 2 != o.latent_height ||
+            o.two_stage.latent_width * 2 != o.latent_width)
+            throw std::runtime_error("LTX-2.5 two-stage grid must be half the video latent grid");
+    }
     if (doc.contains("vae_tiling")) {
         const auto& tiling = doc.at("vae_tiling");
         if (tiling.at("world_size").get<int32_t>() != world_size)
@@ -274,11 +305,12 @@ LTX2Pipeline::LTX2Pipeline(std::unique_ptr<ITrtModule> text_encoder,
                            std::unique_ptr<ITrtModule> denoiser, std::unique_ptr<ITrtModule> vae,
                            std::unique_ptr<ITrtModule> audio, LTX2Options options,
                            std::shared_ptr<ITokenizer> tokenizer,
-                           LTX2DistributedContext distributed)
+                           LTX2DistributedContext distributed,
+                           std::unique_ptr<ITrtModule> upsampler)
     : distributed_(std::move(distributed)), text_encoder_(std::move(text_encoder)),
       denoiser_(std::move(denoiser)), vae_(std::move(vae)), audio_(std::move(audio)),
-      options_(std::move(options)), tokenizer_(std::move(tokenizer)), progress_(distributed_.rank) {
-}
+      upsampler_(std::move(upsampler)), options_(std::move(options)),
+      tokenizer_(std::move(tokenizer)), progress_(distributed_.rank) {}
 
 LTX2Pipeline::~LTX2Pipeline() = default;
 
@@ -308,9 +340,9 @@ LTX2Pipeline::TextContext LTX2Pipeline::encode(const std::string& text) {
 }
 
 void LTX2Pipeline::run_dit(const std::vector<float>& video, const std::vector<float>& audio,
-                           const TextContext& text, float timestep, std::vector<float>& video_out,
-                           std::vector<float>& audio_out) {
-    const int64_t S = options_.video_tokens();
+                           const TextContext& text, float timestep, int64_t video_tokens,
+                           std::vector<float>& video_out, std::vector<float>& audio_out) {
+    const int64_t S = video_tokens;
     const int64_t Sa = options_.audio_frames;
     const int64_t L = options_.text_seq_len;
     std::vector<float> t{timestep};
@@ -332,6 +364,95 @@ void LTX2Pipeline::run_dit(const std::vector<float>& video, const std::vector<fl
     const auto outputs = denoiser_->forward(inputs);
     video_out = float_output(outputs, "video_velocity", video.size());
     audio_out = float_output(outputs, "audio_velocity", audio.size());
+}
+
+double LTX2Pipeline::StageTimes::median_ms() const {
+    if (step_ms.empty())
+        return 0.0;
+    std::vector<double> sorted = step_ms;
+    std::sort(sorted.begin(), sorted.end());
+    return sorted[sorted.size() / 2];
+}
+
+LTX2Pipeline::Noise LTX2Pipeline::initial_noise(int64_t seed, bool two_stage) const {
+    const auto channels = static_cast<std::size_t>(options_.latent_channels);
+    const auto full = static_cast<std::size_t>(options_.video_tokens()) * channels;
+    const auto stage1 =
+        two_stage
+            ? static_cast<std::size_t>(options_.two_stage.video_tokens(options_.latent_frames)) *
+                  channels
+            : full;
+    const auto audio =
+        static_cast<std::size_t>(options_.audio_frames) * options_.audio_latent_channels;
+    Noise noise;
+    noise.video.resize(stage1);
+    noise.audio.resize(audio);
+    if (two_stage) {
+        noise.video_stage2.resize(full);
+        noise.audio_stage2.resize(audio);
+    }
+    const std::vector<std::vector<float>*> draws{&noise.video, &noise.audio, &noise.video_stage2,
+                                                 &noise.audio_stage2};
+    if (const char* path = std::getenv("TRTMC_LTX2_INITIAL_LATENTS");
+        path != nullptr && *path != '\0') {
+        const auto values = read_f32_file(path);
+        std::size_t total = 0;
+        for (const auto* d : draws)
+            total += d->size();
+        if (values.size() != total)
+            throw std::runtime_error("TRTMC_LTX2_INITIAL_LATENTS must hold the packed video then "
+                                     "audio noise (then the stage 2 video and audio draws)");
+        auto it = values.begin();
+        for (auto* d : draws) {
+            std::copy_n(it, d->size(), d->begin());
+            it += static_cast<std::ptrdiff_t>(d->size());
+        }
+        return noise;
+    }
+    std::mt19937 generator(static_cast<uint32_t>(seed));
+    ltx2::LibstdcxxNormalFloat normal;
+    for (auto* d : draws)
+        for (auto& v : *d)
+            v = normal(generator);
+    return noise;
+}
+
+void LTX2Pipeline::denoise(std::vector<float>& video, std::vector<float>& audio,
+                           const TextContext& text, const std::vector<float>& sigmas,
+                           int64_t video_tokens, const char* stage, StageTimes& times) {
+    const auto start = Clock::now();
+    const int32_t steps = static_cast<int32_t>(sigmas.size()) - 1;
+    std::vector<float> video_v;
+    std::vector<float> audio_v;
+    for (int32_t step = 0; step < steps; ++step) {
+        const auto step_start = Clock::now();
+        const float sigma = sigmas[static_cast<std::size_t>(step)];
+        const float sigma_next = sigmas[static_cast<std::size_t>(step) + 1];
+        run_dit(video, audio, text, sigma * 1000.0F, video_tokens, video_v, audio_v);
+        ltx2_euler_step(video, video_v, sigma, sigma_next);
+        ltx2_euler_step(audio, audio_v, sigma, sigma_next);
+        times.step_ms.push_back(elapsed_ms(step_start, Clock::now()));
+        if (progress_.enabled()) {
+            std::ostringstream detail;
+            detail << "stage=" << stage << " step=" << (step + 1) << "/" << steps
+                   << " step_ms=" << std::fixed << std::setprecision(3) << times.step_ms.back();
+            progress_.emit("step", detail.str());
+        }
+    }
+    times.total_ms = elapsed_ms(start, Clock::now());
+}
+
+std::vector<float> LTX2Pipeline::upsample(const std::vector<float>& video, int64_t video_tokens) {
+    if (!upsampler_)
+        throw std::runtime_error("LTX-2.5 two-stage run without latent_upsampler.plan");
+    TensorMap inputs;
+    inputs["latents"] = Tensor{const_cast<float*>(video.data()),
+                               {1, video_tokens, options_.latent_channels},
+                               DType::kFloat32};
+    const auto outputs = upsampler_->forward(inputs);
+    return float_output(outputs, "upsampled",
+                        static_cast<std::size_t>(options_.video_tokens()) *
+                            options_.latent_channels);
 }
 
 std::vector<float> LTX2Pipeline::decode_video(const std::vector<float>& video_latents) {
@@ -537,12 +658,16 @@ internal::AudioVideoResult LTX2Pipeline::run(const internal::TextToAudioVideoReq
     internal::validate_config({fields.data(), fields.size()}, config);
     const auto seed =
         internal::config_get<std::int64_t>(config, {fields.data(), fields.size()}, "seed").value();
+    const bool two_stage =
+        internal::config_get<bool>(config, {fields.data(), fields.size()}, "two_stage").value();
+    if (two_stage && !options_.two_stage.enabled())
+        throw internal::ConfigError(
+            "two_stage=true needs a two-stage bundle (trtmc ltx2 build --two-stage)");
     const std::string prompt(request.prompt);
-    const int32_t steps = static_cast<int32_t>(options_.sigmas.size()) - 1;
-    const auto video_count =
-        static_cast<std::size_t>(options_.video_tokens()) * options_.latent_channels;
-    const auto audio_count =
-        static_cast<std::size_t>(options_.audio_frames) * options_.audio_latent_channels;
+    const auto& stage1_sigmas = two_stage ? options_.two_stage.sigmas : options_.sigmas;
+    const int32_t steps =
+        static_cast<int32_t>(stage1_sigmas.size()) - 1 +
+        (two_stage ? static_cast<int32_t>(options_.two_stage.stage2_sigmas.size()) - 1 : 0);
 
     // Ranks finish loading their engines at different times (the ranks load different decoders);
     // start together so the first collective does not charge one rank's load to the generation.
@@ -553,7 +678,7 @@ internal::AudioVideoResult LTX2Pipeline::run(const internal::TextToAudioVideoReq
         std::ostringstream detail;
         detail << "world_size=" << distributed_.world_size << " frames=" << options_.video_frames
                << " width=" << options_.video_width << " height=" << options_.video_height
-               << " steps=" << steps;
+               << " steps=" << steps << " two_stage=" << (two_stage ? 1 : 0);
         progress_.start(detail.str());
         progress_.emit("encode_begin");
     }
@@ -561,48 +686,39 @@ internal::AudioVideoResult LTX2Pipeline::run(const internal::TextToAudioVideoReq
     const auto t_text = Clock::now();
     progress_.emit("encode_end");
 
-    std::vector<float> video(video_count);
-    std::vector<float> audio(audio_count);
-    if (const char* path = std::getenv("TRTMC_LTX2_INITIAL_LATENTS");
-        path != nullptr && *path != '\0') {
-        const auto values = read_f32_file(path);
-        if (values.size() != video_count + audio_count)
-            throw std::runtime_error(
-                "TRTMC_LTX2_INITIAL_LATENTS must hold the packed video then audio noise");
-        std::copy_n(values.begin(), video_count, video.begin());
-        std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(video_count), audio_count,
-                    audio.begin());
-    } else {
-        std::mt19937 generator(static_cast<uint32_t>(seed));
-        ltx2::LibstdcxxNormalFloat normal;
-        for (auto& v : video)
-            v = normal(generator);
-        for (auto& v : audio)
-            v = normal(generator);
-    }
-
+    auto noise = initial_noise(seed, two_stage);
+    auto& video = noise.video;
+    auto& audio = noise.audio;
+    const int64_t stage1_tokens = two_stage
+                                      ? options_.two_stage.video_tokens(options_.latent_frames)
+                                      : options_.video_tokens();
     progress_.emit("denoise_begin");
-    std::vector<double> step_ms;
-    std::vector<float> video_v;
-    std::vector<float> audio_v;
-    for (int32_t step = 0; step < steps; ++step) {
-        const auto step_start = Clock::now();
-        const float sigma = options_.sigmas[static_cast<std::size_t>(step)];
-        const float sigma_next = options_.sigmas[static_cast<std::size_t>(step) + 1];
-        run_dit(video, audio, text, sigma * 1000.0F, video_v, audio_v);
-        ltx2_euler_step(video, video_v, sigma, sigma_next);
-        ltx2_euler_step(audio, audio_v, sigma, sigma_next);
-        step_ms.push_back(elapsed_ms(step_start, Clock::now()));
-        if (progress_.enabled()) {
-            std::ostringstream detail;
-            detail << "step=" << (step + 1) << "/" << steps << " step_ms=" << std::fixed
-                   << std::setprecision(3) << step_ms.back();
-            progress_.emit("step", detail.str());
-        }
+    StageTimes stage1;
+    StageTimes stage2;
+    denoise(video, audio, text, stage1_sigmas, stage1_tokens, "stage1", stage1);
+    double upsample_ms = 0.0;
+    if (two_stage) {
+        const auto up_start = Clock::now();
+        if (distributed_.rank == 0)
+            maybe_dump(video, audio, ".stage1");
+        video = upsample(video, stage1_tokens);
+        if (distributed_.rank == 0)
+            maybe_dump(video, audio, ".upsampled");
+        // diffusers prepare_latents / prepare_audio_latents: noise_scale * noise + (1 -
+        // noise_scale) * x.
+        const float s = options_.two_stage.noise_scale;
+        ltx2_renoise(video, noise.video_stage2, s);
+        ltx2_renoise(audio, noise.audio_stage2, s);
+        upsample_ms = elapsed_ms(up_start, Clock::now());
+        progress_.emit("upsample_end");
+        denoise(video, audio, text, options_.two_stage.stage2_sigmas, options_.video_tokens(),
+                "stage2", stage2);
     }
     const auto t_denoise = Clock::now();
     progress_.emit("denoise_end");
     replace_final_latents(video, audio);
+    std::vector<double> step_ms = stage1.step_ms;
+    step_ms.insert(step_ms.end(), stage2.step_ms.begin(), stage2.step_ms.end());
 
     const bool tiled = options_.vae_tiling.enabled();
     if (distributed_.world_size > 1 && distributed_.rank != 0 && !tiled) {
@@ -654,7 +770,11 @@ internal::AudioVideoResult LTX2Pipeline::run(const internal::TextToAudioVideoReq
               << "[ltx2-perf-json] {\"world_size\":" << distributed_.world_size
               << ",\"text_encode_ms\":" << elapsed_ms(t_start, t_text)
               << ",\"denoise_ms\":" << elapsed_ms(t_text, t_denoise)
-              << ",\"median_step_ms\":" << median << ",\"decode_ms\":"
+              << ",\"median_step_ms\":" << median << ",\"two_stage\":" << (two_stage ? 1 : 0)
+              << ",\"stage1_ms\":" << stage1.total_ms
+              << ",\"stage1_median_step_ms\":" << stage1.median_ms()
+              << ",\"upsample_ms\":" << upsample_ms << ",\"stage2_ms\":" << stage2.total_ms
+              << ",\"stage2_median_step_ms\":" << stage2.median_ms() << ",\"decode_ms\":"
               << elapsed_ms(t_denoise, t_audio)
               // Untiled: the video then the audio decode. Tiled: the audio overlaps the blend
               // (one device) or runs on the audio rank, so the video path spans the phase.

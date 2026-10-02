@@ -70,13 +70,13 @@ def gather_rope_rows(g: Graph, rope: RopeTables, rows) -> RopeTables:
 
 
 def apply_split_rope(g: Graph, x, rope: RopeTables):
-    """``x``: ``[B, T, H*2r]`` -> same shape/dtype, rotated in fp32."""
+    """``x``: ``[B, T, H*2r]`` -> same shape/dtype, rotated in fp32 (``T`` may be a run-time size)."""
     b, t, d = (int(s) for s in x.shape)
     h, r = rope.heads, rope.half
     out_dtype = x.dtype
     x5 = g.reshape(g.cast(x, trt.float32), (b, t, h, 2, r))
-    x1 = g.slice(x5, (0, 0, 0, 0, 0), (b, t, h, 1, r))
-    x2 = g.slice(x5, (0, 0, 0, 1, 0), (b, t, h, 1, r))
+    x1 = g.take(x5, 3, 0)
+    x2 = g.take(x5, 3, 1)
     o1 = g.sub(g.mul(x1, rope.cos), g.mul(x2, rope.sin))
     o2 = g.add(g.mul(x2, rope.cos), g.mul(x1, rope.sin))
     return g.cast(g.reshape(g.concat([o1, o2], axis=3), (b, t, d)), out_dtype)

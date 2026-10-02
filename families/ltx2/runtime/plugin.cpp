@@ -94,6 +94,10 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         audio->tensor_shape("waveform") != options.audio_waveform_shape)
         throw std::runtime_error(
             "LTX-2.5 audio.plan does not match runtime.json audio_waveform_shape");
+    // Every rank upsamples the stage 1 latents itself (a small plan; no transfer needed).
+    std::unique_ptr<ITrtModule> upsampler;
+    if (options.two_stage.enabled())
+        upsampler = ltx2::load(context.backend, context.reader, "latent_upsampler.plan", plain);
     const auto tokenizer_data = ltx2::require_section(context.reader, "tokenizer.json");
     std::shared_ptr<ITokenizer> tokenizer = CreateLtx2BpeTokenizer(
         tokenizer_data.data(), tokenizer_data.size(), /*add_special_tokens=*/false);
@@ -102,5 +106,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     return new LTX2Pipeline(
         std::move(text), std::move(denoiser), std::move(vae), std::move(audio), std::move(options),
         std::move(tokenizer),
-        LTX2DistributedContext{group.owner, group.rank, group.world_size, group.channel});
+        LTX2DistributedContext{group.owner, group.rank, group.world_size, group.channel},
+        std::move(upsampler));
 }

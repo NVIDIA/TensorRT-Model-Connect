@@ -42,23 +42,37 @@ class NpEngine:
         self.stream = int(ck(rt.cudaStreamCreate()))
         self.on_timeout = on_timeout
         self.buffers: dict[str, tuple[int, tuple, object]] = {}
-        for i in range(self.engine.num_io_tensors):
-            name = self.engine.get_tensor_name(i)
+        names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
+        self.inputs = [n for n in names if self.engine.get_tensor_mode(n) == trt.TensorIOMode.INPUT]
+        for name in self.inputs:  # run-time dimensions: allocate the profile maximum
             shape = tuple(self.engine.get_tensor_shape(name))
-            dtype = _NP[self.engine.get_tensor_dtype(name)]
-            nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
-            ptr = int(ck(rt.cudaMalloc(max(nbytes, 1))))
-            self.buffers[name] = (ptr, shape, dtype)
-            self.context.set_tensor_address(name, ptr)
+            if -1 in shape:
+                shape = tuple(self.engine.get_tensor_profile_shape(name, 0)[2])
+                self.context.set_input_shape(name, shape)
+            self._allocate(name, shape)
+        for name in names:
+            if name not in self.inputs:
+                self._allocate(name, tuple(self.context.get_tensor_shape(name)))
+
+    def _allocate(self, name: str, shape: tuple) -> None:
+        dtype = _NP[self.engine.get_tensor_dtype(name)]
+        nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
+        ptr = int(ck(rt.cudaMalloc(max(nbytes, 1))))
+        self.buffers[name] = (ptr, shape, dtype)
+        self.context.set_tensor_address(name, ptr)
 
     def __call__(self, inputs: dict[str, np.ndarray], *, timeout_s: float = 120.0) -> dict[str, np.ndarray]:
         outs = {}
-        for name, (ptr, shape, dtype) in self.buffers.items():
-            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
-                a = np.ascontiguousarray(np.asarray(inputs[name]).astype(dtype))
-                if a.shape != shape:
-                    raise ValueError(f"{name}: shape {a.shape} != engine {shape}")
-                ck(rt.cudaMemcpy(ptr, a.ctypes.data, a.nbytes, rt.cudaMemcpyKind.cudaMemcpyHostToDevice))
+        for name in self.inputs:
+            ptr, shape, dtype = self.buffers[name]
+            a = np.ascontiguousarray(np.asarray(inputs[name]).astype(dtype))
+            if -1 in tuple(self.engine.get_tensor_shape(name)):
+                if a.size > int(np.prod(shape)):
+                    raise ValueError(f"{name}: shape {a.shape} exceeds the profile maximum {shape}")
+                self.context.set_input_shape(name, a.shape)
+            elif a.shape != shape:
+                raise ValueError(f"{name}: shape {a.shape} != engine {shape}")
+            ck(rt.cudaMemcpy(ptr, a.ctypes.data, a.nbytes, rt.cudaMemcpyKind.cudaMemcpyHostToDevice))
         if not self.context.execute_async_v3(self.stream):
             raise RuntimeError("execute_async_v3 failed")
         deadline = time.monotonic() + timeout_s
@@ -68,9 +82,9 @@ class NpEngine:
                     self.on_timeout()
                 raise TimeoutError(f"engine did not finish within {timeout_s} s")
             time.sleep(0.002)
-        for name, (ptr, shape, dtype) in self.buffers.items():
-            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
-                a = np.empty(shape, dtype=dtype)
+        for name, (ptr, _, dtype) in self.buffers.items():
+            if name not in self.inputs:
+                a = np.empty(tuple(self.context.get_tensor_shape(name)), dtype=dtype)
                 ck(rt.cudaMemcpy(a.ctypes.data, ptr, a.nbytes, rt.cudaMemcpyKind.cudaMemcpyDeviceToHost))
                 outs[name] = a.astype(np.float32) if dtype is not np.int32 else a
         return outs

@@ -21,6 +21,10 @@ Engine I/O (``B`` = batch of guidance branches; 1 for the distilled model):
         video_velocity  [B, S, 128]     fp32  (full sequence on every rank)
         audio_velocity  [B, Sa, 128]    fp32
 
+Two-stage plans (``extra_shapes``) also serve the half-resolution stage 1 grid: ``S`` is a run-time
+dimension (one optimization profile spanning both token counts). The RoPE tables of both grids are
+baked in one after the other, and the run-time token count selects the rows of its grid.
+
 Precision: bf16 strongly typed (diffusers runs this model in bf16), with fp32 RMSNorm /
 LayerNorm statistics, fp32 split RoPE, fp32 timestep sinusoids and fp32 GELU/SiLU islands.
 
@@ -68,7 +72,7 @@ from .layers import (
     stg_lerp,
     to_heads,
 )
-from .parallel import add_collective, local_row_indices
+from .parallel import add_collective, local_row_indices, local_row_start
 
 EPS = 1e-6
 _FP16_SAFE_BF16_MAX = 65280.0  # largest bf16 value that is finite in fp16
@@ -316,28 +320,74 @@ def _scalar_like(g: Graph, x, value: float):
     return g.scalar(value, x.dtype, len(x.shape))
 
 
-def add_dit(g: Graph, ckpt: Checkpoint, cfg: DiTConfig, shape: DiTShape, inputs: dict, *, cp: int = 1,
-            stg_blocks: tuple[int, ...] = (), num_layers: int | None = None):
-    """Adds the DiT; returns (video_velocity ``[B, S_local, C]`` bf16, audio_velocity ``[B, Sa, C]`` bf16)."""
-    B = shape.batch
-    S = shape.video_tokens
-    if S % cp:
-        raise ValueError(f"video tokens {S} are not divisible by context_parallel_size {cp}")
+def _check_grids(shape: DiTShape, extra_shapes: tuple[DiTShape, ...], cp: int, cfg: DiTConfig) -> None:
+    for grid in (shape, *extra_shapes):
+        if grid.video_tokens % cp:
+            raise ValueError(f"video tokens {grid.video_tokens} are not divisible by context_parallel_size {cp}")
+        if (grid.batch, grid.audio_frames, grid.text_len, grid.fps) != (shape.batch, shape.audio_frames,
+                                                                          shape.text_len, shape.fps):
+            raise ValueError("every video grid of one DiT plan needs the same batch, audio, text and fps")
+    if len(extra_shapes) > 1 or (extra_shapes and extra_shapes[0].video_tokens == shape.video_tokens):
+        raise ValueError("a DiT plan serves its grid plus at most one grid with a different token count")
     for name, h in (("video", cfg.heads), ("audio", cfg.audio_heads)):
         if h % cp:
             raise ValueError(f"{name} heads {h} are not divisible by context_parallel_size {cp}")
+
+
+def _grid_rows(g: Graph, video_latent, shape: DiTShape, extra: DiTShape, cp: int):
+    """Run-time grid selection of a two-grid plan.
+
+    Returns (latent rows of this rank or None, RoPE rows): the RoPE tables hold the rows of
+    ``shape`` followed by the rows of ``extra``, and the run-time token count picks the block.
+    """
+    s_main, s_extra = shape.video_tokens, extra.video_tokens
+    tokens = g.dim(video_latent, 1)
+    # 0 for the main grid, 1 for the extra grid (exact integer arithmetic on the two counts).
+    main = g.const(np.array([s_main], np.int32), trt.int32)
+    distance = g.sub(main, tokens) if s_extra < s_main else g.sub(tokens, main)
+    which = g.ew(distance, g.const(np.array([abs(s_extra - s_main)], np.int32), trt.int32),
+                 trt.ElementWiseOperation.FLOOR_DIV)
+    offset = g.mul(which, main)
+    if cp == 1:
+        return None, g.arange(tokens, offset)
+    local = g.ew(tokens, g.const(np.array([cp], np.int32), trt.int32), trt.ElementWiseOperation.FLOOR_DIV)
+    rows = g.arange(local, local_row_start(g, cp=cp, local_rows=local))
+    return rows, g.add(rows, offset)
+
+
+def add_dit(g: Graph, ckpt: Checkpoint, cfg: DiTConfig, shape: DiTShape, inputs: dict, *, cp: int = 1,
+            stg_blocks: tuple[int, ...] = (), num_layers: int | None = None,
+            extra_shapes: tuple[DiTShape, ...] = ()):
+    """Adds the DiT; returns (video_velocity ``[B, S_local, C]`` bf16, audio_velocity ``[B, Sa, C]`` bf16).
+
+    ``extra_shapes`` (at most one): a second video grid served by the same plan. The video token
+    count is then a run-time dimension and picks the RoPE rows of its grid.
+    """
+    B = shape.batch
+    S = shape.video_tokens
+    _check_grids(shape, extra_shapes, cp, cfg)
     s_loc = S // cp
     D, Da = cfg.dim, cfg.audio_dim
     n_layers = cfg.layers if num_layers is None else num_layers
 
     tables = rope_tables(cfg, shape)
+    for extra in extra_shapes:
+        more = rope_tables(cfg, extra)
+        for key in ("video", "ca_video"):
+            tables[key] = tuple(np.concatenate([a, b], axis=0) for a, b in zip(tables[key], more[key]))
     rope_v = rope_constants(g, *tables["video"])
     rope_ca_v = rope_constants(g, *tables["ca_video"])
     rope_a = rope_constants(g, *tables["audio"])
     rope_ca_a = rope_constants(g, *tables["ca_audio"])
 
     video_latent = g.cast(inputs["video_latent"], trt.bfloat16)
-    if cp > 1:
+    if extra_shapes:
+        rows, rope_rows = _grid_rows(g, inputs["video_latent"], shape, extra_shapes[0], cp)
+        if rows is not None:
+            video_latent = g.gather(video_latent, rows, 1)
+        rope_v = gather_rope_rows(g, rope_v, rope_rows)
+        rope_ca_v = gather_rope_rows(g, rope_ca_v, rope_rows)
+    elif cp > 1:
         rows = local_row_indices(g, cp=cp, local_rows=s_loc)
         video_latent = g.gather(video_latent, rows, 1)
         rope_v = gather_rope_rows(g, rope_v, rows)
@@ -451,7 +501,7 @@ def _gather_video_rows(g: Graph, y, cp: int, batch: int):
     b, s_loc, c = (int(v) for v in yf.shape)
     if b == 1:
         out = add_collective(g.net, g.reshape(yf, (s_loc, c)), trt.CollectiveOperation.ALL_GATHER, cp)
-        return g.reshape(out, (1, s_loc * cp, c))
+        return g.reshape(out, (1, s_loc * cp if s_loc >= 0 else -1, c))
     t = g.transpose(yf, (1, 0, 2))  # [S/cp, B, C]
     out = add_collective(g.net, t, trt.CollectiveOperation.ALL_GATHER, cp)  # [S, B, C]
     return g.transpose(out, (1, 0, 2))
@@ -459,14 +509,17 @@ def _gather_video_rows(g: Graph, y, cp: int, batch: int):
 
 def build_dit_engine(transformer_dir: str | Path, shape: DiTShape, *, cp_size: int = 1,
                      stg_blocks: tuple[int, ...] = (28,), num_layers: int | None = None,
-                     verbose: bool = False) -> bytes:
+                     verbose: bool = False, extra_shapes: tuple[DiTShape, ...] = ()) -> bytes:
+    """Serialized DiT plan for ``shape``; ``extra_shapes`` adds one more video grid (run-time token count)."""
     ckpt = Checkpoint(transformer_dir)
     cfg = DiTConfig.from_dict(ckpt.config())
     builder, network = new_network(make_logger(verbose))
     g = Graph(network)
     B, S, Sa, L = shape.batch, shape.video_tokens, shape.audio_frames, shape.text_len
+    tokens = sorted({S, *(extra.video_tokens for extra in extra_shapes)})
     inputs = {
-        "video_latent": network.add_input("video_latent", trt.float32, (B, S, cfg.in_channels)),
+        "video_latent": network.add_input("video_latent", trt.float32,
+                                          (B, S if len(tokens) == 1 else -1, cfg.in_channels)),
         "audio_latent": network.add_input("audio_latent", trt.float32, (B, Sa, cfg.audio_in_channels)),
         "video_context": network.add_input("video_context", trt.bfloat16, (B, L, cfg.cross_attention_dim)),
         "audio_context": network.add_input("audio_context", trt.bfloat16, (B, L, cfg.audio_cross_attention_dim)),
@@ -476,14 +529,18 @@ def build_dit_engine(transformer_dir: str | Path, shape: DiTShape, *, cp_size: i
     }
     if cfg.cross_attention_dim != cfg.dim or cfg.audio_cross_attention_dim != cfg.audio_dim:
         raise NotImplementedError("LTX-2.5 DiT builder expects the connector widths to match the streams")
-    video, audio = add_dit(g, ckpt, cfg, shape, inputs, cp=cp_size, stg_blocks=stg_blocks, num_layers=num_layers)
+    video, audio = add_dit(g, ckpt, cfg, shape, inputs, cp=cp_size, stg_blocks=stg_blocks, num_layers=num_layers,
+                           extra_shapes=tuple(extra_shapes))
     if cp_size > 1:
         video = _gather_video_rows(g, video, cp_size, B)
     g.mark_output(video, "video_velocity", trt.float32)
     g.mark_output(audio, "audio_velocity", trt.float32)
-    print(f"[ltx2] Building DiT engine (batch={B}, video_tokens={S}, audio_tokens={Sa}, cp={cp_size}, "
-          f"layers={num_layers or cfg.layers}) ...", file=sys.stderr)
-    return build_plan(builder, network, label="DiT")
+    profile = None
+    if len(tokens) > 1:
+        profile = {"video_latent": tuple((B, s, cfg.in_channels) for s in (tokens[0], S, tokens[-1]))}
+    print(f"[ltx2] Building DiT engine (batch={B}, video_tokens={'/'.join(map(str, tokens))}, audio_tokens={Sa}, "
+          f"cp={cp_size}, layers={num_layers or cfg.layers}) ...", file=sys.stderr)
+    return build_plan(builder, network, label="DiT", profile=profile)
 
 
 def load_dit_config(transformer_dir: str | Path) -> DiTConfig:

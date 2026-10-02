@@ -47,6 +47,21 @@ void test_euler_step_matches_flow_match_euler() {
     check(threw, "euler step rejects mismatched sizes");
 }
 
+void test_two_stage_renoise() {
+    // diffusers _create_noised_state: noise_scale * noise + (1 - noise_scale) * latents.
+    std::vector<float> x{1.0F, -2.0F};
+    trtmc::ltx2_renoise(x, {0.5F, 4.0F}, 0.25F);
+    check(x[0] == 0.25F * 0.5F + 0.75F * 1.0F && x[1] == 0.25F * 4.0F + 0.75F * -2.0F,
+          "re-noise mixes noise and latents");
+    bool threw = false;
+    try {
+        trtmc::ltx2_renoise(x, {1.0F}, 0.5F);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "re-noise rejects mismatched sizes");
+}
+
 void test_prompt_ids_left_pad_and_truncate() {
     std::vector<int32_t> ids;
     std::vector<int32_t> mask;
@@ -184,6 +199,7 @@ void test_vae_tile_latents_and_validation() {
 
 int main() {
     test_euler_step_matches_flow_match_euler();
+    test_two_stage_renoise();
     test_prompt_ids_left_pad_and_truncate();
     test_interleave_stereo();
     test_progress_line_format();

@@ -26,6 +26,17 @@ inline void ltx2_euler_step(std::vector<float>& x, const std::vector<float>& v, 
         x[i] = x[i] + dt * v[i];
 }
 
+// Two-stage re-noise (diffusers LTX2Pipeline._create_noised_state):
+// x = noise_scale * noise + (1 - noise_scale) * x.
+inline void ltx2_renoise(std::vector<float>& x, const std::vector<float>& noise,
+                         float noise_scale) {
+    if (x.size() != noise.size())
+        throw std::runtime_error("LTX-2.5 re-noise: latent and noise sizes differ");
+    const float keep = 1.0F - noise_scale;
+    for (std::size_t i = 0; i < x.size(); ++i)
+        x[i] = noise_scale * noise[i] + keep * x[i];
+}
+
 // Gemma prompt ids for one prompt: the tokenizer ids (no special tokens) right-truncated to
 // seq_len and left-padded with pad_id, as LTX2Pipeline tokenizes with padding_side="left".
 // mask is 1 on tokens and 0 on padding.
