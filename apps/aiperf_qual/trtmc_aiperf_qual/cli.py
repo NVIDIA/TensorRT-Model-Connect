@@ -136,7 +136,7 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
     their report entries, then rejudge; the rest of the result is kept. Generations that sent the
     same requests are reused unless ``regenerate``."""
     from . import models
-    from .runner import SUPPLEMENTARY_SUITES, supplementary
+    from .runner import SUPPLEMENTARY_SUITES, applies, supplementary
     from .services import reference_python
 
     for out in outs:
@@ -148,7 +148,7 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
         # Today's checks against today's native reference (which backend, which precisions).
         model = {**recorded, "supplementary": current["supplementary"], "reference": current["reference"]}
         checks = [{**check, "reuse_outputs": not regenerate} for check in model["supplementary"]
-                  if not only or check["check"] in only]
+                  if (not only or check["check"] in only) and applies(check, model)]
         if not checks:
             continue
         python = reference_python(environment, model)
@@ -173,7 +173,7 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
     today's judging settings from the configuration."""
     import yaml
 
-    from . import judge
+    from . import absolute, judge
     from .config import CONFIG_ROOT
     from .report import write_report
 
@@ -216,6 +216,16 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
 
         result["accuracy"] = [refresh(item) for item in result.get("accuracy", [])]
         for item in result["accuracy"]:
+            if item.get("source") == "absolute":  # both sides' scores are kept: re-apply today's gate
+                declared = next((entry for entry in model.get("absolute", []) if entry["suite"] == item["suite"]), {})
+                if environment is not None and declared.get("gate"):
+                    item["gate"] = dict(declared["gate"])
+                if item.get("metrics") and item["status"] != "error":
+                    item["status"], item["reasons"] = absolute.status(item["metrics"], item["gate"],
+                                                                      expected=item["expected_samples"],
+                                                                      paired=item["samples"])
+                    item["notes"] = absolute.notes(item["metrics"])
+                continue
             if item.get("source") == "family" or item.get("suite") in ("tts-intelligibility", "clip-alignment", "replay-parity"):
                 continue  # the family's own metric and gate, or a whole-output check, decided it
             declared = next((entry for entry in model["accuracy"] if entry["suite"]["suite"] == item["suite"]), {})

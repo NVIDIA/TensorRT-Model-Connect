@@ -5,3 +5,5 @@
 performance:
   l1:
     output_grader_params: {max_distance: 0.5}
+# An OCR model: OCRBench only.
+absolute: [ocrbench]

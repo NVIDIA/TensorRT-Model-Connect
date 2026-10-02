@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A retrieval model: SciFact retrieval and STS (document images: ViDoRe, not yet).
+absolute: [retrieval, sts]

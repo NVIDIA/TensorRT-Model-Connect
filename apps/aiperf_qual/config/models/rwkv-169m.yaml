@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The catalog sequence limit (32) leaves 16 prompt and 8 generated tokens of the MMLU and HumanEval
-# suites: short-context token parity, not the benchmarks.
-coverage: sequence limit 32 - Task suites check 16-token prompts and 8 generated tokens, not full MMLU/HumanEval
+# MMLU is near chance at this size: LAMBADA last-word prediction discriminates. Its passages need a
+# 256-token bundle (the catalog's is 32), which is built as rwkv-169m-qual.
+absolute: [lambada]

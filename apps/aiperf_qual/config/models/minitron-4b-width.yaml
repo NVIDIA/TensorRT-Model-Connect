@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The catalog bundle (max_sequence_length 131072) measured 0.18x; qualify a 4096 bundle.
+candidate:
+  build: {name: minitron-4b-width-qual, max_sequence_length: 4096}

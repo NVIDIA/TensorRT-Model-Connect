@@ -64,6 +64,7 @@ def _accuracy(items: Sequence[Mapping[str, Any]]) -> str:
                 f'</span> {_e(counted(item))}'
                 f' · gate {_e(json.dumps(item.get("gate", {})))}'
                 + (f' · {_e(item.get("benchmark"))} (family case)' if item.get("source") == "family" else "")
+                + (f' · {_e(item.get("benchmark"))} (AIPerf, gold answers)' if item.get("source") == "absolute" else "")
                 + (f' · isolated {_e(item["isolated_check"].get("status"))}' if item.get("isolated_check") else "")
                 + (f' · native@{_e(item["noise_floor"].get("precision"))} {_e(item["noise_floor"].get("passed"))}/'
                    f'{_e(item["noise_floor"].get("total"))}' if item.get("noise_floor") else "")

@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# ImageNetV2 matched-frequency (10,000 new test images over the 1,000 ImageNet classes, open license),
+# 5 images per class, class-stratified; gold is the class index (0-999) the 1000-way classifiers predict.
+suite: imagenetv2-5k
+version: 1
+source:
+  kind: image_archive
+  repo: vaishaal/ImageNetV2
+  revision: d626240be2538720e83103a0e1178d24aca8b12c
+  filename: imagenetv2-matched-frequency.tar.gz
+selection: {method: stratified, field: label, count: 5000}
+fields: {image: image_path}

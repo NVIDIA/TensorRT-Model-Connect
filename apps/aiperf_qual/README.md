@@ -3,10 +3,10 @@
 Accuracy and performance qualification of every ready catalog model against its native
 (unconverted) Hugging Face / PyTorch model, driven by [AIPerf](https://github.com/ai-dynamo/aiperf).
 
-- **Acc**: the TRTMC output must match the native model's for the same inputs. A family's own
-  benchmark qualification accuracy cases (dataset, native reference, metric, gate, including task
-  metrics against labels such as COCO mAP or top-1 accuracy) judge its models; Task suites cover
-  models without one.
+- **Acc**: TRTMC must be as accurate as the native model. Where a gold-labelled benchmark fits the
+  model (`absolute`, most models), both sides answer it and are scored against the gold answers, and
+  the two scores must be close. Otherwise TRTMC's output must match the native model's for the same
+  inputs: the family's own benchmark qualification cases, or Task suites for models without one.
 - **Perf**: TRTMC must be faster than the native model (eager and, where listed, `torch.compile`)
   at the candidate's precision, timed over the whole Task call on both sides.
 
@@ -22,6 +22,29 @@ Accuracy and performance qualification of every ready catalog model against its 
 `trtmc-aiperf-qual plan` prints the derived configuration of every model.
 
 ### Accuracy
+
+**Absolute accuracy** (`absolute` in `config/tasks.yaml` and `config/models`; `absolute.py`). TRTMC
+and the native model (the generic adapter, eager, at the candidate precision) answer the same
+problems and each side is scored against the gold answers. An entry passes when the two scores
+differ by at most `max_delta_points` (or `max_relative` of the native score): "close" is a size; the
+paired McNemar test (right/wrong metrics) or bootstrap interval (corpus metrics) is a note. A model
+whose catalog request samples answers once per seed on each side (mean scores compared). Benchmarks
+whose prompts need a longer bundle than the catalog's (`sequence_length`) build `<profile>-qual`;
+problems that still do not fit are dropped for both sides. Every entry also reports the model-call
+time of both sides on the benchmark's own requests (informational). With `native_replicas` in the
+environment, the native side runs as that many copies of the adapter (as many as fit the GPU), each
+answering one problem at a time: the answers are the same, the native model-call times are then not
+comparable (the workload light stays white).
+
+| Benchmarks | How | Models (examples) |
+|---|---|---|
+| MMLU 5-shot (57 subjects x 20); GSM8K (first 500) and MATH-500 are defined but off by default (their native eager generation dominated the run time) | AIPerf's own benchmarks and graders at pinned dataset revisions (`trtmc_aiperf_plugins.benchmarks`), completions or chat by the catalog request | text LLMs |
+| LAMBADA, TinyStories (last word), BART span reconstruction | AIPerf accuracy plugins with first-word / sentence graders | small LMs, TinyStories, BART |
+| MMStar, OCRBench, RefCOCO, LibriSpeech WER, STS-B Spearman, SciFact retrieval / rerank nDCG, HumanEval pass@1, ImageNetV2 top-1, COCO mAP, ADE20K mIoU, point / text-prompted mask IoU, ETTh1 MSE, WMT / FLORES chrF++ | gold suites sent through AIPerf's `trtmc_task` endpoint, scored by `gold_metrics` | VLMs, ASR, encoders, rerankers, code models, classifiers, detectors, segmenters, forecasters, translators |
+| GenEval-style (images), VBench object dimensions (videos), MagicBrush CLIP-I (edits), SeedTTS ASR round trip | supplementary checks rendering both sides (`geneval`, `edit_similarity`, `tts_intelligibility`) | diffusion, edit, and TTS models |
+
+`absolute: []` keeps the parity cases below (random-weight test models, and models whose scheme is
+not implemented yet).
 
 **Family cases.** Each accuracy case of the family runs its own evaluation
 (`qualification_tests.benchmark_qualification.accuracy.run_accuracy`: dataset, selection, native
@@ -61,8 +84,9 @@ from the catalog manifest).
 | robot control, stereo, geometry | catalog testcase | `parity_numeric` (shapes exact, vectors by cosine) |
 
 **Checks for every model of a Task** (`supplementary`): text-to-speech models also pass an ASR
-round trip (`tts_intelligibility`): TRTMC and the native model speak the SeedTTS sentences, an ASR
-model transcribes both, and TRTMC's word error rate must stay within 0.1 of the native model's.
+round trip (`tts_intelligibility`): TRTMC and the native model speak 200 SeedTTS sentences, Whisper
+large-v3-turbo transcribes both, and TRTMC's mean word error rate against the text must stay within 5
+points of the native model's.
 Sampling models (Bark, MagpieTTS) cannot be judged per sample, but what they say can. Image and
 video generation models also pass a CLIP text-alignment check (`clip_alignment`): both sides render
 PartiPrompts 30 (3 for videos) at the catalog request, CLIP ViT-L/14 scores every image (8 evenly

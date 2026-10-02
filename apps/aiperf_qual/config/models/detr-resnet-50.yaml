@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DETR numbers classes by COCO category id; its family case keeps detections scoring 0.5 or more.
+absolute: [{name: coco, metric_params: {label_space: coco-category-id}, request: {score_threshold: 0.5}}]

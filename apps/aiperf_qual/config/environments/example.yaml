@@ -18,6 +18,7 @@ hf_datasets_cache: /path/to/state/hf-datasets
 hf_hub_cache: /path/to/huggingface/hub                  # checkpoint cache of builds and references
 reference_env_root: /path/to/state/ref-envs             # per-family reference environments
 ports: {reference: 8900, candidate: 8901}
+# native_replicas: 4                     # gold-scored native runs: copies of the HF adapter that fit the GPU (default 1)
 gpu_lock: /path/to/state/gpu.lock                       # optional: serializes timing with builds on this GPU
 build_env: {}                                           # optional extra environment of bundle builds
 

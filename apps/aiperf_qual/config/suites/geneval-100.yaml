@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# GenEval: 100 of its 553 prompts, balanced over its six tags (single object, two objects, counting,
+# colors, position, color attribution), at the catalog request (size, steps, seed); the prompt's requirements
+# (objects, counts, colors, positions) are the gold label. The metadata file is pinned by its sha256.
+suite: geneval-100
+version: 1
+base: catalog
+source:
+  kind: url_jsonl
+  url: https://raw.githubusercontent.com/djghosh13/geneval/main/prompts/evaluation_metadata.jsonl
+  sha256: 5c48e0813e812e3c373fa5c8ed07a8f0a483be30272b4427b0559c8048e67c13
+  label_record: true
+  task_field: tag
+selection: {method: stratified, count: 100, field: task}
+fields: {prompt: prompt}

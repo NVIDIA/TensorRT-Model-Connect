@@ -11,7 +11,7 @@ import signal
 import subprocess
 import time
 import urllib.request
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -20,6 +20,11 @@ from .config import Environment
 
 class ServiceError(RuntimeError):
     pass
+
+
+REPLICA_PORT_OFFSET = 10  # replica i > 0 listens on <port> + 10 + i
+REPLICA_HEADROOM_MIB = 24 * 1024  # GPU memory left free next to the replicas
+REPLICA_GROWTH = 1.5  # a replica's peak over its memory once loaded (activations, KV cache)
 
 
 def _serve_env(environment: Environment) -> dict[str, str]:
@@ -80,14 +85,15 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             mode: str = "eager", precision: str | None = None, deterministic: bool = False,
             isolate_requests: bool = False, python: str | None = None,
             script_measurement: Mapping[str, int] | None = None,
-            keep_artifacts: bool = False, memory_probe: bool = False) -> Iterator[dict[str, Any]]:
+            keep_artifacts: bool = False, memory_probe: bool = False,
+            port: int | None = None) -> Iterator[dict[str, Any]]:
     """Run one server for the model; yields its URL and /v1/serving/info.
 
     backend: ``trtmc`` (candidate), ``reference`` (generic HF adapters), or ``script`` (the family's
     qualification reference). References run in ``python``, the family's reference environment.
     """
     repo = environment.path("repo")
-    port = int(environment["ports"]["candidate" if backend == "trtmc" else "reference"])
+    port = port or int(environment["ports"]["candidate" if backend == "trtmc" else "reference"])
     out.mkdir(parents=True, exist_ok=True)
     command = [python or str(environment["serve_python"]), "-m", "trtmc_perf_serving", "serve",
                "--manifest-root", str(repo / "families"), "--profile", model["catalog_profile"],
@@ -134,6 +140,47 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
         yield {"url": url, "info": info, "records": out / "records.jsonl"}
     finally:
         _stop(process)
+
+
+def gpu_memory_mib() -> tuple[int, int] | None:
+    """(used, total) MiB of the first visible GPU, or None without nvidia-smi."""
+    try:
+        line = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                              capture_output=True, text=True, timeout=60, check=True).stdout.splitlines()[0]
+        used, total = (int(value) for value in line.split(","))
+        return used, total
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+def replicas_that_fit(before: tuple[int, int] | None, after: tuple[int, int] | None, wanted: int) -> int:
+    """How many copies of a server fit: ``after`` (one copy loaded) - ``before`` is one copy's memory;
+    each needs REPLICA_GROWTH times that at its peak, with REPLICA_HEADROOM_MIB left free."""
+    if wanted <= 1 or before is None or after is None:
+        return 1
+    one = max(after[0] - before[0], 1)
+    return max(1, min(wanted, int((after[1] - before[0] - REPLICA_HEADROOM_MIB) // (one * REPLICA_GROWTH))))
+
+
+@contextmanager
+def serving_replicas(environment: Environment, model: dict[str, Any], backend: str, out: Path, *, count: int,
+                     **options: Any) -> Iterator[dict[str, Any]]:
+    """Up to ``count`` copies of one server on the GPU, as many as its free memory holds (the first copy
+    measures what one needs); yields the first copy's service with ``urls`` of all and ``replicas``. Each
+    copy still serves one request at a time; clients spread their requests over ``urls``."""
+    base = int(environment["ports"]["candidate" if backend == "trtmc" else "reference"])
+    before = gpu_memory_mib() if count > 1 else None
+    with ExitStack() as stack:
+        first = stack.enter_context(serving(environment, model, backend, out, **options))
+        urls = [first["url"]]
+        for index in range(1, replicas_that_fit(before, gpu_memory_mib() if before else None, count)):
+            try:
+                extra = stack.enter_context(serving(environment, model, backend, out.parent / f"{out.name}-replica{index}",
+                                                    port=base + REPLICA_PORT_OFFSET + index, **options))
+            except ServiceError:  # the copies started so far serve
+                break
+            urls.append(extra["url"])
+        yield {**first, "urls": urls, "replicas": len(urls)}
 
 
 def _wait_ready(process: subprocess.Popen, url: str, out: Path, timeout_s: float = 1800) -> dict[str, Any]:

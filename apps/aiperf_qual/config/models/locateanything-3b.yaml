@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A grounding model: RefCOCO boxes against the gold boxes (Acc@IoU 0.5).
+absolute: [refcoco]

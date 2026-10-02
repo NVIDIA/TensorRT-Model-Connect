@@ -1,0 +1,254 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""AIPerf's MMLU, GSM8K, and MATH-500 at pinned dataset revisions, on a deterministic subset, and
+LAMBADA (last-word prediction) with its first-word grader.
+
+The subclasses keep AIPerf's lighteval prompts and graders. They pin the dataset revision (AIPerf
+loads the latest one) and select the same problems for every side, configured through the
+environment because AIPerf does not forward benchmark options:
+
+  TRTMC_ACCURACY_PER_TASK         keep the first k problems of each task (MMLU subject)
+  TRTMC_ACCURACY_LIMIT            keep the first n problems overall
+  TRTMC_ACCURACY_MAX_NEW_TOKENS   cap each problem's generation size
+  TRTMC_ACCURACY_TOKEN_LIMIT      drop problems whose prompt plus generation exceed the bundle's
+                                  sequence limit, counted with TRTMC_ACCURACY_TOKENIZER (at
+                                  TRTMC_ACCURACY_TOKENIZER_REVISION; TRTMC_ACCURACY_TRUST_REMOTE_CODE=1)
+  TRTMC_ACCURACY_TEMPLATE_MARGIN  tokens reserved for a chat template around the prompt (default 128)
+  HF_DATASETS_CACHE               the datasets cache (shared by the harness and AIPerf's processes)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections import Counter
+from typing import Any, Callable, Mapping, Sequence
+
+from aiperf.accuracy.benchmarks import gsm8k, math_500, mmlu
+from aiperf.accuracy.benchmarks._datasets_compat import load_dataset
+from aiperf.accuracy.graders.base import BaseGrader
+from aiperf.accuracy.models import BenchmarkProblem, GradingResult
+
+MMLU_REVISION = "31d46ab06e6934bb0d95f6918668716d1db6f921"
+GSM8K_REVISION = "740312add88f781978c0658806c59bc2815b9866"
+MATH500_REVISION = "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+LAMBADA_REVISION = "900124bf3b8235c6daf21033af9948b3f07346c4"
+TINYSTORIES_REVISION = "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64"
+WIKITEXT_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
+BART_SENTENCES = 1000
+# Tokens a greedy continuation needs to spell out one word.
+LAMBADA_GENERATION_SIZE = 8
+# Tokens a chat template adds around the conversation (role markers, generation prompt); the
+# length filter counts the plain prompt plus this margin (plain completions need only a few).
+TEMPLATE_MARGIN = 128
+
+
+def _int(environ: Mapping[str, str], name: str) -> int | None:
+    value = environ.get(name)
+    return int(value) if value else None
+
+
+def _token_counter(environ: Mapping[str, str]) -> Callable[[str], int] | None:
+    if not environ.get("TRTMC_ACCURACY_TOKENIZER"):
+        return None
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(environ["TRTMC_ACCURACY_TOKENIZER"],
+                                              revision=environ.get("TRTMC_ACCURACY_TOKENIZER_REVISION") or None,
+                                              trust_remote_code=environ.get("TRTMC_ACCURACY_TRUST_REMOTE_CODE") == "1")
+    return lambda text: len(tokenizer(text, add_special_tokens=True)["input_ids"])
+
+
+def _prompt_text(problem: BenchmarkProblem) -> str:
+    """The text a problem sends: its chat messages joined, else its prompt."""
+    if problem.raw_messages:
+        return "\n".join(message["content"] for message in problem.raw_messages)
+    return problem.prompt
+
+
+def select(problems: Sequence[BenchmarkProblem], environ: Mapping[str, str] | None = None,
+           count_tokens: Callable[[str], int] | None = None) -> list[BenchmarkProblem]:
+    """The configured subset in dataset order: per-task and overall limits, capped generation, and
+    only problems that fit the sequence limit (the same problems for every side)."""
+    environ = os.environ if environ is None else environ
+    per_task, limit = _int(environ, "TRTMC_ACCURACY_PER_TASK"), _int(environ, "TRTMC_ACCURACY_LIMIT")
+    max_new, token_limit = _int(environ, "TRTMC_ACCURACY_MAX_NEW_TOKENS"), _int(environ, "TRTMC_ACCURACY_TOKEN_LIMIT")
+    if token_limit and count_tokens is None:
+        count_tokens = _token_counter(environ)
+    seen: Counter[str] = Counter()
+    selected = []
+    for problem in problems:
+        if per_task and seen[problem.task] >= per_task:
+            continue
+        metadata = dict(problem.metadata or {})
+        if max_new:
+            metadata["generation_size"] = min(int(metadata.get("generation_size", max_new)), max_new)
+        if token_limit and count_tokens is not None:
+            margin = _int(environ, "TRTMC_ACCURACY_TEMPLATE_MARGIN")
+            needed = (count_tokens(_prompt_text(problem)) + (TEMPLATE_MARGIN if margin is None else margin)
+                      + int(metadata.get("generation_size", 0)))
+            if needed > token_limit:
+                continue
+        seen[problem.task] += 1
+        selected.append(problem.model_copy(update={"metadata": metadata}))
+        if limit and len(selected) >= limit:
+            break
+    return selected
+
+
+class _Configured:
+    """The selection settings: the process environment, or a mapping the harness sets."""
+
+    environ: Mapping[str, str] | None = None
+
+    def _cache(self) -> dict[str, str]:
+        cache = (os.environ if self.environ is None else self.environ).get("HF_DATASETS_CACHE")
+        return {"cache_dir": cache} if cache else {}
+
+
+class PinnedMMLU(_Configured, mmlu.MMLUBenchmark):
+    async def load_problems(self, tasks: list[str] | None, n_shots: int, enable_cot: bool) -> list[BenchmarkProblem]:
+        from datasets import DatasetDict
+
+        problems: list[BenchmarkProblem] = []
+        for subject in self._resolve_subjects(tasks):
+            # Only the few-shot (dev) and evaluation (test) splits: the full subject config also
+            # prepares a ~100k-row auxiliary_train split.
+            dev, test = await asyncio.to_thread(load_dataset, mmlu.DATASET_NAME, subject, split=["dev", "test"],
+                                                revision=MMLU_REVISION, **self._cache())
+            problems += await asyncio.to_thread(self._build_subject_problems, DatasetDict({"dev": dev, "test": test}),
+                                                subject, n_shots, enable_cot)
+        return select(problems, self.environ)
+
+
+class PinnedGSM8K(_Configured, gsm8k.GSM8KBenchmark):
+    async def load_problems(self, tasks: list[str] | None, n_shots: int, enable_cot: bool) -> list[BenchmarkProblem]:
+        dataset = await asyncio.to_thread(load_dataset, gsm8k.DATASET_NAME, gsm8k.DATASET_CONFIG, split="test",
+                                          revision=GSM8K_REVISION, **self._cache())
+        return select(await asyncio.to_thread(self._build_problems, dataset), self.environ)
+
+
+class PinnedMath500(_Configured, math_500.Math500Benchmark):
+    async def load_problems(self, tasks: list[str] | None, n_shots: int, enable_cot: bool) -> list[BenchmarkProblem]:
+        dataset = await asyncio.to_thread(load_dataset, math_500.DATASET_NAME, split="test", revision=MATH500_REVISION,
+                                          **self._cache())
+        return select(await asyncio.to_thread(self._build_problems, dataset), self.environ)
+
+
+class Lambada(_Configured):
+    """LAMBADA (OpenAI version, test split): each passage without its last word is the prompt, the
+    last word the gold answer; a greedy continuation must start with it (lm-eval's greedy check)."""
+
+    def __init__(self, run: Any = None, **kwargs: Any) -> None:
+        self.run = run
+
+    async def load_problems(self, tasks: list[str] | None, n_shots: int, enable_cot: bool) -> list[BenchmarkProblem]:
+        dataset = await asyncio.to_thread(load_dataset, "EleutherAI/lambada_openai", "default", split="test",
+                                          revision=LAMBADA_REVISION, **self._cache())
+        problems = []
+        for row in dataset:
+            context, word = row["text"].rsplit(" ", 1)
+            problems.append(BenchmarkProblem(prompt=context, ground_truth=word, task="lambada",
+                                             metadata={"generation_size": LAMBADA_GENERATION_SIZE},
+                                             raw_messages=[{"role": "user", "content": context}]))
+        return select(problems, self.environ)
+
+
+PUNCTUATION = ".,;:!?\"'”’)]}"
+
+
+class TinyStories(_Configured):
+    """TinyStories (validation): each story without its last word is the prompt, that word (without
+    punctuation) the gold answer; scored like LAMBADA (TRTMC_ACCURACY_LIMIT keeps the first stories
+    that fit the sequence limit)."""
+
+    def __init__(self, run: Any = None, **kwargs: Any) -> None:
+        self.run = run
+
+    async def load_problems(self, tasks: list[str] | None, n_shots: int, enable_cot: bool) -> list[BenchmarkProblem]:
+        dataset = await asyncio.to_thread(load_dataset, "roneneldan/TinyStories", split="validation",
+                                          revision=TINYSTORIES_REVISION, **self._cache())
+        problems = []
+        for row in dataset:
+            text = row["text"].strip()
+            if " " not in text:
+                continue
+            context, word = text.rsplit(" ", 1)
+            word = word.rstrip(PUNCTUATION)
+            if word.isalpha():
+                problems.append(BenchmarkProblem(prompt=context, ground_truth=word, task="tinystories",
+                                                 metadata={"generation_size": LAMBADA_GENERATION_SIZE},
+                                                 raw_messages=[{"role": "user", "content": context}]))
+        return select(problems, self.environ)
+
+
+class BartDenoise(_Configured):
+    """BART's pre-training task on WikiText-103 test sentences (10-40 words): three consecutive words in
+    the middle become ``<mask>``; the gold answer is the original sentence."""
+
+    def __init__(self, run: Any = None, **kwargs: Any) -> None:
+        self.run = run
+
+    async def load_problems(self, tasks: list[str] | None, n_shots: int, enable_cot: bool) -> list[BenchmarkProblem]:
+        dataset = await asyncio.to_thread(load_dataset, "Salesforce/wikitext", "wikitext-103-raw-v1", split="test",
+                                          revision=WIKITEXT_REVISION, **self._cache())
+        problems = []
+        for row in dataset:
+            line = row["text"].strip()
+            if not line or line.startswith("="):
+                continue
+            for sentence in line.split(" . "):
+                words = sentence.replace(" @-@ ", "-").replace(" @,@ ", ",").replace(" @.@ ", ".").split()
+                if 10 <= len(words) <= 40 and len(problems) < BART_SENTENCES:
+                    middle = len(words) // 2 - 1
+                    masked = " ".join(words[:middle] + ["<mask>"] + words[middle + 3:]) + " ."
+                    original = " ".join(words) + " ."
+                    problems.append(BenchmarkProblem(prompt=masked, ground_truth=original, task="bart-denoise",
+                                                     metadata={"generation_size": 96},
+                                                     raw_messages=[{"role": "user", "content": masked}]))
+        return select(problems, self.environ)
+
+
+def _sentence(text: str) -> str:
+    """Whitespace collapsed, and none before punctuation (WikiText writes ``film , television``)."""
+    import re
+
+    return re.sub(r"\s+([,.;:!?'])", r"\1", " ".join((text or "").split()))
+
+
+class SentenceExactGrader(BaseGrader):
+    """Correct when the response equals the gold sentence up to whitespace."""
+
+    def extract_answer(self, response_text: str, **kwargs: Any) -> str:
+        return _sentence(response_text)
+
+    async def grade(self, response_text: str, ground_truth: str, **kwargs: Any) -> GradingResult:
+        answer, gold = self.extract_answer(response_text), _sentence(ground_truth)
+        return GradingResult(correct=bool(answer) and answer == gold, unparsed=not answer, confidence=1.0,
+                             reasoning="whitespace-normalized sentence", extracted_answer=answer[:200],
+                             ground_truth=gold[:200])
+
+
+class FirstWordGrader(BaseGrader):
+    """Correct when the response's first word, without trailing punctuation, equals the gold word."""
+
+    def extract_answer(self, response_text: str, **kwargs: Any) -> str:
+        words = (response_text or "").split()
+        return words[0].rstrip(PUNCTUATION) if words else ""
+
+    async def grade(self, response_text: str, ground_truth: str, **kwargs: Any) -> GradingResult:
+        answer, gold = self.extract_answer(response_text), (ground_truth or "").strip()
+        return GradingResult(correct=bool(answer) and answer == gold, unparsed=not answer, confidence=1.0,
+                             reasoning="first word of the continuation", extracted_answer=answer, ground_truth=gold)
+
+
+BENCHMARKS: dict[str, type] = {"trtmc_mmlu": PinnedMMLU, "trtmc_gsm8k": PinnedGSM8K, "trtmc_math500": PinnedMath500,
+                               "trtmc_lambada": Lambada, "trtmc_tinystories": TinyStories,
+                               "trtmc_bart_denoise": BartDenoise}
+
+
+def problems(benchmark: str, tasks: list[str] | None, n_shots: int, environ: Mapping[str, str]) -> list[Any]:
+    """The problems a run of ``benchmark`` sends under ``environ`` (the harness counts and labels them)."""
+    loader = BENCHMARKS[benchmark](run=None)
+    loader.environ = dict(environ)
+    return asyncio.run(loader.load_problems(tasks, n_shots, False))

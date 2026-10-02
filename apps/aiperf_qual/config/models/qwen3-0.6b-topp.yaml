@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Sampled (T=0.7, top_p 0.9): three seeds per side. GSM8K is off for now (config/tasks.yaml).
+absolute: [mmlu]

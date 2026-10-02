@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Random weights: no accuracy to score against gold answers. Token parity with the native model on the
+# Task suites (60 prompts) instead of the family's 10.
+absolute: []
+accuracy_source: tasks

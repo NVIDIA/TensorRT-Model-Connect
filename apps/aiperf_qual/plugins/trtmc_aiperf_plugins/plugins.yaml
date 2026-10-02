@@ -53,7 +53,57 @@ accuracy_benchmark:
       default_grader: parity_token_exact
       default_n_shots: 0
 
+  # AIPerf's own benchmarks at pinned dataset revisions on a deterministic subset (benchmarks.py);
+  # both sides are scored against the gold answers with AIPerf's graders.
+  trtmc_mmlu:
+    class: trtmc_aiperf_plugins.benchmarks:PinnedMMLU
+    description: AIPerf MMLU (lighteval prompt) at a pinned revision, first k problems per subject.
+    metadata:
+      default_grader: multiple_choice
+      default_n_shots: 5
+
+  trtmc_gsm8k:
+    class: trtmc_aiperf_plugins.benchmarks:PinnedGSM8K
+    description: AIPerf GSM8K (lighteval prompt) at a pinned revision.
+    metadata:
+      default_grader: lighteval_gsm8k
+      default_n_shots: 0
+
+  trtmc_math500:
+    class: trtmc_aiperf_plugins.benchmarks:PinnedMath500
+    description: AIPerf MATH-500 (lighteval prompt) at a pinned revision, generation size capped.
+    metadata:
+      default_grader: lighteval_latex
+      default_n_shots: 0
+
+  trtmc_lambada:
+    class: trtmc_aiperf_plugins.benchmarks:Lambada
+    description: LAMBADA (OpenAI version) last-word prediction at a pinned revision.
+    metadata:
+      default_grader: trtmc_first_word
+      default_n_shots: 0
+
+  trtmc_tinystories:
+    class: trtmc_aiperf_plugins.benchmarks:TinyStories
+    description: TinyStories (validation) last-word prediction at a pinned revision.
+    metadata:
+      default_grader: trtmc_first_word
+      default_n_shots: 0
+
+  trtmc_bart_denoise:
+    class: trtmc_aiperf_plugins.benchmarks:BartDenoise
+    description: BART span-mask reconstruction of WikiText-103 test sentences at a pinned revision.
+    metadata:
+      default_grader: trtmc_sentence_exact
+      default_n_shots: 0
+
 accuracy_grader:
+  trtmc_sentence_exact:
+    class: trtmc_aiperf_plugins.benchmarks:SentenceExactGrader
+    description: The response must equal the gold sentence up to whitespace.
+  trtmc_first_word:
+    class: trtmc_aiperf_plugins.benchmarks:FirstWordGrader
+    description: The response's first word (trailing punctuation removed) must equal the gold word.
   parity_token_exact:
     class: trtmc_aiperf_plugins.accuracy:TokenExactGrader
     description: Generated token IDs must equal the reference golden (text if IDs are absent).

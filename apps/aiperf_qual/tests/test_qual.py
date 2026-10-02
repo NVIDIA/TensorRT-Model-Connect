@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -291,15 +292,32 @@ def test_models_are_derived_from_the_catalog_the_family_cases_and_task_defaults(
 
     environment = Environment({"repo": str(REPOSITORY)})
     qwen = resolve_model("qwen3-0.6b-fp16", environment)
-    # The family's MMLU continuation case owns Acc; its build (one more position) owns the bundle.
-    assert qwen["accuracy_source"] == "family" and qwen["accuracy"] == [] and qwen["family_accuracy"]
+    # Gold-scored MMLU replaces the parity cases; its prompts need a 4096-token bundle.
+    assert qwen["accuracy_source"] == "absolute" and qwen["accuracy"] == [] and not qwen["family_accuracy"]
+    assert [(item["suite"], item["endpoint"]) for item in qwen["absolute"]] == [("mmlu-5shot", "chat")]
     assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16-qual/qwen3-0.6b-fp16.bundle"
-    assert qwen["candidate"]["build"]["max_sequence_length"] == 257
+    assert qwen["candidate"]["build"]["max_sequence_length"] == 4096
     assert qwen["performance"]["l1"]["suite"]["source"] == {"kind": "qualification_perf", "profile": "qwen3-0.6b-fp16"}
+    small = resolve_model("falcon-rw-1b", environment)  # MMLU is near chance: LAMBADA on the catalog length
+    assert [item["suite"] for item in small["absolute"]] == ["lambada"] and small["candidate"]["max_sequence_length"] == 256
     detr = resolve_model("detr-resnet-50", environment)
-    assert detr["candidate"]["build"]["image_height"] == 1333 and detr["family_accuracy"]
+    assert detr["candidate"]["build"]["image_height"] == 1333 and not detr["family_accuracy"]
+    coco, = detr["absolute"]  # COCO mAP in DETR's own class numbering at its family score threshold
+    assert coco["metric_params"] == {"label_space": "coco-category-id"}
+    assert coco["suite_definition"]["request"] == {"score_threshold": 0.5}
     assert (detr["reference"]["backend"], detr["reference"]["fallback"]) == ("reference", "script")
-    tiny = resolve_model("tinyllama-1.1b", environment)  # no family case: the Task suites
+    stories = resolve_model("mixtral-stories-15m", environment)
+    assert [item["suite"] for item in stories["absolute"]] == ["tinystories"]
+    import shutil
+    import tempfile
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    with tempfile.TemporaryDirectory() as directory:  # `absolute: []` and no family case: the Task suites
+        root = Path(directory) / "config"
+        shutil.copytree(CONFIG_ROOT, root)
+        (root / "models/mixtral-stories-15m.yaml").write_text("absolute: []\n")
+        tiny = resolve_model("mixtral-stories-15m", environment, root=root)
     assert tiny["accuracy_source"] == "tasks" and [item["suite"]["suite"] for item in tiny["accuracy"]] == [
         "mmlu-0shot-30", "humaneval-30"]
     assert tiny["performance"]["l1"]["suite"]["source"]["kind"] == "catalog_testcase"
@@ -520,7 +538,9 @@ def test_task_suites_fit_the_models_without_family_cases():
     assert vlm["suite"] == "imagenette-vlm-30" and "tench" in vlm["request"]["prompt"]
     assert tasks["object_detection"]["accuracy"][0]["suite"] == "coco2017-detect-100"
     timesfm = resolve_model("timesfm-2.0-500m-official", _environment())
-    assert timesfm["accuracy"] == [] and timesfm["family_accuracy"]  # the family's ETTh1 case
+    # Rolling ETTh1 windows in the family case's columns, context, and horizon, every hour.
+    window = timesfm["absolute"][0]["suite_definition"]["source"]["window"]
+    assert (window["context_length"], window["prediction_length"], window["stride"]) == (2048, 128, 1)
 
 
 

@@ -23,7 +23,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import alignment, family, intelligibility, judge, sweep
+from . import absolute, alignment, edits, family, geneval, intelligibility, judge, sweep
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
 from .family import sampled_request
@@ -61,6 +61,47 @@ def probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any]
         urllib.request.urlopen(call, timeout=3600).read()
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-600:]}") from error
+
+
+# A benchmark bundle longer than this that rejects requests is rebuilt at this length once.
+FALLBACK_SEQUENCE_LENGTH = 2048
+
+
+def _probe_candidate(environment: Environment, model: Mapping[str, Any], suite: Suite | None, out: Path) -> None:
+    with serving(environment, dict(model), "trtmc", out) as service:
+        probe(service, model["operation"], suite.samples[0]["request"] if suite else {})
+
+
+def serviceable_candidate(environment: Environment, model: dict[str, Any], plans: dict[str, Any], suite: Suite | None,
+                          python: str, out: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """TRTMC must serve one request before the native model spends hours on the benchmarks. A longer
+    benchmark bundle (``-qual``) that rejects every request (some families fail TensorRT enqueue at
+    4096 tokens) is rebuilt once at FALLBACK_SEQUENCE_LENGTH; its problems are re-planned to fit."""
+    import copy
+
+    from . import bundles
+
+    try:
+        _probe_candidate(environment, model, suite, out / "absolute-probe")
+        return model, plans
+    except Exception as error:  # noqa: BLE001 - maybe a shorter bundle serves
+        first = f"{type(error).__name__}: {str(error)[-300:]}"
+    build = model["candidate"].get("build") or {}
+    length = int(model["candidate"].get("max_sequence_length") or 0)
+    if length <= FALLBACK_SEQUENCE_LENGTH or not build.get("max_sequence_length"):
+        raise RuntimeError(first)
+    shorter = copy.deepcopy(model)
+    name = f"{model['catalog_profile']}-qual-{FALLBACK_SEQUENCE_LENGTH}"
+    shorter["candidate"].update(build={**build, "name": name, "max_sequence_length": FALLBACK_SEQUENCE_LENGTH},
+                                max_sequence_length=FALLBACK_SEQUENCE_LENGTH,
+                                bundle=f"{name}/{model['candidate']['bundle'].split('/', 1)[1]}")
+    built = bundles.ensure_bundle(environment, shorter, python, out / f"retry-{FALLBACK_SEQUENCE_LENGTH}")
+    if built["status"] == "failed":
+        raise RuntimeError(f"{first}; the {FALLBACK_SEQUENCE_LENGTH}-token rebuild failed: {built.get('reason', '')[:300]}")
+    _probe_candidate(environment, shorter, suite, out / f"absolute-probe-{FALLBACK_SEQUENCE_LENGTH}")
+    shorter["candidate"]["sequence_fallback"] = (f"the {length}-token bundle rejected requests ({first[:200]}); "
+                                                 f"benchmarks and Perf on a {FALLBACK_SEQUENCE_LENGTH}-token bundle")
+    return shorter, {item["suite"]: absolute.plan(environment, shorter, item) for item in shorter["absolute"]}
 
 
 def _task_url(service: Mapping[str, Any], operation: str) -> list[str]:
@@ -169,21 +210,33 @@ def run_completeness(run: Any, expected: int) -> str | None:
 
 # Checks that judge whole outputs per Task (``supplementary``); each returns report entries.
 SUPPLEMENTARY_CHECKS = {"tts_intelligibility": intelligibility.run, "clip_alignment": alignment.run,
-                        "replay_parity": alignment.run_replay}
+                        "replay_parity": alignment.run_replay, "geneval": geneval.run,
+                        "edit_similarity": edits.run}
 # The report entries each check writes (rejudge leaves them; recheck replaces them).
 SUPPLEMENTARY_SUITES = {"tts_intelligibility": ("tts-intelligibility",),
-                        "clip_alignment": ("clip-alignment", "replay-parity"), "replay_parity": ("replay-parity",)}
+                        "clip_alignment": ("clip-alignment", "replay-parity"), "replay_parity": ("replay-parity",),
+                        "geneval": ("geneval", "vbench-objects"), "edit_similarity": ("edit-similarity",)}
+
+
+def applies(check: Mapping[str, Any], model: Mapping[str, Any]) -> bool:
+    """A supplementary check limited to ``only_families`` skips other families (e.g. GenEval: images)."""
+    return not check.get("only_families") or model.get("family") in check["only_families"]
 
 
 def expected_suites(model: Mapping[str, Any]) -> dict[str, str]:
     """Every Accuracy result the configuration requires, mapped to the phase that produces it."""
     expected = {item["suite"]["suite"]: "candidate" for item in model.get("accuracy", [])}
     expected.update({name: "family_accuracy" for name in model.get("family_accuracy", [])})
+    expected.update({item["suite"]: "candidate" for item in model.get("absolute", [])})
     for check in model.get("supplementary", []):
+        if not applies(check, model):
+            continue
         replay = model.get("family") in check.get("latent_replay_families", ())
         names = {"tts_intelligibility": ["tts-intelligibility"],
                  "clip_alignment": ["clip-alignment"] + (["replay-parity"] if replay else []),
-                 "replay_parity": ["replay-parity"] if replay else []}.get(check.get("check"), [])
+                 "replay_parity": ["replay-parity"] if replay else [],
+                 "geneval": [check.get("entry", "geneval")],
+                 "edit_similarity": [check.get("entry", "edit-similarity")]}.get(check.get("check"), [])
         expected.update({name: check["check"] for name in names})
     return expected
 
@@ -442,8 +495,10 @@ def _time_reference(environment: Environment, model: Mapping[str, Any], l1: Mapp
 def _candidate(environment: Environment, model: Mapping[str, Any], suites: Mapping[str, Suite],
                goldens: Mapping[str, Any], noise: Mapping[str, Any], l1: Mapping[str, Any] | None,
                perf_suite: Suite | None, reference_perf: Mapping[str, tuple], accuracy: list, performance: list,
-               out: Path) -> None:
+               out: Path, absolute_runs: Mapping[str, Any] | None = None) -> None:
     with serving(environment, model, "trtmc", out / "candidate") as service:
+        if absolute_runs:
+            accuracy.extend(absolute.candidate_entries(environment, service, model, out, **absolute_runs))
         if goldens:
             accuracy.extend(_run_accuracy(environment, service, model, suites, goldens, noise, out, "persistent"))
         if not l1:
@@ -512,6 +567,12 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     goldens, golden_status, noise = references or ({}, {}, {})
     accuracy: list[dict[str, Any]] = []
     performance_l1: list[dict[str, Any]] = []
+    # Absolute accuracy: the problems both sides answer (selected and length-checked outside the GPU lock).
+    plans = phases.run("absolute_plan", lambda: {item["suite"]: absolute.plan(environment, model, item)
+                                                 for item in model["absolute"]}) if model.get("absolute") else None
+    if model.get("absolute") and plans is None:
+        accuracy.extend(absolute.error_entry(item, 0, f"problem selection: {phases.errors.get('absolute_plan')}")
+                        for item in model["absolute"])
     if model.get("family_accuracy"):
         def family_phase() -> None:
             entries = family.run(environment, model, out, python)
@@ -519,14 +580,31 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
             accuracy.extend(entries)
         phases.run("family_accuracy", family_phase)
     for check in model.get("supplementary", []):
-        if check.get("check") in SUPPLEMENTARY_CHECKS:
+        if check.get("check") in SUPPLEMENTARY_CHECKS and applies(check, model):
             def run_check(check: Mapping[str, Any] = check) -> None:
                 accuracy.extend(supplementary(environment, model, check, python, out))
             phases.run(check["check"], run_check)
+    if plans:  # outside the GPU lock: a rebuild takes it
+        served = phases.run("absolute_probe", lambda: serviceable_candidate(environment, model, plans, perf_suite,
+                                                                            python, out))
+        if served:
+            model, plans = served
+            (out / "model.json").write_text(json.dumps(model, indent=2, default=str))
     with gpu_exclusive(environment):
         reference_perf = _reference_perf(environment, model, l1, perf_suite, python, phases, out) if l1 else {}
+        absolute_runs = None
+        if plans:
+            if "absolute_probe" in phases.errors:
+                accuracy.extend(absolute.error_entry(item, len(plans[item["suite"]]),
+                                                     f"TRTMC cannot serve the model: {phases.errors['absolute_probe'][:500]}")
+                                for item in model["absolute"])
+            else:
+                native = phases.run("absolute_native", lambda: absolute.run_native(
+                    environment, model, python, plans, out, perf_suite.samples[0]["request"] if perf_suite else None))
+                absolute_runs = {"plans": plans, "native": native or {},
+                                 "native_error": phases.errors.get("absolute_native")}
         phases.run("candidate", lambda: _candidate(environment, model, suites, goldens, noise, l1, perf_suite,
-                                                   reference_perf, accuracy, performance_l1, out))
+                                                   reference_perf, accuracy, performance_l1, out, absolute_runs))
         l2 = model["performance"].get("l2")
         performance_l2: dict[str, Any] = {}
         # The sweeps start the generic adapter: only where L1 could time it (not a script fallback).
@@ -573,6 +651,8 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
                        f"{environment.values.get('environment_file', '<environment.yaml>')} --out {out}",
               "family": model.get("family"), "started": started, "platform": {"id": platform, **fingerprint},
               **({"coverage": model["coverage"]} if model.get("coverage") else {}),
+              **({"candidate_note": model["candidate"]["sequence_fallback"]}
+                 if model["candidate"].get("sequence_fallback") else {}),
               "reference": {key: reference.get(key) for key in ("backend", "precision", "perf_precision",
                                                                  "timing_precision", "fallback_from", "noise_error",
                                                                  "precision_fallback_from")},

@@ -9,3 +9,5 @@ pillow
 pyyaml
 soundfile
 transformers
+# chrF++ of translations (absolute accuracy)
+sacrebleu==2.5.1

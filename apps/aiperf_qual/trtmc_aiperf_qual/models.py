@@ -122,8 +122,9 @@ def _suite(reference: str | Mapping[str, Any], profile: str, repository: Path) -
         # The family's qualification case declares the window its model forecasts from.
         declared = [case["window"] for case in _qualification_cases(repository, profile, "accuracy")
                     if isinstance(case.get("window"), Mapping)]
-        if declared:
-            suite["source"] = {**suite["source"], "window": dict(declared[0])}
+        if declared:  # ``window_overrides`` (for example every hour's window) apply on top
+            window = {**dict(declared[0]), **dict(suite["source"].get("window_overrides") or {})}
+            suite["source"] = {**suite["source"], "window": window}
     return suite
 
 
@@ -141,6 +142,31 @@ def _bound_generation(suite: dict[str, Any], item: Mapping[str, Any], catalog_mo
                                     "trust_remote_code": trust_remote_code,
                                     "max_tokens": int(limit) - new_tokens - GENERATION_MARGIN}
     return suite
+
+
+def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mapping[str, Any],
+              quantized: bool) -> list[dict[str, Any]]:
+    """Absolute-accuracy benchmarks (config/tasks.yaml ``benchmarks``; a model may name one with
+    overrides, ``{name: gsm8k, limit: 300}``) as the model runs them: the chat route when its catalog
+    request uses the chat template, the quantization or sampling gate, and one repetition per seed
+    when the catalog request samples (top_k 1 is greedy)."""
+    sampled = float(testcase.get("temperature") or 0.0) > 0.0 and int(testcase.get("top_k") or 0) != 1
+    items = []
+    for entry in names:
+        overrides = dict(entry) if isinstance(entry, Mapping) else {"name": entry}
+        name = overrides.pop("name", None)
+        if name not in definitions:
+            raise ConfigError(f"unknown absolute-accuracy benchmark {name!r}")
+        item = {**definitions[name], **overrides}
+        gates = {"quantized": item.pop("quantized_gate", None), "sampled": item.pop("sampled_gate", None)}
+        seeds = item.pop("seeds_when_sampled", [1, 2, 3])
+        if sampled:
+            item.update(gate=gates["sampled"] or item["gate"], seeds=list(seeds))
+        elif quantized and gates["quantized"]:
+            item["gate"] = gates["quantized"]
+        item.setdefault("endpoint", "chat" if testcase.get("use_chat_template") else "completions")
+        items.append(item)
+    return items
 
 
 def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_ROOT) -> dict[str, Any]:
@@ -186,7 +212,17 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     # A family's own accuracy cases (dataset, reference, metric, gate) qualify its models; the Task
     # suites cover models without one.
     family_cases = _qualification_cases(repository, profile, "accuracy")
-    accuracy_source = config.get("accuracy_source") or ("family" if family_cases else "tasks")
+    # Absolute accuracy (both sides scored against gold answers) replaces the parity suites.
+    absolute = _absolute(list(config.get("absolute") or []), tasks.get("benchmarks", {}),
+                         (manifest.get("testcases") or [{}])[0], bool(quantization))
+    for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
+        if item.get("metric"):
+            suite = _suite(item["suite_definition"], profile, repository)
+            if item.get("request"):
+                suite = {**suite, "request": {**suite.get("request", {}), **item.pop("request")}}
+            item["suite_definition"] = suite
+    accuracy_source = config.get("accuracy_source") or (
+        "absolute" if absolute else "family" if family_cases else "tasks")
     accuracy = []
     for item in config.get("accuracy", []) if accuracy_source == "tasks" else []:
         suite = _suite(item["suite"], profile, repository)
@@ -227,6 +263,15 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         profile, manifest, family_cases[0] if family_cases else case))
     if revision and not manifest.get("hf_revision") and not build.get("hf_revision"):
         build = {"name": f"{profile}-qual", **build, "hf_revision": revision}  # build the pinned checkpoint
+    # The benchmarks' prompts and answers must fit the bundle: a longer one is built under the -qual name.
+    needed = max((int(item.get("sequence_length", 0)) for item in absolute), default=0)
+    if needed and config.get("absolute_sequence_length"):  # a model whose longer bundles cannot run
+        needed = min(needed, int(config["absolute_sequence_length"]))
+    current = build.get("max_sequence_length") or catalog_model.build_settings.get("max_sequence_length")
+    if needed and (not current or int(current) < needed):
+        # A capped length gets its own name: bundles are reused by path, whatever their length.
+        name = f"{profile}-qual-{needed}" if config.get("absolute_sequence_length") else f"{profile}-qual"
+        build = {**build, "name": name, "max_sequence_length": needed}
     bundle = f"{build.get('name', profile)}/{build.get('bundle', catalog_model.bundle_name)}"
     # The native model the family declares (another checkpoint, e.g. a base model, or a Diffusers export)
     # and its pin; otherwise the candidate's own checkpoint at the candidate's revision.
@@ -255,6 +300,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
                       "perf_precision": perf_precision, "trust_remote_code": trust_remote_code},
         "noise_floor": bool(config.get("noise_floor", True)) and perf_precision != golden_precision,
         "accuracy_source": accuracy_source,
+        "absolute": absolute,
         "family_accuracy": [item["name"] for item in family_cases] if accuracy_source == "family" else [],
         "accuracy": accuracy,
         "supplementary": [dict(item) for item in config.get("supplementary", [])],

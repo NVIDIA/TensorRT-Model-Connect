@@ -14,7 +14,16 @@ def _fmt(value: Any, digits: int = 3) -> str:
 
 
 def counted(item: Mapping[str, Any], limit: int = 3) -> str:
-    """``passed/samples``, or the first numeric metrics when the family grades aggregates only."""
+    """``passed/samples``, both sides' gold-scored accuracy, or the first numeric metrics when the
+    family grades aggregates only."""
+    metrics = item.get("metrics") or {}
+    if item.get("source") == "absolute" and "trtmc_score" in metrics:
+        return (f"TRTMC {metrics['trtmc_score']} vs native {metrics['native_score']} {item.get('benchmark')} "
+                f"(Δ {metrics['delta_points']:+.3f}, 95% CI {metrics.get('ci95')}; {metrics.get('units')} units)")
+    if item.get("source") == "absolute" and "trtmc_accuracy" in metrics:
+        p_value = f", McNemar p {metrics['mcnemar_p_worse']:.3g}" if metrics.get("mcnemar_p_worse") is not None else ""
+        return (f"TRTMC {metrics['trtmc_accuracy']}% vs native {metrics['native_accuracy']}% "
+                f"(Δ {metrics['delta_points']:+.2f} pt{p_value}; {item.get('samples')} problems)")
     if item.get("passed") is not None:
         return f"{item['passed']}/{item.get('samples')}"
     values = [f"{name} {value:.4g}" for name, value in (item.get("metrics") or {}).items()
@@ -60,11 +69,13 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
              f"aiperf {result['provenance'].get('aiperf')}, plugins {result['provenance'].get('plugins')}.", ""]
     if result.get("coverage"):
         lines += [f"Coverage: {result['coverage']}", ""]
+    if result.get("candidate_note"):
+        lines += [f"TRTMC bundle: {result['candidate_note']}", ""]
     if reference.get("noise_error"):
         lines += [f"Noise floor not available: {reference['noise_error'][:300]}", ""]
     if reference.get("fallback_from"):
         lines += [f"Generic reference failed, fell back to the family script: {reference['fallback_from'][:300]}", ""]
-    lines += ["## Accuracy (parity with the native model)", "",
+    lines += ["## Accuracy (absolute: both sides scored against gold answers; otherwise parity with the native model)", "",
               "| suite | source | status | passed | gate | native at the candidate precision | isolated re-check | "
               "golden / evidence |", "|---|---|---|---|---|---|---|---|"]
     for item in result.get("accuracy", []):
@@ -78,14 +89,26 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
                 else json.dumps(item.get("gate", {})))
         count = counted(item) if item.get("samples") else json.dumps(item.get("metrics", {}))[:160]
         evidence = item.get("evidence") if family else (item.get("golden") or {}).get("status")
-        source = f"{item.get('benchmark')} (family)" if family else item.get("benchmark") or "Task suite"
+        source = (f"{item.get('benchmark')} (family)" if family else
+                  f"{item.get('benchmark')} (AIPerf, gold answers, {item.get('endpoint')})" if item.get("source") == "absolute"
+                  else item.get("benchmark") or "Task suite")
         lines.append(f"| {item['suite']} | {source} | "
                      f"{item['status']} | {count} | {gate} | {noise_text} | "
                      f"{' '.join(str(part) for part in (isolated['status'], isolated.get('passed')) if part is not None) if isolated else '—'} | {evidence} |")
         if item.get("error"):
             lines.append(f"|  | error: {item['error'][:300].replace('|', '/')} |  |  |  |  |  |  |")
-        if item.get("reasons"):
-            lines.append(f"|  | {'; '.join(item['reasons'])[:300].replace('|', '/')} |  |  |  |  |  |  |")
+        if item.get("reasons") or item.get("notes"):
+            text = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
+            lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |  |  |  |")
+    workloads = [item for item in result.get("accuracy", []) if (item.get("workload_perf") or {}).get("pairs")]
+    if workloads:
+        lines += ["", "## Performance on the benchmark requests (informational; server model-call time, p50)", "",
+                  "| benchmark | light | TRTMC ms | native ms | speedup | problems (same output length) | prompt tokens p50 |",
+                  "|---|---|---|---|---|---|---|"]
+        for item in workloads:
+            perf = item["workload_perf"]
+            lines.append(f"| {item['suite']} | {perf['light']} | {perf['trtmc_p50_ms']} | {perf['native_p50_ms']} | "
+                         f"{perf['speedup']}x | {perf['pairs']} | {perf.get('prompt_tokens_p50')} |")
     lines += ["", "## Performance L1 (server model-call time, p50)", "",
               "| reference mode | light | TRTMC ms | CI % | reference ms (aggregation) | CI % | speedup | notes |",
               "|---|---|---|---|---|---|---|---|"]

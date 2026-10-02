@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A 4096-token Qwen3.5 bundle rejects every request ("TensorRT enqueue failed", 2026-10-01) while the
+# 256-token catalog bundle serves: benchmarks run on a 2048-token bundle (longer MMLU prompts dropped on
+# both sides).
+absolute_sequence_length: 2048
