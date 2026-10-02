@@ -110,7 +110,8 @@ void write_json(const std::string& path, const Json& value) {
     std::ofstream output(path);
     if (!output)
         throw std::runtime_error("cannot write " + path);
-    output << value.dump(2) << '\n';
+    // Text cut inside a multi-byte character is invalid UTF-8: replace, do not throw.
+    output << value.dump(2, ' ', false, Json::error_handler_t::replace) << '\n';
     output.close();
     if (!output)
         throw std::runtime_error("failed to write " + path);
@@ -4046,7 +4047,8 @@ int serve(const Arguments& arguments) {
     if (protocol == nullptr)
         throw std::runtime_error("cannot open the serve protocol stream");
     const auto emit = [protocol](const Json& value) {
-        const std::string line = value.dump() + "\n";
+        // Text cut inside a multi-byte character is invalid UTF-8: replace, do not throw.
+        const std::string line = value.dump(-1, ' ', false, Json::error_handler_t::replace) + "\n";
         std::fwrite(line.data(), 1, line.size(), protocol);
         std::fflush(protocol);
     };
