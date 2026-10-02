@@ -238,7 +238,10 @@ def _run_json(
     env = os.environ.copy()
     env["TRTMC_LTX2_INITIAL_LATENTS"] = str(noise_path)
     if parallel_size > 1 and shutil.which("mpirun"):
-        env["TRTMC_NCCL_RENDEZVOUS"] = str(bundle.with_suffix(".nccl-rendezvous"))
+        rendezvous = bundle.with_suffix(".nccl-rendezvous")
+        # A file left by an interrupted launch would hand its stale id to the ranks.
+        rendezvous.unlink(missing_ok=True)
+        env["TRTMC_NCCL_RENDEZVOUS"] = str(rendezvous)
         invocation = [
             shutil.which("mpirun"),
             "--tag-output",

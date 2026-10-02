@@ -49,6 +49,10 @@ class NcclComm:
         self.comm = ctypes.c_void_p()
         self._check(self.lib.ncclCommInitRank(ctypes.byref(self.comm), self.world, uid, self.rank),
                     "ncclCommInitRank")
+        if self.rank == 0:
+            # Every rank joined, so every rank read the id; a reused path must not
+            # hand this stale id to the next launch.
+            path.unlink(missing_ok=True)
 
     @staticmethod
     def _check(status: int, what: str) -> None:

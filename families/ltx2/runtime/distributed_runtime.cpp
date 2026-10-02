@@ -16,6 +16,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 
 namespace trtmc::ltx2 {
@@ -207,6 +208,13 @@ DistributedRuntimeGroup initialize_parallel_group(int parallel_size) {
         id = read_unique_id(path);
     }
     runtime->init(parallel_size, group.rank, id);
+    if (group.rank == 0) {
+        // ncclCommInitRank returns only after every rank joined, so every rank
+        // has read the ID. Remove it so a reused path cannot hand a stale ID to
+        // the next launch.
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+    }
     group.communicator = runtime->communicator();
     group.owner = std::move(runtime);
     return group;
