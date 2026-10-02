@@ -79,7 +79,7 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
         except Exception as error:  # noqa: BLE001
             record.update(category="error", reason=_error(error))
             (out / "error.json").write_text(json.dumps({**record, "traceback": traceback.format_exc()}, indent=2))
-        if retention.should_delete_bundle(bundle_policy, record["category"]):
+        if retention.should_delete_bundle(bundle_policy, record["category"], built=build.get("status") == "built"):
             record["bundle_deleted"] = retention.delete_bundle(environment, model)
     record["seconds"] = round(time.time() - started)
     return record

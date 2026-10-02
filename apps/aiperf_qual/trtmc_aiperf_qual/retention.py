@@ -4,8 +4,10 @@
 
 ``retention`` in the environment (both default to ``retain``):
 
-- ``bundle``: ``retain`` | ``delete_on_pass`` | ``delete_unless_error``. A bundle is deleted after its
-  model's run when the verdict allows; an ``error`` verdict (a harness failure to rerun) always keeps it.
+- ``bundle``: ``retain`` | ``delete_on_pass`` | ``delete_unless_error`` | ``delete_built_unless_error``.
+  A bundle is deleted after its model's run when the verdict allows; an ``error`` verdict (a harness
+  failure to rerun) always keeps it. ``delete_built_unless_error`` deletes only a bundle the run itself
+  built (a bundle that existed before the run is kept).
 - ``hf_cache``: ``retain`` | ``delete_unused``. ``run-all`` deletes a checkpoint repository from
   ``hf_hub_cache`` once no remaining profile of the batch uses it (profiles sharing one run together).
 
@@ -23,7 +25,7 @@ from typing import Any, Mapping
 
 from .config import ConfigError, Environment
 
-BUNDLE_POLICIES = ("retain", "delete_on_pass", "delete_unless_error")
+BUNDLE_POLICIES = ("retain", "delete_on_pass", "delete_unless_error", "delete_built_unless_error")
 HF_CACHE_POLICIES = ("retain", "delete_unused")
 _REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 
@@ -40,10 +42,12 @@ def policies(environment: Environment) -> tuple[str, str]:
     return bundle, hf_cache
 
 
-def should_delete_bundle(policy: str, category: str) -> bool:
+def should_delete_bundle(policy: str, category: str, built: bool = False) -> bool:
+    """``built``: this run built the bundle (it did not exist before)."""
     if category in ("error", "build-failed"):
         return False
-    return policy == "delete_unless_error" or (policy == "delete_on_pass" and category == "pass")
+    return (policy == "delete_unless_error" or (policy == "delete_on_pass" and category == "pass")
+            or (policy == "delete_built_unless_error" and built))
 
 
 def _size(path: Path) -> int:

@@ -88,6 +88,12 @@ def test_bundle_retention_policy(policy, category, deleted):
     assert retention.should_delete_bundle(policy, category) is deleted
 
 
+def test_only_bundles_the_run_built_are_deleted_by_delete_built_unless_error():
+    assert retention.should_delete_bundle("delete_built_unless_error", "acc-issue", built=True)
+    assert not retention.should_delete_bundle("delete_built_unless_error", "pass", built=False)  # it existed before
+    assert not retention.should_delete_bundle("delete_built_unless_error", "error", built=True)
+
+
 def test_retention_policies_are_validated():
     assert retention.policies(Environment({})) == ("retain", "retain")
     with pytest.raises(ConfigError):
