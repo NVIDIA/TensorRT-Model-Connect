@@ -35,7 +35,8 @@ install(TARGETS trtmc_model_llama
 )
 
 if(TRTMC_BUILD_TESTS)
-  foreach(test_name IN ITEMS test_llama_chat_template test_llama_native_kv_cache)
+  foreach(test_name IN ITEMS test_llama_chat_template test_llama_native_kv_cache
+                             test_llama_pretokenizer_variant)
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/${test_name}.cpp
     )
