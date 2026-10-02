@@ -7,7 +7,7 @@ torch = pytest.importorskip("torch")
 
 from trtmc_perf_serving.backends.base import BackendError  # noqa: E402
 from trtmc_perf_serving.backends.reference.text import (  # noqa: E402
-    _generation_kwargs, _language_controls, _place_source_language,
+    _generation_kwargs, _language_controls, _place_source_language, encoder_input_limit,
 )
 
 
@@ -54,3 +54,12 @@ def test_a_source_token_replaces_the_final_unknown_token_for_pair_tokenizers():
     inputs = {"input_ids": torch.tensor([[5, 6, 3, 0]]), "attention_mask": torch.tensor([[1, 1, 1, 0]])}
     _place_source_language(inputs, manual, PairTokenizer())
     assert inputs["input_ids"].tolist() == [[5, 6, 7, 0]]
+
+
+def test_encoder_inputs_are_cut_at_the_declared_limit():
+    from types import SimpleNamespace
+
+    assert encoder_input_limit(SimpleNamespace(model_max_length=512), SimpleNamespace(max_position_embeddings=514)) == 512
+    unbounded = SimpleNamespace(model_max_length=int(1e30))  # tokenizers without a declared maximum
+    assert encoder_input_limit(unbounded, SimpleNamespace(max_position_embeddings=8192)) == 8192
+    assert encoder_input_limit(unbounded, SimpleNamespace()) is None

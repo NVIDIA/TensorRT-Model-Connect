@@ -173,6 +173,15 @@ class Translation(TextGeneration):
         return invocation({"output_tokens": len(token_ids), "token_ids": token_ids, "text": text}, model_ms)
 
 
+def encoder_input_limit(tokenizer: Any, config: Any) -> int | None:
+    """Tokens an encoder accepts: the tokenizer's declared maximum, else the position embeddings."""
+    declared = getattr(tokenizer, "model_max_length", None)
+    if isinstance(declared, int) and 0 < declared < 1_000_000:
+        return declared
+    positions = getattr(config, "max_position_embeddings", None)
+    return int(positions) if isinstance(positions, int) and positions > 0 else None
+
+
 class TextEncoder:
     """``encode`` (first-token hidden state, TRTMC ``feature_kind: token``) and ``embed``
     (attention-mask mean pool, L2-normalized, ``feature_kind: pooled``); both report ``values``."""
@@ -191,9 +200,13 @@ class TextEncoder:
         self.model = maybe_compile(model.to(spec.device).eval(), spec)
         # Remote-code embedding models may return a causal-LM output; they need hidden states requested.
         self.forward_kwargs: dict[str, Any] = {}
+        # Longer inputs are cut at the model's position limit (an overflow is a device-side assert that
+        # poisons the CUDA context for every later request).
+        self.max_length = encoder_input_limit(self.tokenizer, config)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
-        batch = self.tokenizer(str(required(request, "prompt")), return_tensors="pt").to(self.spec.device)
+        batch = self.tokenizer(str(required(request, "prompt")), return_tensors="pt", truncation=self.max_length is not None,
+                               max_length=self.max_length).to(self.spec.device)
         pooled = self.spec.operation == "embed"
 
         def run() -> torch.Tensor:
