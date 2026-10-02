@@ -52,6 +52,7 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == FAMILY
         assert manifest["task"] in TASKS
+        assert manifest["tensor_parallel_size"] == 1
         for case in manifest["testcases"]:
             name = str(case["name"])
             assert name not in result
@@ -182,6 +183,7 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
             image_height=manifest.get("image_height"),
             image_width=manifest.get("image_width"),
             video_num_frames=manifest.get("video_num_frames"),
+            tensor_parallel_size=int(manifest["tensor_parallel_size"]),
             context_parallel_size=_parallel_size(manifest),
         )
     )

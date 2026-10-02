@@ -15,6 +15,7 @@
       "runtime_timeout_s": 3600
     }
   ],
+  "tensor_parallel_size": 1,
   "context_parallel_size": 1,
   "image_height": 384,
   "image_width": 640,
