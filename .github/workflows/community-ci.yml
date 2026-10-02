@@ -960,6 +960,26 @@ jobs:
             done
           }
 
+          # Measured directly (2026-10-01): a freshly created --provider aws
+          # instance (g6e.xlarge) can take ~5.5 minutes for SSH to come up on
+          # a perfectly healthy instance, vs ~70-90s for the default
+          # (non-aws) instance types. The fast retry() probe budget above is
+          # tuned for the non-aws case and would misdiagnose a slow-but-alive
+          # aws instance as dead. Give aws-provisioned instances a probe
+          # budget with enough margin over that measured worst case instead.
+          retry_probe_aws() {
+            local attempts=6 delay=20 n=1
+            until "$@"; do
+              if [ "$n" -ge "$attempts" ]; then
+                echo "::error::Command failed after $attempts attempts: $*" >&2
+                return 1
+              fi
+              echo "Attempt $n/$attempts failed, retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              n=$((n + 1))
+            done
+          }
+
           # Some SSH failures mean the instance itself never became usable
           # (e.g. the provider reports InsufficientCapacity after Brev already
           # reported success), so retrying the same command against it can
@@ -972,7 +992,11 @@ jobs:
             # spending the full git fetch retry budget against a dead
             # instance. Confirmed with Brev: this is a known CLI bug where
             # provisioning failures are not propagated to the exit code.
-            retry brev exec "$INSTANCE_NAME" "true" || return 1
+            if [ "${INSTANCE_PROVIDER_AWS:-false}" = "true" ]; then
+              retry_probe_aws brev exec "$INSTANCE_NAME" "true" || return 1
+            else
+              retry brev exec "$INSTANCE_NAME" "true" || return 1
+            fi
             retry_backoff brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || return 1
             # The host coordinator and container entrypoint belong to the chosen
             # CI commit. Neither imports contributor code outside the container.
@@ -1011,6 +1035,7 @@ jobs:
 
           max_instance_attempts=3
           instance_attempt=1
+          INSTANCE_PROVIDER_AWS=false
           while true; do
             if run_on_instance; then
               break
@@ -1034,6 +1059,7 @@ jobs:
             # constraint; their suggested workaround is to steer retries to
             # a different provider until Nebius capacity frees up.
             retry brev create "$INSTANCE_NAME" -g "$GPU_TYPE" --provider aws --timeout 600
+            INSTANCE_PROVIDER_AWS=true
             # Keep teardown targeting the instance actually in use, even if
             # this job ultimately fails after exhausting every attempt.
             echo "instance_name=$INSTANCE_NAME" >> "$GITHUB_OUTPUT"
