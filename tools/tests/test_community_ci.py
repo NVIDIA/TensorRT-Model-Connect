@@ -796,7 +796,11 @@ def test_complete_pipeline_requires_every_cpu_and_gpu_stage(failed, bad_result):
     assert result.returncode == (1 if failed else 0), result.stderr
 
 
-def test_gpu_status_and_cleanup_fail_closed() -> None:
+@pytest.mark.parametrize("failure", ["", "copy", "coordinate", "exit"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_gpu_status_and_cleanup_fail_closed(
+    tmp_path: Path, failure: str, cleanup_fails: bool
+) -> None:
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github/workflows/community-ci.yml").read_text(encoding="utf-8")
     )
@@ -821,16 +825,105 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
     assert "${{" not in result["run"]
     cleanup = steps["Always tear down the GPU instance"]
     assert cleanup["if"] == "${{ always() && steps.reserve.outputs.instance_name != '' }}"
-    assert cleanup["env"] == {"INSTANCE_NAME": "${{ steps.reserve.outputs.instance_name }}"}
+    assert cleanup["env"] == {
+        "INSTANCE_NAME": "${{ steps.test.outputs.instance_name || steps.reserve.outputs.instance_name }}"
+    }
+    assert 'echo "instance_name=$INSTANCE_NAME" >> "$GITHUB_OUTPUT"' in test_step["run"]
     assert cleanup["run"] == 'brev delete "$INSTANCE_NAME" || true'
     assert job["outputs"] == {"conclusion": "${{ steps.result.outputs.conclusion }}"}
     cleanup_job = workflow["jobs"]["cleanup"]
     assert "always()" in cleanup_job["if"]
     assert "needs.gpu-authorize.outputs.run_gpu == 'true'" in cleanup_job["if"]
     cleanup_steps = {step["name"]: step for step in cleanup_job["steps"]}
-    assert cleanup_steps["Delete the deterministic GPU instance"]["run"] == (
-        'brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true'
+    cleanup_script = cleanup_steps["Delete the deterministic GPU instance"]["run"]
+    cleanup_result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'brev() { printf "%s\\n" "$*"; return 1; }\n' + cleanup_script,
+        ],
+        env={**os.environ, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"},
+        capture_output=True,
+        text=True,
     )
+    assert cleanup_result.returncode == 0, cleanup_result.stderr
+    assert cleanup_result.stdout.splitlines() == [
+        "delete trtmc-gpu-ci-123-2",
+        "delete trtmc-gpu-ci-123-2-r2",
+        "delete trtmc-gpu-ci-123-2-r3",
+    ]
+    # Execute the real workflow script with remote operations stubbed. A copy
+    # can leave a partial token even when it reports failure; each affected VM
+    # must receive cleanup before replacement, including when deletion fails.
+    trace = tmp_path / "auth-trace"
+    stubs = r"""
+sleep() { :; }
+timeout() { shift; "$@"; }
+brev() {
+  case "$1" in
+    copy)
+      printf 'copy %s\n' "${3%%:*}" >> "$AUTH_TRACE"
+      test -z "${HF_TOKEN+x}" || exit 99
+      test "$AUTH_FAILURE" != copy || return 1
+      ;;
+    exec)
+      if [[ "$3" == "rm -f -- "* ]]; then
+        printf 'cleanup %s\n' "$2" >> "$AUTH_TRACE"
+        test "$AUTH_CLEANUP_FAILS" != true || return 1
+      fi
+      ;;
+    delete)
+      printf 'delete %s\n' "$2" >> "$AUTH_TRACE"
+      return 1
+      ;;
+  esac
+}
+python3() {
+  printf 'coordinate %s\n' "$INSTANCE_NAME" >> "$AUTH_TRACE"
+  test "$AUTH_FAILURE" != exit || exit 17
+  test "$AUTH_FAILURE" != coordinate
+}
+"""
+    auth_result = subprocess.run(
+        ["bash", "-c", stubs + test_step["run"]],
+        env={
+            **os.environ,
+            "AUTH_TRACE": str(trace),
+            "AUTH_FAILURE": failure,
+            "AUTH_CLEANUP_FAILS": str(cleanup_fails).lower(),
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(tmp_path / "outputs"),
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_REPOSITORY": "example/repository",
+            "INSTANCE_NAME": "trtmc-gpu-ci-123-2",
+            "GPU_TYPE": "test",
+            "CI_SHA": "a" * 40,
+            "MERGE_SHA": "b" * 40,
+            "FAMILIES": "[]",
+            "DIRECT_FAMILIES": "[]",
+            "ADDED_FAMILIES": "[]",
+            "SCOPE": "families",
+            "CUDA_ARCHITECTURES": "89",
+            "HF_TOKEN": "test-checkpoint-secret",
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert auth_result.returncode == (17 if failure == "exit" else 1 if failure else 0)
+    events = trace.read_text(encoding="utf-8").splitlines()
+    copied = {event.removeprefix("copy ") for event in events if event.startswith("copy ")}
+    assert len(copied) == (3 if failure in {"copy", "coordinate"} else 1)
+    for instance in copied:
+        cleanup_index = events.index(f"cleanup {instance}")
+        assert cleanup_index > events.index(f"copy {instance}")
+        if f"delete {instance}" in events:
+            assert cleanup_index < events.index(f"delete {instance}")
+    assert not list(tmp_path.glob("trtmc-checkpoint-token.*"))
+    assert "test-checkpoint-secret" not in auth_result.stdout + auth_result.stderr
+    assert ("VM teardown is still required" in auth_result.stderr) is cleanup_fails
+    assert 'timeout 30s brev exec "$checkpoint_instance"' in test_step["run"]
     publish = workflow["jobs"]["publish"]["steps"][0]
     assert publish["env"]["CPU_RESULT"] == "${{ needs.required.result }}"
     assert publish["env"]["GPU_RESULT"] == "${{ needs.provision-and-test.result }}"
@@ -1086,8 +1179,14 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert "sleep" not in step["run"]
     gpu = executor["jobs"]["provision-and-test"]
     test = next(step for step in gpu["steps"] if step.get("id") == "test")
-    assert "HF_TOKEN" not in test["env"]
-    assert "HF_TOKEN" not in test["run"]
+    assert test["env"]["HF_TOKEN"] == "${{ secrets.HF_TOKEN }}"
+    assert """printf '%s' "$HF_TOKEN" > "$checkpoint_token" """.strip() in test["run"]
+    assert "unset HF_TOKEN" in test["run"]
+    assert """trap 'rm -f "$checkpoint_token"; cleanup_checkpoint_token' EXIT""" in test["run"]
+    assert "install -d -m 0700 $remote_auth" in test["run"]
+    assert 'retry brev copy "$checkpoint_token" "$INSTANCE_NAME:$remote_auth/token"' in test["run"]
+    assert '--checkpoint-token-file "$remote_auth/token"' in test["run"]
+    assert "HF_TOKEN=" not in test["run"]
     assert "git show $CI_SHA:tools/community_gpu_ci.py" in test["run"]
     assert "git fetch --depth 2 origin $MERGE_SHA" in test["run"]
     assert "huggingface-hub==0.36.0" in test["run"]

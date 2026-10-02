@@ -418,6 +418,7 @@ def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
             stage_env = {
                 key: env[key]
                 for key in (
+                    "HF_TOKEN",
                     "HF_ENDPOINT",
                     "HTTP_PROXY",
                     "HTTPS_PROXY",
@@ -503,10 +504,23 @@ def main() -> int:
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--image", default="trtmc-quickstart-gpu")
     parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--checkpoint-token-file", type=Path)
     args = parser.parse_args()
     try:
+        if args.checkpoint_token_file is not None and not args.containers:
+            raise CommunityGpuError("--checkpoint-token-file requires --containers")
         if args.containers:
-            run_containers(args.repository, dict(os.environ), args.image)
+            env = dict(os.environ)
+            if args.checkpoint_token_file is not None:
+                # Only the trusted coordinator reads this private, unmounted
+                # file. Delete it before starting any contributor container.
+                try:
+                    token = args.checkpoint_token_file.read_text(encoding="utf-8").strip()
+                finally:
+                    args.checkpoint_token_file.unlink(missing_ok=True)
+                if token:
+                    env["HF_TOKEN"] = token
+            run_containers(args.repository, env, args.image)
         elif args.stage_family:
             if args.cache_dir is None:
                 raise CommunityGpuError("--stage-family requires --cache-dir")
