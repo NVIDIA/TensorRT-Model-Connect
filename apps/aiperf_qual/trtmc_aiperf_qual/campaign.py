@@ -67,6 +67,15 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
         python = reference_python(environment, model)  # the family environment builds and serves references
         prefetch(environment, model)  # outside the GPU lock the build takes
         build = bundles.ensure_bundle(environment, model, python, out)
+        from .runner import FALLBACK_SEQUENCE_LENGTH, shorter_candidate  # on use: summary runs without AIPerf
+
+        shorter = (shorter_candidate(model, f"the {model['candidate'].get('max_sequence_length')}-token "
+                                            f"benchmark bundle did not build ({str(build.get('reason'))[:200]})")
+                   if build["status"] == "failed" else None)
+        if shorter is not None:  # a family that cannot build the benchmark length may build a shorter one
+            retry = bundles.ensure_bundle(environment, shorter, python, out / f"retry-{FALLBACK_SEQUENCE_LENGTH}")
+            if retry["status"] != "failed":
+                model, build = shorter, {**retry, "first_build": build}
     except Exception as error:  # noqa: BLE001 - recorded; a batch goes on with the next model
         build = {"status": "failed", "reason": _error(error)}
     (out / "build.json").write_text(json.dumps({**record, **build}, indent=2))

@@ -473,3 +473,40 @@ def test_an_adapter_checkpoint_without_a_tokenizer_uses_the_base_models(monkeypa
     full = {"candidate": {"checkpoint": "org/full", "revision": "f1"}, "reference": {"model": "org/base"}}
     assert absolute.tokenizer_source(full) == ("org/full", "f1")
     assert absolute.tokenizer_source({"candidate": {"checkpoint": "org/adapter"}, "reference": {}}) == ("org/adapter", None)
+
+
+def test_an_empty_answer_is_a_wrong_answer_not_a_failed_request():
+    empty = {"status": 200, "error": {"type": "InvalidInferenceResultError", "message": "no content"}}
+    assert not absolute.unanswered(empty)  # AIPerf grades it (passed False)
+    assert absolute.unanswered({"status": 422, "error": {"type": "HTTPError"}})
+    assert absolute.unanswered({"status": 200, "error": {"type": "ClientConnectionError"}})
+    assert not absolute.unanswered({"status": 200})
+    assert "rejected" in absolute.failed_reason([empty, {"status": 422, "error": {"message": "rejected"}}], 1)
+
+
+def test_a_benchmark_bundle_that_does_not_build_is_built_shorter(tmp_path, monkeypatch):
+    import sys
+
+    from trtmc_aiperf_qual import campaign
+    from trtmc_aiperf_qual.config import Environment
+
+    built, qualified = [], []
+
+    def ensure_bundle(environment, model, python, out):
+        built.append(model["candidate"]["bundle"])
+        if model["candidate"]["max_sequence_length"] > 2048:
+            return {"status": "failed", "reason": "OLMo2 batched-prefill engine build failed"}
+        return {"status": "built", "bundle": model["candidate"]["bundle"]}
+
+    monkeypatch.setattr(campaign, "reference_python", lambda environment, model: sys.executable)
+    monkeypatch.setattr(campaign, "prefetch", lambda environment, model: None)
+    monkeypatch.setattr(campaign.bundles, "ensure_bundle", ensure_bundle)
+    monkeypatch.setattr(campaign, "qualify", lambda model, environment, out: qualified.append(model) or {
+        "verdict": {"category": "pass"}})
+    model = {"model": "m", "catalog_profile": "m", "task": "text_generation", "absolute": [{"suite": "mmlu-5shot"}],
+             "reference": {}, "candidate": {"bundle": "m-qual/m.bundle", "max_sequence_length": 4096,
+                                            "build": {"name": "m-qual", "max_sequence_length": 4096}}}
+    record = campaign.run_one(Environment({}), model, tmp_path / "m")
+    assert record["category"] == "pass" and built == ["m-qual/m.bundle", "m-qual-2048/m.bundle"]
+    assert qualified[0]["candidate"]["max_sequence_length"] == 2048
+    assert "did not build" in qualified[0]["candidate"]["sequence_fallback"]

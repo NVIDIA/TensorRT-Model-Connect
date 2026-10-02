@@ -179,8 +179,7 @@ def run_side(environment: Environment, service: Mapping[str, Any], model: Mappin
                          env=selection_environment(environment, model, item), timeout_s=RUN_TIMEOUT_S)
         raw = run.raw_records()
         # AIPerf grades a failed request as an empty (wrong) answer: it is a missing answer instead.
-        failed = {int(record["metadata"]["session_num"]) for record in raw
-                  if record.get("status") != 200 or record.get("error")}
+        failed = {int(record["metadata"]["session_num"]) for record in raw if unanswered(record)}
         runs["records"][name] = {int(record["session_num"]): record for record in run.accuracy_records()
                                  if int(record["session_num"]) not in failed}
         runs["exit"][name] = run.exit_code
@@ -190,9 +189,18 @@ def run_side(environment: Environment, service: Mapping[str, Any], model: Mappin
     return runs
 
 
+def unanswered(record: Mapping[str, Any]) -> bool:
+    """A request without an answer (an HTTP or transport failure). An HTTP 200 with empty content (AIPerf's
+    InvalidInferenceResultError) is an answer: AIPerf grades it, as a wrong one."""
+    if record.get("status") != 200:
+        return True
+    error = record.get("error")
+    return bool(error) and not (isinstance(error, Mapping) and error.get("type") == "InvalidInferenceResultError")
+
+
 def failed_reason(raw_records: Sequence[Mapping[str, Any]], count: int) -> str:
     """How many requests failed, and the first error (e.g. the backend rejecting every request)."""
-    first = next((record.get("error") for record in raw_records if record.get("error")), None)
+    first = next((record.get("error") for record in raw_records if unanswered(record)), None)
     message = (first or {}).get("message") if isinstance(first, Mapping) else first
     return f"{count} requests failed: {str(message)[:300]}"
 

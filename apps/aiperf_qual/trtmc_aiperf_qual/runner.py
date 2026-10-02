@@ -73,8 +73,6 @@ def serviceable_candidate(environment: Environment, model: dict[str, Any], plans
     """TRTMC must serve one request before the native model spends hours on the benchmarks. A longer
     benchmark bundle (``-qual``) that rejects every request (some families fail TensorRT enqueue at
     4096 tokens) is rebuilt once at FALLBACK_SEQUENCE_LENGTH; its problems are re-planned to fit."""
-    import copy
-
     from . import bundles
 
     try:
@@ -82,22 +80,33 @@ def serviceable_candidate(environment: Environment, model: dict[str, Any], plans
         return model, plans
     except Exception as error:  # noqa: BLE001 - maybe a shorter bundle serves
         first = f"{type(error).__name__}: {str(error)[-300:]}"
-    build = model["candidate"].get("build") or {}
-    length = int(model["candidate"].get("max_sequence_length") or 0)
-    if length <= FALLBACK_SEQUENCE_LENGTH or not build.get("max_sequence_length"):
+    shorter = shorter_candidate(model, f"the {model['candidate'].get('max_sequence_length')}-token bundle "
+                                       f"rejected requests ({first[:200]})")
+    if shorter is None:
         raise RuntimeError(first)
-    shorter = copy.deepcopy(model)
-    name = f"{model['catalog_profile']}-qual-{FALLBACK_SEQUENCE_LENGTH}"
-    shorter["candidate"].update(build={**build, "name": name, "max_sequence_length": FALLBACK_SEQUENCE_LENGTH},
-                                max_sequence_length=FALLBACK_SEQUENCE_LENGTH,
-                                bundle=f"{name}/{model['candidate']['bundle'].split('/', 1)[1]}")
     built = bundles.ensure_bundle(environment, shorter, python, out / f"retry-{FALLBACK_SEQUENCE_LENGTH}")
     if built["status"] == "failed":
         raise RuntimeError(f"{first}; the {FALLBACK_SEQUENCE_LENGTH}-token rebuild failed: {built.get('reason', '')[:300]}")
     _probe_candidate(environment, shorter, suite, out / f"absolute-probe-{FALLBACK_SEQUENCE_LENGTH}")
-    shorter["candidate"]["sequence_fallback"] = (f"the {length}-token bundle rejected requests ({first[:200]}); "
-                                                 f"benchmarks and Perf on a {FALLBACK_SEQUENCE_LENGTH}-token bundle")
     return shorter, {item["suite"]: absolute.plan(environment, shorter, item) for item in shorter["absolute"]}
+
+
+def shorter_candidate(model: Mapping[str, Any], why: str) -> dict[str, Any] | None:
+    """The model on a FALLBACK_SEQUENCE_LENGTH bundle (``<profile>-qual-<length>``) when its benchmark
+    bundle is longer (None otherwise); ``why`` becomes the report's note."""
+    import copy
+
+    build = model["candidate"].get("build") or {}
+    length = int(model["candidate"].get("max_sequence_length") or 0)
+    if length <= FALLBACK_SEQUENCE_LENGTH or not build.get("max_sequence_length") or not model.get("absolute"):
+        return None
+    shorter = copy.deepcopy(dict(model))
+    name = f"{model['catalog_profile']}-qual-{FALLBACK_SEQUENCE_LENGTH}"
+    shorter["candidate"].update(build={**build, "name": name, "max_sequence_length": FALLBACK_SEQUENCE_LENGTH},
+                                max_sequence_length=FALLBACK_SEQUENCE_LENGTH,
+                                bundle=f"{name}/{model['candidate']['bundle'].split('/', 1)[1]}",
+                                sequence_fallback=f"{why}; benchmarks and Perf on a {FALLBACK_SEQUENCE_LENGTH}-token bundle")
+    return shorter
 
 
 def _task_url(service: Mapping[str, Any], operation: str) -> list[str]:
