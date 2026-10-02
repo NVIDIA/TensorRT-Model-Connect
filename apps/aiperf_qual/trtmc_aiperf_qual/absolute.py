@@ -18,6 +18,7 @@ difference of the mean accuracies.
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import statistics
@@ -38,15 +39,36 @@ WORKLOAD_MARGIN_PERCENT = 5.0
 RUN_TIMEOUT_S = 12 * 3600
 
 
+@functools.lru_cache(maxsize=None)
+def _has_tokenizer(name: str, revision: str | None, trust_remote_code: bool) -> bool:
+    from transformers import AutoTokenizer
+
+    try:
+        AutoTokenizer.from_pretrained(name, revision=revision, trust_remote_code=trust_remote_code)
+    except Exception:  # noqa: BLE001 - for example an adapter-only checkpoint (LoRA) without tokenizer files
+        return False
+    return True
+
+
+def tokenizer_source(model: Mapping[str, Any]) -> tuple[str, str | None]:
+    """The checkpoint whose tokenizer counts and formats the prompts: the candidate's, unless it carries
+    none (an adapter on a base model), then the native reference model's (that base model)."""
+    candidate = (str(model["candidate"]["checkpoint"]), model["candidate"].get("revision") or None)
+    reference = model["reference"]
+    if reference.get("model") and not _has_tokenizer(*candidate, bool(reference.get("trust_remote_code"))):
+        return str(reference["model"]), reference.get("revision") or None
+    return candidate
+
+
 def selection_environment(environment: Environment, model: Mapping[str, Any], item: Mapping[str, Any]) -> dict[str, str]:
     """TRTMC_ACCURACY_* settings of the plugin's problem selection (identical for both sides)."""
     environ = {"HF_DATASETS_CACHE": str(environment["hf_datasets_cache"]),
                "TRTMC_ACCURACY_TOKEN_LIMIT": str(model["candidate"]["max_sequence_length"]),
                # A chat template wraps the prompt; plain completions add at most a BOS token.
                "TRTMC_ACCURACY_TEMPLATE_MARGIN": "128" if item.get("endpoint") == "chat" else "8",
-               "TRTMC_ACCURACY_TOKENIZER": str(model["candidate"]["checkpoint"])}
-    if model["candidate"].get("revision"):
-        environ["TRTMC_ACCURACY_TOKENIZER_REVISION"] = str(model["candidate"]["revision"])
+               "TRTMC_ACCURACY_TOKENIZER": tokenizer_source(model)[0]}
+    if tokenizer_source(model)[1]:
+        environ["TRTMC_ACCURACY_TOKENIZER_REVISION"] = str(tokenizer_source(model)[1])
     if model["reference"].get("trust_remote_code"):
         environ["TRTMC_ACCURACY_TRUST_REMOTE_CODE"] = "1"
     for key, name in (("per_task", "TRTMC_ACCURACY_PER_TASK"), ("limit", "TRTMC_ACCURACY_LIMIT"),
@@ -76,8 +98,8 @@ def _head_truncated(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any
     """Samples whose ``prompt`` keeps only its first ``limit`` tokens (the model's tokenizer)."""
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(str(model["candidate"]["checkpoint"]),
-                                              revision=model["candidate"].get("revision") or None,
+    name, revision = tokenizer_source(model)
+    tokenizer = AutoTokenizer.from_pretrained(name, revision=revision,
                                               trust_remote_code=bool(model["reference"].get("trust_remote_code")))
     result = []
     for sample in samples:
@@ -99,11 +121,11 @@ def _targets(service: Mapping[str, Any], path: str = "") -> list[str]:
 def _arguments(model: Mapping[str, Any], item: Mapping[str, Any], service: Mapping[str, Any], count: int,
                seed: int | None) -> list[str]:
     arguments = ["--endpoint-type", item["endpoint"], *_targets(service),
-                 "--tokenizer", str(model["candidate"]["checkpoint"]),
+                 "--tokenizer", tokenizer_source(model)[0],
                  "--accuracy-benchmark", item["plugin"], "--accuracy-n-shots", str(int(item.get("n_shots", 0))),
                  "--request-count", str(count)]
-    if model["candidate"].get("revision"):
-        arguments += ["--tokenizer-revision", str(model["candidate"]["revision"])]
+    if tokenizer_source(model)[1]:
+        arguments += ["--tokenizer-revision", str(tokenizer_source(model)[1])]
     if model["reference"].get("trust_remote_code"):
         arguments.append("--tokenizer-trust-remote-code")
     if item.get("tasks"):

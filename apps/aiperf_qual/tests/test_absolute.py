@@ -463,3 +463,13 @@ def test_a_long_benchmark_bundle_that_rejects_requests_is_rebuilt_shorter(tmp_pa
     with patch.object(runner, "_probe_candidate", probe), pytest.raises(RuntimeError):
         runner.serviceable_candidate({}, {**catalog, "candidate": {**catalog["candidate"], "max_sequence_length": 4096}},
                                      {}, None, "python", tmp_path)  # no benchmark build to shorten: an error
+
+
+def test_an_adapter_checkpoint_without_a_tokenizer_uses_the_base_models(monkeypatch):
+    monkeypatch.setattr(absolute, "_has_tokenizer", lambda name, revision, trust: name != "org/adapter")
+    adapter = {"candidate": {"checkpoint": "org/adapter", "revision": "a1"},
+               "reference": {"model": "org/base", "revision": "b1"}}
+    assert absolute.tokenizer_source(adapter) == ("org/base", "b1")
+    full = {"candidate": {"checkpoint": "org/full", "revision": "f1"}, "reference": {"model": "org/base"}}
+    assert absolute.tokenizer_source(full) == ("org/full", "f1")
+    assert absolute.tokenizer_source({"candidate": {"checkpoint": "org/adapter"}, "reference": {}}) == ("org/adapter", None)
