@@ -821,7 +821,9 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
     assert "${{" not in result["run"]
     cleanup = steps["Always tear down the GPU instance"]
     assert cleanup["if"] == "${{ always() && steps.reserve.outputs.instance_name != '' }}"
-    assert cleanup["env"] == {"INSTANCE_NAME": "${{ steps.reserve.outputs.instance_name }}"}
+    assert cleanup["env"] == {
+        "INSTANCE_NAME": "${{ steps.test.outputs.instance_name || steps.reserve.outputs.instance_name }}"
+    }
     assert cleanup["run"] == 'brev delete "$INSTANCE_NAME" || true'
     assert job["outputs"] == {"conclusion": "${{ steps.result.outputs.conclusion }}"}
     cleanup_job = workflow["jobs"]["cleanup"]
@@ -829,7 +831,13 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
     assert "needs.gpu-authorize.outputs.run_gpu == 'true'" in cleanup_job["if"]
     cleanup_steps = {step["name"]: step for step in cleanup_job["steps"]}
     assert cleanup_steps["Delete the deterministic GPU instance"]["run"] == (
-        'brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true'
+        "set -euo pipefail\n"
+        "# Backstop for the per-attempt names a retry may have created\n"
+        "# (see provision-and-test); harmless if none of them exist.\n"
+        'brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true\n'
+        'for attempt in 2 3; do\n'
+        '  brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-r${attempt}" || true\n'
+        "done\n"
     )
     publish = workflow["jobs"]["publish"]["steps"][0]
     assert publish["env"]["CPU_RESULT"] == "${{ needs.required.result }}"
@@ -1097,6 +1105,18 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     )
     assert gpu["environment"]["name"] == "gpu-ci-dispatch"
     assert gpu["concurrency"]["cancel-in-progress"] is True
+
+
+def test_community_gpu_retries_only_brev_transport_failures():
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    test = next(
+        step for step in workflow["jobs"]["provision-and-test"]["steps"] if step.get("id") == "test"
+    )
+
+    assert "retry_backoff_transport()" in test["run"]
+    assert 'if [ "$status" -ne 75 ]; then' in test["run"]
+    assert "retry_backoff_transport python3 -m tools.brev_exec" in test["run"]
+    assert "retry_backoff python3 -m tools.brev_exec" not in test["run"]
 
 
 @pytest.mark.parametrize(

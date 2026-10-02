@@ -960,6 +960,32 @@ jobs:
             done
           }
 
+          # tools.brev_exec returns 75 when Brev itself cannot complete the
+          # request. Any other nonzero value is the selected family's real
+          # result and must be reported immediately instead of rerunning every
+          # selected family.
+          retry_backoff_transport() {
+            local attempts=6 delay=20 max_delay=160 n=1 status
+            until "$@"; do
+              status=$?
+              if [ "$status" -ne 75 ]; then
+                echo "::error::Command returned non-transient exit $status; not retrying: $*" >&2
+                return "$status"
+              fi
+              if [ "$n" -ge "$attempts" ]; then
+                echo "::error::Command failed after $attempts transport attempts: $*" >&2
+                return 75
+              fi
+              echo "Transport attempt $n/$attempts failed, retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              n=$((n + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt "$max_delay" ]; then
+                delay=$max_delay
+              fi
+            done
+          }
+
           # Measured directly (2026-10-01): a freshly created --provider aws
           # instance (g6e.xlarge) can take ~5.5 minutes for SSH to come up on
           # a perfectly healthy instance, vs ~70-90s for the default
@@ -1020,7 +1046,7 @@ jobs:
             # tools.brev_exec caches its remote result keyed by this run's
             # result file, so a retry after a dropped connection is safe.
             echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
-            retry_backoff python3 -m tools.brev_exec \
+            retry_backoff_transport python3 -m tools.brev_exec \
               --instance "$INSTANCE_NAME" \
               --log /tmp/gpu-ci-output.log \
               --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
