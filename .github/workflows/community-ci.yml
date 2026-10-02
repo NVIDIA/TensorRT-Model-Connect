@@ -980,6 +980,30 @@ jobs:
             done
           }
 
+          # The intermittent "git fetch hangs on an otherwise-reachable
+          # instance" failure has never been reproduced in isolated manual
+          # testing (SSH works, network checks pass, git fetch succeeds
+          # every time outside of real CI). Capture live diagnostics from
+          # the instance automatically the next time this happens in
+          # production instead of guessing further.
+          capture_git_fetch_diagnostics() {
+            echo "::group::git fetch failure diagnostics ($INSTANCE_NAME)"
+            brev exec "$INSTANCE_NAME" "
+              echo '--- ip link (interface MTU) ---'
+              ip link show
+              echo '--- DNS resolution for github.com ---'
+              getent ahosts github.com || true
+              echo '--- curl timing breakdown to github.com ---'
+              curl -sS -o /dev/null -w 'connect=%{time_connect}s tls=%{time_appconnect}s total=%{time_total}s http_code=%{http_code}\n' --max-time 15 https://github.com || true
+              echo '--- top CPU/network processes (contention check) ---'
+              ps aux --sort=-%cpu | head -20
+              echo '--- memory and disk ---'
+              free -h
+              df -h /tmp
+            " || echo "(diagnostic capture itself failed -- instance may be fully unreachable now)"
+            echo "::endgroup::"
+          }
+
           # Some SSH failures mean the instance itself never became usable
           # (e.g. the provider reports InsufficientCapacity after Brev already
           # reported success), so retrying the same command against it can
@@ -997,11 +1021,11 @@ jobs:
             else
               retry brev exec "$INSTANCE_NAME" "true" || return 1
             fi
-            retry_backoff brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || return 1
+            retry_backoff brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || { capture_git_fetch_diagnostics; return 1; }
             # The host coordinator and container entrypoint belong to the chosen
             # CI commit. Neither imports contributor code outside the container.
             [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
-            retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py" || return 1
+            retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py" || { capture_git_fetch_diagnostics; return 1; }
             # A freshly created instance's SSH session may not have its Docker
             # group membership yet. The first live GPU run reached this point
             # and failed on docker.sock, so do not depend on propagation timing.
