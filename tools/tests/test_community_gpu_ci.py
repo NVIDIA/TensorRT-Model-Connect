@@ -614,6 +614,34 @@ def test_brev_wrapper_caches_application_failure_without_retry(tmp_path: Path) -
     assert brev_exec.parse_remote_status(first.stdout.splitlines(), marker) == 17
 
 
+def test_brev_exec_distinguishes_transport_failure_from_application_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only Brev transport errors receive the workflow retry classification."""
+    from tools import brev_exec
+
+    arguments = [
+        "--instance",
+        "example",
+        "--log",
+        str(tmp_path / "log"),
+        "--result-file",
+        str(tmp_path / "result"),
+        "--",
+        "echo",
+        "remote",
+    ]
+    monkeypatch.setattr(brev_exec, "execute", lambda *_args: 17)
+    assert brev_exec.main(arguments) == 17
+
+    def transport_failure(*_args):
+        raise brev_exec.CiError("connection dropped")
+
+    monkeypatch.setattr(brev_exec, "execute", transport_failure)
+    assert brev_exec.main(arguments) == brev_exec.TRANSPORT_FAILURE_EXIT_CODE
+
+
 def test_eagle_vlm_declares_remote_processor_http_dependency() -> None:
     """The official checkpoint processor can import its requests dependency."""
     requirements = (Path(__file__).parents[2] / "families/eagle_vlm/requirements.txt").read_text(

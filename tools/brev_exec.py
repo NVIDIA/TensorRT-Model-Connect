@@ -16,6 +16,11 @@ from pathlib import Path
 from tools.ci.process import CiError
 
 
+# Keep remote application failures in the normal 1-255 range.  The workflow
+# uses this reserved value to retry only Brev transport failures.
+TRANSPORT_FAILURE_EXIT_CODE = 75
+
+
 def remote_wrapper(command: Sequence[str], result_file: Path, marker: str) -> str:
     """Cache the application result remotely while returning success to Brev."""
     if not command:
@@ -115,7 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return execute(arguments.instance, command, arguments.log, arguments.result_file)
     except (CiError, OSError, ValueError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
-        return 1
+        return TRANSPORT_FAILURE_EXIT_CODE
 
 
 if __name__ == "__main__":
