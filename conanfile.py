@@ -114,6 +114,32 @@ class TensorRTModelConnectConan(ConanFile):
                 f"family DLL set does not match: missing={sorted(expected - packaged)}, "
                 f"extra={sorted(packaged - expected)}"
             )
+        self._package_windows_cli(source, module_bin, expected)
+
+    def _package_windows_cli(self, source: Path, module_bin: Path, families: set[str]) -> None:
+        # trtmc.exe resolves family commands from families/<family>/cli.json
+        # beside the executable and loads native adapters from that directory.
+        expected = set()
+        for family in sorted(families):
+            declaration = source / "families" / family / "cli.json"
+            if not declaration.is_file():
+                continue
+            copy(
+                self,
+                declaration.name,
+                src=str(declaration.parent),
+                dst=str(module_bin / "families" / family),
+                keep_path=False,
+            )
+            commands = json.loads(declaration.read_text(encoding="utf-8"))["commands"]
+            if any(command["executor"] == "native" for command in commands):
+                expected.add(f"trtmc_cli_{family}.dll")
+        packaged = {path.name for path in module_bin.glob("trtmc_cli_*.dll")}
+        if packaged != expected:
+            raise ConanException(
+                f"family CLI adapter set does not match CLI declarations: "
+                f"missing={sorted(expected - packaged)}, extra={sorted(packaged - expected)}"
+            )
 
     def package(self) -> None:
         if self._windows():
