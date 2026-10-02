@@ -9,7 +9,8 @@ half precision), and the check compares how far TRTMC and the native half-precis
 it. It fails when TRTMC is on average more than ``max_psnr_gap_db`` (PSNR) or ``max_ssim_gap`` (SSIM)
 further away and that gap is significant (one-sided 95%). Without a usable full-precision render
 (it fails, or renders noise such as an fp16 overflow), each sample needs ``fallback_min`` PSNR / SSIM
-against the native output instead.
+against the native output instead. Generated media drift between TRTMC and the native model at any
+precision, so config/tasks.yaml marks this check ``informational``: reported, not part of the verdict.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .config import Environment
+from .generation import generate, generate_native, is_video
 from .services import _serve_env
+from .suites import build_suite, limit_suite, with_latent_seeds
 
 # Full-resolution PSNR (RGB) and SSIM (luminance, 7x7 box windows) over evenly sampled frames.
 PIXELS = r"""
@@ -87,14 +90,31 @@ def _mean(values: Sequence[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+# One-sided 95% Student-t critical values by degrees of freedom (larger df use the next lower entry).
+_T95_ONE_SIDED = {1: 6.314, 2: 2.920, 3: 2.353, 4: 2.132, 5: 2.015, 6: 1.943, 7: 1.895, 8: 1.860, 9: 1.833,
+                  10: 1.812, 15: 1.753, 20: 1.725, 30: 1.697}
+
+
+def drop(differences: Sequence[float], limit: float) -> tuple[float, float | None, bool]:
+    """Mean paired drop (native minus TRTMC), its one-sided 95% lower bound, and whether it fails:
+    above ``limit`` and significant (a single pair can only be judged by the limit)."""
+    import statistics
+
+    mean = statistics.fmean(differences)
+    if len(differences) < 2:
+        return mean, None, mean > limit
+    degrees = len(differences) - 1
+    critical = _T95_ONE_SIDED[max(key for key in _T95_ONE_SIDED if key <= degrees)] if degrees <= 30 else 1.645
+    lower = mean - critical * statistics.stdev(differences) / len(differences) ** 0.5
+    return mean, lower, mean > limit and lower > 0
+
+
 def judge(rows: Sequence[Mapping[str, Any]], samples: Sequence[Mapping[str, Any]], check: Mapping[str, Any],
           planned: int | None = None) -> dict[str, Any]:
     """Judge the first ``planned`` samples (the full-precision budget) and nothing less: a native output
     missing there is an error, a TRTMC output missing or of another geometry is a failure, and unless
     every planned full-precision render is usable the whole budget is judged by ``fallback_min``.
     Samples beyond the budget only report TRTMC against the native output."""
-    from .alignment import drop
-
     psnr_gap, ssim_gap = float(check.get("max_psnr_gap_db", 3.0)), float(check.get("max_ssim_gap", 0.05))
     planned = min(planned or len(rows), len(rows))
     budget = list(zip(samples[:planned], rows[:planned]))
@@ -172,3 +192,67 @@ def item(suite: Any, verdict: Mapping[str, Any], native: str, floor: str | None,
             "passed": None if reasons else verdict["passed"],
             "required_passes": None, "gate": dict(verdict.get("gate", {})), "metrics": dict(verdict.get("metrics", {})),
             "failures": failures, **({"reasons": list(reasons)} if reasons else {})}
+
+
+def _floor(environment: Environment, model: dict[str, Any], suite: Any, python: str, out: Path, backend: str,
+           precision: str, reuse: bool = False) -> tuple[list[tuple[Path, dict[str, Any]]], str] | tuple[None, None]:
+    """The same backend at the next native precision (a script reference does not replay the noise)."""
+    from .runner import timing_precisions
+
+    # fp32 first (how far the native half-precision run is from full precision; it never overflows),
+    # then the other half precision where fp32 does not fit.
+    preferred = {"bf16": ["fp32", "fp16"], "fp16": ["fp32", "bf16"]}.get(precision, ["bf16", "fp16"])
+    for other in dict.fromkeys([*preferred, *timing_precisions(model["reference"])]):
+        if other == precision:
+            continue
+        try:
+            return generate(environment, model, backend, out / f"replay-floor-{backend}-{other}", suite, python,
+                            other, reuse), f"{backend} {other}"
+        except Exception:  # noqa: BLE001 - try the next precision; no floor at all is reported
+            continue
+    return None, None
+
+
+def _parity(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
+                   out: Path, suite: Any, outputs: Mapping[str, Any], native: tuple[str, str],
+                   max_frames: int) -> dict[str, Any]:
+    label = " ".join(native)
+    missing = not_replayed(outputs)
+    if missing:
+        return item(suite, {}, label, None, outputs,
+                                  [f"the initial noise was not replayed on {', '.join(missing)}"])
+    floor_suite = limit_suite(suite, int(check.get("parity_floor_samples", 10)))
+    floor, floor_label = _floor(environment, model, floor_suite, python, out, *native,
+                                reuse=bool(check.get("reuse_outputs")))
+    if floor is not None and not_replayed({"floor": floor}):
+        floor, floor_label = None, None
+    items = [(str(outputs["candidate"][index][0]), str(outputs["native"][index][0]),
+              str(floor[index][0]) if floor is not None and index < len(floor) else None)
+             for index in range(len(suite.samples))]
+    rows = measure(environment, items, max_frames)
+    if model["candidate"].get("quantization"):  # quantized weights deviate more than a native precision change
+        check = {**check, **check.get("quantized_gap", {})}
+    return item(suite, judge(rows, suite.samples, check, len(floor_suite.samples)),
+                              label, floor_label, outputs)
+
+
+def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
+        out: Path) -> list[dict[str, Any]]:
+    """The ``replay-parity`` entry of a family that takes caller latents (nothing otherwise): both sides
+    render the first ``parity_floor_samples`` prompts (``video_samples`` videos) with the same initial
+    noise, the native model also at full precision."""
+    from .models import _suite
+
+    if model.get("family") not in check.get("latent_replay_families", ()):
+        return []
+    suite = build_suite(_suite(check["suite"], model["catalog_profile"], environment.path("repo")), environment)
+    count = int(check.get("video_samples", 3) if is_video(suite.samples[0]["request"])
+                else check.get("parity_floor_samples", 10))
+    suite = with_latent_seeds(limit_suite(suite, count))
+    reuse = bool(check.get("reuse_outputs"))
+    native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "replay",
+                                                               reuse=reuse)
+    outputs = {"candidate": generate(environment, model, "trtmc", out / "replay-candidate", suite, reuse=reuse),
+               "native": native}
+    return [_parity(environment, model, check, python, out, suite, outputs,
+                    (native_backend, native_precision), int(check.get("max_frames", 8)))]

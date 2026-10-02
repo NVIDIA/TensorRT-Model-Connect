@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The native pipeline does not produce a valid output in fp16 (its noise floor is 0): time it in bf16.
+# The native pipeline does not produce a valid output in fp16 (its fp16 outputs are blank): time it in bf16.
 reference:
   timing_precision: bf16

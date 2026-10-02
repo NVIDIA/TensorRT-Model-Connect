@@ -18,9 +18,6 @@ runtime_root: /runs/tmp/build
 worker: /runs/tmp/build/trtmc_benchmark_worker
 serve_python: /opt/venv/bin/python        # runs trtmc-perf-serve (torch, transformers, runtime)
 aiperf: /state/aiperf-venv/bin/aiperf
-golden_store:
-  root: /state/golden-store               # `publish-goldens` copies it to the shared golden store
-  # read_url: <HTTP root of the shared golden store>   (optional; fetches goldens missing locally)
 hf_datasets_cache: /state/hf-datasets
 reference_env_root: /state/ref-envs      # family reference environments (trtmc-perf-serve reference-env)
 ports: {reference: 8900, candidate: 8901}

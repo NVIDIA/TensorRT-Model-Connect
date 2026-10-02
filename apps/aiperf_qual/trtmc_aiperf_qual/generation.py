@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generate a suite's outputs on TRTMC and on the native model, keeping the output files.
 
-Checks that judge generated media as a whole (``tts_intelligibility``, ``clip_alignment``) read the
-files each request wrote under ``scratch/<request id>``.
+Checks that judge generated media as a whole (``tts_intelligibility``, ``geneval``, ``edit_similarity``,
+``replay_parity``) read the files each request wrote under ``scratch/<request id>``.
 """
 
 from __future__ import annotations
@@ -17,6 +17,10 @@ from .services import serving
 
 # (request directory, the server's record of the request) per suite sample, in suite order.
 Outputs = list[tuple[Path, dict[str, Any]]]
+
+
+def is_video(request: Mapping[str, Any]) -> bool:
+    return request.get("media_type") == "video" or int(request.get("num_frames") or 1) > 1
 
 
 def generate(environment: Environment, model: dict[str, Any], backend: str, out: Path, suite: Any,

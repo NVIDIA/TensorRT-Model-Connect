@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""trtmc-aiperf-qual: run | run-all | summary | plan | rejudge | recheck | doctor | publish-goldens."""
+"""trtmc-aiperf-qual: run | run-all | summary | plan | rejudge | recheck | doctor."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import shlex
 import subprocess
 import sys
 import sysconfig
@@ -55,36 +54,6 @@ def doctor_environment(environment) -> int:
     return 1 if preflight.problems(checks) else 0
 
 
-def publish_goldens(source: Path, store_cli: str, remote_dir: str) -> int:
-    """Upload golden directories with a storage CLI that answers ``exists REMOTE`` and
-    ``upload --parents --recursive LOCAL REMOTE`` with JSON ``{"ok": ..., "data": ..., "error": ...}``.
-
-    Golden directories are content-addressed (<suite>/<platform>/<key>), so existing ones are skipped,
-    never replaced.
-    """
-    def store(*arguments: str) -> dict:
-        completed = subprocess.run([*shlex.split(store_cli), *arguments], capture_output=True, text=True)
-        try:
-            return json.loads(completed.stdout)
-        except json.JSONDecodeError:
-            return {"ok": False, "error": {"message": (completed.stderr or completed.stdout)[-400:]}}
-
-    results = []
-    for directory in sorted(path for path in source.glob("*/*/*") if (path / "golden.jsonl").is_file()):
-        remote = f"{remote_dir}/{directory.relative_to(source).as_posix()}"
-        exists = store("exists", remote)
-        if not exists.get("ok"):
-            results.append({"golden": remote, "status": "error", "error": exists.get("error")})
-        elif exists["data"].get("exists"):
-            results.append({"golden": remote, "status": "already-published"})
-        else:
-            upload = store("upload", "--parents", "--recursive", str(directory), remote)
-            results.append({"golden": remote, "status": "uploaded" if upload.get("ok") else "error",
-                            "error": None if upload.get("ok") else upload.get("error")})
-    print(json.dumps(results, indent=2))
-    return 0 if results and all(item["status"] != "error" for item in results) else 1
-
-
 def recheck_output(out: Path, l1: dict, item: dict) -> dict | None:
     """Re-run the Perf output check on the recorded first observations with the current grader."""
     from . import judge
@@ -109,26 +78,24 @@ def recheck_output(out: Path, l1: dict, item: dict) -> dict | None:
     return {"match": match, "reason": reason}
 
 
-# Grader explanations meaning the two outputs share no comparable field.
-NOT_COMPARABLE = ("not comparable", "lacks the compared field", "no common numeric fields")
-
-
 def current_settings(model: dict, environment) -> dict:
-    """The recorded model with today's judging settings (Acc gates and ``sampled``, the Perf output check
-    and margins), so a judge-only configuration change needs no rerun."""
+    """The recorded model with today's judging settings (benchmark gates, which checks and family cases
+    are informational, the Perf output check and margins), so a judge-only configuration change needs
+    no rerun."""
     from . import models
 
     try:
         current = models.resolve_model(model["catalog_profile"], environment)
     except ConfigError:
         return model
-    declared = {item["suite"]["suite"]: item for item in current["accuracy"]}
-    accuracy = [{**item, **{key: declared[item["suite"]["suite"]][key] for key in ("gate", "sampled")
-                            if key in declared.get(item["suite"]["suite"], {})}} for item in model["accuracy"]]
+    gates = {item["suite"]: item.get("gate") for item in current["absolute"]}
+    absolute = [{**item, "gate": gates.get(item["suite"]) or item.get("gate")} for item in model.get("absolute", [])]
     judging = ("output_grader", "output_grader_params", "margin_percent", "max_ci_percent", "not_equivalent")
     l1 = {**model["performance"]["l1"],
           **{key: value for key, value in current["performance"]["l1"].items() if key in judging}}
-    return {**model, "accuracy": accuracy, "performance": {**model["performance"], "l1": l1}}
+    return {**model, "absolute": absolute, "supplementary": current["supplementary"],
+            "family_informational": current.get("family_informational", False),
+            "accuracy_source": current["accuracy_source"], "performance": {**model["performance"], "l1": l1}}
 
 
 def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (), regenerate: bool = False) -> int:
@@ -146,7 +113,8 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
         recorded = json.loads((out / "model.json").read_text())
         current = models.resolve_model(recorded["catalog_profile"], environment)
         # Today's checks against today's native reference (which backend, which precisions).
-        model = {**recorded, "supplementary": current["supplementary"], "reference": current["reference"]}
+        model = {**recorded, "supplementary": current["supplementary"], "reference": current["reference"],
+                 "family_informational": current.get("family_informational", False)}
         checks = [{**check, "reuse_outputs": not regenerate} for check in model["supplementary"]
                   if (not only or check["check"] in only) and applies(check, model)]
         if not checks:
@@ -176,6 +144,7 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
     from . import absolute, judge
     from .config import CONFIG_ROOT
     from .report import write_report
+    from .runner import expected_suites, informational_suites, mark_informational, missing_results
 
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())
     for out in outs:
@@ -225,32 +194,15 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
                                                                       expected=item["expected_samples"],
                                                                       paired=item["samples"])
                     item["notes"] = absolute.notes(item["metrics"])
-                continue
-            if item.get("source") == "family" or item.get("suite") in ("tts-intelligibility", "clip-alignment", "replay-parity"):
-                continue  # the family's own metric and gate, or a whole-output check, decided it
-            declared = next((entry for entry in model["accuracy"] if entry["suite"]["suite"] == item["suite"]), {})
-            if environment is not None and "gate" in declared:
-                item["gate"] = dict(declared["gate"])
-            item.pop("precision_sensitive", None)
-            if item["status"] in ("pass", "fail", "inconclusive") and item.get("samples") == item.get("expected_samples"):
-                item["required_passes"] = judge.required_passes(item.get("gate", {}), item["samples"])
-                labels_ok = "label_metrics" not in item or (
-                    item["label_metrics"].get("unmatched") == 0 and item["label_metrics"]["wer_increase_from_reference"]
-                    <= float(item["gate"].get("max_wer_increase_from_reference", 1.0)))
-                status = "pass" if item["passed"] >= item["required_passes"] and labels_ok else "fail"
-                failed = item.get("failed_indices") or [
-                    index for index in (judge.sample_index(f.get("conversation_id")) for f in item.get("failures", []))
-                    if index is not None]
-                # The full native record of the suite (its failing indices), not the entry's summary.
-                noise = (result.get("noise_floor") or {}).get(item["suite"]) or item.get("noise_floor")
-                item["status"] = judge.settle(status, failed, noise, bool(declared.get("sampled")), item)
-            reasons = [str(failure.get("explanation", "")) for failure in item.get("failures", [])]
-            if (item["status"] == "fail" and item.get("passed") == 0 and reasons
-                    and all(any(marker in reason for marker in NOT_COMPARABLE) for reason in reasons)):
-                item["status"] = "not-comparable"
-        from .runner import expected_suites, missing_results
-
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("source") != "missing"]
+        # Results the configuration no longer asks for (a retired check or suite) stay as evidence only.
+        configured = set(expected_suites(model)) | informational_suites(model)
+        for item in result["accuracy"]:
+            item.pop("informational", None)
+            if item.get("suite") not in configured:
+                item["informational"] = True
+        mark_informational(model, result["accuracy"])
+        result["accuracy_source"] = model.get("accuracy_source", result.get("accuracy_source"))
         result["accuracy"] += missing_results(model, result["accuracy"], result.get("errors") or {})
         result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)),
                                           expected_modes=len(l1.get("reference_modes", [])) if l1 else 0)
@@ -291,9 +243,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     rejudge = commands.add_parser("rejudge", help="recompute Perf lights and verdicts of existing reports")
     rejudge.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
     rejudge.add_argument("--environment", type=Path,
-                         help="also apply today's judging settings (gates, sampled, Perf output check)")
+                         help="also apply today's judging settings (gates, informational checks, Perf output check)")
     recheck = commands.add_parser("recheck", help="run the Task's whole-output checks again on finished results "
-                                                  "(CLIP alignment, latent replay parity, TTS intelligibility)")
+                                                  "(GenEval, MagicBrush, latent replay parity, TTS intelligibility)")
     recheck.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
     recheck.add_argument("--environment", type=Path, required=True)
     recheck.add_argument("--check", action="append", default=[], help="only these checks (default: all)")
@@ -303,12 +255,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                                                "this machine's environment file")
     check.add_argument("--fix", action="store_true")
     check.add_argument("--environment", type=Path, help="also check paths, interpreters, GPU, and model list")
-    publish = commands.add_parser("publish-goldens", help="upload local goldens to a shared golden store")
-    publish.add_argument("--source", type=Path, required=True, help="local golden store (<suite>/<key>/...)")
-    publish.add_argument("--store-cli", required=True,
-                         help="storage command (exists / upload with JSON results), for example 'my-store'")
-    publish.add_argument("--remote-dir", default="goldens",
-                         help="directory below the storage root")
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "doctor":
@@ -316,8 +262,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.environment:
                 code = max(code, doctor_environment(load_environment(arguments.environment)))
             return code
-        if arguments.command == "publish-goldens":
-            return publish_goldens(arguments.source, arguments.store_cli, arguments.remote_dir)
         if arguments.command == "recheck":
             return recheck_reports(arguments.outs, load_environment(arguments.environment), arguments.check,
                                    arguments.regenerate)
@@ -394,8 +338,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                                       "backend": model["reference"]["backend"],
                                       "fallback": model["reference"]["fallback"],
                                       "accuracy_source": model["accuracy_source"],
+                                      "benchmarks": [item["suite"] for item in model["absolute"]],
                                       "family_cases": model["family_accuracy"],
-                                      "suites": [item["suite"]["suite"] for item in model["accuracy"]],
                                       "supplementary": [item["check"] for item in model["supplementary"]],
                                       "perf_request": model["performance"]["l1"]["suite"]["source"]["kind"],
                                       "bundle": model["candidate"]["bundle"],

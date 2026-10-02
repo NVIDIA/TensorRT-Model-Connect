@@ -14,8 +14,8 @@ from .config import Environment
 
 # key -> kind: existing directory, executable file, or a directory created on first use.
 PATHS = {"repo": "dir", "data_root": "dir", "runtime_root": "dir", "worker": "exe", "serve_python": "exe",
-         "aiperf": "exe", "bundle_root": "created", "golden_store.root": "created",
-         "hf_datasets_cache": "created", "reference_env_root": "created"}
+         "aiperf": "exe", "bundle_root": "created", "hf_datasets_cache": "created",
+         "reference_env_root": "created"}
 SERVE_PACKAGES = ("torch", "transformers", "fastapi", "uvicorn", "multipart", "soundfile", "PIL", "numpy")
 
 

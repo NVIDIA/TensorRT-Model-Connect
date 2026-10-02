@@ -46,14 +46,6 @@ class Suite:
                 handle.write(json.dumps({"text": json.dumps({"request": sample["request"]})}) + "\n")
         return path
 
-    def write_with_goldens(self, path: Path, goldens: Mapping[str, Any],
-                           params: Mapping[str, Any] | None = None) -> Path:
-        with open(path, "w") as handle:
-            for sample in self.samples:
-                handle.write(json.dumps({**sample, "golden": goldens[sample["request_sha"]],
-                                         "params": dict(params or {})}) + "\n")
-        return path
-
 
 def with_latent_seeds(suite: Suite, base: int = 1000) -> Suite:
     """Each sample with its own ``latent_seed`` (base + index): trtmc-perf-serve then gives TRTMC and
@@ -67,7 +59,7 @@ def with_latent_seeds(suite: Suite, base: int = 1000) -> Suite:
 
 
 def limit_suite(suite: Suite, count: int) -> Suite:
-    """The first ``count`` samples (a new suite key, so goldens stay separate)."""
+    """The first ``count`` samples (a new suite key)."""
     if len(suite.samples) <= count:
         return suite
     samples = suite.samples[:count]
@@ -105,26 +97,6 @@ def select(records: Sequence[dict[str, Any]], selection: Mapping[str, Any]) -> l
             raise ConfigError(f"selection index out of range for {len(records)} records")
         return [records[index] for index in indices]
     raise ConfigError(f"unknown selection method {method!r}")
-
-
-def _mmlu_records(source: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Zero-shot MMLU questions in lighteval's prompt format from a pinned dataset revision, read with
-    the public ``datasets`` API; the answer letter is the label."""
-    import datasets
-
-    revision = require(source, "revision", "source")
-    records = []
-    for subject in require(source, "subjects", "source"):
-        table = datasets.load_dataset(source.get("dataset", "lighteval/mmlu"), subject, split="test", revision=revision)
-        for index in range(min(int(source.get("per_subject", 1)), len(table))):
-            row = table[index]
-            choices = "".join(f"\n{letter}. {text}" for letter, text in zip("ABCD", row["choices"]))
-            prompt = (f"The following are multiple choice questions (with answers) about {subject.replace('_', ' ')}."
-                      f"\n\n{row['question'].strip()}{choices}\nAnswer:")
-            answer = row["answer"]
-            records.append({"id": f"{subject}/{index}", "task": subject, "prompt": prompt,
-                            "label": "ABCD"[answer] if isinstance(answer, int) else str(answer)})
-    return records
 
 
 def _aiperf_public_records(source: Mapping[str, Any], selection: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -509,40 +481,13 @@ def _catalog_testcase_records(source: Mapping[str, Any], environment: Environmen
     return [{"id": source.get("testcase") or source["profile"], "request": request}]
 
 
-_TOKENIZERS: dict[tuple[str, str | None], Any] = {}
-
-
-def _truncate_prompt(prompt: str, truncation: Mapping[str, Any]) -> str:
-    """Keep the last ``max_tokens`` prompt tokens of the model's tokenizer (left truncation).
-
-    Both backends receive the same truncated text, so parity is unaffected; the bound keeps the
-    prompt plus generated tokens inside the bundle's sequence limit.
-    """
-    key = (truncation["tokenizer"], truncation.get("revision"))
-    if key not in _TOKENIZERS:
-        from transformers import AutoTokenizer
-
-        try:
-            _TOKENIZERS[key] = AutoTokenizer.from_pretrained(
-                key[0], revision=key[1], trust_remote_code=bool(truncation.get("trust_remote_code")))
-        except Exception:  # noqa: BLE001 - fall back to a conservative character bound
-            _TOKENIZERS[key] = None
-    tokenizer, limit = _TOKENIZERS[key], int(truncation["max_tokens"])
-    if tokenizer is None:
-        return prompt[-limit * 2:]
-    ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-    return prompt if len(ids) <= limit else tokenizer.decode(ids[-limit:])
-
-
 def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suite:
     from trtmc_perf_serving.files import inline_files
 
     source = definition["source"]
     kind = require(source, "kind", "source")
     selection = definition["selection"]
-    if kind == "mmlu":
-        records = _mmlu_records(source)
-    elif kind == "aiperf_public":
+    if kind == "aiperf_public":
         records = _aiperf_public_records(source, selection)
         selection = {"method": "first", "count": len(records)}  # already selected before decoding
     elif kind == "hf_dataset":
@@ -578,8 +523,6 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
             request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
         if isinstance(request.get("prompt"), str) and (definition.get("prompt_prefix") or definition.get("prompt_suffix")):
             request["prompt"] = f"{definition.get('prompt_prefix', '')}{request['prompt']}{definition.get('prompt_suffix', '')}"
-        if definition.get("truncate_prompt") and isinstance(request.get("prompt"), str):
-            request["prompt"] = _truncate_prompt(request["prompt"], definition["truncate_prompt"])
         request = inline_files(request)
         sample = {"sample_id": record["id"], "task": record.get("task", definition["suite"]),
                   "request": request, "request_sha": request_sha(request)}

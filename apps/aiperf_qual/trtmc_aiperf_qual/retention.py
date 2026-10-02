@@ -12,8 +12,8 @@
   ``hf_hub_cache`` once no remaining profile of the batch uses it (profiles sharing one run together).
 
 Deletion is confined to the configured roots: one model directory below ``bundle_root`` and one
-``models--<org>--<name>`` repository below ``hf_hub_cache``. Reference environments, goldens, and
-reports are kept: re-judging needs only the reports.
+``models--<org>--<name>`` repository below ``hf_hub_cache``. Reference environments and reports
+are kept: re-judging needs only the reports.
 """
 
 from __future__ import annotations

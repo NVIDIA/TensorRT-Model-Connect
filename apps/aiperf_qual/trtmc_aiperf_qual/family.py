@@ -249,7 +249,7 @@ def _noop() -> Iterator[None]:
 
 def attribute(environment: Environment, model: dict[str, Any], out: Path, reference_python: str,
               entries: list[dict[str, Any]]) -> None:
-    """Settle failing family cases the way Task suites settle: a sampling case is ``inconclusive``;
+    """Settle failing family cases: a sampling case is ``inconclusive``;
     when the family reference runs at another precision than the candidate, the native model at the
     candidate precision repeats the case, and a failure it shares on the same samples (or, for
     aggregate-only metrics, at all) is ``inconclusive`` and marked ``precision_sensitive``."""

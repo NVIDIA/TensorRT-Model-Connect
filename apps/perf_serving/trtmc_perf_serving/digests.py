@@ -4,8 +4,8 @@
 """Compact, backend-independent digests of generated media.
 
 Generated images, video frames, and audio are written as files (PNG/WAV by the TRTMC worker,
-``.npy`` arrays by the Python references). Parity graders and goldens need a small value that
-both sides produce the same way, so the server replaces the files with digests: a 64x64 RGB
+``.npy`` arrays by the Python references). Output comparators need a small value that both sides
+produce the same way, so the server replaces the files with digests: a 64x64 RGB
 thumbnail per sampled frame and a banded log power spectrum for audio.
 """
 

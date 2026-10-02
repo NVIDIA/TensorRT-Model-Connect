@@ -176,7 +176,7 @@ def compare_media(candidate: Sequence[Mapping[str, Any]], reference: Sequence[Ma
 def run_media(environment: Environment, model: Mapping[str, Any], l2: Mapping[str, Any], out: Path,
               python: str, precision: str) -> dict[str, Any]:
     """The media sweep; TRTMC first, then the native model (eager), each alone on the GPU."""
-    from .alignment import is_video
+    from .generation import is_video
     from .models import _suite
     from .services import serving
     from .suites import build_suite

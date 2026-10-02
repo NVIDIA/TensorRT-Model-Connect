@@ -4,8 +4,9 @@
 # Qualification defaults per catalog Task. Every catalog model inherits the entry of its Task;
 # config/models/<profile>.yaml holds only the exceptions (deep-merged over this).
 #
-# Acc: per-sample parity of the TRTMC output with the native Hugging Face model (fp32 golden),
-# gated per suite and relaxed to the reference's own precision noise (noise_floor).
+# Acc: TRTMC and the native model answer the Task's gold-labelled benchmarks (`absolute`, below) and their
+# scores must be close. Tasks without one are judged by the family's own accuracy cases; a model with
+# neither sets `accuracy_source: none` (Perf only, for example random-weight test models).
 # Perf: server model-call p50 over repeated identical requests against the native model at the
 # candidate precision, eager and (where listed) torch.compile.
 #
@@ -14,7 +15,6 @@
 defaults:
   reference:
     backend: auto              # generic HF adapter when one serves the Task, else the family script
-  noise_floor: true
   performance:
     l1:
       suite: catalog
@@ -27,8 +27,7 @@ defaults:
 # Absolute accuracy: AIPerf's own benchmarks (trtmc_aiperf_plugins.benchmarks, pinned revisions), answered
 # by TRTMC and by the native model at the candidate precision and scored against the gold answers on both
 # sides. Fails when the accuracies differ by more than max_delta_points (the paired McNemar test is a
-# note). sequence_length is the bundle length the prompts and answers
-# need (a shorter catalog bundle is rebuilt as <profile>-qual); problems that still do not fit are dropped
+# note). sequence_length is the bundle length the prompts and answers need (a shorter catalog bundle is rebuilt as <profile>-qual); problems that still do not fit are dropped
 # for both sides alike.
 benchmarks:
   mmlu: {plugin: trtmc_mmlu, suite: mmlu-5shot, n_shots: 5, per_task: 20, sequence_length: 4096,
@@ -107,73 +106,46 @@ benchmarks:
 
 tasks:
   text_generation:
-    # Absolute accuracy replaces the parity suites below (models set `absolute: []` to keep them).
     # GSM8K is off for now: the native eager model's 256-token answers dominated the run time.
     absolute: [mmlu]
-    accuracy:
-      - {suite: mmlu-0shot-30, grader: parity_answer_line, max_new_tokens: 8, gate: {min_pass_rate: 0.9}}
-      - {suite: humaneval-30, grader: parity_token_exact, max_new_tokens: 32, gate: {min_pass_rate: 0.9}}
     performance: {l1: {reference_modes: [eager, compile], output_grader: parity_token_exact,
                        output_grader_params: {min_prefix: 8, accept_equal_text: true}},
                   # L2 serving sweep (informational): synthetic prompts through /v1/completions.
                   l2: {concurrency: [1, 4], requests: 32, isl: 96, osl: 32, margin_percent: 5}}
-    # Quantized weights (FP8, MXFP4, ...) legitimately move late tokens: the answer and the first eight
-    # generated tokens must still agree on 8 of 10 samples, which a broken quantization does not meet.
-    quantized:
-      accuracy:
-        - {suite: mmlu-0shot-30, grader: parity_answer_line, max_new_tokens: 8, gate: {min_pass_rate: 0.8}}
-        - {suite: humaneval-30, grader: parity_token_exact, grader_params: {min_prefix: 8}, max_new_tokens: 32,
-           gate: {min_pass_rate: 0.8}}
 
   vision_language_generation:
     absolute: [mmstar, ocrbench]
-    accuracy:
-      - {suite: imagenette-vlm-30, grader: parity_edit_distance, grader_params: {max_distance: 0.15},
-         gate: {min_pass_rate: 0.9}}
     performance: {l1: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}}
 
   classification: &classify
     absolute: [imagenet]
-    accuracy: [{suite: imagenette-classify-100, grader: parity_top1, gate: {min_pass_rate: 0.98}}]
     performance: {l1: {output_grader: parity_top1, output_grader_params: {tie_cosine: 0.999}}}
   image_to_class_scores: *classify
 
   encoding: &encode
     absolute: [sts]
-    accuracy: [{suite: stsbenchmark-sentences-50, grader: parity_vector, grader_params: {min_cosine: 0.999},
-                gate: {min_pass_rate: 1.0}}]
     performance: {l1: {reference_modes: [eager, compile], output_grader: parity_vector}}
   embedding: *encode
 
   image_features:
-    accuracy: [{suite: beans-features-12, grader: parity_numeric, grader_params: {min_cosine: 0.99},
-                gate: {min_pass_rate: 1.0}}]
     performance: {l1: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}}
 
   object_detection:
     absolute: [coco]
-    accuracy: [{suite: coco2017-detect-100, grader: parity_boxes, gate: {min_pass_rate: 0.9}}]
     performance: {l1: {output_grader: parity_boxes}}
 
   segmentation:
     absolute: [ade20k]
-    accuracy: [{suite: imagenette-segment-10, grader: parity_mask,
-                grader_params: {min_pixel_accuracy: 0.99, min_mean_iou: 0.94}, gate: {min_pass_rate: 0.9}}]
     performance: {l1: {output_grader: parity_mask}}
   prompted_segmentation:
     absolute: [sam_point]
-    accuracy: [{suite: imagenette-prompted-10, grader: parity_mask, grader_params: {min_mask_iou: 0.7},
-                gate: {min_pass_rate: 0.9}}]
     performance: {l1: {output_grader: parity_mask, output_grader_params: {min_mask_iou: 0.7}}}
   text_prompted_segmentation:
     absolute: [sam3_text]
-    accuracy: [{suite: catalog, grader: parity_numeric, gate: {min_pass_rate: 1.0}}]
     performance: {l1: {output_grader: parity_numeric}}
 
   transcription: &transcribe
     absolute: [librispeech]
-    accuracy: [{suite: librispeech-aiperf-30, grader: parity_wer, grader_params: {max_wer: 0.1},
-                gate: {min_pass_rate: 0.9, max_wer_increase_from_reference: 0.02}}]
     performance: {l1: {output_grader: parity_wer}}
   transcription_streaming:
     <<: *transcribe
@@ -181,7 +153,6 @@ tasks:
 
   # Generative media are slow per request: fewer requests per run, still three runs for the CI.
   audio_generation:
-    accuracy: [{suite: seedtts-en-5, grader: parity_audio, gate: {min_pass_rate: 1.0}}]
     # Also for models with a family case: sampling models cannot be judged per sample, but what they
     # say can. Absolute accuracy: both sides speak 200 SeedTTS-eval sentences, Whisper large-v3-turbo
     # transcribes them, and TRTMC's mean WER against the text stays within 5 points of the native
@@ -191,23 +162,19 @@ tasks:
                      max_wer_increase: 0.05}]
     performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
   speech_to_speech:
-    accuracy: [{suite: catalog, grader: parity_audio, gate: {min_pass_rate: 1.0}}]
     performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
 
   # Perf only checks that both sides generate the same geometry (frames, height, width): diffusion
-  # content diverges across precisions, and content parity is the Acc suites' job.
+  # content diverges across precisions. Acc is the gold-referenced checks below (GenEval, VBench); the
+  # family's media parity cases and the pixel parity under latent replay are reported only
+  # (`informational`): generated media drift between TRTMC and the native model at any precision.
   image_generation:
     reference: {precision: bf16}
-    accuracy: [{suite: partiprompts-3, grader: parity_image, gate: {min_pass_rate: 1.0}}]
-    # CLIP judges whether TRTMC still renders the prompt (fails on a significant mean CLIPScore drop
-    # of more than 1 point vs the native model; videos: 3 prompts, plus the temporal consistency of
-    # adjacent frames). Families whose TRTMC runtime takes caller initial latents also render with
-    # the same initial noise on both sides (latent replay), which makes them comparable pixel by
-    # pixel: against the native fp32 render of the first 10 prompts, TRTMC may be at most 3 dB PSNR /
-    # 0.05 SSIM further away than the native half-precision run (6 dB / 0.1 for quantized weights).
-    supplementary: [{check: clip_alignment, suite: partiprompts-30, clip_model: openai/clip-vit-large-patch14,
-                     clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
-                     max_mean_clip_drop: 1.0, max_temporal_consistency_drop: 0.02, video_samples: 3,
+    family_cases_informational: true
+    # Families whose TRTMC runtime takes caller initial latents render with the same initial noise on
+    # both sides (latent replay), which makes them comparable pixel by pixel: how much further TRTMC is
+    # from the native fp32 render of the first 10 prompts than the native half-precision run.
+    supplementary: [{check: replay_parity, suite: partiprompts-30, informational: true, video_samples: 3,
                      latent_replay_families: [flux, pixart, qwen_image, z_image, wan_t2v],
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
                      quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
@@ -234,10 +201,11 @@ tasks:
       l2: {kind: media, suite: partiprompts-30, prompts: 3, requests: 3, video_requests: 1, margin_percent: 5}
   image_edit:  # edit inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
-    accuracy: [{suite: catalog, grader: parity_image, gate: {min_pass_rate: 1.0}}]
+    family_cases_informational: true  # Acc is MagicBrush below; media parity is reported only
     # Edits of ten Imagenette images with the same initial noise on both sides (latent replay),
-    # judged like image generation's replay parity.
-    supplementary: [{check: replay_parity, suite: imagenette-edit-10, latent_replay_families: [qwen_image],
+    # measured like image generation's replay parity (informational).
+    supplementary: [{check: replay_parity, suite: imagenette-edit-10, informational: true,
+                     latent_replay_families: [qwen_image],
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
                      quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
@@ -249,21 +217,16 @@ tasks:
     performance: {l1: *media_l1}
   world_model_generation:  # world-model inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
-    accuracy: [{suite: catalog, grader: parity_image, gate: {min_pass_rate: 1.0}}]
     performance: {l1: *media_l1}
 
   time_series_forecast:
     absolute: [etth1]
-    accuracy: [{suite: etth1-windows-10, grader: parity_numeric, grader_params: {min_cosine: 0.999, rtol: 0.02},
-                gate: {min_pass_rate: 1.0}}]
     performance: {l1: {output_grader: parity_numeric}}
   reranking:
     absolute: [rerank]
-    accuracy: [{suite: beir-scifact-10, grader: parity_scores, gate: {min_pass_rate: 0.9}}]
     performance: {l1: {output_grader: parity_scores}}
 
   robot_control: &numeric
-    accuracy: [{suite: catalog, grader: parity_numeric, gate: {min_pass_rate: 1.0}}]
     # Perf only checks that both sides computed the same output: counts may differ slightly across
     # precisions (for example valid pixels), which is the Acc cases' concern.
     performance: {l1: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}}

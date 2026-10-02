@@ -1,49 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Candidate-vs-reference parity through AIPerf's accuracy pipeline.
+"""Output comparators: does the TRTMC observation match the native one?
 
-``TRTMC_PARITY_SUITE`` names a JSONL file with one sample per line:
-``{"sample_id", "task", "request", "golden", "params"}``; ``golden`` is the reference
-backend's observation and ``params`` holds grader thresholds (for example ``max_wer``). The prompt is the JSON operation request, which the
-``trtmc_task`` endpoint sends verbatim, so non-text inputs travel as inline files.
-Graders receive the candidate observation and the golden as canonical JSON text.
+The Perf L1 output check compares the first output of each timed side with these (``COMPARATORS``,
+named by ``output_grader`` in config/tasks.yaml). Each returns ``(match, reason, candidate summary,
+reference summary)``.
 """
 
 from __future__ import annotations
 
-import json
 import math
-import os
 import re
 from collections import Counter
-from pathlib import Path
 from typing import Any, Sequence
-
-from aiperf.accuracy.graders.base import BaseGrader
-from aiperf.accuracy.models import BenchmarkProblem, GradingResult
-
-SUITE_ENV = "TRTMC_PARITY_SUITE"
-
-
-class ParityBenchmark:
-    def __init__(self, run: Any, **kwargs: Any) -> None:
-        self.run = run
-
-    async def load_problems(self, tasks: list[str] | None = None, n_shots: int = 0,
-                            enable_cot: bool = False) -> list[BenchmarkProblem]:
-        problems = []
-        for line in Path(os.environ[SUITE_ENV]).read_text().splitlines():
-            sample = json.loads(line)
-            if tasks and sample["task"] not in tasks:
-                continue
-            problems.append(BenchmarkProblem(
-                prompt=json.dumps({"request": sample["request"]}),
-                ground_truth=json.dumps({"golden": sample["golden"], "params": sample.get("params") or {}},
-                                        sort_keys=True),
-                task=sample["task"],
-                metadata={"sample_id": sample["sample_id"], "generation_size": 1},
-            ))
-        return problems
 
 
 def _first_divergence(left: list, right: list) -> int | None:
@@ -404,82 +373,3 @@ COMPARATORS = {"parity_scores": compare_scores, "parity_numeric": compare_numeri
                "parity_edit_distance": compare_edit_distance, "parity_boxes": compare_boxes,
                "parity_mask": compare_mask,
                "parity_top1": compare_top1, "parity_vector": compare_vector}
-
-
-class _ParityGrader(BaseGrader):
-    """Parses both sides as JSON and applies ``comparator``."""
-
-    comparator = staticmethod(compare_text)
-
-    async def grade(self, response_text: str, ground_truth: str, **kwargs: Any) -> GradingResult:
-        try:
-            candidate, truth = json.loads(response_text), json.loads(ground_truth)
-        except json.JSONDecodeError as error:
-            return GradingResult(correct=False, unparsed=True, confidence=0.0, reasoning=f"invalid JSON: {error}",
-                                 extracted_answer=response_text[:200], ground_truth=ground_truth[:200])
-        # Suite files wrap the golden with grader parameters; a bare observation is also accepted.
-        reference = truth.get("golden", truth) if isinstance(truth, dict) else truth
-        params = truth.get("params", {}) if isinstance(truth, dict) and "golden" in truth else {}
-        try:
-            correct, reasoning, answer, expected = self.comparator(candidate, reference, **params)
-        except (KeyError, TypeError, ValueError) as error:
-            return GradingResult(correct=False, unparsed=True, confidence=0.0,
-                                 reasoning=f"observation lacks the compared field: {error}",
-                                 extracted_answer=json.dumps(candidate)[:200], ground_truth=json.dumps(reference)[:200])
-        return GradingResult(correct=correct, unparsed=False, confidence=1.0, reasoning=reasoning,
-                             extracted_answer=answer[:500], ground_truth=expected[:500])
-
-    def extract_answer(self, response_text: str, **kwargs: Any) -> str:
-        return response_text[:200]
-
-
-class TokenExactGrader(_ParityGrader):
-    comparator = staticmethod(compare_token_exact)
-
-
-class AnswerLineGrader(_ParityGrader):
-    comparator = staticmethod(compare_answer_line)
-
-
-class TextGrader(_ParityGrader):
-    comparator = staticmethod(compare_text)
-
-
-class WerGrader(_ParityGrader):
-    comparator = staticmethod(compare_wer)
-
-
-class EditDistanceGrader(_ParityGrader):
-    comparator = staticmethod(compare_edit_distance)
-
-
-class BoxesGrader(_ParityGrader):
-    comparator = staticmethod(compare_boxes)
-
-
-class MaskGrader(_ParityGrader):
-    comparator = staticmethod(compare_mask)
-
-
-class Top1Grader(_ParityGrader):
-    comparator = staticmethod(compare_top1)
-
-
-class VectorGrader(_ParityGrader):
-    comparator = staticmethod(compare_vector)
-
-
-class ScoresGrader(_ParityGrader):
-    comparator = staticmethod(compare_scores)
-
-
-class NumericGrader(_ParityGrader):
-    comparator = staticmethod(compare_numeric)
-
-
-class ImageGrader(_ParityGrader):
-    comparator = staticmethod(compare_image)
-
-
-class AudioGrader(_ParityGrader):
-    comparator = staticmethod(compare_audio)

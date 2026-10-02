@@ -62,8 +62,7 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
     lines = [f"# {result['model']} — AIPerf qualification", "",
              f"Task `{result.get('task')}`, operation `{result.get('operation')}`; verdict **{verdict.get('category')}** "
              f"(Acc {verdict.get('acc')}, Perf {verdict.get('perf')}).", "",
-             f"Reference: backend `{reference.get('backend')}`, golden precision {reference.get('precision')}, "
-             f"noise precision {reference.get('perf_precision')}, perf precision "
+             f"Reference: backend `{reference.get('backend')}`, perf precision "
              f"{reference.get('timing_precision') or reference.get('perf_precision')}; "
              f"platform `{result.get('platform', {}).get('id')}`; "
              f"aiperf {result['provenance'].get('aiperf')}, plugins {result['provenance'].get('plugins')}.", ""]
@@ -71,35 +70,29 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
         lines += [f"Coverage: {result['coverage']}", ""]
     if result.get("candidate_note"):
         lines += [f"TRTMC bundle: {result['candidate_note']}", ""]
-    if reference.get("noise_error"):
-        lines += [f"Noise floor not available: {reference['noise_error'][:300]}", ""]
-    if reference.get("fallback_from"):
-        lines += [f"Generic reference failed, fell back to the family script: {reference['fallback_from'][:300]}", ""]
-    lines += ["## Accuracy (absolute: both sides scored against gold answers; otherwise parity with the native model)", "",
-              "| suite | source | status | passed | gate | native at the candidate precision | isolated re-check | "
-              "golden / evidence |", "|---|---|---|---|---|---|---|---|"]
+    if result.get("accuracy_note"):
+        lines += [f"Accuracy not applicable: {result['accuracy_note']}", ""]
+    lines += ["## Accuracy (absolute: both sides scored against gold answers; family: the family's own cases)", "",
+              "| suite | source | status | passed | gate | isolated re-check | evidence |",
+              "|---|---|---|---|---|---|---|"]
     for item in result.get("accuracy", []):
-        noise = item.get("noise_floor") or {}
-        noise_text = (f"{noise.get('passed')}/{noise.get('total')}"
-                      + (" (every failure also native: inconclusive)" if item.get("precision_sensitive") else "")
-                      if noise else "—")
         isolated = item.get("isolated_check")
         family = item.get("source") == "family"
         gate = (f"{item['required_passes']} passes" if item.get("required_passes") is not None
                 else json.dumps(item.get("gate", {})))
         count = counted(item) if item.get("samples") else json.dumps(item.get("metrics", {}))[:160]
-        evidence = item.get("evidence") if family else (item.get("golden") or {}).get("status")
+        evidence = item.get("evidence") if family else "—"
+        status = item["status"] + (" (informational)" if item.get("informational") else "")
         source = (f"{item.get('benchmark')} (family)" if family else
                   f"{item.get('benchmark')} (AIPerf, gold answers, {item.get('endpoint')})" if item.get("source") == "absolute"
-                  else item.get("benchmark") or "Task suite")
-        lines.append(f"| {item['suite']} | {source} | "
-                     f"{item['status']} | {count} | {gate} | {noise_text} | "
+                  else item.get("benchmark") or "Task check")
+        lines.append(f"| {item['suite']} | {source} | {status} | {count} | {gate} | "
                      f"{' '.join(str(part) for part in (isolated['status'], isolated.get('passed')) if part is not None) if isolated else '—'} | {evidence} |")
         if item.get("error"):
-            lines.append(f"|  | error: {item['error'][:300].replace('|', '/')} |  |  |  |  |  |  |")
+            lines.append(f"|  | error: {item['error'][:300].replace('|', '/')} |  |  |  |  |  |")
         if item.get("reasons") or item.get("notes"):
             text = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
-            lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |  |  |  |")
+            lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |  |  |")
     workloads = [item for item in result.get("accuracy", []) if (item.get("workload_perf") or {}).get("pairs")]
     if workloads:
         lines += ["", "## Performance on the benchmark requests (informational; server model-call time, p50)", "",

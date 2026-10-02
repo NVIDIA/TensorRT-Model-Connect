@@ -310,7 +310,7 @@ def test_preflight_reports_missing_paths_and_interpreters(tmp_path):
     environment = Environment({
         "repo": str(tmp_path / "repo"), "data_root": str(tmp_path / "data"), "bundle_root": str(tmp_path / "engines"),
         "runtime_root": str(tmp_path / "rt"), "worker": str(worker), "serve_python": str(tmp_path / "missing/python"),
-        "aiperf": sys.executable, "golden_store": {"root": str(tmp_path / "goldens")},
+        "aiperf": sys.executable,
         "hf_datasets_cache": str(tmp_path / "datasets"), "reference_env_root": str(tmp_path / "envs"),
         "ports": {"reference": 8900, "candidate": 8901}})
     checks = preflight.check_paths(environment)
@@ -349,14 +349,17 @@ def test_summary_reports_an_unreachable_remote_root(tmp_path):
 def test_rejudge_can_take_todays_judging_settings(monkeypatch):
     from trtmc_aiperf_qual import cli, models
 
-    recorded = {"catalog_profile": "bark-small", "accuracy": [{"suite": {"suite": "s"}, "gate": {"min_pass_rate": 1.0}}],
+    recorded = {"catalog_profile": "bark-small", "absolute": [{"suite": "s", "gate": {"max_delta_points": 1.0}}],
+                "supplementary": [{"check": "replay_parity"}],
                 "performance": {"l1": {"output_grader": "parity_audio", "reference_modes": ["eager"]}}}
-    today = {"accuracy": [{"suite": {"suite": "s"}, "gate": {"min_pass_rate": 0.8}, "sampled": True}],
+    today = {"absolute": [{"suite": "s", "gate": {"max_delta_points": 2.0}}], "accuracy_source": "absolute",
+             "supplementary": [{"check": "replay_parity", "informational": True}], "family_informational": True,
              "performance": {"l1": {"output_grader": "parity_audio", "output_grader_params": {"max_rms_ratio": 9.0},
                                     "reference_modes": ["eager", "compile"]}}}
     monkeypatch.setattr(models, "resolve_model", lambda profile, environment: today)
     current = cli.current_settings(recorded, Environment({}))
-    assert current["accuracy"][0] == {"suite": {"suite": "s"}, "gate": {"min_pass_rate": 0.8}, "sampled": True}
+    assert current["absolute"] == [{"suite": "s", "gate": {"max_delta_points": 2.0}}]
+    assert current["supplementary"][0]["informational"] and current["family_informational"]
     assert current["performance"]["l1"]["output_grader_params"] == {"max_rms_ratio": 9.0}
     assert current["performance"]["l1"]["reference_modes"] == ["eager"]  # what was measured stays
 
@@ -467,40 +470,6 @@ def test_serving_sweep_fits_the_bundle_and_compares_throughput():
     assert sweep.compare([{**fast[0], "request_error_rate_avg": 3.0}], slow, 5)["light"] == "white"
 
 
-def test_clip_alignment_fails_only_a_significant_mean_drop_and_video_temporal_consistency():
-    from trtmc_aiperf_qual import alignment
-
-    samples = [{"sample_id": str(index), "request": {"prompt": f"p{index}"}} for index in range(6)]
-    native = [{"clip_score": value} for value in (30.0, 28.0, 32.0, 30.0, 29.0, 31.0)]
-    check = {"max_mean_clip_drop": 1.0, "sample_tolerance": 3.0}
-
-    def rows(drops):
-        return [None if d is None else {"clip_score": n["clip_score"] - d} for n, d in zip(native, drops)]
-
-    close = alignment.judge(rows([0.5, -0.4, 1.0, -0.2, 0.5, 0.4]), native, samples, check, video=False)
-    assert close["status"] == "pass" and close["passed"] == 6 and close["gate"] == {"max_mean_clip_drop": 1.0}
-    assert abs(close["metrics"]["clip_score_drop"] - 0.3) < 1e-9
-    worse = alignment.judge(rows([5.0, None, 5.0, 5.0, 5.0, 5.0]), native, samples, check, video=False)
-    assert worse["status"] == "fail" and worse["passed"] == 0
-    assert any("no image" in reason for reason in worse["reasons"]) and any("mean CLIP" in r for r in worse["reasons"])
-    assert "no TRTMC image" in worse["failures"][1]["explanation"]
-    noisy = alignment.judge(rows([9.0, -6.0, 8.0, -5.0, 7.0, -4.0]), native, samples, check, video=False)
-    assert noisy["metrics"]["clip_score_drop"] == 1.5 and noisy["metrics"]["clip_score_drop_lower_bound"] < 0
-    assert noisy["status"] == "pass" and noisy["passed"] == 3
-    flicker = alignment.judge([{**row, "temporal_consistency": 0.80} for row in native],
-                              [{**row, "temporal_consistency": 0.95} for row in native], samples, check, video=True)
-    assert flicker["status"] == "fail" and "temporal consistency 0.800" in flicker["reasons"][0]
-    assert alignment.drop([2.0], 1.0) == (2.0, None, True)
-    ignored = alignment.judge(rows([0.0] * 6), native, samples, check, video=False,
-                              cross={"candidate": 0.99, "native": 0.6})
-    assert ignored["status"] == "fail" and "near-identical" in ignored["reasons"][0]
-    broken = alignment.judge(rows([0.0] * 6), native, samples, check, video=False,
-                             cross={"candidate": 0.6, "native": 0.995})
-    assert broken["status"] == "not-comparable" and "broken reference" in broken["reasons"][0]
-    assert alignment.is_video({"media_type": "video"}) and alignment.is_video({"num_frames": 17})
-    assert not alignment.is_video({"num_frames": 1})
-
-
 def test_family_perf_requests_take_explicit_generation_controls_from_the_catalog():
     from trtmc_aiperf_qual.suites import fill_model_defaults
 
@@ -558,25 +527,17 @@ def test_replay_parity_compares_both_sides_with_the_full_precision_render(tmp_pa
     assert replay_parity.not_replayed({"candidate": [(tmp_path, record)], "native": [(tmp_path, {"observation": {}})]}) == ["native"]
 
 
-def test_script_reference_frames_missing_natives_and_broken_floors(tmp_path):
-    from trtmc_aiperf_qual import alignment, replay_parity
-    from trtmc_aiperf_qual.generation import media_source
+def test_script_reference_frames_and_broken_floors(tmp_path):
+    from trtmc_aiperf_qual import replay_parity
+    from trtmc_aiperf_qual.generation import is_video, media_source
 
     record = {"observation": {"frame_artifacts": ["/x/000000.png", "/x/000062.png"], "artifact_indices": [0, 62]}}
     assert media_source(tmp_path, record) == {"dir": str(tmp_path), "files": ["/x/000000.png", "/x/000062.png"],
                                               "indices": [0, 62]}
     assert media_source(tmp_path, {"observation": {}}) == {"dir": str(tmp_path)}
+    assert is_video({"media_type": "video"}) and is_video({"num_frames": 17}) and not is_video({"num_frames": 1})
+    assert replay_parity.drop([2.0], 1.0) == (2.0, None, True)  # a single pair is judged by the limit alone
     samples = [{"sample_id": "0", "request": {"prompt": "p"}}]
-    missing = alignment.judge([{"clip_score": 25.0}], [None], samples, {}, video=False)
-    assert missing["status"] == "error" and "no image for 1 of 1" in missing["reasons"][0]
-    partial = alignment.judge([{"clip_score": 25.0}] * 3, [{"clip_score": 25.0}, None, None], samples * 3, {},
-                              video=False)
-    assert partial["status"] == "error" and "2 of 3" in partial["reasons"][0]  # no shrinking denominator
-    rows = [{"clip_score": 30.0, "temporal_consistency": 0.8}] * 3
-    frozen = alignment.judge([{"clip_score": 30.0, "temporal_consistency": 1.0}] * 3, rows, samples * 3, {}, video=True)
-    assert frozen["status"] == "fail" and "temporal consistency 1.000 vs native 0.800" in frozen["reasons"][0]
-    untimed = alignment.judge([{"clip_score": 30.0}] * 3, [{"clip_score": 30.0}] * 3, samples * 3, {}, video=True)
-    assert untimed["status"] == "error" and "0 of 3 videos" in untimed["reasons"][0]
     rows = [{"candidate": {"psnr": 18.0, "ssim": 0.75}, "candidate_ref": {"psnr": 9.0, "ssim": 0.1},
              "native_ref": {"psnr": 8.0, "ssim": 0.1}}]
     broken = replay_parity.judge(rows, samples, {})  # an 8 dB full-precision render broke: 19 dB / 0.8 instead
@@ -592,19 +553,19 @@ def test_recheck_replaces_only_the_rechecked_entries(tmp_path, monkeypatch):
     out.mkdir()
     (out / "model.json").write_text(json.dumps({"catalog_profile": "m", "supplementary": []}))
     (out / "report.json").write_text(json.dumps({"accuracy": [
-        {"suite": "family-case", "status": "pass"}, {"suite": "clip-alignment", "status": "fail"},
+        {"suite": "family-case", "status": "pass"}, {"suite": "geneval", "status": "fail"},
         {"suite": "replay-parity", "status": "fail"}]}))
-    check = {"check": "clip_alignment", "suite": "partiprompts-30"}
+    check = {"check": "geneval", "suite": "geneval-100"}
     monkeypatch.setattr(models, "resolve_model", lambda profile, environment: {"supplementary": [check],
                                                                                 "reference": {"backend": "reference"}})
     monkeypatch.setattr(services, "reference_python", lambda environment, model: "/ref/python")
     monkeypatch.setattr(runner, "supplementary", lambda environment, model, check, python, out: [
-        {"suite": "clip-alignment", "status": "pass"}])
+        {"suite": "geneval", "status": "pass"}])
     judged = []
     monkeypatch.setattr(cli, "rejudge_reports", lambda outs, environment: judged.append(outs) or 0)
     assert cli.recheck_reports([out], environment=object()) == 0 and judged == [[out]]
     suites = {item["suite"]: item["status"] for item in json.loads((out / "report.json").read_text())["accuracy"]}
-    assert suites == {"family-case": "pass", "clip-alignment": "pass"}
+    assert suites == {"family-case": "pass", "geneval": "pass", "replay-parity": "fail"}
     assert json.loads((out / "model.json").read_text())["supplementary"] == [check]
 
 
@@ -615,7 +576,7 @@ def test_recheck_reuses_a_generation_only_for_the_same_requests(tmp_path):
     from trtmc_aiperf_qual.suites import Suite
 
     suite = Suite("s", "k", [{"sample_id": "0", "request": {"prompt": "a", "latent_seed": 1000}}], {})
-    out = tmp_path / "clip-candidate"
+    out = tmp_path / "replay-candidate"
     (out / "scratch" / "r1").mkdir(parents=True)
     (out / "aiperf.inputs.jsonl").write_text(json.dumps({"text": json.dumps({"request": suite.samples[0]["request"]})}) + "\n")
     (out / "records.jsonl").write_text(json.dumps({"route": "/v1/tasks/generate_image", "request_id": "r1"}) + "\n")
@@ -625,13 +586,13 @@ def test_recheck_reuses_a_generation_only_for_the_same_requests(tmp_path):
     assert generation._earlier(out, other) is None
 
 
-def test_edit_replay_parity_runs_only_for_families_that_take_caller_latents(tmp_path):
-    from trtmc_aiperf_qual import alignment, runner
+def test_replay_parity_runs_only_for_families_that_take_caller_latents(tmp_path):
+    from trtmc_aiperf_qual import replay_parity, runner
 
-    assert alignment.run_replay(None, {"family": "sana_wm"}, {"latent_replay_families": ["qwen_image"]}, "py",
-                                tmp_path) == []
+    assert replay_parity.run(None, {"family": "sana_wm"}, {"latent_replay_families": ["qwen_image"]}, "py",
+                             tmp_path) == []
     assert runner.SUPPLEMENTARY_SUITES["replay_parity"] == ("replay-parity",)
-    assert runner.SUPPLEMENTARY_CHECKS["replay_parity"] is alignment.run_replay
+    assert runner.SUPPLEMENTARY_CHECKS["replay_parity"] is replay_parity.run
 
 
 def test_edit_inputs_are_center_cropped_to_cached_squares(tmp_path):

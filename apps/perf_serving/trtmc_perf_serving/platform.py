@@ -3,7 +3,7 @@
 """Platform identity of a serving environment.
 
 ``fingerprint`` holds what changes reference numerics (GPU architecture, framework
-and CUDA versions) and keys reference goldens; ``host_details`` is recorded for
+and CUDA versions) and identifies where a result was measured; ``host_details`` is recorded for
 traceability only.
 """
 
@@ -56,7 +56,7 @@ def host_details() -> dict[str, Any]:
 
 
 def apply_deterministic_numerics() -> dict[str, Any]:
-    """Settings used when generating reference goldens: no TF32, deterministic kernels."""
+    """Deterministic numerics (``serve --deterministic``): no TF32, deterministic kernels."""
     import torch
 
     torch.backends.cuda.matmul.allow_tf32 = False

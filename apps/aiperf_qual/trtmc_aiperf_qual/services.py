@@ -80,6 +80,13 @@ def platform_fingerprint(environment: Environment, python: str | None = None) ->
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
+def platform_id(fingerprint: Mapping[str, Any]) -> str:
+    """Readable, stable platform name: GPU architecture plus a hash of the whole fingerprint."""
+    from .suites import canonical, sha256_text
+
+    return f"{fingerprint.get('gpu_arch', 'unknown')}-{sha256_text(canonical(dict(fingerprint)))[:10]}"
+
+
 @contextmanager
 def serving(environment: Environment, model: dict[str, Any], backend: str, out: Path, *,
             mode: str = "eager", precision: str | None = None, deterministic: bool = False,

@@ -3,9 +3,11 @@
 """Qualification configuration of a catalog model, derived rather than written.
 
 A model's configuration is its catalog entry (checkpoint, revision, precision, bundle, Task,
-sequence limit) combined with the defaults of its Task (config/tasks.yaml). The benchmark
-qualification case, when the family has one, only tells whether the native reference needs the
-family's own script. config/models/<profile>.yaml holds exceptions and is deep-merged last.
+sequence limit) combined with the defaults of its Task (config/tasks.yaml). Accuracy comes from the
+Task's gold-labelled benchmarks (``absolute``), else the family's own accuracy cases; a model with
+neither declares ``accuracy_source: none`` (Perf only). The family's benchmark qualification case
+also tells whether the native reference needs the family's own script. config/models/<profile>.yaml
+holds exceptions and is deep-merged last.
 """
 
 from __future__ import annotations
@@ -46,7 +48,6 @@ def checkpoint_bytes(hf_id: str, revision: str | None) -> int | None:
     except Exception:  # noqa: BLE001 - size is only a measurement hint
         return None
     return None
-GENERATION_MARGIN = 8  # tokens kept free for BOS/template tokens when bounding prompts
 
 
 def deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
@@ -128,22 +129,6 @@ def _suite(reference: str | Mapping[str, Any], profile: str, repository: Path) -
     return suite
 
 
-def _bound_generation(suite: dict[str, Any], item: Mapping[str, Any], catalog_model: Any,
-                      trust_remote_code: bool) -> dict[str, Any]:
-    """Fit text prompts and generated tokens into the bundle's sequence limit."""
-    limit = catalog_model.build_settings.get("max_sequence_length")
-    wanted = item.get("max_new_tokens")
-    if not wanted:
-        return suite
-    new_tokens = int(wanted) if not limit else max(4, min(int(wanted), int(limit) // 4))
-    suite["request"] = {**suite.get("request", {}), "max_new_tokens": new_tokens}
-    if limit:
-        suite["truncate_prompt"] = {"tokenizer": catalog_model.hf_id, "revision": catalog_model.hf_revision or None,
-                                    "trust_remote_code": trust_remote_code,
-                                    "max_tokens": int(limit) - new_tokens - GENERATION_MARGIN}
-    return suite
-
-
 def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mapping[str, Any],
               quantized: bool) -> list[dict[str, Any]]:
     """Absolute-accuracy benchmarks (config/tasks.yaml ``benchmarks``; a model may name one with
@@ -186,11 +171,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     override = (yaml.safe_load(override_path.read_text()) if override_path.is_file() else None) or {}
     task = dict(tasks["tasks"][catalog_model.task])
     # Quantized candidates (the catalog's `quantization`, or a quantized checkpoint declared in
-    # config/models) are held to the Task's quantization tolerance instead of exact parity.
+    # config/models) are held to the benchmarks' quantization gates.
     quantization = (override.get("candidate") or {}).get("quantization") or manifest.get("quantization")
-    tolerance = task.pop("quantized", None)
-    config = deep_merge(deep_merge(tasks["defaults"], task), tolerance if quantization and tolerance else {})
-    config = deep_merge(config, override)
+    config = deep_merge(deep_merge(tasks["defaults"], task), override)
 
     operation = config.get("operation") or entries[profile].operation
     trust_remote_code = bool(manifest.get("trust_remote_code", False))
@@ -204,15 +187,14 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     reference = config.get("reference", {})
     if reference.get("backend", "auto") != "auto":
         backend, fallback = reference["backend"], reference.get("fallback")
-    # fp32 goldens make every candidate precision (fp16, bf16) comparable to a precision-independent
-    # truth and give it a noise floor; the declared reference precision is the fallback.
-    golden_precision = reference.get("precision") or "fp32"
+    # The last precision the native model is timed at when the candidate's fails (timing_precisions).
+    reference_precision = reference.get("precision") or "fp32"
     declared_precision = (declared or {}).get("precision")
 
-    # A family's own accuracy cases (dataset, reference, metric, gate) qualify its models; the Task
-    # suites cover models without one.
+    # A family's own accuracy cases (dataset, reference, metric, gate) qualify models whose Task has no
+    # gold-labelled benchmark.
     family_cases = _qualification_cases(repository, profile, "accuracy")
-    # Absolute accuracy (both sides scored against gold answers) replaces the parity suites.
+    # Absolute accuracy: both sides scored against gold answers.
     absolute = _absolute(list(config.get("absolute") or []), tasks.get("benchmarks", {}),
                          (manifest.get("testcases") or [{}])[0], bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
@@ -221,16 +203,19 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
             if item.get("request"):
                 suite = {**suite, "request": {**suite.get("request", {}), **item.pop("request")}}
             item["suite_definition"] = suite
-    accuracy_source = config.get("accuracy_source") or (
-        "absolute" if absolute else "family" if family_cases else "tasks")
-    accuracy = []
-    for item in config.get("accuracy", []) if accuracy_source == "tasks" else []:
-        suite = _suite(item["suite"], profile, repository)
-        if item.get("request"):  # per-model request settings, e.g. a runtime's decoding convention
-            suite = {**suite, "request": {**suite.get("request", {}), **item["request"]}}
-        suite = _bound_generation(suite, item, catalog_model, trust_remote_code)
-        accuracy.append({**{key: value for key, value in item.items() if key not in ("max_new_tokens", "request")},
-                         "suite": suite, "reference_mode": "eager"})
+    if config.get("accuracy_source") not in (None, "none"):
+        raise ConfigError(f"{profile}: accuracy_source may only be `none` (Perf only)")
+    if config.get("accuracy_source") == "none":
+        if not config.get("accuracy_note"):
+            raise ConfigError(f"{profile}: accuracy_source none needs an accuracy_note (why no accuracy applies)")
+        accuracy_source = "none"
+    elif absolute or family_cases:
+        accuracy_source = "absolute" if absolute else "family"
+    else:
+        raise ConfigError(f"{profile}: no accuracy scheme: its Task has no `absolute` benchmark and its family no "
+                          "accuracy case (set accuracy_source: none with an accuracy_note for a Perf-only model)")
+    if accuracy_source == "none":
+        absolute = []
     l1 = dict(config["performance"]["l1"])
     if l1["suite"] == "catalog" and case and case.get("request") and not case["candidate"].get("model_directory"):
         # The family's performance workload (the request benchmark qualification times).
@@ -238,8 +223,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
                        "source": {"kind": "qualification_perf", "profile": profile},
                        "selection": {"method": "first", "count": 1}}
     l1["suite"] = _suite(l1["suite"], profile, repository)
-    # One immutable checkpoint for the bundle, the native reference, and golden identity: the catalog
-    # pin, else the revision the family qualification pins for the same checkpoint.
+    # One immutable checkpoint for the bundle and the native reference: the catalog pin, else the revision the family qualification pins for the same checkpoint.
     family_candidate = ((family_cases[0] if family_cases else case) or {}).get("candidate", {})
     revision = catalog_model.hf_revision or (
         family_candidate.get("revision") if family_candidate.get("checkpoint", catalog_model.hf_id) == catalog_model.hf_id
@@ -253,9 +237,8 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         # example MoGe's num_tokens): add the scalar settings of the qualification request.
         extra = {key: value for key, value in (case.get("request") or {}).items()
                  if not key.endswith("_path") and not isinstance(value, (dict, list))}
-        for item in [*accuracy, l1]:
-            if item["suite"]["source"].get("kind") in ("catalog_testcase", "qualification_perf"):
-                item["suite"] = {**item["suite"], "request": {**extra, **item["suite"].get("request", {})}}
+        if l1["suite"]["source"].get("kind") in ("catalog_testcase", "qualification_perf"):
+            l1["suite"] = {**l1["suite"], "request": {**extra, **l1["suite"].get("request", {})}}
     # candidate.build overrides catalog manifest fields for the qualified bundle (a new name keeps it
     # apart from the catalog bundle); a family-prepared model directory replaces the checkpoint.
     candidate = dict(config.get("candidate", {}))
@@ -295,14 +278,15 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
                       "model_directory": (case or {}).get("candidate", {}).get("model_directory"), **candidate},
         "reference": {**{key: value for key, value in reference.items() if key not in ("backend", "fallback")},
                       **({"model": reference_model} if reference_model else {}), "revision": reference_revision,
-                      "backend": backend, "fallback": fallback, "precision": golden_precision,
-                      "declared_precision": declared_precision if declared_precision != golden_precision else None,
+                      "backend": backend, "fallback": fallback, "precision": reference_precision,
+                      "declared_precision": declared_precision if declared_precision != reference_precision else None,
                       "perf_precision": perf_precision, "trust_remote_code": trust_remote_code},
-        "noise_floor": bool(config.get("noise_floor", True)) and perf_precision != golden_precision,
         "accuracy_source": accuracy_source,
+        **({"accuracy_note": str(config["accuracy_note"])} if accuracy_source == "none" else {}),
         "absolute": absolute,
         "family_accuracy": [item["name"] for item in family_cases] if accuracy_source == "family" else [],
-        "accuracy": accuracy,
+        # The family cases are reported but not judged where gold-referenced checks decide (generated media).
+        "family_informational": bool(config.get("family_cases_informational")) and accuracy_source == "family",
         "supplementary": [dict(item) for item in config.get("supplementary", [])],
         **({"coverage": str(config["coverage"])} if config.get("coverage") else {}),
         "performance": {"l1": l1, **({"l2": dict(config["performance"]["l2"])}

@@ -206,8 +206,8 @@ def _isolated(check: Mapping[str, Any] | None) -> Any:
 def _accuracy_text(items: Sequence[Mapping[str, Any]]) -> str:
     def one(item: Mapping[str, Any]) -> str:
         extra = "".join(f", {label} {value}" for label, value in (
-            ("ref@prec", (item.get("noise_floor") or {}).get("passed")),
-            ("isolated", _isolated(item.get("isolated_check")))) if value is not None)
+            ("isolated", _isolated(item.get("isolated_check"))),
+            ("informational", "yes" if item.get("informational") else None)) if value is not None)
         need = (f"need {item['required_passes']}" if item.get("required_passes") is not None
                 else f"family gate {json.dumps(item.get('gate', {}))}")
         status = f"{item['status']} " if item.get("status") else ""

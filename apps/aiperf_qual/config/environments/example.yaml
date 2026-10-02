@@ -11,9 +11,6 @@ runtime_root: /path/to/runtime                          # TRTMC runtime librarie
 worker: /path/to/runtime/trtmc_benchmark_worker         # built with --serve support
 serve_python: /path/to/trtmc-venv/bin/python            # torch, transformers, TRTMC runtime, perf_serving reqs
 aiperf: /path/to/aiperf-venv/bin/aiperf                 # apps/aiperf_qual/setup.sh creates this environment
-golden_store:
-  root: /path/to/state/golden-store                     # reference goldens (<suite>/<platform>/<key>)
-  # read_url: <HTTP root of a shared golden store>     # optional: fetch goldens missing locally
 hf_datasets_cache: /path/to/state/hf-datasets
 hf_hub_cache: /path/to/huggingface/hub                  # checkpoint cache of builds and references
 reference_env_root: /path/to/state/ref-envs             # per-family reference environments
