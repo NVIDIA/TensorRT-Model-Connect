@@ -90,3 +90,39 @@ if(TRTMC_BUILD_TESTS)
     COMMAND test_timm_regnet_image_preprocess
   )
 endif()
+
+# The family CLI is an application adapter; the model does not depend on its loader.
+add_library(trtmc_cli_timm_regnet SHARED cli.cpp)
+target_include_directories(trtmc_cli_timm_regnet PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+target_include_directories(trtmc_cli_timm_regnet SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
+target_link_libraries(trtmc_cli_timm_regnet PRIVATE trtmc_c trtmc_core nlohmann_json::nlohmann_json)
+target_compile_options(trtmc_cli_timm_regnet PRIVATE -Wall -Wextra -Wno-unused-function)
+set_target_properties(trtmc_cli_timm_regnet PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  BUILD_RPATH "\$ORIGIN"
+  INSTALL_RPATH "\$ORIGIN"
+)
+install(TARGETS trtmc_cli_timm_regnet LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+if(TRTMC_BUILD_TESTS)
+  add_library(timm_regnet_cli_fixture SHARED ${PROJECT_SOURCE_DIR}/families/timm_regnet/tests/cpp/test_cli.cpp)
+  target_compile_definitions(timm_regnet_cli_fixture PRIVATE TRTMC_FAMILY_CLI_FIXTURE)
+  target_include_directories(timm_regnet_cli_fixture PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_link_libraries(timm_regnet_cli_fixture PRIVATE trtmc_core nlohmann_json::nlohmann_json)
+  set_target_properties(timm_regnet_cli_fixture PROPERTIES
+    OUTPUT_NAME trtmc_model_timm_regnet
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/timm_regnet-cli"
+  )
+  add_dependencies(timm_regnet_cli_fixture trtmc_test_backend_fake)
+  add_custom_command(TARGET timm_regnet_cli_fixture POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:trtmc_test_backend_fake>
+      $<TARGET_FILE_DIR:timm_regnet_cli_fixture>
+  )
+  add_executable(test_timm_regnet_cli ${PROJECT_SOURCE_DIR}/families/timm_regnet/tests/cpp/test_cli.cpp)
+  target_include_directories(test_timm_regnet_cli PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_link_libraries(test_timm_regnet_cli PRIVATE trtmc_cli_timm_regnet nlohmann_json::nlohmann_json)
+  target_compile_options(test_timm_regnet_cli PRIVATE -Wall -Wextra -Wpedantic)
+  add_dependencies(test_timm_regnet_cli timm_regnet_cli_fixture)
+  add_test(NAME timm_regnet_cli COMMAND test_timm_regnet_cli $<TARGET_FILE_DIR:timm_regnet_cli_fixture>)
+  set_tests_properties(timm_regnet_cli PROPERTIES LABELS cpu)
+endif()
