@@ -17,8 +17,8 @@ Build a new bundle with this family version; the old `classification` bundle
 mode is not retained. The existing CLI command remains simple:
 
 ```sh
-trtmc build timm/convnext_tiny.in12k_ft_in1k -o timm_convnext.bundle
-trtmc classify timm_convnext.bundle --image photo.jpg
+trtmc timm_convnext build timm/convnext_tiny.in12k_ft_in1k -o timm_convnext.bundle
+trtmc timm_convnext classify timm_convnext.bundle --image photo.jpg
 ```
 
 ## Validation

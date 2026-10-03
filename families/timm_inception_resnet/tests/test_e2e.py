@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tensorrt_model_connect import BuildRequest, build
+from families.timm_inception_resnet.cli import BuildRequest, build_bundle
 from tools.e2e_evidence import evidence_stage, record_evidence
 
 
@@ -175,28 +175,30 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
     assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
+    if not (runtime_root / f"libtrtmc_cli_{FAMILY}.so").is_file():
+        raise AssertionError(f"selected {FAMILY} E2E requires its native CLI adapter")
     model_dir = _model_dir(manifest)
     record_evidence(
         "checkpoint",
         {"model_dir": str(model_dir), "hf_id": manifest["hf_id"], "hf_revision": manifest["hf_revision"]},
     )
     bundle = tmp_path / manifest["bundle"]
+    if int(manifest["tensor_parallel_size"]) != 1:
+        raise NotImplementedError("this family does not support tensor parallelism")
     with evidence_stage("build"):
-        build(
+        build_bundle(
             BuildRequest(
                 model_dir=model_dir,
-                output_path=bundle,
-                family=FAMILY,
                 task=manifest["task"],
                 precision=manifest["precision"],
-                max_sequence_length=int(manifest["max_sequence_length"]),
-                tensor_parallel_size=int(manifest["tensor_parallel_size"]),
-            )
+            ),
+            bundle,
         )
     with evidence_stage("native"):
         completed = subprocess.run(
             [
                 str(binary),
+                FAMILY,
                 "classify",
                 str(bundle),
                 "--runtime-root",

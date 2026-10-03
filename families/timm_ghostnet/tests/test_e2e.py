@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tensorrt_model_connect import BuildRequest, build
+from families.timm_ghostnet.cli import BuildRequest, build_bundle
 
 
 FAMILY = "timm_ghostnet"
@@ -179,25 +179,27 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
     with evidence_stage("setup"):
         assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
+        if not (runtime_root / f"libtrtmc_cli_{FAMILY}.so").is_file():
+            raise AssertionError(f"selected {FAMILY} E2E requires its native CLI adapter")
     model_dir = _model_dir(manifest)
     record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     bundle = tmp_path / manifest["bundle"]
+    if int(manifest["tensor_parallel_size"]) != 1:
+        raise NotImplementedError("this family does not support tensor parallelism")
     with evidence_stage("build"):
-        build(
+        build_bundle(
             BuildRequest(
                 model_dir=model_dir,
-                output_path=bundle,
-                family=FAMILY,
                 task=manifest["task"],
                 precision=manifest["precision"],
-                max_sequence_length=int(manifest["max_sequence_length"]),
-                tensor_parallel_size=int(manifest["tensor_parallel_size"]),
-            )
+            ),
+            bundle,
         )
     with evidence_stage("native"):
         completed = subprocess.run(
             [
                 str(binary),
+                FAMILY,
                 "classify",
                 str(bundle),
                 "--runtime-root",
