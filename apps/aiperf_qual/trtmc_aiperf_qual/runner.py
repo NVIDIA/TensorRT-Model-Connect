@@ -548,34 +548,68 @@ ORDER_EFFECT_LIMIT = 0.02  # DESIGN.md 4.6: an order effect above this changes h
 def order_check(environment: Environment, model: Mapping[str, Any], out: Path) -> dict[str, Any]:
     """DESIGN.md 4.6: the model's L1 requests timed twice in both orders (native then TRTMC, TRTMC then native),
     against native eager at its timing precision. Each side's order effect is its p50 when timed second relative
-    to its p50 when timed first (native after TRTMC vs native first; TRTMC after native vs TRTMC first)."""
+    to its p50 when timed first (native after TRTMC vs native first; TRTMC after native vs TRTMC first). The
+    effect is resolved only when all four measurements are valid (``judge.measurement_problems``) and each
+    order's two sides did the same work; otherwise, or when a measurement or the check itself fails, the
+    check is ``unresolved``, never within the limit. A previous ``order.json`` is removed first."""
+    order = out / "order.json"
+    order.unlink(missing_ok=True)
+    result: dict[str, Any] = {"model": model["model"], "status": "unresolved", "order_effect": None, "largest": None,
+                              "above_limit": None, "problems": []}
+    try:
+        result |= _order_timings(environment, model, out)
+    except Exception as error:  # noqa: BLE001 - recorded as unresolved
+        result["problems"] = [f"order check failed: {type(error).__name__}: {str(error)[-400:]}"]
+    order.write_text(json.dumps(result, indent=2, default=str))
+    return result
+
+
+def _order_timings(environment: Environment, model: Mapping[str, Any], out: Path) -> dict[str, Any]:
     l1 = model["performance"]["l1"]
+    max_ci = float(l1["max_ci_percent"])
     python = reference_python(environment, model)
     perf_suite = build_suite(l1["suite"], environment)
     with serving(environment, dict(model), "trtmc", out / "order-probe") as service:
         suites = perf_suites(environment, model, perf_suite, service)
     precision = timing_precisions(model["reference"])[0]
 
-    def native(tag: str) -> dict[str, float]:
+    def native(tag: str) -> dict[str, dict[str, Any]]:
         timed = _time_reference(environment, model, l1, suites, python, "eager", precision, out / tag)
-        return {name: stats["p50_ms"] for name, (_, stats, _) in timed.items()}
+        return {name: stats for name, (_, stats, _) in timed.items()}
 
-    def candidate(tag: str) -> dict[str, float]:
+    def candidate(tag: str) -> dict[str, dict[str, Any]]:
         with serving(environment, dict(model), "trtmc", out / tag) as service:
             return {suite.name: _perf_run(environment, service, model, suite, l1["measurement"],
-                                          out / f"{tag}-{suite.name}", "mean")[1]["p50_ms"] for suite in suites}
+                                          out / f"{tag}-{suite.name}", "mean")[1] for suite in suites}
+
+    def measured(timer: Any, tag: str) -> dict[str, dict[str, Any]]:
+        """One measurement's stats per request; a failed measurement is kept as each request's failure."""
+        try:
+            return timer(tag)
+        except Exception as error:  # noqa: BLE001 - an invalid measurement, not a crash
+            failure = f"measurement failed: {type(error).__name__}: {str(error)[-300:]}"
+            return {suite.name: {"p50_ms": None, "incomplete": failure} for suite in suites}
 
     with gpu_exclusive(environment):
-        native_first, trtmc_second = native("order-native-first"), candidate("order-trtmc-second")
-        trtmc_first, native_second = candidate("order-trtmc-first"), native("order-native-second")
-    effects = {"native": {name: native_second[name] / native_first[name] - 1 for name in native_first},
-               "trtmc": {name: trtmc_second[name] / trtmc_first[name] - 1 for name in trtmc_first}}
-    largest = max(abs(value) for side in effects.values() for value in side.values())
-    result = {"model": model["model"], "precision": precision, "measurement": l1["measurement"],
-              "p50_ms": {"native_first": native_first, "trtmc_second": trtmc_second, "trtmc_first": trtmc_first,
-                         "native_second": native_second},
-              "order_effect": effects, "largest": largest, "above_limit": largest > ORDER_EFFECT_LIMIT}
-    (out / "order.json").write_text(json.dumps(result, indent=2))
+        timings = {"native_first": measured(native, "order-native-first"),
+                   "trtmc_second": measured(candidate, "order-trtmc-second")}
+        timings |= {"trtmc_first": measured(candidate, "order-trtmc-first"),
+                    "native_second": measured(native, "order-native-second")}
+    problems = [f"{name} {suite.name}: {problem}" for name, by_suite in timings.items() for suite in suites
+                for problem in judge.measurement_problems(by_suite.get(suite.name) or {}, max_ci)]
+    for first, second in (("native_first", "trtmc_second"), ("trtmc_first", "native_second")):
+        problems += [f"{first}/{second} {suite.name}: {reason}" for suite in suites
+                     if (reason := judge.work_check(timings[first].get(suite.name) or {},
+                                                    timings[second].get(suite.name) or {}))]
+    p50 = {name: {suite: stats.get("p50_ms") for suite, stats in by_suite.items()} for name, by_suite in timings.items()}
+    result = {"precision": precision, "measurement": l1["measurement"], "p50_ms": p50, "measurements": timings,
+              "problems": problems}
+    if not problems:
+        effects = {side: {suite.name: p50[f"{side}_second"][suite.name] / p50[f"{side}_first"][suite.name] - 1
+                          for suite in suites} for side in ("native", "trtmc")}
+        largest = max(abs(value) for side in effects.values() for value in side.values())
+        result |= {"order_effect": effects, "largest": largest, "above_limit": largest > ORDER_EFFECT_LIMIT,
+                   "status": "above-limit" if largest > ORDER_EFFECT_LIMIT else "within-limit"}
     return result
 
 

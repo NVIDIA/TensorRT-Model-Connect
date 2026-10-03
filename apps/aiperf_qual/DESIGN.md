@@ -1,6 +1,6 @@
 # trtmc-aiperf-qual design (decoupled, 24-hour scheme)
 
-Status: approved (codex review round 4, 2026-10-03); revision 6 records what the implementation, its review,
+Status: approved (codex review round 4, 2026-10-03); revision 7 records what the implementation, its review,
 and the smoke run settled (Section 12). Supersedes the v7 campaign
 scheme; its results are archived.
 
@@ -377,11 +377,17 @@ smoke results, and the formal run before each lands in PR #1550.
   scorer runs; the combined code suite sends one HumanEval and one MBPP problem. A conversion-parity output that is
   missing or unreadable on either side (no vector or action chunk, no size, an unreadable artifact, no audio digest,
   a video without frames) is missing evidence: an `error`, never a `fail`, in smoke and formal runs alike; a smoke
-  verdict whose Acc or Perf is `error` is `smoke-fail`.
+  verdict whose Acc or Perf is `error` is `smoke-fail`. Each side's depth, mask, or disparity artifact is read at
+  that side's own size before the sizes are compared, so a size difference fails only between readable outputs.
 - **Order check** (Section 4.6): `trtmc-aiperf-qual order-check --profile P` times a profile's L1 requests in both
   orders (native then TRTMC, TRTMC then native) and reports each side's order effect (its second timing relative to
   its first). Before the formal run it runs on five profiles spanning the server sizes, including the largest
   dense one; an effect above 2% switches that size class to interleaved runs or native, TRTMC, native timing.
+  The effect counts only when all four measurements are valid on their own (every request succeeded and is timed,
+  every response carries work evidence, the GPU was idle, at least two runs within `max_ci_percent`) and each
+  order's two sides did the same work; otherwise, or when a measurement or the check fails (kept as the
+  measurement's failure; the other measurements still run), the check is `unresolved` and is repeated, never read
+  as within the limit. Each run replaces the profile's previous `order.json`.
 - **Smoke namespace**: `run --smoke --out <dir>/<profile>` writes to `<dir>/smoke/<profile>`, as `run-all --smoke`
   does.
 - **Lance** (lance-3b-x2t-image) is `not-covered`, declared with its reason (`reference.not_covered`): the upstream
@@ -393,3 +399,19 @@ smoke results, and the formal run before each lands in PR #1550.
   generation for the media checks, L2) takes the ledger's per-profile deadline from the environment's
   `deadlines` map.
 
+### 12.1 Gates before the formal run
+
+The formal run starts only when every gate holds; each is recorded in PR #1550.
+
+1. **Pilot**: one representative profile per Task completes at the formal `n` (Section 9), on the final code.
+2. **Ledger**: the per-model ledger from the smoke run and the pilot's steady-state request times predicts at most
+   22 hours on one GB300, failure allowance included; otherwise the levers of Section 9, then a report to the owner.
+3. **Order**: the order check (above) runs on five profiles across the server sizes with a resolved result each;
+   where an effect exceeds 2%, the size class's mitigation (interleaved runs, or native, TRTMC, native timing that is
+   `perf-inconclusive` when the two native timings differ by more than 2%) is implemented and tested.
+4. **Blocked profiles**: DINOv3's kNN scorer once the checkpoints are accessible; Lance's resident adapter; s1-mini
+   once the catalog builds it. A profile still blocked is reported with its reason, not dropped.
+5. **Smoke rerun**: every ready profile `smoke-pass` (or an accepted, reported finding) on the final code.
+6. **Frozen inputs**: the per-suite counts, sample manifests, and pinned revisions frozen; the execution matrix
+   regenerated from them.
+7. **Review**: codex approves the final code, the smoke results, the pilot, and the ledger (Section 11).

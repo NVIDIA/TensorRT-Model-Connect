@@ -377,7 +377,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 out = arguments.out_root / name
                 out.mkdir(parents=True, exist_ok=True)
                 result = order_check(environment, resolve_model(name, environment), out)
-                print(json.dumps({key: result[key] for key in ("model", "order_effect", "largest", "above_limit")}),
+                print(json.dumps({key: result[key] for key in ("model", "status", "order_effect", "largest", "problems")}),
                       flush=True)
             return 0
         if arguments.command == "matrix":

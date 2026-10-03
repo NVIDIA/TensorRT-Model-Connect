@@ -238,18 +238,17 @@ def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, An
     import numpy as np
 
     candidate, native = candidate or {}, native or {}
-    shape = (int(native.get("height") or 0), int(native.get("width") or 0))
-    mine = (int(candidate.get("height") or 0), int(candidate.get("width") or 0))
-    if not all(shape) or not all(mine):
-        return None, f"no geometry size: {mine[0]}x{mine[1]} vs {shape[0]}x{shape[1]}"
-    if mine != shape:
-        return False, f"size differs: {mine[0]}x{mine[1]} vs {shape[0]}x{shape[1]}"
-    try:
-        depths = [np.fromfile(side["depth_artifact"], dtype="<f4").reshape(shape) for side in (candidate, native)]
+    shapes = [(int(side.get("height") or 0), int(side.get("width") or 0)) for side in (candidate, native)]
+    if not all(shapes[0]) or not all(shapes[1]):
+        return None, f"no geometry size: {shapes[0][0]}x{shapes[0][1]} vs {shapes[1][0]}x{shapes[1][1]}"
+    try:  # each side's files at its own size: missing evidence first, a size difference after
+        depths = [np.fromfile(side["depth_artifact"], dtype="<f4").reshape(shape) for side, shape in zip((candidate, native), shapes)]
         masks = [np.fromfile(side["valid_mask_artifact"], dtype=np.uint8).reshape(shape).astype(bool)
-                 for side in (candidate, native)]
+                 for side, shape in zip((candidate, native), shapes)]
     except (KeyError, OSError, ValueError) as error:
         return None, f"geometry artifacts unreadable: {error}"
+    if shapes[0] != shapes[1]:
+        return False, f"size differs: {shapes[0][0]}x{shapes[0][1]} vs {shapes[1][0]}x{shapes[1][1]}"
     union = np.logical_or(*masks).sum()
     iou = float(np.logical_and(*masks).sum() / union) if union else 1.0
     both = np.logical_and(*masks) & np.isfinite(depths[0]) & (depths[1] > 0)
@@ -282,16 +281,16 @@ def disparity_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, A
     import numpy as np
 
     candidate, native = candidate or {}, native or {}
-    shape = (int(native.get("height") or 0), int(native.get("width") or 0))
-    size = (int(candidate.get("height") or 0), int(candidate.get("width") or 0))
-    if not all(shape) or not all(size):
-        return None, f"no disparity size: {size[0]}x{size[1]} vs {shape[0]}x{shape[1]}"
-    if size != shape:
-        return False, f"size differs: {size[0]}x{size[1]} vs {shape[0]}x{shape[1]}"
-    try:
-        mine, theirs = (np.fromfile(side["disparity_artifact"], dtype="<f4").reshape(shape) for side in (candidate, native))
+    shapes = [(int(side.get("height") or 0), int(side.get("width") or 0)) for side in (candidate, native)]
+    if not all(shapes[0]) or not all(shapes[1]):
+        return None, f"no disparity size: {shapes[0][0]}x{shapes[0][1]} vs {shapes[1][0]}x{shapes[1][1]}"
+    try:  # each side's file at its own size: missing evidence first, a size difference after
+        mine, theirs = (np.fromfile(side["disparity_artifact"], dtype="<f4").reshape(shape)
+                        for side, shape in zip((candidate, native), shapes))
     except (KeyError, OSError, ValueError) as error:
         return None, f"disparity artifacts unreadable: {error}"
+    if shapes[0] != shapes[1]:
+        return False, f"size differs: {shapes[0][0]}x{shapes[0][1]} vs {shapes[1][0]}x{shapes[1][1]}"
     if not np.isfinite(mine).all():
         return False, "non-finite disparities"
     error = float(np.abs(mine - theirs).mean())

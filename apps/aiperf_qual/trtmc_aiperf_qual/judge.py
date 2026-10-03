@@ -172,6 +172,23 @@ def work_check(candidate: Mapping[str, Any], reference: Mapping[str, Any]) -> st
     return f"work differs: TRTMC {shown['TRTMC']} vs native {shown['native']}"[:400]
 
 
+def measurement_problems(stats: Mapping[str, Any], max_ci_percent: float) -> list[str]:
+    """Why one side's timing is no valid measurement on its own, or []: a run incomplete, no model-call time, a
+    response without work evidence, a busy GPU, or its runs spread beyond ``max_ci_percent`` (or too few for a CI)."""
+    problems = [str(stats["incomplete"])] if stats.get("incomplete") else []
+    if stats.get("p50_ms") is None:
+        problems.append(f"no {METRIC}")
+    if stats.get("work_missing") or not stats.get("work"):
+        problems.append(f"{stats.get('work_missing') or 'all'} responses report no work")
+    if (stats.get("gpu_busy_percent") or 0) >= GPU_BUSY_PERCENT:
+        problems.append(f"GPU {stats['gpu_busy_percent']:.0f}% busy with other processes")
+    if stats.get("ci_percent") is None:
+        problems.append("fewer than two runs: no CI")
+    elif stats["ci_percent"] > max_ci_percent:
+        problems.append(f"CI ±{stats['ci_percent']:.2f}% > {max_ci_percent}%")
+    return problems
+
+
 def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any], *, margin_percent: float,
                       max_ci_percent: float, outputs_match: bool, output_reason: str,
                       not_equivalent: str | None = None, candidate_precision: str | None = None) -> dict[str, Any]:
