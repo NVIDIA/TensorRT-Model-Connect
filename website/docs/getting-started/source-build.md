@@ -121,8 +121,12 @@ Run the remaining commands inside the container.
 
 ## 2. Build the native runtime
 
+The development image already contains the builder's Python dependencies. Put
+the checkout's builder and family packages on `PYTHONPATH` instead of installing
+the project with pip; a pip install of this checkout compiles every family DSO.
+
 ```bash
-python -m pip install --no-deps -e . -C py-only=true
+export PYTHONPATH="$PWD/core/builder:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
 TRTMC_BUILD_DIR="build-sm${TRTMC_SM}"
 
@@ -142,8 +146,13 @@ cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
 ```
 
-To run the optional text server from this build, install its Python control
-plane dependencies with `python -m pip install -e '.[serve]' -C py-only=true`.
+To run the optional text server from this build, install only its Python
+control plane dependencies. The source-built `trtmc-server` finds its control
+plane package beside the executable:
+
+```bash
+python -m pip install 'fastapi>=0.115,<0.142' 'pydantic>=2.11,<3' 'uvicorn>=0.30,<0.53'
+```
 
 TensorRT-RTX is an explicit optional build. When its SDK is installed, enable
 only its backend DSO with the exact include and library directories:
@@ -156,8 +165,25 @@ cmake -S . -B "$TRTMC_BUILD_DIR" \
 cmake --build "$TRTMC_BUILD_DIR" --target trtmc_backend_rtx
 ```
 
-This path skips CI-only Python profiles and unrelated model DSOs. Continue to
-[Quick Start](quick-start.md) in the same container shell. Full-repository
+## 3. Build and run Qwen
+
+This build contains only the Qwen family DSO, so check it with a Qwen
+checkpoint. The build directory is the runtime root:
+
+```bash
+python -m tensorrt_model_connect build Qwen/Qwen3-0.6B \
+  --precision fp16 \
+  --output qwen3-0.6b.bundle
+
+trtmc run qwen3-0.6b.bundle \
+  --runtime-root "$PWD/$TRTMC_BUILD_DIR" \
+  --prompt "Explain what TensorRT does in one sentence." \
+  --max-new-tokens 64
+```
+
+This path skips CI-only Python profiles and unrelated model DSOs. To run
+another family, add its `trtmc_model_<family>` target to the build above, then
+continue to [Quick Start](quick-start.md) in the same container shell. Full-repository
 ownership and backend boundaries are documented in the
 [AI-Native Horizontal Scaling Architecture](../architecture/ai-native-horizontal-scaling.md).
 
