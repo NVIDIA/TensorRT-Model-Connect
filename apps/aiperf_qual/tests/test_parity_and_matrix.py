@@ -105,12 +105,14 @@ def test_the_near_capacity_prompt_shrinks_until_trtmc_accepts_it(monkeypatch):
 
     monkeypatch.setattr(runner, "probe", probe)
     model = {"operation": "generate", "reference": {}}
-    long, tokens = runner.near_capacity_request(None, model, {"prompt": "x"}, 224, {"url": "u"})
-    assert tokens == 221 and long["max_new_tokens"] == runner.NEAR_CAPACITY_NEW_TOKENS and long["temperature"] == 0.0
+    greedy = {"prompt": "x", "temperature": 1.0, "top_k": 1}  # a pinned greedy contract (Qwen3-Omni) is kept
+    long, tokens = runner.near_capacity_request(None, model, greedy, 224, {"url": "u"})
+    assert tokens == 221 and long["max_new_tokens"] == runner.NEAR_CAPACITY_NEW_TOKENS
+    assert (long["temperature"], long["top_k"]) == (1.0, 1)
 
     def broken(service, operation, request):
         raise RuntimeError("probe rejected: CUDA error")
 
     monkeypatch.setattr(runner, "probe", broken)
     with pytest.raises(RuntimeError, match="CUDA"):
-        runner.near_capacity_request(None, model, {"prompt": "x"}, 224, {"url": "u"})
+        runner.near_capacity_request(None, model, greedy, 224, {"url": "u"})

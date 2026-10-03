@@ -173,10 +173,10 @@ def _arguments(model: Mapping[str, Any], item: Mapping[str, Any], service: Mappi
         arguments.append("--tokenizer-trust-remote-code")
     if item.get("tasks"):
         arguments += ["--accuracy-tasks", *item["tasks"]]
-    # Greedy unless the model's catalog request samples; a seed then makes each repetition distinct.
-    if seed is None:
-        arguments += ["--extra-inputs", "temperature:0"]
-    else:
+    # The serving base request is the catalog request: greedy as it is unless it samples (top_k 1 or temperature 0;
+    # a family may pin its greedy contract, Qwen3-Omni: temperature 1 with top_k 1); a sampling model's runs are
+    # repeated with distinct seeds.
+    if seed is not None:
         arguments += ["--extra-inputs", f"seed:{seed}"]
     return arguments
 

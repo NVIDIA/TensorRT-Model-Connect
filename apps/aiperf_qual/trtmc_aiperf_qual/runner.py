@@ -99,8 +99,9 @@ def near_capacity_request(environment: Environment, model: Mapping[str, Any], re
                                               trust_remote_code=bool(model["reference"].get("trust_remote_code")))
     count = budget
     for _ in range(5):  # the template's tokens, then the decode / re-encode round trip, taken off the passage
-        long = {**request, **GREEDY, "prompt": _passage(environment, tokenizer, count),
-                "max_new_tokens": NEAR_CAPACITY_NEW_TOKENS}
+        # ``request`` is the timed request, greedy already (``timed_request``): its own sampling fields stay, as a
+        # family may pin its greedy contract (Qwen3-Omni: temperature 1 with top_k 1).
+        long = {**request, "prompt": _passage(environment, tokenizer, count), "max_new_tokens": NEAR_CAPACITY_NEW_TOKENS}
         excess = rendered_tokens(tokenizer, long) - budget
         if excess <= 0:
             break
