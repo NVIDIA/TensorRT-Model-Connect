@@ -342,8 +342,9 @@ smoke results, and the formal run before each lands in PR #1550.
   translation, transcription) the generated token count or the generated text, all responses agreeing on
   either (equal counts are the same decode steps; equal texts the same tokens, whichever way a backend counts
   the end-of-sequence token: Marian's TRTMC counts it, the native path does not; the native Whisper-style
-  transcriber reports its decode steps, transcript tokens plus the end token's step, as TRTMC counts them, so two
-  transcripts differing only in punctuation of equal length still compare); `media_digest` frames /
+  transcriber reports its decoding steps, counted by a logits processor that generation calls once per generated
+  token (the end token and generated special tokens included, the forced prompt not), as TRTMC counts its generated
+  ids, so two transcripts of equal decoding length still compare); `media_digest` frames /
   height / width for generated media; `audio_digest` length (10 ms) for generated speech; nothing for
   operations whose input fixes the work. TRTMC requests cannot force a generation length (no ignore-EOS), so a
   greedy text request whose two outputs end at different points is `perf-inconclusive`.
@@ -410,8 +411,10 @@ smoke results, and the formal run before each lands in PR #1550.
 - **Five timed runs** (Section 4.6): the pilot timed ResNet-50 at a 9.7x speedup with run p50s 2% apart, and the
   CI gate turned it white: with three runs the 95% half-width is t(0.975, 2) = 4.30 standard errors, so ordinary
   run-to-run noise exceeds 5%. The same number of timed requests now runs as five runs (t = 2.78): 12 requests per
-  run instead of 20 (large checkpoints 3 instead of 5). Generative media and speech keep three runs of three long
-  requests, whose run p50s vary far less (FLUX.1-schnell: green).
+  run instead of 20 (large checkpoints 3 instead of 5). Generative media and speech output keep three runs of three
+  long requests, a cost choice resting on the pilot so far (half-widths with three runs: FLUX.1-schnell TRTMC 0.63%,
+  native 0.21%; Bark-small 1.73%, 2.19%): every media and speech profile of the pilot is checked before the counts
+  freeze (Section 12.1), and if any is white on the CI gate those categories move to five runs too.
 - **Retries and deadlines**: a failed GPU phase runs once more (not in smoke mode); every AIPerf run (Acc, Perf,
   generation for the media checks, L2) takes the ledger's per-profile deadline from the environment's
   `deadlines` map.

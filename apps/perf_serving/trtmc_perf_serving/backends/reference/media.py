@@ -133,21 +133,27 @@ class SpeechRecognition:
         kwargs: dict[str, Any] = {"max_new_tokens": int(request.get("max_new_tokens", 128))}
         if request.get("language"):
             kwargs["language"] = request["language"]
+        import transformers
+
+        steps = DecodeSteps()
+        kwargs["logits_processor"] = transformers.LogitsProcessorList([steps])
         ids, model_ms = timed(lambda: self.model.generate(features, **kwargs))
         text = self.processor.batch_decode(ids, skip_special_tokens=True)[0]
         seconds = len(audio) / self.sample_rate
-        return invocation({"text": text, "output_tokens": self.decode_steps(ids[0].tolist(), kwargs["max_new_tokens"]),
-                           "input_audio_seconds": seconds}, model_ms, realtime_factor=seconds / (model_ms / 1000.0))
+        return invocation({"text": text, "output_tokens": steps.count, "input_audio_seconds": seconds}, model_ms,
+                          realtime_factor=seconds / (model_ms / 1000.0))
 
-    def decode_steps(self, sequence: list[int], limit: int) -> int:
-        """Decoder steps after the forced prompt: one per transcript token, plus the step that produced the end
-        token when decoding stopped before ``limit`` (Transformers may return the sequence with or without its
-        forced prompt and end token; both count the same)."""
-        tokenizer = self.processor.tokenizer
-        special = set(tokenizer.all_special_ids)
-        transcript = [token for token in sequence if token not in special]
-        ended = (bool(sequence) and sequence[-1] == tokenizer.eos_token_id) or len(transcript) < limit
-        return len(transcript) + int(ended)
+
+class DecodeSteps:
+    """A logits processor counting decoding steps: generation calls its processors once per generated token (the
+    end token and generated special tokens included, the forced prompt not), whatever the returned sequence keeps."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def __call__(self, input_ids: Any, scores: Any) -> Any:
+        self.count += 1
+        return scores
 
 
 class SpeechSynthesis:

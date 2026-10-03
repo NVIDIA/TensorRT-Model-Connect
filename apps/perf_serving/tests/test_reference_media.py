@@ -51,16 +51,13 @@ def test_timm_classifiers_load_the_pinned_revision(monkeypatch):
     assert created == ["hf-hub:timm/convnext_tiny@abc123"]
 
 
-def test_transcription_decode_steps_count_the_end_token_whatever_the_returned_form():
-    """Whisper's 76-token transcript decodes in 77 steps (the end token's included), whether Transformers returns
-    the forced prompt and end token or the transcript alone; a transcript cut at the limit has no end step."""
-    from trtmc_perf_serving.backends.reference.media import SpeechRecognition
 
-    recognizer = object.__new__(SpeechRecognition)
-    recognizer.processor = SimpleNamespace(tokenizer=SimpleNamespace(all_special_ids=[50257, 50258, 50259, 50359, 50363],
-                                                                     eos_token_id=50257))
-    transcript = list(range(1000, 1076))
-    assert recognizer.decode_steps(transcript, 120) == 77
-    assert recognizer.decode_steps([50258, 50259, 50359, 50363, *transcript, 50257], 120) == 77
-    assert recognizer.decode_steps(transcript, 76) == 76
-    assert recognizer.decode_steps([50257], 120) == 1
+def test_transcription_counts_every_generation_step_whatever_the_returned_sequence_keeps():
+    """Generation calls the counter once per generated token: a stripped end token or a generated special token
+    still counts, the forced prompt never does."""
+    from trtmc_perf_serving.backends.reference.media import DecodeSteps
+
+    steps, scores = DecodeSteps(), torch.zeros(1, 4)
+    for _ in range(78):  # 76 transcript tokens, a generated language token, the end token
+        assert steps(torch.zeros(1, 5), scores) is scores
+    assert steps.count == 78
