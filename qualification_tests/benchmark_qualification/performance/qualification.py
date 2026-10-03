@@ -25,6 +25,22 @@ from ..runtime import (
 
 
 _COMPLETED_COMPARISONS = frozenset({"green", "yellow", "red"})
+_BUNDLE_RETENTIONS = frozenset({"retain", "delete_on_pass", "delete_always"})
+
+
+def _bundle_retention() -> str:
+    """Return the bundle retention requested by the qualification caller.
+
+    Callers that qualify many models on one disk set
+    ``TRTMC_QUALIFICATION_BUNDLE_RETENTION`` to remove each case's private
+    bundle after it ran; the default keeps bundles as before.
+    """
+    retention = os.environ.get("TRTMC_QUALIFICATION_BUNDLE_RETENTION", "retain")
+    if retention not in _BUNDLE_RETENTIONS:
+        raise QualificationError(
+            "TRTMC_QUALIFICATION_BUNDLE_RETENTION must be retain, delete_on_pass, or delete_always"
+        )
+    return retention
 
 
 def _qualification_status(
@@ -129,7 +145,7 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
         bundle_cache=context.bundle_cache,
         bundle_roots=context.bundle_roots,
         runtime_root=runtime_root,
-        bundle_retention="retain",
+        bundle_retention=_bundle_retention(),
         local_files_only=os.environ.get("TRTMC_QUALIFICATION_LOCAL_FILES_ONLY") == "1",
         timeout_seconds=int(configured.get("timeout_seconds", 7200)),
         references={},
