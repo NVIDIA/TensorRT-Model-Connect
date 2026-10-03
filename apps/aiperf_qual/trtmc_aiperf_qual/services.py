@@ -7,6 +7,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -175,32 +176,108 @@ def replicas_that_fit(before: tuple[int, int] | None, after: tuple[int, int] | N
     return max(1, min(wanted, int((after[1] - before[0] - REPLICA_HEADROOM_MIB) // (one * REPLICA_GROWTH))))
 
 
+MPS_CONTROL = re.compile(r"Control (\d+)\] Starting control daemon")
+MPS_SERVER = re.compile(r"Starting new server (\d+)")
+MPS_START_S, MPS_QUIT_S, MPS_EXIT_S = 30, 120, 60  # the daemon's log line; its quit; its processes' exit
+
+
+def _alive(pid: int) -> bool:
+    """A process that still runs (a zombie has exited: only its parent has not collected it)."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def _mps_pids(directory: Path) -> list[int]:
+    """The daemon's control and server processes, as its log names them ([] before it logged)."""
+    try:
+        text = (directory / "log" / "control.log").read_text(errors="replace")
+    except OSError:
+        return []
+    return [int(pid) for pattern in (MPS_CONTROL, MPS_SERVER) for pid in pattern.findall(text)]
+
+
+def _mps_devices(env: Mapping[str, str]) -> str | None:
+    """CUDA_VISIBLE_DEVICES as GPU UUIDs (MPS renumbers its clients' devices), None when unset. Raises
+    ServiceError for ordinals that do not name one GPU unambiguously (several GPUs not in PCI bus order)."""
+    entries = [entry.strip() for entry in (env.get("CUDA_VISIBLE_DEVICES") or "").split(",") if entry.strip()]
+    if not entries or all(entry.startswith(("GPU-", "MIG-")) for entry in entries):
+        return ",".join(entries) or None
+    try:
+        lines = subprocess.run(["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"], capture_output=True,
+                               text=True, timeout=60, check=True).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ServiceError(f"GPU UUIDs unavailable: {error}") from error
+    uuids = dict(tuple(part.strip() for part in line.split(",", 1)) for line in lines if "," in line)
+    if len(uuids) > 1 and env.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
+        raise ServiceError("CUDA ordinals in CUDA_VISIBLE_DEVICES are ambiguous without CUDA_DEVICE_ORDER=PCI_BUS_ID")
+    try:
+        return ",".join(entry if entry.startswith(("GPU-", "MIG-")) else uuids[entry] for entry in entries)
+    except KeyError as error:
+        raise ServiceError(f"no GPU {error} for CUDA_VISIBLE_DEVICES") from error
+
+
+def _mps_stop(env: Mapping[str, str], directory: Path) -> None:
+    """Quit the daemon and make sure its processes exited (signalled if they outlive the quit); raises
+    ServiceError when one still runs, so no timing follows. Nothing to do when no daemon logged."""
+    pids = _mps_pids(directory)
+    if not pids:
+        return
+    try:
+        completed = subprocess.run(["nvidia-cuda-mps-control"], input="quit\n", text=True, env=dict(env),
+                                   capture_output=True, timeout=MPS_QUIT_S)
+        note = f"quit exited {completed.returncode}"
+    except (OSError, subprocess.SubprocessError) as error:
+        note = f"quit failed: {type(error).__name__}"
+    for sig, wait_s in ((None, MPS_EXIT_S), (signal.SIGTERM, 10), (signal.SIGKILL, 10)):
+        living = [pid for pid in pids if _alive(pid)]
+        for pid in living if sig else []:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.time() + wait_s
+        while living and time.time() < deadline:
+            time.sleep(1)
+            living = [pid for pid in living if _alive(pid)]
+        if not living:
+            return
+    raise ServiceError(f"MPS processes {living} still run after the daemon's quit ({note})")
+
+
 @contextmanager
 def mps(environment: Environment, directory: Path) -> Iterator[dict[str, str]]:
     """With ``acc_mps`` (environment), a CUDA MPS daemon of its own (private pipe directory): the processes given
     the yielded variables share the GPU's SMs concurrently instead of time-slicing it; others are unaffected.
-    Yields {} without it or when the daemon does not start (the copies then time-slice, still correct)."""
+    The daemon and its clients name the GPU by UUID. Yields {} without it or when the daemon does not start (the
+    copies then time-slice, still correct); a daemon that started is stopped and its exit verified either way."""
     if not environment.values.get("acc_mps"):
         yield {}
         return
     variables = {"CUDA_MPS_PIPE_DIRECTORY": str(directory / "pipe"), "CUDA_MPS_LOG_DIRECTORY": str(directory / "log")}
     for path in variables.values():
         Path(path).mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, **variables}
+    env = {**_serve_env(environment), **variables}
     try:
+        devices = _mps_devices(env)
+        if devices:
+            env["CUDA_VISIBLE_DEVICES"] = variables["CUDA_VISIBLE_DEVICES"] = devices
         subprocess.run(["nvidia-cuda-mps-control", "-d"], env=env, check=True, capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as error:
+        deadline = time.time() + MPS_START_S
+        while not _mps_pids(directory) and time.time() < deadline:
+            time.sleep(0.5)
+        if not _mps_pids(directory):
+            raise ServiceError("the MPS daemon did not log its start")
+    except (OSError, subprocess.SubprocessError, ServiceError) as error:
         (directory / "mps-unavailable.txt").write_text(f"{type(error).__name__}: {error}\n")
+        _mps_stop(env, directory)
         yield {}
         return
     try:
         yield variables
     finally:  # after the clients stopped (the caller's servers exit first)
-        try:
-            subprocess.run(["nvidia-cuda-mps-control"], input="quit\n", text=True, env=env, capture_output=True,
-                           timeout=120)
-        except (OSError, subprocess.SubprocessError) as error:
-            (directory / "mps-quit-failed.txt").write_text(f"{type(error).__name__}: {error}\n")
+        _mps_stop(env, directory)
 
 
 @contextmanager

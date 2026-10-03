@@ -627,45 +627,123 @@ def test_concurrent_trtmc_copies_make_the_workload_times_incomparable():
     assert copies["candidate_replicas"] == 4
 
 
-def test_copies_share_the_gpu_through_their_own_mps_daemon_when_enabled(tmp_path):
-    """With acc_mps, every copy gets the private daemon's variables and the daemon quits after the copies stop;
-    without it (or when the daemon fails to start) the copies run as plain processes."""
-    import subprocess
-    from contextlib import contextmanager
-    from unittest.mock import patch
 
+class FakeMps:
+    """nvidia-cuda-mps-control and nvidia-smi for the MPS tests: ``-d`` logs a control and a server pid (or fails
+    after logging), ``quit`` ends them unless ``stubborn``; signals end them unless ``immortal``."""
+
+    def __init__(self, directory, *, start_fails=False, stubborn=False, immortal=False):
+        self.directory, self.start_fails, self.stubborn, self.immortal = directory, start_fails, stubborn, immortal
+        self.calls, self.living, self.env = [], set(), None
+
+    def run(self, command, **kwargs):
+        import subprocess
+
+        if command[0] == "nvidia-smi":
+            return subprocess.CompletedProcess(command, 0, stdout="0, GPU-aaaa\n")
+        self.calls.append("quit" if kwargs.get("input") else "start")
+        if kwargs.get("input"):
+            if not self.stubborn:
+                self.living.clear()
+            return subprocess.CompletedProcess(command, 1 if self.stubborn else 0)
+        self.env = kwargs["env"]
+        log = self.directory / "log" / "control.log"
+        log.write_text("[t Control 101] Starting control daemon using socket x\n[t Control 102] Starting new server 102\n")
+        self.living.update({101, 102})
+        if self.start_fails:
+            raise subprocess.TimeoutExpired(command, 60)
+        return subprocess.CompletedProcess(command, 0)
+
+    def kill(self, pid, sig):
+        self.calls.append(f"kill {pid}")
+        if not self.immortal:
+            self.living.discard(pid)
+
+
+def mps_patches(fake, monkeypatch):
     from trtmc_aiperf_qual import services
+
+    monkeypatch.setattr(services.subprocess, "run", fake.run)
+    monkeypatch.setattr(services.os, "kill", fake.kill)
+    monkeypatch.setattr(services, "_alive", lambda pid: pid in fake.living)
+    monkeypatch.setattr(services.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(services, "MPS_EXIT_S", 0)
+    return services
+
+
+def test_copies_share_the_gpu_through_their_own_mps_daemon_when_enabled(tmp_path, monkeypatch):
+    """With acc_mps, every copy gets the private daemon's variables (the GPU by UUID), the daemon quits after the
+    copies stop, and its exit is verified."""
+    from contextlib import contextmanager
+
     from trtmc_aiperf_qual.config import Environment
 
+    fake = FakeMps(tmp_path / "acc-mps")
+    services = mps_patches(fake, monkeypatch)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
     events = []
 
     @contextmanager
     def serving(environment, model, backend, out, *, extra_env=None, port=None, **options):
         events.append(("start", out.name, dict(extra_env or {})))
         yield {"url": f"http://{out.name}"}
-        events.append(("stop", out.name))
+        events.append(("stop", out.name, fake.living == {101, 102}))
 
-    def run(command, **kwargs):
-        events.append(("mps", "quit" if kwargs.get("input") else "start"))
-        return subprocess.CompletedProcess(command, 0)
-
-    environment = Environment({"acc_mps": True, "ports": {"candidate": 9000, "reference": 9100}})
+    environment = Environment({"acc_mps": True, "repo": str(tmp_path), "ports": {"candidate": 9000, "reference": 9100}})
     memory = iter([(0, 250 * 1024), (10 * 1024, 250 * 1024)])
-    with patch.object(services, "serving", serving), patch.object(services.subprocess, "run", run), \
-            patch.object(services, "gpu_memory_mib", lambda: next(memory)):
-        with services.serving_replicas(environment, {}, "trtmc", tmp_path / "acc", count=2) as service:
-            assert service["replicas"] == 2 and service["mps"]
-    pipe = str(tmp_path / "acc-mps" / "pipe")
-    assert events[0] == ("mps", "start") and events[-1] == ("mps", "quit")
-    assert all(event[2]["CUDA_MPS_PIPE_DIRECTORY"] == pipe for event in events if event[0] == "start")
-    assert [event[0] for event in events[1:-1]] == ["start", "start", "stop", "stop"]
+    monkeypatch.setattr(services, "serving", serving)
+    monkeypatch.setattr(services, "gpu_memory_mib", lambda: next(memory))
+    with services.serving_replicas(environment, {}, "trtmc", tmp_path / "acc", count=2) as service:
+        assert service["replicas"] == 2 and service["mps"]
+    starts = [event for event in events if event[0] == "start"]
+    assert len(starts) == 2 and all(event[2]["CUDA_VISIBLE_DEVICES"] == "GPU-aaaa" for event in starts)
+    assert all(event[2]["CUDA_MPS_PIPE_DIRECTORY"] == str(tmp_path / "acc-mps" / "pipe") for event in starts)
+    assert fake.env["CUDA_VISIBLE_DEVICES"] == "GPU-aaaa"
+    assert all(event[2] for event in events if event[0] == "stop")  # the daemon outlived its clients
+    assert fake.calls == ["start", "quit"] and not fake.living
 
-    def broken(command, **kwargs):
-        raise subprocess.CalledProcessError(1, command)
 
-    events.clear()
-    with patch.object(services, "serving", serving), patch.object(services.subprocess, "run", broken), \
-            patch.object(services, "gpu_memory_mib", lambda: None):
-        with services.serving_replicas(environment, {}, "trtmc", tmp_path / "plain", count=2) as service:
-            assert not service["mps"]
-    assert events[0] == ("start", "plain", {}) and (tmp_path / "plain-mps" / "mps-unavailable.txt").is_file()
+def test_an_mps_daemon_that_fails_to_start_is_stopped_and_one_that_will_not_stop_fails_the_phase(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.services import ServiceError
+
+    environment = Environment({"acc_mps": True, "repo": str(tmp_path)})
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    fake = FakeMps(tmp_path / "late", start_fails=True)
+    services = mps_patches(fake, monkeypatch)
+    with services.mps(environment, tmp_path / "late") as variables:
+        assert variables == {}  # time-sliced copies
+    assert fake.calls == ["start", "quit"] and not fake.living
+    assert (tmp_path / "late" / "mps-unavailable.txt").is_file()
+
+    fake = FakeMps(tmp_path / "stuck", stubborn=True)
+    services = mps_patches(fake, monkeypatch)
+    with services.mps(environment, tmp_path / "stuck") as variables:
+        assert variables["CUDA_MPS_PIPE_DIRECTORY"].endswith("pipe")
+    assert fake.calls[:2] == ["start", "quit"] and "kill 101" in fake.calls and not fake.living  # signalled
+
+    fake = FakeMps(tmp_path / "immortal", stubborn=True, immortal=True)
+    services = mps_patches(fake, monkeypatch)
+    with pytest.raises(ServiceError, match="still run"):
+        with services.mps(environment, tmp_path / "immortal"):
+            pass
+
+
+def test_ambiguous_gpu_ordinals_leave_the_copies_without_mps(tmp_path, monkeypatch):
+    import subprocess
+
+    from trtmc_aiperf_qual.config import Environment
+
+    fake = FakeMps(tmp_path / "two")
+    services = mps_patches(fake, monkeypatch)
+    two = lambda command, **kwargs: (subprocess.CompletedProcess(command, 0, stdout="0, GPU-a\n1, GPU-b\n")  # noqa: E731
+                                     if command[0] == "nvidia-smi" else fake.run(command, **kwargs))
+    monkeypatch.setattr(services.subprocess, "run", two)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
+    with services.mps(Environment({"acc_mps": True, "repo": str(tmp_path)}), tmp_path / "two") as variables:
+        assert variables == {}
+    assert fake.calls == [] and "ambiguous" in (tmp_path / "two" / "mps-unavailable.txt").read_text()
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    with services.mps(Environment({"acc_mps": True, "repo": str(tmp_path)}), tmp_path / "two") as variables:
+        assert variables["CUDA_VISIBLE_DEVICES"] == "GPU-b"
