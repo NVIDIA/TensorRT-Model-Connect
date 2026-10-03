@@ -58,6 +58,8 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
                 "4",
                 "--quantization",
                 "fp8",
+                "--weight-streaming-budget-bytes",
+                "17179869184",
                 "--fp32-layer",
                 "2",
                 "--fp32-layer",
@@ -83,6 +85,7 @@ def test_build_command_forwards_only_direct_inputs(monkeypatch, tmp_path: Path) 
     assert request.tensor_parallel_size == 2
     assert request.context_parallel_size == 4
     assert request.quantization == "fp8"
+    assert request.weight_streaming_budget_bytes == 17179869184
     assert request.fp32_layers == (2, 5)
     assert request.dynamic_kv_cache is True
     assert request.verbose is True
@@ -103,6 +106,60 @@ def test_build_command_uses_the_family_owned_default_task(monkeypatch, tmp_path:
     assert captured[0].family == "example_owner"
     assert captured[0].task == "owner_default"
     assert captured[0].precision == "fp32"
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_budget"),
+    (("full-residency", None), ("min-residency", 0)),
+)
+def test_build_command_maps_weight_streaming_modes(
+    monkeypatch, tmp_path: Path, mode: str, expected_budget: int | None
+) -> None:
+    captured = []
+    monkeypatch.setattr(build_cli, "build", captured.append)
+    monkeypatch.setattr(
+        build_cli,
+        "resolve_family",
+        lambda metadata: (
+            "example_owner",
+            FamilySupport(("owner_default",), "owner_default"),
+        ),
+    )
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
+
+    assert (
+        build_cli.main(
+            [
+                "build",
+                str(model),
+                "--output",
+                str(tmp_path / "out.bundle"),
+                "--weight-streaming-mode",
+                mode,
+            ]
+        )
+        == 0
+    )
+
+    assert captured[0].weight_streaming_budget_bytes == expected_budget
+
+
+def test_weight_streaming_mode_and_budget_are_mutually_exclusive(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        build_cli._parser().parse_args(
+            [
+                "build",
+                str(tmp_path / "model"),
+                "--output",
+                str(tmp_path / "out.bundle"),
+                "--weight-streaming-mode",
+                "min-residency",
+                "--weight-streaming-budget-bytes",
+                "1024",
+            ]
+        )
 
 
 def test_build_command_uses_an_explicit_compatible_family(monkeypatch, tmp_path: Path) -> None:

@@ -14,6 +14,7 @@
 
 #include <NvInfer.h>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 
@@ -30,6 +31,20 @@ void keep_backend_resources(ITrtModule& module,
         module.keep_alive(stream_owner);
     if (distributed_owner)
         module.keep_alive(distributed_owner);
+}
+
+void configure_weight_streaming(nvinfer1::ICudaEngine& engine, const ModuleCreateOptions& options) {
+    if (!options.weight_streaming_budget_bytes)
+        return;
+    const auto requested = *options.weight_streaming_budget_bytes;
+    if (requested > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+        throw std::invalid_argument("[trtmc] Weight streaming budget exceeds int64 range");
+    const auto streamable = engine.getStreamableWeightsSize();
+    if (streamable <= 0)
+        throw std::runtime_error(
+            "[trtmc] Weight streaming was requested for an engine built without it");
+    if (!engine.setWeightStreamingBudgetV2(static_cast<std::int64_t>(requested)))
+        throw std::runtime_error("[trtmc] TensorRT rejected the weight streaming budget");
 }
 
 } // namespace
@@ -63,6 +78,7 @@ class TrtBackend final : public IBackend {
             throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
         std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
                                                       [](nvinfer1::ICudaEngine* p) { delete p; });
+        configure_weight_streaming(*engine, options);
 
         cudaStream_t stream = options.stream;
         std::shared_ptr<void> stream_owner;
@@ -101,40 +117,34 @@ class TrtBackend final : public IBackend {
     std::unique_ptr<ITrtModule>
     create_module_impl(const void* plan_data, size_t plan_size, const ModuleCreateOptions& options,
                        const std::vector<ModuleExternalBinding>& external_bindings) {
-        auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
-        if (!engine)
+        auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        if (!engine_raw)
             throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
+        std::shared_ptr<nvinfer1::ICudaEngine> engine(
+            engine_raw, [](nvinfer1::ICudaEngine* value) { delete value; });
+        configure_weight_streaming(*engine, options);
 
-        auto* ctx = engine->createExecutionContext();
-        if (!ctx) {
-            delete engine;
+        TrtUniquePtr<nvinfer1::IExecutionContext> context(engine->createExecutionContext());
+        if (!context)
             throw std::runtime_error("[trtmc] Failed to create TRT execution context");
-        }
 
         cudaStream_t stream = options.stream;
         std::shared_ptr<void> stream_owner;
         if (!stream) {
             auto owned = std::make_shared<CudaStream>();
-            if (!owned->ok()) {
-                delete ctx;
-                delete engine;
+            if (!owned->ok())
                 throw std::runtime_error("[trtmc] Failed to create CUDA stream");
-            }
             stream = owned->get();
             stream_owner = owned;
         }
 
-        auto module = std::make_unique<TrtModuleImpl>(
-            engine, ctx, stream, 0, options.distributed_communicator, external_bindings);
-        if (!module->ok()) {
-            delete engine;
+        auto module =
+            std::make_unique<TrtModuleImpl>(engine.get(), context.release(), stream, 0,
+                                            options.distributed_communicator, external_bindings);
+        if (!module->ok())
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
-        }
 
-        keep_backend_resources(*module,
-                               std::shared_ptr<nvinfer1::ICudaEngine>(
-                                   engine, [](nvinfer1::ICudaEngine* p) { delete p; }),
-                               stream_owner, options.distributed_owner);
+        keep_backend_resources(*module, engine, stream_owner, options.distributed_owner);
 
         return module;
     }

@@ -42,6 +42,40 @@ void test_pinned_schedules() {
                "H3 audio penultimate sigma matches Diffusers");
 }
 
+void test_fasth3_dense_four_step_schedule() {
+    const std::vector<int32_t> rungs = {999, 749, 500, 250};
+    const auto video = trtmc::make_minimax_h3_dmd_schedule(rungs, 12.0F);
+    const auto audio = trtmc::make_minimax_h3_dmd_schedule(rungs, 3.0F);
+    check(video.sigmas.size() == 5 && video.timesteps.size() == 4,
+          "FastH3 video schedule uses five grid points and four evaluations");
+    check(audio.sigmas.size() == 5 && audio.timesteps.size() == 4,
+          "FastH3 audio schedule uses five grid points and four evaluations");
+    check_near(video.sigmas[0], 0.9999166131F, 1.0e-7F,
+               "FastH3 video applies shift 12 once to rung 999");
+    check_near(video.sigmas[1], 0.9728325605F, 1.0e-7F,
+               "FastH3 video preserves the trained rung 749");
+    check_near(video.sigmas[2], 0.9230769277F, 1.0e-7F,
+               "FastH3 video preserves the trained rung 500");
+    check_near(video.sigmas[3], 0.8000000119F, 1.0e-7F,
+               "FastH3 video preserves the trained rung 250");
+    check_near(audio.sigmas[0], 0.9996664524F, 1.0e-7F,
+               "FastH3 audio applies shift 3 once to rung 999");
+    check_near(audio.sigmas[1], 0.8995196223F, 1.0e-7F,
+               "FastH3 audio preserves the trained rung 749");
+    check_near(audio.sigmas[2], 0.75F, 1.0e-7F, "FastH3 audio preserves the trained rung 500");
+    check_near(audio.sigmas[3], 0.5F, 1.0e-7F, "FastH3 audio preserves the trained rung 250");
+    check_near(video.sigmas.back(), 0.0F, 0.0F, "FastH3 video schedule appends its terminal zero");
+    check_near(audio.sigmas.back(), 0.0F, 0.0F, "FastH3 audio schedule appends its terminal zero");
+
+    bool rejected = false;
+    try {
+        (void)trtmc::make_minimax_h3_dmd_schedule({999, 500, 500, 250}, 12.0F);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "FastH3 rejects a non-decreasing DMD ladder");
+}
+
 void test_data_ward_euler_sign() {
     std::vector<float> sample = {1.0F, -2.0F};
     const std::vector<float> velocity = {0.5F, 0.25F};
@@ -80,6 +114,7 @@ void test_variable_text_position_layout() {
 
 int main() {
     test_pinned_schedules();
+    test_fasth3_dense_four_step_schedule();
     test_data_ward_euler_sign();
     test_variable_text_position_layout();
     return failures == 0 ? 0 : 1;

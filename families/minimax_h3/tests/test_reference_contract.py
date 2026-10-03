@@ -37,9 +37,23 @@ def _framework(monkeypatch) -> tuple[dict, object]:
         video_token_ids = [20]
         audio_token_ids = [30]
 
+    class Scheduler:
+        def __init__(self, shift: float, name: str):
+            self.shift = shift
+            self.name = name
+
+        def set_timesteps(self, num_inference_steps=None, device=None, sigmas=None):
+            calls[f"{self.name}_schedule"] = {
+                "num_inference_steps": num_inference_steps,
+                "device": device,
+                "sigmas": sigmas,
+            }
+
     class Pipeline:
         def __init__(self):
             self.processor = Processor()
+            self.scheduler = Scheduler(12.0, "video")
+            self.audio_scheduler = Scheduler(3.0, "audio")
 
         @classmethod
         def from_pretrained(cls, model_dir, **kwargs):
@@ -88,6 +102,38 @@ def test_reference_uses_cpu_generator_local_components_and_family_processor(
     assert not hasattr(processor, "create_mm_token_type_ids")
     frames = np.load(result["frames_path"], mmap_mode="r")
     assert frames.shape == (3, 2, 2, 3)
+
+
+def test_fasth3_reference_pins_the_trained_dmd_ladder(monkeypatch, tmp_path: Path) -> None:
+    calls, _ = _framework(monkeypatch)
+    _, base_manifest, base_case = e2e.CASES["minimax-h3-768p"]
+    manifest = {
+        **base_manifest,
+        "generation_profile": "fasth3-dense-4step",
+        "video_num_frames": 3,
+        "image_height": 2,
+        "image_width": 2,
+    }
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "fastvideo_inference.json").write_text(
+        '{"dmd_denoising_steps":[999,749,500,250],"num_inference_steps":5}',
+        encoding="utf-8",
+    )
+    case = {**base_case, "num_inference_steps": 5}
+
+    e2e._official_reference(model_dir, manifest, case, tmp_path)
+    pipeline = calls["pipeline"]
+    pipeline.scheduler.set_timesteps(5, device="cuda")
+    pipeline.audio_scheduler.set_timesteps(5, device="cuda")
+
+    video = calls["video_schedule"]
+    audio = calls["audio_schedule"]
+    assert video["num_inference_steps"] is None
+    assert audio["num_inference_steps"] is None
+    assert video["device"] == audio["device"] == "cuda"
+    assert video["sigmas"] == pytest.approx([0.99991661, 0.97283256, 0.92307693, 0.8, 0.0])
+    assert audio["sigmas"] == pytest.approx([0.99966645, 0.89951962, 0.75, 0.5, 0.0])
 
 
 def test_visual_metrics_stream_one_pair_and_use_block_activity(monkeypatch, tmp_path: Path) -> None:
