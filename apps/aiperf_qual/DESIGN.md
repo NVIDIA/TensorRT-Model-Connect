@@ -413,9 +413,10 @@ smoke results, and the formal run before each lands in PR #1550.
   starts a CUDA MPS daemon of the copies' own (a private pipe directory: only the copies are its clients, L1
   servers and the GPU-idle reading are not) so their kernels share the SMs. The daemon and its clients name the
   GPU by UUID (MPS renumbers ordinals; ambiguous ordinals mean no MPS). It quits after the copies stop and its
-  control and server processes must have exited (signalled if they outlive the quit) before anything else runs:
-  one that survives fails the phase. A daemon that does not start is stopped too and leaves the copies
-  time-sliced. Measured on lfm2-350m (four copies a side, the same
+  control and server processes must have exited (signalled if they outlive the quit; only processes whose program
+  is MPS's and whose environment names the attempt's own pipe directory, each attempt in a directory of its own)
+  before anything else runs: one that survives stops the run (no phase, fallback, or per-model handler absorbs
+  it). A daemon that does not start is stopped too and leaves the copies time-sliced. Measured on lfm2-350m (four copies a side, the same
   bundle): TRTMC MMLU 199 -> 88 s and LAMBADA 345 -> 150 s with every answer identical (2,278 and 5,151); native
   LAMBADA 189 -> 147 s; falcon-rw-1b TRTMC LAMBADA 84 -> 43 s. TensorRT builds are not bit-reproducible: falcon's
   bundle, rebuilt between the two runs, changed 58 of 5,153 LAMBADA grades (55.95% -> 55.99%), so a verdict is

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from pathlib import Path
 
 import pytest
 
@@ -647,7 +648,7 @@ class FakeMps:
                 self.living.clear()
             return subprocess.CompletedProcess(command, 1 if self.stubborn else 0)
         self.env = kwargs["env"]
-        log = self.directory / "log" / "control.log"
+        log = Path(self.env["CUDA_MPS_LOG_DIRECTORY"]) / "control.log"  # the attempt's own directory
         log.write_text("[t Control 101] Starting control daemon using socket x\n[t Control 102] Starting new server 102\n")
         self.living.update({101, 102})
         if self.start_fails:
@@ -725,9 +726,44 @@ def test_an_mps_daemon_that_fails_to_start_is_stopped_and_one_that_will_not_stop
 
     fake = FakeMps(tmp_path / "immortal", stubborn=True, immortal=True)
     services = mps_patches(fake, monkeypatch)
-    with pytest.raises(ServiceError, match="still run"):
+    with pytest.raises(services.GpuStateError, match="still run"):
         with services.mps(environment, tmp_path / "immortal"):
             pass
+    assert not issubclass(services.GpuStateError, Exception)  # no phase or fallback handler catches it
+    assert ServiceError  # (start failures stay ordinary service errors)
+
+    fake = FakeMps(tmp_path / "retry")
+    services = mps_patches(fake, monkeypatch)
+    for _ in range(2):  # a retry's daemon logs in a directory of its own
+        with services.mps(environment, tmp_path / "retry") as variables:
+            pass
+    assert variables["CUDA_MPS_LOG_DIRECTORY"] == str(tmp_path / "retry-2" / "log")
+
+
+def test_a_gpu_left_in_an_unknown_state_stops_the_run(tmp_path):
+    """Neither the phase runner's retries nor the native side's precision fallback absorb a GpuStateError."""
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    from trtmc_aiperf_qual import runner
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.services import GpuStateError
+
+    def stuck():
+        raise GpuStateError("MPS processes [1] still run")
+
+    with pytest.raises(GpuStateError):
+        runner._Phases(tmp_path).run("absolute_native", stuck, retries=1)
+
+    @contextmanager
+    def serving_replicas(*args, **kwargs):
+        stuck()
+        yield
+
+    model = {"operation": "generate", "absolute": [{"suite": "s"}],
+             "reference": {"backend": "reference", "perf_precision": "fp16", "precision": "fp32"}}
+    with patch.object(absolute, "serving_replicas", serving_replicas), pytest.raises(GpuStateError):
+        absolute.run_native(Environment({"native_replicas": 4}), model, "python", {"s": []}, tmp_path)
 
 
 def test_ambiguous_gpu_ordinals_leave_the_copies_without_mps(tmp_path, monkeypatch):

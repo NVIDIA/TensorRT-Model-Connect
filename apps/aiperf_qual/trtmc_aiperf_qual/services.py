@@ -23,6 +23,11 @@ class ServiceError(RuntimeError):
     pass
 
 
+class GpuStateError(BaseException):
+    """The GPU is left in a state that no measurement may follow (an MPS daemon that would not stop). A
+    BaseException, so no phase, precision fallback, or per-model handler swallows it: the run stops."""
+
+
 REPLICA_PORT_OFFSET = 10  # replica i > 0 listens on <port> + 10 + i
 REPLICA_HEADROOM_MIB = 24 * 1024  # GPU memory left free next to the replicas
 REPLICA_GROWTH = 1.5  # a replica's peak over its memory once loaded (activations, KV cache)
@@ -234,8 +239,8 @@ def _mps_devices(env: Mapping[str, str]) -> str | None:
 
 def _mps_stop(env: Mapping[str, str], directory: Path) -> None:
     """Quit the daemon and make sure its processes exited (signalled if they outlive the quit; only processes that
-    ``_ours`` confirms); raises ServiceError when one still runs, so no timing follows. Nothing to do when no
-    daemon logged."""
+    ``_ours`` confirms); raises GpuStateError when one still runs, so nothing follows on this GPU. Nothing to do
+    when no daemon logged."""
     pids = _mps_pids(directory)
     if not pids:
         return
@@ -260,7 +265,7 @@ def _mps_stop(env: Mapping[str, str], directory: Path) -> None:
             living = running(living)
         if not living:
             return
-    raise ServiceError(f"MPS processes {living} still run after the daemon's quit ({note})")
+    raise GpuStateError(f"MPS processes {living} still run after the daemon's quit ({note})")
 
 
 @contextmanager
@@ -272,6 +277,9 @@ def mps(environment: Environment, directory: Path) -> Iterator[dict[str, str]]:
     if not environment.values.get("acc_mps"):
         yield {}
         return
+    # A directory of this attempt's own (a retry gets the next one): its log names only this daemon's processes.
+    directory = next(path for path in (directory, *(directory.with_name(f"{directory.name}-{n}") for n in range(2, 100)))
+                     if not path.exists())
     variables = {"CUDA_MPS_PIPE_DIRECTORY": str(directory / "pipe"), "CUDA_MPS_LOG_DIRECTORY": str(directory / "log")}
     for path in variables.values():
         Path(path).mkdir(parents=True, exist_ok=True)
