@@ -211,6 +211,9 @@ int run_protocol(std::int64_t default_tokens, Generate&& generate, std::istream&
                 request = Json::parse(std::string_view(buffer.data(), size));
             } catch (const nlohmann::json::parse_error&) {
                 throw ProtocolError("request is not valid JSON");
+            } catch (const nlohmann::json::out_of_range&) {
+                // Jiaxin Deng: Numeric overflow is invalid input, not a fatal model error.
+                throw ProtocolError("request contains an out-of-range JSON number");
             }
             id = request_id(request);
             if (id.is_null())

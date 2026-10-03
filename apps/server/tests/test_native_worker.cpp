@@ -105,6 +105,33 @@ int main() {
           "integral range error is explicit");
     check(messages.at(5)["result"]["status"] == "shutting_down", "shutdown is acknowledged");
 
+    for (const auto& number :
+         {std::string("1e1000"), std::string("-1e1000"), std::string(400, '9')}) {
+        FakeText after_overflow;
+        std::istringstream overflow_input(
+            "{\"id\":\"overflow\",\"op\":\"generate\",\"prompt\":\"x\","
+            "\"config\":{\"temperature\":" +
+            number +
+            "}}\n"
+            "{\"id\":\"valid\",\"op\":\"generate\",\"prompt\":\"after\"}\n"
+            "{\"id\":\"stop\",\"op\":\"shutdown\"}\n");
+        std::ostringstream overflow_output;
+        check(trtmc::server::run_text_worker(after_overflow, overflow_input, overflow_output) == 0,
+              "JSON number overflow does not retire worker");
+        const auto overflow_messages = records(overflow_output.str());
+        check(overflow_messages.size() == 4, "worker continues after JSON number overflow");
+        if (overflow_messages.size() != 4)
+            continue;
+        check(overflow_messages.at(1)["id"].is_null() &&
+                  overflow_messages.at(1)["error"]["type"] == "invalid_request_error",
+              "unrepresentable JSON number is a parse-time client error");
+        check(overflow_messages.at(2)["id"] == "valid" &&
+                  overflow_messages.at(2)["result"]["text"] == "reply:after",
+              "valid generation succeeds after JSON number overflow");
+        check(overflow_messages.at(3)["result"]["status"] == "shutting_down",
+              "shutdown succeeds after JSON number overflow");
+    }
+
     ThrowingText throwing;
     std::istringstream failing_input("{\"id\":\"failure\",\"op\":\"generate\",\"prompt\":\"x\"}\n");
     std::ostringstream failing_output;
