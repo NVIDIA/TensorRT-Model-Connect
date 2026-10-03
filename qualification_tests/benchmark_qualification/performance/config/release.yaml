@@ -894,6 +894,19 @@ entries:
         # Match the Accuracy/TRTMC component contract: FP32 T5 encoder,
         # FP16 DiT inputs, and FP32 DiT outputs/scheduler bindings.
         component_precision_contract: pixart_fp16_dit_fp32_t5
+  - id: rt_detr_v2.detect
+    family: rt_detr_v2
+    operation: detect
+    model: rtdetr-v2-r18
+    workload:
+      testcase: rtdetr-v2-r18
+    baseline:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: qwen.generate
     family: qwen
     operation: generate
