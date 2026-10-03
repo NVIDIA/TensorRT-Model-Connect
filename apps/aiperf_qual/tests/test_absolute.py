@@ -666,6 +666,7 @@ def mps_patches(fake, monkeypatch):
     monkeypatch.setattr(services.subprocess, "run", fake.run)
     monkeypatch.setattr(services.os, "kill", fake.kill)
     monkeypatch.setattr(services, "_alive", lambda pid: pid in fake.living)
+    monkeypatch.setattr(services, "_ours", lambda pid, pipe: pid != 999)
     monkeypatch.setattr(services.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(services, "MPS_EXIT_S", 0)
     return services
@@ -747,3 +748,20 @@ def test_ambiguous_gpu_ordinals_leave_the_copies_without_mps(tmp_path, monkeypat
     monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
     with services.mps(Environment({"acc_mps": True, "repo": str(tmp_path)}), tmp_path / "two") as variables:
         assert variables["CUDA_VISIBLE_DEVICES"] == "GPU-b"
+
+
+
+def test_only_the_runs_own_mps_processes_are_signalled(tmp_path, monkeypatch):
+    """A pid the log names that now belongs to another process (reused, or a log naming it) is never signalled."""
+    from trtmc_aiperf_qual import services
+
+    (tmp_path / "log").mkdir()
+    (tmp_path / "log" / "control.log").write_text("[t Control 999] Starting control daemon using socket x\n")
+    killed = []
+    monkeypatch.setattr(services.subprocess, "run", lambda command, **kwargs: services.subprocess.CompletedProcess(command, 0))
+    monkeypatch.setattr(services.os, "kill", lambda pid, sig: killed.append(pid))
+    monkeypatch.setattr(services, "_alive", lambda pid: True)
+    monkeypatch.setattr(services.time, "sleep", lambda seconds: None)
+    services._mps_stop({"CUDA_MPS_PIPE_DIRECTORY": str(tmp_path / "pipe")}, tmp_path)  # pid 999 is not an MPS program
+    assert killed == []
+    assert not services._ours(1, str(tmp_path / "pipe"))  # init: not an MPS program of this run

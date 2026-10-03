@@ -189,6 +189,20 @@ def _alive(pid: int) -> bool:
         return False
 
 
+MPS_PROGRAMS = ("nvidia-cuda-mps-control", "nvidia-cuda-mps-server")
+
+
+def _ours(pid: int, pipe: str) -> bool:
+    """A process of this run's daemon: an MPS program whose environment names this run's private pipe directory
+    (a logged pid that the system reused, or a log naming another process, is never signalled)."""
+    try:
+        program = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0].decode(errors="replace")
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    return os.path.basename(program) in MPS_PROGRAMS and f"CUDA_MPS_PIPE_DIRECTORY={pipe}".encode() in environ
+
+
 def _mps_pids(directory: Path) -> list[int]:
     """The daemon's control and server processes, as its log names them ([] before it logged)."""
     try:
@@ -219,11 +233,14 @@ def _mps_devices(env: Mapping[str, str]) -> str | None:
 
 
 def _mps_stop(env: Mapping[str, str], directory: Path) -> None:
-    """Quit the daemon and make sure its processes exited (signalled if they outlive the quit); raises
-    ServiceError when one still runs, so no timing follows. Nothing to do when no daemon logged."""
+    """Quit the daemon and make sure its processes exited (signalled if they outlive the quit; only processes that
+    ``_ours`` confirms); raises ServiceError when one still runs, so no timing follows. Nothing to do when no
+    daemon logged."""
     pids = _mps_pids(directory)
     if not pids:
         return
+    pipe = str(env["CUDA_MPS_PIPE_DIRECTORY"])
+    running = lambda candidates: [pid for pid in candidates if _alive(pid) and _ours(pid, pipe)]  # noqa: E731
     try:
         completed = subprocess.run(["nvidia-cuda-mps-control"], input="quit\n", text=True, env=dict(env),
                                    capture_output=True, timeout=MPS_QUIT_S)
@@ -231,7 +248,7 @@ def _mps_stop(env: Mapping[str, str], directory: Path) -> None:
     except (OSError, subprocess.SubprocessError) as error:
         note = f"quit failed: {type(error).__name__}"
     for sig, wait_s in ((None, MPS_EXIT_S), (signal.SIGTERM, 10), (signal.SIGKILL, 10)):
-        living = [pid for pid in pids if _alive(pid)]
+        living = running(pids)
         for pid in living if sig else []:
             try:
                 os.kill(pid, sig)
@@ -240,7 +257,7 @@ def _mps_stop(env: Mapping[str, str], directory: Path) -> None:
         deadline = time.time() + wait_s
         while living and time.time() < deadline:
             time.sleep(1)
-            living = [pid for pid in living if _alive(pid)]
+            living = running(living)
         if not living:
             return
     raise ServiceError(f"MPS processes {living} still run after the daemon's quit ({note})")
