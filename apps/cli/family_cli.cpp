@@ -12,7 +12,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <fstream>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -21,8 +20,15 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 #include <vector>
+
+#if defined(_WIN32)
+#include <process.h>
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#include <unistd.h>
+#endif
 
 namespace trtmc::cli {
 namespace {
@@ -371,9 +377,102 @@ void write_error(void* context, const char* data, std::size_t size) {
     }
 }
 
+// Family CLI adapters are shared libraries beside the executable:
+// libtrtmc_cli_<family>.so on ELF platforms, trtmc_cli_<family>.dll on Windows.
+std::string cli_library_name(const std::string& family) {
+#if defined(_WIN32)
+    return "trtmc_cli_" + family + ".dll";
+#else
+    return "libtrtmc_cli_" + family + ".so";
+#endif
+}
+
+class CliLibrary {
+  public:
+    explicit CliLibrary(const fs::path& path) {
+#if defined(_WIN32)
+        // Report a missing dependent DLL as an error instead of a modal loader
+        // dialog that would block unattended runs.
+        const UINT previous_mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+        handle_ = LoadLibraryExW(path.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        const DWORD error = handle_ == nullptr ? GetLastError() : ERROR_SUCCESS;
+        SetErrorMode(previous_mode);
+        if (handle_ == nullptr) {
+            throw std::runtime_error("cannot load family CLI: " + path.string() +
+                                     " (Windows error " + std::to_string(error) + ")");
+        }
+#else
+        handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (handle_ == nullptr)
+            throw std::runtime_error("cannot load family CLI: " + std::string(dlerror()));
+#endif
+    }
+    CliLibrary(const CliLibrary&) = delete;
+    CliLibrary& operator=(const CliLibrary&) = delete;
+    ~CliLibrary() {
+#if defined(_WIN32)
+        FreeLibrary(handle_);
+#else
+        dlclose(handle_);
+#endif
+    }
+
+    void* symbol(const char* name) const {
+#if defined(_WIN32)
+        return reinterpret_cast<void*>(GetProcAddress(handle_, name));
+#else
+        dlerror();
+        void* result = dlsym(handle_, name);
+        return dlerror() == nullptr ? result : nullptr;
+#endif
+    }
+
+  private:
+#if defined(_WIN32)
+    HMODULE handle_{nullptr};
+#else
+    void* handle_{nullptr};
+#endif
+};
+
+fs::path running_executable() {
+#if defined(_WIN32)
+    std::wstring buffer(32768, L'\0');
+    const DWORD length =
+        GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length == 0 || length >= buffer.size())
+        throw std::runtime_error("cannot resolve the trtmc executable path");
+    buffer.resize(length);
+    return fs::path(buffer);
+#else
+    return fs::read_symlink("/proc/self/exe");
+#endif
+}
+
 int invoke(const fs::path& executable, const std::string& family, const Json& command,
            const Json& values, int argc, char** argv, std::ostream& output, std::ostream& error) {
     if (command.at("executor") == "python") {
+#if defined(_WIN32)
+        // Windows has no exec: run the Python command as a child process and
+        // return its exit status. The launcher is "python" on Windows.
+        // _spawnvp joins the arguments with spaces without quoting them, so
+        // quote each one to keep values with spaces or quotes intact.
+        std::vector<std::string> quoted;
+        for (int i = 1; i < argc; ++i)
+            quoted.push_back(quote_windows_argument(argv[i]));
+        std::vector<const char*> arguments{"python", "-m", "tensorrt_model_connect"};
+        for (const auto& argument : quoted)
+            arguments.push_back(argument.c_str());
+        arguments.push_back(nullptr);
+        output.flush();
+        error.flush();
+        const intptr_t status = _spawnvp(_P_WAIT, arguments.front(), arguments.data());
+        if (status == -1) {
+            throw std::runtime_error("cannot execute Python family command: " +
+                                     std::string(std::strerror(errno)));
+        }
+        return static_cast<int>(status);
+#else
         std::vector<char*> arguments{const_cast<char*>("python3"), const_cast<char*>("-m"),
                                      const_cast<char*>("tensorrt_model_connect")};
         for (int i = 1; i < argc; ++i)
@@ -382,11 +481,13 @@ int invoke(const fs::path& executable, const std::string& family, const Json& co
         execvp(arguments.front(), arguments.data());
         throw std::runtime_error("cannot execute Python family command: " +
                                  std::string(std::strerror(errno)));
+#endif
     }
     const auto directory = executable.parent_path();
+    const auto file_name = cli_library_name(family);
     fs::path library;
     for (const auto& root : {directory, directory / "../lib", directory / "../lib64"}) {
-        auto candidate = root / ("libtrtmc_cli_" + family + ".so");
+        auto candidate = root / file_name;
         if (fs::is_regular_file(candidate)) {
             library = fs::absolute(candidate).lexically_normal();
             break;
@@ -394,32 +495,46 @@ int invoke(const fs::path& executable, const std::string& family, const Json& co
     }
     if (library.empty())
         throw std::runtime_error("family CLI library is not installed: " + family);
-    void* handle = dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (handle == nullptr)
-        throw std::runtime_error("cannot load family CLI: " + std::string(dlerror()));
-    struct Close {
-        void* handle;
-        ~Close() { dlclose(handle); }
-    } close{handle};
-    dlerror();
-    auto dispatch = reinterpret_cast<trtmc_family_cli_fn_v1>(dlsym(handle, "trtmc_family_cli_v1"));
-    if (const char* reason = dlerror(); reason != nullptr || dispatch == nullptr)
+    const CliLibrary handle(library);
+    auto dispatch = reinterpret_cast<trtmc_family_cli_fn_v1>(handle.symbol("trtmc_family_cli_v1"));
+    if (dispatch == nullptr)
         throw std::runtime_error("family does not provide trtmc_family_cli_v1: " + family);
     Sinks sinks{output, error};
     const auto result =
         dispatch(command.at("handler").get<std::string>().c_str(), values.dump().c_str(),
-                 library.parent_path().c_str(), &sinks, write_output, write_error);
+                 library.parent_path().string().c_str(), &sinks, write_output, write_error);
     if (sinks.failed || !output || !error)
         throw std::runtime_error("failed to write family CLI output");
     return result;
 }
 } // namespace
 
+std::string quote_windows_argument(const std::string& argument) {
+    if (!argument.empty() && argument.find_first_of(" \t\n\v\"") == std::string::npos)
+        return argument;
+    // Backslashes are literal unless they precede a quote: double those before
+    // an embedded quote (which is then escaped) and before the closing quote.
+    std::string quoted = "\"";
+    std::size_t backslashes = 0;
+    for (const char c : argument) {
+        if (c == '\\') {
+            ++backslashes;
+            continue;
+        }
+        quoted.append(c == '"' ? backslashes * 2 + 1 : backslashes, '\\');
+        quoted.push_back(c);
+        backslashes = 0;
+    }
+    quoted.append(backslashes * 2, '\\');
+    quoted.push_back('"');
+    return quoted;
+}
+
 std::optional<int> run_family_cli(int argc, char** argv, std::ostream& output, std::ostream& error,
                                   const fs::path& executable_override) {
     try {
-        const auto executable = executable_override.empty() ? fs::read_symlink("/proc/self/exe")
-                                                            : fs::absolute(executable_override);
+        const auto executable =
+            executable_override.empty() ? running_executable() : fs::absolute(executable_override);
         const std::string family = argc < 2 ? "--help" : argv[1];
         if (family == "--help" || family == "-h" || family == "help") {
             std::map<std::string, Json> declarations;
