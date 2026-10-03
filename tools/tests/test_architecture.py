@@ -630,6 +630,10 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "qualification_tests/benchmark_qualification/performance/tests/test_reporting.py",
         "qualification_tests/benchmark_qualification/performance/tests/test_structured_output_contracts.py",
         "qualification_tests/benchmark_qualification/performance/tests/test_timing_contracts.py",
+        "qualification_tests/benchmark_qualification/render_published.py",
+        "qualification_tests/benchmark_qualification/report.css",
+        "qualification_tests/benchmark_qualification/reporting.py",
+        "qualification_tests/benchmark_qualification/tests/test_reporting.py",
     }
     expected_cmake = {
         "cmake/trtmcConfig.cmake.in",
