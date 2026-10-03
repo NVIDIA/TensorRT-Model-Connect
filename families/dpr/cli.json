@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one dpr TensorRT bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "Hugging Face model ID or local snapshot"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "task", "flags": ["--task"], "type": "string", "choices": ["encoding", "embedding", "reranking"], "default": "embedding"},
+        {"name": "precision", "flags": ["--precision"], "type": "string", "choices": ["fp16", "bf16", "fp32"], "default": "fp32"},
+        {"name": "backend", "flags": ["--backend"], "type": "string", "choices": ["trt", "trt_rtx"], "default": "trt"},
+        {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int"},
+        {"name": "tensor_parallel_size", "flags": ["--tensor-parallel-size"], "type": "int", "choices": [1, 2, 4, 8], "default": 1},
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+      ]
+    },
+    {
+      "name": "encode",
+      "help": "Encode text using dpr",
+      "executor": "native",
+      "handler": "encode",
+      "arguments": [
+        {"name": "bundle", "type": "path", "help": "dpr bundle path"},
+        {"name": "text", "flags": ["--text"], "type": "string", "required": true},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path", "help": "Override the installed task runtime directory"},
+        {"name": "runtime_cache", "flags": ["--runtime-cache"], "type": "path", "help": "TensorRT-RTX runtime cache path"},
+        {"name": "cuda_graphs", "flags": ["--cuda-graphs"], "type": "bool", "action": "store_true", "default": false, "help": "Enable TensorRT-RTX CUDA graphs"}
+      ]
+    },
+    {
+      "name": "embed",
+      "help": "Embed text using dpr",
+      "executor": "native",
+      "handler": "embed",
+      "arguments": [
+        {"name": "bundle", "type": "path", "help": "dpr bundle path"},
+        {"name": "text", "flags": ["--text"], "type": "string", "required": true},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path", "help": "Override the installed task runtime directory"},
+        {"name": "runtime_cache", "flags": ["--runtime-cache"], "type": "path", "help": "TensorRT-RTX runtime cache path"},
+        {"name": "cuda_graphs", "flags": ["--cuda-graphs"], "type": "bool", "action": "store_true", "default": false, "help": "Enable TensorRT-RTX CUDA graphs"}
+      ]
+    },
+    {
+      "name": "rerank",
+      "help": "Score a query and document using dpr",
+      "executor": "native",
+      "handler": "rerank",
+      "arguments": [
+        {"name": "bundle", "type": "path", "help": "dpr bundle path"},
+        {"name": "query", "flags": ["--query"], "type": "string", "required": true},
+        {"name": "document", "flags": ["--document"], "type": "string", "required": true},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path", "help": "Override the installed task runtime directory"},
+        {"name": "runtime_cache", "flags": ["--runtime-cache"], "type": "path", "help": "TensorRT-RTX runtime cache path"},
+        {"name": "cuda_graphs", "flags": ["--cuda-graphs"], "type": "bool", "action": "store_true", "default": false, "help": "Enable TensorRT-RTX CUDA graphs"}
+      ]
+    }
+  ]
+}
