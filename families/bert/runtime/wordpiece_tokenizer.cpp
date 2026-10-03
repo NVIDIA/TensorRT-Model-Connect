@@ -85,10 +85,22 @@ inline bool in_ranges(char32_t cp, const UnicodeRange* ranges, size_t count) {
     return false;
 }
 
+// Jiaxin Deng: Match the reference clean_text handling of format and private-use characters.
+// Ranges verified against tokenizers 0.22.2 BertNormalizer (unicode_categories).
+constexpr UnicodeRange kOtherControlRanges[] = {
+    {0x00AD, 0x00AD},   {0x0600, 0x0605},   {0x061C, 0x061C},   {0x06DD, 0x06DD},
+    {0x070F, 0x070F},   {0x180E, 0x180E},   {0x200B, 0x200F},   {0x202A, 0x202E},
+    {0x2060, 0x2064},   {0x2066, 0x206F},   {0xE000, 0xF8FF},   {0xFEFF, 0xFEFF},
+    {0xFFF9, 0xFFFB},   {0x110BD, 0x110BD}, {0x1BCA0, 0x1BCA3}, {0x1D173, 0x1D17A},
+    {0xE0001, 0xE0001}, {0xE0020, 0xE007F}, {0xF0000, 0xFFFFD}, {0x100000, 0x10FFFD},
+};
+
 inline bool is_control_char(char32_t cp) {
     if (cp == '\t' || cp == '\n' || cp == '\r')
         return false;
-    return (cp <= 0x1F) || (cp >= 0x7F && cp <= 0x9F);
+    return (cp <= 0x1F) || (cp >= 0x7F && cp <= 0x9F) ||
+           in_ranges(cp, kOtherControlRanges,
+                     sizeof(kOtherControlRanges) / sizeof(kOtherControlRanges[0]));
 }
 
 constexpr UnicodeRange kWhitespaceRanges[] = {
