@@ -8,7 +8,7 @@
   ],
   "bundle": "bark-small-tp4.bundle",
   "family": "bark",
-  "task": "audio_generation",
+  "task": "text_to_audio",
   "testcases": [
     {
       "name": "bark-small-tp4",

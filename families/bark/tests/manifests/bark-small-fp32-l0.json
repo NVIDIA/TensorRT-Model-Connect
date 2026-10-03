@@ -8,7 +8,7 @@
   ],
   "bundle": "bark-small-fp32-l0.bundle",
   "family": "bark",
-  "task": "audio_generation",
+  "task": "text_to_audio",
   "precision": "fp32",
   "testcases": [
     {

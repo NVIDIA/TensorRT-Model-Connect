@@ -6,6 +6,7 @@
 #pragma once
 
 // BarkPipeline: text-to-audio pipeline with semantic, coarse, fine, and codec stages.
+// Implements IModel + ITextToAudio (semantic Task SDK, text_to_audio v1.0).
 // Uses ITrtModule(semantic) + ITrtModule(coarse) + ITrtModule(codec) + ITrtModule(fine) +
 // KvCaches + embeddings.
 
@@ -13,8 +14,9 @@
 #include "families/bark/runtime/inference_state.h"
 #include "families/bark/runtime/kv_cache.h"
 #include "families/bark/runtime/tokenizer.h"
+#include "trtmc/internal/audio.h"
+#include "trtmc/internal/model.h"
 #include "trtmc/runtime/trt_module.h"
-#include "trtmc/task.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -27,7 +29,8 @@ namespace trtmc {
 
 class BarkSampler;
 
-class BarkPipeline final : public IAudioGeneration {
+class BarkPipeline final : public trtmc::internal::IModel,
+                           public trtmc::internal::ITextToAudio {
   public:
     BarkPipeline(std::unique_ptr<ITrtModule> semantic, std::unique_ptr<ITrtModule> coarse,
                  std::unique_ptr<BarkInferenceState> semantic_state,
@@ -38,8 +41,17 @@ class BarkPipeline final : public IAudioGeneration {
 
     ~BarkPipeline() override;
 
-    AudioResult generate_audio(const std::string& prompt,
-                               const AudioGenerationConfig& cfg = {}) override;
+    // ITask (via IModel)
+    const char* task() const noexcept override;
+
+    // IModel
+    std::vector<trtmc::internal::TaskInstance> task_bindings() override;
+
+    // ITextToAudio — was: audio_generation / generate_audio
+    // Accepts a free-text prompt; returns PCM audio at the family's declared sample rate.
+    trtmc::internal::AudioResult run(
+        const trtmc::internal::TextToAudioRequest& request,
+        trtmc::internal::ConfigView config) override;
 
     void set_codec_module(std::unique_ptr<ITrtModule> codec);
     void set_fine_module(std::unique_ptr<ITrtModule> fine);

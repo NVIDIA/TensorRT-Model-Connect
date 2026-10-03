@@ -5,6 +5,8 @@
 
 #include "families/bark/runtime/kv_cache.h"
 #include "families/bark/runtime/pipeline.h"
+#include "trtmc/internal/audio.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
@@ -145,13 +147,27 @@ void test_bark_generate_audio() {
         module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
         cache(16, stream), std::move(semantic_embed), std::move(coarse_embed), config(), stream);
 
-    trtmc::IAudioGeneration& audio = pipeline;
-    trtmc::AudioGenerationConfig request;
-    request.max_new_tokens = 1;
-    const auto output = audio.generate_audio("", request);
+    trtmc::internal::ITextToAudio& audio = pipeline;
+    trtmc::internal::TextToAudioRequest request;
+    request.prompt = "";
+    trtmc::internal::ConfigView cfg{};
+    const auto output = audio.run(request, cfg);
 
-    check(output.num_samples > 0, "bark generate_audio produces samples");
-    check(output.sample_rate == 24000, "bark generate_audio sample_rate");
+    check(!output.samples.empty(), "bark run produces samples");
+    check(output.sample_rate == 24000, "bark run sample_rate");
+
+    const auto bindings = pipeline.task_bindings();
+    check(bindings.size() == 1, "bark task bindings count");
+    check(bindings[0].fields.size() == 2, "bark task bindings declared fields");
+
+    const trtmc::internal::ConfigEntry entries[] = {
+        {"max_new_tokens", trtmc::internal::ConfigValue{std::int64_t{10}}},
+        {"seed", trtmc::internal::ConfigValue{std::int64_t{42}}},
+    };
+    trtmc::internal::ConfigView custom_cfg{entries, 2};
+    const auto custom_output = audio.run(request, custom_cfg);
+    check(!custom_output.samples.empty(), "bark run custom config produces samples");
+
     cudaStreamDestroy(stream);
 }
 
@@ -172,9 +188,10 @@ void test_bark_batches_semantic_and_coarse_prefill() {
     pipeline.set_prefill_modules(module(semantic_stats, semantic_logits, 512, stream),
                                  module(coarse_stats, coarse_logits, 16, stream));
 
-    trtmc::AudioGenerationConfig request;
-    request.max_new_tokens = 1;
-    (void)pipeline.generate_audio("", request);
+    trtmc::internal::TextToAudioRequest request;
+    request.prompt = "";
+    trtmc::internal::ConfigView cfg{};
+    (void)pipeline.run(request, cfg);
 
     check(semantic_stats->calls == 1, "bark semantic prefill uses one batched call");
     check(semantic_stats->input_embed_shape == std::vector<int64_t>({257, 4}),
@@ -203,9 +220,10 @@ void test_bark_dual_profile_decode_uses_one_embedding_row() {
     pipeline.set_prefill_modules(module(semantic_prefill_stats, semantic_logits, 512, nullptr),
                                  module(coarse_prefill_stats, coarse_logits, 16, nullptr));
 
-    trtmc::AudioGenerationConfig request;
-    request.max_new_tokens = 2;
-    (void)pipeline.generate_audio("", request);
+    trtmc::internal::TextToAudioRequest request;
+    request.prompt = "";
+    trtmc::internal::ConfigView cfg{};
+    (void)pipeline.run(request, cfg);
 
     check(semantic_decode_stats->calls == 2,
           "bark embed-only semantic engine decodes each generated token");
