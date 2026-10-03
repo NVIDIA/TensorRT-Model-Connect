@@ -43,6 +43,11 @@ WIKITEXT_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
 BART_SENTENCES = 1000
 # Tokens a greedy continuation needs to spell out one word.
 LAMBADA_GENERATION_SIZE = 8
+# MMLU's answer format, added to lighteval's 0-shot instruction: instruction-tuned models otherwise open with an
+# explanation and give no letter within the answer budget ("To find the factorization ..."). The budget fits
+# "The answer is (B)." and the like, which AIPerf's grader extracts.
+MMLU_ANSWER_INSTRUCTION = " Answer with the letter of the correct option only."
+MMLU_GENERATION_SIZE = 8
 # Tokens a chat template adds around the conversation (role markers, generation prompt) where it cannot
 # be rendered; plain completions need only a few.
 TEMPLATE_MARGIN = 128
@@ -151,7 +156,24 @@ class PinnedMMLU(_Configured, mmlu.MMLUBenchmark):
                                                 revision=MMLU_REVISION, **self._cache())
             problems += await asyncio.to_thread(self._build_subject_problems, DatasetDict({"dev": dev, "test": test}),
                                                 subject, n_shots, enable_cot)
-        return select(problems, self.environ)
+        return select([problem if enable_cot else instructed(problem) for problem in problems], self.environ)
+
+
+def instructed(problem: BenchmarkProblem) -> BenchmarkProblem:
+    """An MMLU problem with MMLU_ANSWER_INSTRUCTION after lighteval's instruction (in the prompt and the first
+    chat message alike) and MMLU_GENERATION_SIZE answer tokens."""
+    marker = f"about {problem.task.replace('_', ' ')}.\n\n"
+
+    def add(text: str) -> str:
+        if marker not in text:
+            raise ValueError(f"MMLU prompt without lighteval's instruction for {problem.task!r}")
+        return text.replace(marker, f"about {problem.task.replace('_', ' ')}.{MMLU_ANSWER_INSTRUCTION}\n\n", 1)
+
+    messages = [dict(message) for message in problem.raw_messages or []]
+    if messages:
+        messages[0]["content"] = add(messages[0]["content"])
+    return problem.model_copy(update={"prompt": add(problem.prompt), "raw_messages": messages or problem.raw_messages,
+                                      "metadata": {**(problem.metadata or {}), "generation_size": MMLU_GENERATION_SIZE}})
 
 
 class PinnedGSM8K(_Configured, gsm8k.GSM8KBenchmark):

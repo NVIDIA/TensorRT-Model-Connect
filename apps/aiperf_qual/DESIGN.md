@@ -193,7 +193,7 @@ revisions (`mteb/stsbenchmark-sts`, `mteb/scifact`) with the transformation in t
 
 | Task (models) | Benchmark, source | n, sampling | Metric (direction), margin | Notes |
 |---|---|---|---|---|
-| text generation, instruction / base LMs (~45) | MMLU 0-shot, AIPerf `mmlu` | 40 per subject, stratified | accuracy (up), 1 pt; quantized 2 | min_native 30; chat route per catalog request |
+| text generation, instruction / base LMs (~45) | MMLU 0-shot, AIPerf `mmlu` with an answer-format instruction (Section 12) | 40 per subject, stratified | accuracy (up), 1 pt; quantized 2 | min_native 30; chat route per catalog request |
 | small base LMs (~14) | LAMBADA OpenAI | all 5,153 | last-word accuracy (up), 0.5 pt | completions |
 | code (codegen, starcoder2) | HumanEval 164 + MBPP test 500 | all 664 | pass@1 greedy (up), 2 pt | MBPP prompt as bigcode-evaluation-harness writes it for base models: the description and the first test in a docstring (names the function); execution in Section 8 |
 | translation (marian, t5, nllb, riva) | newstest2019 en-ru / WMT14 en-de / FLORES-200 en-fr | all | chrF++ (up), 1 pt | document clusters |
@@ -424,6 +424,14 @@ smoke results, and the formal run before each lands in PR #1550.
   long requests, a cost choice resting on the pilot so far (half-widths with three runs: FLUX.1-schnell TRTMC 0.63%,
   native 0.21%; Bark-small 1.73%, 2.19%): every media and speech profile of the pilot is checked before the counts
   freeze (Section 12.1), and if any is white on the CI gate those categories move to five runs too.
+- **MMLU answer format**: lighteval's 0-shot prompt gets one added sentence, "Answer with the letter of the
+  correct option only.", and an 8-token answer budget (lighteval: 5), on the completion and chat routes alike;
+  AIPerf's grader is unchanged. Without it, instruction-tuned models open with an explanation and give no letter
+  within the budget: the pilot's qwen35-4b scored 0.7 natively (not-comparable), and the smoke runs' native
+  answers began "To find ...", "We are given ..." for about 30 of 43 chat models. A CPU probe (60 problems, 3 per
+  subject over 20 subjects, the native chat rendering): Qwen3.5-0.8B 5.0 -> 53.3 (5 -> 57 parsed), Qwen3-0.6B
+  6.7 -> 48.3, MiniCPM5-2B 11.7 -> 68.3, and the base Falcon3-1B 53.3 -> 51.7 (60 parsed either way). Five-shot
+  prompts, which make chat models answer with a letter too, do not fit the 256-token bundles (Section 2).
 - **Retries and deadlines**: a failed GPU phase runs once more (not in smoke mode); every AIPerf run (Acc, Perf,
   generation for the media checks, L2) takes the ledger's per-profile deadline from the environment's
   `deadlines` map.

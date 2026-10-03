@@ -20,6 +20,25 @@ def problem(task, prompt="q", size=5):
     return BenchmarkProblem(prompt=prompt, ground_truth=" A", task=task, metadata={"generation_size": size})
 
 
+def test_mmlu_asks_for_the_letter_on_both_routes():
+    """The answer-format instruction follows lighteval's on the completion prompt and in the first chat message;
+    the answer budget fits a short answer statement."""
+    from trtmc_aiperf_plugins.benchmarks import MMLU_ANSWER_INSTRUCTION, MMLU_GENERATION_SIZE, instructed
+
+    head = "The following are multiple choice questions (with answers) about college biology.\n\n"
+    question = "Question: Which is a cell?\nA. a\nB. b\nC. c\nD. d\nAnswer:"
+    original = BenchmarkProblem(prompt=head + question, ground_truth=" B", task="college_biology",
+                                metadata={"generation_size": 5, "stop_sequence": ["\n"]},
+                                raw_messages=[{"role": "user", "content": head + question}])
+    changed = instructed(original)
+    expected = head.replace("biology.", "biology." + MMLU_ANSWER_INSTRUCTION) + question
+    assert changed.prompt == expected and changed.raw_messages[0]["content"] == expected
+    assert changed.metadata == {"generation_size": MMLU_GENERATION_SIZE, "stop_sequence": ["\n"]}
+    assert original.prompt == head + question  # the input problem is left as it was
+    with pytest.raises(ValueError):
+        instructed(problem("college_biology", prompt=question))
+
+
 def test_selection_keeps_the_first_problems_per_task_in_dataset_order():
     problems = [problem(task) for task in ("a", "a", "a", "b", "b", "c")]
     chosen = select(problems, {"TRTMC_ACCURACY_PER_TASK": "2"})
