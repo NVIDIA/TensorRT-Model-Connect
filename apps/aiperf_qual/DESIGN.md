@@ -256,8 +256,9 @@ run once when its reference environment is created (`reference.prepare`).
 - **Reference environments** are keyed by the requirements file, the preparation script, and the
   interpreter; at creation their `pip freeze` is stored with them and every reuse verifies it is unchanged.
   An environment whose freeze differs or was never recorded is left as it is and a fresh one is created
-  next to it; each report records the interpreter used. References read the hub cache offline when every
-  checkpoint they need is cached (as builds do), and go online only otherwise.
+  next to it; each report records the interpreter used. References may download what their checkpoint
+  does not carry; one whose gated repository refuses even optional-file checks (SAM3) declares
+  `reference.offline` and reads the hub cache only.
 - **Code execution** (HumanEval, MBPP): the GB300 container forbids namespaces (`unshare`: operation not
   permitted, verified), so each program runs as `nobody` through `setpriv` (groups cleared, no
   capabilities, no new privileges), with an empty environment, a temporary home and working directory,
@@ -312,7 +313,7 @@ smoke results, and the formal run before each lands in PR #1550.
   `native_inputs.py` next to it): the family's `tests/` directory is where the repository keeps reference code
   (its architecture rules require family production code to be reachable from `model.py` and free of
   environment side channels): GLM-ASR (a speech-conditioned causal
-  LM), SAM3, MoGe-2, ACT, Fast-FoundationStereo, PersonaPlex, SANA-WM, YOLOv5 / v8 / v10 / 11 (Ultralytics
+  LM), Magpie TTS (NeMo), SAM3, MoGe-2, ACT, Fast-FoundationStereo, PersonaPlex, SANA-WM, YOLOv5 / v8 / v10 / 11 (Ultralytics
   archives), Chronos-Bolt and TimesFM (no generic time-series adapter). Inputs a family must prepare itself
   (decoded LeRobot frames, the Middlebury 700x700 profile) come from its `native_inputs.py` (`family_inputs`
   suites), run in its reference environment.

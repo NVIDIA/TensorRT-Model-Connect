@@ -139,14 +139,10 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
     if memory_probe:  # peak GPU memory per call; only meaningful while this server is alone on the GPU
         command.append("--memory-probe")
     env = _serve_env(environment)
-    if backend != "trtmc":
-        from .bundles import cached
-
-        if not cached(environment, model):
-            # References may fetch what their checkpoint does not carry (pipeline parts, remote code). With
-            # every checkpoint cached they read the cache, as builds do: gated repositories refuse even the
-            # checks for optional files.
-            env.pop("HF_HUB_OFFLINE", None)
+    if backend != "trtmc" and not reference.get("offline"):
+        # References may fetch what their checkpoint does not carry (pipeline parts, remote code); one whose
+        # gated repository refuses even the checks for optional files declares ``reference.offline``.
+        env.pop("HF_HUB_OFFLINE", None)
     (out / "command.json").write_text(json.dumps(command))
     process = subprocess.Popen(command, stdout=open(out / "server.log", "w"), stderr=subprocess.STDOUT,
                                env=env, cwd=repo, start_new_session=True)
