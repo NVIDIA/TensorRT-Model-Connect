@@ -1,0 +1,34 @@
+HSTU native attention third-party notices
+
+The native attention provider compiles portions of the following projects.
+The TensorRT-Model-Connect Apache-2.0 license applies to its original host
+adapters and does not replace these third-party licenses. Source headers,
+trained weights, CUDA, TensorRT and cuBLAS runtime libraries are not bundled
+by this notice payload.
+
+FBGEMM and its HSTU implementation
+https://github.com/pytorch/FBGEMM/tree/43791a0ade113a0ad5530c2a4948870dd0f7e417
+Copyright (c) 2023, Tri Dao.
+Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES.
+Copyright (c) Meta Platforms, Inc. and affiliates.
+All rights reserved.
+The kernel headers are used without modification. The native host adapter
+supplies parameters and launches the existing kernel. FBGEMM.LICENSE.txt and
+HSTU.LICENSE.txt below reproduce the upstream license files. The upstream
+HSTU license mentions AUTHORS; that revision does not contain an AUTHORS file.
+The individual source-header credits are preserved above.
+
+CUTLASS C++ headers
+https://github.com/jwfromm/cutlass/tree/571edeb2d0ac872a8392fc49285b156b07884b4e
+Copyright (c) 2017 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+CUTLASS.LICENSE.txt below reproduces the upstream license. This provider uses
+C++ headers; it does not distribute the separately licensed Python CuTeDSL.
+
+CUDA Core Compute Libraries (CCCL): CUB, Thrust and libcu++
+https://github.com/NVIDIA/cccl/blob/v3.3.3/LICENSE
+Copyright (c) 2011, Duane Merrill. All rights reserved.
+Copyright (c) 2011-2024, NVIDIA CORPORATION. All rights reserved.
+Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES.
+CCCL headers are supplied by the installed CUDA development toolkit. The
+CCCL.LICENSE.txt copy below includes CUB's BSD conditions, the Thrust terms,
+and the libcu++ Apache-2.0 license with LLVM exceptions and legacy notices.

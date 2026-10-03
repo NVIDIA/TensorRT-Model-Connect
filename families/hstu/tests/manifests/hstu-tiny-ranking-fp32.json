@@ -1,0 +1,16 @@
+{
+  "name": "hstu-tiny-ranking-fp32",
+  "family": "hstu",
+  "task": "recommendation",
+  "bundle": "hstu-tiny-ranking-fp32.bundle",
+  "precision": "fp32",
+  "max_batch_size": 2,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "hstu-tiny-ranking-fp32",
+      "premerge": true,
+      "config_overrides": {}
+    }
+  ]
+}

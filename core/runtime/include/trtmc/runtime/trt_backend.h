@@ -17,12 +17,29 @@
 
 namespace trtmc {
 
+// Native TensorRT plugin dependency. The caller owns extraction/resolution policy.
+// The optional owner keeps a materialized library file alive until final unload.
+struct ModulePluginLibrary {
+    std::string path;
+    std::shared_ptr<void> owner;
+};
+
 struct ModuleCreateOptions {
     cudaStream_t stream{nullptr};            // nullptr = backend creates one
     void* distributed_communicator{nullptr}; // TensorRT 11.0+ NCCL communicator, optional
     std::shared_ptr<void> distributed_owner; // keeps communicator alive
     const char* runtime_cache_path{""};      // TensorRT-RTX JIT cache, optional
-    bool cuda_graphs{false};                 // TensorRT-RTX whole-graph capture
+    // Standard TRT prepares with one real call before capture; RTX uses its
+    // backend-managed whole-graph strategy. No extra inference is introduced.
+    bool cuda_graphs{false};
+    // Nonempty lists require a self-contained standard-TRT plugin plan. All
+    // plugin dependencies must be listed; parent-registry search is disabled.
+    // This source-level struct change requires rebuilding every DSO consumer.
+    std::vector<ModulePluginLibrary> plugin_libraries;
+    // Construction-time collection of aggregate CUDA-event inference timing.
+    // Default preserves legacy logs/counts. Disabling removes those events;
+    // execution, synchronization, CUDA-graph policy and teardown stay valid.
+    bool collect_timing{true};
 };
 
 struct ModuleExternalBinding {

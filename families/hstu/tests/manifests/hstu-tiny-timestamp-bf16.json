@@ -1,0 +1,19 @@
+{
+  "name": "hstu-tiny-timestamp-bf16",
+  "family": "hstu",
+  "task": "recommendation",
+  "bundle": "hstu-tiny-timestamp-bf16.bundle",
+  "precision": "bf16",
+  "max_batch_size": 2,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "hstu-tiny-timestamp-bf16",
+      "premerge": true,
+      "config_overrides": {
+        "time_buckets": 2048,
+        "hidden_size": 24
+      }
+    }
+  ]
+}

@@ -33,6 +33,7 @@ inline bool uses_existing_task_runtime(std::string_view primary_task) noexcept {
         ISpeechToolSessionProvider::kTask,
         IEmbedding::kTask,
         IEncoding::kTask,
+        IRecommendation::kTask,
         IReranking::kTask,
         ISegmentation::kTask,
         IPointPromptedSegmentation::kTask,

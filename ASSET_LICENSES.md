@@ -193,4 +193,29 @@ with the rest of the project:
 - `families/openfold3/tests/data/openfold3_features.npz`
 - `families/openfold3/tests/data/openfold3_structure.json`
 
+## HSTU native-provider license copies
+
+The [HSTU third-party notice](families/hstu/third_party/NOTICE.txt) records
+attribution for the optional native attention provider. Its accompanying
+license files preserve the full upstream terms. The kernel sources are
+obtained separately at build time and verified against
+`native_attention_source.json`.
+
+- `FBGEMM.LICENSE.txt` and `HSTU.LICENSE.txt`: verbatim BSD license files from
+  [FBGEMM revision 43791a0ade113a0ad5530c2a4948870dd0f7e417](https://github.com/pytorch/FBGEMM/tree/43791a0ade113a0ad5530c2a4948870dd0f7e417).
+- `CUTLASS.LICENSE.txt`: verbatim license from its pinned
+  [CUTLASS revision 571edeb2d0ac872a8392fc49285b156b07884b4e](https://github.com/jwfromm/cutlass/tree/571edeb2d0ac872a8392fc49285b156b07884b4e).
+  The compiled C++ headers use BSD-3-Clause; the separate Python CuTeDSL
+  exception in this license does not apply to those headers.
+- `CCCL.LICENSE.txt`: verbatim [CCCL 3.3.3 license](https://github.com/NVIDIA/cccl/blob/v3.3.3/LICENSE),
+  including CUB's BSD terms and Thrust/libcu++ notices. These headers come from
+  the installed CUDA development toolkit.
+- `NOTICE.txt`: source attribution and dependency boundaries. The builder
+  combines this text with the full licenses into `attention_native.NOTICE`
+  whenever it embeds the native attention library in a model bundle.
+
+This source distribution contains no third-party HSTU model weights or
+prebuilt native provider libraries. Users supply their own model checkpoints
+and the separately licensed CUDA, TensorRT and cuBLAS runtime dependencies.
+
 <!-- Collaborative review anchor: batch 2. -->
