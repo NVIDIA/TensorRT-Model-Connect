@@ -275,6 +275,8 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
     measured = [value for value in busy if value is not None]
     if measured:
         stats["gpu_busy_percent"] = max(measured)
+    if len(measured) < len(busy):  # no reading is no evidence of an idle GPU
+        stats["gpu_unmeasured_runs"] = len(busy) - len(measured)
     return runs[0], stats
 
 

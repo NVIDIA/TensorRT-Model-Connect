@@ -155,7 +155,7 @@ shortfall is resolved by execution, never by a smaller `n` (Section 9).
 - Speedup `S = native / TRTMC`; its 90% two-sided interval (95% one-sided per bound) is Welch's t
   interval of `log(native) - log(TRTMC)` over the runs. **green**: lower bound > 1.05; **red**: upper
   bound < 0.95; **perf-inconclusive** (white): either side's 95% half-width exceeds 5% of its mean, the
-  work differs, the native model ran at another precision, or the GPU was busy; **yellow** (not
+  work differs, the native model ran at another precision, or the GPU was busy or not measured; **yellow** (not
   demonstrably faster): otherwise. Every request of the model must be green to pass.
 - Work equivalence is checked on **every** timed response, not the first: equal output tokens for text,
   equal height/width/frames/steps for media, equal audio length (10 ms) for speech; any mismatch is
@@ -384,10 +384,12 @@ smoke results, and the formal run before each lands in PR #1550.
   its first). Before the formal run it runs on five profiles spanning the server sizes, including the largest
   dense one; an effect above 2% switches that size class to interleaved runs or native, TRTMC, native timing.
   The effect counts only when all four measurements are valid on their own (every request succeeded and is timed,
-  every response carries work evidence, the GPU was idle, at least two runs within `max_ci_percent`) and each
-  order's two sides did the same work; otherwise, or when a measurement or the check fails (kept as the
-  measurement's failure; the other measurements still run), the check is `unresolved` and is repeated, never read
-  as within the limit. Each run replaces the profile's previous `order.json`.
+  every response carries work evidence, the GPU was measured idle before every run, at least two runs within
+  `max_ci_percent`) and each order's two sides did the same work; otherwise, or when a measurement or the check
+  fails (kept as the measurement's failure; the other measurements still run), the check is `unresolved` and is
+  repeated, never read as within the limit. Each run replaces the profile's previous `order.json`. A GPU
+  utilization reading that fails is no evidence of an idle GPU: in the formal verdict it makes the Perf light
+  white, as a busy GPU does.
 - **Smoke namespace**: `run --smoke --out <dir>/<profile>` writes to `<dir>/smoke/<profile>`, as `run-all --smoke`
   does.
 - **Lance** (lance-3b-x2t-image) is `not-covered`, declared with its reason (`reference.not_covered`): the upstream

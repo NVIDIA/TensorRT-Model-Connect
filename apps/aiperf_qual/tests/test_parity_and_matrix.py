@@ -172,7 +172,8 @@ def _order_check(tmp_path, monkeypatch, measurements):
 
 
 def timing(p50_ms, **extra):
-    return {"p50_ms": p50_ms, "ci_percent": 1.0, "runs": 3, "work": [(("tokens", 32),)], "work_missing": 0, **extra}
+    return {"p50_ms": p50_ms, "ci_percent": 1.0, "runs": 3, "work": [(("tokens", 32),)], "work_missing": 0,
+            "gpu_busy_percent": 0.0, **extra}
 
 
 def test_the_order_check_reports_each_sides_effect(tmp_path, monkeypatch):
@@ -185,7 +186,8 @@ def test_the_order_check_reports_each_sides_effect(tmp_path, monkeypatch):
 @pytest.mark.parametrize("invalid", [
     timing(10.4, incomplete="2 of 20 requests succeeded"), timing(10.4, work_missing=3),
     timing(10.4, work=[]), timing(10.4, gpu_busy_percent=60.0), timing(10.4, ci_percent=9.0),
-    timing(10.4, ci_percent=None), timing(10.4, work=[(("tokens", 31),)])])
+    timing(10.4, ci_percent=None), timing(10.4, work=[(("tokens", 31),)]), timing(10.4, gpu_busy_percent=None),
+    timing(10.4, gpu_unmeasured_runs=1)])
 def test_an_order_check_on_invalid_measurements_is_unresolved(tmp_path, monkeypatch, invalid):
     """A near-equal pair (within the limit) is no evidence when a measurement is incomplete, lacks work
     evidence, ran on a busy GPU, spread too far, or did other work than the side it was compared with."""

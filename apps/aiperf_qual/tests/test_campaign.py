@@ -635,6 +635,8 @@ def test_perf_is_white_on_a_busy_gpu_or_a_fallback_reference_precision():
     assert judge.judge_performance(fast, slow, **ok)["light"] == "green"
     busy = judge.judge_performance({**fast, "gpu_busy_percent": 45}, slow, **ok)
     assert busy["light"] == "white" and "busy" in busy["reasons"][0]
+    unmeasured = judge.judge_performance(fast, {**slow, "gpu_unmeasured_runs": 1}, **ok)  # nvidia-smi failed
+    assert unmeasured["light"] == "white" and "not measured" in unmeasured["reasons"][0]
     fallback = judge.judge_performance(fast, {**slow, "precision": "fp32", "precision_fallback": "fp16: error"}, **ok)
     assert fallback["light"] == "white" and "fp32" in fallback["reasons"][0] and fallback["speedup"] == 10.0
 

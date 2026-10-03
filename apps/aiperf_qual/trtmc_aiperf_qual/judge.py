@@ -174,13 +174,16 @@ def work_check(candidate: Mapping[str, Any], reference: Mapping[str, Any]) -> st
 
 def measurement_problems(stats: Mapping[str, Any], max_ci_percent: float) -> list[str]:
     """Why one side's timing is no valid measurement on its own, or []: a run incomplete, no model-call time, a
-    response without work evidence, a busy GPU, or its runs spread beyond ``max_ci_percent`` (or too few for a CI)."""
+    response without work evidence, a busy GPU or one whose utilization was not measured before every run, or its
+    runs spread beyond ``max_ci_percent`` (or too few for a CI)."""
     problems = [str(stats["incomplete"])] if stats.get("incomplete") else []
     if stats.get("p50_ms") is None:
         problems.append(f"no {METRIC}")
     if stats.get("work_missing") or not stats.get("work"):
         problems.append(f"{stats.get('work_missing') or 'all'} responses report no work")
-    if (stats.get("gpu_busy_percent") or 0) >= GPU_BUSY_PERCENT:
+    if stats.get("gpu_unmeasured_runs") or stats.get("gpu_busy_percent") is None:
+        problems.append(f"GPU utilization not measured before {stats.get('gpu_unmeasured_runs') or 'any'} runs")
+    elif stats["gpu_busy_percent"] >= GPU_BUSY_PERCENT:
         problems.append(f"GPU {stats['gpu_busy_percent']:.0f}% busy with other processes")
     if stats.get("ci_percent") is None:
         problems.append("fewer than two runs: no CI")
@@ -216,6 +219,8 @@ def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any]
     for side, stats in (("candidate", candidate), ("reference", reference)):
         if (stats.get("gpu_busy_percent") or 0) >= GPU_BUSY_PERCENT:
             reasons.append(f"GPU {stats['gpu_busy_percent']:.0f}% busy with other processes before the {side} timing")
+        if stats.get("gpu_unmeasured_runs"):
+            reasons.append(f"GPU utilization not measured before {stats['gpu_unmeasured_runs']} {side} runs")
     if reference.get("precision_fallback"):
         # The native model could not run at the candidate precision: a slower precision is no baseline.
         reasons.append(f"reference timed at {reference.get('precision')} (candidate precision failed: "
