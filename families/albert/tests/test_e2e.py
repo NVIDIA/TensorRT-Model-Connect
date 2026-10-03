@@ -16,7 +16,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "albert"
-TASKS = frozenset({"encoding"})
+TASKS = frozenset({"text_to_pooled_features", "text_to_token_features"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -261,7 +261,7 @@ def _native(
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
-    manifest["task"]
+    del tmp_path
     import torch
     from transformers import AutoModel, AutoTokenizer
 
@@ -279,16 +279,28 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     with torch.no_grad():
         outputs = model(**encoded)
     hidden = outputs.last_hidden_state
-    values = hidden[0, 0]
+    if manifest["task"] == "text_to_token_features":
+        seq_len = int(encoded["input_ids"].shape[1])
+        values = hidden[0, :seq_len]
+    else:
+        values = hidden[0, 0]
     return {"values": values.float().cpu().numpy()}
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    del manifest, case
+    del case
     configured = thresholds.get(
         "contract_cosine_threshold", thresholds.get("cls_embedding_cosine", 0.8)
     )
-    assert _cosine(actual["values"], expected["values"]) >= max(float(configured), 0.8)
+    threshold = max(float(configured), 0.8)
+    if manifest.get("task") == "text_to_token_features":
+        actual_vals = np.asarray(actual["values"], dtype=np.float64)
+        expected_vals = np.asarray(expected["values"], dtype=np.float64)
+        assert actual_vals.shape == expected_vals.shape and actual_vals.ndim == 2
+        for actual_row, expected_row in zip(actual_vals, expected_vals):
+            assert _cosine(actual_row, expected_row) >= threshold
+    else:
+        assert _cosine(actual["values"], expected["values"]) >= threshold
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
