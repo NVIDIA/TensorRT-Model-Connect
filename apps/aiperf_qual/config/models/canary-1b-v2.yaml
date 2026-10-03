@@ -11,5 +11,6 @@ performance:
       source: {kind: catalog_testcase, profile: canary-1b-v2}
       selection: {method: first, count: 1}
       request: {language: en}
-    # The family reference script restores Canary on the CPU at fp32: no GPU baseline at the candidate precision.
-    not_equivalent: the family reference runs Canary on the CPU at fp32
+
+reference:
+  requirements: families/canary/requirements.txt  # the family's dependencies, layered on the serving interpreter

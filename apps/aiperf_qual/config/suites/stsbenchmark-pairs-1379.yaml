@@ -1,14 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# STS Benchmark test (all 1,379 pairs as consecutive sentence samples); gold is the pair score (0-5).
+# STS Benchmark test (mteb/stsbenchmark-sts, pinned): all 1,379 pairs as consecutive sentence samples; gold is the
+# pair score (0-5).
 suite: stsbenchmark-pairs-1379
-version: 1
+version: 2
 source:
-  kind: json_manifest
-  path: STSBenchmark/stsbenchmark_test.jsonl
-  sha256: 7c8927eef1ac4e256cae9768afc76232f79c39d19cb05d16bef92e11cecbe5bb
+  kind: hf_file
+  repo: mteb/stsbenchmark-sts
+  revision: 96943a16ea6a35129e253c659081cb59daf81b30
+  filename: test.jsonl.gz
   explode: [sentence1, sentence2]
   label_field: score
+smoke_samples: 6  # smoke mode: three sentence pairs (Spearman needs three)
 selection: {method: first, count: 2758}
 fields: {text: prompt}

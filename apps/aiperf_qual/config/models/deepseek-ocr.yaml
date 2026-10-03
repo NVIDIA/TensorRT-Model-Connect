@@ -7,3 +7,7 @@ performance:
     output_grader_params: {max_distance: 0.5}
 # An OCR model: OCRBench only.
 absolute: [ocrbench]
+
+reference:
+  requirements: families/deepseek_ocr/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  trust_remote_code: true  # the checkpoint's own modeling code

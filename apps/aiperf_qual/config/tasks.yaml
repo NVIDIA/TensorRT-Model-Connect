@@ -1,20 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Qualification defaults per catalog Task. Every catalog model inherits the entry of its Task;
+# Qualification defaults per catalog Task (DESIGN.md). Every catalog model inherits the entry of its Task;
 # config/models/<profile>.yaml holds only the exceptions (deep-merged over this).
 #
-# Acc: TRTMC and the native model answer the Task's gold-labelled benchmarks (`absolute`, below) and their
-# scores must be close. Tasks without one are judged by the family's own accuracy cases; a model with
-# neither sets `accuracy_source: none` (Perf only, for example random-weight test models).
-# Perf: server model-call p50 over repeated identical requests against the native model at the
-# candidate precision, eager and (where listed) torch.compile.
+# Acc: TRTMC and the native model answer the Task's gold-labelled benchmarks (`absolute`, below); each is a
+# paired non-inferiority decision against its margin (trtmc_aiperf_qual/noninferiority.py). A model with no
+# benchmark sets `accuracy_source: none` (Perf only, for example random-weight test models).
+# Perf: server model-call p50 over repeated identical requests against the native model at the candidate
+# precision, eager. torch.compile (`reference_modes: [eager, compile]`) and the L2 sweep (`performance.l2`)
+# are opt-in reports, set per model.
 #
 # Suite "catalog" is the profile's catalog testcase request (model-specific shapes and settings).
 
 defaults:
   reference:
-    backend: auto              # generic HF adapter when one serves the Task, else the family script
+    backend: auto              # the generic adapter of the operation (unsupported: no native path)
   performance:
     l1:
       suite: catalog
@@ -24,96 +25,97 @@ defaults:
       margin_percent: 5
       max_ci_percent: 5
 
-# Absolute accuracy: AIPerf's own benchmarks (trtmc_aiperf_plugins.benchmarks, pinned revisions), answered
-# by TRTMC and by the native model at the candidate precision and scored against the gold answers on both
-# sides. Fails when the accuracies differ by more than max_delta_points (the paired McNemar test is a
-# note). sequence_length is the bundle length the prompts and answers need (a shorter catalog bundle is rebuilt as <profile>-qual-<length>); problems that still do not fit are dropped
-# for both sides alike.
+# Benchmarks. gate: `margin` (points of the metric) and optionally `relative_margin` (a fraction of the native
+# score, when larger); `quantized_gate` / `sampled_gate` replace it for quantized or sampling candidates.
+# `min_native`: below it the benchmark does not discriminate for the model (not comparable). Selection is
+# seeded and stratified (per subject / class); prompts are filtered to the bundle's length as rendered.
 benchmarks:
-  # min_native: a native score at or below half of chance (four choices) means the prompt format does not
-  # fit the model; the entry is then not comparable.
-  mmlu: {plugin: trtmc_mmlu, suite: mmlu-5shot, n_shots: 5, per_task: 20, sequence_length: 4096, min_native: 12.5,
-         gate: {max_delta_points: 1.0}, quantized_gate: {max_delta_points: 2.0},
-         sampled_gate: {max_delta_points: 2.0}}
-  # The native eager model generates up to 256 tokens per problem (7-9 s at 1-4B, much more for large
-  # MoE models): the first 500 of 1,319 problems by default.
-  gsm8k: {plugin: trtmc_gsm8k, suite: gsm8k, limit: 500, sequence_length: 1024,
-          gate: {max_delta_points: 1.5}, quantized_gate: {max_delta_points: 3.0},
-          sampled_gate: {max_delta_points: 3.0}}
-  math500: {plugin: trtmc_math500, suite: math500, max_new_tokens: 1024, sequence_length: 2048,
-            gate: {max_delta_points: 2.0}, quantized_gate: {max_delta_points: 4.0},
-            sampled_gate: {max_delta_points: 4.0}}
-  # LAMBADA (OpenAI, 5,153 passages, at most 222 prompt tokens): models too small for MMLU to discriminate.
-  lambada: {plugin: trtmc_lambada, suite: lambada, endpoint: completions, sequence_length: 256,
-            gate: {max_delta_points: 1.0}, quantized_gate: {max_delta_points: 2.0},
-            sampled_gate: {max_delta_points: 2.0}}
-  tinystories: {plugin: trtmc_tinystories, suite: tinystories, endpoint: completions, limit: 2000,
-                sequence_length: 256, gate: {max_delta_points: 1.5}}
-  bart_denoise: {plugin: trtmc_bart_denoise, suite: bart-denoise, endpoint: completions, sequence_length: 256,
-                 gate: {max_delta_points: 1.5}}
+  # MMLU 0-shot (AIPerf mmlu, pinned): 40 per subject (<= 2,280); margin 1 point.
+  mmlu: {plugin: trtmc_mmlu, suite: mmlu-0shot, n_shots: 0, per_task: 40, min_native: 30.0,
+         gate: {margin: 1.0}, quantized_gate: {margin: 2.0}, sampled_gate: {margin: 2.0}}
+  # LAMBADA (OpenAI, all 5,153 passages): base LMs too small for MMLU to discriminate.
+  lambada: {plugin: trtmc_lambada, suite: lambada, endpoint: completions, min_native: 10.0,
+            gate: {margin: 0.5}, quantized_gate: {margin: 1.0}, sampled_gate: {margin: 1.0}}
+  tinystories: {plugin: trtmc_tinystories, suite: tinystories, endpoint: completions, limit: 2000, min_native: 10.0,
+                gate: {margin: 1.0}}
+  # BART's denoising pre-training task scored as corpus chrF++ of the reconstructed sentences (exact-sentence
+  # accuracy is 5% on the native model: too coarse to discriminate).
+  bart_denoise: {plugin: trtmc_bart_denoise, suite: bart-denoise, endpoint: completions, corpus_metric: chrf,
+                 gate: {margin: 1.0}}
   # Gold suites sent through AIPerf's trtmc_task endpoint and scored here (gold_metrics): `choice` /
-  # `contains` grade each sample (McNemar), `wer` / `sts_spearman` are corpus statistics (paired
-  # bootstrap); max_relative widens the gate to a fraction of the native score.
-  mmstar: {suite: mmstar, suite_definition: mmstar-val-1500, metric: choice, min_native: 12.5, sequence_length: 2048,
-           gate: {max_delta_points: 1.5}, quantized_gate: {max_delta_points: 3.0},
-           sampled_gate: {max_delta_points: 3.0}}
-  ocrbench: {suite: ocrbench, suite_definition: ocrbench-1000, metric: contains, sequence_length: 4096,
-             gate: {max_delta_points: 1.5}, quantized_gate: {max_delta_points: 3.0},
-             sampled_gate: {max_delta_points: 3.0}}
-  librispeech: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-2620, metric: wer,
-                gate: {max_delta_points: 0.2, max_relative: 0.03}}
-  # Streaming TRTMC vs the offline native transcription: a wider gate.
-  librispeech_streaming: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-2620,
-                          metric: wer, gate: {max_delta_points: 0.5, max_relative: 0.05}}
-  sts: {suite: stsb, suite_definition: stsbenchmark-pairs-1379, metric: sts_spearman,
-        gate: {max_delta_points: 0.5}}
-  rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-300, metric: rerank_ndcg,
-           gate: {max_delta_points: 1.0}}
-  # Documents keep their first 256 tokens on both sides (encoders cut longer inputs differently).
-  retrieval: {suite: scifact-retrieval, suite_definition: scifact-retrieval-300, metric: retrieval_ndcg,
-              sequence_length: 512, truncate_tokens: 256, gate: {max_delta_points: 1.0}}
-  # ImageNetV2 (5 per class; ImageNet-1k validation needs Hugging Face access): top-1 against the gold class.
-  imagenet: {suite: imagenet-top1, suite_definition: imagenetv2-5k, metric: top1,
-             gate: {max_delta_points: 0.3}}
-  # COCO val2017 mAP@[.5:.95] (no bootstrap: one mAP takes the whole corpus); label_space is the
-  # model's class numbering (coco-contiguous-80 or coco-category-id).
-  coco: {suite: coco-map, suite_definition: coco-val2017, metric: coco_map,
-         metric_params: {label_space: coco-contiguous-80}, gate: {max_delta_points: 0.5}}
-  # ETTh1 rolling forecasts (every test window, the family's columns/context/horizon): MSE against the
-  # observed future, within 0.5% of the native MSE.
+  # `contains` / `box_iou50` / `top1` / `code_pass` grade each sample (paired score test); the others are
+  # corpus statistics (paired bootstrap over the suite's clusters).
+  mmstar: {suite: mmstar, suite_definition: mmstar-val-1500, metric: choice, min_native: 30.0,
+           gate: {margin: 1.5}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
+  ocrbench: {suite: ocrbench, suite_definition: ocrbench-1000, metric: contains, min_native: 10.0,
+             gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
+  librispeech: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-1000, metric: wer,
+                gate: {margin: 0.3, relative_margin: 0.05}}
+  # Streaming TRTMC vs the native transcription: a wider margin.
+  librispeech_streaming: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-1000,
+                          metric: wer, gate: {margin: 0.5, relative_margin: 0.10}}
+  sts: {suite: stsb, suite_definition: stsbenchmark-pairs-1379, metric: sts_spearman, gate: {margin: 0.5}}
+  # Raw encoders (BERT, RoBERTa, ...: STS-B is not their task): conversion parity of the encode output (the
+  # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance.
+  encoder_parity: {suite: encoder-parity, suite_definition: stsbenchmark-sentences-400, metric: vector_parity,
+                   gate: {min_cosine: 0.999, max_relative_l2: 0.02}}
+  # SciFact reranking of fixed BM25 top-20 candidates (nDCG@10).
+  rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-bm25-300, metric: rerank_ndcg, gate: {margin: 1.0}}
+  # SciFact retrieval over the whole corpus (nDCG@10); documents keep their first 256 tokens on both sides
+  # (encoders cut longer inputs differently).
+  retrieval: {suite: scifact-retrieval, suite_definition: scifact-retrieval-corpus, metric: retrieval_ndcg10,
+              truncate_tokens: 256, gate: {margin: 1.0}}
+  # ImageNetV2 matched-frequency (all 10,000 images): top-1 against the gold class.
+  imagenet: {suite: imagenet-top1, suite_definition: imagenetv2-10k, metric: top1, gate: {margin: 0.5}}
+  # COCO val2017 mAP@[.5:.95] (pycocotools); label_space is the model's class numbering
+  # (coco-contiguous-80 or coco-category-id).
+  coco: {suite: coco-map, suite_definition: coco-val2017-500, metric: coco_map,
+         metric_params: {label_space: coco-contiguous-80}, gate: {margin: 1.0}}
+  # ETTh1 rolling forecasts (the model's columns / context / horizon in config/models `window`): MSE against
+  # the observed future, within 1% of the native MSE.
   etth1: {suite: etth1-mse, suite_definition: etth1-test-rolling, metric: forecast_mse,
-          gate: {max_delta_points: 0.0, max_relative: 0.005}}
-  # Full test sets in each model's own request format: corpus chrF++ against the references.
-  wmt14: {suite: wmt14-en-de, suite_definition: wmt14-en-de-3003, metric: chrf, sequence_length: 512,
-          gate: {max_delta_points: 0.5}}
-  wmt19_en_ru: {suite: newstest2019-en-ru, suite_definition: newstest2019-en-ru-1997, metric: chrf,
-                sequence_length: 512, gate: {max_delta_points: 0.5}}
-  flores_riva: {suite: flores200-en-fr, suite_definition: flores200-en-fr-riva-1012, metric: chrf,
-                sequence_length: 512, gate: {max_delta_points: 0.5}}
-  flores_nllb: {suite: flores200-en-fr, suite_definition: flores200-en-fr-nllb-1012, metric: chrf,
-                sequence_length: 512, gate: {max_delta_points: 0.5}}
+          gate: {margin: 0.0, relative_margin: 0.01}}
+  # Translation test sets in each model's own request format: corpus chrF++ against the references (the
+  # pinned sets carry no document ids: sentences are the bootstrap units).
+  wmt14: {suite: wmt14-en-de, suite_definition: wmt14-en-de-3003, metric: chrf, fit_prompt: true, min_new_tokens: 16,
+          gate: {margin: 1.0}}
+  wmt19_en_ru: {suite: newstest2019-en-ru, suite_definition: newstest2019-en-ru-1997, metric: chrf, fit_prompt: true, min_new_tokens: 16,
+          gate: {margin: 1.0}}
+  flores_riva: {suite: flores200-en-fr, suite_definition: flores200-en-fr-riva-1012, metric: chrf, fit_prompt: true, min_new_tokens: 16,
+          gate: {margin: 1.0}}
+  flores_nllb: {suite: flores200-en-fr, suite_definition: flores200-en-fr-nllb-1012, metric: chrf, fit_prompt: true, min_new_tokens: 16,
+          gate: {margin: 1.0}}
   # RefCOCO grounding: the first box of the answer against the gold box (IoU >= 0.5).
-  refcoco: {suite: refcoco, suite_definition: refcoco-val-2000, metric: box_iou50, gate: {max_delta_points: 1.0}}
-  # ADE20K SceneParse150 (500 validation images): mIoU of the 150-class maps against the annotations.
-  ade20k: {suite: ade20k-miou, suite_definition: ade20k-val-500, metric: miou, gate: {max_delta_points: 0.5}}
+  refcoco: {suite: refcoco, suite_definition: refcoco-val-1500, metric: box_iou50, min_native: 20.0,
+            gate: {margin: 1.5}}
+  # ADE20K SceneParse150: dataset-level class mIoU of the 150-class maps against the annotations.
+  ade20k: {suite: ade20k-miou, suite_definition: ade20k-val-500, metric: miou, gate: {margin: 1.0}}
   # RefCOCO objects as prompted segmentation (a point inside the object; the referring expression):
   # mean IoU of the best mask against the object's mask.
-  sam_point: {suite: refcoco-point-masks, suite_definition: refcoco-point-200, metric: mask_iou,
-              gate: {max_delta_points: 1.0}}
-  sam3_text: {suite: refcoco-text-masks, suite_definition: refcoco-text-200, metric: mask_iou,
-              gate: {max_delta_points: 1.0}}
-  # HumanEval completions run against the unit tests (isolated subprocess, CPU/memory/time limits).
-  humaneval: {suite: humaneval, suite_definition: humaneval-164, metric: code_pass, sequence_length: 1024,
-              gate: {max_delta_points: 2.5}}
+  sam_point: {suite: refcoco-point-masks, suite_definition: refcoco-point-500, metric: mask_iou, gate: {margin: 1.0}}
+  sam3_text: {suite: refcoco-text-masks, suite_definition: refcoco-text-500, metric: mask_iou, gate: {margin: 1.0}}
+  # MoGe-2 geometry against the native model on 50 COCO val2017 images (conversion parity, every image).
+  geometry_parity: {suite: geometry-parity, suite_definition: coco-val2017-geometry-50, metric: geometry_parity,
+                    gate: {min_mask_iou: 0.99, max_median_relative_depth: 0.01}}
+  # ACT on 50 recorded observations of its training dataset (conversion parity, every observation).
+  action_parity: {suite: action-parity, suite_definition: lerobot-act-observations-50, metric: action_parity,
+                  gate: {max_error_of_range: 0.001}}
+  # Fast-FoundationStereo on the 15 Middlebury v3 trainingQ scenes of its 700x700 profile (conversion parity).
+  disparity_parity: {suite: disparity-parity, suite_definition: middlebury-q-700-15, metric: disparity_parity,
+                     gate: {max_mean_epe: 0.1}}
+  # PersonaPlex answering 20 LibriSpeech test-clean utterances (conversion parity of the generated speech).
+  speech_parity: {suite: speech-parity, suite_definition: librispeech-test-clean-speech-20, metric: audio_parity,
+                  gate: {min_duration_ratio: 0.8, max_duration_ratio: 1.2, min_rms_ratio: 0.5, max_rms_ratio: 2.0,
+                         max_log_spectral_distance: 3.0}}
+  # HumanEval and MBPP completions run against their unit tests (as nobody, CPU/memory/time limits, DESIGN.md 8);
+  # prompts that leave fewer than 64 tokens to generate on the bundle are dropped for both sides.
+  code: {suite: code, suite_definition: code-humaneval-mbpp-664, metric: code_pass, fit_prompt: true,
+         min_new_tokens: 64, min_native: 5.0, gate: {margin: 2.0}}
 
 tasks:
   text_generation:
-    # GSM8K is off for now: the native eager model's 256-token answers dominated the run time.
     absolute: [mmlu]
-    performance: {l1: {reference_modes: [eager, compile], output_grader: parity_token_exact,
-                       output_grader_params: {min_prefix: 8, accept_equal_text: true}},
-                  # L2 serving sweep (informational): synthetic prompts through /v1/completions.
-                  l2: {concurrency: [1, 4], requests: 32, isl: 96, osl: 32, margin_percent: 5}}
+    performance: {l1: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}}
 
   vision_language_generation:
     absolute: [mmstar, ocrbench]
@@ -124,10 +126,12 @@ tasks:
     performance: {l1: {output_grader: parity_top1, output_grader_params: {tie_cosine: 0.999}}}
   image_to_class_scores: *classify
 
-  encoding: &encode
-    absolute: [sts]
-    performance: {l1: {reference_modes: [eager, compile], output_grader: parity_vector}}
-  embedding: *encode
+  encoding:
+    absolute: [encoder_parity]
+    performance: {l1: {output_grader: parity_vector}}
+  embedding:
+    absolute: [sts, retrieval]
+    performance: {l1: {output_grader: parity_vector}}
 
   image_features:
     performance: {l1: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}}
@@ -155,24 +159,23 @@ tasks:
 
   # Generative media are slow per request: fewer requests per run, still three runs for the CI.
   audio_generation:
-    # Also for models with a family case: sampling models cannot be judged per sample, but what they
-    # say can. Absolute accuracy: both sides speak 200 SeedTTS-eval sentences, Whisper large-v3-turbo
-    # transcribes them, and TRTMC's mean WER against the text stays within 5 points of the native
-    # model's (sampling alone moves a 200-sentence mean by 1-2 points).
+    # Sampling models cannot be judged per sample, but what they say can: both sides speak 200 Seed-TTS
+    # eval sentences, Whisper large-v3-turbo transcribes them, and TRTMC's corpus WER is judged against the
+    # native model's (margin 2 points or 10%); every output must be valid audio (tts-validity).
     supplementary: [{check: tts_intelligibility, suite: seedtts-en-200, asr_model: openai/whisper-large-v3-turbo,
                      asr_revision: 41f01f3fe87f28c78e2fbf8b568835947dd65ed9,
-                     max_wer_increase: 0.05}]
+                     gate: {margin: 2.0, relative_margin: 0.10}}]
     performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
   speech_to_speech:
+    absolute: [speech_parity]
     performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
 
   # Perf only checks that both sides generate the same geometry (frames, height, width): diffusion
-  # content diverges across precisions. Acc is the gold-referenced checks below (GenEval, VBench); the
-  # family's media parity cases and the pixel parity under latent replay are reported only
-  # (`informational`): generated media drift between TRTMC and the native model at any precision.
+  # content diverges across precisions. Acc is the gold-referenced checks below (GenEval, VBench CLIP-T);
+  # the pixel parity under latent replay is reported only (`informational`): generated media drift
+  # between TRTMC and the native model at any precision.
   image_generation:
     reference: {precision: bf16}
-    family_cases_informational: true
     # Families whose TRTMC runtime takes caller initial latents render with the same initial noise on
     # both sides (latent replay), which makes them comparable pixel by pixel: how much further TRTMC is
     # from the native fp32 render of the first 10 prompts than the native half-precision run.
@@ -181,29 +184,28 @@ tasks:
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
                      quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
-                    # Absolute accuracy of text-to-image: GenEval-style (100 prompts over its six tags, OWLv2
-                    # detections and CLIP colors); TRTMC's pass rate within 2 points (prompts) of the native model's.
-                    {check: geneval, suite: geneval-100, only_families: [flux, pixart, qwen_image, z_image],
+                    # Text-to-image with the same initial noise on both sides: GenEval-style (200 prompts over its six
+                    # tags, OWLv2 detections and CLIP colors, exact counts), paired right/wrong per prompt, margin 5 points.
+                    {check: geneval, suite: geneval-200, only_families: [flux, pixart, qwen_image, z_image],
                      latent_replay_families: [flux, pixart, qwen_image, z_image],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
-                     detector_threshold: 0.2, gate: {max_delta_points: 2.0}},
-                    # Videos: VBench's object dimensions (20 prompts) checked the same way on the middle frame;
-                    # one prompt is 5 points: at most one prompt apart.
-                    {check: geneval, entry: vbench-objects, suite: vbench-objects-20,
+                     detector_threshold: 0.2, gate: {margin: 5.0, min_native: 10}},
+                    # Videos (and families without caller latents): VBench's object prompts (20), CLIP-T of the middle
+                    # frame against the prompt, paired per prompt, margin 1 point; every video must keep the native
+                    # frame count and move (video validity). Motion quality and temporal order are not covered.
+                    {check: geneval, entry: vbench-objects, suite: vbench-objects-20, metric: clip_t, video: true,
                      only_families: [wan_t2v, wan2_2_ti2v, minimax_h3], latent_replay_families: [wan_t2v],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
-                     detector_threshold: 0.2, gate: {max_delta_points: 5.0}}]
+                     detector_threshold: 0.2, gate: {margin: 1.0}}]
     performance:
       l1: &media_l1 {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
-                     measurement: {warmup: 1, requests: 1, runs: 3}}
-      l2: {kind: media, suite: partiprompts-30, prompts: 3, requests: 3, video_requests: 1, margin_percent: 5}
+                     measurement: {warmup: 1, requests: 3, runs: 3}}
   image_edit:  # edit inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
-    family_cases_informational: true  # Acc is MagicBrush below; media parity is reported only
     # Edits of ten Imagenette images with the same initial noise on both sides (latent replay),
     # measured like image generation's replay parity (informational).
     supplementary: [{check: replay_parity, suite: imagenette-edit-10, informational: true,
@@ -211,26 +213,37 @@ tasks:
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
                      quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
-                    # Absolute accuracy: MagicBrush edits against the human targets (CLIP-I), TRTMC's mean
-                    # within 1 point of the native model's.
+                    # MagicBrush edits against the human targets: CLIP-I and DINO (paired bootstrap, margin 1 point
+                    # each), the no-edit baseline reported, and no output equal to its source. Whether the edit
+                    # follows the instruction is not covered beyond target similarity.
                     {check: edit_similarity, suite: magicbrush-dev-100, latent_replay_families: [qwen_image],
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
-                     gate: {max_delta_points: 1.0}}]
+                     dino_model: facebook/dino-vits16, dino_revision: abe3b354cb6a9b6f146096b14a4a9d7eecbcb4bd,
+                     gate: {margin: 1.0}}]
     performance: {l1: *media_l1}
   world_model_generation:  # world-model inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
+    # 10 COCO images with the catalog's prompt, action, and camera, the same seed on both sides: video
+    # validity and coarse agreement (PSNR >= 5 dB, SSIM >= 0.1); action-conditional fidelity is not covered.
+    supplementary: [{check: world_model_parity, suite: coco-world-model-10, min_psnr_db: 5.0, min_ssim: 0.1}]
     performance: {l1: *media_l1}
 
   time_series_forecast:
     absolute: [etth1]
-    performance: {l1: {output_grader: parity_numeric}}
+    # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
+    performance: {l1: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}}
   reranking:
     absolute: [rerank]
     performance: {l1: {output_grader: parity_scores}}
 
-  robot_control: &numeric
+  robot_control:
+    absolute: [action_parity]
     # Perf only checks that both sides computed the same output: counts may differ slightly across
-    # precisions (for example valid pixels), which is the Acc cases' concern.
+    # precisions (for example valid pixels), which is the Acc checks' concern.
     performance: {l1: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}}
-  stereo_disparity: *numeric
-  monocular_geometry: *numeric
+  stereo_disparity:
+    absolute: [disparity_parity]
+    performance: {l1: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}}
+  monocular_geometry:
+    absolute: [geometry_parity]
+    performance: {l1: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}}

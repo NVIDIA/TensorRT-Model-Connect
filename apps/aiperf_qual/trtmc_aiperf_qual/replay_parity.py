@@ -26,7 +26,7 @@ from .services import _serve_env
 from .suites import build_suite, limit_suite, with_latent_seeds
 
 # Full-resolution PSNR (RGB) and SSIM (luminance, 7x7 box windows) over evenly sampled frames.
-PIXELS = r"""
+PIXEL_HELPERS = r"""
 import json, sys
 from pathlib import Path
 import numpy as np
@@ -58,6 +58,8 @@ def compare(a, b):
     return {"psnr": float(np.mean([psnr(a[i], b[i]) for i in picks])),
             "ssim": float(np.mean([ssim(a[i], b[i]) for i in picks]))}
 
+"""
+PIXELS = PIXEL_HELPERS + r"""
 rows = []
 for candidate, native, reference in items:
     c, n = media_frames(Path(candidate)), media_frames(Path(native))
@@ -90,11 +92,6 @@ def _mean(values: Sequence[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
-# One-sided 95% Student-t critical values by degrees of freedom (larger df use the next lower entry).
-_T95_ONE_SIDED = {1: 6.314, 2: 2.920, 3: 2.353, 4: 2.132, 5: 2.015, 6: 1.943, 7: 1.895, 8: 1.860, 9: 1.833,
-                  10: 1.812, 15: 1.753, 20: 1.725, 30: 1.697}
-
-
 def drop(differences: Sequence[float], limit: float) -> tuple[float, float | None, bool]:
     """Mean paired drop (native minus TRTMC), its one-sided 95% lower bound, and whether it fails:
     above ``limit`` and significant (a single pair can only be judged by the limit)."""
@@ -103,9 +100,9 @@ def drop(differences: Sequence[float], limit: float) -> tuple[float, float | Non
     mean = statistics.fmean(differences)
     if len(differences) < 2:
         return mean, None, mean > limit
-    degrees = len(differences) - 1
-    critical = _T95_ONE_SIDED[max(key for key in _T95_ONE_SIDED if key <= degrees)] if degrees <= 30 else 1.645
-    lower = mean - critical * statistics.stdev(differences) / len(differences) ** 0.5
+    from .noninferiority import t_quantile
+
+    lower = mean - t_quantile(0.95, len(differences) - 1) * statistics.stdev(differences) / len(differences) ** 0.5
     return mean, lower, mean > limit and lower > 0
 
 
@@ -245,7 +242,7 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
 
     if model.get("family") not in check.get("latent_replay_families", ()):
         return []
-    suite = build_suite(_suite(check["suite"], model["catalog_profile"], environment.path("repo")), environment)
+    suite = build_suite(_suite(check["suite"], model["catalog_profile"]), environment)
     count = int(check.get("video_samples", 3) if is_video(suite.samples[0]["request"])
                 else check.get("parity_floor_samples", 10))
     suite = with_latent_seeds(limit_suite(suite, count))

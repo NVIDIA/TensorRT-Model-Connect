@@ -61,27 +61,25 @@ def _earlier(out: Path, suite: Any) -> Outputs | None:
 
 def generate_native(environment: Environment, model: dict[str, Any], suite: Any, python: str, out: Path,
                     label: str, skip: tuple[str, str] | None = None, reuse: bool = False) -> tuple[Outputs, str, str]:
-    """The native model's outputs and the (backend, precision) that produced them: the generic adapter,
-    else the family's declared reference, at the Perf precisions in order (``skip`` excluded)."""
+    """The native model's outputs and the (backend, precision) that produced them: the reference adapter
+    at the Perf precisions in order (``skip`` excluded)."""
     from .runner import timing_precisions
 
-    reference, errors = model["reference"], []
-    for backend in dict.fromkeys([reference["backend"], reference.get("fallback") or reference["backend"]]):
-        for precision in timing_precisions(reference):
-            if (backend, precision) == skip:
-                continue
-            try:
-                return (generate(environment, model, backend, out / f"{label}-native-{backend}-{precision}", suite,
-                                 python, precision, reuse), backend, precision)
-            except Exception as error:  # noqa: BLE001 - try the next precision, then the fallback
-                errors.append(f"{backend} {precision}: {type(error).__name__}: {str(error)[-200:]}")
+    errors = []
+    for precision in timing_precisions(model["reference"]):
+        if ("reference", precision) == skip:
+            continue
+        try:
+            return (generate(environment, model, "reference", out / f"{label}-native-reference-{precision}", suite,
+                             python, precision, reuse), "reference", precision)
+        except Exception as error:  # noqa: BLE001 - try the next precision
+            errors.append(f"{precision}: {type(error).__name__}: {str(error)[-200:]}")
     raise RuntimeError("; ".join(errors)[-1500:] or "no other native precision")
 
 
 def media_source(workdir: Path, record: Mapping[str, Any]) -> dict[str, Any]:
-    """Where a request's generated frames are: its request directory, plus (family script references,
-    which keep a few sampled frames elsewhere) the frame files the observation lists and their
-    frame indices."""
+    """Where a request's generated frames are: its request directory, plus the frame files the
+    observation lists and their frame indices (a server that keeps only sampled frames)."""
     observation = record.get("observation") or {}
     files = [str(path) for path in (observation.get("frame_artifacts") or observation.get("image_artifacts") or [])
              if isinstance(path, str)]

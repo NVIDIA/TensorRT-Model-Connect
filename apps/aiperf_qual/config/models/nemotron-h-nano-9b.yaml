@@ -4,3 +4,7 @@
 # A reasoning model: through its chat template it thinks aloud first ("Okay, let's ...") and never
 # reaches the answer letter within MMLU's few tokens; the completions route asks for the letter.
 absolute: [{name: mmlu, endpoint: completions}]
+
+reference:
+  requirements: families/nemotron_h/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  build_isolation: false  # its requirements build native extensions against the installed torch

@@ -100,10 +100,18 @@ which rejects local tokenizer directories and incomplete cache snapshots.
 
 ## Reference coverage
 
-Python reference adapters exist for `generate`, `translate`, `encode`,
+Generic Python reference adapters exist for `generate`, `translate`, `encode`,
 `embed`, `rerank`, `classify`, `detect`, `segment`, `segment_prompted`,
 `extract_features`, `transcribe`, `generate_audio` (Bark), `generate_image`
-(Diffusers), `solve`, and `regress` (Transformers PatchTST/PatchTSMixer). The
-remaining operations need upstream reference checkouts (PersonaPlex, MoGe,
-LeRobot, Fast-FoundationStereo, Boltz, ...), so they are served by the `trtmc`
-backend only.
+(Diffusers), `solve`, and `regress` (Transformers PatchTST/PatchTSMixer). A model
+whose native pipeline they cannot run (an upstream checkout such as PersonaPlex,
+MoGe, LeRobot, Fast-FoundationStereo, SANA-WM; Ultralytics archives; a
+speech-conditioned LM) is served by its family's own adapter:
+`--reference-adapter families/<family>/tests/native_reference.py`, a file defining
+`Adapter(spec)` with `invoke(request, artifact_base) -> Invocation`.
+
+`reference-env --requirements FILE --root DIR [--prepare SCRIPT]` creates (once, cached
+by digest) a virtual environment that layers `FILE` on this interpreter, runs `SCRIPT`
+in it after the install (an upstream checkout), records its `pip freeze`, and prints its
+interpreter; an environment whose packages changed since (or that has no freeze record) is
+left in place and a fresh one is created next to it.

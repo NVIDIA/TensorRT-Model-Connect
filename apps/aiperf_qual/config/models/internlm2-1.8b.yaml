@@ -3,3 +3,6 @@
 
 # internlm2-math-plus: GSM8K and MATH-500 are off for now (config/tasks.yaml).
 absolute: [mmlu]
+
+reference:
+  requirements: families/internlm/requirements.txt  # the family's dependencies, layered on the serving interpreter

@@ -60,13 +60,21 @@ def gpu_exclusive(environment: Environment) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def reference_python(environment: Environment, model: dict[str, Any]) -> str:
-    """The family's reference interpreter (created on first use and cached by requirements digest)."""
-    completed = subprocess.run(
-        [str(environment["serve_python"]), "-m", "trtmc_perf_serving", "reference-env", "--profile",
-         model["catalog_profile"], "--manifest-root", str(environment.path("repo") / "families"),
-         "--root", str(environment.path("reference_env_root"))],
-        capture_output=True, text=True, env=_serve_env(environment), cwd=environment.path("repo"), timeout=10800)
+def reference_python(environment: Environment, model: Mapping[str, Any]) -> str:
+    """The native reference's interpreter: the serving one, or an environment that layers the model's
+    ``reference.requirements`` (a file relative to the repository) on it, created once and cached."""
+    reference = model.get("reference") or {}
+    if not reference.get("requirements"):
+        return str(environment["serve_python"])
+    command = [str(environment["serve_python"]), "-m", "trtmc_perf_serving", "reference-env",
+               "--requirements", str(environment.path("repo") / reference["requirements"]),
+               "--root", str(environment.path("reference_env_root"))]
+    if reference.get("build_isolation") is False:
+        command.append("--no-build-isolation")
+    if reference.get("prepare"):
+        command += ["--prepare", str(environment.path("repo") / reference["prepare"])]
+    completed = subprocess.run(command, capture_output=True, text=True, env=build_env(environment),
+                               cwd=environment.path("repo"), timeout=10800)
     if completed.returncode != 0:
         raise ServiceError(f"reference environment for {model['catalog_profile']} failed: {completed.stderr[-800:]}")
     return json.loads(completed.stdout.strip().splitlines()[-1])["python"]
@@ -90,14 +98,12 @@ def platform_id(fingerprint: Mapping[str, Any]) -> str:
 @contextmanager
 def serving(environment: Environment, model: dict[str, Any], backend: str, out: Path, *,
             mode: str = "eager", precision: str | None = None, deterministic: bool = False,
-            isolate_requests: bool = False, python: str | None = None,
-            script_measurement: Mapping[str, int] | None = None,
-            keep_artifacts: bool = False, memory_probe: bool = False,
+            isolate_requests: bool = False, python: str | None = None, keep_artifacts: bool = False, memory_probe: bool = False,
             port: int | None = None) -> Iterator[dict[str, Any]]:
     """Run one server for the model; yields its URL and /v1/serving/info.
 
-    backend: ``trtmc`` (candidate), ``reference`` (generic HF adapters), or ``script`` (the family's
-    qualification reference). References run in ``python``, the family's reference environment.
+    backend: ``trtmc`` (candidate) or ``reference`` (generic HF adapters, run in ``python``: the model's
+    reference environment).
     """
     repo = environment.path("repo")
     port = port or int(environment["ports"]["candidate" if backend == "trtmc" else "reference"])
@@ -118,26 +124,29 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
         command += ["--mode", mode, "--precision", precision or reference.get("precision", "fp32")]
         if reference.get("trust_remote_code"):
             command.append("--trust-remote-code")
-        if backend == "script":
-            command += ["--runtime-root", str(environment["runtime_root"]),
-                        "--reference-options", json.dumps(dict(script_measurement or {"warmup": 0, "iterations": 1}))]
-        else:
-            if deterministic:
-                command.append("--deterministic")
-            if reference.get("model"):
-                command += ["--reference-model", reference["model"]]
-            if reference.get("revision"):
-                command += ["--reference-revision", str(reference["revision"])]
-            if reference.get("options"):
-                command += ["--reference-options", json.dumps(reference["options"])]
+        if deterministic:
+            command.append("--deterministic")
+        if reference.get("model"):
+            command += ["--reference-model", reference["model"]]
+        if reference.get("revision"):
+            command += ["--reference-revision", str(reference["revision"])]
+        if reference.get("options"):
+            command += ["--reference-options", json.dumps(reference["options"])]
+        if reference.get("adapter"):  # the family's own native pipeline
+            command += ["--reference-adapter", str(repo / reference["adapter"])]
     if keep_artifacts:  # checks that read output artifacts (audio, images) after the run
         command.append("--keep-artifacts")
     if memory_probe:  # peak GPU memory per call; only meaningful while this server is alone on the GPU
         command.append("--memory-probe")
     env = _serve_env(environment)
     if backend != "trtmc":
-        # References may fetch what their checkpoint does not carry (pipeline parts, remote code).
-        env.pop("HF_HUB_OFFLINE", None)
+        from .bundles import cached
+
+        if not cached(environment, model):
+            # References may fetch what their checkpoint does not carry (pipeline parts, remote code). With
+            # every checkpoint cached they read the cache, as builds do: gated repositories refuse even the
+            # checks for optional files.
+            env.pop("HF_HUB_OFFLINE", None)
     (out / "command.json").write_text(json.dumps(command))
     process = subprocess.Popen(command, stdout=open(out / "server.log", "w"), stderr=subprocess.STDOUT,
                                env=env, cwd=repo, start_new_session=True)

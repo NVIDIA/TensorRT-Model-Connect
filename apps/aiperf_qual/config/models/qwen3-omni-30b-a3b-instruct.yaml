@@ -2,3 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # GSM8K is off for now (config/tasks.yaml).
 absolute: [mmlu]
+
+reference:
+  requirements: families/qwen3_omni/requirements.txt  # the family's dependencies, layered on the serving interpreter

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Random weights: no accuracy to score against gold answers, so Perf only (the family's token-parity
-# case still runs in benchmark qualification).
+# Random weights: no accuracy to score against gold answers, so Perf only; the L1 output check (greedy
+# token parity with the native model) is the conversion evidence.
 accuracy_source: none
 accuracy_note: random weights (a test model); no accuracy to measure

@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Qualification configuration of a catalog model, derived rather than written.
 
-A model's configuration is its catalog entry (checkpoint, revision, precision, bundle, Task,
-sequence limit) combined with the defaults of its Task (config/tasks.yaml). Accuracy comes from the
-Task's gold-labelled benchmarks (``absolute``), else the family's own accuracy cases; a model with
-neither declares ``accuracy_source: none`` (Perf only). The family's benchmark qualification case
-also tells whether the native reference needs the family's own script. config/models/<profile>.yaml
-holds exceptions and is deep-merged last.
+A model's configuration is its catalog entry (checkpoint, revision, precision, bundle, Task) combined
+with the defaults of its Task (config/tasks.yaml). The candidate is the catalog bundle as shipped;
+accuracy comes from the Task's gold-labelled benchmarks (``absolute``) and whole-output checks
+(``supplementary``); a model with neither declares ``accuracy_source: none`` (Perf only). The native
+reference is the generic Hugging Face adapter of the operation. config/models/<profile>.yaml holds the
+exceptions (a reference environment, remote code, another native checkpoint, a build override) and is
+deep-merged last.
 """
 
 from __future__ import annotations
@@ -26,10 +27,9 @@ from .config import CONFIG_ROOT, ConfigError, Environment, load_suite
 HF_OPERATIONS = {"generate", "translate", "encode", "embed", "rerank", "classify", "detect", "segment",
                  "segment_prompted", "extract_features", "transcribe", "generate_audio", "generate_image",
                  "solve", "regress"}
-# Tasks whose inputs the generic adapters would silently ignore (a world-model context, a text
-# prompt for masks): only the family's declared reference is valid for them. Image edits run on the
-# Diffusers adapter (it rejects an edit pipeline-less checkpoint, and the family reference takes over).
-SCRIPT_ONLY_TASKS = {"world_model_generation", "text_prompted_segmentation"}
+# Tasks whose inputs the generic adapters would silently ignore (a world-model context, a text prompt for
+# masks): only a family's own native adapter (``reference.adapter``) serves them.
+NO_GENERIC_TASKS = {"world_model_generation", "text_prompted_segmentation"}
 PRECISIONS = ("fp16", "bf16", "fp32")
 # Checkpoints above this size (bytes) measure fewer requests per run: native references of large models
 # take seconds per request, and three runs still give the confidence interval.
@@ -75,40 +75,12 @@ def catalog_profiles(repository: Path) -> list[Any]:
             if entry.status == "ready" and "-l0" not in f"-{entry.name}-" and "-regression-" not in f"-{entry.name}-"]
 
 
-def _qualification_cases(repository: Path, profile: str, kind: str) -> list[Mapping[str, Any]]:
-    _import_repository(repository)
-    from qualification_tests.benchmark_qualification.catalog import discover
-
-    return [{**dict(case.values), "candidate": dict(case.candidate), "name": case.name, "benchmark": case.benchmark}
-            for case in discover(repository) if case.model == profile and case.kind == kind]
+def _reference_backend(operation: str, task: str) -> str:
+    """``reference`` where a generic adapter serves the operation, else ``unsupported``."""
+    return "reference" if operation in HF_OPERATIONS and task not in NO_GENERIC_TASKS else "unsupported"
 
 
-def _qualified_build(profile: str, manifest: Mapping[str, Any], case: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Manifest overrides of the family qualification's candidate (its own bundle when they differ)."""
-    if not case:
-        return {}
-    candidate = case["candidate"]
-    changed = {key: value for key, value in (candidate.get("build") or {}).items() if manifest.get(key) != value}
-    if not changed and candidate.get("bundle", manifest.get("bundle")) == manifest.get("bundle"):
-        return {}
-    return {"name": f"{profile}-qual", "bundle": candidate.get("bundle", manifest.get("bundle")), **changed}
-
-
-def _qualification_case(repository: Path, profile: str) -> Mapping[str, Any] | None:
-    cases = _qualification_cases(repository, profile, "performance")
-    return cases[0] if cases else None
-
-
-def _reference_backend(operation: str, task: str, declared: Mapping[str, Any] | None) -> tuple[str, str | None]:
-    """(backend, fallback). The generic adapter serves every operation it supports; when it cannot
-    load or run the model, the family's declared qualification reference takes over."""
-    script = "script" if declared is not None else None
-    if operation not in HF_OPERATIONS or task in SCRIPT_ONLY_TASKS:
-        return (script or "unsupported"), None
-    return "reference", script
-
-
-def _suite(reference: str | Mapping[str, Any], profile: str, repository: Path) -> dict[str, Any]:
+def _suite(reference: str | Mapping[str, Any], profile: str) -> dict[str, Any]:
     if isinstance(reference, Mapping):
         suite = dict(reference)
     elif reference == "catalog":
@@ -119,13 +91,6 @@ def _suite(reference: str | Mapping[str, Any], profile: str, repository: Path) -
         suite = load_suite(reference)
     if suite.pop("base", None) == "catalog":  # samples override the profile's catalog request
         suite["base_profile"] = profile
-    if suite["source"].get("kind") == "etth1_windows":
-        # The family's qualification case declares the window its model forecasts from.
-        declared = [case["window"] for case in _qualification_cases(repository, profile, "accuracy")
-                    if isinstance(case.get("window"), Mapping)]
-        if declared:  # ``window_overrides`` (for example every hour's window) apply on top
-            window = {**dict(declared[0]), **dict(suite["source"].get("window_overrides") or {})}
-            suite["source"] = {**suite["source"], "window": window}
     return suite
 
 
@@ -149,6 +114,11 @@ def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mappin
             item.update(gate=gates["sampled"] or item["gate"], seeds=list(seeds))
         elif quantized and gates["quantized"]:
             item["gate"] = gates["quantized"]
+        if item.get("window"):  # a forecast window (ETTh1): the model's columns, context, and horizon
+            suite = item["suite_definition"]
+            suite = load_suite(suite) if isinstance(suite, str) else dict(suite)
+            window = {**dict(suite["source"].get("window") or {}), **item.pop("window")}
+            item["suite_definition"] = {**suite, "source": {**suite["source"], "window": window}}
         if "min_native" in item:  # below it the native score is no baseline (half of chance)
             item["gate"] = {**item["gate"], "min_native": item.pop("min_native")}
         item.setdefault("endpoint", "chat" if testcase.get("use_chat_template") else "completions")
@@ -171,104 +141,64 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         raise ConfigError(f"no Task defaults for {catalog_model.task!r} ({profile})")
     override_path = root / "models" / f"{profile}.yaml"
     override = (yaml.safe_load(override_path.read_text()) if override_path.is_file() else None) or {}
-    task = dict(tasks["tasks"][catalog_model.task])
+    config = deep_merge(deep_merge(tasks["defaults"], tasks["tasks"][catalog_model.task]), override)
+    candidate = dict(config.get("candidate", {}))
     # Quantized candidates (the catalog's `quantization`, or a quantized checkpoint declared in
     # config/models) are held to the benchmarks' quantization gates.
-    quantization = (override.get("candidate") or {}).get("quantization") or manifest.get("quantization")
-    config = deep_merge(deep_merge(tasks["defaults"], task), override)
-
+    quantization = candidate.get("quantization") or manifest.get("quantization")
     operation = config.get("operation") or entries[profile].operation
-    trust_remote_code = bool(manifest.get("trust_remote_code", False))
-    case = _qualification_case(repository, profile)
-    declared = dict(case.get("reference", {})) if case else None
-    # Remote code the family's accepted qualification already trusts may run in the generic adapters too.
-    trust_remote_code = trust_remote_code or bool((case or {}).get("candidate", {}).get("trust_remote_code"))
-    backend, fallback = _reference_backend(operation, catalog_model.task, declared)
+    reference = dict(config.get("reference", {}))
+    backend = reference.pop("backend", "auto")
+    if backend == "auto":  # a family's own native pipeline serves any operation
+        backend = "reference" if reference.get("adapter") else _reference_backend(operation, catalog_model.task)
+    trust_remote_code = bool(manifest.get("trust_remote_code", False) or reference.pop("trust_remote_code", False))
     candidate_precision = catalog_model.precision
-    perf_precision = candidate_precision if candidate_precision in PRECISIONS else "bf16"
-    reference = config.get("reference", {})
-    if reference.get("backend", "auto") != "auto":
-        backend, fallback = reference["backend"], reference.get("fallback")
-    # The last precision the native model is timed at when the candidate's fails (timing_precisions).
-    reference_precision = reference.get("precision") or "fp32"
-    declared_precision = (declared or {}).get("precision")
+    # One immutable checkpoint for the bundle and the native reference: the catalog pin, else
+    # config/models' (the build then uses it too); without either both sides load the cached snapshot.
+    revision = catalog_model.hf_revision or candidate.pop("revision", None) or None
+    build = dict(candidate.pop("build", None) or {})
+    if revision and not manifest.get("hf_revision"):
+        build["hf_revision"] = revision
+    if build:  # a bundle other than the catalog's: its own name, so the catalog bundle is never served instead
+        build.setdefault("name", f"{profile}-qual")
 
-    # A family's own accuracy cases (dataset, reference, metric, gate) qualify models whose Task has no
-    # gold-labelled benchmark.
-    family_cases = _qualification_cases(repository, profile, "accuracy")
-    # Absolute accuracy: both sides scored against gold answers.
     absolute = _absolute(list(config.get("absolute") or []), tasks.get("benchmarks", {}),
                          (manifest.get("testcases") or [{}])[0], bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):
-            suite = _suite(item["suite_definition"], profile, repository)
+            suite = _suite(item["suite_definition"], profile)
             if item.get("request"):
                 suite = {**suite, "request": {**suite.get("request", {}), **item.pop("request")}}
             item["suite_definition"] = suite
+    supplementary = [dict(item) for item in config.get("supplementary", [])]
     if config.get("accuracy_source") not in (None, "none"):
         raise ConfigError(f"{profile}: accuracy_source may only be `none` (Perf only)")
     if config.get("accuracy_source") == "none":
         if not config.get("accuracy_note"):
             raise ConfigError(f"{profile}: accuracy_source none needs an accuracy_note (why no accuracy applies)")
-        accuracy_source = "none"
-    elif absolute or family_cases:
-        accuracy_source = "absolute" if absolute else "family"
-    else:
-        raise ConfigError(f"{profile}: no accuracy scheme: its Task has no `absolute` benchmark and its family no "
-                          "accuracy case (set accuracy_source: none with an accuracy_note for a Perf-only model)")
-    if accuracy_source == "none":
-        absolute = []
+        accuracy_source, absolute, supplementary = "none", [], []
+    elif absolute or supplementary:
+        accuracy_source = "absolute"
+    else:  # reported as an error: the Task's contract is not implemented yet (DESIGN.md Section 6)
+        accuracy_source = "missing"
+
     l1 = dict(config["performance"]["l1"])
-    if l1["suite"] == "catalog" and case and case.get("request") and not case["candidate"].get("model_directory"):
-        # The family's performance workload (the request benchmark qualification times).
-        l1["suite"] = {"suite": f"{profile}-qualification-perf", "version": 1,
-                       "source": {"kind": "qualification_perf", "profile": profile},
-                       "selection": {"method": "first", "count": 1}}
-    l1["suite"] = _suite(l1["suite"], profile, repository)
-    # One immutable checkpoint for the bundle and the native reference: the catalog pin, else the revision the family qualification pins for the same checkpoint.
-    family_candidate = ((family_cases[0] if family_cases else case) or {}).get("candidate", {})
-    revision = catalog_model.hf_revision or (
-        family_candidate.get("revision") if family_candidate.get("checkpoint", catalog_model.hf_id) == catalog_model.hf_id
-        else None) or None
+    if isinstance(l1["suite"], Mapping) and l1["suite"].get("from_benchmark"):
+        # The first problem of one of the model's benchmarks (a catalog testcase that is no workload,
+        # for example a 28-value time series against a 512-step model).
+        name = l1["suite"]["from_benchmark"]
+        source = next((item for item in absolute if item.get("suite") == name or item.get("name") == name), None)
+        if source is None or not isinstance(source.get("suite_definition"), Mapping):
+            raise ConfigError(f"{profile}: performance.l1.suite.from_benchmark {name!r} is not one of its gold suites")
+        l1["suite"] = {**source["suite_definition"], "suite": f"{profile}-{name}-first", "selection": {"method": "first", "count": 1}}
+    l1["suite"] = _suite(l1["suite"], profile)
     size = checkpoint_bytes(catalog_model.hf_id, revision)
     if size and size > LARGE_CHECKPOINT_BYTES and l1["measurement"]["requests"] > LARGE_MODEL_MEASUREMENT["requests"]:
         l1["measurement"] = dict(LARGE_MODEL_MEASUREMENT)
         l1["measurement_reason"] = f"checkpoint {size / 2**30:.0f} GiB > {LARGE_CHECKPOINT_BYTES / 2**30:.0f} GiB"
-    if backend == "script" and case:
-        # Family reference scripts validate request settings the catalog testcase may omit (for
-        # example MoGe's num_tokens): add the scalar settings of the qualification request.
-        extra = {key: value for key, value in (case.get("request") or {}).items()
-                 if not key.endswith("_path") and not isinstance(value, (dict, list))}
-        if l1["suite"]["source"].get("kind") in ("catalog_testcase", "qualification_perf"):
-            l1["suite"] = {**l1["suite"], "request": {**extra, **l1["suite"].get("request", {})}}
-    # candidate.build overrides catalog manifest fields for the qualified bundle (a new name keeps it
-    # apart from the catalog bundle); a family-prepared model directory replaces the checkpoint.
-    candidate = dict(config.get("candidate", {}))
-    build = dict(candidate.pop("build", None) or _qualified_build(
-        profile, manifest, family_cases[0] if family_cases else case))
-    if revision and not manifest.get("hf_revision") and not build.get("hf_revision"):
-        build = {"name": f"{profile}-qual", **build, "hf_revision": revision}  # build the pinned checkpoint
-    # The benchmarks' prompts and answers must fit the bundle: a longer one is built under the -qual name.
-    needed = max((int(item.get("sequence_length", 0)) for item in absolute), default=0)
-    if needed and config.get("absolute_sequence_length"):  # a model whose longer bundles cannot run
-        needed = min(needed, int(config["absolute_sequence_length"]))
-    current = build.get("max_sequence_length") or catalog_model.build_settings.get("max_sequence_length")
-    if needed and (not current or int(current) < needed):
-        # Bundles are reused by path, whatever their length: the name carries the length, so a shorter
-        # bundle of the same profile (an earlier campaign's `-qual`) is never served instead.
-        build = {**build, "name": f"{profile}-qual-{needed}", "max_sequence_length": needed}
     bundle = f"{build.get('name', profile)}/{build.get('bundle', catalog_model.bundle_name)}"
-    # The native model the family declares (another checkpoint, e.g. a base model, or a Diffusers export)
-    # and its pin; otherwise the candidate's own checkpoint at the candidate's revision.
-    options = (declared or {}).get("adapter_options") or {}
-    declared_model = (declared or {}).get("model") or options.get("model_id")
-    declared_revision = (declared or {}).get("revision") or options.get("model_revision")
-    reference_model = reference.get("model") or (declared_model if declared_model not in (None, catalog_model.hf_id)
-                                                 else None)
-    reference_revision = reference.get("revision") or (
-        declared_revision if reference_model and reference_model == declared_model
-        else None if reference_model else declared_revision if declared_model == catalog_model.hf_id and declared_revision
-        else revision)
+    reference_model = reference.pop("model", None)
+    reference_revision = reference.pop("revision", None) or (None if reference_model else revision)
     return {
         "model": profile, "catalog_profile": profile, "operation": operation, "family": catalog_model.family,
         "task": catalog_model.task,
@@ -276,20 +206,15 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
                       "manifest": str(catalog_model.manifest_path), "checkpoint": catalog_model.hf_id,
                       "revision": revision, "quantization": quantization,
                       "max_sequence_length": build.get("max_sequence_length")
-                      or catalog_model.build_settings.get("max_sequence_length"),
-                      "model_directory": (case or {}).get("candidate", {}).get("model_directory"), **candidate},
-        "reference": {**{key: value for key, value in reference.items() if key not in ("backend", "fallback")},
-                      **({"model": reference_model} if reference_model else {}), "revision": reference_revision,
-                      "backend": backend, "fallback": fallback, "precision": reference_precision,
-                      "declared_precision": declared_precision if declared_precision != reference_precision else None,
-                      "perf_precision": perf_precision, "trust_remote_code": trust_remote_code},
+                      or catalog_model.build_settings.get("max_sequence_length"), **candidate},
+        "reference": {**reference, **({"model": reference_model} if reference_model else {}),
+                      "revision": reference_revision, "backend": backend,
+                      "precision": reference.get("precision") or "fp32",
+                      "perf_precision": candidate_precision if candidate_precision in PRECISIONS else "bf16",
+                      "trust_remote_code": trust_remote_code},
         "accuracy_source": accuracy_source,
         **({"accuracy_note": str(config["accuracy_note"])} if accuracy_source == "none" else {}),
-        "absolute": absolute,
-        "family_accuracy": [item["name"] for item in family_cases] if accuracy_source == "family" else [],
-        # The family cases are reported but not judged where gold-referenced checks decide (generated media).
-        "family_informational": bool(config.get("family_cases_informational")) and accuracy_source == "family",
-        "supplementary": [dict(item) for item in config.get("supplementary", [])],
+        "absolute": absolute, "supplementary": supplementary,
         **({"coverage": str(config["coverage"])} if config.get("coverage") else {}),
         "performance": {"l1": l1, **({"l2": dict(config["performance"]["l2"])}
                                      if config["performance"].get("l2") else {})},

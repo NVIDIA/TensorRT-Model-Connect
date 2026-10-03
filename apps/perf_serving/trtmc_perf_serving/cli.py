@@ -51,8 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = commands.add_parser("serve", help="serve one operation of one backend")
     _profile_arguments(serve)
-    serve.add_argument("--backend", required=True, choices=("trtmc", "reference", "script"),
-                       help="reference: generic Hugging Face adapters; script: the family's qualification reference")
+    serve.add_argument("--backend", required=True, choices=("trtmc", "reference"),
+                       help="trtmc: the TRTMC bundle; reference: the generic Hugging Face adapters")
     serve.add_argument("--bundle", type=Path, help="TRTMC bundle (trtmc backend)")
     serve.add_argument("--runtime-root", type=Path, help="directory with libtrtmc_runtime and family DSOs")
     serve.add_argument("--worker", type=Path, help="trtmc_benchmark_worker executable")
@@ -62,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--reference-revision", help="revision of the reference checkpoint (default: --revision)")
     serve.add_argument("--revision", help="the profile checkpoint's revision when the catalog does not pin one")
     serve.add_argument("--reference-options", default="{}", help="adapter options JSON")
+    serve.add_argument("--reference-adapter", help="a family's native pipeline file (defines Adapter)")
     serve.add_argument("--trust-remote-code", action="store_true")
     serve.add_argument("--deterministic", action="store_true",
                        help="reference only: disable TF32 and use deterministic kernels (golden generation)")
@@ -83,10 +84,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("platform", help="print the platform fingerprint and host details as JSON")
 
     env = commands.add_parser("reference-env",
-                              help="prepare the profile's reference Python environment and print its interpreter")
-    env.add_argument("--profile", required=True)
-    env.add_argument("--manifest-root", type=Path, default=Path("families"))
-    env.add_argument("--root", type=Path, required=True, help="directory holding the family environments")
+                              help="prepare a reference Python environment and print its interpreter")
+    env.add_argument("--requirements", type=Path, help="requirements file layered on this interpreter (none: it as is)")
+    env.add_argument("--root", type=Path, required=True, help="directory holding the environments")
+    env.add_argument("--no-build-isolation", action="store_true", help="pip install --no-build-isolation")
+    env.add_argument("--prepare", type=Path, help="a script run once with the environment's interpreter after "
+                                                    "installing (for example an upstream checkout)")
 
     payload = commands.add_parser("payload", help="write aiperf mooncake_trace payloads for /v1/tasks")
     _profile_arguments(payload)
@@ -143,15 +146,6 @@ def serve(arguments: argparse.Namespace) -> int:
                                      request_timeout_s=arguments.request_timeout,
                                      full_observations=arguments.full_observations,
                                      isolate_requests=arguments.isolate_requests)
-    elif arguments.backend == "script":
-        from .backends.script import ScriptReferenceBackend
-
-        options = _json_object(arguments.reference_options, "--reference-options")
-        backend = ScriptReferenceBackend(
-            repository=arguments.manifest_root.resolve().parent, profile=arguments.profile, mode=arguments.mode,
-            scratch=arguments.scratch / "_script", runtime_root=arguments.runtime_root or Path("/nonexistent"),
-            warmup=int(options.get("warmup", 0)), iterations=int(options.get("iterations", 1)),
-            precision=arguments.precision)
     else:
         from .backends.reference import ReferenceBackend
         from .backends.reference.common import ReferenceSpec
@@ -164,9 +158,10 @@ def serve(arguments: argparse.Namespace) -> int:
             mode=arguments.mode,
             trust_remote_code=arguments.trust_remote_code,
             deterministic=arguments.deterministic,
-            options=_json_object(arguments.reference_options, "--reference-options")))
+            options=_json_object(arguments.reference_options, "--reference-options"),
+            adapter=arguments.reference_adapter))
     latent_replay = None
-    if profile.operation == "generate_image" and arguments.backend in ("trtmc", "reference"):
+    if profile.operation == "generate_image":
         from .latents import Replay, read_checkpoint, snapshot
 
         source = ((arguments.reference_model, arguments.reference_revision)
@@ -208,24 +203,12 @@ def write_payload(arguments: argparse.Namespace) -> int:
 
 
 def reference_env(arguments: argparse.Namespace) -> int:
-    """Family reference environments are the benchmark qualification ones: declared requirements and
-    hook, keyed by their digest, layered on this interpreter. Profiles without a declaration use it as is."""
-    from .backends.script import _import_qualification
+    from .environments import reference_python
 
-    repository = arguments.manifest_root.resolve().parent
-    catalog, runtime, _, _ = _import_qualification(repository)
-    cases = [case for case in catalog.discover(repository) if case.model == arguments.profile]
-    python = Path(sys.executable)
-    requirements = None
-    if cases and cases[0].reference_requirements is not None:
-        root = arguments.root.resolve()
-        context = runtime.RuntimeContext(
-            repository=repository, artifacts=root / "_setup", data_root=root, environment_root=root,
-            bundle_cache=root, bundle_roots=(), runtime_root=None, trtmc_bench=repository, worker=None,
-            datasets={}, reference_pythons={}, no_build=True, verbose=False)
-        python = runtime.reference_python(cases[0], context)
-        requirements = str(cases[0].reference_requirements)
-    print(json.dumps({"python": str(python), "requirements": requirements}))
+    python = (reference_python(arguments.requirements, arguments.root, build_isolation=not arguments.no_build_isolation,
+                               prepare=arguments.prepare)
+              if arguments.requirements else Path(sys.executable))
+    print(json.dumps({"python": str(python), "requirements": str(arguments.requirements or "") or None}))
     return 0
 
 

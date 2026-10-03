@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import sysconfig
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -61,27 +62,29 @@ def recheck_output(out: Path, l1: dict, item: dict) -> dict | None:
 
     from .runner import output_check, sampled_request
 
+    request_name = item.get("request")
+    suffix = f"-{request_name}" if request_name else ""
+
     def first_output(mode: str) -> Any:
-        dirs = sorted(out.glob(f"perf-reference-{mode}-*/run_01")) + [out / f"perf-reference-{mode}" / "run_01"]
-        found = [path for path in dirs if path.is_dir() and (path / "profile_export_raw.jsonl").is_file()]
+        found = [path for path in sorted(out.glob(f"perf-reference-{mode}-*{suffix}/run_01"))
+                 if (path / "profile_export_raw.jsonl").is_file()]
         return judge.first_observation(AiperfRun(found[-1], 0, []).raw_records()) if found else None
 
     mode = item["reference_mode"]
-    candidate_dir = out / "perf-candidate" / "run_01"
+    candidate_dir = out / f"perf-candidate{suffix}" / "run_01"
     references = {name: first_output(name) for name in {mode, "eager"}}
     if references.get(mode) is None or not candidate_dir.is_dir():
         return None
     candidate = judge.first_observation(AiperfRun(candidate_dir, 0, []).raw_records())
-    inputs = out / "perf-candidate.inputs.jsonl"
+    inputs = out / f"perf-candidate{suffix}.inputs.jsonl"
     request = json.loads(json.loads(inputs.read_text().splitlines()[0])["text"])["request"] if inputs.is_file() else {}
     match, reason = output_check(l1, candidate, references, mode, sampled_request(request))
     return {"match": match, "reason": reason}
 
 
 def current_settings(model: dict, environment) -> dict:
-    """The recorded model with today's judging settings (benchmark gates, which checks and family cases
-    are informational, the Perf output check and margins), so a judge-only configuration change needs
-    no rerun."""
+    """The recorded model with today's judging settings (benchmark gates, which checks are informational,
+    the Perf output check and margins), so a judge-only configuration change needs no rerun."""
     from . import models
 
     try:
@@ -94,7 +97,6 @@ def current_settings(model: dict, environment) -> dict:
     l1 = {**model["performance"]["l1"],
           **{key: value for key, value in current["performance"]["l1"].items() if key in judging}}
     return {**model, "absolute": absolute, "supplementary": current["supplementary"],
-            "family_informational": current.get("family_informational", False),
             "accuracy_source": current["accuracy_source"], "performance": {**model["performance"], "l1": l1}}
 
 
@@ -113,8 +115,7 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
         recorded = json.loads((out / "model.json").read_text())
         current = models.resolve_model(recorded["catalog_profile"], environment)
         # Today's checks against today's native reference (which backend, which precisions).
-        model = {**recorded, "supplementary": current["supplementary"], "reference": current["reference"],
-                 "family_informational": current.get("family_informational", False)}
+        model = {**recorded, "supplementary": current["supplementary"], "reference": current["reference"]}
         checks = [{**check, "reuse_outputs": not regenerate} for check in model["supplementary"]
                   if (not only or check["check"] in only) and applies(check, model)]
         if not checks:
@@ -131,20 +132,36 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
                                 "error": f"{type(error).__name__}: {str(error)[-800:]}"})
         result = json.loads(path.read_text())
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("suite") not in suites] + entries
+        preserve_original(out)
         path.write_text(json.dumps(result, indent=2, default=str))
         (out / "model.json").write_text(json.dumps(model, indent=2, default=str))
     return rejudge_reports(outs, environment)
 
 
+ORIGINAL_REPORT = "report.original.json"
+
+
+def preserve_original(out: Path) -> None:
+    """Keep the report a run wrote (``report.original.json`` / ``.md``) before re-judging or re-checking
+    replaces ``report.json``; the first original is never overwritten."""
+    import shutil
+
+    for name, original in (("report.json", ORIGINAL_REPORT), ("report.md", "report.original.md")):
+        if (out / name).is_file() and not (out / original).exists():
+            shutil.copy2(out / name, out / original)
+
+
 def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
     """Re-apply the current judge to recorded statistics (no model is run); with an environment, also
-    today's judging settings from the configuration."""
+    today's judging settings from the configuration. The run's own report is kept next to the result
+    (``preserve_original``)."""
     import yaml
 
     from . import absolute, judge
     from .config import CONFIG_ROOT
     from .report import write_report
-    from .runner import expected_suites, informational_suites, mark_informational, missing_results
+    from .runner import (CONVERSION_PARITY, conversion_parity, expected_suites, informational_suites, mark_informational,
+                         missing_results, smoke_verdict)
 
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())
     for out in outs:
@@ -170,31 +187,35 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
                                               max_ci_percent=float(l1.get("max_ci_percent", 5)),
                                               outputs_match=bool(check.get("match")),
                                               output_reason=str(check.get("reason", "")),
-                                              not_equivalent=l1.get("not_equivalent"))
+                                              not_equivalent=l1.get("not_equivalent"),
+                                              candidate_precision=(model.get("reference") or {}).get("perf_precision"))
             result["performance_l1"][index] = {key: item[key] for key in item
-                                               if key in ("reference_mode", "candidate_timing_scope",
+                                               if key in ("reference_mode", "request", "candidate_timing_scope",
                                                           "reference_timing_scope", "reference_backend")} | verdict
+        requests = sorted({item.get("request") for item in result.get("performance_l1", [])}, key=str) or [None]
         if result.get("performance_l1"):
             from .runner import unavailable_mode
 
-            measured = {item["reference_mode"] for item in result["performance_l1"]}
+            measured = {(item["reference_mode"], item.get("request")) for item in result["performance_l1"]}
             result["performance_l1"] += [
-                unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"))
-                for mode in l1.get("reference_modes", []) if mode not in measured]
-        from .family import refresh
-
-        result["accuracy"] = [refresh(item) for item in result.get("accuracy", [])]
+                unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"), request)
+                for mode in l1.get("reference_modes", []) for request in requests if (mode, request) not in measured]
         for item in result["accuracy"]:
             if item.get("source") == "absolute":  # both sides' scores are kept: re-apply today's gate
                 declared = next((entry for entry in model.get("absolute", []) if entry["suite"] == item["suite"]), {})
+                judged = dict(item.get("gate") or {})
                 if environment is not None and declared.get("gate"):
                     item["gate"] = dict(declared["gate"])
                 if item.get("metrics") and item["status"] != "error":
-                    item["status"], item["reasons"] = absolute.status(item["metrics"], item["gate"],
-                                                                      expected=item["expected_samples"],
-                                                                      paired=item["samples"])
-                    item["notes"] = absolute.notes(item["metrics"])
+                    if "counts" in item or "per_problem_regression" in item["metrics"]:  # binary: re-test
+                        item["metrics"]["test"] = absolute.binary_test(item)
+                    elif item["gate"] != judged:  # a corpus bootstrap needs the outputs: rerun the model
+                        item["metrics"]["test"] = {"outcome": None}
+                    item["status"], item["reasons"] = absolute.status(item)
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("source") != "missing"]
+        if model.get("accuracy_source") == "none":  # re-derived from today's output checks
+            result["accuracy"] = [item for item in result["accuracy"] if item.get("suite") != CONVERSION_PARITY]
+            result["accuracy"] += conversion_parity(result.get("performance_l1", []))
         # Results the configuration no longer asks for (a retired check or suite) stay as evidence only.
         configured = set(expected_suites(model)) | informational_suites(model)
         for item in result["accuracy"]:
@@ -205,7 +226,11 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
         result["accuracy_source"] = model.get("accuracy_source", result.get("accuracy_source"))
         result["accuracy"] += missing_results(model, result["accuracy"], result.get("errors") or {})
         result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)),
-                                          expected_modes=len(l1.get("reference_modes", [])) if l1 else 0)
+                                          expected_modes=len(requests) if l1 else 0)
+        if result.get("mode") == "smoke":  # a smoke result stays a smoke result
+            result["verdict"] = smoke_verdict(result)
+        preserve_original(out)
+        result["rejudged"] = {"time": time.time(), "original": ORIGINAL_REPORT}
         write_report(out, result)
         print(json.dumps({"out": str(out), **result["verdict"]}))
     return 0
@@ -218,6 +243,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--profile", required=True, help="catalog profile; its configuration is derived")
     run.add_argument("--environment", type=Path, required=True)
     run.add_argument("--out", type=Path, required=True)
+    run.add_argument("--smoke", action="store_true", help="one problem per benchmark and one timed request: "
+                                                          "validates the pipeline, never a verdict "
+                                                          "(results in <out's directory>/smoke/<out's name>)")
     batch = commands.add_parser("run-all", help="run this machine's model list (environment 'models', "
                                                 "or --profile ...) in sequence")
     batch.add_argument("--environment", type=Path, required=True)
@@ -225,6 +253,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     batch.add_argument("--profile", action="append", help="only these profiles")
     batch.add_argument("--shard", help="INDEX/COUNT: this host's share (profiles sharing a checkpoint stay together)")
     batch.add_argument("--rerun", action="store_true", help="rerun profiles that already have a result")
+    batch.add_argument("--smoke", action="store_true", help="smoke mode (results under <out-root>/smoke)")
     batch.add_argument("--no-prefetch", action="store_true",
                        help="do not download the next checkpoint during a run (lower disk peak)")
     merge = commands.add_parser("summary", help="merge result roots (for example one per host) into Markdown")
@@ -240,6 +269,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                                             "(and its exclusions)")
     plan.add_argument("--environment", type=Path, required=True)
     plan.add_argument("--profile", action="append", help="only these profiles")
+    matrix = commands.add_parser("matrix", help="the execution matrix (DESIGN.md Section 7): one CSV row per ready "
+                                                "profile with its native path, environment, workloads, and checks")
+    matrix.add_argument("--environment", type=Path, required=True)
+    matrix.add_argument("--profile", action="append", help="only these profiles")
+    matrix.add_argument("--output", type=Path, help="write the CSV here instead of stdout")
     rejudge = commands.add_parser("rejudge", help="recompute Perf lights and verdicts of existing reports")
     rejudge.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
     rejudge.add_argument("--environment", type=Path,
@@ -294,6 +328,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         environment = load_environment(arguments.environment)
         environment.values["environment_file"] = str(arguments.environment.resolve())  # for reproduction commands
+        if getattr(arguments, "smoke", False):
+            environment.values["smoke"] = True
         if environment.values.get("hf_hub_cache"):  # tokenizers loaded here use the managed cache too
             os.environ["HF_HUB_CACHE"] = str(environment["hf_hub_cache"])
         from .models import resolve_model
@@ -311,6 +347,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .campaign import exit_code, parse_shard, run_all, shard, write_exclusions, write_plan
 
             names, excluded = machine_list()
+            if arguments.smoke and arguments.out_root.name != "smoke":  # never mixed with formal results
+                arguments.out_root = arguments.out_root / "smoke"
             write_exclusions(arguments.out_root, excluded)
             for item in excluded:
                 print(json.dumps({**item, "category": "excluded"}), flush=True)
@@ -326,7 +364,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_plan(arguments.out_root, [model["model"] for model in models], config_errors)
             records = run_all(environment, models, arguments.out_root, rerun=arguments.rerun,
                               prefetch_next=not arguments.no_prefetch)
-            return exit_code(records, config_errors)
+            return exit_code(records, config_errors, smoke=arguments.smoke)
+        if arguments.command == "matrix":
+            from .matrix import write_matrix
+
+            names, _ = machine_list()
+            return write_matrix(environment, names, arguments.output)
         if arguments.command == "plan":
             names, excluded = machine_list()
             for item in excluded:
@@ -336,10 +379,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     model = resolve_model(name, environment)
                     print(json.dumps({"profile": name, "task": model["task"], "operation": model["operation"],
                                       "backend": model["reference"]["backend"],
-                                      "fallback": model["reference"]["fallback"],
                                       "accuracy_source": model["accuracy_source"],
                                       "benchmarks": [item["suite"] for item in model["absolute"]],
-                                      "family_cases": model["family_accuracy"],
                                       "supplementary": [item["check"] for item in model["supplementary"]],
                                       "perf_request": model["performance"]["l1"]["suite"]["source"]["kind"],
                                       "bundle": model["candidate"]["bundle"],
@@ -349,9 +390,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         from .campaign import run_one
 
+        if arguments.smoke and arguments.out.parent.name != "smoke":  # as run-all: <dir>/smoke/<profile>
+            arguments.out = arguments.out.parent / "smoke" / arguments.out.name
         record = run_one(environment, resolve_model(arguments.profile, environment), arguments.out)
         print(json.dumps({"report": str(arguments.out / "report.md"), **record}))
-        return 0 if record["category"] == "pass" else 1
+        return 0 if record["category"] in ("pass", "smoke-pass") else 1
     except ConfigError as error:
         print(f"trtmc-aiperf-qual: {error}", file=sys.stderr)
         return 2

@@ -36,17 +36,38 @@ def supported_operations() -> tuple[str, ...]:
     return tuple(sorted(_ADAPTERS))
 
 
+def _family_adapter(path: str) -> type:
+    """``Adapter`` of a family's native pipeline file (model-specific code stays in its family)."""
+    import importlib.util
+    import sys
+
+    file = Path(path).resolve()
+    if not file.is_file():
+        raise BackendUnavailable(f"family native adapter not found: {file}")
+    name = f"trtmc_family_native_{file.parent.name}"
+    spec = importlib.util.spec_from_file_location(name, file)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    if not hasattr(module, "Adapter"):
+        raise BackendUnavailable(f"{file} defines no Adapter")
+    return module.Adapter
+
+
 class ReferenceBackend:
     def __init__(self, spec: ReferenceSpec) -> None:
-        if spec.operation not in _ADAPTERS:
+        if spec.operation not in _ADAPTERS and not spec.adapter:
             raise BackendUnavailable(
                 f"no Python reference adapter for {spec.operation!r}; supported: {', '.join(supported_operations())}")
         if spec.mode not in MODES:
             raise BackendUnavailable(f"mode must be one of {MODES}")
         import importlib
 
-        module_name, class_name = _ADAPTERS[spec.operation]
-        module = importlib.import_module(f"{__name__}.{module_name}")
+        if spec.adapter:
+            adapter_cls = _family_adapter(spec.adapter)
+        else:
+            module_name, class_name = _ADAPTERS[spec.operation]
+            adapter_cls = getattr(importlib.import_module(f"{__name__}.{module_name}"), class_name)
         self.operation = spec.operation
         self._spec = spec
         self._numerics: dict[str, Any] = {"deterministic": False}
@@ -54,7 +75,7 @@ class ReferenceBackend:
             from ...platform import apply_deterministic_numerics
 
             self._numerics = {"deterministic": True, **apply_deterministic_numerics()}
-        self._adapter = getattr(module, class_name)(spec)
+        self._adapter = adapter_cls(spec)
 
     def describe(self) -> Mapping[str, Any]:
         spec = self._spec

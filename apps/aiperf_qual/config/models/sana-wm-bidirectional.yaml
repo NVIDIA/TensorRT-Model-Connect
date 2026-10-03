@@ -1,6 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# One fixed image and action at the family gate (PSNR 5 dB / SSIM 0.1); the reference is the family script
-# (no caller latents, so no pixel parity under replay).
-coverage: one fixed image/action input at PSNR 5 / SSIM 0.1 - smoke coverage, not action-conditional validation
+# The family's build reads the materialized model directory (the snapshot with its stage-1 text encoder), not
+# the Hugging Face repository alone: the build takes the directory native_prepare.py prepares.
+candidate:
+  model_directory: trtmc-reference/SANA-model
+
+reference:
+  adapter: families/sana_wm/tests/native_reference.py  # the pinned official SANA source (no generic adapter)
+  prepare: families/sana_wm/tests/native_prepare.py
+  requirements: families/sana_wm/requirements.txt
+
+performance:
+  l1:
+    # The catalog request states cfg_scale 5.0, which TRTMC's pipeline and the official one both take first; its
+    # guidance_scale stays -1. Stated as the same 5.0 so no side can fall back to a default.
+    suite:
+      suite: sana-wm-bidirectional-catalog
+      version: 2
+      source: {kind: catalog_testcase, profile: sana-wm-bidirectional}
+      selection: {method: first, count: 1}
+      request: {guidance_scale: 5.0}

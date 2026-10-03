@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/sam3/tests/native_reference.py  # Sam3Model with the text prompt (no generic adapter)
+  requirements: families/sam3/requirements.txt  # the family's dependencies, layered on the serving interpreter

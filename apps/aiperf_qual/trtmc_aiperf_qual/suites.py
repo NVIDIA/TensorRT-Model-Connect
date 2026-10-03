@@ -9,8 +9,10 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import random
+import statistics
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -58,6 +60,13 @@ def with_latent_seeds(suite: Suite, base: int = 1000) -> Suite:
     return Suite(suite.name, key, samples, {**suite.manifest, "key": key, "latent_seed_base": base})
 
 
+def single_request_suite(name: str, request: Mapping[str, Any], manifest: Mapping[str, Any]) -> Suite:
+    """A one-sample suite (a timed request) under its own name and key."""
+    sample = {"sample_id": name, "task": name, "request": dict(request), "request_sha": request_sha(request)}
+    key = sha256_text(canonical({"suite": name, "samples": [sample["request_sha"]]}))
+    return Suite(name, key, [sample], {**manifest, "suite": name, "key": key, "samples": 1})
+
+
 def limit_suite(suite: Suite, count: int) -> Suite:
     """The first ``count`` samples (a new suite key)."""
     if len(suite.samples) <= count:
@@ -69,7 +78,8 @@ def limit_suite(suite: Suite, count: int) -> Suite:
 
 def select(records: Sequence[dict[str, Any]], selection: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Deterministic selection: first N, every k-th (stride to N), class-balanced (``stratified`` over a
-    field), or explicit indices; optionally per task."""
+    field), a seeded random sample (``seeded``, stratified over ``field`` when given: each value's
+    records shuffled, then taken round-robin), or explicit indices; optionally per task."""
     if selection.get("per_task"):
         groups: dict[str, list[dict[str, Any]]] = {}
         for record in records:
@@ -91,6 +101,16 @@ def select(records: Sequence[dict[str, Any]], selection: Mapping[str, Any]) -> l
         chosen = [group[depth] for depth in range(max(map(len, groups.values()), default=0))
                   for group in groups.values() if depth < len(group)][:count]
         return [record for _, record in sorted(chosen, key=lambda pair: pair[0])]
+    if method == "seeded":  # DESIGN.md 4.4: seeded stratified sampling, records in their sampled order
+        count, field = int(require(selection, "count", "selection")), selection.get("field")
+        generator = random.Random(int(selection.get("seed", SELECTION_SEED)))
+        groups = {}
+        for record in records:
+            groups.setdefault(json.dumps(record.get(field), sort_keys=True) if field else "", []).append(record)
+        for members in groups.values():
+            generator.shuffle(members)
+        return [group[depth] for depth in range(max(map(len, groups.values()), default=0))
+                for group in groups.values() if depth < len(group)][:count]
     if method == "indices":
         indices = require(selection, "indices", "selection")
         if any(index >= len(records) for index in indices):
@@ -265,15 +285,25 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
         candidates = [index for index in candidates
                       if all(columns[name][index] == value for name, value in source["where"].items())]
     # A stratified selection reads its field (the label column) before any media are decoded.
-    field = selection.get("field") if selection.get("method") == "stratified" else None
+    field = selection.get("field") if selection.get("method") in ("stratified", "seeded") else None
     column = (label_column if field == "label" else field) if field else None
     values = (table[column] if not meta.streaming else [row[column] for row in table]) if column else None
-    chosen = select([{"id": f"{name}/{index}", "row": index, **({field: values[index]} if column else {})}
+    # ``cluster_column``: the independent unit of a row (a speaker, an image) the bootstrap resamples;
+    # ``one_per_cluster`` keeps a cluster's first row only (independent pairs for a paired test).
+    cluster_column = source.get("cluster_column")
+    clusters = ((table[cluster_column] if not meta.streaming else [row[cluster_column] for row in table])
+                if cluster_column else None)
+    if clusters is not None and source.get("one_per_cluster"):
+        seen: set[str] = set()
+        candidates = [index for index in candidates
+                      if not (str(clusters[index]) in seen or seen.add(str(clusters[index])))]
+    chosen = select([{"id": f"{name}/{index}", "row": index, **({field: values[index]} if column else {}),
+                      **({"cluster": str(clusters[index])} if clusters is not None else {})}
                      for index in candidates], selection)
     records = []
     for item in chosen:
         row = table[item["row"]]
-        record: dict[str, Any] = {"id": item["id"]}
+        record: dict[str, Any] = {"id": item["id"], **({"cluster": item["cluster"]} if "cluster" in item else {})}
         if "prompt" in roles:
             record["prompt"] = row[roles["prompt"]]
         if "image" in roles:
@@ -333,20 +363,37 @@ def _verified(source: Mapping[str, Any], environment: Environment) -> Path:
     return path
 
 
+def _hf_file(source: Mapping[str, Any]) -> Path:
+    """One file of a Hugging Face dataset repository at a pinned revision (``hf_file`` sources)."""
+    from huggingface_hub import hf_hub_download
+
+    return Path(hf_hub_download(require(source, "repo", "source"), require(source, "filename", "source"),
+                                revision=require(source, "revision", "source"), repo_type="dataset"))
+
+
+def _read_records(path: Path) -> Any:
+    """JSON, JSONL (optionally gzip-compressed), or TSV content."""
+    import gzip
+
+    if path.name.endswith(".jsonl.gz"):
+        return [json.loads(line) for line in gzip.decompress(path.read_bytes()).decode().splitlines() if line.strip()]
+    if path.suffix == ".jsonl":
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    if path.suffix == ".tsv":
+        return list(csv.DictReader(io.StringIO(path.read_text()), delimiter="\t"))
+    return json.loads(path.read_text())
+
+
 def _json_manifest_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
-    """Records from a sha256-verified JSON, JSONL, or TSV manifest under data_root.
+    """Records from a sha256-verified JSON, JSONL, or TSV manifest under data_root, or (``hf_file``) one
+    file of a Hugging Face dataset at a pinned revision.
 
     ``file_fields`` (dotted names reach nested values) are resolved relative to the manifest
     directory, so ``*_path`` request fields are inlined (``square_crop`` fields become their centered
     square once selected); ``explode`` turns each record into one record per listed text field.
     """
-    path = _verified(source, environment)
-    if path.suffix == ".jsonl":
-        data: Any = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    elif path.suffix == ".tsv":
-        data = list(csv.DictReader(io.StringIO(path.read_text()), delimiter="\t"))
-    else:
-        data = json.loads(path.read_text())
+    path = _hf_file(source) if source.get("kind") == "hf_file" else _verified(source, environment)
+    data = _read_records(path)
     records = data[source["records"]] if source.get("records") else data
     id_field = source.get("id_field", "id")
     records = [{**record, "id": str(record[id_field]) if id_field in record else str(index)}
@@ -394,74 +441,53 @@ def _square_crop(path: Path, cache: Path) -> Path:
     return target
 
 
+SELECTION_SEED = 20261003  # the seeded selections of every suite (DESIGN.md 4.4)
+ETTH1_TRAIN_ROWS = 8640  # the standard split's training months: the scaler of the scored MSE
+
+
 def _etth1_window_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
-    """Seeded ETTh1 forecast windows, as benchmark qualification draws them: every ``stride`` hours of
-    the test range, shuffled with ``seed``; ``past_values`` is row-major [time, column]."""
+    """Seeded ETTh1 forecast windows: every ``stride`` hours of the test range, shuffled with ``seed``;
+    ``past_values`` is row-major [time, column] in the raw units the models take. The gold future
+    carries each column's training mean and standard deviation, so the MSE is scored on scaled values
+    (the standard protocol)."""
     rows = list(csv.DictReader(io.StringIO(_verified(source, environment).read_text())))
     window = require(source, "window", "source")
     columns, context = window.get("columns", ["OT"]), int(window.get("context_length", 512))
     start, end = int(window.get("test_target_start", 11520)), int(window.get("test_end", 14400))
     prediction = int(window.get("prediction_length", 0))
-    starts = list(range(start - context, end - context - prediction + 1, int(window.get("stride", 24))))
+    stride = int(window.get("stride", 24))
+    starts = list(range(start - context, end - context - prediction + 1, stride))
     random.Random(int(source.get("seed", 20260715))).shuffle(starts)
     if len(rows) < end or not starts:
         raise ConfigError("ETTh1 data cannot satisfy the configured window")
-    records = []
+    train = [[float(row[column]) for row in rows[:ETTH1_TRAIN_ROWS]] for column in columns]
+    scaler = {"mean": [statistics.fmean(values) for values in train], "std": [statistics.pstdev(values) for values in train]}
+    # Windows overlap within context + horizon hours: the bootstrap resamples moving blocks of that many
+    # consecutive windows (DESIGN.md 4.3), so each record carries its position in the series.
+    records, block = [], math.ceil((context + prediction) / stride)
     for index, first in enumerate(starts):
         values = [float(row[column]) for row in rows[first:first + context] for column in columns]
-        record = {"id": f"etth1-{index:04d}", "request": {
+        record = {"id": f"etth1-{index:04d}", "series": {"position": (first - (start - context)) // stride,
+                                                         "block": block}, "request": {
             "past_values": values, "observed_mask": [1.0] * len(values), "frequency": int(window.get("frequency", 0))}}
         if source.get("gold"):  # the observed future the forecast is scored against (row-major [time, column])
             future = rows[first + context:first + context + prediction]
-            record["label"] = [float(row[column]) for row in future for column in columns]
+            record["label"] = {"values": [float(row[column]) for row in future for column in columns],
+                               "mean": scaler["mean"], "std": scaler["std"]}
         records.append(record)
     return records
 
 
-# Generation controls that resolve to -1 ("model default") unless stated under the name the testcase
-# resolver reads: the descriptor of a family request keeps ``num_steps``, while image-generation
-# testcases read ``num_inference_steps``. TRTMC then applies the family's default and a Diffusers
-# reference the pipeline's (FLUX.1-schnell: 4 vs 28 steps), so both would time different work.
-MODEL_DEFAULT_FIELDS = {"num_steps": ("num_steps", "num_inference_steps", "num_sampling_steps"),
-                        "guidance_scale": ("guidance_scale",), "cfg_scale": ("cfg_scale",),
-                        "num_frames": ("num_frames", "video_num_frames")}
+# Generation controls a request may leave at -1 ("model default"): TRTMC then applies the family's
+# default and a Diffusers reference the pipeline's (FLUX.1-schnell: 4 vs 28 steps), so both sides
+# would do different work. A timed request must state them.
+MODEL_DEFAULT_FIELDS = ("num_steps", "num_inference_steps", "num_sampling_steps", "guidance_scale", "cfg_scale",
+                        "num_frames", "video_num_frames")
 
 
-def fill_model_defaults(request: Mapping[str, Any], *sources: Mapping[str, Any]) -> dict[str, Any]:
-    """``request`` with each -1 generation control taken from the first source that states it."""
-    unset = (-1, -1.0)
-    filled = dict(request)
-    for field, names in MODEL_DEFAULT_FIELDS.items():
-        if request.get(field) not in unset:
-            continue
-        stated = [source[name] for source in sources for name in names if source.get(name) not in (None, *unset)]
-        if stated:
-            filled[field] = stated[0]
-    return filled
-
-
-def _qualification_perf_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
-    """The request the family's performance qualification times, resolved like a catalog testcase."""
-    from .models import _import_repository
-
-    repo = environment.path("repo")
-    _import_repository(repo)
-    from qualification_tests.benchmark_qualification import accuracy, catalog, runtime
-
-    profile = require(source, "profile", "source")
-    case = next((case for case in catalog.discover(repo) if case.model == profile and case.kind == "performance"),
-                None)
-    if case is None or not isinstance(case.values.get("request"), Mapping):
-        raise ConfigError(f"{profile} has no family performance request")
-    request = accuracy._resolve_task_assets(case, case.values["request"])
-    with tempfile.TemporaryDirectory() as scratch:
-        descriptor = runtime.write_model_descriptor(case, Path(scratch), request)
-        records = _catalog_testcase_records({"profile": str(descriptor)}, environment)
-    resolved = records[0]["request"]
-    if any(resolved.get(field) in (-1, -1.0) for field in MODEL_DEFAULT_FIELDS):
-        catalog_request = _catalog_testcase_records({"profile": profile}, environment)[0]["request"]
-        resolved = fill_model_defaults(resolved, request, catalog_request)
-    return [{**records[0], "request": resolved, "id": f"{profile}:{case.name}"}]
+def unstated_defaults(request: Mapping[str, Any]) -> list[str]:
+    """The generation controls ``request`` leaves to each side's default (-1)."""
+    return [field for field in MODEL_DEFAULT_FIELDS if request.get(field) in (-1, -1.0)]
 
 
 def _catalog_testcase_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
@@ -481,12 +507,125 @@ def _catalog_testcase_records(source: Mapping[str, Any], environment: Environmen
     return [{"id": source.get("testcase") or source["profile"], "request": request}]
 
 
+SCIFACT = ("mteb/scifact", "cf10ab6856b15b0e670ef8ae5dae4e266c12d035")
+RERANK_CANDIDATES = 20
+
+
+def _bm25_top(query: str, documents: Sequence[list[str]], frequencies: Mapping[str, int], average: float,
+              count: int, k1: float = 1.5, b: float = 0.75) -> list[int]:
+    """Okapi BM25 ranking of tokenized ``documents`` for ``query``: the indices of the best ``count``."""
+    import math as _math
+
+    total = len(documents)
+    terms = query.lower().split()
+    scores = []
+    for index, words in enumerate(documents):
+        counts: dict[str, int] = {}
+        for word in words:
+            counts[word] = counts.get(word, 0) + 1
+        score = 0.0
+        for term in terms:
+            if term in counts:
+                idf = _math.log(1 + (total - frequencies[term] + 0.5) / (frequencies[term] + 0.5))
+                tf = counts[term]
+                score += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * len(words) / average))
+        scores.append((-score, index))
+    return [index for _, index in sorted(scores)[:count]]
+
+
+def _scifact_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """SciFact (BEIR, pinned) test queries with their relevance judgments. ``mode: retrieval``: every test
+    query, then every corpus document (title and text), the query's label being its relevant documents'
+    positions among them (smoke mode: one query, its relevant documents, and nine others). ``mode: rerank``:
+    per query its BM25 top-20 documents as one request, the label the relevant ones' positions."""
+    repo, revision = SCIFACT
+    corpus = _read_records(_hf_file({"repo": repo, "filename": "corpus.jsonl", "revision": revision}))
+    queries = {row["_id"]: row["text"] for row in _read_records(_hf_file({"repo": repo, "filename": "queries.jsonl",
+                                                                          "revision": revision}))}
+    qrels: dict[str, list[str]] = {}
+    for row in _read_records(_hf_file({"repo": repo, "filename": "qrels/test.tsv", "revision": revision})):
+        if int(row["score"]) > 0:
+            qrels.setdefault(row["query-id"], []).append(row["corpus-id"])
+    texts = {row["_id"]: f"{row.get('title', '')} {row['text']}".strip() for row in corpus}
+    order = [row["_id"] for row in corpus]
+    if source.get("mode") == "rerank":
+        words = [texts[doc].lower().split() for doc in order]
+        frequencies: dict[str, int] = {}
+        for document in words:
+            for word in set(document):
+                frequencies[word] = frequencies.get(word, 0) + 1
+        average = sum(map(len, words)) / len(words)
+        records = []
+        for query_id, relevant in qrels.items():
+            top = [order[index] for index in _bm25_top(queries[query_id], words, frequencies, average, RERANK_CANDIDATES)]
+            records.append({"id": f"scifact/{query_id}", "query": queries[query_id], "documents": [texts[doc] for doc in top],
+                            "label": [position for position, doc in enumerate(top) if doc in relevant]})
+        return records
+    query_ids = list(qrels)
+    documents = order
+    if environment.values.get("smoke"):
+        query_ids = query_ids[:1]
+        relevant = set(qrels[query_ids[0]])
+        documents = [doc for doc in order if doc in relevant] + [doc for doc in order if doc not in relevant][:9]
+    position = {doc: index for index, doc in enumerate(documents)}
+    return ([{"id": f"scifact/{query_id}", "text": queries[query_id], "task": "query",
+              "label": [position[doc] for doc in qrels[query_id] if doc in position]} for query_id in query_ids]
+            + [{"id": f"scifact-doc/{doc}", "text": texts[doc], "task": "document"} for doc in documents])
+
+
+HUMANEVAL = ("openai/openai_humaneval", "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544")
+MBPP = ("google-research-datasets/mbpp", "4bb6404fdc6cacfda99d4ac4205087b89d32030c")
+# The completions' stop sequences (bigcode-evaluation-harness): HumanEval completes a function body,
+# MBPP writes whole functions after its docstring prompt.
+HUMANEVAL_STOPS = ["\nclass ", "\ndef ", "\n#", "\n@", "\nprint(", "\nif ", "\n```"]
+MBPP_STOPS = ["\nclass ", "\nassert ", '\n"""', "\nprint(", "\nif ", "\n```"]
+
+
+def _code_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """HumanEval (164) and MBPP's full test split (500) at pinned revisions. MBPP's prompt is the description
+    and its first test in a docstring, as bigcode-evaluation-harness writes it for base models (the test
+    names the function); gold is the prompt, the tests, and the stop sequences."""
+    import datasets
+
+    cache = {"cache_dir": str(environment["hf_datasets_cache"])} if environment.values.get("hf_datasets_cache") else {}
+    records = []
+    humaneval = datasets.load_dataset(HUMANEVAL[0], split="test", revision=HUMANEVAL[1], **cache)
+    for row in humaneval:
+        records.append({"id": row["task_id"], "task": "humaneval", "request": {"prompt": row["prompt"]},
+                        "label": {"prompt": row["prompt"], "test_code": f"{row['test']}\n\ncheck({row['entry_point']})",
+                                  "stops": HUMANEVAL_STOPS}})
+    mbpp = datasets.load_dataset(MBPP[0], "full", split="test", revision=MBPP[1], **cache)
+    for row in mbpp:
+        prompt = f'"""\n{row["text"]}\n{row["test_list"][0]}\n"""\n'
+        tests = "\n".join([row.get("test_setup_code") or "", *row["test_list"]])
+        records.append({"id": f"mbpp/{row['task_id']}", "task": "mbpp", "request": {"prompt": prompt},
+                        "label": {"prompt": prompt, "test_code": tests, "stops": MBPP_STOPS}})
+    return records
+
+
+def _family_input_records(source: Mapping[str, Any], selection: Mapping[str, Any],
+                          environment: Environment) -> list[dict[str, Any]]:
+    """Inputs a family prepares itself (``family_inputs``: its ``module`` run with ``--count`` and ``--output``
+    in the model's reference environment, ``python``), for example decoded recorded observations."""
+    repo = environment.path("repo")
+    output = Path(environment["hf_datasets_cache"]) / "trtmc-family-inputs" / Path(source["module"]).parent.name
+    count = int(selection.get("count", 1))
+    completed = subprocess.run([str(require(source, "python", "source")), str(repo / source["module"]), "--count",
+                                str(count), "--output", str(output)], capture_output=True, text=True, timeout=3600,
+                               cwd=repo, env={**os.environ, "PYTHONPATH": f"{repo}:{repo}/apps/perf_serving"})
+    if completed.returncode:
+        raise ConfigError(f"{source['module']} failed: {completed.stderr[-600:]}")
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
 def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suite:
     from trtmc_perf_serving.files import inline_files
 
     source = definition["source"]
     kind = require(source, "kind", "source")
     selection = definition["selection"]
+    if environment.values.get("smoke") and kind in ("aiperf_public", "hf_dataset"):  # decode only what smoke sends
+        selection = {"method": "first", "count": int(definition.get("smoke_samples", 1))}
     if kind == "aiperf_public":
         records = _aiperf_public_records(source, selection)
         selection = {"method": "first", "count": len(records)}  # already selected before decoding
@@ -497,14 +636,19 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
         records = _image_archive_records(source, environment)
     elif kind == "url_jsonl":
         records = _url_jsonl_records(source, environment)
-    elif kind == "json_manifest":
+    elif kind in ("json_manifest", "hf_file"):
         records = _json_manifest_records(source, environment)
+    elif kind == "scifact":
+        records = _scifact_records(source, environment)
     elif kind == "catalog_testcase":
         records = _catalog_testcase_records(source, environment)
-    elif kind == "qualification_perf":
-        records = _qualification_perf_records(source, environment)
     elif kind == "etth1_windows":
         records = _etth1_window_records(source, environment)
+    elif kind == "code_benchmarks":
+        records = _code_records(source, environment)
+    elif kind == "family_inputs":
+        records = _family_input_records(source, {"count": 1} if environment.values.get("smoke") else selection,
+                                        environment)
     elif kind == "inline":
         records = [dict(record) for record in require(source, "records", "source")]
     else:
@@ -514,7 +658,10 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
     base = (_catalog_testcase_records({"profile": definition["base_profile"]}, environment)[0]["request"]
             if definition.get("base_profile") else {})
     samples = []
-    for record in select(records, selection):
+    chosen = select(records, selection)
+    if environment.values.get("smoke"):  # one logical problem (``smoke_samples`` requests, default 1)
+        chosen = chosen[:int(definition.get("smoke_samples", 1))]
+    for record in chosen:
         for field in source.get("square_crop", []):  # only the selected images
             record = {**record, field: str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))}
         request = {**base, **(record.get("request") or {})}
@@ -528,6 +675,10 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
                   "request": request, "request_sha": request_sha(request)}
         if "label" in record:
             sample["label"] = record["label"]
+        if "cluster" in record:  # the independent unit the bootstrap resamples
+            sample["cluster"] = str(record["cluster"])
+        if "series" in record:  # a time-series window: its position and the moving-block length
+            sample["series"] = dict(record["series"])
         samples.append(sample)
     key = sha256_text(canonical({"suite": definition["suite"], "version": definition["version"],
                                  "samples": [sample["request_sha"] for sample in samples]}))

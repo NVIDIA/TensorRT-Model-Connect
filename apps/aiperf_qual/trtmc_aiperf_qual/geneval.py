@@ -8,8 +8,8 @@ objects are detected (an open-vocabulary detector, OWLv2, at score >= 0.2 after 
 least as often as required and not as often as excluded, an object's CLIP-classified color is the
 required one, and a required relative position (left of, right of, above, below) holds between the
 objects' box centers along the dominant axis. The detector differs from GenEval's Mask2Former, so the
-absolute scores are GenEval-style; both sides are scored alike, and TRTMC's pass rate must stay within
-``max_delta_points`` of the native model's (the paired McNemar test is a note).
+absolute scores are GenEval-style; both sides are scored alike, and TRTMC's pass rate is judged by the
+paired score test against the check's ``margin`` (``noninferiority``).
 """
 
 from __future__ import annotations
@@ -89,19 +89,41 @@ def holds(relation, a, b):
             "above": dy < 0 and abs(dy) >= abs(dx), "below": dy > 0 and abs(dy) >= abs(dx)}[relation]
 
 
-def first_frame(source):
-    # An image, or a video's middle frame.
+def all_frames(source):
     frames = media_frames(Path(source["dir"])) if source else []
     if frames:
-        return Image.fromarray(np.asarray(frames[len(frames) // 2])).convert("RGB")
+        return [np.asarray(frame) for frame in frames]
     files = [path for path in (source or {}).get("files") or [] if Path(path).is_file()]
-    return Image.open(files[0]).convert("RGB") if files else None
+    return [np.asarray(Image.open(path).convert("RGB")) for path in files]
+
+
+def first_frame(source):
+    # An image, or a video's middle frame.
+    frames = all_frames(source)
+    return Image.fromarray(frames[len(frames) // 2]).convert("RGB") if frames else None
+
+
+def clip_t(image, prompt):
+    # CLIP-T: 100 x the cosine of the image and prompt embeddings.
+    inputs = clip_processor(text=[prompt], images=image, return_tensors="pt", padding=True, truncation=True).to(device)
+    with torch.no_grad():
+        image_embedding = clip.get_image_features(pixel_values=inputs["pixel_values"])
+        text_embedding = clip.get_text_features(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"])
+    return 100.0 * float(torch.nn.functional.cosine_similarity(image_embedding, text_embedding).item())
+
+
+def motion(frames):
+    # Mean absolute change between consecutive frames (0-255 scale); 0 for an image or a frozen video.
+    if len(frames) < 2:
+        return 0.0
+    return float(np.mean([np.abs(a.astype(np.float32) - b.astype(np.float32)).mean() for a, b in zip(frames, frames[1:])]))
 
 
 def evaluate(source, meta):
     image = first_frame(source)
     if image is None:
         return False, "no image"
+    # Exact counts: GenEval's counting prompts also exclude count + 1 of the class (below).
     classes = sorted({req["class"] for req in meta["include"] + meta.get("exclude", [])})
     found = detect(image, classes)
     for req in meta["include"]:
@@ -123,9 +145,20 @@ def evaluate(source, meta):
     return True, "all requirements hold"
 
 
-rows = [evaluate(source, meta) for source, meta in json.load(open(items))]
-print(json.dumps([{"passed": passed, "reason": reason} for passed, reason in rows]))
+rows = []
+for source, meta in json.load(open(items)):
+    passed, reason = evaluate(source, meta)
+    frames = all_frames(source)
+    image = first_frame(source)
+    if image is None:  # no output: a missing answer, never a wrong one or a zero score
+        rows.append({"missing": True, "frames": 0, "motion": 0.0})
+        continue
+    rows.append({"passed": passed, "reason": reason, "frames": len(frames), "motion": motion(frames),
+                 "clip_t": clip_t(image, meta.get("prompt", ""))})
+print(json.dumps(rows))
 """
+# A video counts as frozen when it changes less than this fraction of the native video between frames.
+MIN_MOTION_RATIO = 0.25
 
 
 def _score(environment: Environment, check: Mapping[str, Any], items: Sequence[tuple[Mapping, Mapping]],
@@ -146,25 +179,54 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
         out: Path) -> dict[str, Any]:
     from .models import _suite
 
-    suite = build_suite(_suite(check["suite"], model["catalog_profile"], environment.path("repo")), environment)
+    suite = build_suite(_suite(check["suite"], model["catalog_profile"]), environment)
     if model.get("family") in check.get("latent_replay_families", ()):
         suite = with_latent_seeds(suite)
     native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "geneval",
                                                                reuse=bool(check.get("reuse_outputs")))
     outputs = {"candidate": generate(environment, model, "trtmc", out / "geneval-candidate", suite,
                                      reuse=bool(check.get("reuse_outputs"))), "native": native}
-    metadata = [sample["label"] for sample in suite.samples]
-    graded = {}
+    metadata = [{**sample["label"], "prompt": sample["request"].get("prompt", "")} for sample in suite.samples]
+    scored = {}
     for side, rows in outputs.items():
         sources = [media_source(workdir, record) for workdir, record in rows]
-        scores = _score(environment, check, list(zip(sources, metadata)), out / f"geneval-{side}.items.json")
-        graded[side] = {"records": {"greedy": {index: {"passed": row["passed"], "unparsed": False, "actual": row["reason"]}
-                                               for index, row in enumerate(scores)}},
-                        "exit": {"greedy": 0}, "timings": {"greedy": {}}}
-    problems = [{"task": meta.get("tag", "geneval"), "gold": sample["request"].get("prompt")}
-                for sample, meta in zip(suite.samples, metadata)]
-    item = {"suite": check.get("entry", "geneval"), "plugin": f"GenEval-style ({check['detector']} + CLIP colors)",
-            "endpoint": "image_generation", "gate": dict(check.get("gate") or {"max_delta_points": 2.0})}
-    entry = absolute.judge(item, problems, graded["candidate"], graded["native"])
+        scored[side] = _score(environment, check, list(zip(sources, metadata)), out / f"geneval-{side}.items.json")
+    problems = [{"task": meta.get("tag", "geneval"), "gold": meta["prompt"]} for meta in metadata]
+    name = check.get("entry", "geneval")
+    if check.get("metric") == "clip_t":  # without shared noise: a continuous prompt-paired score
+        sides = {side: {"observations": {"greedy": {index: {"value": row["clip_t"]} for index, row in enumerate(rows)
+                                                    if not row.get("missing")}},
+                        "exit": {"greedy": 0}, "timings": {"greedy": {}}} for side, rows in scored.items()}
+        item = {"suite": name, "metric": "precomputed_mean", "gate": dict(check.get("gate") or {"margin": 1.0})}
+        entry = absolute.judge(item, problems, sides["candidate"], sides["native"])
+        entry["benchmark"] = f"CLIP-T ({check['clip_model']})"
+    else:  # the same initial noise on both sides: right/wrong per prompt, paired
+        graded = {side: {"records": {"greedy": {index: {"passed": row["passed"], "unparsed": False, "actual": row["reason"]}
+                                                for index, row in enumerate(rows) if not row.get("missing")}},
+                         "exit": {"greedy": 0}, "timings": {"greedy": {}}} for side, rows in scored.items()}
+        item = {"suite": name, "plugin": f"GenEval-style ({check['detector']} + CLIP colors)",
+                "endpoint": "image_generation", "gate": dict(check.get("gate") or {"margin": 5.0, "min_native": 10.0})}
+        entry = absolute.judge(item, problems, graded["candidate"], graded["native"])
     entry["native"] = {"backend": native_backend, "precision": native_precision}
-    return entry
+    entries = [entry]
+    if any(row["frames"] > 1 for row in scored["native"]):  # videos: every one valid (frames, not frozen)
+        entries.append(video_validity(name, problems, scored["candidate"], scored["native"]))
+    return entries
+
+
+def video_validity(name: str, problems: Sequence[Mapping[str, Any]], candidate: Sequence[Mapping[str, Any]],
+                   native: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Every TRTMC video has the native video's frame count and moves at least MIN_MOTION_RATIO as much."""
+    failures = []
+    for index, (mine, theirs) in enumerate(zip(candidate, native)):
+        if mine["frames"] != theirs["frames"]:
+            failures.append({"sample_id": str(index), "explanation": f"{mine['frames']} frames, native {theirs['frames']}"})
+        elif theirs["motion"] > 0 and mine["motion"] < MIN_MOTION_RATIO * theirs["motion"]:
+            failures.append({"sample_id": str(index),
+                             "explanation": f"frozen: motion {mine['motion']:.2f} vs native {theirs['motion']:.2f}"})
+    count = len(problems)
+    return {"suite": f"{name}-video-validity", "source": "task", "benchmark": "video validity (frames, motion)",
+            "samples": count, "expected_samples": count, "passed": count - len(failures), "required_passes": count,
+            "status": "pass" if not failures and len(candidate) == count else "fail", "failures": failures[:5],
+            "reasons": [f"{len(failures)} of {count} videos invalid"] if failures else [],
+            "gate": {"same_frames": True, "min_motion_ratio": MIN_MOTION_RATIO}}

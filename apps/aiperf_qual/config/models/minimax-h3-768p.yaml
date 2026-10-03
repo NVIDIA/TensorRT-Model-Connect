@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The native weights (351 GB) exceed the GPU: the native pipeline offloads idle components to host memory,
+# and its Perf is against that offloaded baseline (DESIGN.md Section 9).
+reference:
+  options: {cpu_offload: true}
+  requirements: families/minimax_h3/requirements.txt  # the family's dependencies, layered on the serving interpreter

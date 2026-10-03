@@ -3,4 +3,5 @@
 
 # Match the family's accepted reference preprocessing (slow image processor).
 reference:
+  requirements: families/segformer/requirements.txt  # the family's dependencies, layered on the serving interpreter
   options: {processor_kwargs: {use_fast: false}}

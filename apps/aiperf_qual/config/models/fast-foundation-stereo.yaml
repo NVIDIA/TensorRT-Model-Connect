@@ -1,4 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-coverage: one recorded input - smoke parity, not broad task accuracy
+# The family's build reads the upstream checkout (and its serialized checkpoint), not the Hugging Face
+# repository alone: the build takes the directory native_prepare.py prepares (DESIGN.md Section 2).
+candidate:
+  model_directory: trtmc-reference/Fast-FoundationStereo
+
+reference:
+  adapter: families/fast_foundation_stereo/tests/native_reference.py  # the pinned official source (no generic adapter)
+  prepare: families/fast_foundation_stereo/tests/native_prepare.py
+  requirements: families/fast_foundation_stereo/requirements.txt  # the family's dependencies, layered on the serving interpreter

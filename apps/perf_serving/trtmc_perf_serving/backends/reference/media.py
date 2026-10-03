@@ -199,7 +199,11 @@ class Diffusion:
         for name in retie_encoder_embeddings(pipe):
             print(f"trtmc-perf-serve: tied {name}.encoder.embed_tokens to {name}.shared (zero after loading)",
                   file=sys.stderr)
-        self.pipe = pipe.to(spec.device)
+        if spec.options.get("cpu_offload"):  # weights larger than the GPU: components move in when they run
+            pipe.enable_model_cpu_offload()
+            self.pipe = pipe
+        else:
+            self.pipe = pipe.to(spec.device)
         self.pipe.set_progress_bar_config(disable=True)
         self.parameters = set(inspect.signature(self.pipe.__call__).parameters)
         denoiser = getattr(self.pipe, "transformer", None) or getattr(self.pipe, "unet", None)
@@ -252,6 +256,19 @@ class Diffusion:
         return latents.to(self.spec.dtype) if layout.cast_to_pipeline_dtype else latents
 
 
+def _with_post_init(model_cls: type) -> type:
+    """``model_cls`` finishing its construction with ``post_init``: Transformers 5.2's PatchTSMixer heads
+    skip it, and loading then fails on the missing ``all_tied_weights_keys``."""
+    class Initialized(model_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, config: Any, *args: Any, **kwargs: Any) -> None:
+            super().__init__(config, *args, **kwargs)
+            if not hasattr(self, "all_tied_weights_keys"):
+                self.post_init()
+
+    Initialized.__name__, Initialized.__module__ = model_cls.__name__, model_cls.__module__
+    return Initialized
+
+
 class TimeSeries:
     """``solve`` (forecast) and ``regress`` for Transformers time-series models.
 
@@ -267,16 +284,18 @@ class TimeSeries:
         if prefix is None:
             raise BackendError(f"no time-series reference for model type {config.model_type!r}")
         suffix = "ForRegression" if spec.operation == "regress" else "ForPrediction"
-        model_cls = getattr(transformers, prefix + suffix)
+        model_cls = _with_post_init(getattr(transformers, prefix + suffix))
         self.model = maybe_compile(model_cls.from_pretrained(spec.model, **spec.pretrained_kwargs())
                                    .to(spec.device, spec.dtype).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         values = np.asarray(required(request, "past_values"), dtype=np.float32)
-        rows, columns = request.get("shape", [values.size, 1])
+        # Without an explicit shape, the flat values are [time, channel] over the model's input channels.
+        channels = int(getattr(self.model.config, "num_input_channels", 1) or 1)
+        rows, columns = request.get("shape", [values.size // channels, channels])
         past = torch.from_numpy(values.reshape(1, int(rows), int(columns))).to(self.spec.device, self.spec.dtype)
         output, model_ms = timed(lambda: self.model(past_values=past))
         field = "regression_outputs" if self.spec.operation == "regress" else "prediction_outputs"
         tensor = getattr(output, field)
-        return invocation(tensor_observation(tensor[0] if isinstance(tensor, tuple) else tensor, artifact_base),
+        return invocation(tensor_observation(tensor[0] if isinstance(tensor, tuple) else tensor, artifact_base, inline=True),
                           model_ms)

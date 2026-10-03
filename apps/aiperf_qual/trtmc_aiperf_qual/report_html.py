@@ -19,7 +19,7 @@ from typing import Any, Mapping, Sequence
 from .report import counted
 
 EVIDENCE = ("report.md", "report.json", "build.json", "build/build.log", "error.json", "phase-errors.log",
-            "candidate/server.log", "candidate-family-persistent/server.log")
+            "candidate/server.log")
 LIGHT_COLORS = {"green": "#1a7f37", "yellow": "#9a6700", "red": "#cf222e", "white": "#6e7781", "n/a": "#6e7781"}
 STYLE = """
 body{font:14px/1.45 system-ui,sans-serif;margin:24px;color:#1f2328}h1{font-size:22px}

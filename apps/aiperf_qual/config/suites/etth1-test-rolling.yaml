@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Every ETTh1 test-range window, one hour apart (the standard rolling protocol), with the model's own
-# columns, context, and horizon from its family case; gold is the observed future.
+# ETTh1 test-range windows every 24 hours (targets 11,520-14,399 of the standard split), with the model's own
+# columns, context, and horizon (config/models `window`); gold is the observed future, scored on scaled values.
 suite: etth1-test-rolling
-version: 1
+version: 3
 source:
   kind: etth1_windows
   path: ETTh1/ETTh1.csv
   sha256: f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066
   seed: 20260715
   gold: true
-  window: {columns: [OT], context_length: 512, stride: 1, test_target_start: 11520, test_end: 14400, frequency: 0}
-  window_overrides: {stride: 1}
+  window: {columns: [OT], context_length: 512, stride: 24, test_target_start: 11520, test_end: 14400, frequency: 0}
 selection: {method: first, count: 100000}

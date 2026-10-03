@@ -10,33 +10,38 @@ problems, and each side is scored against the gold answers:
 - ``metric`` entries send a suite with gold labels (images, audio, sentence pairs) through AIPerf's
   trtmc_task endpoint and score the outputs here (gold_metrics).
 
-An entry passes when the two scores differ by at most ``max_delta_points`` (or ``max_relative`` of
-the native score): "close enough" is a size, not a test. The paired McNemar test (right/wrong
-metrics) or bootstrap interval (corpus metrics: WER, Spearman, MSE) is reported as a note. A sampled model answers once per seed on each side and is held to the
-difference of the mean accuracies.
+Each entry is a paired non-inferiority decision (``noninferiority``, DESIGN.md Section 4): pass when
+TRTMC's regression against the native model is shown to be below the benchmark's margin, fail when it
+is shown to exceed it, inconclusive otherwise; ``not-comparable`` when the native score is below the
+benchmark's suitability floor ``min_native``. A sampled model answers once per seed on each side and
+is judged on the per-problem seed means.
 """
 
 from __future__ import annotations
 
 import functools
 import json
-import math
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import gold_metrics
+from . import gold_metrics, noninferiority
 from .aiperf_runner import run_aiperf
 from .config import Environment
 from .judge import light
 from .services import serving_replicas
-from .suites import build_suite, request_sha
+from .suites import SELECTION_SEED, build_suite, request_sha
 
-ALPHA = 0.05
 WORKLOAD_MARGIN_PERCENT = 5.0
 # A request answers within seconds; whole-benchmark runs of large native models take hours.
 RUN_TIMEOUT_S = 12 * 3600
+
+
+def run_timeout(environment: Environment, model: Mapping[str, Any]) -> float:
+    """An AIPerf run's deadline: the ledger's for the profile (environment ``deadlines``), else RUN_TIMEOUT_S."""
+    deadline = (environment.values.get("deadlines") or {}).get(model.get("catalog_profile"))
+    return float(deadline) if deadline else RUN_TIMEOUT_S
 
 
 @functools.lru_cache(maxsize=None)
@@ -64,34 +69,72 @@ def selection_environment(environment: Environment, model: Mapping[str, Any], it
     """TRTMC_ACCURACY_* settings of the plugin's problem selection (identical for both sides)."""
     environ = {"HF_DATASETS_CACHE": str(environment["hf_datasets_cache"]),
                "TRTMC_ACCURACY_TOKEN_LIMIT": str(model["candidate"]["max_sequence_length"]),
-               # A chat template wraps the prompt; plain completions add at most a BOS token.
+               # The chat route counts the prompt as rendered (else a 128-token allowance when the tokenizer has
+               # no template); plain completions add at most a BOS token.
                "TRTMC_ACCURACY_TEMPLATE_MARGIN": "128" if item.get("endpoint") == "chat" else "8",
+               "TRTMC_ACCURACY_SEED": str(SELECTION_SEED),
                "TRTMC_ACCURACY_TOKENIZER": tokenizer_source(model)[0]}
     if tokenizer_source(model)[1]:
         environ["TRTMC_ACCURACY_TOKENIZER_REVISION"] = str(tokenizer_source(model)[1])
     if model["reference"].get("trust_remote_code"):
         environ["TRTMC_ACCURACY_TRUST_REMOTE_CODE"] = "1"
+    if item.get("endpoint") == "chat":
+        environ["TRTMC_ACCURACY_CHAT"] = "1"
     for key, name in (("per_task", "TRTMC_ACCURACY_PER_TASK"), ("limit", "TRTMC_ACCURACY_LIMIT"),
                       ("max_new_tokens", "TRTMC_ACCURACY_MAX_NEW_TOKENS")):
         if item.get(key):
             environ[name] = str(item[key])
+    if environment.values.get("smoke"):  # one problem
+        environ.pop("TRTMC_ACCURACY_PER_TASK", None)
+        environ["TRTMC_ACCURACY_LIMIT"] = "1"
     return environ
 
 
 def plan(environment: Environment, model: Mapping[str, Any], item: Mapping[str, Any]) -> list[dict[str, Any]]:
     """The problems a run sends, in request order: their task and gold answer (and the request)."""
     if item.get("metric"):
-        suite = build_suite(item["suite_definition"], environment)
+        definition = item["suite_definition"]
+        if definition["source"].get("kind") == "family_inputs":  # the family's script, in its environment
+            from .services import reference_python
+
+            definition = {**definition, "source": {**definition["source"],
+                                                   "python": reference_python(environment, dict(model))}}
+        suite = build_suite(definition, environment)
         samples = suite.samples
         if item.get("truncate_tokens"):  # the same text on both sides, whatever each side's own cut
             samples = _head_truncated(model, samples, int(item["truncate_tokens"]))
+        if item.get("fit_prompt"):  # text prompts on a generation bundle: the shipped length decides
+            samples = _fitted(model, samples, int(item.get("min_new_tokens", 16)))
         return [{"task": sample.get("task", suite.name), "gold": sample.get("label"), "sample_id": sample["sample_id"],
-                 "request": sample["request"], "request_sha": sample["request_sha"]} for sample in samples]
+                 "request": sample["request"], "request_sha": sample["request_sha"],
+                 **{key: sample[key] for key in ("cluster", "series") if key in sample}} for sample in samples]
     from trtmc_aiperf_plugins.benchmarks import problems
 
     chosen = problems(item["plugin"], item.get("tasks"), int(item.get("n_shots", 0)),
                       selection_environment(environment, model, item))
     return [{"task": problem.task, "gold": problem.ground_truth} for problem in chosen]
+
+
+def _fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], min_new: int) -> list[dict[str, Any]]:
+    """Samples whose prompt leaves at least ``min_new`` tokens to generate on the bundle, each generating at
+    most what is left (the same requests on both sides); the others are dropped (DESIGN.md Section 2)."""
+    from transformers import AutoTokenizer
+
+    length = int(model["candidate"].get("max_sequence_length") or 0)
+    if not length:
+        return list(samples)
+    name, revision = tokenizer_source(model)
+    tokenizer = AutoTokenizer.from_pretrained(name, revision=revision,
+                                              trust_remote_code=bool(model["reference"].get("trust_remote_code")))
+    kept = []
+    for sample in samples:
+        request = dict(sample["request"])
+        budget = length - len(tokenizer(str(request.get("prompt", "")), add_special_tokens=True)["input_ids"]) - 8
+        if budget < min_new:
+            continue
+        request["max_new_tokens"] = min(int(request.get("max_new_tokens", budget)), budget)
+        kept.append({**sample, "request": request, "request_sha": request_sha(request)})
+    return kept
 
 
 def _head_truncated(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -149,7 +192,7 @@ def _suite_side(environment: Environment, service: Mapping[str, Any], model: Map
     run = run_aiperf(environment, out, ["--endpoint-type", "trtmc_task",
                                         *_targets(service, f"/v1/tasks/{model['operation']}"), "--input-file", str(inputs), "--custom-dataset-type", "single_turn",
                                         "--dataset-sampling-strategy", "sequential",
-                                        "--request-count", str(len(problems))], timeout_s=RUN_TIMEOUT_S)
+                                        "--request-count", str(len(problems))], timeout_s=run_timeout(environment, model))
     by_request, timing_by_request = {}, {}
     for record in run.raw_records():
         if record.get("status") != 200 or not record.get("responses"):
@@ -173,10 +216,10 @@ def run_side(environment: Environment, service: Mapping[str, Any], model: Mappin
         return _suite_side(environment, service, model, item, problems, out / item["suite"])
     count = len(problems)
     runs: dict[str, Any] = {"records": {}, "exit": {}, "timings": {}}
-    for seed in item.get("seeds") or [None]:
+    for seed in (item.get("seeds") or [None])[:1 if environment.values.get("smoke") else None]:
         name = "greedy" if seed is None else f"seed{seed}"
         run = run_aiperf(environment, out / f"{item['suite']}-{name}", _arguments(model, item, service, count, seed),
-                         env=selection_environment(environment, model, item), timeout_s=RUN_TIMEOUT_S)
+                         env=selection_environment(environment, model, item), timeout_s=run_timeout(environment, model))
         raw = run.raw_records()
         # AIPerf grades a failed request as an empty (wrong) answer: it is a missing answer instead.
         failed = {int(record["metadata"]["session_num"]) for record in raw if unanswered(record)}
@@ -224,7 +267,7 @@ def timings(raw_records: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, flo
 
 def workload_perf(candidate: Mapping[int, Mapping[str, Any]], native: Mapping[int, Mapping[str, Any]]) -> dict[str, Any]:
     """Model-call time on the benchmark's own requests, over the problems both sides answered with the
-    same number of tokens (informational: the Perf L1 gate times the family's request)."""
+    same number of tokens (informational: the Perf L1 gate times the catalog request)."""
     pairs = [(candidate[index], native[index]) for index in sorted(set(candidate) & set(native))
              if candidate[index].get("completion_tokens") == native[index].get("completion_tokens")]
     if not pairs:
@@ -238,14 +281,6 @@ def workload_perf(candidate: Mapping[int, Mapping[str, Any]], native: Mapping[in
             "speedup": round(theirs / mine, 3) if mine else None,
             "light": light(mine, theirs, WORKLOAD_MARGIN_PERCENT) if mine and theirs else "white",
             "prompt_tokens_p50": statistics.median(prompts) if prompts else None}
-
-
-def mcnemar_worse_p(trtmc_only: int, native_only: int) -> float:
-    """One-sided exact McNemar p-value that TRTMC is worse: P(X >= native_only), X ~ Bin(n, 1/2)."""
-    n = trtmc_only + native_only
-    if n == 0:
-        return 1.0
-    return min(1.0, sum(math.comb(n, k) for k in range(native_only, n + 1)) / 2 ** n)
 
 
 def _correct(record: Mapping[str, Any] | None) -> bool | None:
@@ -276,35 +311,40 @@ def _paired(problems: Sequence[Mapping[str, Any]], candidate: Mapping[int, Any],
     return {"counts": dict(counts), "per_task": per_task, "examples": examples}
 
 
-def status(metrics: Mapping[str, Any], gate: Mapping[str, Any], *, expected: int,
-           paired: int) -> tuple[str, list[str]]:
-    """pass / fail / error of a scored entry under ``gate`` (also used when re-judging a report): only
-    the size of the difference decides ("close enough"); a statistically significant shift within
-    the gate is reported as a note."""
+def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
+    """pass / fail / inconclusive / not-comparable / error of a scored entry (also when re-judging a
+    report): every expected problem answered on both sides, a native score above the suitability
+    floor, then the entry's non-inferiority outcome under its gate."""
+    metrics, gate = entry.get("metrics") or {}, entry.get("gate") or {}
+    expected, paired = int(entry.get("expected_samples") or 0), int(entry.get("samples") or 0)
     if paired < expected:
         return "error", [f"{expected - paired} of {expected} problems lack a graded answer on one side"
                          + (f" ({metrics['failed']})" if metrics.get("failed") else "")]
-    native = metrics.get("native_accuracy")
-    if native is not None and native <= float(gate.get("min_native", 0.0)):
-        # Hardly a right answer from the native model (none, or far below chance on multiple choice): the
-        # benchmark's prompt or answer format does not fit the model (for example a reasoning model
-        # thinking aloud), so it says nothing about TRTMC.
-        return "not-comparable", [f"the native model scores {native:g} (at most {gate.get('min_native', 0):g}): "
-                                  "the benchmark's prompt or answer format does not fit this model"]
-    limit = float(gate.get("max_delta_points", 1.0))
-    if gate.get("max_relative") and metrics.get("native_score"):  # e.g. WER: 0.2 points or 3% of native
-        limit = max(limit, float(gate["max_relative"]) * abs(float(metrics["native_score"])))
-    if abs(metrics["delta_points"]) > limit:
-        return "fail", [f"differs by {metrics['delta_points']:+.3f} points (gate {limit:.3g})"]
-    return "pass", []
+    native = metrics.get("native_score")
+    if native is not None and gate.get("min_native") is not None and native < float(gate["min_native"]):
+        # Too few right answers from the native model (at or near chance): the benchmark does not
+        # discriminate for this model, so it says nothing about TRTMC.
+        return "not-comparable", [f"the native model scores {native:g} (< {gate['min_native']:g}): the benchmark "
+                                  "does not fit this model"]
+    test = metrics.get("test") or {}
+    if test.get("outcome") is None:
+        return "error", ["no non-inferiority outcome"]
+    reasons = [] if test["outcome"] == "pass" else [
+        f"regression {test.get('regression_points', 0.0):+.3f} points against margin "
+        f"{noninferiority.margin(gate, native):g}: {test['outcome']}"]
+    return test["outcome"], reasons
 
 
-def notes(metrics: Mapping[str, Any]) -> list[str]:
-    if metrics.get("mcnemar_p_worse") is not None and metrics["mcnemar_p_worse"] < ALPHA:
-        return [f"TRTMC significantly worse within the gate (McNemar p={metrics['mcnemar_p_worse']:.3g})"]
-    if metrics.get("significantly_worse"):
-        return [f"TRTMC significantly worse within the gate (bootstrap 95% interval {metrics.get('ci95')})"]
-    return []
+def binary_test(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """The non-inferiority outcome of a right/wrong entry from its recorded counts or per-problem
+    regressions (so a re-judge under a new gate needs no rerun)."""
+    gate, metrics = entry.get("gate") or {}, entry.get("metrics") or {}
+    delta = noninferiority.margin(gate, metrics.get("native_score"))
+    if metrics.get("per_problem_regression") is not None:
+        return noninferiority.paired_means(metrics["per_problem_regression"], delta)
+    counts = entry.get("counts") or {}
+    return noninferiority.binary(counts.get("native_only", 0), counts.get("trtmc_only", 0), int(entry.get("samples") or 0),
+                                 delta)
 
 
 def _graded(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], side: Mapping[str, Any]) -> dict[str, Any]:
@@ -321,31 +361,74 @@ def _graded(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], side
 
 def judge_corpus(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], candidate: Mapping[str, Any],
                  native: Mapping[str, Any]) -> dict[str, Any]:
-    """The entry of a corpus metric (WER, Spearman): both sides' statistic and the bootstrap interval."""
+    """The entry of a corpus metric (WER, chrF, Spearman, mAP): both sides' statistic and the bootstrap
+    outcome."""
     expected = len(problems)
-    mine, theirs = candidate["observations"]["greedy"], native["observations"]["greedy"]
+    mine = gold_metrics.answered(item["metric"], problems, candidate["observations"]["greedy"])
+    theirs = gold_metrics.answered(item["metric"], problems, native["observations"]["greedy"])
     paired = len(set(mine) & set(theirs))
     entry: dict[str, Any] = {"suite": item["suite"], "source": "absolute", "benchmark": item["metric"],
                              "endpoint": "trtmc_task", "expected_samples": expected, "samples": paired, "passed": None,
                              "gate": dict(item["gate"]),
                              "aiperf_exit": {"trtmc": candidate["exit"], "native": native["exit"]}}
     if paired < expected:
-        entry["status"], entry["reasons"] = "error", [f"{expected - paired} of {expected} problems lack an output on one side"]
+        entry["status"], entry["reasons"] = "error", [f"{expected - paired} of {expected} problems lack a usable output "
+                                                      "on one side"]
         return entry
-    comparison = gold_metrics.compare_corpus(item["metric"], problems, mine, theirs, item.get("metric_params"))
+    comparison = gold_metrics.compare_corpus(item["metric"], problems, mine, theirs, item["gate"], item.get("metric_params"))
+    test = {key: comparison[key] for key in ("outcome", "regression_points", "margin_points", "excess_interval90",
+                                             "clusters", "resamples", "block", "reason") if key in comparison}
     entry["metrics"] = {"trtmc_score": comparison["trtmc"], "native_score": comparison["native"],
-                        "delta_points": comparison["delta_points"], "ci95": comparison["ci95"],
-                        "significantly_worse": comparison["significantly_worse"],
-                        "higher_is_better": comparison["higher_is_better"], "units": comparison["units"]}
+                        "higher_is_better": comparison["higher_is_better"], "units": comparison["units"], "test": test}
     entry["workload_perf"] = workload_perf(candidate["timings"]["greedy"], native["timings"]["greedy"])
-    entry["status"], entry["reasons"] = status(entry["metrics"], entry["gate"], expected=expected, paired=paired)
-    entry["notes"] = notes(entry["metrics"])
+    entry["status"], entry["reasons"] = status(entry)
     return entry
+
+
+def judge_parity(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], candidate: Mapping[str, Any],
+                 native: Mapping[str, Any]) -> dict[str, Any]:
+    """A conversion-parity entry: every problem's TRTMC output within the gate's tolerance of the native
+    output (no gold answer; a deterministic per-sample check, so no statistical test)."""
+    compare = gold_metrics.PARITY[item["metric"]]
+    mine, theirs = candidate["observations"]["greedy"], native["observations"]["greedy"]
+    expected = len(problems)
+    paired = sorted(set(mine) & set(theirs))
+    entry: dict[str, Any] = {"suite": item["suite"], "source": "absolute", "benchmark": item["metric"],
+                             "endpoint": "trtmc_task", "expected_samples": expected, "samples": len(paired),
+                             "gate": dict(item["gate"]), "aiperf_exit": {"trtmc": candidate["exit"], "native": native["exit"]}}
+    if len(paired) < expected:
+        return {**entry, "passed": None, "status": "error",
+                "reasons": [f"{expected - len(paired)} of {expected} problems lack an output on one side"]}
+    results = [(index, *compare(mine[index], theirs[index], item["gate"])) for index in paired]
+    failures = [{"sample_id": problems[index].get("sample_id", str(index)), "explanation": reason}
+                for index, ok, reason in results if not ok]
+    entry.update(passed=expected - len(failures), required_passes=expected, failures=failures[:5],
+                 status="pass" if not failures else "fail",
+                 reasons=[f"{len(failures)} of {expected} outputs outside the tolerance"] if failures else [])
+    return entry
+
+
+def _as_observations(side: Mapping[str, Any]) -> dict[str, Any]:
+    """An AIPerf benchmark side (graded records) as text observations: each answer's normalized sentence."""
+    from trtmc_aiperf_plugins.benchmarks import _sentence
+
+    records = side["records"].get("greedy", {})
+    return {**side, "observations": {"greedy": {index: {"text": _sentence(record.get("model_output") or "")}
+                                                for index, record in records.items()}}}
 
 
 def judge(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], candidate: Mapping[str, Any],
           native: Mapping[str, Any]) -> dict[str, Any]:
     """The entry of one benchmark from both sides' graded records."""
+    if item.get("corpus_metric"):  # an AIPerf benchmark scored as a corpus (BART: chrF++ of its sentences)
+        from trtmc_aiperf_plugins.benchmarks import _sentence
+
+        corpus = {**item, "metric": item["corpus_metric"]}
+        golds = [{**problem, "gold": _sentence(str(problem["gold"]))} for problem in problems]
+        entry = judge_corpus(corpus, golds, _as_observations(candidate), _as_observations(native))
+        return {**entry, "benchmark": f"{item.get('plugin')} ({item['corpus_metric']})", "endpoint": item.get("endpoint")}
+    if item.get("metric") in gold_metrics.PARITY:
+        return judge_parity(item, problems, candidate, native)
     if item.get("metric") in gold_metrics.CORPUS:
         return judge_corpus(item, problems, candidate, native)
     if item.get("metric"):
@@ -357,22 +440,19 @@ def judge(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], candid
                              "gate": dict(item["gate"]), "aiperf_exit": {"trtmc": candidate["exit"], "native": native["exit"]}}
     repetitions = list(candidate["records"])
     paired = [_paired(problems, candidate["records"][name], native["records"].get(name, {})) for name in repetitions]
-    accuracies = []
-    for pair in paired:
-        counts = pair["counts"]
-        scored = sum(counts.get(key, 0) for key in ("both_correct", "trtmc_only", "native_only", "both_wrong"))
-        accuracies.append(((counts.get("both_correct", 0) + counts.get("trtmc_only", 0)) / scored if scored else 0.0,
-                           (counts.get("both_correct", 0) + counts.get("native_only", 0)) / scored if scored else 0.0,
-                           scored))
-    scored = min(count for _, _, count in accuracies)
-    mine = sum(value for value, _, _ in accuracies) / len(accuracies)
-    theirs = sum(value for _, value, _ in accuracies) / len(accuracies)
-    metrics: dict[str, Any] = {"trtmc_accuracy": round(100 * mine, 2), "native_accuracy": round(100 * theirs, 2),
-                               "delta_points": round(100 * (mine - theirs), 2)}
+    answered = [index for index in range(expected)
+                if all(index in candidate["records"][name] and index in native["records"].get(name, {})
+                       for name in repetitions)]
+    scored = len(answered)
+    mine = sum(_correct(candidate["records"][name][index]) for name in repetitions for index in answered)
+    theirs = sum(_correct(native["records"][name][index]) for name in repetitions for index in answered)
+    total = scored * len(repetitions)
+    metrics: dict[str, Any] = {"trtmc_score": 100.0 * mine / total if total else 0.0,
+                               "native_score": 100.0 * theirs / total if total else 0.0}
+    metrics["regression_points"] = metrics["native_score"] - metrics["trtmc_score"]
     if len(repetitions) == 1:
         counts = paired[0]["counts"]
-        metrics["mcnemar_p_worse"] = round(mcnemar_worse_p(counts.get("trtmc_only", 0), counts.get("native_only", 0)), 5)
-        metrics["answer_agreement"] = round((counts.get("both_correct", 0) + counts.get("both_wrong", 0)) / scored, 4) if scored else None
+        metrics["answer_agreement"] = (counts.get("both_correct", 0) + counts.get("both_wrong", 0)) / scored if scored else None
         entry["counts"] = counts
         tasks = paired[0]["per_task"]
         deltas = {task: (c["trtmc_only"] - c["native_only"]) / max(1, sum(c.values())) for task, c in tasks.items()}
@@ -380,19 +460,20 @@ def judge(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], candid
                                           for task in sorted(deltas, key=lambda t: abs(deltas[t]), reverse=True)[:5]
                                           if deltas[task]}
         entry["failures"] = paired[0]["examples"]
-    else:
-        metrics["per_seed"] = [{"seed": name, "trtmc_accuracy": round(100 * a, 2), "native_accuracy": round(100 * b, 2)}
-                               for name, (a, b, _) in zip(repetitions, accuracies)]
+    else:  # seeds stay inside their problem: one regression per problem, averaged over the seeds
+        metrics["per_problem_regression"] = [
+            100.0 * sum(_correct(native["records"][name][index]) - _correct(candidate["records"][name][index])
+                        for name in repetitions) / len(repetitions) for index in answered]
     entry["samples"] = scored
     failures = [*(candidate.get("failed") or {}).values(), *(native.get("failed") or {}).values()]
     if failures:
         metrics["failed"] = "; ".join(failures)[:600]
     entry["metrics"] = metrics
+    metrics["test"] = binary_test(entry)
     first = repetitions[0]
     entry["workload_perf"] = workload_perf(candidate.get("timings", {}).get(first, {}),
                                            native.get("timings", {}).get(first, {}))
-    entry["status"], entry["reasons"] = status(metrics, entry["gate"], expected=expected, paired=scored)
-    entry["notes"] = notes(metrics)
+    entry["status"], entry["reasons"] = status(entry)
     return entry
 
 
@@ -415,65 +496,35 @@ def _probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any
         raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-400:]}") from error
 
 
-# A family script reference answers slowly (one process per request for most): its benchmarks take at most
-# this many problems, the same ones on both sides (MMLU keeps every subject).
-SCRIPT_NATIVE_LIMIT = 300
-
-
-def capped(environment: Environment, model: Mapping[str, Any],
-           plans: Mapping[str, Sequence]) -> tuple[list[dict[str, Any]], dict[str, list]]:
-    """The benchmarks and their problems at most SCRIPT_NATIVE_LIMIT each: fewer per task where the
-    selection takes ``per_task``, else the first problems."""
-    items, kept = [], {}
-    for item in model["absolute"]:
-        problems = list(plans[item["suite"]])
-        if len(problems) <= SCRIPT_NATIVE_LIMIT:
-            items.append(item)
-            kept[item["suite"]] = problems
-            continue
-        if item.get("metric"):  # a gold suite: its problems are sent as listed
-            smaller = {**item, "limited_to": SCRIPT_NATIVE_LIMIT}
-            kept[item["suite"]] = problems[:SCRIPT_NATIVE_LIMIT]
-        else:  # an AIPerf benchmark selects its problems itself: fewer per task, or the first ones
-            tasks = len({problem.get("task") for problem in problems})
-            smaller = ({**item, "per_task": max(1, min(int(item["per_task"]), SCRIPT_NATIVE_LIMIT // tasks))}
-                       if item.get("per_task") else {**item, "limit": SCRIPT_NATIVE_LIMIT})
-            kept[item["suite"]] = plan(environment, model, smaller)
-        items.append(smaller)
-    return items, kept
+def keeps_artifacts(model: Mapping[str, Any]) -> bool:
+    """A benchmark reads the output files the servers write (their scratch is then kept)."""
+    return any(item.get("metric") in gold_metrics.ARTIFACT_METRICS for item in model.get("absolute", []))
 
 
 def run_native(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],
                out: Path, probe_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Every benchmark on the native model: the generic adapter, eager, at the candidate precision; the
-    family's declared reference (and its precisions) when the adapter cannot serve the model. The adapter
-    runs as up to ``native_replicas`` (environment) copies that fit on the GPU, each answering one problem
-    at a time: the answers do not change, its model-call times are then not comparable. With the family
-    script, each benchmark takes at most SCRIPT_NATIVE_LIMIT problems; the result then carries the
-    benchmarks and problems the TRTMC side must answer too (``absolute``, ``plans``)."""
+    """Every benchmark on the native model: the reference adapter, eager, at the first precision of
+    ``timing_precisions`` it serves. The adapter runs as up to ``native_replicas`` (environment) copies
+    that fit on the GPU, each answering one problem at a time: the answers do not change, its model-call
+    times are then not comparable."""
     from .runner import timing_precisions
 
-    reference = model["reference"]
     errors = []
-    for backend in dict.fromkeys([reference["backend"], reference.get("fallback") or reference["backend"]]):
-        for precision in timing_precisions(reference):
-            tag = "" if (backend, precision) == (reference["backend"], reference["perf_precision"]) else f"-{backend}-{precision}"
-            try:
-                count = int(environment.values.get("native_replicas") or 1) if backend == "reference" else 1
-                items, kept = capped(environment, model, plans) if backend == "script" else (model["absolute"], plans)
-                limited = items != model["absolute"]
-                with serving_replicas(environment, dict(model), backend, out / f"absolute-native-server{tag}",
-                                      count=count, mode="eager", precision=precision, python=python) as service:
-                    if probe_request is not None:
-                        _probe(service, model["operation"], probe_request)
-                    runs = {item["suite"]: run_side(environment, service, {**model, "absolute": items}, item,
-                                                    kept[item["suite"]], out / f"absolute-native{tag}")
-                            for item in items}
-                return {"backend": backend, "precision": precision, "runs": runs, "replicas": service["replicas"],
-                        **({"absolute": items, "plans": kept} if limited else {}),
-                        **({"fallback_from": "; ".join(errors)[:600]} if errors else {})}
-            except Exception as error:  # noqa: BLE001 - the next precision, then the family reference
-                errors.append(f"{backend} {precision}: {type(error).__name__}: {str(error)[-300:]}")
+    for precision in timing_precisions(model["reference"]):
+        try:
+            count = 1 if environment.values.get("smoke") else int(environment.values.get("native_replicas") or 1)
+            with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{precision}",
+                                  count=count, mode="eager", precision=precision, python=python,
+                                  keep_artifacts=keeps_artifacts(model)) as service:
+                if probe_request is not None:
+                    _probe(service, model["operation"], probe_request)
+                runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
+                                                out / f"absolute-native-{precision}")
+                        for item in model["absolute"]}
+            return {"backend": "reference", "precision": precision, "runs": runs, "replicas": service["replicas"],
+                    **({"fallback_from": "; ".join(errors)[:600]} if errors else {})}
+        except Exception as error:  # noqa: BLE001 - the next precision
+            errors.append(f"{precision}: {type(error).__name__}: {str(error)[-300:]}")
     raise RuntimeError("; ".join(errors)[:1500])
 
 
@@ -500,11 +551,6 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
                 entry["workload_perf"] = {**entry["workload_perf"], "light": "white",
                                           "note": f"native ran as {native['replicas']} concurrent copies: "
                                                   "its model-call times are not comparable"}
-            if model["candidate"].get("sequence_fallback"):
-                entry["notes"] = [*entry.get("notes", []), model["candidate"]["sequence_fallback"]]
-            if native.get("plans"):
-                entry["notes"] = [*entry.get("notes", []), f"the native side is the family script reference: "
-                                  f"at most {SCRIPT_NATIVE_LIMIT} problems per benchmark on both sides"]
             results.append(entry)
     return results
 

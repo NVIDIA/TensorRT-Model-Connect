@@ -3,3 +3,7 @@
 
 # A grounding model: RefCOCO boxes against the gold boxes (Acc@IoU 0.5).
 absolute: [refcoco]
+
+reference:
+  requirements: families/locateanything/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  trust_remote_code: true  # the checkpoint's own modeling code

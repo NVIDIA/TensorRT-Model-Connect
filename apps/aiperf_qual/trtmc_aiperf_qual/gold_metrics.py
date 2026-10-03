@@ -3,20 +3,24 @@
 """Scores of task outputs against gold labels, for absolute-accuracy suites.
 
 A binary metric grades each sample right or wrong (both sides are then compared with the paired
-McNemar test). A corpus metric is a statistic over units (utterances, sentence pairs): each side's
-units are scored, and a paired bootstrap over units gives the confidence interval of the difference.
+score test, ``noninferiority.binary``). A corpus metric is a statistic over units (utterances, sentence
+pairs): each side's units are scored, and a paired bootstrap over independent clusters of units decides
+(``noninferiority.bootstrap``).
 """
 
 from __future__ import annotations
 
 import math
-import random
+import os
 import re
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-BOOTSTRAP_SAMPLES = 1000
+from . import noninferiority
+
+BOOTSTRAP_SAMPLES = 2000
 # Corpus statistics that cost seconds per evaluation resample less.
-BOOTSTRAP_SAMPLES_BY_METRIC = {"chrf": 200, "miou": 200}
+BOOTSTRAP_SAMPLES_BY_METRIC = {"coco_map": 200, "miou": 200}
 
 
 def _text(observation: Mapping[str, Any] | None) -> str:
@@ -56,32 +60,110 @@ CODE_TIMEOUT_S = 10.0
 CODE_STOPS = ("\nclass ", "\ndef ", "\n#", "\nif ", "\nprint(", "\nassert ")
 
 
-def _limits() -> None:  # in the child: bounded CPU time and memory, no core dumps
+CODE_LIMITS = {"RLIMIT_CPU": int(CODE_TIMEOUT_S), "RLIMIT_AS": 4 * 2**30, "RLIMIT_CORE": 0,
+               "RLIMIT_FSIZE": 16 * 2**20, "RLIMIT_NPROC": 64, "RLIMIT_NOFILE": 64}
+
+
+def _limits() -> None:  # in the child: bounded CPU time, memory, file sizes, processes, and open files
     import resource
 
-    resource.setrlimit(resource.RLIMIT_CPU, (int(CODE_TIMEOUT_S), int(CODE_TIMEOUT_S)))
-    resource.setrlimit(resource.RLIMIT_AS, (4 * 2**30, 4 * 2**30))
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    for name, value in CODE_LIMITS.items():
+        resource.setrlimit(getattr(resource, name), (value, value))
+
+
+# human-eval's reliability guard (github.com/openai/human-eval, execution.py, MIT), run before the program:
+# destructive and process-spawning functions are disabled. (``help`` through ``builtins``: in a ``-c``
+# program ``__builtins__`` is the module.) Not a security boundary; the user, limits, and permissions are.
+RELIABILITY_GUARD = """
+def _reliability_guard():
+    import builtins, faulthandler, os, shutil, subprocess, sys
+    faulthandler.disable()
+    builtins.exit = None
+    builtins.quit = None
+    builtins.help = None
+    os.environ["OMP_NUM_THREADS"] = "1"
+    for name in ("kill", "system", "putenv", "remove", "removedirs", "rmdir", "fchdir", "setuid", "fork", "forkpty",
+                 "killpg", "rename", "renames", "truncate", "replace", "unlink", "fchmod", "fchown", "chmod", "chown",
+                 "chroot", "lchflags", "lchmod", "lchown", "getcwd", "chdir", "setsid", "setpgid", "posix_spawn",
+                 "posix_spawnp"):
+        setattr(os, name, None)
+    shutil.rmtree = None
+    shutil.move = None
+    shutil.chown = None
+    subprocess.Popen = None
+    for name in ("ipdb", "joblib", "resource", "psutil", "tkinter"):
+        sys.modules[name] = None
+_reliability_guard()
+del _reliability_guard
+"""
+
+
+NOBODY = 65534
+# Paths the generated programs must not write (the harness adds the environment's roots) or read.
+PROTECTED_WRITE: set[str] = set()
+PROTECTED_READ = ("/root",)
+SETPRIV = ["setpriv", f"--reuid={NOBODY}", f"--regid={NOBODY}", "--clear-groups", "--no-new-privs",
+           "--inh-caps=-all", "--bounding-set=-all"]
+
+
+def protect(paths: Sequence[Any]) -> None:
+    """Directories the generated programs must not be able to write (result, bundle, cache, data roots)."""
+    PROTECTED_WRITE.update(str(path) for path in paths if path)
+
+
+def _sandbox_verified(protected: Sequence[str]) -> None:
+    """The DESIGN.md Section 8 boundary holds, checked before every program: programs run as ``nobody``
+    with no capabilities, and that user can neither write the protected roots nor read root's home.
+    Raises otherwise (fail closed)."""
+    import subprocess
+
+    for path in protected:
+        if Path(path).exists() and subprocess.run([*SETPRIV, "test", "-w", path]).returncode == 0:
+            raise RuntimeError(f"code sandbox: nobody can write {path}")
+    for path in PROTECTED_READ:
+        if Path(path).exists() and subprocess.run([*SETPRIV, "ls", path], capture_output=True).returncode == 0:
+            raise RuntimeError(f"code sandbox: nobody can read {path}")
+    if subprocess.run([*SETPRIV, "true"]).returncode != 0:
+        raise RuntimeError("code sandbox: cannot switch to the nobody user (setpriv)")
 
 
 def code_pass(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:
-    """HumanEval: the prompt plus the generated body passes the problem's unit tests. The program runs
-    isolated (``python -I`` in an empty temporary directory, CPU, memory, and wall-time limits)."""
+    """HumanEval / MBPP: the prompt plus the generated code passes the problem's unit tests. The program
+    runs as ``nobody`` (no capabilities, an empty environment and a temporary home and directory) under
+    human-eval's reliability guard and CPU, memory, file-size, process, open-file, and wall-time limits, in
+    its own process group (killed whole after the run); it passes only when it exits 0 after printing a
+    per-run nonce that follows the tests (an early ``exit(0)`` fails). Fails closed when the sandbox
+    boundary does not hold."""
+    import signal
     import subprocess
     import sys
     import tempfile
+    import uuid
 
+    _sandbox_verified(sorted(PROTECTED_WRITE))
     completion = _text(observation)
-    cut = min((completion.find(stop) for stop in CODE_STOPS if completion.find(stop) >= 0), default=len(completion))
-    completion = completion[:cut]  # the function body only (HumanEval's stop sequences)
-    program = f"{gold['prompt']}{completion}\n\n{gold['test']}\n\ncheck({gold['entry_point']})\n"
+    stops = gold.get("stops") or CODE_STOPS
+    cut = min((completion.find(stop) for stop in stops if completion.find(stop) > 0), default=len(completion))
+    completion = completion[:cut]  # up to the benchmark's stop sequences
+    nonce = uuid.uuid4().hex
+    tests = gold.get("test_code") or f"{gold['test']}\n\ncheck({gold['entry_point']})"
+    program = f"{RELIABILITY_GUARD}\n{gold['prompt']}{completion}\n\n{tests}\n\nprint({nonce!r})\n"
     with tempfile.TemporaryDirectory(prefix="trtmc-code-") as directory:
+        os.chown(directory, NOBODY, NOBODY)
+        process = subprocess.Popen([*SETPRIV, sys.executable, "-I", "-c", program], cwd=directory, text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=_limits,
+                                   start_new_session=True, env={"PATH": "/usr/bin:/bin", "HOME": directory})
         try:
-            result = subprocess.run([sys.executable, "-I", "-c", program], cwd=directory, capture_output=True,
-                                    timeout=CODE_TIMEOUT_S + 5, preexec_fn=_limits, env={"PATH": "/usr/bin:/bin"})
-            passed = result.returncode == 0
+            stdout, _ = process.communicate(timeout=CODE_TIMEOUT_S + 5)
+            passed = process.returncode == 0 and stdout.rstrip().endswith(nonce)
         except subprocess.TimeoutExpired:
             passed = False
+        finally:
+            try:  # the program and anything it started
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
     return passed, completion[:200]
 
 
@@ -124,6 +206,105 @@ def box_iou50(gold: Any, observation: Mapping[str, Any] | None, task: str | None
 
 BINARY: dict[str, Callable[..., tuple[bool, str]]] = {"choice": choice, "contains": contains, "code_pass": code_pass,
                                                       "top1": top1, "box_iou50": box_iou50}
+
+
+# ---------------- conversion parity: (TRTMC observation, native observation, gate) -> (match, reason) -------
+
+def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                  gate: Mapping[str, Any]) -> tuple[bool, str]:
+    """An encoder output vector (``values``) against the native one: equal length, finite values, cosine
+    at least ``min_cosine`` and relative L2 error at most ``max_relative_l2`` (magnitude, not only direction)."""
+    mine = [float(value) for value in (candidate or {}).get("values") or []]
+    theirs = [float(value) for value in (native or {}).get("values") or []]
+    if not mine or len(mine) != len(theirs):
+        return False, f"shape differs: {len(mine)} vs {len(theirs)} values"
+    if not all(math.isfinite(value) for value in mine):
+        return False, "non-finite values"
+    cosine = _cosine(mine, theirs)
+    norm = math.sqrt(sum(value * value for value in theirs)) or 1.0
+    relative = math.sqrt(sum((a - b) ** 2 for a, b in zip(mine, theirs))) / norm
+    ok = cosine >= float(gate.get("min_cosine", 0.999)) and relative <= float(gate.get("max_relative_l2", 0.02))
+    return ok, f"cosine {cosine:.5f}, relative L2 {relative:.4f}"
+
+
+def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                    gate: Mapping[str, Any]) -> tuple[bool, str]:
+    """Monocular geometry (the ``depth_artifact`` / ``valid_mask_artifact`` files both sides write): equal
+    size, valid-mask IoU at least ``min_mask_iou``, and the median relative depth error over the pixels
+    valid on both sides at most ``max_median_relative_depth``."""
+    import numpy as np
+
+    candidate, native = candidate or {}, native or {}
+    shape = (int(native.get("height") or 0), int(native.get("width") or 0))
+    if not all(shape) or (int(candidate.get("height") or 0), int(candidate.get("width") or 0)) != shape:
+        return False, f"size differs: {candidate.get('height')}x{candidate.get('width')} vs {shape[0]}x{shape[1]}"
+    try:
+        depths = [np.fromfile(side["depth_artifact"], dtype="<f4").reshape(shape) for side in (candidate, native)]
+        masks = [np.fromfile(side["valid_mask_artifact"], dtype=np.uint8).reshape(shape).astype(bool)
+                 for side in (candidate, native)]
+    except (KeyError, OSError, ValueError) as error:
+        return False, f"geometry artifacts unreadable: {error}"
+    union = np.logical_or(*masks).sum()
+    iou = float(np.logical_and(*masks).sum() / union) if union else 1.0
+    both = np.logical_and(*masks) & np.isfinite(depths[0]) & (depths[1] > 0)
+    relative = float(np.median(np.abs(depths[0][both] - depths[1][both]) / depths[1][both])) if both.any() else 1.0
+    ok = iou >= float(gate.get("min_mask_iou", 0.99)) and relative <= float(gate.get("max_median_relative_depth", 0.01))
+    return ok, f"mask IoU {iou:.4f}, median relative depth error {relative:.4f}"
+
+
+def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                  gate: Mapping[str, Any]) -> tuple[bool, str]:
+    """A robot action chunk (``actions``, row-major [step, component]) against the native one: equal shape,
+    finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range."""
+    mine = [float(value) for value in (candidate or {}).get("actions") or []]
+    theirs = [float(value) for value in (native or {}).get("actions") or []]
+    if not theirs or len(mine) != len(theirs):
+        return False, f"shape differs: {len(mine)} vs {len(theirs)} values"
+    if not all(math.isfinite(value) for value in mine):
+        return False, "non-finite actions"
+    span = (max(theirs) - min(theirs)) or 1.0
+    error = max(abs(a - b) for a, b in zip(mine, theirs))
+    return error <= float(gate.get("max_error_of_range", 1e-3)) * span, f"max abs error {error:.3g} (range {span:.3g})"
+
+
+def disparity_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                     gate: Mapping[str, Any]) -> tuple[bool, str]:
+    """A stereo disparity map (the ``disparity_artifact`` file both sides write) against the native one: equal
+    size and a mean end-point error between the sides of at most ``max_mean_epe`` pixels."""
+    import numpy as np
+
+    candidate, native = candidate or {}, native or {}
+    shape = (int(native.get("height") or 0), int(native.get("width") or 0))
+    if not all(shape) or (int(candidate.get("height") or 0), int(candidate.get("width") or 0)) != shape:
+        return False, f"size differs: {candidate.get('height')}x{candidate.get('width')} vs {shape[0]}x{shape[1]}"
+    try:
+        mine, theirs = (np.fromfile(side["disparity_artifact"], dtype="<f4").reshape(shape) for side in (candidate, native))
+    except (KeyError, OSError, ValueError) as error:
+        return False, f"disparity artifacts unreadable: {error}"
+    if not np.isfinite(mine).all():
+        return False, "non-finite disparities"
+    error = float(np.abs(mine - theirs).mean())
+    return error <= float(gate.get("max_mean_epe", 0.1)), f"mean end-point error {error:.4f} px"
+
+
+def audio_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                 gate: Mapping[str, Any]) -> tuple[bool, str]:
+    """Generated speech against the native output (the ``audio_digest`` the servers attach): duration and RMS
+    ratios and the log-spectral distance within the gate (the plugins' ``parity_audio`` comparator)."""
+    from trtmc_aiperf_plugins.accuracy import COMPARATORS
+
+    try:
+        match, reason, _, _ = COMPARATORS["parity_audio"](candidate or {}, native or {}, **dict(gate))
+    except (KeyError, TypeError, ValueError) as error:
+        return False, f"not comparable: {error}"
+    return match, reason
+
+
+PARITY: dict[str, Callable[..., tuple[bool, str]]] = {"vector_parity": vector_parity, "geometry_parity": geometry_parity,
+                                                      "action_parity": action_parity, "disparity_parity": disparity_parity,
+                                                      "audio_parity": audio_parity}
+# Parity metrics that read the output files the servers write (their artifacts are kept).
+ARTIFACT_METRICS = {"geometry_parity", "disparity_parity"}
 
 
 # ---------------- corpus metrics ----------------
@@ -206,11 +387,11 @@ def _ndcg(scores: Sequence[float], relevant: Sequence[int], k: int) -> float:
 
 
 def rerank_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[float]:
-    """Per query: nDCG over its candidate documents, ranked by the model's scores."""
+    """Per query: nDCG@10 of its fixed candidate documents (BM25 top-20), ranked by the model's scores."""
     units = []
     for index, problem in enumerate(problems):
         scores = (observations.get(index) or {}).get("scores") or []
-        units.append(_ndcg(scores, list(problem["gold"]), max(1, len(scores))))
+        units.append(_ndcg(scores, list(problem["gold"]), 10))
     return units
 
 
@@ -232,6 +413,29 @@ def retrieval_units(problems: Sequence[Mapping[str, Any]], observations: Mapping
     return units
 
 
+def corpus_retrieval_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[float]:
+    """Per query: nDCG@10 of the whole corpus (every ``document`` sample) ranked by embedding cosine with the
+    query (``query`` samples; their gold lists the relevant documents' positions among the documents)."""
+    import numpy as np
+
+    queries = [index for index, problem in enumerate(problems) if problem.get("task") == "query"]
+    documents = [index for index, problem in enumerate(problems) if problem.get("task") == "document"]
+
+    def matrix(indices: Sequence[int]) -> Any:
+        rows = [np.asarray((observations.get(index) or {}).get("values") or [], dtype=np.float32) for index in indices]
+        width = max((row.size for row in rows), default=0)
+        stacked = np.stack([row if row.size == width else np.zeros(width, np.float32) for row in rows]) if rows else \
+            np.zeros((0, 0), np.float32)
+        norms = np.linalg.norm(stacked, axis=1, keepdims=True)
+        return stacked / np.where(norms > 0, norms, 1.0)
+
+    if not queries or not documents:
+        return [0.0] * len(queries)
+    scores = matrix(queries) @ matrix(documents).T if matrix(queries).shape[1] == matrix(documents).shape[1] else \
+        np.zeros((len(queries), len(documents)), np.float32)
+    return [_ndcg(scores[row].tolist(), list(problems[query]["gold"]), 10) for row, query in enumerate(queries)]
+
+
 def mean_percent(units: Sequence[float]) -> float:
     return 100.0 * sum(units) / len(units) if units else 0.0
 
@@ -250,13 +454,18 @@ def point_forecast(observation: Mapping[str, Any] | None, length: int) -> list[f
 
 
 def forecast_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[tuple[float, float]]:
-    """Per window: (squared error summed over the horizon, values); a missing forecast counts its full
-    squared target as error."""
+    """Per window: (squared error of the scaled values summed over the horizon, values). Values are
+    row-major [time, column], scaled by each column's training mean and standard deviation; a missing
+    forecast counts its full squared scaled target as error."""
     units = []
     for index, problem in enumerate(problems):
-        gold = [float(value) for value in problem["gold"]]
-        forecast = point_forecast(observations.get(index), len(gold)) or [0.0] * len(gold)
-        units.append((sum((a - b) ** 2 for a, b in zip(forecast, gold)), float(len(gold))))
+        gold = problem["gold"]
+        values, mean, std = [float(value) for value in gold["values"]], gold["mean"], gold["std"]
+        forecast = point_forecast(observations.get(index), len(values))
+        scaled = [((value - mean[i % len(mean)]) / (std[i % len(std)] or 1.0)) for i, value in enumerate(values)]
+        predicted = ([((value - mean[i % len(mean)]) / (std[i % len(std)] or 1.0)) for i, value in enumerate(forecast)]
+                     if forecast else [0.0] * len(values))
+        units.append((sum((a - b) ** 2 for a, b in zip(predicted, scaled)), float(len(values))))
     return units
 
 
@@ -265,16 +474,24 @@ def mse(units: Sequence[tuple[float, float]]) -> float:
     return sum(error for error, _ in units) / count if count else 0.0
 
 
-def translation_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[tuple[str, str]]:
-    """Per sentence: (the model's translation, the reference)."""
-    return [(_text(observations.get(index)).strip(), str(problem["gold"])) for index, problem in enumerate(problems)]
+def _chrf_metric() -> Any:
+    from sacrebleu.metrics import CHRF
+
+    return CHRF(word_order=2)
 
 
-def chrf(units: Sequence[tuple[str, str]]) -> float:
-    """Corpus chrF++ (sacreBLEU, word order 2)."""
-    import sacrebleu
+def translation_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[list[float]]:
+    """Per sentence: its chrF++ statistics (character and word n-gram matches) against the reference."""
+    hypotheses = [_text(observations.get(index)).strip() for index in range(len(problems))]
+    references = [str(problem["gold"]) for problem in problems]
+    return [list(stats) for stats in _chrf_metric()._extract_corpus_statistics(hypotheses, [references])]
 
-    return sacrebleu.corpus_chrf([unit[0] for unit in units], [[unit[1] for unit in units]], word_order=2).score
+
+def chrf(units: Sequence[Sequence[float]]) -> float:
+    """Corpus chrF++ (sacreBLEU 2.5, word order 2) from summed sentence statistics, as corpus_chrf."""
+    if not units:
+        return 0.0
+    return _chrf_metric()._compute_score_from_stats([sum(column) for column in zip(*units)]).score
 
 
 def mask_iou_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[float]:
@@ -364,27 +581,59 @@ LABEL_FIELDS = {"coco-contiguous-80": "category_index", "coco-category-id": "cat
 def coco_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any],
                params: Mapping[str, Any]) -> list[tuple[dict, dict, str]]:
     """Per image: its gold annotations (``objects`` of detection-datasets/coco: xyxy boxes, contiguous
-    categories), the model's detections, and the label space they are compared in."""
+    categories, areas), the model's detections, and the label space they are compared in."""
     field = LABEL_FIELDS[params.get("label_space", "coco-contiguous-80")]
     units = []
     for index, problem in enumerate(problems):
         objects = problem["gold"]
+        areas = objects.get("area") or [None] * len(objects["bbox"])
         annotations = [{"box": [float(v) for v in box], "category_index": int(category),
-                        "category_id": COCO_IDS[int(category)]}
-                       for box, category in zip(objects["bbox"], objects["category"])]
+                        "category_id": COCO_IDS[int(category)], **({"area": float(area)} if area is not None else {})}
+                       for box, category, area in zip(objects["bbox"], objects["category"], areas)]
         output = observations.get(index) or {"boxes": [], "scores": [], "class_ids": []}
         units.append(({"sample_id": problem.get("sample_id", str(index)), "annotations": annotations}, output, field))
     return units
 
 
 def coco_map(units: Sequence[tuple[dict, dict, str]]) -> float:
-    """COCO mAP@[.5:.95] x 100 (the family qualification's AP, all images, 100 detections each)."""
-    from qualification_tests.benchmark_qualification.accuracy import _coco_detection_metrics
+    """COCO mAP@[.5:.95] x 100 by pycocotools' COCOeval (all images, at most 100 detections each)."""
+    import contextlib
+    import io
+
+    from pycocotools.coco import COCO
+    from pycocotools.cocoeval import COCOeval
 
     if not units:
         return 0.0
-    samples, outputs = [unit[0] for unit in units], [unit[1] for unit in units]
-    return 100.0 * _coco_detection_metrics(samples, outputs, units[0][2])["map_50_95"]
+    field = units[0][2]
+    images, annotations, detections = [], [], []
+    for image_id, (sample, output, _) in enumerate(units, start=1):
+        images.append({"id": image_id})
+        for annotation in sample["annotations"]:
+            x0, y0, x1, y1 = annotation["box"]
+            annotations.append({"id": len(annotations) + 1, "image_id": image_id, "category_id": annotation[field],
+                                "bbox": [x0, y0, x1 - x0, y1 - y0],
+                                "area": annotation.get("area", (x1 - x0) * (y1 - y0)), "iscrowd": 0})
+        boxes = output.get("boxes") or []
+        if boxes and not isinstance(boxes[0], (list, tuple)):  # a flat [n x 4] array (the worker's layout)
+            boxes = [boxes[index:index + 4] for index in range(0, len(boxes), 4)]
+        for box, score, label in zip(boxes, output.get("scores") or [], output.get("class_ids") or []):
+            x0, y0, x1, y1 = (float(value) for value in box)
+            detections.append({"image_id": image_id, "category_id": int(label), "bbox": [x0, y0, x1 - x0, y1 - y0],
+                               "score": float(score)})
+    if not detections:
+        return 0.0
+    categories = sorted({item["category_id"] for item in annotations + detections})
+    with contextlib.redirect_stdout(io.StringIO()):  # COCOeval prints its progress and summary
+        gold = COCO()
+        gold.dataset = {"info": {}, "images": images, "annotations": annotations,
+                        "categories": [{"id": category} for category in categories]}
+        gold.createIndex()
+        evaluation = COCOeval(gold, gold.loadRes(detections), "bbox")
+        evaluation.evaluate()
+        evaluation.accumulate()
+        evaluation.summarize()
+    return 100.0 * max(0.0, float(evaluation.stats[0]))
 
 
 def precomputed_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[float]:
@@ -396,9 +645,78 @@ def mean(units: Sequence[float]) -> float:
     return sum(units) / len(units) if units else 0.0
 
 
-# name -> (units of a side, statistic over units, higher is better); NO_BOOTSTRAP statistics are too
-# costly to resample (the gate then rests on the difference alone).
-NO_BOOTSTRAP = {"coco_map"}
+# name -> (units of a side, statistic over units, higher is better).
+def _finite(values: Any) -> bool:
+    try:
+        return bool(values) and all(math.isfinite(float(value)) for value in values)
+    except (TypeError, ValueError):
+        return False
+
+
+def _text_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    return isinstance(observation.get("text"), str)  # an empty transcript or translation is an answer
+
+
+def _vector_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    return _finite(observation.get("values"))
+
+
+def _scores_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    return _finite(observation.get("scores"))
+
+
+def _forecast_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    return _finite(point_forecast(observation, len(problem["gold"]["values"])))
+
+
+def _detections_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    return isinstance(observation.get("boxes"), list)  # no detections is an answer
+
+
+def _planes(observation: Mapping[str, Any], field: str) -> tuple[Any, int] | None:
+    """The finite values of ``field`` and the plane size (positive height x width), or None."""
+    import numpy as np
+
+    values, height, width = observation.get(field), observation.get("height"), observation.get("width")
+    if not isinstance(values, list) or not isinstance(height, int) or not isinstance(width, int) or height <= 0 or width <= 0:
+        return None
+    try:
+        array = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    return (array, height * width) if array.ndim == 1 and bool(np.isfinite(array).all()) else None
+
+
+def _masks_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    planes = _planes(observation, "masks")  # whole H x W planes (none: nothing found, an answer)
+    return planes is not None and planes[0].size % planes[1] == 0
+
+
+def _label_map_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    planes = _planes(observation, "mask")  # exactly one H x W label plane
+    return planes is not None and planes[0].size == planes[1]
+
+
+def _value_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    return _finite([observation.get("value")])
+
+
+# Per corpus metric: whether an output answers its problem (the field the metric reads, well formed). An
+# output that does not is a missing answer (an error), never scored as zeros or an empty prediction.
+ANSWERS: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any]], bool]] = {
+    "chrf": _text_answer, "wer": _text_answer, "coco_map": _detections_answer, "forecast_mse": _forecast_answer,
+    "miou": _label_map_answer, "mask_iou": _masks_answer, "precomputed_mean": _value_answer,
+    "sts_spearman": _vector_answer, "rerank_ndcg": _scores_answer, "retrieval_ndcg": _vector_answer,
+    "retrieval_ndcg10": _vector_answer}
+
+
+def answered(metric: str, problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> dict[int, Any]:
+    """The observations that answer their problem under ``metric`` (``ANSWERS``)."""
+    check = ANSWERS[metric]
+    return {index: observation for index, observation in observations.items()
+            if index < len(problems) and isinstance(observation, Mapping) and check(problems[index], observation)}
+
+
 PARAMETRIC = {"coco_map"}  # unit functions that take the benchmark's ``metric_params``
 CORPUS: dict[str, tuple[Callable, Callable, bool]] = {"chrf": (translation_units, chrf, True),
                                                       "coco_map": (coco_units, coco_map, True),
@@ -409,31 +727,33 @@ CORPUS: dict[str, tuple[Callable, Callable, bool]] = {"chrf": (translation_units
                                                       "wer": (wer_units, wer, False),
                                                       "sts_spearman": (sts_units, spearman, True),
                                                       "rerank_ndcg": (rerank_units, mean_percent, True),
-                                                      "retrieval_ndcg": (retrieval_units, mean_percent, True)}
+                                                      "retrieval_ndcg": (retrieval_units, mean_percent, True),
+                                                      "retrieval_ndcg10": (corpus_retrieval_units, mean_percent, True)}
 
 
 def compare_corpus(metric: str, problems: Sequence[Mapping[str, Any]], candidate: Mapping[int, Any],
-                   native: Mapping[int, Any], params: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Both sides' statistic, their difference (TRTMC - native, in the metric's points), and a paired
-    bootstrap 95% interval of the difference; ``worse`` when the interval excludes zero on TRTMC's
-    losing side."""
+                   native: Mapping[int, Any], gate: Mapping[str, Any], params: Mapping[str, Any] | None = None,
+                   resamples: int | None = None) -> dict[str, Any]:
+    """Both sides' statistic and the non-inferiority outcome: a paired bootstrap over the problems'
+    ``cluster`` (one unit per problem; else each unit is its own cluster), or over moving blocks of
+    consecutive time-series windows when the problems carry their ``series`` position."""
     units_of, statistic, higher = CORPUS[metric]
     if metric in PARAMETRIC:
         mine, theirs = units_of(problems, candidate, params or {}), units_of(problems, native, params or {})
     else:
         mine, theirs = units_of(problems, candidate), units_of(problems, native)
-    mine_value, theirs_value = statistic(mine), statistic(theirs)
-    delta = mine_value - theirs_value
-    if metric in NO_BOOTSTRAP:
-        return {"trtmc": round(mine_value, 3), "native": round(theirs_value, 3), "delta_points": round(delta, 3),
-                "ci95": None, "significantly_worse": False, "higher_is_better": higher, "units": len(mine)}
-    generator, deltas = random.Random(0), []
-    for _ in range(BOOTSTRAP_SAMPLES_BY_METRIC.get(metric, BOOTSTRAP_SAMPLES)):
-        picks = [generator.randrange(len(mine)) for _ in range(len(mine))]
-        deltas.append(statistic([mine[i] for i in picks]) - statistic([theirs[i] for i in picks]))
-    deltas.sort()
-    low, high = deltas[int(0.025 * len(deltas))], deltas[int(0.975 * len(deltas)) - 1]
-    worse = high < 0 if higher else low > 0
-    return {"trtmc": round(mine_value, 3), "native": round(theirs_value, 3), "delta_points": round(delta, 3),
-            "ci95": [round(low, 3), round(high, 3)], "significantly_worse": worse, "higher_is_better": higher,
-            "units": len(mine)}
+    clusters = ([problem.get("cluster", index) for index, problem in enumerate(problems)]
+                if len(mine) == len(problems) else list(range(len(mine))))
+
+    def both(indices: Sequence[int]) -> tuple[float, float]:
+        return statistic([mine[i] for i in indices]), statistic([theirs[i] for i in indices])
+
+    series = [problem.get("series") for problem in problems] if len(mine) == len(problems) else []
+    if series and all(series):
+        clusters, block = [item["position"] for item in series], int(series[0]["block"])
+    else:
+        block = None
+    outcome = noninferiority.bootstrap(both, clusters, dict(gate), higher,
+                                       resamples or BOOTSTRAP_SAMPLES_BY_METRIC.get(metric, BOOTSTRAP_SAMPLES), block=block)
+    return {"trtmc": statistic(mine), "native": statistic(theirs), "higher_is_better": higher, "units": len(mine),
+            **outcome}

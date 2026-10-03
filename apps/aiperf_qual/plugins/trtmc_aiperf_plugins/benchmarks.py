@@ -7,13 +7,16 @@ The subclasses keep AIPerf's lighteval prompts and graders. They pin the dataset
 loads the latest one) and select the same problems for every side, configured through the
 environment because AIPerf does not forward benchmark options:
 
+  TRTMC_ACCURACY_SEED             shuffle each task's problems with this seed first (seeded stratified
+                                  sampling; unset: dataset order)
   TRTMC_ACCURACY_PER_TASK         keep the first k problems of each task (MMLU subject)
   TRTMC_ACCURACY_LIMIT            keep the first n problems overall
   TRTMC_ACCURACY_MAX_NEW_TOKENS   cap each problem's generation size
   TRTMC_ACCURACY_TOKEN_LIMIT      drop problems whose prompt plus generation exceed the bundle's
                                   sequence limit, counted with TRTMC_ACCURACY_TOKENIZER (at
                                   TRTMC_ACCURACY_TOKENIZER_REVISION; TRTMC_ACCURACY_TRUST_REMOTE_CODE=1)
-  TRTMC_ACCURACY_TEMPLATE_MARGIN  tokens reserved for a chat template around the prompt (default 128)
+  TRTMC_ACCURACY_CHAT=1           count the prompt as the chat template renders it (the chat route)
+  TRTMC_ACCURACY_TEMPLATE_MARGIN  tokens reserved around the prompt when it is not rendered (default 128)
   HF_DATASETS_CACHE               the datasets cache (shared by the harness and AIPerf's processes)
 """
 
@@ -21,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
+import zlib
 from collections import Counter
 from typing import Any, Callable, Mapping, Sequence
 
@@ -38,9 +43,11 @@ WIKITEXT_REVISION = "b08601e04326c79dfdd32d625aee71d232d685c3"
 BART_SENTENCES = 1000
 # Tokens a greedy continuation needs to spell out one word.
 LAMBADA_GENERATION_SIZE = 8
-# Tokens a chat template adds around the conversation (role markers, generation prompt); the
-# length filter counts the plain prompt plus this margin (plain completions need only a few).
+# Tokens a chat template adds around the conversation (role markers, generation prompt) where it cannot
+# be rendered; plain completions need only a few.
 TEMPLATE_MARGIN = 128
+# Tokens a rendered chat prompt may still differ by on the server (for example a thinking switch).
+RENDERED_MARGIN = 8
 
 
 def _int(environ: Mapping[str, str], name: str) -> int | None:
@@ -48,7 +55,9 @@ def _int(environ: Mapping[str, str], name: str) -> int | None:
     return int(value) if value else None
 
 
-def _token_counter(environ: Mapping[str, str]) -> Callable[[str], int] | None:
+def _token_counter(environ: Mapping[str, str]) -> Callable[[BenchmarkProblem], int] | None:
+    """Tokens a problem's prompt takes on the bundle: rendered by the chat template on the chat route
+    (TRTMC_ACCURACY_CHAT=1), else the plain prompt plus TRTMC_ACCURACY_TEMPLATE_MARGIN."""
     if not environ.get("TRTMC_ACCURACY_TOKENIZER"):
         return None
     from transformers import AutoTokenizer
@@ -56,7 +65,16 @@ def _token_counter(environ: Mapping[str, str]) -> Callable[[str], int] | None:
     tokenizer = AutoTokenizer.from_pretrained(environ["TRTMC_ACCURACY_TOKENIZER"],
                                               revision=environ.get("TRTMC_ACCURACY_TOKENIZER_REVISION") or None,
                                               trust_remote_code=environ.get("TRTMC_ACCURACY_TRUST_REMOTE_CODE") == "1")
-    return lambda text: len(tokenizer(text, add_special_tokens=True)["input_ids"])
+    margin = _int(environ, "TRTMC_ACCURACY_TEMPLATE_MARGIN")
+    margin = TEMPLATE_MARGIN if margin is None else margin
+    if environ.get("TRTMC_ACCURACY_CHAT") == "1" and getattr(tokenizer, "chat_template", None):
+        def rendered(problem: BenchmarkProblem) -> int:
+            messages = problem.raw_messages or [{"role": "user", "content": problem.prompt}]
+            text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False,
+                                                 enable_thinking=False)
+            return len(tokenizer(text, add_special_tokens=False)["input_ids"]) + RENDERED_MARGIN
+        return rendered
+    return lambda problem: len(tokenizer(_prompt_text(problem), add_special_tokens=True)["input_ids"]) + margin
 
 
 def _prompt_text(problem: BenchmarkProblem) -> str:
@@ -66,28 +84,43 @@ def _prompt_text(problem: BenchmarkProblem) -> str:
     return problem.prompt
 
 
+def _shuffled(problems: Sequence[BenchmarkProblem], seed: int | None) -> list[BenchmarkProblem]:
+    """Each task's problems in a seeded random order (tasks keep their dataset order)."""
+    if seed is None:
+        return list(problems)
+    groups: dict[str, list[BenchmarkProblem]] = {}
+    for problem in problems:
+        groups.setdefault(problem.task, []).append(problem)
+    for task, members in groups.items():
+        random.Random(seed ^ zlib.crc32(task.encode())).shuffle(members)
+    return [problem for members in groups.values() for problem in members]
+
+
 def select(problems: Sequence[BenchmarkProblem], environ: Mapping[str, str] | None = None,
            count_tokens: Callable[[str], int] | None = None) -> list[BenchmarkProblem]:
-    """The configured subset in dataset order: per-task and overall limits, capped generation, and
-    only problems that fit the sequence limit (the same problems for every side)."""
+    """The configured subset: each task's problems in seeded random order (or dataset order), per-task and
+    overall limits, capped generation, and only problems that fit the sequence limit (the same problems
+    for every side). ``count_tokens`` (tests) counts a plain prompt; the margin is added to it."""
     environ = os.environ if environ is None else environ
     per_task, limit = _int(environ, "TRTMC_ACCURACY_PER_TASK"), _int(environ, "TRTMC_ACCURACY_LIMIT")
     max_new, token_limit = _int(environ, "TRTMC_ACCURACY_MAX_NEW_TOKENS"), _int(environ, "TRTMC_ACCURACY_TOKEN_LIMIT")
-    if token_limit and count_tokens is None:
-        count_tokens = _token_counter(environ)
+    measure = None
+    if token_limit and count_tokens is not None:
+        margin = _int(environ, "TRTMC_ACCURACY_TEMPLATE_MARGIN")
+        margin = TEMPLATE_MARGIN if margin is None else margin
+        measure = lambda problem: count_tokens(_prompt_text(problem)) + margin  # noqa: E731
+    elif token_limit:
+        measure = _token_counter(environ)
     seen: Counter[str] = Counter()
     selected = []
-    for problem in problems:
+    for problem in _shuffled(problems, _int(environ, "TRTMC_ACCURACY_SEED")):
         if per_task and seen[problem.task] >= per_task:
             continue
         metadata = dict(problem.metadata or {})
         if max_new:
             metadata["generation_size"] = min(int(metadata.get("generation_size", max_new)), max_new)
-        if token_limit and count_tokens is not None:
-            margin = _int(environ, "TRTMC_ACCURACY_TEMPLATE_MARGIN")
-            needed = (count_tokens(_prompt_text(problem)) + (TEMPLATE_MARGIN if margin is None else margin)
-                      + int(metadata.get("generation_size", 0)))
-            if needed > token_limit:
+        if token_limit and measure is not None:
+            if measure(problem) + int(metadata.get("generation_size", 0)) > token_limit:
                 continue
         seen[problem.task] += 1
         selected.append(problem.model_copy(update={"metadata": metadata}))
@@ -225,8 +258,8 @@ class SentenceExactGrader(BaseGrader):
     async def grade(self, response_text: str, ground_truth: str, **kwargs: Any) -> GradingResult:
         answer, gold = self.extract_answer(response_text), _sentence(ground_truth)
         return GradingResult(correct=bool(answer) and answer == gold, unparsed=not answer, confidence=1.0,
-                             reasoning="whitespace-normalized sentence", extracted_answer=answer[:200],
-                             ground_truth=gold[:200])
+                             reasoning="whitespace-normalized sentence", extracted_answer=answer,
+                             ground_truth=gold)
 
 
 class FirstWordGrader(BaseGrader):

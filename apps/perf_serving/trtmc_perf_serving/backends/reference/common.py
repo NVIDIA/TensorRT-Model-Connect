@@ -35,6 +35,9 @@ class ReferenceSpec:
     deterministic: bool = False
     # Adapter-specific options, e.g. {"processor_kwargs": {...}} for remote-code processors.
     options: Mapping[str, Any] = field(default_factory=dict)
+    # A family's own native pipeline: a Python file defining ``Adapter(spec)`` with
+    # ``invoke(request, artifact_base) -> Invocation`` (families/<family>/tests/native_reference.py).
+    adapter: str | None = None
 
     @property
     def dtype(self) -> torch.dtype:
@@ -83,29 +86,42 @@ def required(request: Mapping[str, Any], name: str) -> Any:
 # Output evidence is written after the timed call (the TRTMC worker also stops timing before it
 # writes its artifacts); input files are decoded before it (TRTMC excludes asset loading by default).
 _PENDING = "_pending_array"
+_FILES = "_pending_files"
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff")
 AUDIO_SUFFIXES = (".wav", ".flac", ".mp3", ".ogg")
 _DECODED: dict[tuple[str, str], Any] = {}
 
 
-def tensor_observation(value: Any, artifact_base: Path) -> dict[str, Any]:
+def tensor_observation(value: Any, artifact_base: Path, inline: bool = False) -> dict[str, Any]:
     """Summarize a tensor output (copied to host memory, as the Task returns it); ``write_artifacts``
-    keeps the full value as ``<artifact_base>.npy`` with its sha256 once the timed call returned."""
+    keeps the full value as ``<artifact_base>.npy`` with its sha256 once the timed call returned.
+    ``inline`` also returns the values themselves (row-major), as TRTMC does for small outputs such as
+    forecasts."""
     if isinstance(value, torch.Tensor):
         array = value.detach().float().cpu().numpy()
     else:
         array = np.asarray(value)
     return {"shape": list(array.shape), "dtype": str(array.dtype),
+            **({"values": array.reshape(-1).astype(float).tolist()} if inline else {}),
             "artifact": str(artifact_base.with_suffix(".npy")), _PENDING: array}
 
 
+def deferred_files(observation: Mapping[str, Any], files: Mapping[Path, Any]) -> dict[str, Any]:
+    """``observation`` with output ``files`` (path -> array) that ``write_artifacts`` writes once the timed
+    call returned, as raw little-endian values in the array's dtype (``tofile``)."""
+    return {**observation, _FILES: dict(files)}
+
+
 def write_artifacts(observation: Any) -> Any:
-    """Write the pending output arrays of an observation (any nesting) and add their sha256."""
+    """Write the pending output arrays and files of an observation (any nesting); arrays get their sha256."""
     if isinstance(observation, list):
         return [write_artifacts(item) for item in observation]
     if not isinstance(observation, dict):
         return observation
-    result = {key: write_artifacts(value) for key, value in observation.items() if key != _PENDING}
+    result = {key: write_artifacts(value) for key, value in observation.items() if key not in (_PENDING, _FILES)}
+    for path, array in (observation.get(_FILES) or {}).items():
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        np.asarray(array).tofile(path)
     if _PENDING in observation:
         array, artifact = observation[_PENDING], Path(observation["artifact"])
         artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +144,8 @@ def _read_audio(path: str) -> tuple[np.ndarray, int]:
 
 
 def preload_inputs(request: Mapping[str, Any]) -> None:
-    """Read and decode the request's image and audio files ahead of the timed call."""
+    """Read and decode the request's image and audio files, and read its other input files, ahead of the
+    timed call."""
     _DECODED.clear()
     for key, value in request.items():
         if not (key.endswith("_path") or key.endswith("_paths")):
@@ -141,6 +158,8 @@ def preload_inputs(request: Mapping[str, Any]) -> None:
                 _DECODED[("image", path)] = _read_image(path)
             elif suffix in AUDIO_SUFFIXES:
                 _DECODED[("audio", path)] = _read_audio(path)
+            else:
+                _DECODED[("bytes", path)] = Path(path).read_bytes()
 
 
 def release_inputs() -> None:
@@ -150,6 +169,12 @@ def release_inputs() -> None:
 def load_image(path: str):
     cached = _DECODED.get(("image", path))
     return cached if cached is not None else _read_image(path)
+
+
+def load_bytes(path: str) -> bytes:
+    """An input file's contents (read before the timed call when the request names it)."""
+    cached = _DECODED.get(("bytes", path))
+    return cached if cached is not None else Path(path).read_bytes()
 
 
 def load_audio(path: str, sample_rate: int) -> np.ndarray:

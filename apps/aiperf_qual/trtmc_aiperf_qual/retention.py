@@ -5,8 +5,8 @@
 ``retention`` in the environment (both default to ``retain``):
 
 - ``bundle``: ``retain`` | ``delete_on_pass`` | ``delete_unless_error`` | ``delete_built_unless_error``.
-  A bundle is deleted after its model's run when the verdict allows; an ``error`` verdict (a harness
-  failure to rerun) always keeps it. ``delete_built_unless_error`` deletes only a bundle the run itself
+  A bundle is deleted after its model's run when the verdict allows; an ``error`` or ``smoke-fail``
+  verdict (a failure to fix and rerun) always keeps it. ``delete_built_unless_error`` deletes only a bundle the run itself
   built (a bundle that existed before the run is kept).
 - ``hf_cache``: ``retain`` | ``delete_unused``. ``run-all`` deletes a checkpoint repository from
   ``hf_hub_cache`` once no remaining profile of the batch uses it (profiles sharing one run together).
@@ -44,7 +44,7 @@ def policies(environment: Environment) -> tuple[str, str]:
 
 def should_delete_bundle(policy: str, category: str, built: bool = False) -> bool:
     """``built``: this run built the bundle (it did not exist before)."""
-    if category in ("error", "build-failed"):
+    if category in ("error", "build-failed", "smoke-fail"):
         return False
     return (policy == "delete_unless_error" or (policy == "delete_on_pass" and category == "pass")
             or (policy == "delete_built_unless_error" and built))

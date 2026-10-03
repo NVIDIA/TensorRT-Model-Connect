@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# ADE20K SceneParsing (SceneParse150) validation, 500 of 2,000 images evenly spaced (Hugging Face's
-# parquet conversion of the dataset script); gold is the class map (1-150, 0 ignored), scored as mIoU.
+# ADE20K SceneParse150 validation: 500 images in seeded order; gold is the 150-class annotation map, scored as the
+# dataset-level class mIoU.
 suite: ade20k-val-500
-version: 1
+version: 2
 source:
   kind: hf_dataset
   dataset: zhoubolei/scene_parse_150
@@ -14,5 +14,5 @@ source:
   image_column: image
   label_column: annotation
   label_image: true
-selection: {method: stride, count: 500}
+selection: {method: seeded, count: 500}
 fields: {image: image_path}

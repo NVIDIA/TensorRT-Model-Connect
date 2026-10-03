@@ -11,3 +11,7 @@ soundfile
 transformers
 # chrF++ of translations (absolute accuracy)
 sacrebleu==2.5.1
+# COCO mAP of detections (absolute accuracy)
+pycocotools==2.0.10
+# Student-t quantiles (non-inferiority bounds, Perf speedup intervals)
+scipy

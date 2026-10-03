@@ -14,16 +14,17 @@ def _fmt(value: Any, digits: int = 3) -> str:
 
 
 def counted(item: Mapping[str, Any], limit: int = 3) -> str:
-    """``passed/samples``, both sides' gold-scored accuracy, or the first numeric metrics when the
-    family grades aggregates only."""
+    """``passed/samples``, both sides' gold-scored score and the regression test, or the first numeric
+    metrics of a check that reports aggregates only."""
     metrics = item.get("metrics") or {}
-    if item.get("source") == "absolute" and "trtmc_score" in metrics:
-        return (f"TRTMC {metrics['trtmc_score']} vs native {metrics['native_score']} {item.get('benchmark')} "
-                f"(Δ {metrics['delta_points']:+.3f}, 95% CI {metrics.get('ci95')}; {metrics.get('units')} units)")
-    if item.get("source") == "absolute" and "trtmc_accuracy" in metrics:
-        p_value = f", McNemar p {metrics['mcnemar_p_worse']:.3g}" if metrics.get("mcnemar_p_worse") is not None else ""
-        return (f"TRTMC {metrics['trtmc_accuracy']}% vs native {metrics['native_accuracy']}% "
-                f"(Δ {metrics['delta_points']:+.2f} pt{p_value}; {item.get('samples')} problems)")
+    if "trtmc_score" in metrics:
+        test = metrics.get("test") or {}
+        bound = (f"z {test['z']:+.2f}" if "z" in test else
+                 f"excess 90% interval {[round(v, 3) for v in test['excess_interval90']]}" if "excess_interval90" in test
+                 else f"bounds {_fmt(test.get('lower'))}..{_fmt(test.get('upper'))}" if "upper" in test else "")
+        unit = f"{metrics['units']} units" if metrics.get("units") is not None else f"{item.get('samples')} problems"
+        return (f"TRTMC {_fmt(metrics['trtmc_score'], 2)} vs native {_fmt(metrics['native_score'], 2)} "
+                f"(regression {_fmt(test.get('regression_points', metrics.get('regression_points')), 3)} pt, {bound}; {unit})")
     if item.get("passed") is not None:
         return f"{item['passed']}/{item.get('samples')}"
     values = [f"{name} {value:.4g}" for name, value in (item.get("metrics") or {}).items()
@@ -68,31 +69,24 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
              f"aiperf {result['provenance'].get('aiperf')}, plugins {result['provenance'].get('plugins')}.", ""]
     if result.get("coverage"):
         lines += [f"Coverage: {result['coverage']}", ""]
-    if result.get("candidate_note"):
-        lines += [f"TRTMC bundle: {result['candidate_note']}", ""]
     if result.get("accuracy_note"):
         lines += [f"Accuracy not applicable: {result['accuracy_note']}", ""]
-    lines += ["## Accuracy (absolute: both sides scored against gold answers; family: the family's own cases)", "",
-              "| suite | source | status | passed | gate | isolated re-check | evidence |",
-              "|---|---|---|---|---|---|---|"]
+    lines += ["## Accuracy (both sides scored against gold answers)", "",
+              "| suite | source | status | passed | gate |",
+              "|---|---|---|---|---|"]
     for item in result.get("accuracy", []):
-        isolated = item.get("isolated_check")
-        family = item.get("source") == "family"
         gate = (f"{item['required_passes']} passes" if item.get("required_passes") is not None
                 else json.dumps(item.get("gate", {})))
         count = counted(item) if item.get("samples") else json.dumps(item.get("metrics", {}))[:160]
-        evidence = item.get("evidence") if family else "—"
         status = item["status"] + (" (informational)" if item.get("informational") else "")
-        source = (f"{item.get('benchmark')} (family)" if family else
-                  f"{item.get('benchmark')} (AIPerf, gold answers, {item.get('endpoint')})" if item.get("source") == "absolute"
+        source = (f"{item.get('benchmark')} (AIPerf, gold answers, {item.get('endpoint')})" if item.get("source") == "absolute"
                   else item.get("benchmark") or "Task check")
-        lines.append(f"| {item['suite']} | {source} | {status} | {count} | {gate} | "
-                     f"{' '.join(str(part) for part in (isolated['status'], isolated.get('passed')) if part is not None) if isolated else '—'} | {evidence} |")
+        lines.append(f"| {item['suite']} | {source} | {status} | {count} | {gate} |")
         if item.get("error"):
-            lines.append(f"|  | error: {item['error'][:300].replace('|', '/')} |  |  |  |  |  |")
+            lines.append(f"|  | error: {item['error'][:300].replace('|', '/')} |  |  |  |")
         if item.get("reasons") or item.get("notes"):
             text = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
-            lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |  |  |")
+            lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |")
     workloads = [item for item in result.get("accuracy", []) if (item.get("workload_perf") or {}).get("pairs")]
     if workloads:
         lines += ["", "## Performance on the benchmark requests (informational; server model-call time, p50)", "",
@@ -107,7 +101,7 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
               "|---|---|---|---|---|---|---|---|"]
     for item in result.get("performance_l1", []):
         cand, ref = item.get("candidate", {}), item.get("reference", {})
-        lines.append(f"| {item['reference_mode']} | {item['light']} | {_fmt(cand.get('p50_ms'))} | "
+        lines.append(f"| {item['reference_mode']}{' ' + item['request'] if item.get('request') else ''} | {item['light']} | {_fmt(cand.get('p50_ms'))} | "
                      f"{_fmt(cand.get('ci_percent'), 2)} | {_fmt(ref.get('p50_ms'))} ({ref.get('aggregation', 'mean')}) | "
                      f"{_fmt(ref.get('ci_percent'), 2)} | "
                      f"{_fmt(item.get('speedup'), 2)} | {'; '.join(item.get('reasons', []) + item.get('notes', []))} |")

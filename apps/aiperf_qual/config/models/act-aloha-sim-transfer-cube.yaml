@@ -1,4 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-coverage: one recorded input - smoke parity, not broad task accuracy
+reference:
+  adapter: families/lerobot_act/tests/native_reference.py  # the pinned LeRobot source (no generic adapter)
+  prepare: families/lerobot_act/tests/native_prepare.py
+  requirements: families/lerobot_act/requirements.txt  # the family's dependencies, layered on the serving interpreter

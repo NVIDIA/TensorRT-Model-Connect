@@ -5,20 +5,36 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from typing import Any, Mapping, Sequence
+
+from .noninferiority import t_quantile
 
 METRIC = "trtmc_model_call_time"
 
 
-def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expected_modes: int) -> dict[str, Any]:
-    """Model-level outcome: Acc pass/fail/error (``n/a`` for a Perf-only model), one light per reference
-    mode, and a category.
+def light_key(item: Mapping[str, Any]) -> str:
+    """One light per reference mode and timed request: ``eager``, or ``eager/<request>`` with several."""
+    return f"{item['reference_mode']}/{item['request']}" if item.get("request") else item["reference_mode"]
 
-    ``expected_suites`` names every judged result the configuration requires (benchmarks, family cases,
-    and the entries each supplementary check emits); a missing one is an error, whatever else ran.
-    ``informational`` entries are reported, never judged.
+
+QUALIFYING_MODE = "eager"  # torch.compile lights are opt-in reports outside the category (DESIGN.md 4.6)
+
+
+def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expected_modes: int) -> dict[str, Any]:
+    """Model-level outcome (DESIGN.md 4.7): Acc (``n/a`` for a Perf-only model), the lights, and a category.
+    Only ``pass`` qualifies. ``expected_modes`` eager lights (one per timed request) decide Perf; a missing,
+    unavailable (``n/a``), or ``error`` eager light is an error, and other reference modes are reported only.
+
+    ``expected_suites`` names every judged result the configuration requires (benchmarks and the
+    entries each supplementary check emits); a missing one is an error, whatever else ran.
+    ``informational`` entries are reported, never judged. A model without a native path is
+    ``not-covered``.
     """
+    lights = {light_key(item): item["light"] for item in result.get("performance_l1", [])}
+    if (result.get("reference") or {}).get("backend") == "unsupported":
+        return {"acc": "n/a", "perf": "n/a", "lights": lights, "category": "not-covered"}
     accuracy = [item for item in result.get("accuracy", []) if not item.get("informational")]
     produced = {item.get("suite") for item in accuracy}
     if any(name not in produced for name in expected_suites):
@@ -28,22 +44,20 @@ def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expect
     else:
         statuses = {item["status"] for item in accuracy}
         acc = ("pass" if statuses == {"pass"} else "error" if "error" in statuses else "fail" if "fail" in statuses else
-               "not-comparable" if "not-comparable" in statuses else "inconclusive")
-    session_state = any(item.get("isolated_check", {}).get("status") == "pass" for item in accuracy)
-    lights = {item["reference_mode"]: item["light"] for item in result.get("performance_l1", [])}
-    # "n/a": the native model could not run in that mode (for example torch.compile failing).
-    measured = [value for value in lights.values() if value != "n/a"]
-    perf = "error" if len(lights) < expected_modes or not measured or "error" in measured else (
-        "green" if all(value == "green" for value in measured) else
-        "red" if "red" in measured else "white" if "white" in measured else "yellow")
+               "inconclusive" if "inconclusive" in statuses else "not-comparable")
+    qualifying = [item["light"] for item in result.get("performance_l1", [])
+                  if item.get("reference_mode") == QUALIFYING_MODE]
+    perf = "error" if len(qualifying) < max(expected_modes, 1) or {"error", "n/a"} & set(qualifying) else (
+        "green" if all(value == "green" for value in qualifying) else
+        "red" if "red" in qualifying else "yellow" if "yellow" in qualifying else "white")
     if acc == "error" or perf == "error":
         category = "error"
     elif acc == "fail":
-        category = "acc-session-state" if session_state else "acc-issue"
-    elif acc == "not-comparable":
-        category = "not-comparable"
+        category = "acc-issue"
     elif acc == "inconclusive":
         category = "acc-inconclusive"
+    elif acc == "not-comparable":
+        category = "not-comparable"
     elif perf in ("red", "yellow"):
         category = "perf-issue"
     elif perf == "white":
@@ -53,13 +67,7 @@ def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expect
     return {"acc": acc, "perf": perf, "lights": lights, "category": category}
 
 
-# Two-sided 95% Student-t critical values by degrees of freedom (AIPerf's confidence method).
-_T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228}
-
-
 AGGREGATIONS = ("mean", "best")
-# Run-to-run spread below this is timer and scheduling jitter, not instability (sub-ms models).
-MIN_CI_MS = 0.05
 # GPU utilization before a timed run (our servers idle) at or above this means another process shares it.
 GPU_BUSY_PERCENT = 20
 
@@ -78,7 +86,7 @@ def across_runs(p50_values: Sequence[float | None], aggregation: str = "mean") -
     mean = statistics.fmean(values)
     ci = None
     if len(values) > 1 and mean:
-        half = _T95.get(len(values) - 1, 1.96) * statistics.stdev(values) / len(values) ** 0.5
+        half = t_quantile(0.975, len(values) - 1) * statistics.stdev(values) / len(values) ** 0.5
         ci = half / mean * 100
     center = min(values) if aggregation == "best" else mean
     return {"p50_ms": center, "ci_percent": ci, "runs": len(values), "per_run_p50_ms": values,
@@ -86,7 +94,8 @@ def across_runs(p50_values: Sequence[float | None], aggregation: str = "mean") -
 
 
 def light(candidate_ms: float, reference_ms: float, margin_percent: float) -> str:
-    """Same rule as the perf matrix: green faster by more than the margin, red slower by more."""
+    """Point-estimate light (informational workload timings): green faster by more than the margin, red
+    slower by more."""
     ratio = candidate_ms / reference_ms
     if ratio < 1 - margin_percent / 100:
         return "green"
@@ -95,11 +104,82 @@ def light(candidate_ms: float, reference_ms: float, margin_percent: float) -> st
     return "yellow"
 
 
+def speedup_interval(candidate_runs: Sequence[float], reference_runs: Sequence[float]) -> tuple[float, float, float] | None:
+    """Speedup (native / TRTMC) and its 90% two-sided interval (95% one-sided per bound): Welch's t
+    interval of log(native) - log(TRTMC) over the per-run p50s. None with fewer than two runs a side."""
+    if len(candidate_runs) < 2 or len(reference_runs) < 2:
+        return None
+    mine, theirs = [math.log(value) for value in candidate_runs], [math.log(value) for value in reference_runs]
+    center = statistics.fmean(theirs) - statistics.fmean(mine)
+    parts = [statistics.variance(values) / len(values) for values in (theirs, mine)]
+    spread = sum(parts)
+    if spread == 0.0:
+        return math.exp(center), math.exp(center), math.exp(center)
+    df = spread ** 2 / sum(part ** 2 / (len(values) - 1) for part, values in zip(parts, (theirs, mine)) if part)
+    half = t_quantile(0.95, df) * math.sqrt(spread)  # Welch-Satterthwaite degrees of freedom, fractional
+    return math.exp(center), math.exp(center - half), math.exp(center + half)
+
+
+TEXT_OPERATIONS = ("generate", "translate", "transcribe")
+MEDIA_OPERATIONS = ("generate_image",)
+AUDIO_OPERATIONS = ("generate_audio", "speak")
+
+
+def work_signature(operation: str, observation: Mapping[str, Any] | None) -> tuple | None:
+    """What a response did (DESIGN.md 4.6), as (evidence, value) pairs from fields both backends report:
+    for text (generation, translation, transcription) the generated token count and the generated text,
+    two alternatives (equal counts: the same decode steps; equal texts: the same tokens, whichever way a
+    backend counts the end-of-sequence token); for generated media ``media_digest`` frames / height / width;
+    for generated speech the ``audio_digest`` length in 10 ms. Denoising steps are not in a response: both
+    sides get the request's stated value (an unstated one is a configuration error). ``()`` where the input
+    fixes the work; None when a response lacks the evidence its operation needs."""
+    observation = observation or {}
+    if operation in TEXT_OPERATIONS:
+        tokens, text = observation.get("output_tokens"), observation.get("text")
+        if tokens is None and text is None:
+            return None
+        return (("output_tokens", None if tokens is None else int(tokens)),
+                ("text", None if text is None else str(text)))  # exact: whitespace is generated work too
+    if operation in MEDIA_OPERATIONS:
+        media = observation.get("media_digest") or {}
+        geometry = tuple(media.get(key) for key in ("frames", "height", "width"))
+        return None if None in geometry else (("frames_height_width", geometry),)
+    if operation in AUDIO_OPERATIONS:
+        seconds = (observation.get("audio_digest") or {}).get("seconds")
+        return None if seconds is None else (("audio_10ms", round(float(seconds) * 100)),)
+    return ()
+
+
+def work_check(candidate: Mapping[str, Any], reference: Mapping[str, Any]) -> str | None:
+    """Why the timed responses did not all do the same work, or None: every response of both sides carries
+    its evidence, and on one of its kinds (``work_signature``) all responses of both sides agree."""
+    missing = [f"{side}: {stats['work_missing']} responses report no work" for side, stats in
+               (("TRTMC", candidate), ("native", reference)) if stats.get("work_missing")]
+    missing += [f"{side}: no work evidence" for side, stats in (("TRTMC", candidate), ("native", reference))
+                if not stats.get("work")]
+    if missing:
+        return "; ".join(missing)
+    signatures = [dict(tuple(pair) for pair in signature) for stats in (candidate, reference)
+                  for signature in stats["work"]]
+    kinds = {kind for signature in signatures for kind in signature}
+    if not kinds:  # the input fixes the work (every signature is empty)
+        return None
+    if any(len({repr(signature.get(kind)) for signature in signatures}) == 1
+           and signatures[0].get(kind) is not None for kind in kinds):
+        return None
+    shown = {side: [signature for signature in stats.get("work") or []][:2]
+             for side, stats in (("TRTMC", candidate), ("native", reference))}
+    return f"work differs: TRTMC {shown['TRTMC']} vs native {shown['native']}"[:400]
+
+
 def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any], *, margin_percent: float,
                       max_ci_percent: float, outputs_match: bool, output_reason: str,
-                      not_equivalent: str | None = None) -> dict[str, Any]:
-    """Light of one reference mode. A side whose runs did not complete every request, or that exported
-    no model-call time, is an ``error`` light: a successful subset is not a measurement."""
+                      not_equivalent: str | None = None, candidate_precision: str | None = None) -> dict[str, Any]:
+    """Light of one reference mode (DESIGN.md 4.6). white: the comparison is invalid (work or outputs
+    differ, the native model ran at another precision than ``candidate_precision``, a busy GPU) or a
+    side's runs spread more than ``max_ci_percent``; otherwise green / red when the speedup interval lies
+    beyond the margin, yellow when it does not. A side whose runs did not complete every request, or that
+    exported no model-call time, is an ``error`` light."""
     result = {"candidate": dict(candidate), "reference": dict(reference), "margin_percent": margin_percent,
               "output_check": {"match": outputs_match, "reason": output_reason}}
     errors = [f"{side}: {stats['incomplete']}" for side, stats in (("candidate", candidate), ("reference", reference))
@@ -113,25 +193,9 @@ def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any]
         reasons.append(f"not the same workload: {not_equivalent}")
     if not outputs_match:
         reasons.append(f"output check failed: {output_reason}")
-    wide = []
-    for side, stats in (("candidate", candidate), ("reference", reference)):
-        if (stats.get("aggregation", "mean") == "mean" and stats.get("ci_percent") is not None
-              and stats["ci_percent"] > max_ci_percent
-              and stats["ci_percent"] / 100 * stats["p50_ms"] > MIN_CI_MS):
-            wide.append(f"{side} CI ±{stats['ci_percent']:.2f}% > {max_ci_percent}%")
-    if wide and candidate.get("p50_ms") and reference.get("p50_ms"):
-        # A wide CI only matters if it could change the light: evaluate both extremes.
-        def bounds(stats: Mapping[str, Any]) -> tuple[float, float]:
-            half = (stats.get("ci_percent") or 0.0) / 100 * stats["p50_ms"] if stats.get("aggregation", "mean") == "mean" else 0.0
-            return stats["p50_ms"] - half, stats["p50_ms"] + half
-        (c_low, c_high), (r_low, r_high) = bounds(candidate), bounds(reference)
-        extremes = {light(c_low, r_high, margin_percent), light(c_high, r_low, margin_percent)}
-        if len(extremes) == 1:
-            notes += [f"{item} (light unchanged across the interval)" for item in wide]
-        else:
-            reasons += [f"{item}: {' or '.join(sorted(extremes))} within the interval" for item in wide]
-    else:
-        reasons += wide
+    work = work_check(candidate, reference)
+    if work:
+        reasons.append(work)
     for side, stats in (("candidate", candidate), ("reference", reference)):
         if (stats.get("gpu_busy_percent") or 0) >= GPU_BUSY_PERCENT:
             reasons.append(f"GPU {stats['gpu_busy_percent']:.0f}% busy with other processes before the {side} timing")
@@ -139,14 +203,32 @@ def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any]
         # The native model could not run at the candidate precision: a slower precision is no baseline.
         reasons.append(f"reference timed at {reference.get('precision')} (candidate precision failed: "
                        f"{str(reference['precision_fallback'])[:120]})")
+    elif candidate_precision and reference.get("precision") and reference["precision"] != candidate_precision:
+        reasons.append(f"reference timed at {reference['precision']}, TRTMC runs {candidate_precision}")
     notes += [f"{side}: {stats['exit_note']}" for side, stats in (("candidate", candidate), ("reference", reference))
               if stats.get("exit_note")]
     result["notes"] = notes
-    if candidate.get("p50_ms") and reference.get("p50_ms"):
-        result["speedup"] = reference["p50_ms"] / candidate["p50_ms"]  # informative even when white
+    result["speedup"] = reference["p50_ms"] / candidate["p50_ms"]  # informative even when white
+    interval = speedup_interval(candidate.get("per_run_p50_ms") or [], reference.get("per_run_p50_ms") or [])
+    if interval:
+        result["speedup_interval90"] = [interval[1], interval[2]]
+    if interval is None:
+        reasons.append("fewer than two runs a side: no interval")
+    # Unstable timing on either side invalidates the comparison, whatever the interval says (a side
+    # aggregated by its best run, the opt-in torch.compile reference, is not held to it).
+    reasons += [f"{side} CI ±{stats['ci_percent']:.2f}% > {max_ci_percent}%"
+                for side, stats in (("TRTMC", candidate), ("native", reference))
+                if stats.get("aggregation", "mean") == "mean" and stats.get("ci_percent") is not None
+                and stats["ci_percent"] > max_ci_percent]
     if reasons:
         return {**result, "light": "white", "reasons": reasons}
-    return {**result, "light": light(candidate["p50_ms"], reference["p50_ms"], margin_percent), "reasons": []}
+    low, high = interval[1], interval[2]
+    if low > 1 + margin_percent / 100:
+        return {**result, "light": "green", "reasons": []}
+    if high < 1 - margin_percent / 100:
+        return {**result, "light": "red", "reasons": [f"TRTMC slower: speedup interval {low:.3f}..{high:.3f}"]}
+    return {**result, "light": "yellow", "reasons": [f"not faster by {margin_percent}%: speedup interval "
+                                                     f"{low:.3f}..{high:.3f}"]}
 
 
 def first_observation(raw_records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:

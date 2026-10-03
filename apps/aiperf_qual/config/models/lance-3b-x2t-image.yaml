@@ -3,3 +3,7 @@
 
 # Image understanding of a unified model: MMStar.
 absolute: [mmstar]
+
+reference:
+  requirements: families/lance/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  build_isolation: false  # its requirements build native extensions against the installed torch

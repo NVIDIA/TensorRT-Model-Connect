@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .absolute import run_timeout
 from .aiperf_runner import run_aiperf
 from .config import Environment
 from .judge import light
@@ -47,7 +48,7 @@ def _level(environment: Environment, service: Mapping[str, Any], model: Mapping[
                  "--request-count", str(requests), "--warmup-request-count", str(max(1, concurrency))]
     if model["reference"].get("trust_remote_code"):
         arguments.append("--tokenizer-trust-remote-code")
-    run = run_aiperf(environment, out, arguments)
+    run = run_aiperf(environment, out, arguments, timeout_s=run_timeout(environment, model))
     summary = run.summary
     level: dict[str, Any] = {"concurrency": concurrency, "aiperf_exit": run.exit_code}
     for name, fields in METRICS.items():
@@ -123,14 +124,14 @@ def media_stats(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def _media_level(environment: Environment, service: Mapping[str, Any], endpoint: str, prompts: Path,
-                 steps: int | None, requests: int, out: Path) -> dict[str, Any]:
+                 steps: int | None, requests: int, out: Path, timeout_s: float) -> dict[str, Any]:
     arguments = ["--endpoint-type", endpoint, "--url", service["url"], "--tokenizer", "builtin",
                  "--input-file", str(prompts), "--custom-dataset-type", "single_turn", "--concurrency", "1",
                  "--request-count", str(requests), "--warmup-request-count", "1"]
     if steps:
         arguments += ["--extra-inputs", f"num_inference_steps:{steps}"]
     before = len(_route_records(Path(service["records"])))
-    run = run_aiperf(environment, out, arguments)
+    run = run_aiperf(environment, out, arguments, timeout_s=timeout_s)
     measured = _route_records(Path(service["records"]))[before + 1:]  # the first one is AIPerf's warmup
     latency = run.summary.get("request_latency") or {}
     return {"steps": steps, "aiperf_exit": run.exit_code, "request_latency_p50": latency.get("p50"),
@@ -181,8 +182,7 @@ def run_media(environment: Environment, model: Mapping[str, Any], l2: Mapping[st
     from .services import serving
     from .suites import build_suite
 
-    suite = build_suite(_suite(l2.get("suite", "partiprompts-30"), model["catalog_profile"],
-                               environment.path("repo")), environment)
+    suite = build_suite(_suite(l2.get("suite", "partiprompts-30"), model["catalog_profile"]), environment)
     samples = suite.samples[: int(l2.get("prompts", 3))]
     video = is_video(samples[0]["request"])
     endpoint = "video_generation" if video else "image_generation"
@@ -197,7 +197,8 @@ def run_media(environment: Environment, model: Mapping[str, Any], l2: Mapping[st
                                                               "python": python})):
         with serving(environment, model, backend, out / f"l2-{side}-server", memory_probe=True, **kwargs) as service:
             sides[side] = [_media_level(environment, service, endpoint, prompts, steps, requests,
-                                        out / f"l2-{side}-steps{steps or 'catalog'}") for steps in variants]
+                                        out / f"l2-{side}-steps{steps or 'catalog'}", run_timeout(environment, model))
+                           for steps in variants]
     return {"kind": "media", "endpoint": endpoint, "prompts": len(samples), "requests": requests,
             "reference_precision": precision, **sides,
             "decomposition": {side: decompose(levels) for side, levels in sides.items()},

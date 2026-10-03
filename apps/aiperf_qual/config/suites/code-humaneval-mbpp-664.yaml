@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# HumanEval (openai/openai_humaneval, 164) and MBPP's full test split (google-research-datasets/mbpp, 500) at
+# pinned revisions; MBPP prompted as bigcode-evaluation-harness does for base models. Gold: the program's tests.
+suite: code-humaneval-mbpp-664
+version: 1
+source:
+  kind: code_benchmarks
+selection: {method: first, count: 664}
+request:
+  max_new_tokens: 512
+  temperature: 0.0
+  top_k: 1
+  top_p: 1.0
+  use_chat_template: false
+  enable_thinking: false

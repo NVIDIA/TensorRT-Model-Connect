@@ -63,17 +63,18 @@ def test_light_uses_perf_matrix_rule(candidate, reference, expected):
 
 
 def test_perf_white_when_unstable_or_outputs_differ():
-    stable = {"p50_ms": 10.0, "ci_percent": 1.0}
-    assert judge.judge_performance(stable, stable, margin_percent=5, max_ci_percent=5, outputs_match=True,
-                                   output_reason="")["light"] == "yellow"
-    unstable = judge.judge_performance({"p50_ms": 10.0, "ci_percent": 9.0}, stable, margin_percent=5,
-                                       max_ci_percent=5, outputs_match=True, output_reason="")
-    assert unstable["light"] == "white" and "within the interval" in unstable["reasons"][0]
-    decisive = judge.judge_performance(stable, {"p50_ms": 40.0, "ci_percent": 9.0}, margin_percent=5,
-                                       max_ci_percent=5, outputs_match=True, output_reason="")
-    assert decisive["light"] == "green" and "unchanged" in decisive["notes"][0]
-    assert judge.judge_performance(stable, stable, margin_percent=5, max_ci_percent=5, outputs_match=False,
-                                   output_reason="differs")["light"] == "white"
+    stable = {"p50_ms": 10.0, "ci_percent": 1.0, "per_run_p50_ms": [9.95, 10.0, 10.05], "work": [[]]}
+    common = dict(margin_percent=5, max_ci_percent=5, output_reason="")
+    assert judge.judge_performance(stable, stable, outputs_match=True, **common)["light"] == "yellow"
+    noisy = {"p50_ms": 10.0, "ci_percent": 9.0, "per_run_p50_ms": [9.6, 10.0, 10.4], "work": [[]]}
+    unstable = judge.judge_performance(noisy, stable, outputs_match=True, **common)
+    assert unstable["light"] == "white" and "CI" in unstable["reasons"][0]
+    slow = {"p50_ms": 40.0, "ci_percent": 9.0, "per_run_p50_ms": [38.4, 40.0, 41.6], "work": [[]]}
+    wide = judge.judge_performance(stable, slow, outputs_match=True, **common)  # even a decisive interval
+    assert wide["light"] == "white" and "native CI" in wide["reasons"][0]
+    assert judge.judge_performance(stable, stable, outputs_match=False, **common)["light"] == "white"
+    unproven = judge.judge_performance(stable, {**stable, "work": []}, outputs_match=True, **common)
+    assert unproven["light"] == "white" and "no work evidence" in unproven["reasons"][0]
 
 
 def test_across_runs_confidence_interval():
@@ -88,6 +89,7 @@ def test_best_aggregation_uses_fastest_run_and_does_not_gate_stability():
     best = judge.across_runs([30.7, 28.4, 30.5], "best")
     assert best["p50_ms"] == 28.4 and best["ci_percent"] > 5
     candidate = judge.across_runs([5.74, 5.73, 5.74])
+    candidate["work"] = best["work"] = [[]]
     verdict = judge.judge_performance(candidate, best, margin_percent=5, max_ci_percent=5, outputs_match=True,
                                       output_reason="")
     assert verdict["light"] == "green" and not verdict["reasons"]
@@ -162,9 +164,8 @@ REPOSITORY = __import__("pathlib").Path(__file__).resolve().parents[3]
 
 @pytest.mark.parametrize("accuracy, lights, category", [
     ([{"status": "pass"}], {"eager": "green", "compile": "green"}, "pass"),
-    ([{"status": "pass"}], {"eager": "green", "compile": "red"}, "perf-issue"),
-    ([{"status": "fail", "isolated_check": {"status": "pass"}}], {"eager": "green", "compile": "green"},
-     "acc-session-state"),
+    ([{"status": "pass"}], {"eager": "green", "compile": "red"}, "pass"),  # compile: reported only
+    ([{"status": "pass"}], {"eager": "n/a", "compile": "green"}, "error"),
     ([{"status": "fail"}], {"eager": "green", "compile": "green"}, "acc-issue"),
     ([], {"eager": "green", "compile": "green"}, "error"),
     ([{"status": "pass"}], {"eager": "white", "compile": "green"}, "perf-inconclusive"),
@@ -176,7 +177,7 @@ REPOSITORY = __import__("pathlib").Path(__file__).resolve().parents[3]
 def test_verdict_categories(accuracy, lights, category):
     result = {"accuracy": [{"suite": "s", **item} for item in accuracy],
               "performance_l1": [{"reference_mode": mode, "light": light} for mode, light in lights.items()]}
-    assert judge.verdict(result, expected_suites=["s"], expected_modes=2)["category"] == category
+    assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["category"] == category
 
 
 def test_numeric_parity_matches_shapes_exactly_and_vectors_by_cosine():
@@ -209,27 +210,25 @@ def test_scores_image_and_audio_parity():
     assert not compare_audio({"audio_digest": audio_digest(tone[:4000], 16000)}, {"audio_digest": audio_digest(tone, 16000)})[0]
 
 
-def test_models_are_derived_from_the_catalog_the_family_cases_and_task_defaults():
+def test_models_are_derived_from_the_catalog_and_task_defaults():
     from trtmc_aiperf_qual.config import Environment
     from trtmc_aiperf_qual.models import resolve_model
 
     environment = Environment({"repo": str(REPOSITORY)})
     qwen = resolve_model("qwen3-0.6b-fp16", environment)
-    # Gold-scored MMLU replaces the parity cases; its prompts need a 4096-token bundle.
-    assert qwen["accuracy_source"] == "absolute" and not qwen["family_accuracy"]
-    assert [(item["suite"], item["endpoint"]) for item in qwen["absolute"]] == [("mmlu-5shot", "chat")]
-    # The benchmark bundle's name carries its length: an earlier shorter `-qual` bundle is never reused.
-    assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16-qual-4096/qwen3-0.6b-fp16.bundle"
-    assert qwen["candidate"]["build"]["max_sequence_length"] == 4096
-    assert qwen["performance"]["l1"]["suite"]["source"] == {"kind": "qualification_perf", "profile": "qwen3-0.6b-fp16"}
-    small = resolve_model("falcon-rw-1b", environment)  # MMLU is near chance: LAMBADA on the catalog length
+    # Gold-scored MMLU 0-shot on the shipped catalog bundle; Perf times the catalog testcase.
+    assert qwen["accuracy_source"] == "absolute"
+    assert [(item["suite"], item["endpoint"]) for item in qwen["absolute"]] == [("mmlu-0shot", "chat")]
+    assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16/qwen3-0.6b-fp16.bundle" and not qwen["candidate"]["build"]
+    assert qwen["performance"]["l1"]["suite"]["source"] == {"kind": "catalog_testcase", "profile": "qwen3-0.6b-fp16"}
+    assert qwen["performance"]["l1"]["reference_modes"] == ["eager"] and "l2" not in qwen["performance"]
+    small = resolve_model("falcon-rw-1b", environment)  # MMLU is near chance: LAMBADA
     assert [item["suite"] for item in small["absolute"]] == ["lambada"] and small["candidate"]["max_sequence_length"] == 256
     detr = resolve_model("detr-resnet-50", environment)
-    assert detr["candidate"]["build"]["image_height"] == 1333 and not detr["family_accuracy"]
-    coco, = detr["absolute"]  # COCO mAP in DETR's own class numbering at its family score threshold
+    coco, = detr["absolute"]  # COCO mAP in DETR's own class numbering at its score threshold
     assert coco["metric_params"] == {"label_space": "coco-category-id"}
     assert coco["suite_definition"]["request"] == {"score_threshold": 0.5}
-    assert (detr["reference"]["backend"], detr["reference"]["fallback"]) == ("reference", "script")
+    assert detr["reference"]["backend"] == "reference" and detr["reference"]["requirements"] == "families/detr/requirements.txt"
     stories = resolve_model("mixtral-stories-15m", environment)
     assert [item["suite"] for item in stories["absolute"]] == ["tinystories"]
     import shutil
@@ -237,20 +236,24 @@ def test_models_are_derived_from_the_catalog_the_family_cases_and_task_defaults(
 
     from trtmc_aiperf_qual.config import CONFIG_ROOT
 
-    with tempfile.TemporaryDirectory() as directory:  # `absolute: []` and no family case: no accuracy scheme
+    with tempfile.TemporaryDirectory() as directory:  # `absolute: []`: no accuracy scheme, reported as an error
         root = Path(directory) / "config"
         shutil.copytree(CONFIG_ROOT, root)
         (root / "models/mixtral-stories-15m.yaml").write_text("absolute: []\n")
-        with pytest.raises(ConfigError, match="no accuracy scheme"):
-            resolve_model("mixtral-stories-15m", environment, root=root)
+        assert resolve_model("mixtral-stories-15m", environment, root=root)["accuracy_source"] == "missing"
         (root / "models/mixtral-stories-15m.yaml").write_text("accuracy_source: none\n")
         with pytest.raises(ConfigError, match="accuracy_note"):
             resolve_model("mixtral-stories-15m", environment, root=root)
     random = resolve_model("qwen3-moe-tiny-random", environment)  # random weights: Perf only
     assert random["accuracy_source"] == "none" and not random["absolute"] and "random" in random["accuracy_note"]
-    assert random["performance"]["l1"]["suite"]["source"]["kind"] in ("catalog_testcase", "qualification_perf")
-    edit = resolve_model("qwen-image-edit-2511", environment)["reference"]  # Diffusers edit, family fallback
-    assert (edit["backend"], edit["fallback"]) == ("reference", "script")
+    assert random["performance"]["l1"]["suite"]["source"]["kind"] == "catalog_testcase"
+    world = resolve_model("sana-wm-bidirectional", environment)  # the family's own native adapter
+    assert world["reference"]["backend"] == "reference" and world["reference"]["adapter"].startswith("families/sana_wm/")
+    with tempfile.TemporaryDirectory() as directory:  # without it no generic adapter serves a world model
+        root = Path(directory) / "config"
+        shutil.copytree(CONFIG_ROOT, root)
+        (root / "models/sana-wm-bidirectional.yaml").unlink()
+        assert resolve_model("sana-wm-bidirectional", environment, root=root)["reference"]["backend"] == "unsupported"
 
 
 def test_top1_near_tie_tolerance_is_opt_in():
@@ -297,6 +300,8 @@ def test_equal_text_with_different_token_ids_is_opt_in():
     reference = {"token_ids": [450, 10150], "text": "The largest"}
     assert not compare_token_exact(candidate, reference, min_prefix=8)[0]
     assert compare_token_exact(candidate, reference, min_prefix=8, accept_equal_text=True)[0]
+    spaced = {"token_ids": [450, 13, 13, 10150], "text": "The\n\nlargest"}  # whitespace is output too
+    assert not compare_token_exact(candidate, spaced, min_prefix=8, accept_equal_text=True)[0]
 
 
 def test_answer_line_accepts_identical_tokens_with_different_rendering():
@@ -319,6 +324,32 @@ def test_perf_output_check_falls_back_to_the_eager_reference():
     assert match and "eager reference" in reason
     assert not output_check(l1, candidate, {"eager": {"token_ids": [7]}, "compile": {"token_ids": [8]}}, "compile")[0]
     assert not output_check(l1, candidate, {"eager": {"token_ids": [7]}}, "eager")[0]
+
+
+def test_perf_only_models_have_conversion_parity_as_their_accuracy():
+    from trtmc_aiperf_qual.runner import CONVERSION_PARITY, conversion_parity, expected_suites
+
+    model = {"accuracy_source": "none", "absolute": [], "supplementary": []}
+    assert list(expected_suites(model)) == [CONVERSION_PARITY]
+    perf = [{"reference_mode": "eager", "request": "catalog", "light": "white",
+             "output_check": {"match": False, "reason": "token 3 differs"}},
+            {"reference_mode": "eager", "request": "near-capacity", "light": "green", "output_check": {"match": True}},
+            {"reference_mode": "compile", "request": "catalog", "light": "n/a", "output_check": {}}]
+    [entry] = conversion_parity(perf)
+    assert (entry["status"], entry["samples"], entry["passed"]) == ("fail", 2, 1)
+    result = {"accuracy_source": "none", "accuracy": [entry], "performance_l1": perf}
+    assert judge.verdict(result, expected_suites=[CONVERSION_PARITY], expected_modes=2)["category"] == "acc-issue"
+    assert conversion_parity([]) == []  # nothing compared: missing_results reports it
+
+
+def test_a_task_without_an_accuracy_scheme_stays_an_error():
+    from trtmc_aiperf_qual.runner import expected_suites, missing_results
+
+    model = {"accuracy_source": "missing", "task": "image_features", "absolute": [], "supplementary": []}
+    [entry] = missing_results(model, [], {})
+    assert entry["suite"] == "accuracy-scheme" and entry["status"] == "error" and "image_features" in entry["error"]
+    result = {"accuracy": [entry], "performance_l1": [{"reference_mode": "eager", "light": "green"}]}
+    assert judge.verdict(result, expected_suites=list(expected_suites(model)), expected_modes=1)["category"] == "error"
 
 
 def test_perf_only_models_and_informational_entries():
@@ -356,16 +387,12 @@ def test_sampled_perf_requests_compare_generated_length():
     assert not output_check(l1, {"token_ids": [1, 2]}, refs, "eager", sampled=True)[0]
 
 
-def test_family_cases_with_top_k_one_are_greedy_and_judged_strictly():
-    from types import SimpleNamespace
+def test_requests_with_top_k_one_are_greedy():
+    from trtmc_aiperf_qual.runner import sampled_request
 
-    from trtmc_aiperf_qual import family
-
-    def case(request):
-        return SimpleNamespace(values={"request": request})
-    assert not family.sampled(case({"temperature": 1.0, "top_k": 1}))  # Qwen2.5-VL's family request
-    assert not family.sampled(case({"do_sample": True, "top_k": 1}))
-    assert family.sampled(case({"do_sample": True})) and family.sampled(case({"temperature": 0.7}))
+    assert not sampled_request({"temperature": 1.0, "top_k": 1})  # Qwen2.5-VL's catalog request
+    assert not sampled_request({"do_sample": True, "top_k": 1})
+    assert sampled_request({"do_sample": True}) and sampled_request({"temperature": 0.7})
 
 
 def _environment(tmp_path=None):
@@ -436,13 +463,14 @@ def test_suites_can_take_the_catalog_request_as_their_base(tmp_path, monkeypatch
         {"prompt": "a red cube", "num_steps": 28, "seed": 42}, {"prompt": "a blue ball", "num_steps": 28, "seed": 42}]
 
 
-def test_the_etth1_benchmark_follows_the_family_window():
+def test_the_etth1_benchmark_follows_the_model_window():
     from trtmc_aiperf_qual.models import resolve_model
 
     timesfm = resolve_model("timesfm-2.0-500m-official", _environment())
-    # Rolling ETTh1 windows in the family case's columns, context, and horizon, every hour.
+    # ETTh1 windows in the model's columns, context, and horizon (config/models), every 24 hours of the test range.
     window = timesfm["absolute"][0]["suite_definition"]["source"]["window"]
-    assert (window["context_length"], window["prediction_length"], window["stride"]) == (2048, 128, 1)
+    assert (window["context_length"], window["prediction_length"], window["stride"]) == (2048, 128, 24)
+    assert (window["test_target_start"], window["test_end"]) == (11520, 14400)
 
 
 def test_quantized_candidates_get_the_benchmarks_quantization_gate():
@@ -451,7 +479,7 @@ def test_quantized_candidates_get_the_benchmarks_quantization_gate():
     fp8 = resolve_model("qwen3-0.6b-fp8", _environment())
     assert fp8["candidate"]["quantization"] == "fp8"
     assert [(item["suite"], item["gate"]) for item in fp8["absolute"]] == [
-        ("mmlu-5shot", {"max_delta_points": 2.0, "min_native": 12.5})]
+        ("mmlu-0shot", {"margin": 2.0, "min_native": 30.0})]
 
 
 def test_timing_reference_precision_can_differ_from_the_candidate_precision():
@@ -461,8 +489,6 @@ def test_timing_reference_precision_can_differ_from_the_candidate_precision():
     z_image = resolve_model("z-image-turbo", _environment())["reference"]
     assert z_image["perf_precision"] == "fp16" and timing_precisions(z_image) == ["bf16"]
     assert timing_precisions({"perf_precision": "fp16", "precision": "fp32"}) == ["fp16", "fp32"]
-    assert timing_precisions({"perf_precision": "fp16", "precision": "fp32", "declared_precision": "bf16"}) == [
-        "fp16", "bf16", "fp32"]
 
 
 def test_always_sampling_tts_models_compare_duration_in_perf():
@@ -470,22 +496,21 @@ def test_always_sampling_tts_models_compare_duration_in_perf():
 
     for profile in ("bark-small", "bark-large", "magpie-tts-357m"):
         model = resolve_model(profile, _environment())
-        assert model["family_accuracy"]  # the family's own case judges Acc
+        assert [check["check"] for check in model["supplementary"]] == ["tts_intelligibility"]
         assert model["performance"]["l1"]["output_grader_params"]["max_log_spectral_distance"] > 100
 
 
 def test_a_missing_mandatory_result_is_an_error_even_when_other_checks_add_rows():
     from trtmc_aiperf_qual.runner import expected_suites, informational_suites, missing_results
 
-    model = {"family": "flux", "family_accuracy": ["generated-media-parity"],
+    model = {"family": "flux", "absolute": [{"suite": "mmlu-0shot"}],
              "supplementary": [{"check": "replay_parity", "latent_replay_families": ["flux"]},
                                {"check": "geneval", "only_families": ["flux"]}]}
-    assert expected_suites(model) == {"generated-media-parity": "family_accuracy", "replay-parity": "replay_parity",
-                                      "geneval": "geneval"}
+    assert expected_suites(model) == {"mmlu-0shot": "candidate", "replay-parity": "replay_parity", "geneval": "geneval"}
     produced = [{"suite": "geneval", "status": "pass"}, {"suite": "replay-parity", "status": "pass"}]
-    errors = {"family_accuracy": "RuntimeError: startup failed"}
+    errors = {"candidate": "RuntimeError: startup failed"}
     missing = missing_results(model, produced, errors)
-    assert [(m["suite"], m["status"]) for m in missing] == [("generated-media-parity", "error")]
+    assert [(m["suite"], m["status"]) for m in missing] == [("mmlu-0shot", "error")]
     assert "startup failed" in missing[0]["error"]
     lights = [{"reference_mode": "eager", "light": "green"}]
     assert judge.verdict({"accuracy": produced, "performance_l1": lights}, expected_suites=list(expected_suites(model)),
@@ -493,12 +518,12 @@ def test_a_missing_mandatory_result_is_an_error_even_when_other_checks_add_rows(
     assert judge.verdict({"accuracy": produced + missing, "performance_l1": lights},
                          expected_suites=list(expected_suites(model)), expected_modes=1)["acc"] == "error"
     other = {**model, "family": "minimax"}  # no caller latents (and not a GenEval family): neither expected
-    assert set(expected_suites(other)) == {"generated-media-parity"}
-    # Generated media: the family's media parity and the pixel parity are reported only; GenEval decides.
-    informational = {**model, "family_informational": True,
-                     "supplementary": [{**model["supplementary"][0], "informational": True}, model["supplementary"][1]]}
-    assert expected_suites(informational) == {"geneval": "geneval"}
-    assert informational_suites(informational) == {"generated-media-parity", "replay-parity"}
+    assert set(expected_suites(other)) == {"mmlu-0shot"}
+    # The pixel parity under latent replay is reported only; GenEval decides.
+    informational = {**model, "supplementary": [{**model["supplementary"][0], "informational": True},
+                                                model["supplementary"][1]]}
+    assert expected_suites(informational) == {"mmlu-0shot": "candidate", "geneval": "geneval"}
+    assert informational_suites(informational) == {"replay-parity"}
 
 
 def test_incomplete_perf_runs_and_missing_exports_are_errors_not_lights():
@@ -511,8 +536,8 @@ def test_incomplete_perf_runs_and_missing_exports_are_errors_not_lights():
     assert run_completeness(partial, 20) == "1 of 20 requests succeeded (failed with status 500)"
     assert run_completeness(SimpleNamespace(raw_records=lambda: [ok] * 20), 20) is None
     assert "19 of 20" in run_completeness(SimpleNamespace(raw_records=lambda: [ok] * 19), 20)
-    fast = {"p50_ms": 1.0, "ci_percent": 0.0, "aggregation": "mean"}
-    slow = {"p50_ms": 2.0, "ci_percent": 0.0, "aggregation": "mean"}
+    fast = {"p50_ms": 1.0, "ci_percent": 0.0, "aggregation": "mean", "per_run_p50_ms": [1.0, 1.0, 1.0], "work": [[]]}
+    slow = {"p50_ms": 2.0, "ci_percent": 0.0, "aggregation": "mean", "per_run_p50_ms": [2.0, 2.0, 2.0], "work": [[]]}
     common = dict(margin_percent=5, max_ci_percent=5, outputs_match=True, output_reason="identical")
     broken = judge.judge_performance({**fast, "incomplete": "run_01: 1 of 20 requests succeeded"}, slow, **common)
     assert broken["light"] == "error" and "1 of 20" in broken["reasons"][0]
@@ -524,20 +549,18 @@ def test_incomplete_perf_runs_and_missing_exports_are_errors_not_lights():
     assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["category"] == "error"
 
 
-def test_one_pinned_checkpoint_serves_the_bundle_and_the_reference():
+def test_one_checkpoint_serves_the_bundle_and_the_reference():
     from trtmc_aiperf_qual.config import Environment
     from trtmc_aiperf_qual.models import resolve_model
 
     environment = Environment({"repo": str(REPOSITORY)})
-    albert = resolve_model("albert-base", environment)  # the catalog does not pin it; the family does
-    revision = albert["candidate"]["revision"]
-    assert revision and revision.startswith("8e2f239c5f8a")
-    assert albert["candidate"]["build"]["hf_revision"] == revision
-    assert albert["candidate"]["bundle"].startswith("albert-base-qual/")
-    assert albert["reference"]["revision"] == revision and "model" not in albert["reference"]
-    k2 = resolve_model("k2-horizon-7b-uno", environment)  # the family's native reference is the base model
+    albert = resolve_model("albert-base", environment)  # unpinned in the catalog: both sides load the cached snapshot
+    assert albert["candidate"]["revision"] is None and albert["reference"]["revision"] is None
+    assert albert["candidate"]["bundle"] == "albert-base/albert-base.bundle" and not albert["candidate"]["build"]
+    k2 = resolve_model("k2-horizon-7b-uno", environment)  # the adapter's native model is its base checkpoint
     assert (k2["reference"]["model"], k2["reference"]["revision"]) == (
         "IFM/K2-Horizon-7B", "586b03f0fd1fbbf2f13eeafc33749e95ae34dd10")
+    assert k2["reference"]["trust_remote_code"] and k2["reference"]["requirements"].endswith("k2_horizon_uno/requirements.txt")
 
 
 def test_rejudging_reports_results_the_configuration_no_longer_asks_for(tmp_path, monkeypatch):
@@ -545,13 +568,14 @@ def test_rejudging_reports_results_the_configuration_no_longer_asks_for(tmp_path
 
     from trtmc_aiperf_qual import cli
 
-    model = {"catalog_profile": "demo", "task": "text_generation", "family_accuracy": [], "supplementary": [],
-             "accuracy_source": "absolute", "absolute": [{"suite": "mmlu-5shot", "gate": {"max_delta_points": 1.0}}],
+    model = {"catalog_profile": "demo", "task": "text_generation", "supplementary": [],
+             "accuracy_source": "absolute", "absolute": [{"suite": "mmlu-0shot", "gate": {"margin": 1.0}}],
              "performance": {"l1": {"reference_modes": ["eager"]}}}
     perf = {"reference_mode": "eager", **judge.judge_performance(
-        {"p50_ms": 1.0, "ci_percent": 0.0}, {"p50_ms": 2.0, "ci_percent": 0.0}, margin_percent=5, max_ci_percent=5,
+        {"p50_ms": 1.0, "ci_percent": 0.0, "per_run_p50_ms": [1.0, 1.0], "work": [[]]},
+        {"p50_ms": 2.0, "ci_percent": 0.0, "per_run_p50_ms": [2.0, 2.0], "work": [[]]}, margin_percent=5, max_ci_percent=5,
         outputs_match=True, output_reason="identical")}
-    accuracy = [{"suite": "mmlu-5shot", "source": "absolute", "status": "pass"},
+    accuracy = [{"suite": "mmlu-0shot", "source": "absolute", "status": "pass"},
                 {"suite": "clip-alignment", "source": "task", "status": "fail"}]  # a retired check
     (tmp_path / "model.json").write_text(json.dumps(model))
     (tmp_path / "report.json").write_text(json.dumps({"model": "demo", "task": "text_generation", "accuracy": accuracy,
@@ -561,6 +585,14 @@ def test_rejudging_reports_results_the_configuration_no_longer_asks_for(tmp_path
     after = json.loads((tmp_path / "report.json").read_text())
     retired = next(item for item in after["accuracy"] if item["suite"] == "clip-alignment")
     assert retired["informational"] and after["verdict"]["category"] == "pass"
+    original = json.loads((tmp_path / "report.original.json").read_text())  # the run's own report is kept
+    assert "verdict" not in original and after["rejudged"]["original"] == "report.original.json"
+    cli.rejudge_reports([tmp_path])
+    assert "verdict" not in json.loads((tmp_path / "report.original.json").read_text())  # never overwritten
+    smoke = {**after, "mode": "smoke"}
+    (tmp_path / "report.json").write_text(json.dumps(smoke))
+    cli.rejudge_reports([tmp_path])
+    assert json.loads((tmp_path / "report.json").read_text())["verdict"]["category"] == "smoke-pass"
 
 
 def test_a_new_run_sets_the_previous_directory_aside_so_its_pass_cannot_stand(tmp_path, monkeypatch):
@@ -583,52 +615,6 @@ def test_a_new_run_sets_the_previous_directory_aside_so_its_pass_cannot_stand(tm
     assert campaign._finished(existing) == "build-failed"
     kept = [path for path in (tmp_path / "results").iterdir() if campaign.KEPT_ASIDE.search(path.name)]
     assert len(kept) == 1 and (kept[0] / "report.json").is_file()  # the old evidence is kept, not shown
-
-
-def test_a_single_request_family_media_case_counts_its_input():
-    from types import SimpleNamespace
-
-    from trtmc_aiperf_qual import family
-
-    case = SimpleNamespace(name="generated-media-parity", benchmark="task_output_parity",
-                           values={"request": {"prompt": "cat"}})
-    result = {"status": "passed", "gate": {"min_psnr": 5.0},
-              "metrics": {"compared_frames": 3.0, "media_count": 320.0, "min_psnr": 11.4}}
-    entry = family.item(case, result, "result.json")
-    assert (entry["samples"], entry["executed_inputs"], entry["passed"]) == (1, 1, None)
-    assert entry["metrics"]["media_count"] == 320.0
-
-
-def test_failing_family_cases_settle_by_their_native_control(tmp_path, monkeypatch):
-    import json
-
-    from trtmc_aiperf_qual import family
-
-    controls = []
-
-    def run(environment, model, out, python, *, only, control):
-        controls.append((sorted(only)[0], control))
-        failed = {"shared": ["a", "b"], "native-ok": []}[sorted(only)[0]]
-        return [{"status": "fail" if failed else "pass", "failed_samples": failed, "passed": 8, "samples": 10}]
-
-    monkeypatch.setattr(family, "run", run)
-    model = {"candidate": {"precision": "fp16"}, "reference": {"backend": "reference", "fallback": "script"}}
-    entries = [{"suite": "sampled", "status": "fail", "sampled": True, "reference_precision": "fp32"},
-               {"suite": "shared", "status": "fail", "failed_samples": ["a"], "reference_precision": "fp32"},
-               {"suite": "native-ok", "status": "fail", "failed_samples": ["a"], "reference_precision": "fp32"},
-               {"suite": "same", "status": "fail", "failed_samples": ["a"], "reference_precision": "fp16"}]
-    family.attribute(None, model, tmp_path, "/py", entries)
-    assert [entry["status"] for entry in entries] == ["inconclusive", "inconclusive", "fail", "fail"]
-    assert entries[1]["precision_sensitive"] and entries[1]["native_control"]["precision"] == "fp16"
-    assert entries[2]["native_control"]["status"] == "pass"
-    assert controls == [("shared", ("reference", "fp16")), ("native-ok", ("reference", "fp16"))]
-    quantized = [{"suite": "shared", "status": "fail", "reference_precision": "bf16"}]
-    family.attribute(None, {**model, "candidate": {"precision": "fp8"}}, tmp_path, "/py", quantized)
-    assert quantized[0]["status"] == "fail" and "native_control" not in quantized[0]
-    evidence = tmp_path / "result.json"
-    evidence.write_text(json.dumps({"status": "failed", "samples": [{"sample_id": "a", "passed": False}]}))
-    kept = family.refresh({**entries[1], "source": "family", "evidence": str(evidence)})
-    assert kept["status"] == "inconclusive"  # rejudge keeps the control's settlement
 
 
 def test_box_parity_holds_matched_boxes_to_their_confidence():

@@ -23,47 +23,38 @@ def test_build_uses_the_catalog_manifest_or_a_descriptor_with_build_overrides(tm
     from trtmc_aiperf_qual.models import resolve_model
 
     environment = Environment({"repo": str(REPOSITORY), "bundle_root": str(tmp_path / "engines"),
-                               "runtime_root": "/rt", "worker": "/rt/worker"})
-    tiny = resolve_model("tinyllama-1.1b", environment)  # no family build: the catalog manifest as is
-    command = bundles.build_command(environment, tiny, "/py", tmp_path / "tiny")
+                               "runtime_root": "/rt", "worker": "/rt/worker", "serve_python": "/py"})
+    tiny = resolve_model("tinyllama-1.1b", environment)  # no build override: the catalog manifest as is
+    command = bundles.build_command(environment, tiny, tmp_path / "tiny")
     assert command[:4] == ["/py", "-m", "trtmc_benchmark", "run"] and "--prepare-only" in command
     assert command[command.index("--model") + 1] == "tinyllama-1.1b" and "--manifest-root" in command
     assert command[command.index("--bundle-cache") + 1] == str(tmp_path / "engines")
 
-    detr = resolve_model("detr-resnet-50", environment)
-    assert detr["candidate"]["bundle"] == "detr-resnet-50-qual/detr-resnet-50.bundle"
-    command = bundles.build_command(environment, detr, "/py", tmp_path / "detr")
+    detr = resolve_model("detr-resnet-50", environment)  # a config/models build exception: its own bundle name
+    assert detr["candidate"]["bundle"] == "detr-resnet-50-coco/detr-resnet-50.bundle"
+    command = bundles.build_command(environment, detr, tmp_path / "detr")
     assert "--manifest-root" not in command
     descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
-    assert (descriptor["name"], descriptor["bundle"], descriptor["image_height"]) == (
-        "detr-resnet-50-qual", "detr-resnet-50.bundle", 1333)
+    assert (descriptor["name"], descriptor["bundle"], descriptor["image_height"], descriptor["image_width"]) == (
+        "detr-resnet-50-coco", "detr-resnet-50.bundle", 1333, 1333)
     image = Path(descriptor["testcases"][0]["test_image"])
     assert image.is_absolute() and image.is_file()  # catalog assets stay reachable from the descriptor
 
 
-def test_build_from_a_family_prepared_model_directory(tmp_path):
-    from trtmc_aiperf_qual.models import resolve_model
-
-    environment = Environment({"repo": str(REPOSITORY), "bundle_root": str(tmp_path / "engines"),
-                               "runtime_root": "/rt", "worker": "/rt/worker"})
-    stereo = resolve_model("fast-foundation-stereo", environment)
-    python = tmp_path / "env/bin/python"
-    with pytest.raises(bundles.BuildError, match="model directory"):
-        bundles.build_command(environment, stereo, str(python), tmp_path / "out")
-    prepared = tmp_path / "env/trtmc-reference/Fast-FoundationStereo"
-    prepared.mkdir(parents=True)
-    command = bundles.build_command(environment, stereo, str(python), tmp_path / "out")
-    descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
-    assert (descriptor["hf_id"], descriptor["hf_revision"]) == (str(prepared.resolve()), "")
-
-
-def test_ensure_bundle_reuses_an_existing_bundle(tmp_path, monkeypatch):
-    environment = Environment({"bundle_root": str(tmp_path / "engines")})
+def test_ensure_bundle_lets_trtmc_bench_decide_reuse_by_its_build_receipt(tmp_path, monkeypatch):
+    environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),
+                               "gpu_lock": str(tmp_path / "gpu.lock")})
     bundle = tmp_path / "engines/m/m.bundle"
     bundle.parent.mkdir(parents=True)
     bundle.write_text("x")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("must not build"))
-    assert bundles.ensure_bundle(environment, _model("m", "org/m"), "/py", tmp_path / "out")["status"] == "reused"
+    receipt = bundle.with_suffix(".bundle.benchmark.json")
+    receipt.write_text('{"identity": "a"}')
+    keep = [sys.executable, "-c", "pass"]  # trtmc-bench found a matching receipt
+    monkeypatch.setattr(bundles, "build_command", lambda *args: keep)
+    assert bundles.ensure_bundle(environment, _model("m", "org/m"), tmp_path / "out")["status"] == "reused"
+    rebuild = [sys.executable, "-c", f"import pathlib; pathlib.Path({str(receipt)!r}).write_text('{{\"identity\": \"b\"}}')"]
+    monkeypatch.setattr(bundles, "build_command", lambda *args: rebuild)  # the identity changed: rebuilt
+    assert bundles.ensure_bundle(environment, _model("m", "org/m"), tmp_path / "out")["status"] == "built"
 
 
 def test_ensure_bundle_records_a_failed_build_under_the_gpu_lock(tmp_path, monkeypatch):
@@ -71,7 +62,7 @@ def test_ensure_bundle_records_a_failed_build_under_the_gpu_lock(tmp_path, monke
                                "gpu_lock": str(tmp_path / "gpu.lock")})
     failing = [sys.executable, "-c", "import sys; print('step'); print('ValueError: boom'); sys.exit(3)"]
     monkeypatch.setattr(bundles, "build_command", lambda *args: failing)
-    result = bundles.ensure_bundle(environment, _model("m", "org/m"), "/py", tmp_path / "out")
+    result = bundles.ensure_bundle(environment, _model("m", "org/m"), tmp_path / "out")
     assert (result["status"], result["exit"]) == ("failed", 3) and "boom" in result["reason"]
     assert Path(result["log"]).is_file() and (tmp_path / "gpu.lock").is_file()
 
@@ -172,25 +163,37 @@ def test_run_all_keeps_checkpoints_by_default(tmp_path, monkeypatch):
     assert events == [("run", "a")]
 
 
-def test_run_all_resumes_and_reruns_on_request(tmp_path, monkeypatch):
+def test_run_all_resumes_only_results_of_the_same_run_key(tmp_path, monkeypatch):
     events = []
-    _record_runs(monkeypatch, events)
+
+    def run_one(environment, model, out):  # what campaign.run_one leaves behind: the run key and a report
+        events.append(("run", model["model"]))
+        out.mkdir(parents=True, exist_ok=True)
+        (out / campaign.RUN_KEY).write_text(campaign.run_key(environment, model) + "\n")
+        (out / "report.json").write_text(json.dumps({"verdict": {"category": "pass"}}))
+        return {"profile": model["model"], "category": "pass"}
+
+    monkeypatch.setattr(campaign, "run_one", run_one)
     done = tmp_path / "out/a"
     done.mkdir(parents=True)
     (done / "report.json").write_text(json.dumps({"verdict": {"category": "pass"}}))
     models = [_model("a", "org/a"), _model("b", "org/b")]
     campaign.run_all(Environment({}), models, tmp_path / "out", prefetch_next=False)
-    assert events == [("run", "b")]
-    campaign.run_all(Environment({}), models[:1], tmp_path / "out", rerun=True, prefetch_next=False)
-    assert events[-1] == ("run", "a")
-    assert [path.name.startswith("a.") for path in (tmp_path / "out").iterdir()].count(True) == 1  # kept aside
+    assert events == [("run", "a"), ("run", "b")]  # no run key: an older harness's result is rerun
+    events.clear()
+    campaign.run_all(Environment({}), models, tmp_path / "out", prefetch_next=False)
+    assert events == []  # same configuration, harness, and mode: resumed
+    campaign.run_all(Environment({"smoke": True}), models[:1], tmp_path / "out", prefetch_next=False)
+    assert events == [("run", "a")]  # a smoke result never stands in for a formal one, nor the reverse
+    campaign.run_all(Environment({"smoke": True}), models[:1], tmp_path / "out", rerun=True, prefetch_next=False)
+    assert events[-1] == ("run", "a") and len(events) == 2
 
 
 def _stub_phases(monkeypatch, *, build="built", qualify=None):
     monkeypatch.setattr(campaign, "reference_python", lambda environment, model: "/py")
     monkeypatch.setattr(campaign, "prefetch", lambda environment, model: None)
     monkeypatch.setattr(campaign.bundles, "ensure_bundle",
-                        lambda environment, model, python, out: {"status": build, "reason": "ValueError: boom"})
+                        lambda environment, model, out, python=None: {"status": build, "reason": "ValueError: boom"})
     monkeypatch.setattr(campaign, "qualify", qualify or (lambda model, environment, out: {
         "verdict": {"category": "acc-issue", "acc": "fail", "perf": "green"}}))
     deleted = []
@@ -349,17 +352,17 @@ def test_summary_reports_an_unreachable_remote_root(tmp_path):
 def test_rejudge_can_take_todays_judging_settings(monkeypatch):
     from trtmc_aiperf_qual import cli, models
 
-    recorded = {"catalog_profile": "bark-small", "absolute": [{"suite": "s", "gate": {"max_delta_points": 1.0}}],
+    recorded = {"catalog_profile": "bark-small", "absolute": [{"suite": "s", "gate": {"margin": 1.0}}],
                 "supplementary": [{"check": "replay_parity"}],
                 "performance": {"l1": {"output_grader": "parity_audio", "reference_modes": ["eager"]}}}
-    today = {"absolute": [{"suite": "s", "gate": {"max_delta_points": 2.0}}], "accuracy_source": "absolute",
-             "supplementary": [{"check": "replay_parity", "informational": True}], "family_informational": True,
+    today = {"absolute": [{"suite": "s", "gate": {"margin": 2.0}}], "accuracy_source": "absolute",
+             "supplementary": [{"check": "replay_parity", "informational": True}],
              "performance": {"l1": {"output_grader": "parity_audio", "output_grader_params": {"max_rms_ratio": 9.0},
                                     "reference_modes": ["eager", "compile"]}}}
     monkeypatch.setattr(models, "resolve_model", lambda profile, environment: today)
     current = cli.current_settings(recorded, Environment({}))
-    assert current["absolute"] == [{"suite": "s", "gate": {"max_delta_points": 2.0}}]
-    assert current["supplementary"][0]["informational"] and current["family_informational"]
+    assert current["absolute"] == [{"suite": "s", "gate": {"margin": 2.0}}]
+    assert current["supplementary"][0]["informational"]
     assert current["performance"]["l1"]["output_grader_params"] == {"max_rms_ratio": 9.0}
     assert current["performance"]["l1"]["reference_modes"] == ["eager"]  # what was measured stays
 
@@ -420,42 +423,11 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
     assert 'href="gb300-1/bad/report.md"' in page and "trtmc-aiperf-qual run --profile bad" in page
 
 
-def test_family_results_become_report_entries_with_their_own_gate(tmp_path):
-    from types import SimpleNamespace
-
-    from trtmc_aiperf_qual import family
-
-    case = SimpleNamespace(name="coco", benchmark="coco2017_object_detection")
-    result = {"status": "failed", "gate": {"max_map_drop": 0.01}, "metrics": {"samples": 3, "map_drop": 0.05},
-              "samples": [{"sample_id": "a", "passed": True},
-                          {"sample_id": "b", "passed": False, "candidate_boxes": [1], "reference_boxes": [2], "iou": 0.1}]}
-    item = family.item(case, result, tmp_path / "result.json")
-    assert (item["status"], item["passed"], item["samples"], item["source"]) == ("fail", 1, 2, "family")
-    assert item["gate"] == {"max_map_drop": 0.01} and item["metrics"]["map_drop"] == 0.05
-    failure = item["failures"][0]
-    assert failure["sample_id"] == "b" and '"iou": 0.1' in failure["explanation"] and "[1]" in failure["actual"]
-
-
-def test_aggregate_family_results_report_metrics_not_a_zero_pass_count(tmp_path):
-    import json
-    from types import SimpleNamespace
-
-    from trtmc_aiperf_qual import family
+def test_aggregate_results_report_metrics_not_a_zero_pass_count():
     from trtmc_aiperf_qual.report import counted
 
-    result = {"status": "passed", "gate": {"max_map_50_95_drop": 0.02},
-              "metrics": {"samples": 100, "label_space": "coco", "candidate_map_50_95": 0.471, "map_50_95_drop": -0.0027}}
-    evidence = tmp_path / "result.json"
-    evidence.write_text(json.dumps(result))
-    item = family.item(SimpleNamespace(name="coco", benchmark="coco"), result, evidence)
-    assert item["passed"] is None and item["samples"] == 100 and item["pass_rate"] is None
-    assert counted(item) == "100 samples: candidate_map_50_95 0.471, map_50_95_drop -0.0027"
-    stale = {**item, "passed": 0}  # recorded before aggregate-only results were recognized
-    assert family.refresh(stale)["passed"] is None
-    assert family.refresh({"source": "task", "passed": 3}) == {"source": "task", "passed": 3}
-    ungraded = family.counts({"status": "passed", "samples": [{"sample_id": "a", "candidate_wer": 0.1}]})
-    assert ungraded["passed"] is None and ungraded["failures"] == [] and ungraded["samples"] == 1
     assert counted({"passed": None, "samples": 0, "metrics": {"min_psnr": 10.1}}) == "min_psnr 10.1"
+    assert counted({"passed": 3, "samples": 4}) == "3/4"
 
 
 def test_serving_sweep_fits_the_bundle_and_compares_throughput():
@@ -470,15 +442,12 @@ def test_serving_sweep_fits_the_bundle_and_compares_throughput():
     assert sweep.compare([{**fast[0], "request_error_rate_avg": 3.0}], slow, 5)["light"] == "white"
 
 
-def test_family_perf_requests_take_explicit_generation_controls_from_the_catalog():
-    from trtmc_aiperf_qual.suites import fill_model_defaults
+def test_a_timed_request_must_state_its_generation_controls():
+    from trtmc_aiperf_qual.suites import unstated_defaults
 
-    resolved = {"prompt": "cat", "num_steps": -1, "guidance_scale": -1.0, "cfg_scale": -1.0, "num_frames": 17}
-    family = {"prompt": "cat", "num_steps": 4, "video_num_frames": 33}
-    catalog = {"prompt": "dog", "num_steps": 8, "guidance_scale": 3.5, "cfg_scale": -1.0}
-    assert fill_model_defaults(resolved, family, catalog) == {**resolved, "num_steps": 4, "guidance_scale": 3.5}
-    assert fill_model_defaults({"num_steps": -1}, {"num_inference_steps": 6}) == {"num_steps": 6}
-    assert fill_model_defaults({"num_steps": 8}, catalog) == {"num_steps": 8}
+    assert unstated_defaults({"prompt": "cat", "num_steps": -1, "guidance_scale": -1.0, "num_frames": 17}) == \
+        ["num_steps", "guidance_scale"]
+    assert unstated_defaults({"prompt": "cat", "num_steps": 4}) == []
 
 
 def test_latent_seeds_give_each_sample_its_own_replayed_noise():
@@ -527,7 +496,7 @@ def test_replay_parity_compares_both_sides_with_the_full_precision_render(tmp_pa
     assert replay_parity.not_replayed({"candidate": [(tmp_path, record)], "native": [(tmp_path, {"observation": {}})]}) == ["native"]
 
 
-def test_script_reference_frames_and_broken_floors(tmp_path):
+def test_sampled_frames_and_broken_floors(tmp_path):
     from trtmc_aiperf_qual import replay_parity
     from trtmc_aiperf_qual.generation import is_video, media_source
 
@@ -555,7 +524,7 @@ def test_recheck_replaces_only_the_rechecked_entries(tmp_path, monkeypatch):
     (out / "report.json").write_text(json.dumps({"accuracy": [
         {"suite": "family-case", "status": "pass"}, {"suite": "geneval", "status": "fail"},
         {"suite": "replay-parity", "status": "fail"}]}))
-    check = {"check": "geneval", "suite": "geneval-100"}
+    check = {"check": "geneval", "suite": "geneval-200"}
     monkeypatch.setattr(models, "resolve_model", lambda profile, environment: {"supplementary": [check],
                                                                                 "reference": {"backend": "reference"}})
     monkeypatch.setattr(services, "reference_python", lambda environment, model: "/ref/python")
@@ -612,7 +581,6 @@ def test_edit_inputs_are_center_cropped_to_cached_squares(tmp_path):
 
 
 def test_gpu_busy_ignores_the_tail_of_our_own_request(monkeypatch):
-    import subprocess
     from types import SimpleNamespace
 
     from trtmc_aiperf_qual import runner
@@ -661,8 +629,8 @@ def test_media_sweep_steps_decomposition_and_light(tmp_path):
 def test_perf_is_white_on_a_busy_gpu_or_a_fallback_reference_precision():
     from trtmc_aiperf_qual import judge
 
-    fast = {"p50_ms": 1.0, "ci_percent": 0.1, "aggregation": "mean"}
-    slow = {"p50_ms": 10.0, "ci_percent": 0.1, "aggregation": "mean"}
+    fast = {"p50_ms": 1.0, "ci_percent": 0.1, "aggregation": "mean", "per_run_p50_ms": [1.0, 1.01, 0.99], "work": [[]]}
+    slow = {"p50_ms": 10.0, "ci_percent": 0.1, "aggregation": "mean", "per_run_p50_ms": [10.0, 10.1, 9.9], "work": [[]]}
     ok = dict(margin_percent=5, max_ci_percent=5, outputs_match=True, output_reason="")
     assert judge.judge_performance(fast, slow, **ok)["light"] == "green"
     busy = judge.judge_performance({**fast, "gpu_busy_percent": 45}, slow, **ok)
@@ -671,17 +639,71 @@ def test_perf_is_white_on_a_busy_gpu_or_a_fallback_reference_precision():
     assert fallback["light"] == "white" and "fp32" in fallback["reasons"][0] and fallback["speedup"] == 10.0
 
 
-def test_family_artifacts_resolve_inside_the_request_directory(tmp_path):
-    from trtmc_aiperf_qual import family
+def test_perf_lights_come_from_the_speedup_interval():
+    from trtmc_aiperf_qual import judge
 
-    (tmp_path / "req").mkdir()
-    (tmp_path / "req/output.image.1.0.png").write_bytes(b"png")
-    resolved = family._resolve_artifacts({"image_artifacts": ["output.image.1.0.png"], "audio_artifact": "a.wav",
-                                          "text": "x"}, tmp_path / "req")
-    assert resolved["image_artifacts"] == [str((tmp_path / "req/output.image.1.0.png").resolve())]
-    assert resolved["audio_artifact"] == str((tmp_path / "req/a.wav").resolve()) and resolved["text"] == "x"
-    with pytest.raises(RuntimeError):
-        family._resolve_artifacts({"image_artifact": "../../etc/passwd"}, tmp_path / "req")
+    ok = dict(margin_percent=5, max_ci_percent=5, outputs_match=True, output_reason="")
+    side = lambda runs: {"p50_ms": sum(runs) / len(runs), "aggregation": "mean", "per_run_p50_ms": runs, "work": [[]],  # noqa: E731
+                         "ci_percent": judge.across_runs(runs)["ci_percent"]}
+    # 94 ms +-4% against 100 ms +-4%: the point estimate is 6% faster, but the interval reaches 1.0: not green
+    noisy = judge.judge_performance(side([90.2, 94.0, 97.8]), side([96.0, 100.0, 104.0]), **ok)
+    assert noisy["light"] in ("white", "yellow") and noisy["speedup_interval90"][0] < 1.05
+    steady = judge.judge_performance(side([94.0, 94.1, 93.9]), side([100.0, 100.1, 99.9]), **ok)
+    assert steady["light"] == "green"
+    slower = judge.judge_performance(side([110.0, 110.1, 109.9]), side([100.0, 100.1, 99.9]), **ok)
+    assert slower["light"] == "red"
+    level = judge.judge_performance(side([100.0, 100.1, 99.9]), side([100.0, 100.1, 99.9]), **ok)
+    assert level["light"] == "yellow"
+    single = judge.judge_performance(side([94.0]), side([100.0]), **ok)
+    assert single["light"] == "white" and "two runs" in single["reasons"][0]
+
+
+def test_perf_needs_the_same_work_on_every_timed_response():
+    from trtmc_aiperf_qual import judge
+
+    ok = dict(margin_percent=5, max_ci_percent=5, outputs_match=True, output_reason="")
+    runs = {"aggregation": "mean", "ci_percent": 0.1}
+    candidate = {**runs, "p50_ms": 1.0, "per_run_p50_ms": [1.0, 1.0, 1.0], "work": [[["output_tokens", 20]]]}
+    native = {**runs, "p50_ms": 10.0, "per_run_p50_ms": [10.0, 10.0, 10.0], "work": [[["output_tokens", 20]]]}
+    assert judge.judge_performance(candidate, native, **ok)["light"] == "green"
+    shorter = {**candidate, "work": [[["output_tokens", 5]], [["output_tokens", 20]]]}
+    result = judge.judge_performance(shorter, native, **ok)
+    assert result["light"] == "white" and "work differs" in result["reasons"][0]
+    # [1, 2, 1] vs [1, 2, 2] tokens: the same sets, but responses did different work
+    varied = judge.judge_performance({**candidate, "work": [[["output_tokens", 1]], [["output_tokens", 2]]]},
+                                     {**native, "work": [[["output_tokens", 1]], [["output_tokens", 2]]]}, **ok)
+    assert varied["light"] == "white"
+    unproven = judge.judge_performance({**candidate, "work_missing": 1}, native, **ok)
+    assert unproven["light"] == "white" and "report no work" in unproven["reasons"][0]
+    # Text: equal counts or equal texts (one backend counts the end-of-sequence token, the other does not)
+    marian = {**candidate, "work": [judge.work_signature("generate", {"output_tokens": 7, "text": "Дом."})]}
+    stripped = {**native, "work": [judge.work_signature("generate", {"output_tokens": 6, "text": "Дом."})]}
+    assert judge.judge_performance(marian, stripped, **ok)["light"] == "green"
+    diverged = {**native, "work": [judge.work_signature("generate", {"output_tokens": 6, "text": "Дом!"})]}
+    assert judge.judge_performance(marian, diverged, **ok)["light"] == "white"
+    # Each operation's evidence, from fields both backends report
+    assert judge.work_signature("generate", {"output_tokens": 3, "text": "a  b"}) == (("output_tokens", 3), ("text", "a  b"))
+    padded = {**native, "work": [judge.work_signature("generate", {"output_tokens": 20, "text": "a" + "\n" * 18 + "b"})]}
+    short = {**candidate, "work": [judge.work_signature("generate", {"output_tokens": 2, "text": "a b"})]}
+    assert judge.judge_performance(short, padded, **ok)["light"] == "white"  # whitespace is generated work
+    assert judge.work_signature("generate", {"scores": [1]}) is None
+    assert judge.work_signature("transcribe", {"text": " a  b "}) == (("output_tokens", None), ("text", " a  b "))
+    media = {"media_digest": {"frames": 17, "height": 480, "width": 832}}
+    assert judge.work_signature("generate_image", media) == (("frames_height_width", (17, 480, 832)),)
+    assert judge.work_signature("generate_image", {"height": 480, "width": 832}) is None
+    assert judge.work_signature("generate_audio", {"audio_digest": {"seconds": 1.234}}) == (("audio_10ms", 123),)
+    assert judge.work_signature("classify", {"scores": [0.1]}) == ()
+
+
+def test_perf_is_white_when_the_native_model_ran_at_another_precision():
+    from trtmc_aiperf_qual import judge
+
+    ok = dict(margin_percent=5, max_ci_percent=5, outputs_match=True, output_reason="")
+    fast = {"p50_ms": 1.0, "ci_percent": 0.1, "aggregation": "mean", "per_run_p50_ms": [1.0, 1.01, 0.99], "work": [[]]}
+    slow = {"p50_ms": 10.0, "ci_percent": 0.1, "aggregation": "mean", "per_run_p50_ms": [10.0, 10.1, 9.9], "work": [[]]}
+    declared = judge.judge_performance(fast, {**slow, "precision": "bf16"}, candidate_precision="fp16", **ok)
+    assert declared["light"] == "white" and "bf16" in declared["reasons"][0]
+    assert judge.judge_performance(fast, {**slow, "precision": "fp16"}, candidate_precision="fp16", **ok)["light"] == "green"
 
 
 def test_long_prompts_are_not_taken_for_asset_paths(tmp_path):

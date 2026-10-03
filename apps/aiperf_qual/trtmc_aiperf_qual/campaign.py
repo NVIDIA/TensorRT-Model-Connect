@@ -12,7 +12,10 @@ directory holds a final result is skipped unless ``rerun`` (the old directory is
 from __future__ import annotations
 
 import collections
+import functools
+import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -29,6 +32,88 @@ from .report import counted
 from .services import reference_python
 
 KEPT_ASIDE = re.compile(r"\.\d{10}$")  # <profile>.<unix time> of a previous run
+RUN_KEY = "run-key.txt"
+PACKAGE = Path(__file__).resolve().parent.parent  # apps/aiperf_qual: the harness code and configuration
+
+
+def harness_digest() -> str:
+    """sha256 of the harness sources and configuration (the code that produced a result)."""
+    digest = hashlib.sha256()
+    for path in sorted(PACKAGE.rglob("*")):
+        if path.suffix in (".py", ".yaml") and "__pycache__" not in path.parts and "tests" not in path.parts:
+            digest.update(str(path.relative_to(PACKAGE)).encode() + b"\0" + path.read_bytes())
+    return digest.hexdigest()
+
+
+SOURCE_SUFFIXES = (".py", ".yaml", ".json", ".txt")
+
+
+@functools.lru_cache(maxsize=None)
+def tree_digest(root: str) -> str:
+    """sha256 of the source files (``SOURCE_SUFFIXES``) below ``root``, symlinks followed; "" when absent."""
+    if not Path(root).is_dir():
+        return ""
+    paths = []
+    for directory, names, files in os.walk(root, followlinks=True):
+        names[:] = [name for name in names if name != "__pycache__"]
+        paths += [Path(directory) / name for name in files if name.endswith(SOURCE_SUFFIXES)]
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(str(path.relative_to(root)).encode() + b"\0" + path.read_bytes())
+    return digest.hexdigest()
+
+
+@functools.lru_cache(maxsize=None)
+def runtime_digest(worker: str, runtime_root: str) -> str:
+    """sha256 of the TRTMC worker binary and the runtime libraries' names, sizes, and modification times."""
+    digest = hashlib.sha256(Path(worker).read_bytes() if Path(worker).is_file() else b"")
+    for path in sorted(Path(runtime_root).rglob("*")) if Path(runtime_root).is_dir() else []:
+        if path.is_file():
+            stat = path.stat()
+            digest.update(f"{path.relative_to(runtime_root)}\0{stat.st_size}\0{stat.st_mtime_ns}\0".encode())
+    return digest.hexdigest()
+
+
+def code_digests(environment: Environment, model: Mapping[str, Any]) -> dict[str, str]:
+    """The code a model's run executes besides the harness: the serving package, TRTMC (core, trtmc-bench,
+    the worker and runtime), and the model's family (its TRTMC implementation and native adapter files)."""
+    repo = environment.path("repo") if environment.values.get("repo") else PACKAGE.parent.parent
+    return {"serving": tree_digest(str(PACKAGE.parent / "perf_serving" / "trtmc_perf_serving")),
+            "core": tree_digest(str(repo / "core")),
+            "benchmark": tree_digest(str(repo / "apps" / "benchmark" / "trtmc_benchmark")),
+            "family": tree_digest(str(repo / "families" / str(model.get("family") or ""))) if model.get("family") else "",
+            "runtime": runtime_digest(str(environment.values.get("worker") or ""),
+                                      str(environment.values.get("runtime_root") or ""))}
+
+
+@functools.lru_cache(maxsize=None)
+def dependencies_digest(python: str) -> str:
+    """sha256 of an interpreter's ``pip freeze`` (its resolved dependencies), "" when it cannot tell."""
+    import subprocess
+
+    try:
+        frozen = subprocess.run([python, "-m", "pip", "freeze", "--all"], capture_output=True, text=True,
+                                timeout=300, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return hashlib.sha256(frozen.encode()).hexdigest()
+
+
+def run_key(environment: Environment, model: Mapping[str, Any]) -> str:
+    """Identity of a run: the resolved model configuration, the harness, the code it executes
+    (``code_digests``), the mode (smoke / formal), and the resolved dependencies of the serving, AIPerf, and
+    reference interpreters. A finished result counts only under the same key."""
+    mode = "smoke" if environment.values.get("smoke") else "formal"
+    pythons = {str(environment.values.get("serve_python") or ""), sys.executable}
+    if (model.get("reference") or {}).get("requirements") and environment.values.get("reference_env_root"):
+        try:
+            pythons.add(reference_python(environment, dict(model)))
+        except Exception:  # noqa: BLE001 - the run itself reports the environment failure
+            pythons.add("reference-environment-unavailable")
+    dependencies = {python: dependencies_digest(python) for python in sorted(pythons) if python and Path(python).exists()}
+    text = json.dumps({"model": model, "harness": harness_digest(), "code": code_digests(environment, model), "mode": mode,
+                       "dependencies": dependencies}, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[str, Any]:
@@ -61,21 +146,13 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
     started = time.time()
     set_aside(out)
     out.mkdir(parents=True, exist_ok=True)
+    (out / RUN_KEY).write_text(run_key(environment, model) + "\n")
     bundle_policy, _ = retention.policies(environment)
     record: dict[str, Any] = {"profile": model["model"], "task": model.get("task")}
     try:
-        python = reference_python(environment, model)  # the family environment builds and serves references
+        python = reference_python(environment, model)  # the family's requirements, as CI builds
         prefetch(environment, model)  # outside the GPU lock the build takes
-        build = bundles.ensure_bundle(environment, model, python, out)
-        from .runner import FALLBACK_SEQUENCE_LENGTH, shorter_candidate  # on use: summary runs without AIPerf
-
-        shorter = (shorter_candidate(model, f"the {model['candidate'].get('max_sequence_length')}-token "
-                                            f"benchmark bundle did not build ({str(build.get('reason'))[:200]})")
-                   if build["status"] == "failed" else None)
-        if shorter is not None:  # a family that cannot build the benchmark length may build a shorter one
-            retry = bundles.ensure_bundle(environment, shorter, python, out / f"retry-{FALLBACK_SEQUENCE_LENGTH}")
-            if retry["status"] != "failed":
-                model, build = shorter, {**retry, "first_build": build}
+        build = bundles.ensure_bundle(environment, model, out, python)
     except Exception as error:  # noqa: BLE001 - recorded; a batch goes on with the next model
         build = {"status": "failed", "reason": _error(error)}
     (out / "build.json").write_text(json.dumps({**record, **build}, indent=2))
@@ -112,8 +189,10 @@ def shard(models: Sequence[Mapping[str, Any]], index: int, count: int) -> list[M
     return [model for position, group in enumerate(_groups(models)) if position % count == index for model in group]
 
 
-def _finished(out: Path) -> str | None:
-    """Category of a final result in ``out`` (a verdict or a failed build), else None."""
+def _finished(out: Path, key: str | None = None) -> str | None:
+    """Category of a final result in ``out`` (a verdict or a failed build) produced under ``key``, else None."""
+    if key is not None and (not (out / RUN_KEY).is_file() or (out / RUN_KEY).read_text().strip() != key):
+        return None
     report, build = out / "report.json", out / "build.json"
     if report.is_file():
         return json.loads(report.read_text()).get("verdict", {}).get("category")
@@ -134,7 +213,7 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
             profile, out = model["model"], out_root / model["model"]
             if prefetch_next and index + 1 < len(ordered):
                 downloads.submit(prefetch, environment, ordered[index + 1])
-            finished = _finished(out)
+            finished = _finished(out, run_key(environment, model))
             if finished and not rerun:
                 record = {"profile": profile, "status": "skipped", "category": finished}
             else:
@@ -152,8 +231,8 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
     return records
 
 
-CATEGORIES = ("error", "config-error", "build-failed", "not-run", "acc-issue", "acc-session-state", "perf-issue",
-              "acc-inconclusive", "perf-inconclusive", "not-comparable", "pass", "excluded")
+CATEGORIES = ("error", "config-error", "build-failed", "not-run", "acc-issue", "not-covered", "acc-inconclusive",
+              "not-comparable", "perf-issue", "perf-inconclusive", "pass", "excluded", "smoke-fail", "smoke-pass")
 EXCLUSIONS = "excluded.json"
 PLAN = "plan.json"
 HARNESS_FAILURES = ("error", "build-failed")
@@ -166,11 +245,15 @@ def write_plan(out_root: Path, selected: Sequence[str], config_errors: Sequence[
                                             indent=2) + "\n")
 
 
-def exit_code(records: Sequence[Mapping[str, Any]], config_errors: Sequence[Mapping[str, Any]]) -> int:
-    """2 when profiles could not be configured, 1 when a run failed in the harness (error, build),
-    0 otherwise (qualification outcomes such as acc-issue are results, not failures)."""
+def exit_code(records: Sequence[Mapping[str, Any]], config_errors: Sequence[Mapping[str, Any]],
+              smoke: bool = False) -> int:
+    """2 when profiles could not be configured, 1 when a run failed in the harness (error, build; in smoke
+    mode any model short of smoke-pass), 0 otherwise (qualification outcomes such as acc-issue are
+    results, not failures)."""
     if config_errors:
         return 2
+    if smoke:
+        return 0 if records and all(record.get("category") == "smoke-pass" for record in records) else 1
     return 1 if any(record.get("category") in HARNESS_FAILURES for record in records) else 0
 
 
@@ -205,27 +288,18 @@ def _row(directory: Path) -> dict[str, Any] | None:
     return None
 
 
-def _isolated(check: Mapping[str, Any] | None) -> Any:
-    """The isolated re-check's pass count, else its status (aggregate-only family results)."""
-    if not check:
-        return None
-    return check["passed"] if check.get("passed") is not None else check.get("status")
-
-
 def _accuracy_text(items: Sequence[Mapping[str, Any]]) -> str:
     def one(item: Mapping[str, Any]) -> str:
-        extra = "".join(f", {label} {value}" for label, value in (
-            ("isolated", _isolated(item.get("isolated_check"))),
-            ("informational", "yes" if item.get("informational") else None)) if value is not None)
+        extra = ", informational" if item.get("informational") else ""
         need = (f"need {item['required_passes']}" if item.get("required_passes") is not None
-                else f"family gate {json.dumps(item.get('gate', {}))}")
+                else f"gate {json.dumps(item.get('gate', {}))}")
         status = f"{item['status']} " if item.get("status") else ""
         return f"{item['suite']} {status}{counted(item)} ({need}{extra})"
     return "; ".join(one(item) for item in items)
 
 
 def _perf_text(items: Sequence[Mapping[str, Any]]) -> str:
-    return ", ".join(f"{item['reference_mode']} {item['light']}"
+    return ", ".join(f"{item['reference_mode']}{'/' + item['request'] if item.get('request') else ''} {item['light']}"
                      + (f" {item['speedup']:.2f}x" if item.get("speedup") else "") for item in items)
 
 
@@ -263,15 +337,16 @@ def annotate_regressions(rows: Mapping[str, dict[str, Any]], baseline: Mapping[s
     """Compare TRTMC p50 per profile and native mode with a baseline run (for example the previous
     release); slower by more than the margin is noted as a regression (the category is unchanged)."""
     for profile, row in rows.items():
-        previous = {item.get("reference_mode"): item for item in (baseline.get(profile) or {}).get("perf", [])}
+        key = lambda item: f"{item.get('reference_mode')}/{item.get('request') or ''}".rstrip("/")  # noqa: E731
+        previous = {key(item): item for item in (baseline.get(profile) or {}).get("perf", [])}
         for item in row.get("perf", []):
-            before = (previous.get(item.get("reference_mode")) or {}).get("candidate", {}).get("p50_ms")
+            before = (previous.get(key(item)) or {}).get("candidate", {}).get("p50_ms")
             now = item.get("candidate", {}).get("p50_ms")
             if before and now:
                 change = (now / before - 1) * 100
-                row.setdefault("baseline", {})[item["reference_mode"]] = change
+                row.setdefault("baseline", {})[key(item)] = change
                 if change > margin_percent:
-                    row["notes"] = (f"regression: TRTMC {item['reference_mode']} p50 +{change:.1f}% vs baseline; "
+                    row["notes"] = (f"regression: TRTMC {key(item)} p50 +{change:.1f}% vs baseline; "
                                     + row.get("notes", "")).strip("; ")
 
 
@@ -307,7 +382,7 @@ MAX_EVIDENCE_BYTES = "5M"
 
 def fetch_roots(specs: Sequence[str], ssh: str, into: Path, *, evidence: bool = False) -> list[Path]:
     """Result roots for ``summary``: local paths as given; ``[NAME=][USER@]HOST:/PATH`` fetched over ssh
-    into ``into/NAME`` (default the host): result files, plus logs and family results with ``evidence``."""
+    into ``into/NAME`` (default the host): result files, plus logs with ``evidence``."""
     import io
     import shlex
     import subprocess
@@ -324,7 +399,7 @@ def fetch_roots(specs: Sequence[str], ssh: str, into: Path, *, evidence: bool = 
         target = into / (match["name"] or match["host"].rsplit("@", 1)[-1])
         target.mkdir(parents=True, exist_ok=True)
         names = " -o ".join(f"-name {shlex.quote(name)}" for name in RESULT_FILES)
-        if evidence:  # result files up to <profile>/, logs and family results below it
+        if evidence:  # result files up to <profile>/, logs below it
             logs = " -o ".join(f"-name {shlex.quote(name)}" for name in EVIDENCE_FILES)
             selection = (f"-maxdepth 7 -type f \\( \\( ! -path './*/*/*' \\( {names} \\) \\) -o "
                          f"\\( -size -{MAX_EVIDENCE_BYTES} \\( {logs} \\) \\) \\)")

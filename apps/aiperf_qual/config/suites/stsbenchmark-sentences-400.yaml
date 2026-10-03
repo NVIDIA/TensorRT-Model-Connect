@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# STS Benchmark test sentences (mteb/stsbenchmark-sts, pinned; the first 200 pairs, both sentences): inputs of the
+# raw encoders' conversion parity.
+suite: stsbenchmark-sentences-400
+version: 2
+source:
+  kind: hf_file
+  repo: mteb/stsbenchmark-sts
+  revision: 96943a16ea6a35129e253c659081cb59daf81b30
+  filename: test.jsonl.gz
+  explode: [sentence1, sentence2]
+  label_field: score
+selection: {method: first, count: 400}
+fields: {text: prompt}

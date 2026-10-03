@@ -99,10 +99,9 @@ def compare_token_exact(candidate: dict, reference: dict, min_prefix: int | None
               f"({len(candidate['token_ids'])} vs {len(reference['token_ids'])} tokens)")
     # min_prefix (Perf output sanity checks only): agreeing on the first tokens is enough there.
     ok = divergence is None or (min_prefix is not None and divergence >= min_prefix)
-    # accept_equal_text (Perf output sanity checks only): different token IDs for the same text, for
-    # example a leading-space token after a differently rendered chat template.
-    if not ok and accept_equal_text and " ".join(str(candidate.get("text", "")).split()) == \
-            " ".join(str(reference.get("text", "")).split()) and candidate.get("text"):
+    # accept_equal_text (Perf output checks and conversion parity): different token IDs for exactly the
+    # same returned text (no whitespace normalization: whitespace is generated output too).
+    if not ok and accept_equal_text and candidate.get("text") and str(candidate.get("text")) == str(reference.get("text")):
         ok, reason = True, reason + "; text identical"
     return ok, reason, candidate.get("text", ""), reference.get("text", "")
 
