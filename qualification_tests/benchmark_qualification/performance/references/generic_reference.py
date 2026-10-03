@@ -755,7 +755,7 @@ def _diffusion_pipeline(
             ),
             local_files_only=arguments.local_files_only,
         )
-    pipeline = diffusers.DiffusionPipeline.from_pretrained(
+    return diffusers.DiffusionPipeline.from_pretrained(
         model_source,
         torch_dtype=_torch_dtype(torch_module, arguments.precision),
         **load_options,
@@ -767,29 +767,6 @@ def _diffusion_pipeline(
         trust_remote_code=bool(options.get("trust_remote_code", arguments.trust_remote_code)),
         local_files_only=arguments.local_files_only,
     )
-    for name in _retie_encoder_embeddings(pipeline):
-        print(f"generic_reference: tied {name}.encoder.embed_tokens to {name}.shared (zero after loading)",
-              file=sys.stderr)
-    return pipeline
-
-
-def _retie_encoder_embeddings(pipeline: Any) -> list[str]:
-    """Tie T5-style text encoders' token embeddings back to ``shared`` when loading left them zero.
-
-    Transformers 5.2 does not tie ``encoder.embed_tokens`` of ``UMT5EncoderModel`` (Wan) to
-    ``shared``: the weight loads as missing and stays zero, every prompt encodes to zeros, and the
-    pipeline renders the same output for any prompt. Returns the repaired component names.
-    """
-    repaired = []
-    for name, component in getattr(pipeline, "components", {}).items():
-        shared = getattr(component, "shared", None)
-        embed = getattr(getattr(component, "encoder", None), "embed_tokens", None)
-        if shared is None or embed is None or embed.weight is shared.weight:
-            continue
-        if embed.weight.shape == shared.weight.shape and not bool(embed.weight.any()):
-            embed.weight = shared.weight
-            repaired.append(name)
-    return repaired
 
 
 def _load_diffusers(

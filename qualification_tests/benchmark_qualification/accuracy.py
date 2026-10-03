@@ -1478,25 +1478,6 @@ def _candidate_outputs(
     return outputs, bundle
 
 
-def _class_stratified(requests: list[Any], limit: int) -> list[tuple[int, Any]]:
-    """``limit`` (index, request) pairs dealt round-robin across labels in manifest order.
-
-    Manifests sorted by class (Imagenette) would otherwise give a first-N selection of one class;
-    requests without a label keep the plain first-N order.
-    """
-    if not all(isinstance(request, Mapping) and "label" in request for request in requests):
-        return list(enumerate(requests[:limit]))
-    groups: dict[Any, list[tuple[int, Any]]] = {}
-    for index, request in enumerate(requests):
-        groups.setdefault(json.dumps(request["label"], sort_keys=True), []).append((index, request))
-    selected: list[tuple[int, Any]] = []
-    for depth in range(max(len(group) for group in groups.values())):
-        for group in groups.values():
-            if depth < len(group) and len(selected) < limit:
-                selected.append(group[depth])
-    return sorted(selected, key=lambda pair: pair[0])
-
-
 def _image_parity_samples(dataset: Dataset, sample_limit: int, task: str) -> list[dict[str, Any]]:
     try:
         payload = json.loads(dataset.path.read_text(encoding="utf-8"))
@@ -1507,7 +1488,7 @@ def _image_parity_samples(dataset: Dataset, sample_limit: int, task: str) -> lis
         raise QualificationError(f"{task} dataset requires at least {sample_limit} requests")
     root = dataset.path.parent.resolve()
     selected = []
-    for index, request in _class_stratified(requests, sample_limit):
+    for index, request in enumerate(requests[:sample_limit]):
         relative = request.get("image") if isinstance(request, Mapping) else None
         if not isinstance(relative, str) or not relative:
             raise QualificationError(f"{task} request {index} has no image")
@@ -2667,7 +2648,7 @@ def _image_classification_parity(
 
     selected: list[dict[str, Any]] = []
     dataset_root = dataset.path.parent.resolve()
-    for index, request in _class_stratified(requests, sample_limit):
+    for index, request in enumerate(requests[:sample_limit]):
         if not isinstance(request, Mapping):
             raise QualificationError(f"image-classification request {index} must be an object")
         relative = request.get("image")
