@@ -35,7 +35,8 @@ problems that still do not fit are dropped for both sides. Every entry also repo
 time of both sides on the benchmark's own requests (informational). With `native_replicas` in the
 environment, the native side runs as that many copies of the adapter (as many as fit the GPU), each
 answering one problem at a time: the answers are the same, the native model-call times are then not
-comparable (the workload light stays white).
+comparable (the workload light stays white). When only the family's script reference serves the native model (one process
+per request for most), each benchmark takes at most 300 problems on both sides (MMLU: 5 per subject).
 
 | Benchmarks | How | Models (examples) |
 |---|---|---|

@@ -536,3 +536,41 @@ def test_unmerged_raw_records_still_show_failed_requests(tmp_path):
     (tmp_path / "raw_records" / "raw_records_processor_a.jsonl").write_text(json.dumps(record) + "\n")
     records = AiperfRun(tmp_path, 1, []).raw_records()  # AIPerf merged no export: every request failed
     assert len(records) == 1 and absolute.unanswered(records[0])
+
+
+def test_a_family_script_native_answers_at_most_the_script_limit(tmp_path):
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    from trtmc_aiperf_qual.config import Environment
+
+    @contextmanager
+    def serving_replicas(environment, model, backend, out, *, count, **kwargs):
+        if backend == "reference":
+            raise RuntimeError("NemotronHForCausalLM.__init__() got an unexpected keyword argument 'dtype'")
+        yield {"url": "http://unused", "replicas": count}
+
+    mmlu = [{"task": f"subject{index % 57}", "gold": "A"} for index in range(1140)]
+    speech = [{"task": "librispeech", "gold": "x"} for _ in range(2620)]
+    small = [{"task": "s", "gold": "y"} for _ in range(100)]
+    model = {"operation": "generate", "absolute": [{"suite": "mmlu-5shot", "per_task": 20},
+                                                  {"suite": "librispeech", "metric": "wer"},
+                                                  {"suite": "small", "metric": "wer"}],
+             "reference": {"backend": "reference", "fallback": "script", "perf_precision": "fp16", "precision": "fp32"}}
+    asked = {}
+
+    def run_side(environment, service, model, item, problems, out):
+        asked[item["suite"]] = (dict(item), len(problems))
+        return {"ok": 1}
+
+    replanned = lambda environment, model, item: mmlu[: 57 * item["per_task"]]  # noqa: E731
+    with patch.object(absolute, "serving_replicas", serving_replicas), patch.object(absolute, "run_side", run_side), \
+            patch.object(absolute, "plan", replanned):
+        native = absolute.run_native(Environment({"native_replicas": 4}), model, "python",
+                                     {"mmlu-5shot": mmlu, "librispeech": speech, "small": small}, tmp_path)
+    assert native["backend"] == "script"
+    assert asked["mmlu-5shot"] == ({"suite": "mmlu-5shot", "per_task": 5}, 285)  # every subject, 5 each
+    assert asked["librispeech"][1] == 300 and asked["small"] == ({"suite": "small", "metric": "wer"}, 100)
+    # The TRTMC side answers the same benchmarks and problems.
+    assert [len(native["plans"][name]) for name in ("mmlu-5shot", "librispeech", "small")] == [285, 300, 100]
+    assert native["absolute"][0]["per_task"] == 5

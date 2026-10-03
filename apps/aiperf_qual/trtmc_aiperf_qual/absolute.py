@@ -415,12 +415,42 @@ def _probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any
         raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-400:]}") from error
 
 
+# A family script reference answers slowly (one process per request for most): its benchmarks take at most
+# this many problems, the same ones on both sides (MMLU keeps every subject).
+SCRIPT_NATIVE_LIMIT = 300
+
+
+def capped(environment: Environment, model: Mapping[str, Any],
+           plans: Mapping[str, Sequence]) -> tuple[list[dict[str, Any]], dict[str, list]]:
+    """The benchmarks and their problems at most SCRIPT_NATIVE_LIMIT each: fewer per task where the
+    selection takes ``per_task``, else the first problems."""
+    items, kept = [], {}
+    for item in model["absolute"]:
+        problems = list(plans[item["suite"]])
+        if len(problems) <= SCRIPT_NATIVE_LIMIT:
+            items.append(item)
+            kept[item["suite"]] = problems
+            continue
+        if item.get("metric"):  # a gold suite: its problems are sent as listed
+            smaller = {**item, "limited_to": SCRIPT_NATIVE_LIMIT}
+            kept[item["suite"]] = problems[:SCRIPT_NATIVE_LIMIT]
+        else:  # an AIPerf benchmark selects its problems itself: fewer per task, or the first ones
+            tasks = len({problem.get("task") for problem in problems})
+            smaller = ({**item, "per_task": max(1, min(int(item["per_task"]), SCRIPT_NATIVE_LIMIT // tasks))}
+                       if item.get("per_task") else {**item, "limit": SCRIPT_NATIVE_LIMIT})
+            kept[item["suite"]] = plan(environment, model, smaller)
+        items.append(smaller)
+    return items, kept
+
+
 def run_native(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],
                out: Path, probe_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Every benchmark on the native model: the generic adapter, eager, at the candidate precision; the
     family's declared reference (and its precisions) when the adapter cannot serve the model. The adapter
     runs as up to ``native_replicas`` (environment) copies that fit on the GPU, each answering one problem
-    at a time: the answers do not change, its model-call times are then not comparable."""
+    at a time: the answers do not change, its model-call times are then not comparable. With the family
+    script, each benchmark takes at most SCRIPT_NATIVE_LIMIT problems; the result then carries the
+    benchmarks and problems the TRTMC side must answer too (``absolute``, ``plans``)."""
     from .runner import timing_precisions
 
     reference = model["reference"]
@@ -430,13 +460,17 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
             tag = "" if (backend, precision) == (reference["backend"], reference["perf_precision"]) else f"-{backend}-{precision}"
             try:
                 count = int(environment.values.get("native_replicas") or 1) if backend == "reference" else 1
+                items, kept = capped(environment, model, plans) if backend == "script" else (model["absolute"], plans)
+                limited = items != model["absolute"]
                 with serving_replicas(environment, dict(model), backend, out / f"absolute-native-server{tag}",
                                       count=count, mode="eager", precision=precision, python=python) as service:
                     if probe_request is not None:
                         _probe(service, model["operation"], probe_request)
-                    runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
-                                                    out / f"absolute-native{tag}") for item in model["absolute"]}
+                    runs = {item["suite"]: run_side(environment, service, {**model, "absolute": items}, item,
+                                                    kept[item["suite"]], out / f"absolute-native{tag}")
+                            for item in items}
                 return {"backend": backend, "precision": precision, "runs": runs, "replicas": service["replicas"],
+                        **({"absolute": items, "plans": kept} if limited else {}),
                         **({"fallback_from": "; ".join(errors)[:600]} if errors else {})}
             except Exception as error:  # noqa: BLE001 - the next precision, then the family reference
                 errors.append(f"{backend} {precision}: {type(error).__name__}: {str(error)[-300:]}")
@@ -468,6 +502,9 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
                                                   "its model-call times are not comparable"}
             if model["candidate"].get("sequence_fallback"):
                 entry["notes"] = [*entry.get("notes", []), model["candidate"]["sequence_fallback"]]
+            if native.get("plans"):
+                entry["notes"] = [*entry.get("notes", []), f"the native side is the family script reference: "
+                                  f"at most {SCRIPT_NATIVE_LIMIT} problems per benchmark on both sides"]
             results.append(entry)
     return results
 

@@ -462,6 +462,8 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
             else:
                 native = phases.run("absolute_native", lambda: absolute.run_native(
                     environment, model, python, plans, out, perf_suite.samples[0]["request"] if perf_suite else None))
+                if native and native.get("plans"):  # a family script answered fewer problems: TRTMC answers those
+                    model, plans = {**model, "absolute": native["absolute"]}, native["plans"]
                 absolute_runs = {"plans": plans, "native": native or {},
                                  "native_error": phases.errors.get("absolute_native")}
         phases.run("candidate", lambda: _candidate(environment, model, l1, perf_suite, reference_perf, accuracy,
