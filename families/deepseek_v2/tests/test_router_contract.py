@@ -121,6 +121,108 @@ def test_non_finite_router_score_bias_is_rejected() -> None:
         )
 
 
+def test_selected_expert_graph_matches_numpy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The portable selected-expert graph preserves DeepSeek SwiGLU routing."""
+
+    class Tensor:
+        def __init__(self, data: np.ndarray):
+            self.data = np.asarray(data)
+            self.shape = self.data.shape
+            self.dtype = self.data.dtype
+
+    class Layer:
+        def __init__(self, data: np.ndarray):
+            self.output = Tensor(data)
+
+        def get_output(self, _index: int) -> Tensor:
+            return self.output
+
+    class Shuffle(Layer):
+        @property
+        def reshape_dims(self):
+            return self.output.shape
+
+        @reshape_dims.setter
+        def reshape_dims(self, shape) -> None:
+            self.output = Tensor(self.output.data.reshape(shape))
+
+    class Network:
+        @staticmethod
+        def add_shuffle(tensor: Tensor) -> Shuffle:
+            return Shuffle(tensor.data)
+
+        @staticmethod
+        def add_cast(tensor: Tensor, dtype) -> Layer:
+            return Layer(tensor.data.astype(dtype))
+
+        @staticmethod
+        def add_gather(data: Tensor, indices: Tensor, _axis: int) -> Layer:
+            return Layer(np.take(data.data, indices.data, axis=0))
+
+        @staticmethod
+        def add_matrix_multiply(left: Tensor, _left_op, right: Tensor, _right_op) -> Layer:
+            return Layer(np.matmul(left.data, right.data))
+
+        @staticmethod
+        def add_activation(tensor: Tensor, _operation) -> Layer:
+            return Layer(1.0 / (1.0 + np.exp(-tensor.data)))
+
+        @staticmethod
+        def add_elementwise(left: Tensor, right: Tensor, _operation) -> Layer:
+            return Layer(left.data * right.data)
+
+        @staticmethod
+        def add_reduce(tensor: Tensor, _operation, _axes: int, keep_dims: bool) -> Layer:
+            return Layer(np.sum(tensor.data, axis=1, keepdims=keep_dims))
+
+    monkeypatch.setattr(
+        model.graph_ops,
+        "add_constant",
+        lambda _network, _shape, values, dtype: Tensor(np.asarray(values, dtype=dtype)),
+    )
+    hidden = np.array([[0.25, -0.5], [1.0, 0.75]], dtype=np.float16)
+    indices = np.array([[0, 2], [1, 0]], dtype=np.int32)
+    routing = np.array([[0.7, 0.3], [0.4, 0.6]], dtype=np.float32)
+    weights = {}
+    for expert in range(3):
+        scale = float(expert + 1)
+        weights[f"layer.0.expert.{expert}.w_gate"] = (
+            np.array([[0.2, -0.1, 0.3], [0.4, 0.5, -0.2]], dtype=np.float16) * scale
+        )
+        weights[f"layer.0.expert.{expert}.w_up"] = (
+            np.array([[0.3, 0.2, -0.4], [-0.1, 0.6, 0.5]], dtype=np.float16) * scale
+        )
+        weights[f"layer.0.expert.{expert}.w_down"] = (
+            np.array([[0.5, -0.2], [0.1, 0.4], [-0.3, 0.2]], dtype=np.float16) / scale
+        )
+
+    actual = model._add_routed_experts(
+        Network(),
+        Tensor(hidden),
+        weights,
+        "layer.0",
+        hidden_size=2,
+        n_routed_experts=3,
+        num_experts_per_tok=2,
+        top_indices=Tensor(indices),
+        scaled_weights=Tensor(routing),
+        dtype=np.float16,
+    ).data
+
+    expected = np.zeros_like(hidden)
+    for token in range(hidden.shape[0]):
+        for route in range(indices.shape[1]):
+            expert = int(indices[token, route])
+            gate = hidden[token] @ weights[f"layer.0.expert.{expert}.w_gate"]
+            up = hidden[token] @ weights[f"layer.0.expert.{expert}.w_up"]
+            activated = gate / (1.0 + np.exp(-gate))
+            down = (activated * up) @ weights[f"layer.0.expert.{expert}.w_down"]
+            expected[token] += routing[token, route] * down
+
+    assert actual.dtype == np.float16
+    np.testing.assert_allclose(actual, expected, rtol=2e-3, atol=2e-3)
+
+
 @pytest.mark.parametrize(
     ("scoring_func", "n_routed_experts", "n_group"),
     (
