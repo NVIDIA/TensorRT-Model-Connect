@@ -35,6 +35,11 @@ struct TrtDeleter {
 template <typename T>
 using TrtUniquePtr = std::unique_ptr<T, TrtDeleter<T>>;
 
+// The process-wide TensorRT logger. TensorRT ignores (and warns about) a
+// second logger passed to createInferRefitter/createInferBuilder once one
+// is registered, so every entry point must share this instance.
+TrtLogger& trt_shared_logger();
+
 TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime();
 
 } // namespace trtmc

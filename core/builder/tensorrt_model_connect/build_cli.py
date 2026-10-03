@@ -45,6 +45,10 @@ def _parser(prepare_family: object | None = None) -> argparse.ArgumentParser:
     build_parser.add_argument("--quantization")
     build_parser.add_argument("--fp32-layer", type=int, action="append", default=[])
     build_parser.add_argument("--dynamic-kv-cache", action="store_true")
+    build_parser.add_argument(
+        "--strip-weights", action="store_true",
+        help="Build a stripped plan: GEMM weights become null placeholders "
+             "and are supplied by refit at load time (supported families only)")
     build_parser.add_argument("--verbose", action="store_true")
     prepare_parser = commands.add_parser(
         "prepare-structure",
@@ -129,6 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             quantization=args.quantization,
             fp32_layers=tuple(args.fp32_layer),
             dynamic_kv_cache=args.dynamic_kv_cache,
+            strip_weights=args.strip_weights,
             verbose=args.verbose,
         )
     )

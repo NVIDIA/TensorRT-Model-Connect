@@ -19,7 +19,8 @@ namespace trtmc::qwen {
 std::vector<char> require_section(const BundleReader& bundle, std::string_view name);
 std::string require_text_section(const BundleReader& bundle, std::string_view name);
 std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<char>& plan,
-                                        const char* label);
+                                        const char* label,
+                                        const ModuleCreateOptions& options = {});
 std::shared_ptr<ITokenizer> create_tokenizer(const BundleReader& bundle);
 
 } // namespace trtmc::qwen
