@@ -8,6 +8,7 @@ import logging
 from concurrent.futures import Future
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from trtmc_server.app import ServerConfig, create_app
@@ -292,3 +293,56 @@ def test_worker_request_too_large_returns_413_and_finishes_metrics() -> None:
         metrics = client.get("/metrics")
         assert 'route="/v1/completions",status="413"' in metrics.text
         assert "trtmc_server_active_requests 0" in metrics.text
+
+
+@pytest.mark.parametrize("route", ["/v1/completions", "/v1/chat/completions"])
+@pytest.mark.parametrize("value", ["1e400", "Infinity", '"Infinity"'])
+def test_nonfinite_temperature_is_rejected_before_worker_acquisition(route: str, value: str) -> None:
+    registry = FakeRegistry()
+    registry.saturated = True
+    payload = {"model": "test/model"}
+    if route == "/v1/completions":
+        payload["prompt"] = "Capital?"
+    else:
+        payload["messages"] = [{"role": "user", "content": "Capital?"}]
+    body = json.dumps(payload)[:-1] + ', "temperature": ' + value + '}'
+    with make_client(registry) as client:
+        invalid = client.post(route, content=body, headers={"content-type": "application/json"})
+        assert invalid.status_code == 400
+        assert invalid.json()["error"]["param"] == "temperature"
+        assert registry.requests == []
+        registry.saturated = False
+        valid = client.post(route, json={**payload, "temperature": 0.0})
+        assert valid.status_code == 200
+        assert registry.requests[-1][1]["config"]["temperature"] == 0.0
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+@pytest.mark.parametrize("location", ["prompt", "user", "system", "text_part"])
+def test_surrogate_input_is_rejected_before_worker_acquisition(surrogate, location):
+    registry = FakeRegistry()
+    registry.saturated = True
+    payload = {"model": "test/model"}
+    route = "/v1/completions" if location == "prompt" else "/v1/chat/completions"
+    if location == "prompt":
+        payload["prompt"] = surrogate
+    else:
+        content = [{"type": "text", "text": surrogate}] if location == "text_part" else surrogate
+        payload["messages"] = [{"role": "user", "content": content}]
+        if location == "system":
+            payload["messages"] = [
+                {"role": "system", "content": surrogate},
+                {"role": "user", "content": "Capital?"},
+            ]
+    with make_client(registry) as client:
+        invalid = client.post(route, content=json.dumps(payload),
+                              headers={"content-type": "application/json"})
+        assert invalid.status_code == 400
+        assert invalid.json()["error"]["type"] == "invalid_request_error"
+        assert registry.requests == []
+        registry.saturated = False
+        valid = client.post("/v1/completions", content=json.dumps({
+            "model": "test/model", "prompt": "\U0001f600",
+        }), headers={"content-type": "application/json"})
+        assert valid.status_code == 200
+        assert registry.requests[-1][1]["prompt"] == "\U0001f600"
