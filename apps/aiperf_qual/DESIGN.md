@@ -412,9 +412,11 @@ smoke results, and the formal run before each lands in PR #1550.
   2x for TRTMC's falcon-rw-1b and none for its lfm2-350m or qwen35-4b. `acc_mps` (environment; on for GB300)
   starts a CUDA MPS daemon of the copies' own (a private pipe directory: only the copies are its clients, L1
   servers and the GPU-idle reading are not) so their kernels share the SMs; it quits after the copies stop, and a
-  daemon that does not start leaves the copies time-sliced. Measured on lfm2-350m (four copies a side): TRTMC
-  MMLU 199 -> 88 s and LAMBADA 345 -> 150 s with every answer identical (2,278 and 5,151); native LAMBADA
-  189 -> 147 s. Native eager answers vary between runs with or without MPS alike (two runs without it agree on
+  daemon that does not start leaves the copies time-sliced. Measured on lfm2-350m (four copies a side, the same
+  bundle): TRTMC MMLU 199 -> 88 s and LAMBADA 345 -> 150 s with every answer identical (2,278 and 5,151); native
+  LAMBADA 189 -> 147 s; falcon-rw-1b TRTMC LAMBADA 84 -> 43 s. TensorRT builds are not bit-reproducible: falcon's
+  bundle, rebuilt between the two runs, changed 58 of 5,153 LAMBADA grades (55.95% -> 55.99%), so a verdict is
+  for the bundle its run built. Native eager answers vary between runs with or without MPS alike (two runs without it agree on
   2,271 of 2,278 MMLU answers; with it, 2,269 to 2,272); TRTMC's copies, with or without MPS, reproduce a single
   server's answers exactly (lfm2-350m, qwen35-4b: 2,227 of 2,227).
 - **Five timed runs** (Section 4.6): the pilot timed ResNet-50 at a 9.7x speedup with run p50s 2% apart, and the
