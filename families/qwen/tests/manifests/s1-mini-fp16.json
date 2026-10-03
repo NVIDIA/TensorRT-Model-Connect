@@ -3,7 +3,7 @@
   "hf_id": "superwhisper/s1-mini",
   "hf_revision": "65f84bcda1d13df582c4a8443c1c5aa53c0c66db",
   "bundle": "s1-mini-fp16.bundle",
-  "family": "s1_mini",
+  "family": "qwen",
   "task": "text_generation",
   "precision": "fp16",
   "trust_remote_code": false,
@@ -20,6 +20,7 @@
       "expected_answers": [
         "Thursday"
       ],
+      "require_answer_and_distance": true,
       "premerge": true
     },
     {
@@ -31,7 +32,8 @@
       "enable_thinking": false,
       "expected_answers": [
         "Tuesday"
-      ]
+      ],
+      "require_answer_and_distance": true
     }
   ]
 }

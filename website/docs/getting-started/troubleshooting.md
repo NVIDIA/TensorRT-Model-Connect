@@ -13,10 +13,10 @@ Identify the first boundary that fails in the [Quick Start](quick-start.md).
 | Hugging Face 401/403/not found | Exact ID/revision, network, authentication | Verify the checkpoint/cache; never substitute a nearby model silently. |
 | CMake cannot find CUDA/TensorRT | Development image and explicit SDK paths | Return to the documented container/toolchain cohort. |
 | Build OOM or disk failure | Requested checkpoint, shape, precision, and cache capacity | Use the exact family manifest/profile or free capacity; retain the first error. |
-| No family matches | Root checkpoint identity metadata | Use a supported exact checkpoint; do not add prefix/fallback matching. |
-| Multiple families match | Shared checkpoint architecture | Choose one of the reported compatible families with `trtmc build MODEL --family FAMILY -o model.bundle`. |
+| No family or multiple families match | Root checkpoint identity metadata | Use a supported exact checkpoint; do not add prefix/fallback matching. |
 | Bundle inspection fails | Partial/corrupt bundle | Rebuild; failed builds must not publish a partial output. |
 | Family/backend DSO missing | `--runtime-root` contents | Confirm `libtrtmc_core.so`, `libtrtmc_runtime.so`, selected backend, and exact family DSO are together. |
+| Existing S1 Mini bundle requests `s1_mini` | Bundle header was built before S1 Mini moved into Qwen | Rebuild the bundle from the checkpoint; new bundles use the `qwen` family and runtime DSO. |
 | Task mismatch | Bundle `task` versus CLI command | Use the Task command named by the family manifest/header. |
 | TensorRT/DSO ABI error | Mixed software or hardware cohort | Run with a compatible environment and rebuild the bundle when required. |
 | Output differs | Revision, input framing, precision, sampling, oracle | Reproduce the exact family testcase before changing code or thresholds. |
