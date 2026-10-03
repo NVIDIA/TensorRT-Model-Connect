@@ -23,4 +23,5 @@ reference_env_root: /state/ref-envs      # family reference environments (trtmc-
 ports: {reference: 8900, candidate: 8901}
 native_replicas: 4                       # gold-scored native runs: copies of the HF adapter that fit the GPU
 candidate_replicas: 4                    # TRTMC's Acc answers: copies of the server that fit the GPU
+acc_mps: true                            # the Acc copies share the GPU's SMs through their own CUDA MPS daemon
 gpu_lock: /state/gpu.lock                # serializes timing phases with bundle builds on this host

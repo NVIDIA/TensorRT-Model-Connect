@@ -409,10 +409,14 @@ smoke results, and the formal run before each lands in PR #1550.
   measures the throughput gain. L1 is timed on a single server started after the copies stopped, and the Acc
   requests' own model-call times (`workload_perf`) are white when either side ran as copies. Smoke runs use one
   copy. Copies of separate processes time-slice the GPU: the pilot measured about 4x for native eager copies,
-  2x for TRTMC's falcon-rw-1b and none for its lfm2-350m. `acc_mps` (environment, off until measured) starts a
-  CUDA MPS daemon of the copies' own (a private pipe directory: only the copies are its clients, L1 servers and
-  the GPU-idle reading are not) so their kernels share the SMs; it quits after the copies stop, and a daemon that
-  does not start leaves the copies time-sliced.
+  2x for TRTMC's falcon-rw-1b and none for its lfm2-350m or qwen35-4b. `acc_mps` (environment; on for GB300)
+  starts a CUDA MPS daemon of the copies' own (a private pipe directory: only the copies are its clients, L1
+  servers and the GPU-idle reading are not) so their kernels share the SMs; it quits after the copies stop, and a
+  daemon that does not start leaves the copies time-sliced. Measured on lfm2-350m (four copies a side): TRTMC
+  MMLU 199 -> 88 s and LAMBADA 345 -> 150 s with every answer identical (2,278 and 5,151); native LAMBADA
+  189 -> 147 s. Native eager answers vary between runs with or without MPS alike (two runs without it agree on
+  2,271 of 2,278 MMLU answers; with it, 2,269 to 2,272); TRTMC's copies, with or without MPS, reproduce a single
+  server's answers exactly (lfm2-350m, qwen35-4b: 2,227 of 2,227).
 - **Five timed runs** (Section 4.6): the pilot timed ResNet-50 at a 9.7x speedup with run p50s 2% apart, and the
   CI gate turned it white: with three runs the 95% half-width is t(0.975, 2) = 4.30 standard errors, so ordinary
   run-to-run noise exceeds 5%. The same number of timed requests now runs as five runs (t = 2.78): 12 requests per
