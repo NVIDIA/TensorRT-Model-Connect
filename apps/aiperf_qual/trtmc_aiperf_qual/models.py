@@ -80,18 +80,28 @@ def _reference_backend(operation: str, task: str) -> str:
     return "reference" if operation in HF_OPERATIONS and task not in NO_GENERIC_TASKS else "unsupported"
 
 
-def _suite(reference: str | Mapping[str, Any], profile: str) -> dict[str, Any]:
+def _suite(reference: str | Mapping[str, Any], profile: str, catalog_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """A suite definition; ``catalog_request`` (config/models ``request``) states controls the catalog request
+    leaves to each side's default, in every suite built on that request (the suite's own request wins)."""
     if isinstance(reference, Mapping):
         suite = dict(reference)
     elif reference == "catalog":
-        return {"suite": f"{profile}-catalog", "version": 1,
-                "source": {"kind": "catalog_testcase", "profile": profile},
-                "selection": {"method": "first", "count": 1}}
+        suite = {"suite": f"{profile}-catalog", "version": 1,
+                 "source": {"kind": "catalog_testcase", "profile": profile},
+                 "selection": {"method": "first", "count": 1}}
     else:
         suite = load_suite(reference)
     if suite.pop("base", None) == "catalog":  # samples override the profile's catalog request
         suite["base_profile"] = profile
+    on_catalog = suite.get("base_profile") or (suite.get("source") or {}).get("kind") == "catalog_testcase"
+    if catalog_request and on_catalog:
+        suite["request"] = {**dict(catalog_request), **dict(suite.get("request") or {})}
     return suite
+
+
+def model_suite(reference: str | Mapping[str, Any], model: Mapping[str, Any]) -> dict[str, Any]:
+    """``_suite`` for a resolved model (its catalog profile and stated catalog request)."""
+    return _suite(reference, model["catalog_profile"], model.get("catalog_request"))
 
 
 def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mapping[str, Any],
@@ -150,7 +160,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     reference = dict(config.get("reference", {}))
     backend = reference.pop("backend", "auto")
     if backend == "auto":  # a family's own native pipeline serves any operation
-        backend = "reference" if reference.get("adapter") else _reference_backend(operation, catalog_model.task)
+        # ``not_covered``: a native pipeline the harness cannot run yet (the reason is reported): not-covered.
+        backend = ("unsupported" if reference.get("not_covered") else
+                   "reference" if reference.get("adapter") else _reference_backend(operation, catalog_model.task))
     trust_remote_code = bool(manifest.get("trust_remote_code", False) or reference.pop("trust_remote_code", False))
     candidate_precision = catalog_model.precision
     # One immutable checkpoint for the bundle and the native reference: the catalog pin, else
@@ -166,7 +178,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
                          (manifest.get("testcases") or [{}])[0], bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):
-            suite = _suite(item["suite_definition"], profile)
+            suite = _suite(item["suite_definition"], profile, config.get("request"))
             if item.get("request"):
                 suite = {**suite, "request": {**suite.get("request", {}), **item.pop("request")}}
             item["suite_definition"] = suite
@@ -191,7 +203,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         if source is None or not isinstance(source.get("suite_definition"), Mapping):
             raise ConfigError(f"{profile}: performance.l1.suite.from_benchmark {name!r} is not one of its gold suites")
         l1["suite"] = {**source["suite_definition"], "suite": f"{profile}-{name}-first", "selection": {"method": "first", "count": 1}}
-    l1["suite"] = _suite(l1["suite"], profile)
+    l1["suite"] = _suite(l1["suite"], profile, config.get("request"))
     size = checkpoint_bytes(catalog_model.hf_id, revision)
     if size and size > LARGE_CHECKPOINT_BYTES and l1["measurement"]["requests"] > LARGE_MODEL_MEASUREMENT["requests"]:
         l1["measurement"] = dict(LARGE_MODEL_MEASUREMENT)
@@ -201,6 +213,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     reference_revision = reference.pop("revision", None) or (None if reference_model else revision)
     return {
         "model": profile, "catalog_profile": profile, "operation": operation, "family": catalog_model.family,
+        **({"catalog_request": dict(config["request"])} if config.get("request") else {}),
         "task": catalog_model.task,
         "candidate": {"bundle": bundle, "precision": candidate_precision, "build": build,
                       "manifest": str(catalog_model.manifest_path), "checkpoint": catalog_model.hf_id,

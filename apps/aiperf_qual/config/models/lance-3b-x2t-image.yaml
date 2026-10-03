@@ -5,5 +5,8 @@
 absolute: [mmstar]
 
 reference:
+  # The upstream Lance inference is a batch command (inference_lance.py) that loads the model on every invocation;
+  # serving it per request needs a resident adapter around its internals, not written yet.
+  not_covered: the upstream Lance inference reloads the model per invocation; no resident native adapter yet
   requirements: families/lance/requirements.txt  # the family's dependencies, layered on the serving interpreter
   build_isolation: false  # its requirements build native extensions against the installed torch

@@ -2,4 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 reference:
+  adapter: families/phi4_multimodal/tests/native_reference.py  # the checkpoint's own processor and causal LM
+  trust_remote_code: true  # the checkpoint's own modeling code
   requirements: families/phi4_multimodal/requirements.txt  # the family's dependencies, layered on the serving interpreter

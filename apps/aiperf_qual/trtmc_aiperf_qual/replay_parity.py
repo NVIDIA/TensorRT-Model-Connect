@@ -238,11 +238,11 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
     """The ``replay-parity`` entry of a family that takes caller latents (nothing otherwise): both sides
     render the first ``parity_floor_samples`` prompts (``video_samples`` videos) with the same initial
     noise, the native model also at full precision."""
-    from .models import _suite
+    from .models import model_suite
 
     if model.get("family") not in check.get("latent_replay_families", ()):
         return []
-    suite = build_suite(_suite(check["suite"], model["catalog_profile"]), environment)
+    suite = build_suite(model_suite(check["suite"], model), environment)
     count = int(check.get("video_samples", 3) if is_video(suite.samples[0]["request"])
                 else check.get("parity_floor_samples", 10))
     suite = with_latent_seeds(limit_suite(suite, count))

@@ -3,3 +3,7 @@
 
 reference:
   requirements: families/pixart/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+# The catalog request leaves guidance (guidance_scale and cfg_scale) at -1: TRTMC's PixArt default and the Diffusers
+# PixArt-Sigma pipeline's are both 4.5, stated here for every request built on it (timing, GenEval, replay parity).
+request: {guidance_scale: 4.5, cfg_scale: 4.5}

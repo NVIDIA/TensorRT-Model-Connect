@@ -8,4 +8,5 @@ performance:
     not_equivalent: TRTMC transcribes in streaming chunks; the native adapter transcribes the whole file offline
 
 reference:
+  adapter: families/nemotron_speech_streaming/tests/native_reference.py  # NeMo's ASR model (no generic adapter loads it)
   requirements: families/nemotron_speech_streaming/requirements.txt  # the family's dependencies, layered on the serving interpreter

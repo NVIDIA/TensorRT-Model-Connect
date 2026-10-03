@@ -103,12 +103,18 @@ def first_frame(source):
     return Image.fromarray(frames[len(frames) // 2]).convert("RGB") if frames else None
 
 
+def projected(output):
+    return output if isinstance(output, torch.Tensor) else output.pooler_output
+
+
 def clip_t(image, prompt):
     # CLIP-T: 100 x the cosine of the image and prompt embeddings.
     inputs = clip_processor(text=[prompt], images=image, return_tensors="pt", padding=True, truncation=True).to(device)
     with torch.no_grad():
-        image_embedding = clip.get_image_features(pixel_values=inputs["pixel_values"])
-        text_embedding = clip.get_text_features(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"])
+        # Transformers 5 returns a model output whose pooler_output is the projected embedding.
+        image_embedding = projected(clip.get_image_features(pixel_values=inputs["pixel_values"]))
+        text_embedding = projected(clip.get_text_features(input_ids=inputs["input_ids"],
+                                                          attention_mask=inputs["attention_mask"]))
     return 100.0 * float(torch.nn.functional.cosine_similarity(image_embedding, text_embedding).item())
 
 
@@ -177,9 +183,9 @@ def _score(environment: Environment, check: Mapping[str, Any], items: Sequence[t
 
 def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
         out: Path) -> dict[str, Any]:
-    from .models import _suite
+    from .models import model_suite
 
-    suite = build_suite(_suite(check["suite"], model["catalog_profile"]), environment)
+    suite = build_suite(model_suite(check["suite"], model), environment)
     if model.get("family") in check.get("latent_replay_families", ()):
         suite = with_latent_seeds(suite)
     native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "geneval",

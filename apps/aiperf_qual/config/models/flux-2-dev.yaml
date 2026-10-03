@@ -3,3 +3,7 @@
 
 reference:
   requirements: families/flux/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+# FLUX.2-dev: TRTMC's catalog default guidance is 3.5 while the Diffusers Flux2Pipeline defaults to 4.0, so
+# the catalog's 3.5 is stated for both sides (no true CFG).
+request: {guidance_scale: 3.5, cfg_scale: 1.0}

@@ -63,9 +63,9 @@ def _audio(workdir: Path, record: Mapping[str, Any]) -> tuple[str, int] | None:
 def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
         out: Path) -> dict[str, Any]:
 
-    from .models import _suite
+    from .models import model_suite
 
-    suite = build_suite(_suite(check["suite"], model["catalog_profile"]), environment)
+    suite = build_suite(model_suite(check["suite"], model), environment)
     native, _, _ = generate_native(environment, model, suite, python, out, "tts")
     audio = {side: [_audio(workdir, record) for workdir, record in outputs] for side, outputs in (
         ("candidate", generate(environment, model, "trtmc", out / "tts-candidate", suite)), ("native", native))}

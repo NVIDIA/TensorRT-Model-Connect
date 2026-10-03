@@ -4,6 +4,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from trtmc_aiperf_qual import absolute, gold_metrics
 from trtmc_aiperf_qual.config import Environment
@@ -85,3 +86,31 @@ def test_the_matrix_marks_profiles_without_a_native_path(tmp_path):
     output = tmp_path / "matrix.csv"
     assert matrix.write_matrix(environment, ["qwen3-0.6b-fp16"], output) == 0
     assert output.read_text().startswith("profile,task,operation")
+
+
+def test_the_near_capacity_prompt_shrinks_until_trtmc_accepts_it(monkeypatch):
+    import transformers
+
+    from trtmc_aiperf_qual import absolute, runner
+
+    monkeypatch.setattr(absolute, "tokenizer_source", lambda model: ("tok", None))
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: object())
+    monkeypatch.setattr(runner, "_passage", lambda environment, tokenizer, count: "w " * count)
+    monkeypatch.setattr(runner, "rendered_tokens", lambda tokenizer, request: len(request["prompt"].split()) + 1)
+
+    def probe(service, operation, request):  # TRTMC counts 3 tokens more than the Hugging Face tokenizer
+        if len(request["prompt"].split()) + 1 + 3 > 224:
+            raise RuntimeError('probe rejected: {"error":{"message":"prompt exceeds the prefill profile",'
+                               '"code":"backend_rejected_request"}}')
+
+    monkeypatch.setattr(runner, "probe", probe)
+    model = {"operation": "generate", "reference": {}}
+    long, tokens = runner.near_capacity_request(None, model, {"prompt": "x"}, 224, {"url": "u"})
+    assert tokens == 221 and long["max_new_tokens"] == runner.NEAR_CAPACITY_NEW_TOKENS and long["temperature"] == 0.0
+
+    def broken(service, operation, request):
+        raise RuntimeError("probe rejected: CUDA error")
+
+    monkeypatch.setattr(runner, "probe", broken)
+    with pytest.raises(RuntimeError, match="CUDA"):
+        runner.near_capacity_request(None, model, {"prompt": "x"}, 224, {"url": "u"})

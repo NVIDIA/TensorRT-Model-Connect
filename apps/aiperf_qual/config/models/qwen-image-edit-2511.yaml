@@ -3,3 +3,7 @@
 
 reference:
   requirements: families/qwen_image/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+# TRTMC's Qwen-Image takes the request's guidance_scale as its true CFG scale (bundle default 4.0); the
+# Diffusers pipeline takes cfg_scale (4.0, stated) as true_cfg_scale. guidance_scale stated as the same 4.0.
+request: {guidance_scale: 4.0}

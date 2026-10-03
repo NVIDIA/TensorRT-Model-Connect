@@ -3,3 +3,7 @@
 
 reference:
   requirements: families/flux/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+# FLUX.1-schnell has no guidance embedding: TRTMC's default guidance is 0.0 and the Diffusers transformer
+# ignores it; true CFG stays off (1.0).
+request: {guidance_scale: 0.0, cfg_scale: 1.0}

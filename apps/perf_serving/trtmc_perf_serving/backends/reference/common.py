@@ -49,6 +49,15 @@ class ReferenceSpec:
             kwargs["revision"] = self.revision
         return kwargs
 
+    def model_kwargs(self) -> dict[str, Any]:
+        """``from_pretrained`` arguments of a Transformers model: ``pretrained_kwargs`` and the precision,
+        named ``dtype`` from Transformers 4.56 on and ``torch_dtype`` before (a family environment may pin
+        an older release for its remote code)."""
+        import transformers
+
+        major, minor = (int(part) for part in transformers.__version__.split(".")[:2])
+        return {**self.pretrained_kwargs(), ("dtype" if (major, minor) >= (4, 56) else "torch_dtype"): self.dtype}
+
 
 def synchronize() -> None:
     if torch.cuda.is_available():

@@ -5,3 +5,7 @@
 reference:
   requirements: families/z_image/requirements.txt  # the family's dependencies, layered on the serving interpreter
   timing_precision: bf16
+
+# Z-Image Turbo runs without CFG on both sides (guidance_scale 0.0 stated; TRTMC ignores guidance); the
+# unused cfg_scale is stated as 0.0 too.
+request: {cfg_scale: 0.0}

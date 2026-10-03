@@ -33,7 +33,7 @@ def row(environment: Environment, profile: str) -> dict[str, Any]:
               else reference.get("adapter") or f"generic {model['operation']}")
     problems = []
     if reference["backend"] == "unsupported":
-        problems.append("no native adapter")
+        problems.append(f"no native adapter{': ' + reference['not_covered'] if reference.get('not_covered') else ''}")
     if model["accuracy_source"] == "missing":
         problems.append("no accuracy scheme")
     return {"profile": profile, "task": model["task"], "operation": model["operation"],

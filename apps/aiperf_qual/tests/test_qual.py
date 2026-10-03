@@ -633,3 +633,14 @@ def test_stratified_selection_takes_every_class_first_in_record_order():
     records = [{"id": f"{label}-{index}", "label": label} for label in range(10) for index in range(3)]
     picked = select(records, {"method": "stratified", "field": "label", "count": 10})
     assert [record["id"] for record in picked] == [f"{label}-0" for label in range(10)]
+
+
+def test_stated_catalog_controls_reach_every_suite_built_on_the_catalog_request():
+    from trtmc_aiperf_qual.models import _suite
+
+    stated = {"guidance_scale": 4.5, "cfg_scale": 4.5}
+    assert _suite("catalog", "pixart", stated)["request"] == stated
+    on_catalog = _suite({"suite": "geneval", "base": "catalog", "request": {"cfg_scale": 7.0}}, "pixart", stated)
+    assert on_catalog["base_profile"] == "pixart" and on_catalog["request"] == {"guidance_scale": 4.5, "cfg_scale": 7.0}
+    dataset = _suite({"suite": "mmlu", "source": {"kind": "hf_dataset"}}, "pixart", stated)
+    assert "request" not in dataset  # a suite not built on the catalog request is left alone

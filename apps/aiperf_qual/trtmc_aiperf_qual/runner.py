@@ -45,6 +45,9 @@ GREEDY = {"temperature": 0.0, "top_k": 1, "top_p": 1.0, "do_sample": False}
 # at most NEAR_CAPACITY_MAX prompt tokens (native eager prefill memory).
 NEAR_CAPACITY_NEW_TOKENS = 32
 NEAR_CAPACITY_MAX = 16384
+# TRTMC tokenizes the passage itself (it may count a few more tokens than the Hugging Face tokenizer) and a
+# bundle's prefill profile may be shorter than its sequence length: a prompt TRTMC rejects for length is
+# shortened to the longest it accepts (a binary search over the passage length).
 
 
 def timed_request(model: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
@@ -85,37 +88,71 @@ def rendered_tokens(tokenizer: Any, request: Mapping[str, Any]) -> int:
 
 
 def near_capacity_request(environment: Environment, model: Mapping[str, Any], request: Mapping[str, Any],
-                          budget: int) -> dict[str, Any]:
-    """The request with a passage whose rendered prompt has exactly ``budget`` tokens (or the most below it
-    that the tokenizer's round trip allows) and NEAR_CAPACITY_NEW_TOKENS to generate, greedy."""
+                          budget: int, service: Mapping[str, Any]) -> tuple[dict[str, Any], int]:
+    """The request with a passage whose rendered prompt has ``budget`` tokens (or the most below it that the
+    tokenizer's round trip allows) and NEAR_CAPACITY_NEW_TOKENS to generate, greedy, or the longest passage the
+    TRTMC ``service`` accepts below that; with the rendered prompt length."""
     from transformers import AutoTokenizer
 
     name, revision = absolute.tokenizer_source(model)
     tokenizer = AutoTokenizer.from_pretrained(name, revision=revision,
                                               trust_remote_code=bool(model["reference"].get("trust_remote_code")))
-    count, long = budget, {}
+    count = budget
     for _ in range(5):  # the template's tokens, then the decode / re-encode round trip, taken off the passage
         long = {**request, **GREEDY, "prompt": _passage(environment, tokenizer, count),
                 "max_new_tokens": NEAR_CAPACITY_NEW_TOKENS}
         excess = rendered_tokens(tokenizer, long) - budget
         if excess <= 0:
-            return long
+            break
         count -= excess
-    raise RuntimeError(f"cannot fit a passage into {budget} rendered prompt tokens")
+    else:
+        raise RuntimeError(f"cannot fit a passage into {budget} rendered prompt tokens")
+
+    def accepted(request: Mapping[str, Any]) -> bool:
+        try:
+            probe(service, model["operation"], request)
+            return True
+        except RuntimeError as error:  # a length rejection ("... exceed(s) the ... capacity / prefill profile")
+            message = str(error).lower()
+            if "backend_rejected_request" not in message or not ("exceed" in message or "capacity" in message):
+                raise
+            return False
+
+    if not accepted(long):
+        low, high = 0, count  # the longest accepted passage is in [low, high)
+        while high - low > 1:
+            middle = (low + high) // 2
+            candidate = {**long, "prompt": _passage(environment, tokenizer, middle)}
+            if accepted(candidate):
+                low, long = middle, candidate
+            else:
+                high = middle
+        if low == 0:
+            raise RuntimeError("TRTMC rejects every near-capacity prompt for length")
+    return long, rendered_tokens(tokenizer, long)
 
 
-def perf_suites(environment: Environment, model: Mapping[str, Any], suite: Suite) -> list[Suite]:
-    """The timed requests: the catalog request (greedy where it samples text) and, for the text generation
-    Task (text only: not vision-language models, whose image tokens share the bundle length), the
-    near-capacity request."""
+def near_capacity_applies(model: Mapping[str, Any], request: Mapping[str, Any]) -> bool:
+    """The text generation Task's text-only requests (not vision-language models, whose image tokens share the
+    bundle length) on a bundle long enough for a passage."""
+    length = int(model["candidate"].get("max_sequence_length") or 0)
+    return (model.get("task") == "text_generation" and not any(key.startswith("image") for key in request)
+            and length > 2 * NEAR_CAPACITY_NEW_TOKENS)
+
+
+def perf_suites(environment: Environment, model: Mapping[str, Any], suite: Suite,
+                service: Mapping[str, Any] | None = None) -> list[Suite]:
+    """The timed requests: the catalog request (greedy where it samples text) and, where
+    ``near_capacity_applies``, the near-capacity request sized against the TRTMC ``service``."""
     request = timed_request(model, suite.samples[0]["request"])
     suites = [single_request_suite(suite.name, request, suite.manifest)]
-    length = int(model["candidate"].get("max_sequence_length") or 0)
-    text_only = not any(key.startswith("image") for key in request)
-    if model.get("task") == "text_generation" and text_only and length > 2 * NEAR_CAPACITY_NEW_TOKENS:
-        budget = min(length - NEAR_CAPACITY_NEW_TOKENS, NEAR_CAPACITY_MAX)
-        long = near_capacity_request(environment, model, request, budget)
-        suites.append(single_request_suite(f"{suite.name}-near-capacity", long, {"near_capacity_tokens": budget}))
+    if near_capacity_applies(model, request):
+        if service is None:
+            raise RuntimeError("sizing the near-capacity request needs the TRTMC server")
+        budget = min(int(model["candidate"]["max_sequence_length"]) - NEAR_CAPACITY_NEW_TOKENS, NEAR_CAPACITY_MAX)
+        long, tokens = near_capacity_request(environment, model, request, budget, service)
+        suites.append(single_request_suite(f"{suite.name}-near-capacity", long,
+                                           {"near_capacity_tokens": tokens, "near_capacity_budget": budget}))
     return suites
 
 
@@ -133,10 +170,17 @@ def probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any]
         raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-600:]}") from error
 
 
-def serviceable_candidate(environment: Environment, model: Mapping[str, Any], suite: Suite | None, out: Path) -> None:
-    """TRTMC must serve one request before the native model spends time on the benchmarks."""
+def candidate_probe(environment: Environment, model: Mapping[str, Any], suite: Suite | None, out: Path,
+                    phases: "_Phases", *, serviceability: bool, l1: bool) -> list[Suite]:
+    """One TRTMC server before any native work: it must serve the first request (when Acc runs) and sizes the
+    near-capacity request; returns the timed requests (none without L1 or when they cannot be built)."""
     with serving(environment, dict(model), "trtmc", out / "absolute-probe") as service:
-        probe(service, model["operation"], suite.samples[0]["request"] if suite else {})
+        if serviceability:
+            phases.run("absolute_probe", lambda: probe(service, model["operation"],
+                                                        suite.samples[0]["request"] if suite else {}))
+        if not l1 or suite is None:
+            return []
+        return phases.run("perf_requests", lambda: perf_suites(environment, model, suite, service)) or []
 
 
 def _task_url(service: Mapping[str, Any], operation: str) -> list[str]:
@@ -544,7 +588,8 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
         result = {"model": model["model"], "operation": model["operation"], "task": model.get("task"),
                   "family": model.get("family"), "started": started, "reference": {"backend": "unsupported"},
                   "accuracy": [], "performance_l1": [], "performance_l2": {}, "duration_s": time.time() - started,
-                  "errors": {"native": f"no native adapter serves {model['operation']!r} for Task {model.get('task')!r}"},
+                  "errors": {"native": reference.get("not_covered") or
+                             f"no native adapter serves {model['operation']!r} for Task {model.get('task')!r}"},
                   "provenance": {"aiperf": importlib.metadata.version("aiperf"),
                                  "plugins": importlib.metadata.version("trtmc-aiperf-plugins"), "perf_suite": None}}
         result["verdict"] = judge.verdict(result, expected_suites=[], expected_modes=0)
@@ -577,9 +622,15 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
             def run_check(check: Mapping[str, Any] = check) -> None:
                 accuracy.extend(supplementary(environment, model, check, python, out))
             phases.run(check["check"], run_check)
-    if plans:
-        phases.run("absolute_probe", lambda: serviceable_candidate(environment, model, perf_suite, out))
-    timed_suites = (phases.run("perf_requests", lambda: perf_suites(environment, model, perf_suite)) or []) if l1 else []
+    probe_server = bool(plans) or bool(l1 and perf_suite and near_capacity_applies(
+        model, timed_request(model, perf_suite.samples[0]["request"])))
+    if probe_server:
+        timed_suites = phases.run("candidate_probe", lambda: candidate_probe(
+            environment, model, perf_suite, out, phases, serviceability=bool(plans), l1=bool(l1))) or []
+        if "candidate_probe" in phases.errors and plans:  # the server did not start: TRTMC cannot serve
+            phases.errors.setdefault("absolute_probe", phases.errors["candidate_probe"])
+    else:
+        timed_suites = (phases.run("perf_requests", lambda: perf_suites(environment, model, perf_suite)) or []) if l1 else []
     if l1 and not timed_suites:
         l1 = None  # the timed requests could not be built: the phase error says why
     with gpu_exclusive(environment):

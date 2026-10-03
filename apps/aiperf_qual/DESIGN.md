@@ -313,7 +313,10 @@ smoke results, and the formal run before each lands in PR #1550.
   `native_inputs.py` next to it): the family's `tests/` directory is where the repository keeps reference code
   (its architecture rules require family production code to be reachable from `model.py` and free of
   environment side channels): GLM-ASR (a speech-conditioned causal
-  LM), Magpie TTS (NeMo), SAM3, MoGe-2, ACT, Fast-FoundationStereo, PersonaPlex, SANA-WM, YOLOv5 / v8 / v10 / 11 (Ultralytics
+  LM), Magpie TTS, Canary and the Nemotron streaming ASR models (NeMo archives), DeepSeek-OCR (its own
+  `model.infer`, bf16 only, so its Perf is perf-inconclusive), LocateAnything (its official loading and
+  prompt contract, fp32 only), Phi-4 Multimodal (its own processor and causal LM), Nemotron Labs Diffusion
+  (`ar_generate`, the catalog's autoregressive mode, which every request carries), SAM3, MoGe-2, ACT, Fast-FoundationStereo, PersonaPlex, SANA-WM, YOLOv5 / v8 / v10 / 11 (Ultralytics
   archives), Chronos-Bolt and TimesFM (no generic time-series adapter). Inputs a family must prepare itself
   (decoded LeRobot frames, the Middlebury 700x700 profile) come from its `native_inputs.py` (`family_inputs`
   suites), run in its reference environment.
@@ -348,7 +351,18 @@ smoke results, and the formal run before each lands in PR #1550.
   `torch.compile` reference, aggregated by its best run, is not held to the 5% half-width.
 - **Near-capacity request** (text-only requests of the text generation Task; vision-language models' image
   tokens share the bundle length): the passage is sized so that the rendered prompt (the chat template when the
-  request asks for one, else the tokenizer with its special tokens) is exactly the bundle length minus 32.
+  request asks for one, else the tokenizer with its special tokens) is exactly the bundle length minus 32. TRTMC
+  tokenizes the passage itself and can count a few more tokens (TinyLlama: 2), and a bundle's prefill profile can
+  be shorter than its sequence length (InternLM2): the TRTMC probe server checks the request first, and one it
+  rejects for length is shortened to the longest passage it accepts (binary search); both sides time that
+  request, and the report records its rendered length next to the budget.
+- **Stated generation controls**: `config/models` `request` states what a catalog request leaves at -1 (guidance,
+  CFG, steps, frames); it applies to every suite built on the catalog request (the timed request, GenEval, replay
+  parity, world-model parity), so Acc generations do not rest on each side's own default either. The value is the
+  one TRTMC's family uses, read where each side actually takes it: PixArt-Sigma 4.5 and Wan 5.0 (both defaults);
+  Qwen-Image 4.0 as guidance_scale (TRTMC's true CFG field; Diffusers takes cfg_scale); FLUX.2-dev 3.5 (TRTMC's
+  default; Diffusers would use 4.0); FLUX.1-schnell 0.0 (no guidance embedding); Z-Image and MiniMax-H3 without CFG
+  (Turbo / CFG-distilled weights).
 - **Qualifying lights**: one eager light per timed request decides Perf; a missing, unavailable, or `error` eager
   light is an `error`. The opt-in `torch.compile` lights are reported only. Every successful timed response must
   carry its model-call time (a success without one, or without a body, makes the run incomplete: `error`).
@@ -361,6 +375,9 @@ smoke results, and the formal run before each lands in PR #1550.
   formed (a forecast of the horizon's length with finite values, a finite vector, a mask of the image's size).
 - **Smoke namespace**: `run --smoke --out <dir>/<profile>` writes to `<dir>/smoke/<profile>`, as `run-all --smoke`
   does.
+- **Lance** (lance-3b-x2t-image) is `not-covered`, declared with its reason (`reference.not_covered`): the upstream
+  inference is a batch command that loads the model on every invocation, so serving it per request needs a resident
+  adapter around its internals, not written yet. A rework item before the formal run (Section 7).
 - **s1-mini** does not build from the catalog (`trtmc build` cannot choose between the `qwen` and `s1_mini`
   families): a TRTMC finding, reported as a build failure.
 - **Retries and deadlines**: a failed GPU phase runs once more (not in smoke mode); every AIPerf run (Acc, Perf,

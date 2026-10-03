@@ -2,5 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 reference:
+  adapter: families/nemotron_labs_diffusion/tests/native_reference.py  # the remote code's ar_generate (catalog mode: ar)
   requirements: families/nemotron_labs_diffusion/requirements.txt  # the family's dependencies, layered on the serving interpreter
   trust_remote_code: true  # the checkpoint's own modeling code

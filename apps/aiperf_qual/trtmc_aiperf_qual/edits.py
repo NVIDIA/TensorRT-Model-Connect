@@ -40,6 +40,8 @@ dino_processor = AutoImageProcessor.from_pretrained(dino_name, revision=dino_rev
 def similarity(a, b):
     # (CLIP-I, DINO) x 100: cosines of the two images' CLIP embeddings and DINO class tokens
     clip_embeds = model.get_image_features(**processor(images=[a, b], return_tensors="pt").to(device))
+    if not isinstance(clip_embeds, torch.Tensor):  # Transformers 5: the projected embedding is pooler_output
+        clip_embeds = clip_embeds.pooler_output
     clip_embeds = clip_embeds / clip_embeds.norm(dim=-1, keepdim=True)
     tokens = dino(**dino_processor(images=[a, b], return_tensors="pt").to(device)).last_hidden_state[:, 0]
     tokens = tokens / tokens.norm(dim=-1, keepdim=True)
@@ -74,9 +76,9 @@ print(json.dumps(rows))
 
 def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
         out: Path) -> dict[str, Any]:
-    from .models import _suite
+    from .models import model_suite
 
-    suite = build_suite(_suite(check["suite"], model["catalog_profile"]), environment)
+    suite = build_suite(model_suite(check["suite"], model), environment)
     if model.get("family") in check.get("latent_replay_families", ()):
         suite = with_latent_seeds(suite)
     native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "edits",

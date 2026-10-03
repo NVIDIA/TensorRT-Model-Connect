@@ -6,3 +6,7 @@
 reference:
   options: {cpu_offload: true}
   requirements: families/minimax_h3/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+# MiniMax-H3's released weights are CFG-distilled: TRTMC runs no guidance branch, and 1.0 (no guidance) is
+# stated for the Diffusers pipeline.
+request: {guidance_scale: 1.0, cfg_scale: 1.0}

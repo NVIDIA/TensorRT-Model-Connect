@@ -5,3 +5,7 @@ reference:
   requirements: families/wan2_2_ti2v/requirements.txt  # the family's dependencies, layered on the serving interpreter
   model: Wan-AI/Wan2.2-TI2V-5B-Diffusers  # the Diffusers export of the same weights
   revision: b8fff7315c768468a5333511427288870b2e9635
+
+# The catalog request states guidance_scale 5.0 (TRTMC's Wan 2.2 option and the Diffusers WanPipeline
+# both use it) and leaves cfg_scale at -1; stated as the same 5.0 for every request built on it.
+request: {cfg_scale: 5.0}

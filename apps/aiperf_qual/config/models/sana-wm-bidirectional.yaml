@@ -11,13 +11,6 @@ reference:
   prepare: families/sana_wm/tests/native_prepare.py
   requirements: families/sana_wm/requirements.txt
 
-performance:
-  l1:
-    # The catalog request states cfg_scale 5.0, which TRTMC's pipeline and the official one both take first; its
-    # guidance_scale stays -1. Stated as the same 5.0 so no side can fall back to a default.
-    suite:
-      suite: sana-wm-bidirectional-catalog
-      version: 2
-      source: {kind: catalog_testcase, profile: sana-wm-bidirectional}
-      selection: {method: first, count: 1}
-      request: {guidance_scale: 5.0}
+# The catalog request states cfg_scale 5.0, which TRTMC's pipeline and the official one both take first; its
+# guidance_scale stays -1. Stated as the same 5.0 in every request built on it, so no side can fall back to a default.
+request: {guidance_scale: 5.0}

@@ -39,9 +39,9 @@ print(json.dumps(rows))
 
 def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
         out: Path) -> dict[str, Any]:
-    from .models import _suite
+    from .models import model_suite
 
-    suite = build_suite(_suite(check["suite"], model["catalog_profile"]), environment)
+    suite = build_suite(model_suite(check["suite"], model), environment)
     native, _, _ = generate_native(environment, model, suite, python, out, "world-model")
     candidate = generate(environment, model, "trtmc", out / "world-model-candidate", suite)
     items = [(str(mine[0]), str(theirs[0])) for mine, theirs in zip(candidate, native)]

@@ -83,7 +83,7 @@ class TextGeneration:
 
         self.spec = spec
         config = transformers.AutoConfig.from_pretrained(spec.model, **spec.pretrained_kwargs())
-        kwargs = {"dtype": spec.dtype, **spec.pretrained_kwargs()}
+        kwargs = spec.model_kwargs()
         if hasattr(config, "vision_config"):
             self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
             self.tokenizer = self.processor.tokenizer
@@ -196,7 +196,7 @@ class TextEncoder:
         if config.model_type == "dpr" and config.architectures:
             # AutoModel maps every DPR checkpoint to the question encoder; use the declared encoder.
             model_cls = getattr(transformers, config.architectures[0])
-        model = model_cls.from_pretrained(spec.model, dtype=spec.dtype, **spec.pretrained_kwargs())
+        model = model_cls.from_pretrained(spec.model, **spec.model_kwargs())
         self.model = maybe_compile(model.to(spec.device).eval(), spec)
         # Remote-code embedding models may return a causal-LM output; they need hidden states requested.
         self.forward_kwargs: dict[str, Any] = {}
@@ -245,7 +245,7 @@ class Reranker:
         self.processor = transformers.AutoProcessor.from_pretrained(
             spec.model, **kwargs, **dict(spec.options.get("processor_kwargs", {})))
         self.model = maybe_compile(transformers.AutoModelForSequenceClassification.from_pretrained(
-            spec.model, dtype=spec.dtype, **kwargs).to(spec.device).eval(), spec)
+            spec.model, **spec.model_kwargs()).to(spec.device).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         query = str(required(request, "query"))

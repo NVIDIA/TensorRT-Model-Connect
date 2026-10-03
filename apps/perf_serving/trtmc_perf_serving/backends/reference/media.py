@@ -123,7 +123,7 @@ class SpeechRecognition:
         self.spec = spec
         self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
         self.model = maybe_compile(transformers.AutoModelForSpeechSeq2Seq.from_pretrained(
-            spec.model, dtype=spec.dtype, **spec.pretrained_kwargs()).to(spec.device).eval(), spec)
+            spec.model, **spec.model_kwargs()).to(spec.device).eval(), spec)
         self.sample_rate = int(self.processor.feature_extractor.sampling_rate)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
@@ -150,7 +150,7 @@ class SpeechSynthesis:
         self.spec = spec
         self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
         self.model = transformers.BarkModel.from_pretrained(
-            spec.model, dtype=spec.dtype, **spec.pretrained_kwargs()).to(spec.device).eval()
+            spec.model, **spec.model_kwargs()).to(spec.device).eval()
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         # Same generation as the accepted Bark reference: Bark's own (sampled) generation configs, a

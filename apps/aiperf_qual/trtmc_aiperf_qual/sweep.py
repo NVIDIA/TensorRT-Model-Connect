@@ -178,11 +178,11 @@ def run_media(environment: Environment, model: Mapping[str, Any], l2: Mapping[st
               python: str, precision: str) -> dict[str, Any]:
     """The media sweep; TRTMC first, then the native model (eager), each alone on the GPU."""
     from .generation import is_video
-    from .models import _suite
+    from .models import model_suite
     from .services import serving
     from .suites import build_suite
 
-    suite = build_suite(_suite(l2.get("suite", "partiprompts-30"), model["catalog_profile"]), environment)
+    suite = build_suite(model_suite(l2.get("suite", "partiprompts-30"), model), environment)
     samples = suite.samples[: int(l2.get("prompts", 3))]
     video = is_video(samples[0]["request"])
     endpoint = "video_generation" if video else "image_generation"
