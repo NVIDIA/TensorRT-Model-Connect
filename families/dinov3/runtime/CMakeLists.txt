@@ -65,3 +65,26 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_dinov3_pipeline PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME test_dinov3_pipeline COMMAND test_dinov3_pipeline)
 endif()
+
+# The CLI adapter owns image I/O and uses the existing family runtime contract.
+add_library(trtmc_cli_dinov3 SHARED cli.cpp)
+target_include_directories(trtmc_cli_dinov3 PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+target_include_directories(trtmc_cli_dinov3 SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
+target_link_libraries(trtmc_cli_dinov3 PRIVATE trtmc_runtime trtmc_core nlohmann_json::nlohmann_json)
+target_compile_options(trtmc_cli_dinov3 PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(trtmc_cli_dinov3 PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  BUILD_RPATH "\$ORIGIN"
+  INSTALL_RPATH "\$ORIGIN"
+)
+install(TARGETS trtmc_cli_dinov3 LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_dinov3_cli ${PROJECT_SOURCE_DIR}/families/dinov3/tests/cpp/test_cli.cpp cli.cpp)
+  target_include_directories(test_dinov3_cli PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_include_directories(test_dinov3_cli SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
+  target_link_libraries(test_dinov3_cli PRIVATE trtmc_core nlohmann_json::nlohmann_json)
+  target_compile_options(test_dinov3_cli PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME dinov3_cli COMMAND test_dinov3_cli)
+  set_tests_properties(dinov3_cli PROPERTIES LABELS cpu)
+endif()

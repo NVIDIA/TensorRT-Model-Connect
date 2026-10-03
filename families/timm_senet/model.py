@@ -28,8 +28,10 @@ from . import graph
 from .checkpoint import Checkpoint
 
 
+from .cli import BuildRequest, coerce_request
+
+
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -341,27 +343,8 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm SENet image-classification bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("timm_senet does not support dynamic_kv_cache")
-    if request.image_height is not None:
-        raise NotImplementedError("timm_senet does not support image_height")
-    if request.image_width is not None:
-        raise NotImplementedError("timm_senet does not support image_width")
-    if request.video_num_frames is not None:
-        raise NotImplementedError("timm_senet does not support video_num_frames")
-    if request.max_batch_size != 1:
-        raise NotImplementedError("timm_senet does not support max_batch_size")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("timm_senet does not support tensor parallelism")
-    if request.context_parallel_size != 1:
-        raise NotImplementedError("timm_senet does not support context parallelism")
-    if request.task != "classification":
-        raise ValueError("timm_senet supports only task=classification")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_senet does not support quantization")
-    if request.fp32_layers:
-        raise NotImplementedError("timm_senet does not support mixed-precision layers")
-    _positive_int(request.max_sequence_length or 1, "max_sequence_length")
+    request = coerce_request(request)
+
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)
     plan, runtime = _build_engine(

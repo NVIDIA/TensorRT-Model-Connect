@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one dinov3 TensorRT bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "task",
+          "flags": [
+            "--task"
+          ],
+          "type": "string",
+          "choices": [
+            "image_features"
+          ],
+          "default": "image_features"
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "fp16",
+            "fp32"
+          ],
+          "default": "fp32"
+        },
+        {
+          "name": "backend",
+          "flags": [
+            "--backend"
+          ],
+          "type": "string",
+          "choices": [
+            "trt",
+            "trt_rtx"
+          ],
+          "default": "trt"
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        }
+      ]
+    },
+    {
+      "name": "extract-features",
+      "help": "Run dinov3 on an image",
+      "executor": "native",
+      "handler": "extract_features",
+      "arguments": [
+        {
+          "name": "bundle",
+          "type": "path"
+        },
+        {
+          "name": "image",
+          "flags": [
+            "--image"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "runtime_root",
+          "flags": [
+            "--runtime-root"
+          ],
+          "type": "path"
+        },
+        {
+          "name": "runtime_cache",
+          "flags": [
+            "--runtime-cache"
+          ],
+          "type": "path"
+        },
+        {
+          "name": "cuda_graphs",
+          "flags": [
+            "--cuda-graphs"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        }
+      ]
+    }
+  ]
+}
