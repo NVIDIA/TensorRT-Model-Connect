@@ -39,7 +39,11 @@ class AiperfRun:
         records = []
         paths = sorted(self.directory.glob(f"**/{RAW_EXPORT}")) or sorted(self.directory.glob("**/raw_records/*.jsonl"))
         for path in paths:
-            for line in path.read_text().splitlines():
+            # JSON Lines split on "\n" only: str.splitlines also breaks at U+2028, U+0085 and the like, which
+            # JSON strings may carry unescaped (benchmark text does).
+            for line in path.read_text().split("\n"):
+                if not line.strip():
+                    continue
                 item = json.loads(line)
                 if item["metadata"].get("benchmark_phase") == phase:
                     records.append(item)
@@ -49,7 +53,7 @@ class AiperfRun:
         path = self.directory / "accuracy_export.jsonl"
         if not path.is_file():
             return []
-        return [item for item in map(json.loads, path.read_text().splitlines())
+        return [item for item in map(json.loads, filter(str.strip, path.read_text().split("\n")))
                 if item.get("benchmark_phase") == "profiling"]
 
 

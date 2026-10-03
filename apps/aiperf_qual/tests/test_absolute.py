@@ -542,3 +542,13 @@ def test_smoke_covers_one_problem_of_each_code_benchmark(monkeypatch):
     smoke = suites._code_records({}, Environment({"smoke": True}))
     assert [record["task"] for record in smoke] == ["humaneval", "mbpp"]
     assert len(suites._code_records({}, Environment({}))) == 6
+
+
+def test_raw_records_keep_unicode_line_separators_inside_json_strings(tmp_path):
+    import json
+
+    from trtmc_aiperf_qual.aiperf_runner import RAW_EXPORT, AiperfRun
+
+    record = {"metadata": {"benchmark_phase": "profiling", "session_num": 0}, "text": "a b\x85c"}
+    (tmp_path / RAW_EXPORT).write_text(json.dumps(record, ensure_ascii=False) + "\n")  # as AIPerf writes it
+    assert [item["text"] for item in AiperfRun(tmp_path, 0, []).raw_records()] == ["a b\x85c"]

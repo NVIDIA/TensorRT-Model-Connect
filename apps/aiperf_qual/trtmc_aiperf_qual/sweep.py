@@ -110,7 +110,7 @@ def _median(values: Sequence[float]) -> float | None:
 def _route_records(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
-    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    records = [json.loads(line) for line in path.read_text().split("\n") if line.strip()]
     return [record for record in records if record.get("route") in MEDIA_ROUTES]
 
 

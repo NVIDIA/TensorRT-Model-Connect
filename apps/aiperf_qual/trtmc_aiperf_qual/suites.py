@@ -193,7 +193,7 @@ def _url_jsonl_records(source: Mapping[str, Any], environment: Environment) -> l
             raise ConfigError(f"{source['url']} does not match sha256 {digest}")
         path.write_bytes(data)
     text = path.read_text()
-    records = json.loads(text) if text.lstrip().startswith("[") else [json.loads(line) for line in text.splitlines()
+    records = json.loads(text) if text.lstrip().startswith("[") else [json.loads(line) for line in text.split("\n")
                                                                       if line.strip()]
     if source.get("transform") == "vbench_objects":
         return vbench_object_records(records)
@@ -376,9 +376,9 @@ def _read_records(path: Path) -> Any:
     import gzip
 
     if path.name.endswith(".jsonl.gz"):
-        return [json.loads(line) for line in gzip.decompress(path.read_bytes()).decode().splitlines() if line.strip()]
+        return [json.loads(line) for line in gzip.decompress(path.read_bytes()).decode().split("\n") if line.strip()]
     if path.suffix == ".jsonl":
-        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        return [json.loads(line) for line in path.read_text().split("\n") if line.strip()]
     if path.suffix == ".tsv":
         return list(csv.DictReader(io.StringIO(path.read_text()), delimiter="\t"))
     return json.loads(path.read_text())

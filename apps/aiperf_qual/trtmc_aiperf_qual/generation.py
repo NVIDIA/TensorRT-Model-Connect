@@ -43,7 +43,7 @@ def generate(environment: Environment, model: dict[str, Any], backend: str, out:
 def _answered(out: Path, suite: Any) -> Outputs | None:
     # AIPerf sends the samples in order, one at a time: the last records are the suite's.
     path = out / "records.jsonl"
-    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.is_file() else []
+    records = [json.loads(line) for line in path.read_text().split("\n") if line.strip()] if path.is_file() else []
     ordered = [record for record in records if record.get("route", "").startswith("/v1/tasks/")]
     if len(ordered) < len(suite.samples):
         return None

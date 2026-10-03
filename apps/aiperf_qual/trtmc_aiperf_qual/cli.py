@@ -77,7 +77,7 @@ def recheck_output(out: Path, l1: dict, item: dict) -> dict | None:
         return None
     candidate = judge.first_observation(AiperfRun(candidate_dir, 0, []).raw_records())
     inputs = out / f"perf-candidate{suffix}.inputs.jsonl"
-    request = json.loads(json.loads(inputs.read_text().splitlines()[0])["text"])["request"] if inputs.is_file() else {}
+    request = json.loads(json.loads(inputs.read_text().split("\n")[0])["text"])["request"] if inputs.is_file() else {}
     match, reason = output_check(l1, candidate, references, mode, sampled_request(request))
     return {"match": match, "reason": reason}
 
