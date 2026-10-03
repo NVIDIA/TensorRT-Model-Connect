@@ -408,7 +408,11 @@ smoke results, and the formal run before each lands in PR #1550.
   answers one request at a time, with nothing batched across requests, so the answers equal one server's; the pilot
   measures the throughput gain. L1 is timed on a single server started after the copies stopped, and the Acc
   requests' own model-call times (`workload_perf`) are white when either side ran as copies. Smoke runs use one
-  copy.
+  copy. Copies of separate processes time-slice the GPU: the pilot measured about 4x for native eager copies,
+  2x for TRTMC's falcon-rw-1b and none for its lfm2-350m. `acc_mps` (environment, off until measured) starts a
+  CUDA MPS daemon of the copies' own (a private pipe directory: only the copies are its clients, L1 servers and
+  the GPU-idle reading are not) so their kernels share the SMs; it quits after the copies stop, and a daemon that
+  does not start leaves the copies time-sliced.
 - **Five timed runs** (Section 4.6): the pilot timed ResNet-50 at a 9.7x speedup with run p50s 2% apart, and the
   CI gate turned it white: with three runs the 95% half-width is t(0.975, 2) = 4.30 standard errors, so ordinary
   run-to-run noise exceeds 5%. The same number of timed requests now runs as five runs (t = 2.78): 12 requests per

@@ -606,3 +606,47 @@ def test_concurrent_trtmc_copies_make_the_workload_times_incomparable():
     assert alone["workload_perf"]["light"] == "green" and "candidate_replicas" not in alone
     assert copies["workload_perf"]["light"] == "white" and "TRTMC ran as 4" in copies["workload_perf"]["note"]
     assert copies["candidate_replicas"] == 4
+
+
+def test_copies_share_the_gpu_through_their_own_mps_daemon_when_enabled(tmp_path):
+    """With acc_mps, every copy gets the private daemon's variables and the daemon quits after the copies stop;
+    without it (or when the daemon fails to start) the copies run as plain processes."""
+    import subprocess
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    from trtmc_aiperf_qual import services
+    from trtmc_aiperf_qual.config import Environment
+
+    events = []
+
+    @contextmanager
+    def serving(environment, model, backend, out, *, extra_env=None, port=None, **options):
+        events.append(("start", out.name, dict(extra_env or {})))
+        yield {"url": f"http://{out.name}"}
+        events.append(("stop", out.name))
+
+    def run(command, **kwargs):
+        events.append(("mps", "quit" if kwargs.get("input") else "start"))
+        return subprocess.CompletedProcess(command, 0)
+
+    environment = Environment({"acc_mps": True, "ports": {"candidate": 9000, "reference": 9100}})
+    memory = iter([(0, 250 * 1024), (10 * 1024, 250 * 1024)])
+    with patch.object(services, "serving", serving), patch.object(services.subprocess, "run", run), \
+            patch.object(services, "gpu_memory_mib", lambda: next(memory)):
+        with services.serving_replicas(environment, {}, "trtmc", tmp_path / "acc", count=2) as service:
+            assert service["replicas"] == 2 and service["mps"]
+    pipe = str(tmp_path / "acc-mps" / "pipe")
+    assert events[0] == ("mps", "start") and events[-1] == ("mps", "quit")
+    assert all(event[2]["CUDA_MPS_PIPE_DIRECTORY"] == pipe for event in events if event[0] == "start")
+    assert [event[0] for event in events[1:-1]] == ["start", "start", "stop", "stop"]
+
+    def broken(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command)
+
+    events.clear()
+    with patch.object(services, "serving", serving), patch.object(services.subprocess, "run", broken), \
+            patch.object(services, "gpu_memory_mib", lambda: None):
+        with services.serving_replicas(environment, {}, "trtmc", tmp_path / "plain", count=2) as service:
+            assert not service["mps"]
+    assert events[0] == ("start", "plain", {}) and (tmp_path / "plain-mps" / "mps-unavailable.txt").is_file()

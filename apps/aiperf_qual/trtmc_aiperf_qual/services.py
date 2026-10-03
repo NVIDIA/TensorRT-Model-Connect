@@ -99,7 +99,7 @@ def platform_id(fingerprint: Mapping[str, Any]) -> str:
 def serving(environment: Environment, model: dict[str, Any], backend: str, out: Path, *,
             mode: str = "eager", precision: str | None = None, deterministic: bool = False,
             isolate_requests: bool = False, python: str | None = None, keep_artifacts: bool = False, memory_probe: bool = False,
-            port: int | None = None) -> Iterator[dict[str, Any]]:
+            port: int | None = None, extra_env: Mapping[str, str] | None = None) -> Iterator[dict[str, Any]]:
     """Run one server for the model; yields its URL and /v1/serving/info.
 
     backend: ``trtmc`` (candidate) or ``reference`` (generic HF adapters, run in ``python``: the model's
@@ -143,6 +143,7 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
         # References may fetch what their checkpoint does not carry (pipeline parts, remote code); one whose
         # gated repository refuses even the checks for optional files declares ``reference.offline``.
         env.pop("HF_HUB_OFFLINE", None)
+    env.update(extra_env or {})
     (out / "command.json").write_text(json.dumps(command))
     process = subprocess.Popen(command, stdout=open(out / "server.log", "w"), stderr=subprocess.STDOUT,
                                env=env, cwd=repo, start_new_session=True)
@@ -175,6 +176,34 @@ def replicas_that_fit(before: tuple[int, int] | None, after: tuple[int, int] | N
 
 
 @contextmanager
+def mps(environment: Environment, directory: Path) -> Iterator[dict[str, str]]:
+    """With ``acc_mps`` (environment), a CUDA MPS daemon of its own (private pipe directory): the processes given
+    the yielded variables share the GPU's SMs concurrently instead of time-slicing it; others are unaffected.
+    Yields {} without it or when the daemon does not start (the copies then time-slice, still correct)."""
+    if not environment.values.get("acc_mps"):
+        yield {}
+        return
+    variables = {"CUDA_MPS_PIPE_DIRECTORY": str(directory / "pipe"), "CUDA_MPS_LOG_DIRECTORY": str(directory / "log")}
+    for path in variables.values():
+        Path(path).mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, **variables}
+    try:
+        subprocess.run(["nvidia-cuda-mps-control", "-d"], env=env, check=True, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        (directory / "mps-unavailable.txt").write_text(f"{type(error).__name__}: {error}\n")
+        yield {}
+        return
+    try:
+        yield variables
+    finally:  # after the clients stopped (the caller's servers exit first)
+        try:
+            subprocess.run(["nvidia-cuda-mps-control"], input="quit\n", text=True, env=env, capture_output=True,
+                           timeout=120)
+        except (OSError, subprocess.SubprocessError) as error:
+            (directory / "mps-quit-failed.txt").write_text(f"{type(error).__name__}: {error}\n")
+
+
+@contextmanager
 def serving_replicas(environment: Environment, model: dict[str, Any], backend: str, out: Path, *, count: int,
                      **options: Any) -> Iterator[dict[str, Any]]:
     """Up to ``count`` copies of one server on the GPU, as many as its free memory holds (the first copy
@@ -183,16 +212,17 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
     base = int(environment["ports"]["candidate" if backend == "trtmc" else "reference"])
     before = gpu_memory_mib() if count > 1 else None
     with ExitStack() as stack:
-        first = stack.enter_context(serving(environment, model, backend, out, **options))
+        shared = stack.enter_context(mps(environment, out.parent / f"{out.name}-mps")) if count > 1 else {}
+        first = stack.enter_context(serving(environment, model, backend, out, extra_env=shared, **options))
         urls = [first["url"]]
         for index in range(1, replicas_that_fit(before, gpu_memory_mib() if before else None, count)):
             try:
                 extra = stack.enter_context(serving(environment, model, backend, out.parent / f"{out.name}-replica{index}",
-                                                    port=base + REPLICA_PORT_OFFSET + index, **options))
+                                                    port=base + REPLICA_PORT_OFFSET + index, extra_env=shared, **options))
             except ServiceError:  # the copies started so far serve
                 break
             urls.append(extra["url"])
-        yield {**first, "urls": urls, "replicas": len(urls)}
+        yield {**first, "urls": urls, "replicas": len(urls), "mps": bool(shared)}
 
 
 def _wait_ready(process: subprocess.Popen, url: str, out: Path, timeout_s: float = 1800) -> dict[str, Any]:
