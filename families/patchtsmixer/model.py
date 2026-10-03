@@ -452,8 +452,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "time_series_forecast":
-        raise ValueError("PatchTSMixer supports only time_series_forecast")
+    if request.task != "series_to_point_forecast":
+        raise ValueError("PatchTSMixer supports only series_to_point_forecast")
     model_dir = Path(request.model_dir)
     precision = request.precision.lower()
     if precision not in {"fp16", "fp32"}:
