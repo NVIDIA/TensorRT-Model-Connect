@@ -114,9 +114,8 @@ class _RwkvModel:
 
         # Embedding
         embedding = _load_tensor(readers, embed_key)
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
-        )
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         # Pre-layer norm (block 0 only in some RWKV-4 variants)

@@ -77,7 +77,8 @@ class _XGLMModel:
 
         # Token embedding
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
-        assert embedding.shape[0] == vocab
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         # XGLM uses scale_embedding: embed * sqrt(hidden_size)
