@@ -68,8 +68,8 @@ def test_albert_qualification_profile_structure():
     assert encode_benchmarks[0].get("reference", {}).get("output_contract") == "embedding-shape"
 
 
-def test_albert_builder_normalizes_encoding_task():
-    """Verify that build normalizes 'encoding' to 'text_to_pooled_features'."""
+def test_albert_builder_accepts_encoding_task():
+    """Verify that build accepts legacy 'encoding' task and publishes it explicitly."""
     dummy_request = SimpleNamespace(
         dynamic_kv_cache=False,
         image_height=None,
@@ -100,10 +100,10 @@ def test_albert_builder_normalizes_encoding_task():
 
         build(dummy_request, writer)
 
-        # Header task written to bundle must be "text_to_pooled_features"
+        # Header task written to bundle must be "encoding"
         writer.set_header.assert_called_once_with(
             family="albert",
-            task="text_to_pooled_features",
+            task="encoding",
             backend="tensorrt",
         )
 

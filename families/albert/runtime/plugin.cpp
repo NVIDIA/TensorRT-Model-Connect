@@ -56,6 +56,9 @@ std::string require_task(const BundleInfo& info) {
         info.task == std::string(ITextPairToRelevance::kTask)) {
         return info.task;
     }
+    if (info.task == "encoding") {
+        return std::string(ITextToPooledFeatures::kTask);
+    }
     throw std::runtime_error("Albert does not implement task: " + info.task);
 }
 
