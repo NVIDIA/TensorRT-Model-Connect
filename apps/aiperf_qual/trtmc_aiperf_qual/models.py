@@ -34,7 +34,7 @@ PRECISIONS = ("fp16", "bf16", "fp32")
 # Checkpoints above this size (bytes) measure fewer requests per run: native references of large models
 # take seconds per request, and three runs still give the confidence interval.
 LARGE_CHECKPOINT_BYTES = 16 * 2**30
-LARGE_MODEL_MEASUREMENT = {"warmup": 1, "requests": 5, "runs": 3}
+LARGE_MODEL_MEASUREMENT = {"warmup": 1, "requests": 3, "runs": 5}
 
 
 def checkpoint_bytes(hf_id: str, revision: str | None) -> int | None:

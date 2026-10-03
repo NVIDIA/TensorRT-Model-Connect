@@ -20,7 +20,7 @@ defaults:
     l1:
       suite: catalog
       reference_modes: [eager]
-      measurement: {warmup: 3, requests: 20, runs: 3}
+      measurement: {warmup: 3, requests: 12, runs: 5}
       aggregation: {candidate: mean, eager: mean, compile: best}
       margin_percent: 5
       max_ci_percent: 5

@@ -150,8 +150,9 @@ shortfall is resolved by execution, never by a smaller `n` (Section 9).
   (a public passage filling the bundle minus 32 generated tokens, greedy). A catalog request leaving
   generation work to each side's default (`num_steps`, `guidance_scale`, `num_frames` at -1) is an
   error until `config/models` states it.
-- Measurement per request and side: warmup 3, 20 requests per run, 3 runs (generative media: warmup 1,
-  3 requests, 3 runs); statistic: the server-side model-call p50 per run.
+- Measurement per request and side: warmup 3, 12 requests per run, 5 runs (checkpoints above the large
+  size: warmup 1, 3 requests, 5 runs; generative media and speech output: warmup 1, 3 requests, 3 runs); statistic:
+  the server-side model-call p50 per run.
 - Speedup `S = native / TRTMC`; its 90% two-sided interval (95% one-sided per bound) is Welch's t
   interval of `log(native) - log(TRTMC)` over the runs. **green**: lower bound > 1.05; **red**: upper
   bound < 0.95; **perf-inconclusive** (white): either side's 95% half-width exceeds 5% of its mean, the
@@ -340,7 +341,9 @@ smoke results, and the formal run before each lands in PR #1550.
 - **Work evidence** (Section 4.6), per operation from fields both backends report: for text (generation,
   translation, transcription) the generated token count or the generated text, all responses agreeing on
   either (equal counts are the same decode steps; equal texts the same tokens, whichever way a backend counts
-  the end-of-sequence token: Marian's TRTMC counts it, the native path does not); `media_digest` frames /
+  the end-of-sequence token: Marian's TRTMC counts it, the native path does not; the native Whisper-style
+  transcriber reports its decode steps, transcript tokens plus the end token's step, as TRTMC counts them, so two
+  transcripts differing only in punctuation of equal length still compare); `media_digest` frames /
   height / width for generated media; `audio_digest` length (10 ms) for generated speech; nothing for
   operations whose input fixes the work. TRTMC requests cannot force a generation length (no ignore-EOS), so a
   greedy text request whose two outputs end at different points is `perf-inconclusive`.
@@ -404,6 +407,11 @@ smoke results, and the formal run before each lands in PR #1550.
   measures the throughput gain. L1 is timed on a single server started after the copies stopped, and the Acc
   requests' own model-call times (`workload_perf`) are white when either side ran as copies. Smoke runs use one
   copy.
+- **Five timed runs** (Section 4.6): the pilot timed ResNet-50 at a 9.7x speedup with run p50s 2% apart, and the
+  CI gate turned it white: with three runs the 95% half-width is t(0.975, 2) = 4.30 standard errors, so ordinary
+  run-to-run noise exceeds 5%. The same number of timed requests now runs as five runs (t = 2.78): 12 requests per
+  run instead of 20 (large checkpoints 3 instead of 5). Generative media and speech keep three runs of three long
+  requests, whose run p50s vary far less (FLUX.1-schnell: green).
 - **Retries and deadlines**: a failed GPU phase runs once more (not in smoke mode); every AIPerf run (Acc, Perf,
   generation for the media checks, L2) takes the ledger's per-profile deadline from the environment's
   `deadlines` map.
