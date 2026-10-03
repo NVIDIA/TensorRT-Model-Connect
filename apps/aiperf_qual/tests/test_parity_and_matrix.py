@@ -116,3 +116,30 @@ def test_the_near_capacity_prompt_shrinks_until_trtmc_accepts_it(monkeypatch):
     monkeypatch.setattr(runner, "probe", broken)
     with pytest.raises(RuntimeError, match="CUDA"):
         runner.near_capacity_request(None, model, greedy, 224, {"url": "u"})
+
+
+def test_the_order_check_reports_each_sides_effect(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual import runner
+
+    @contextmanager
+    def nothing(*args, **kwargs):
+        yield {"url": "u"}
+
+    suite = type("Suite", (), {"name": "catalog"})()
+    natives, candidates = iter([10.0, 10.5]), iter([2.0, 2.02])  # native first / second; TRTMC second / first
+    monkeypatch.setattr(runner, "reference_python", lambda environment, model: "python")
+    monkeypatch.setattr(runner, "build_suite", lambda definition, environment: "suite")
+    monkeypatch.setattr(runner, "serving", nothing)
+    monkeypatch.setattr(runner, "gpu_exclusive", nothing)
+    monkeypatch.setattr(runner, "perf_suites", lambda environment, model, perf_suite, service=None: [suite])
+    monkeypatch.setattr(runner, "_time_reference",
+                        lambda *args: {"catalog": (None, {"p50_ms": next(natives)}, None)})
+    monkeypatch.setattr(runner, "_perf_run", lambda *args: (None, {"p50_ms": next(candidates)}))
+    model = {"model": "m", "reference": {"perf_precision": "fp16", "precision": "fp32"},
+             "performance": {"l1": {"suite": {}, "measurement": {"warmup": 0, "requests": 1, "runs": 1}}}}
+    result = runner.order_check(Environment({}), model, tmp_path)
+    assert result["order_effect"]["native"]["catalog"] == pytest.approx(0.05)  # native slower after TRTMC
+    assert result["order_effect"]["trtmc"]["catalog"] == pytest.approx(2.0 / 2.02 - 1)
+    assert result["above_limit"] and (tmp_path / "order.json").is_file()

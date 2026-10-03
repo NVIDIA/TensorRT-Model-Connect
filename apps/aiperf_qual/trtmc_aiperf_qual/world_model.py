@@ -51,20 +51,26 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
         raise RuntimeError(f"video comparison failed: {completed.stderr[-400:]}")
     rows = json.loads(completed.stdout.strip().splitlines()[-1])
     floor_psnr, floor_ssim = float(check.get("min_psnr_db", 5.0)), float(check.get("min_ssim", 0.1))
+    count = len(suite.samples)
+    empty = [sample["sample_id"] for sample, row in zip(suite.samples, rows) if not all(row["frames"])]
+    if len(rows) != count or empty:  # a video missing on either side is missing evidence, never a failure
+        return {"suite": "world-model-parity", "source": "task", "benchmark": "video parity (frames, motion, PSNR/SSIM)",
+                "samples": count - len(empty), "expected_samples": count, "passed": None, "required_passes": count,
+                "status": "error", "reasons": [f"{len(empty) or count - len(rows)} of {count} videos have no frames on a side"],
+                "gate": {"min_psnr_db": floor_psnr, "min_ssim": floor_ssim, "min_motion_ratio": MIN_MOTION_RATIO}}
     failures = []
     for sample, row in zip(suite.samples, rows):
         mine, theirs = row["frames"]
         pixels = row["pixels"] or {}
-        reason = (f"{mine} frames, native {theirs}" if mine != theirs or not mine else
+        reason = (f"{mine} frames, native {theirs}" if mine != theirs else
                   f"frozen: motion {row['motion'][0]:.2f} vs native {row['motion'][1]:.2f}"
                   if row["motion"][1] > 0 and row["motion"][0] < MIN_MOTION_RATIO * row["motion"][1] else
                   f"PSNR {pixels.get('psnr', 0):.1f} dB / SSIM {pixels.get('ssim', 0):.3f} below the floor"
                   if pixels.get("psnr", 0) < floor_psnr or pixels.get("ssim", 0) < floor_ssim else None)
         if reason:
             failures.append({"sample_id": sample["sample_id"], "explanation": reason})
-    count = len(suite.samples)
     return {"suite": "world-model-parity", "source": "task", "benchmark": "video parity (frames, motion, PSNR/SSIM)",
             "samples": count, "expected_samples": count, "passed": count - len(failures), "required_passes": count,
-            "status": "pass" if not failures and len(rows) == count else "fail", "failures": failures[:5],
+            "status": "pass" if not failures else "fail", "failures": failures[:5],
             "reasons": [f"{len(failures)} of {count} videos outside the floors"] if failures else [],
             "gate": {"min_psnr_db": floor_psnr, "min_ssim": floor_ssim, "min_motion_ratio": MIN_MOTION_RATIO}}

@@ -542,6 +542,43 @@ def _candidate(environment: Environment, model: Mapping[str, Any], l1: Mapping[s
                                     "reference_backend": info.get("backend"), **verdict})
 
 
+ORDER_EFFECT_LIMIT = 0.02  # DESIGN.md 4.6: an order effect above this changes how the two sides are timed
+
+
+def order_check(environment: Environment, model: Mapping[str, Any], out: Path) -> dict[str, Any]:
+    """DESIGN.md 4.6: the model's L1 requests timed twice in both orders (native then TRTMC, TRTMC then native),
+    against native eager at its timing precision. Each side's order effect is its p50 when timed second relative
+    to its p50 when timed first (native after TRTMC vs native first; TRTMC after native vs TRTMC first)."""
+    l1 = model["performance"]["l1"]
+    python = reference_python(environment, model)
+    perf_suite = build_suite(l1["suite"], environment)
+    with serving(environment, dict(model), "trtmc", out / "order-probe") as service:
+        suites = perf_suites(environment, model, perf_suite, service)
+    precision = timing_precisions(model["reference"])[0]
+
+    def native(tag: str) -> dict[str, float]:
+        timed = _time_reference(environment, model, l1, suites, python, "eager", precision, out / tag)
+        return {name: stats["p50_ms"] for name, (_, stats, _) in timed.items()}
+
+    def candidate(tag: str) -> dict[str, float]:
+        with serving(environment, dict(model), "trtmc", out / tag) as service:
+            return {suite.name: _perf_run(environment, service, model, suite, l1["measurement"],
+                                          out / f"{tag}-{suite.name}", "mean")[1]["p50_ms"] for suite in suites}
+
+    with gpu_exclusive(environment):
+        native_first, trtmc_second = native("order-native-first"), candidate("order-trtmc-second")
+        trtmc_first, native_second = candidate("order-trtmc-first"), native("order-native-second")
+    effects = {"native": {name: native_second[name] / native_first[name] - 1 for name in native_first},
+               "trtmc": {name: trtmc_second[name] / trtmc_first[name] - 1 for name in trtmc_first}}
+    largest = max(abs(value) for side in effects.values() for value in side.values())
+    result = {"model": model["model"], "precision": precision, "measurement": l1["measurement"],
+              "p50_ms": {"native_first": native_first, "trtmc_second": trtmc_second, "trtmc_first": trtmc_first,
+                         "native_second": native_second},
+              "order_effect": effects, "largest": largest, "above_limit": largest > ORDER_EFFECT_LIMIT}
+    (out / "order.json").write_text(json.dumps(result, indent=2))
+    return result
+
+
 SMOKE_MEASUREMENT = {"warmup": 0, "requests": 1, "runs": 1}
 PHASE_RETRIES = 1  # a GPU phase that fails before producing its result runs once more (DESIGN.md Section 9)
 
@@ -566,6 +603,9 @@ def smoke_verdict(result: Mapping[str, Any]) -> dict[str, Any]:
                 for item in result.get("accuracy", []) if item.get("status") == "error"]
     failing += [f"perf {item['reference_mode']}: {'; '.join(item.get('reasons', []))}"[:300]
                 for item in result.get("performance_l1", []) if item.get("light") in ("error", "n/a")]
+    # The model-level verdict too: a missing expected result (an L1 light, a required Acc entry) is an error there.
+    verdict = result.get("verdict") or {}
+    failing += [f"verdict {part}: error" for part in ("acc", "perf") if verdict.get(part) == "error" and not failing]
     if result.get("reference", {}).get("backend") == "unsupported":
         failing.append("no native adapter")
     return {**result.get("verdict", {}), "category": "smoke-fail" if failing else "smoke-pass", "failing": failing}

@@ -600,6 +600,8 @@ def _code_records(source: Mapping[str, Any], environment: Environment) -> list[d
         tests = "\n".join([row.get("test_setup_code") or "", *row["test_list"]])
         records.append({"id": f"mbpp/{row['task_id']}", "task": "mbpp", "request": {"prompt": prompt},
                         "label": {"prompt": prompt, "test_code": tests, "stops": MBPP_STOPS}})
+    if environment.values.get("smoke"):  # one problem of each benchmark (the suite's smoke_samples is 2)
+        return [next(record for record in records if record["task"] == task) for task in ("humaneval", "mbpp")]
     return records
 
 

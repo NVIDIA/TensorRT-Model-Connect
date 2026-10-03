@@ -644,3 +644,12 @@ def test_stated_catalog_controls_reach_every_suite_built_on_the_catalog_request(
     assert on_catalog["base_profile"] == "pixart" and on_catalog["request"] == {"guidance_scale": 4.5, "cfg_scale": 7.0}
     dataset = _suite({"suite": "mmlu", "source": {"kind": "hf_dataset"}}, "pixart", stated)
     assert "request" not in dataset  # a suite not built on the catalog request is left alone
+
+
+def test_smoke_fails_when_the_verdict_reports_an_error():
+    from trtmc_aiperf_qual.runner import smoke_verdict
+
+    result = {"accuracy": [{"suite": "s", "status": "pass"}], "performance_l1": [], "errors": {},
+              "verdict": {"acc": "pass", "perf": "error", "category": "error"}}
+    verdict = smoke_verdict(result)
+    assert verdict["category"] == "smoke-fail" and verdict["failing"] == ["verdict perf: error"]

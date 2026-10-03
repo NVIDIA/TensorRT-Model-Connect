@@ -209,14 +209,17 @@ BINARY: dict[str, Callable[..., tuple[bool, str]]] = {"choice": choice, "contain
 
 
 # ---------------- conversion parity: (TRTMC observation, native observation, gate) -> (match, reason) -------
+# ``match`` is None when a side's output is missing or unreadable: missing evidence (an error), never a failure.
 
 def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
-                  gate: Mapping[str, Any]) -> tuple[bool, str]:
+                  gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """An encoder output vector (``values``) against the native one: equal length, finite values, cosine
     at least ``min_cosine`` and relative L2 error at most ``max_relative_l2`` (magnitude, not only direction)."""
     mine = [float(value) for value in (candidate or {}).get("values") or []]
     theirs = [float(value) for value in (native or {}).get("values") or []]
-    if not mine or len(mine) != len(theirs):
+    if not mine or not theirs:
+        return None, f"no output vector ({len(mine)} vs {len(theirs)} values)"
+    if len(mine) != len(theirs):
         return False, f"shape differs: {len(mine)} vs {len(theirs)} values"
     if not all(math.isfinite(value) for value in mine):
         return False, "non-finite values"
@@ -228,7 +231,7 @@ def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
 
 
 def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
-                    gate: Mapping[str, Any]) -> tuple[bool, str]:
+                    gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """Monocular geometry (the ``depth_artifact`` / ``valid_mask_artifact`` files both sides write): equal
     size, valid-mask IoU at least ``min_mask_iou``, and the median relative depth error over the pixels
     valid on both sides at most ``max_median_relative_depth``."""
@@ -236,14 +239,17 @@ def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, An
 
     candidate, native = candidate or {}, native or {}
     shape = (int(native.get("height") or 0), int(native.get("width") or 0))
-    if not all(shape) or (int(candidate.get("height") or 0), int(candidate.get("width") or 0)) != shape:
-        return False, f"size differs: {candidate.get('height')}x{candidate.get('width')} vs {shape[0]}x{shape[1]}"
+    mine = (int(candidate.get("height") or 0), int(candidate.get("width") or 0))
+    if not all(shape) or not all(mine):
+        return None, f"no geometry size: {mine[0]}x{mine[1]} vs {shape[0]}x{shape[1]}"
+    if mine != shape:
+        return False, f"size differs: {mine[0]}x{mine[1]} vs {shape[0]}x{shape[1]}"
     try:
         depths = [np.fromfile(side["depth_artifact"], dtype="<f4").reshape(shape) for side in (candidate, native)]
         masks = [np.fromfile(side["valid_mask_artifact"], dtype=np.uint8).reshape(shape).astype(bool)
                  for side in (candidate, native)]
     except (KeyError, OSError, ValueError) as error:
-        return False, f"geometry artifacts unreadable: {error}"
+        return None, f"geometry artifacts unreadable: {error}"
     union = np.logical_or(*masks).sum()
     iou = float(np.logical_and(*masks).sum() / union) if union else 1.0
     both = np.logical_and(*masks) & np.isfinite(depths[0]) & (depths[1] > 0)
@@ -253,12 +259,14 @@ def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, An
 
 
 def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
-                  gate: Mapping[str, Any]) -> tuple[bool, str]:
+                  gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """A robot action chunk (``actions``, row-major [step, component]) against the native one: equal shape,
     finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range."""
     mine = [float(value) for value in (candidate or {}).get("actions") or []]
     theirs = [float(value) for value in (native or {}).get("actions") or []]
-    if not theirs or len(mine) != len(theirs):
+    if not mine or not theirs:
+        return None, f"no action chunk ({len(mine)} vs {len(theirs)} values)"
+    if len(mine) != len(theirs):
         return False, f"shape differs: {len(mine)} vs {len(theirs)} values"
     if not all(math.isfinite(value) for value in mine):
         return False, "non-finite actions"
@@ -268,19 +276,22 @@ def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
 
 
 def disparity_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
-                     gate: Mapping[str, Any]) -> tuple[bool, str]:
+                     gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """A stereo disparity map (the ``disparity_artifact`` file both sides write) against the native one: equal
     size and a mean end-point error between the sides of at most ``max_mean_epe`` pixels."""
     import numpy as np
 
     candidate, native = candidate or {}, native or {}
     shape = (int(native.get("height") or 0), int(native.get("width") or 0))
-    if not all(shape) or (int(candidate.get("height") or 0), int(candidate.get("width") or 0)) != shape:
-        return False, f"size differs: {candidate.get('height')}x{candidate.get('width')} vs {shape[0]}x{shape[1]}"
+    size = (int(candidate.get("height") or 0), int(candidate.get("width") or 0))
+    if not all(shape) or not all(size):
+        return None, f"no disparity size: {size[0]}x{size[1]} vs {shape[0]}x{shape[1]}"
+    if size != shape:
+        return False, f"size differs: {size[0]}x{size[1]} vs {shape[0]}x{shape[1]}"
     try:
         mine, theirs = (np.fromfile(side["disparity_artifact"], dtype="<f4").reshape(shape) for side in (candidate, native))
     except (KeyError, OSError, ValueError) as error:
-        return False, f"disparity artifacts unreadable: {error}"
+        return None, f"disparity artifacts unreadable: {error}"
     if not np.isfinite(mine).all():
         return False, "non-finite disparities"
     error = float(np.abs(mine - theirs).mean())
@@ -288,19 +299,19 @@ def disparity_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, A
 
 
 def audio_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
-                 gate: Mapping[str, Any]) -> tuple[bool, str]:
+                 gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """Generated speech against the native output (the ``audio_digest`` the servers attach): duration and RMS
     ratios and the log-spectral distance within the gate (the plugins' ``parity_audio`` comparator)."""
     from trtmc_aiperf_plugins.accuracy import COMPARATORS
 
     try:
         match, reason, _, _ = COMPARATORS["parity_audio"](candidate or {}, native or {}, **dict(gate))
-    except (KeyError, TypeError, ValueError) as error:
-        return False, f"not comparable: {error}"
+    except (KeyError, TypeError, ValueError) as error:  # a side's audio digest is missing or malformed
+        return None, f"not comparable: {error}"
     return match, reason
 
 
-PARITY: dict[str, Callable[..., tuple[bool, str]]] = {"vector_parity": vector_parity, "geometry_parity": geometry_parity,
+PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"vector_parity": vector_parity, "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
                                                       "audio_parity": audio_parity}
 # Parity metrics that read the output files the servers write (their artifacts are kept).

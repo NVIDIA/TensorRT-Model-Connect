@@ -373,6 +373,15 @@ smoke results, and the formal run before each lands in PR #1550.
 - **Missing outputs** are missing answers (an `error`), never a wrong answer or a zero score: generated media
   (GenEval, edits) without an image, and for every corpus metric an output without the field it reads, well
   formed (a forecast of the horizon's length with finite values, a finite vector, a mask of the image's size).
+- **Smoke coverage**: a sampled model's smoke run keeps every configured seed (one problem), so the seed-mean
+  scorer runs; the combined code suite sends one HumanEval and one MBPP problem. A conversion-parity output that is
+  missing or unreadable on either side (no vector or action chunk, no size, an unreadable artifact, no audio digest,
+  a video without frames) is missing evidence: an `error`, never a `fail`, in smoke and formal runs alike; a smoke
+  verdict whose Acc or Perf is `error` is `smoke-fail`.
+- **Order check** (Section 4.6): `trtmc-aiperf-qual order-check --profile P` times a profile's L1 requests in both
+  orders (native then TRTMC, TRTMC then native) and reports each side's order effect (its second timing relative to
+  its first). Before the formal run it runs on five profiles spanning the server sizes, including the largest
+  dense one; an effect above 2% switches that size class to interleaved runs or native, TRTMC, native timing.
 - **Smoke namespace**: `run --smoke --out <dir>/<profile>` writes to `<dir>/smoke/<profile>`, as `run-all --smoke`
   does.
 - **Lance** (lance-3b-x2t-image) is `not-covered`, declared with its reason (`reference.not_covered`): the upstream

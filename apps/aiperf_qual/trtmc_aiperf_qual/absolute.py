@@ -216,7 +216,7 @@ def run_side(environment: Environment, service: Mapping[str, Any], model: Mappin
         return _suite_side(environment, service, model, item, problems, out / item["suite"])
     count = len(problems)
     runs: dict[str, Any] = {"records": {}, "exit": {}, "timings": {}}
-    for seed in (item.get("seeds") or [None])[:1 if environment.values.get("smoke") else None]:
+    for seed in item.get("seeds") or [None]:  # smoke too: the seed-mean scorer of a sampled model runs
         name = "greedy" if seed is None else f"seed{seed}"
         run = run_aiperf(environment, out / f"{item['suite']}-{name}", _arguments(model, item, service, count, seed),
                          env=selection_environment(environment, model, item), timeout_s=run_timeout(environment, model))
@@ -400,6 +400,10 @@ def judge_parity(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]],
         return {**entry, "passed": None, "status": "error",
                 "reasons": [f"{expected - len(paired)} of {expected} problems lack an output on one side"]}
     results = [(index, *compare(mine[index], theirs[index], item["gate"])) for index in paired]
+    unreadable = [reason for _, ok, reason in results if ok is None]
+    if unreadable:  # an output missing or unreadable is missing evidence, never a failure
+        return {**entry, "passed": None, "status": "error",
+                "reasons": [f"{len(unreadable)} of {expected} outputs lack readable evidence ({unreadable[0][:200]})"]}
     failures = [{"sample_id": problems[index].get("sample_id", str(index)), "explanation": reason}
                 for index, ok, reason in results if not ok]
     entry.update(passed=expected - len(failures), required_passes=expected, failures=failures[:5],

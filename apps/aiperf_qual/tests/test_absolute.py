@@ -513,3 +513,32 @@ def test_unmerged_raw_records_still_show_failed_requests(tmp_path):
     assert len(records) == 1 and absolute.unanswered(records[0])
 
 
+
+
+def test_missing_parity_evidence_is_an_error_not_a_failure(tmp_path):
+    from trtmc_aiperf_qual import gold_metrics
+
+    side = {"height": 2, "width": 2, "disparity_artifact": str(tmp_path / "missing.f32")}
+    assert gold_metrics.disparity_parity(side, side, {"max_mean_epe": 0.1})[0] is None
+    assert gold_metrics.vector_parity({}, {"values": [1.0]}, {})[0] is None
+    assert gold_metrics.vector_parity({"values": [1.0, 2.0]}, {"values": [1.0]}, {})[0] is False  # a wrong output
+    problems = [{"sample_id": "0"}]
+    observations = {"observations": {"greedy": {0: side}}, "exit": {"greedy": 0}, "timings": {"greedy": {}}}
+    entry = absolute.judge_parity({"suite": "stereo", "metric": "disparity_parity", "gate": {"max_mean_epe": 0.1}},
+                                  problems, observations, observations)
+    assert entry["status"] == "error" and "readable evidence" in entry["reasons"][0]
+
+
+def test_smoke_covers_one_problem_of_each_code_benchmark(monkeypatch):
+    import datasets
+
+    from trtmc_aiperf_qual import suites
+    from trtmc_aiperf_qual.config import Environment
+
+    rows = {"openai/openai_humaneval": [{"task_id": f"HumanEval/{i}", "prompt": "def f():\n", "test": "", "entry_point": "f"}
+                                        for i in range(3)],
+            "google-research-datasets/mbpp": [{"task_id": i, "text": "t", "test_list": ["assert True"]} for i in range(3)]}
+    monkeypatch.setattr(datasets, "load_dataset", lambda name, *args, **kwargs: rows[name])
+    smoke = suites._code_records({}, Environment({"smoke": True}))
+    assert [record["task"] for record in smoke] == ["humaneval", "mbpp"]
+    assert len(suites._code_records({}, Environment({}))) == 6

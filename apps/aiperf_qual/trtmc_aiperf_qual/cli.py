@@ -269,6 +269,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                                             "(and its exclusions)")
     plan.add_argument("--environment", type=Path, required=True)
     plan.add_argument("--profile", action="append", help="only these profiles")
+    order = commands.add_parser("order-check", help="time each profile's L1 requests in both orders (DESIGN.md "
+                                                    "4.6): the order effect before a formal run")
+    order.add_argument("--environment", type=Path, required=True)
+    order.add_argument("--profile", action="append", required=True)
+    order.add_argument("--out-root", type=Path, required=True, help="<out-root>/<profile>/order.json")
     matrix = commands.add_parser("matrix", help="the execution matrix (DESIGN.md Section 7): one CSV row per ready "
                                                 "profile with its native path, environment, workloads, and checks")
     matrix.add_argument("--environment", type=Path, required=True)
@@ -365,6 +370,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             records = run_all(environment, models, arguments.out_root, rerun=arguments.rerun,
                               prefetch_next=not arguments.no_prefetch)
             return exit_code(records, config_errors, smoke=arguments.smoke)
+        if arguments.command == "order-check":
+            from .runner import order_check
+
+            for name in arguments.profile:
+                out = arguments.out_root / name
+                out.mkdir(parents=True, exist_ok=True)
+                result = order_check(environment, resolve_model(name, environment), out)
+                print(json.dumps({key: result[key] for key in ("model", "order_effect", "largest", "above_limit")}),
+                      flush=True)
+            return 0
         if arguments.command == "matrix":
             from .matrix import write_matrix
 

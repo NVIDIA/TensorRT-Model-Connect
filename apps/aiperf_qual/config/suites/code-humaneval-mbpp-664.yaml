@@ -8,6 +8,7 @@ version: 1
 source:
   kind: code_benchmarks
 selection: {method: first, count: 664}
+smoke_samples: 2  # one HumanEval and one MBPP problem
 request:
   max_new_tokens: 512
   temperature: 0.0
