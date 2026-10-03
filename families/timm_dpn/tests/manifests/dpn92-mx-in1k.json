@@ -4,7 +4,7 @@
   "hf_revision": "8f2a71d2525254e14b0830a97250d841d5c4cae8",
   "bundle": "dpn92-mx-in1k.bundle",
   "family": "timm_dpn",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

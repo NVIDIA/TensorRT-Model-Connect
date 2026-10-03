@@ -26,6 +26,6 @@ describe = family_support(
         "dm_nfnet_f5",
         "dm_nfnet_f6",
     ),
-    tasks=("classification",),
-    default_task="classification",
+    tasks=("image_to_class_scores",),
+    default_task="image_to_class_scores",
 )
