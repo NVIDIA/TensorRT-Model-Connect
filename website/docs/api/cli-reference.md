@@ -90,7 +90,7 @@ installed fallback. Common load options are:
 | --- | --- |
 | `--runtime-root DIR` | Required exact DSO root. |
 | `--kv-cache-size BYTES\|GB\|GiB` | Runtime-sized KV capacity for a compatible bundle. |
-| `--runtime-cache PATH` | TensorRT-RTX cache path; rejected by the standard TensorRT backend. |
+| `--runtime-cache PATH` | TensorRT-RTX cache path; rejected by the standard TensorRT backend. `{rank}` in `PATH` becomes `OMPI_COMM_WORLD_RANK` (0 when unset), so distributed ranks keep separate caches. |
 | `--cuda-graphs` | Enable TensorRT-RTX CUDA graphs; rejected by the standard backend. |
 | `--byok-library DSO`, `--byok-function NAME`, `--byok-name NAME` | Load one TVM-FFI BYOK binding. All three are required together. |
 

@@ -17,6 +17,32 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 
 include(GNUInstallDirs)
+
+# MSVC (Windows) builds. Sources stay portable C++17; this block only adapts
+# toolchain mechanics: DLL symbol export, runtime layout, and warning flags.
+if(MSVC)
+  # Family, backend, and runtime DLLs are loaded at run time and must export
+  # their entry points (trtmc_create_family, trtmc_create_backend, ...) and
+  # the C++ runtime API, as ELF shared objects do by default.
+  set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES)
+  # /EHs without "c": the extern "C" plugin entry points (trtmc_create_family,
+  # trtmc_create_backend) report failures by throwing C++ exceptions to the
+  # loader, so MSVC must not assume extern "C" functions never throw.
+  string(REPLACE "/EHsc" "/EHs" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+  string(REPLACE "/EHsc" "/EHs" CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS}")
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus;/bigobj;/permissive->"
+    "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8,/Zc:__cplusplus,/bigobj>"
+  )
+  # Windows resolves a DLL's dependencies from the application directory and
+  # PATH (there is no RUNPATH), so executables and every DLL share one
+  # directory. The runtime root is that directory.
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+endif()
 find_package(CUDAToolkit REQUIRED)
 find_package(nlohmann_json 3.11 REQUIRED)
 option(TRTMC_BUILD_SERVER "Build the optional text-generation server application" ON)
@@ -39,7 +65,7 @@ find_path(TRTMC_TRT_INCLUDE_DIR
   REQUIRED
 )
 find_library(TRTMC_TRT_LIBRARY
-  NAMES nvinfer libnvinfer.so.11
+  NAMES nvinfer libnvinfer.so.11 nvinfer_11
   HINTS ${_trtmc_dependency_roots}
   PATH_SUFFIXES lib lib64 lib/aarch64-linux-gnu lib/x86_64-linux-gnu
   REQUIRED
@@ -90,6 +116,7 @@ set(TRTMC_CUDART_LIBRARY CUDA::cudart)
 add_library(trtmc_core SHARED
   core/runtime/bundle/bundle_format.cpp
   core/runtime/primitives/cuda_common.cpp
+  core/runtime/primitives/dynamic_library.cpp
   core/runtime/primitives/device_tensor.cpp
   core/runtime/primitives/trt_common.cpp
 )
@@ -106,6 +133,7 @@ target_link_libraries(trtmc_core
     CUDA::cudart
   PRIVATE
     nlohmann_json::nlohmann_json
+    ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_core PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(trtmc_core PROPERTIES
@@ -167,9 +195,11 @@ target_compile_definitions(trtmc_c PRIVATE
   TRTMC_VERSION_STRING="${PROJECT_VERSION}"
 )
 target_compile_options(trtmc_c PRIVATE -Wall -Wextra -Wpedantic)
-target_link_options(trtmc_c PRIVATE
-  "-Wl,--version-script=${PROJECT_SOURCE_DIR}/core/api/runtime/exports.map"
-)
+if(NOT WIN32)
+  target_link_options(trtmc_c PRIVATE
+    "-Wl,--version-script=${PROJECT_SOURCE_DIR}/core/api/runtime/exports.map"
+  )
+endif()
 set_target_properties(trtmc_c PROPERTIES
   EXPORT_NAME c
   VERSION 1
@@ -221,8 +251,20 @@ if(TRTMC_BUILD_BACKEND_RTX)
       "TRTMC_BUILD_BACKEND_RTX=ON requires TRTMC_RTX_LIBRARY_DIR"
     )
   endif()
+  # Windows TensorRT-RTX packages name the import library by version
+  # (tensorrt_rtx_<major>_<minor>.lib); prefer the newest one in the directory.
+  set(_trtmc_rtx_names tensorrt_rtx)
+  if(WIN32)
+    file(GLOB _trtmc_rtx_versioned RELATIVE "${TRTMC_RTX_LIBRARY_DIR}"
+      "${TRTMC_RTX_LIBRARY_DIR}/tensorrt_rtx_*_*.lib")
+    list(SORT _trtmc_rtx_versioned COMPARE NATURAL ORDER DESCENDING)
+    foreach(_trtmc_rtx_lib IN LISTS _trtmc_rtx_versioned)
+      get_filename_component(_trtmc_rtx_name "${_trtmc_rtx_lib}" NAME_WE)
+      list(APPEND _trtmc_rtx_names "${_trtmc_rtx_name}")
+    endforeach()
+  endif()
   find_library(TRTMC_RTX_LIBRARY
-    NAMES tensorrt_rtx
+    NAMES ${_trtmc_rtx_names}
     PATHS "${TRTMC_RTX_LIBRARY_DIR}"
     NO_DEFAULT_PATH
   )
@@ -304,7 +346,10 @@ endif()
 
 # A family owns its target, sources, dependencies, warnings, and installation.
 # The root knows only the directory convention; adding a family never changes
-# a central source or target list.
+# a central source or target list. TRTMC_FAMILIES optionally restricts the
+# build to a list of family directory names (default: every family).
+set(TRTMC_FAMILIES "" CACHE STRING
+  "Semicolon-separated family names to build; empty builds every family")
 file(GLOB _trtmc_family_runtime_cmake CONFIGURE_DEPENDS
   "${PROJECT_SOURCE_DIR}/families/*/runtime/CMakeLists.txt"
 )
@@ -312,6 +357,9 @@ foreach(_trtmc_runtime_cmake IN LISTS _trtmc_family_runtime_cmake)
   get_filename_component(_trtmc_runtime_dir "${_trtmc_runtime_cmake}" DIRECTORY)
   get_filename_component(_trtmc_family_dir "${_trtmc_runtime_dir}" DIRECTORY)
   get_filename_component(_trtmc_family "${_trtmc_family_dir}" NAME)
+  if(TRTMC_FAMILIES AND NOT _trtmc_family IN_LIST TRTMC_FAMILIES)
+    continue()
+  endif()
   add_subdirectory(
     "${_trtmc_runtime_dir}"
     "${CMAKE_BINARY_DIR}/families/${_trtmc_family}"
@@ -370,9 +418,11 @@ target_link_libraries(trtmc_cli
 )
 target_compile_definitions(trtmc_cli PRIVATE TRTMC_VERSION_STRING="${PROJECT_VERSION}")
 target_compile_options(trtmc_cli PRIVATE -Wall -Wextra -Wpedantic)
-set_source_files_properties(apps/cli/io.cpp PROPERTIES
-  COMPILE_OPTIONS "-Wno-missing-field-initializers;-Wno-pedantic"
-)
+if(NOT MSVC)
+  set_source_files_properties(apps/cli/io.cpp PROPERTIES
+    COMPILE_OPTIONS "-Wno-missing-field-initializers;-Wno-pedantic"
+  )
+endif()
 
 add_executable(trtmc apps/cli/main.cpp)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/apps)
@@ -531,6 +581,20 @@ if(TRTMC_BUILD_TESTS)
   add_dependencies(test_family_cli trtmc_test_cli_fixture)
   add_test(NAME family_cli COMMAND test_family_cli $<TARGET_FILE:trtmc_test_cli_fixture>)
   set_tests_properties(family_cli PROPERTIES LABELS cpu)
+
+  add_library(trtmc_test_fake_partial_nccl SHARED core/runtime/tests/fake_partial_nccl.cpp)
+  set_target_properties(trtmc_test_fake_partial_nccl PROPERTIES
+    OUTPUT_NAME trtmc_fake_partial_nccl
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/dynamic-library"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/dynamic-library"
+  )
+  add_executable(test_dynamic_library core/runtime/tests/test_dynamic_library.cpp)
+  target_link_libraries(test_dynamic_library PRIVATE trtmc_core)
+  target_compile_options(test_dynamic_library PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_dependencies(test_dynamic_library trtmc_test_fake_partial_nccl)
+  add_test(NAME dynamic_library
+    COMMAND test_dynamic_library $<TARGET_FILE:trtmc_test_fake_partial_nccl>)
+  set_tests_properties(dynamic_library PROPERTIES LABELS cpu)
 
   set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
   add_library(trtmc_test_backend_fake SHARED core/runtime/tests/fake_backend.cpp)
@@ -1074,6 +1138,7 @@ install(FILES
 )
 install(FILES
   core/runtime/include/trtmc/runtime/device_tensor.h
+  core/runtime/include/trtmc/runtime/dynamic_library.h
   core/runtime/include/trtmc/runtime/family_factory.h
   core/runtime/include/trtmc/runtime/family_loader.h
   core/runtime/include/trtmc/runtime/tensor.h
@@ -1125,3 +1190,103 @@ install(FILES
   DESTINATION ${CMAKE_INSTALL_DATADIR}/cmake/trtmc
   COMPONENT sdk
 )
+
+# GCC/Clang warning and optimization flags are spelled inline on each target.
+# MSVC does not understand them (and nvcc forwards them to cl.exe), so
+# translate every target's options once, after all targets exist.
+if(MSVC)
+  # Translates one option that applies to `language`: CUDA, HOST (C/C++ only),
+  # or ANY. Sets `result` to the MSVC option, or to "" to drop it.
+  function(_trtmc_msvc_translate_option option language result)
+    set(_value "${option}")
+    if(option MATCHES "^-W")
+      set(_value "")
+    elseif(option MATCHES "^(-Xcompiler=|--compiler-options=)(.*)$")
+      # nvcc host-compiler pass-through: drop the GCC entries and keep the
+      # option only when cl.exe entries remain.
+      set(_prefix "${CMAKE_MATCH_1}")
+      string(REPLACE "," ";" _host "${CMAKE_MATCH_2}")
+      list(FILTER _host EXCLUDE REGEX "^-[WO]")
+      list(JOIN _host "," _host)
+      set(_value "")
+      if(NOT _host STREQUAL "")
+        set(_value "${_prefix}${_host}")
+      endif()
+    elseif(option MATCHES "^-O[0-9s]?$")
+      # nvcc accepts -O<n>; cl.exe does not, and the MSVC build type already
+      # selects /O2 or /Od for C and C++.
+      if(language STREQUAL "HOST")
+        set(_value "")
+      elseif(language STREQUAL "ANY")
+        set(_value "$<$<COMPILE_LANGUAGE:CUDA>:${option}>")
+      endif()
+    endif()
+    set(${result} "${_value}" PARENT_SCOPE)
+  endfunction()
+
+  function(_trtmc_msvc_translate_warning_flags directory)
+    get_property(_targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_target IN LISTS _targets)
+      get_target_property(_type ${_target} TYPE)
+      if(_type STREQUAL "INTERFACE_LIBRARY" OR _type STREQUAL "UTILITY")
+        continue()
+      endif()
+      get_target_property(_options ${_target} COMPILE_OPTIONS)
+      if(NOT _options)
+        continue()
+      endif()
+      # Generator expressions such as $<$<COMPILE_LANGUAGE:CXX>:-O3;-Wall>
+      # arrive split on ';'. Collect the options inside one, translate them
+      # for its language, and rebuild it only when options remain.
+      set(_translated)
+      set(_open "")
+      set(_language ANY)
+      foreach(_option IN LISTS _options)
+        if(_open STREQUAL "" AND _option MATCHES "^(\\$<\\$<COMPILE_LANGUAGE:([A-Za-z_,]+)>:)(.*)$")
+          set(_open "${CMAKE_MATCH_1}")
+          set(_languages "${CMAKE_MATCH_2}")
+          set(_option "${CMAKE_MATCH_3}")
+          set(_inner)
+          if(_languages STREQUAL "CUDA")
+            set(_language CUDA)
+          elseif(_languages MATCHES "CUDA")
+            set(_language ANY)
+          else()
+            set(_language HOST)
+          endif()
+        endif()
+        set(_close FALSE)
+        if(NOT _open STREQUAL "" AND _option MATCHES "^(.*)>$")
+          set(_option "${CMAKE_MATCH_1}")
+          set(_close TRUE)
+        endif()
+        _trtmc_msvc_translate_option("${_option}" ${_language} _option)
+        if(_open STREQUAL "")
+          if(NOT _option STREQUAL "")
+            list(APPEND _translated "${_option}")
+          endif()
+          continue()
+        endif()
+        if(NOT _option STREQUAL "")
+          list(APPEND _inner "${_option}")
+        endif()
+        if(_close)
+          list(LENGTH _inner _count)
+          if(_count GREATER 0)
+            list(JOIN _inner ";" _inner)
+            list(APPEND _translated "${_open}${_inner}>")
+          endif()
+          set(_open "")
+          set(_language ANY)
+        endif()
+      endforeach()
+      list(APPEND _translated "$<$<COMPILE_LANGUAGE:C,CXX>:/W3>")
+      set_property(TARGET ${_target} PROPERTY COMPILE_OPTIONS "${_translated}")
+    endforeach()
+    get_property(_subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(_subdirectory IN LISTS _subdirectories)
+      _trtmc_msvc_translate_warning_flags("${_subdirectory}")
+    endforeach()
+  endfunction()
+  _trtmc_msvc_translate_warning_flags("${PROJECT_SOURCE_DIR}")
+endif()
