@@ -552,3 +552,57 @@ def test_raw_records_keep_unicode_line_separators_inside_json_strings(tmp_path):
     record = {"metadata": {"benchmark_phase": "profiling", "session_num": 0}, "text": "a b\x85c"}
     (tmp_path / RAW_EXPORT).write_text(json.dumps(record, ensure_ascii=False) + "\n")  # as AIPerf writes it
     assert [item["text"] for item in AiperfRun(tmp_path, 0, []).raw_records()] == ["a b\x85c"]
+
+
+
+def test_trtmc_answers_come_from_copies_and_l1_times_one_server(tmp_path):
+    """With candidate_replicas, the Acc answers come from copies of the TRTMC server (each one request at a time)
+    and L1 then times a single server started after the copies stopped; smoke mode keeps one server."""
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    from trtmc_aiperf_qual import runner
+    from trtmc_aiperf_qual.config import Environment
+
+    events = []
+
+    @contextmanager
+    def copies(environment, model, backend, out, *, count, **options):
+        events.append(("copies", backend, count))
+        yield {"url": "u", "urls": ["u"] * count, "replicas": count}
+        events.append(("copies stopped",))
+
+    @contextmanager
+    def single(environment, model, backend, out, **options):
+        events.append(("single", backend))
+        yield {"url": "u", "info": {}}
+
+    def answers(environment, service, model, out, **runs):
+        events.append(("answers", service.get("replicas", 1)))
+        return [{"suite": "s"}]
+
+    model, accuracy = {"absolute": [{"suite": "s"}]}, []
+    with patch.object(runner, "serving_replicas", copies), patch.object(runner, "serving", single), \
+            patch.object(absolute, "candidate_entries", answers):
+        runner._candidate(Environment({"candidate_replicas": 4}), model, {"suite": {}}, [], {}, accuracy, [], tmp_path,
+                          absolute_runs={"plans": {}})
+        assert events == [("copies", "trtmc", 4), ("answers", 4), ("copies stopped",), ("single", "trtmc")]
+        events.clear()
+        runner._candidate(Environment({"candidate_replicas": 4, "smoke": True}), model, None, [], {}, accuracy, [],
+                          tmp_path, absolute_runs={"plans": {}})
+        assert events == [("single", "trtmc"), ("answers", 1)]
+    assert len(accuracy) == 2
+
+
+def test_concurrent_trtmc_copies_make_the_workload_times_incomparable():
+    from unittest.mock import patch
+
+    judged = {"suite": "s", "status": "pass", "workload_perf": {"pairs": 3, "light": "green"}}
+    native = {"backend": "reference", "precision": "fp16", "replicas": 1, "runs": {"s": {}}}
+    with patch.object(absolute, "judge", side_effect=lambda *args: {**judged}):
+        alone = absolute.entries({"absolute": [{"suite": "s"}]}, {"s": []}, {"s": {}}, native, None)[0]
+        copies = absolute.entries({"absolute": [{"suite": "s"}]}, {"s": []}, {"s": {}}, native, None,
+                                  candidate_replicas=4)[0]
+    assert alone["workload_perf"]["light"] == "green" and "candidate_replicas" not in alone
+    assert copies["workload_perf"]["light"] == "white" and "TRTMC ran as 4" in copies["workload_perf"]["note"]
+    assert copies["candidate_replicas"] == 4

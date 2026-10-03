@@ -284,8 +284,8 @@ formal `n`; together they give a per-model ledger, and the formal run starts onl
 predicts at most 22 hours. Memory: a native model whose weights exceed 240 GB (MiniMax-H3, 351 GB) runs
 with layers offloaded to host memory (Accelerate `device_map`), its Perf labelled as against an
 offloaded baseline. Levers when the ledger exceeds 22 hours: one native server reused for L1 and Acc,
-native replicas where the measured throughput gain is real, the candidate probe reused as the candidate
-server. If it still exceeds 22 hours, the excess Tasks are reported to the owner; `n` is not reduced
+native replicas where the measured throughput gain is real, TRTMC replicas for the Acc answers (Section 12),
+the candidate probe reused as the candidate server. If it still exceeds 22 hours, the excess Tasks are reported to the owner; `n` is not reduced
 silently.
 
 ## 10. Smoke mode
@@ -397,6 +397,13 @@ smoke results, and the formal run before each lands in PR #1550.
   adapter around its internals, not written yet. A rework item before the formal run (Section 7).
 - **s1-mini** does not build from the catalog (`trtmc build` cannot choose between the `qwen` and `s1_mini`
   families): a TRTMC finding, reported as a build failure.
+- **Replicas for Acc answers**: the native adapter (`native_replicas`) and the TRTMC server (`candidate_replicas`)
+  answer Acc problems as up to four copies that fit the GPU's free memory (the first copy measures one copy's
+  footprint; a copy that fails to start leaves the ones running). Each copy loads the same checkpoint or bundle and
+  answers one request at a time, with nothing batched across requests, so the answers equal one server's; the pilot
+  measures the throughput gain. L1 is timed on a single server started after the copies stopped, and the Acc
+  requests' own model-call times (`workload_perf`) are white when either side ran as copies. Smoke runs use one
+  copy.
 - **Retries and deadlines**: a failed GPU phase runs once more (not in smoke mode); every AIPerf run (Acc, Perf,
   generation for the media checks, L2) takes the ledger's per-profile deadline from the environment's
   `deadlines` map.

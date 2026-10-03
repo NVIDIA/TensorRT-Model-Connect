@@ -22,4 +22,5 @@ hf_datasets_cache: /state/hf-datasets
 reference_env_root: /state/ref-envs      # family reference environments (trtmc-perf-serve reference-env)
 ports: {reference: 8900, candidate: 8901}
 native_replicas: 4                       # gold-scored native runs: copies of the HF adapter that fit the GPU
+candidate_replicas: 4                    # TRTMC's Acc answers: copies of the server that fit the GPU
 gpu_lock: /state/gpu.lock                # serializes timing phases with bundle builds on this host

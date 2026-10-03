@@ -539,7 +539,7 @@ def run_candidate(environment: Environment, service: Mapping[str, Any], model: M
 
 
 def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: Mapping[str, Any],
-            native: Mapping[str, Any], native_error: str | None) -> list[dict[str, Any]]:
+            native: Mapping[str, Any], native_error: str | None, candidate_replicas: int = 1) -> list[dict[str, Any]]:
     results = []
     runs = native.get("runs") or {}
     for item in model["absolute"]:
@@ -551,10 +551,13 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
             entry["native"] = {"backend": native.get("backend"), "precision": native.get("precision"), "mode": "eager",
                                "replicas": native.get("replicas", 1),
                                **({"fallback_from": native["fallback_from"]} if native.get("fallback_from") else {})}
-            if native.get("replicas", 1) > 1 and entry.get("workload_perf", {}).get("pairs"):
+            concurrent = [f"{side} ran as {copies} concurrent copies" for side, copies in
+                          (("native", native.get("replicas", 1)), ("TRTMC", candidate_replicas)) if copies > 1]
+            if concurrent and entry.get("workload_perf", {}).get("pairs"):
                 entry["workload_perf"] = {**entry["workload_perf"], "light": "white",
-                                          "note": f"native ran as {native['replicas']} concurrent copies: "
-                                                  "its model-call times are not comparable"}
+                                          "note": f"{'; '.join(concurrent)}: model-call times are not comparable"}
+            if candidate_replicas > 1:
+                entry["candidate_replicas"] = candidate_replicas
             results.append(entry)
     return results
 
@@ -562,11 +565,11 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
 def candidate_entries(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any], out: Path, *,
                       plans: Mapping[str, Sequence], native: Mapping[str, Any],
                       native_error: str | None) -> list[dict[str, Any]]:
-    """TRTMC's answers on the candidate server, judged against the native ones (errors become entries,
-    so the Perf measurement on the same server still runs)."""
+    """TRTMC's answers on the candidate server (or its copies: ``service["replicas"]``), judged against the
+    native ones (errors become entries, so the Perf measurement still runs)."""
     try:
         candidate = run_candidate(environment, service, model, plans, out)
     except Exception as error:  # noqa: BLE001 - the entries carry the failure
         return [error_entry(item, len(plans[item["suite"]]), f"TRTMC side: {type(error).__name__}: {error}")
                 for item in model["absolute"]]
-    return entries(model, plans, candidate, native, native_error)
+    return entries(model, plans, candidate, native, native_error, candidate_replicas=int(service.get("replicas") or 1))

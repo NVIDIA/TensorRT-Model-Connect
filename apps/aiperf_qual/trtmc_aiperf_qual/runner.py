@@ -25,7 +25,7 @@ from . import absolute, edits, geneval, intelligibility, judge, replay_parity, s
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
 from .report import write_report
-from .services import gpu_exclusive, platform_fingerprint, platform_id, reference_python, serving
+from .services import gpu_exclusive, platform_fingerprint, platform_id, reference_python, serving, serving_replicas
 from .suites import Suite, build_suite, request_sha, single_request_suite, unstated_defaults
 
 from trtmc_aiperf_plugins.accuracy import COMPARATORS
@@ -517,7 +517,19 @@ def _time_reference(environment: Environment, model: Mapping[str, Any], l1: Mapp
 def _candidate(environment: Environment, model: Mapping[str, Any], l1: Mapping[str, Any] | None,
                suites: Sequence[Suite], reference_perf: Mapping[str, Mapping[str, tuple]], accuracy: list,
                performance: list, out: Path, absolute_runs: Mapping[str, Any] | None = None) -> None:
-    with serving(environment, model, "trtmc", out / "candidate", keep_artifacts=absolute.keeps_artifacts(model)) as service:
+    """TRTMC's Acc answers, then its L1 timing. With ``candidate_replicas`` (environment, not in smoke mode) above
+    one, the answers come from that many copies of the server that fit the GPU, each answering one request at a
+    time (the same engine and requests: the same answers), and L1 times a single server started afterwards."""
+    keep = absolute.keeps_artifacts(model)
+    copies = 1 if environment.values.get("smoke") else int(environment.values.get("candidate_replicas") or 1)
+    if absolute_runs and copies > 1:
+        with serving_replicas(environment, dict(model), "trtmc", out / "candidate-acc", count=copies,
+                              keep_artifacts=keep) as service:
+            accuracy.extend(absolute.candidate_entries(environment, service, model, out, **absolute_runs))
+        absolute_runs = None
+        if not l1:
+            return
+    with serving(environment, model, "trtmc", out / "candidate", keep_artifacts=keep) as service:
         if absolute_runs:
             accuracy.extend(absolute.candidate_entries(environment, service, model, out, **absolute_runs))
         if not l1:
