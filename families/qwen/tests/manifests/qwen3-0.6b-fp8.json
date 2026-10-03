@@ -3,7 +3,7 @@
   "hf_id": "Qwen/Qwen3-0.6B",
   "bundle": "qwen3-0.6b-fp8-fp16base.bundle",
   "family": "qwen",
-  "task": "text_generation",
+  "task": "text_continuation",
   "precision": "fp16",
   "quantization": "fp8",
   "trust_remote_code": false,

@@ -80,6 +80,28 @@ if(TRTMC_BUILD_TESTS)
 endif()
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_qwen_task_config
+    ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/test_task_config.cpp
+  )
+  target_include_directories(test_qwen_task_config PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_compile_options(test_qwen_task_config PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME qwen_task_config COMMAND test_qwen_task_config)
+  set_tests_properties(qwen_task_config PROPERTIES LABELS "cpu")
+
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_qwen_sdk_${_language}
+      ${PROJECT_SOURCE_DIR}/families/qwen/tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_qwen_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_qwen_sdk_${_language} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    set_target_properties(test_qwen_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+  add_dependencies(test_qwen_task_config test_qwen_sdk_c test_qwen_sdk_cpp)
+
   add_executable(qwen_embedding_consumer
     ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/qwen_embedding_consumer.cpp)
   target_link_libraries(qwen_embedding_consumer PRIVATE trtmc_c)

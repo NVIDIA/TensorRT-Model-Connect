@@ -8,8 +8,8 @@ from tensorrt_model_connect.model_support import FamilySupport, ModelMetadata, f
 
 _generation = family_support(
     model_types=("qwen", "Qwen2", "qwen2", "qwen3", "qwq"),
-    tasks=("text_generation",),
-    default_task="text_generation",
+    tasks=("text_continuation",),
+    default_task="text_continuation",
 )
 
 

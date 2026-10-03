@@ -240,7 +240,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::invalid_argument("qwen does not support --kv-cache-size");
     if (context.reader.info().task == trtmc::IEmbedding::kTask)
         return trtmc::qwen::create_embedding(context);
-    if (context.reader.info().task != trtmc::ITextGeneration::kTask)
+    if (context.reader.info().task != trtmc::internal::ITextContinuation::kTask)
         throw std::invalid_argument("qwen unsupported task");
     return trtmc::qwen::create(context);
 }
