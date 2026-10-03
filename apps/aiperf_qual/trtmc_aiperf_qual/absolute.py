@@ -284,11 +284,13 @@ def status(metrics: Mapping[str, Any], gate: Mapping[str, Any], *, expected: int
     if paired < expected:
         return "error", [f"{expected - paired} of {expected} problems lack a graded answer on one side"
                          + (f" ({metrics['failed']})" if metrics.get("failed") else "")]
-    if "native_accuracy" in metrics and not metrics["native_accuracy"]:
-        # Not one right answer from the native model: the benchmark's prompt or answer format does not
-        # fit the model (for example a reasoning model thinking aloud), so it says nothing about TRTMC.
-        return "not-comparable", ["the native model answers no problem correctly: the benchmark's prompt "
-                                  "or answer format does not fit this model"]
+    native = metrics.get("native_accuracy")
+    if native is not None and native <= float(gate.get("min_native", 0.0)):
+        # Hardly a right answer from the native model (none, or far below chance on multiple choice): the
+        # benchmark's prompt or answer format does not fit the model (for example a reasoning model
+        # thinking aloud), so it says nothing about TRTMC.
+        return "not-comparable", [f"the native model scores {native:g} (at most {gate.get('min_native', 0):g}): "
+                                  "the benchmark's prompt or answer format does not fit this model"]
     limit = float(gate.get("max_delta_points", 1.0))
     if gate.get("max_relative") and metrics.get("native_score"):  # e.g. WER: 0.2 points or 3% of native
         limit = max(limit, float(gate["max_relative"]) * abs(float(metrics["native_score"])))

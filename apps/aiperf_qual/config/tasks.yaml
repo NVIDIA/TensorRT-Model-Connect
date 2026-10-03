@@ -30,7 +30,9 @@ defaults:
 # note). sequence_length is the bundle length the prompts and answers need (a shorter catalog bundle is rebuilt as <profile>-qual-<length>); problems that still do not fit are dropped
 # for both sides alike.
 benchmarks:
-  mmlu: {plugin: trtmc_mmlu, suite: mmlu-5shot, n_shots: 5, per_task: 20, sequence_length: 4096,
+  # min_native: a native score at or below half of chance (four choices) means the prompt format does not
+  # fit the model; the entry is then not comparable.
+  mmlu: {plugin: trtmc_mmlu, suite: mmlu-5shot, n_shots: 5, per_task: 20, sequence_length: 4096, min_native: 12.5,
          gate: {max_delta_points: 1.0}, quantized_gate: {max_delta_points: 2.0},
          sampled_gate: {max_delta_points: 2.0}}
   # The native eager model generates up to 256 tokens per problem (7-9 s at 1-4B, much more for large
@@ -52,7 +54,7 @@ benchmarks:
   # Gold suites sent through AIPerf's trtmc_task endpoint and scored here (gold_metrics): `choice` /
   # `contains` grade each sample (McNemar), `wer` / `sts_spearman` are corpus statistics (paired
   # bootstrap); max_relative widens the gate to a fraction of the native score.
-  mmstar: {suite: mmstar, suite_definition: mmstar-val-1500, metric: choice, sequence_length: 2048,
+  mmstar: {suite: mmstar, suite_definition: mmstar-val-1500, metric: choice, min_native: 12.5, sequence_length: 2048,
            gate: {max_delta_points: 1.5}, quantized_gate: {max_delta_points: 3.0},
            sampled_gate: {max_delta_points: 3.0}}
   ocrbench: {suite: ocrbench, suite_definition: ocrbench-1000, metric: contains, sequence_length: 4096,

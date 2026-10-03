@@ -516,6 +516,11 @@ def test_a_native_model_with_no_right_answer_is_not_comparable():
     metrics = {"trtmc_accuracy": 0.0, "native_accuracy": 0.0, "delta_points": 0.0}
     status, reasons = absolute.status(metrics, {"max_delta_points": 1.0}, expected=10, paired=10)
     assert status == "not-comparable" and "does not fit" in reasons[0]
+    chance = {"trtmc_accuracy": 0.53, "native_accuracy": 0.53, "delta_points": 0.0}  # gpt-oss on 5-shot MMLU
+    assert absolute.status(chance, {"max_delta_points": 1.0, "min_native": 12.5}, expected=10, paired=10)[0] == \
+        "not-comparable"
+    assert absolute.status({**chance, "native_accuracy": 44.0, "trtmc_accuracy": 44.0},
+                           {"max_delta_points": 1.0, "min_native": 12.5}, expected=10, paired=10)[0] == "pass"
     wer = {"trtmc_score": 0.0, "native_score": 0.0, "delta_points": 0.0}  # a corpus metric: 0 is a score
     assert absolute.status(wer, {"max_delta_points": 0.2}, expected=10, paired=10)[0] == "pass"
 

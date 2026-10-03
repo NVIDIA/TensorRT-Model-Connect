@@ -450,7 +450,8 @@ def test_quantized_candidates_get_the_benchmarks_quantization_gate():
 
     fp8 = resolve_model("qwen3-0.6b-fp8", _environment())
     assert fp8["candidate"]["quantization"] == "fp8"
-    assert [(item["suite"], item["gate"]) for item in fp8["absolute"]] == [("mmlu-5shot", {"max_delta_points": 2.0})]
+    assert [(item["suite"], item["gate"]) for item in fp8["absolute"]] == [
+        ("mmlu-5shot", {"max_delta_points": 2.0, "min_native": 12.5})]
 
 
 def test_timing_reference_precision_can_differ_from_the_candidate_precision():

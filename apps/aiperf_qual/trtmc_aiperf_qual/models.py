@@ -149,6 +149,8 @@ def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mappin
             item.update(gate=gates["sampled"] or item["gate"], seeds=list(seeds))
         elif quantized and gates["quantized"]:
             item["gate"] = gates["quantized"]
+        if "min_native" in item:  # below it the native score is no baseline (half of chance)
+            item["gate"] = {**item["gate"], "min_native": item.pop("min_native")}
         item.setdefault("endpoint", "chat" if testcase.get("use_chat_template") else "completions")
         items.append(item)
     return items
