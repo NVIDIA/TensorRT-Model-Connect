@@ -3,8 +3,8 @@
 
 """LocateAnything's native pipeline for the trtmc-perf-serve reference backend (``generate``): the checkpoint's
 own remote code at fp32 with the family's tokenizer, configuration, and rotary-buffer repair, the fixed 448x448
-patchified image contract (which reads the image file itself), the manual chat prompt, and greedy "slow"
-generation, as the family's benchmark reference runs it. The remote code imports video and dataset readers
+patchified image contract of tests/vision_oracle.py (applied to the image the backend decoded before the call), the
+manual chat prompt, and greedy "slow" generation, as the family's benchmark reference runs it. The remote code imports video and dataset readers
 (decord, lmdb, OpenCV) it does not use for images; where they are not installed (decord has no aarch64 wheel),
 empty stand-ins satisfy Transformers' import check."""
 
@@ -18,11 +18,26 @@ from typing import Any, Mapping
 
 from families.locateanything.tests.hf_reference import (_LocalTokenizer, _load_config, _repair_rotary_buffers,
                                                          manual_chat_prompt)
-from families.locateanything.tests.vision_oracle import preprocess_image_inputs_for_trt
 from trtmc_perf_serving.backends.base import BackendError, Invocation
-from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, required, timed
+from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, load_image, required, timed
 
 UNUSED_IMPORTS = ("cv2", "decord", "lmdb")
+IMAGE_SIZE, PATCH = 448, 14
+
+
+def patchified(image: Any) -> dict[str, Any]:
+    """tests/vision_oracle.preprocess_image_inputs_for_trt on a decoded image: RGB resized bicubic to 448x448,
+    scaled to [0, 1], normalized with mean and std 0.5, cut into 14x14 patches in row-major grid order."""
+    import numpy as np
+    from PIL import Image
+
+    pixels = np.asarray(image.convert("RGB").resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.BICUBIC),
+                        dtype=np.float32) / 255.0
+    chw = ((pixels - 0.5) / 0.5).transpose(2, 0, 1)
+    grid = IMAGE_SIZE // PATCH
+    patches = chw.reshape(chw.shape[0], grid, PATCH, grid, PATCH).transpose(1, 3, 0, 2, 4)
+    return {"pixel_values": np.ascontiguousarray(patches.reshape(grid * grid, chw.shape[0], PATCH, PATCH)),
+            "image_grid_hws": np.array([[grid, grid]], dtype=np.int32)}
 
 
 class Adapter:
@@ -46,12 +61,10 @@ class Adapter:
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         torch, device = self.torch, self.spec.device
         prompt, steps = str(request.get("prompt", "")), int(request.get("max_new_tokens", 32))
-        image = Path(str(required(request, "image_path")))
+        image = load_image(str(required(request, "image_path")))  # decoded before the call (preloaded)
 
         def run() -> Any:
-            inputs = preprocess_image_inputs_for_trt(image, fixed_image_size=448, patch_size=14,
-                                                     image_mean=(0.5, 0.5, 0.5), image_std=(0.5, 0.5, 0.5),
-                                                     interpolation="bicubic")
+            inputs = patchified(image)
             encoded = self.tokenizer(manual_chat_prompt(prompt), return_tensors="pt")
             input_ids = encoded["input_ids"].to(device)
             with torch.inference_mode():

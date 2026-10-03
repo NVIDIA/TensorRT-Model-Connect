@@ -45,6 +45,7 @@ GREEDY = {"temperature": 0.0, "top_k": 1, "top_p": 1.0, "do_sample": False}
 # at most NEAR_CAPACITY_MAX prompt tokens (native eager prefill memory).
 NEAR_CAPACITY_NEW_TOKENS = 32
 NEAR_CAPACITY_MAX = 16384
+LENGTH_REJECTIONS = ("exceed", "capacity", "exhaust")  # words of TRTMC's prompt-length rejections
 # TRTMC tokenizes the passage itself (it may count a few more tokens than the Hugging Face tokenizer) and a
 # bundle's prefill profile may be shorter than its sequence length: a prompt TRTMC rejects for length is
 # shortened to the longest it accepts (a binary search over the passage length).
@@ -113,9 +114,9 @@ def near_capacity_request(environment: Environment, model: Mapping[str, Any], re
         try:
             probe(service, model["operation"], request)
             return True
-        except RuntimeError as error:  # a length rejection ("... exceed(s) the ... capacity / prefill profile")
-            message = str(error).lower()
-            if "backend_rejected_request" not in message or not ("exceed" in message or "capacity" in message):
+        except RuntimeError as error:  # a length rejection ("exceed(s) the ... capacity / prefill profile",
+            message = str(error).lower()  # "exhausted its KV cache")
+            if "backend_rejected_request" not in message or not any(word in message for word in LENGTH_REJECTIONS):
                 raise
             return False
 

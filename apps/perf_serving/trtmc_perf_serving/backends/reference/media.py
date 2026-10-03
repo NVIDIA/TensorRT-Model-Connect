@@ -215,10 +215,13 @@ class Diffusion:
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         kwargs: dict[str, Any] = {"prompt": str(required(request, "prompt")), "output_type": "np"}
         for source, target in (("height", "height"), ("width", "width"), ("num_steps", "num_inference_steps"),
-                               ("guidance_scale", "guidance_scale"), ("negative_prompt", "negative_prompt")):
+                               ("negative_prompt", "negative_prompt")):
             value = request.get(source)
             if value not in (None, "", 0, -1):
                 kwargs[target] = value
+        guidance = request.get("guidance_scale")
+        if guidance not in (None, "") and float(guidance) != -1.0:  # -1 leaves the default; 0 turns guidance off
+            kwargs["guidance_scale"] = float(guidance)
         # Qwen-Image pipelines take the classifier-free guidance scale as true_cfg_scale.
         if "true_cfg_scale" in self.parameters and float(request.get("cfg_scale") or -1) > 0:
             kwargs["true_cfg_scale"] = float(request["cfg_scale"])

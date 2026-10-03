@@ -41,3 +41,23 @@ def test_replay_writes_the_same_seeded_noise_and_drops_unknown_layouts(tmp_path)
     unknown = Replay(lambda: Checkpoint("StableDiffusionPipeline", {"in_channels": 4}, SD_VAE))
     assert unknown(request, tmp_path / "c") == ({key: value for key, value in request.items() if key != "latent_seed"},
                                                 False)
+
+
+def test_the_diffusers_adapter_passes_an_explicit_zero_guidance(tmp_path):
+    from trtmc_perf_serving.backends.reference import media
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+
+    calls = []
+
+    class Pipe:
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+            return type("Result", (), {"images": np.zeros((1, 2, 2, 3), np.float32)})()
+
+    adapter = object.__new__(media.Diffusion)
+    adapter.spec = ReferenceSpec(operation="generate_image", model="m", device="cpu")
+    adapter.pipe, adapter.parameters = Pipe(), {"prompt", "guidance_scale"}
+    adapter.invoke({"prompt": "p", "guidance_scale": 0.0, "num_steps": -1}, tmp_path / "zero")
+    assert calls[-1]["guidance_scale"] == 0.0 and "num_inference_steps" not in calls[-1]  # 0 turns guidance off
+    adapter.invoke({"prompt": "p", "guidance_scale": -1}, tmp_path / "default")
+    assert "guidance_scale" not in calls[-1]  # -1 leaves the pipeline default
