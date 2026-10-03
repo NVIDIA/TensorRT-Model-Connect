@@ -3,3 +3,6 @@
 
 reference:
   requirements: families/whisper/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  # TRTMC's fixed decoder prompt (families/whisper/prompt_metadata.py): English transcription, no timestamps;
+  # the native model runs the same instead of detecting the language in an extra pass.
+  options: {language: en, task: transcribe}

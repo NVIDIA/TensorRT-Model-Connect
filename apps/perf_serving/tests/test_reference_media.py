@@ -61,3 +61,38 @@ def test_transcription_counts_every_generation_step_whatever_the_returned_sequen
     for _ in range(78):  # 76 transcript tokens, a generated language token, the end token
         assert steps(torch.zeros(1, 5), scores) is scores
     assert steps.count == 78
+
+
+
+
+def test_transcription_runs_the_declared_decoder_contract_and_counts_generation_steps(monkeypatch):
+    """Without a stated language the adapter applies the declared one (no detection pass), and the steps come from
+    generation's own calls, not from the returned ids."""
+    import numpy as np
+
+    from trtmc_perf_serving.backends.reference import media
+
+    calls = {}
+
+    class Model:
+        def generate(self, features, **kwargs):
+            calls.update(kwargs)
+            for _ in range(77):  # 76 transcript tokens and the end token, which the returned ids omit
+                kwargs["logits_processor"](torch.zeros(1, 4), torch.zeros(1, 8))
+            return torch.ones(1, 76, dtype=torch.long)
+
+    class Processor:
+        def __call__(self, audio, sampling_rate, return_tensors):
+            return SimpleNamespace(input_features=torch.zeros(1, 2))
+
+        def batch_decode(self, ids, skip_special_tokens):
+            return ["text"]
+
+    recognizer = object.__new__(media.SpeechRecognition)
+    recognizer.spec = SimpleNamespace(options={"language": "en", "task": "transcribe"}, device="cpu", dtype=torch.float32)
+    recognizer.processor, recognizer.model, recognizer.sample_rate = Processor(), Model(), 16000
+    monkeypatch.setattr(media, "load_audio", lambda path, rate: np.zeros(16000, dtype=np.float32))
+    observation = recognizer.invoke({"audio_path": "a.wav", "max_new_tokens": 120}, None).observation
+    assert calls["language"] == "en" and calls["task"] == "transcribe" and observation["output_tokens"] == 77
+    recognizer.invoke({"audio_path": "a.wav", "language": "fr"}, None)
+    assert calls["language"] == "fr"

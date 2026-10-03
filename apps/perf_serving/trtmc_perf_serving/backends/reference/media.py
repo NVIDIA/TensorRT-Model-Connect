@@ -131,8 +131,13 @@ class SpeechRecognition:
         features = self.processor(audio, sampling_rate=self.sample_rate, return_tensors="pt").input_features
         features = features.to(self.spec.device, self.spec.dtype)
         kwargs: dict[str, Any] = {"max_new_tokens": int(request.get("max_new_tokens", 128))}
-        if request.get("language"):
-            kwargs["language"] = request["language"]
+        # A stated language, else the decoder contract the model declares (``options``: the candidate's fixed
+        # prompt): without one, generation detects the language in an extra pass the candidate does not make.
+        language = request.get("language") or self.spec.options.get("language")
+        if language:
+            kwargs["language"] = language
+        if self.spec.options.get("task"):
+            kwargs["task"] = self.spec.options["task"]
         import transformers
 
         steps = DecodeSteps()

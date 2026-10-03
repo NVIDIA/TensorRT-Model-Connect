@@ -344,7 +344,8 @@ smoke results, and the formal run before each lands in PR #1550.
   the end-of-sequence token: Marian's TRTMC counts it, the native path does not; the native Whisper-style
   transcriber reports its decoding steps, counted by a logits processor that generation calls once per generated
   token (the end token and generated special tokens included, the forced prompt not), as TRTMC counts its generated
-  ids, so two transcripts of equal decoding length still compare); `media_digest` frames /
+  ids, so two transcripts of equal decoding length still compare; it runs TRTMC's fixed decoder prompt, English
+  transcription declared as `reference.options`, so neither side spends a language-detection pass the other skips); `media_digest` frames /
   height / width for generated media; `audio_digest` length (10 ms) for generated speech; nothing for
   operations whose input fixes the work. TRTMC requests cannot force a generation length (no ignore-EOS), so a
   greedy text request whose two outputs end at different points is `perf-inconclusive`.
