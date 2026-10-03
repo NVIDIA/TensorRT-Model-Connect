@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tensorrt_model_connect import BuildRequest, build
+from families.bloom.cli import BuildRequest, build_bundle
 
 
 _TEST_DIR = Path(__file__).resolve().parent
@@ -134,21 +134,21 @@ def _thresholds(case_name: str) -> dict[str, float]:
 
 
 def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
+    if manifest.get("quantization") not in {None, "none"}:
+        raise ValueError("unsupported quantized build")
+    if manifest.get("fp32_layers"):
+        raise ValueError("unsupported mixed-precision build")
     quantization = manifest.get("quantization")
     assert quantization is None or isinstance(quantization, str)
-    fp32_layers = tuple(manifest.get("fp32_layers", ()))
-    build(
+    build_bundle(
         BuildRequest(
             model_dir=model_dir,
-            output_path=bundle,
-            family=_FAMILY,
-            task="text_generation",
-            precision=manifest["precision"],
-            max_sequence_length=manifest["max_sequence_length"],
-            tensor_parallel_size=manifest["tensor_parallel_size"],
-            quantization=quantization,
-            fp32_layers=fp32_layers,
-        )
+            task='text_generation',
+            precision=manifest['precision'],
+            max_sequence_length=manifest['max_sequence_length'],
+            tensor_parallel_size=manifest['tensor_parallel_size'],
+        ),
+        bundle,
     )
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
 
@@ -177,7 +177,8 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
 
 def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict) -> list[str]:
     arguments = [
-        "run",
+        _FAMILY,
+        "generate",
         str(bundle),
         "--runtime-root",
         str(runtime_root),
