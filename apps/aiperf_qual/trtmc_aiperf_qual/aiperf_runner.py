@@ -107,9 +107,11 @@ def _wait_ready(out: Path, timeout_s: float = 180) -> None:
     aggregating when the ready marker appears, so also wait for its size to settle."""
     deadline = time.time() + timeout_s
     while time.time() < deadline and not any(out.glob(f"**/{READY_MARKER}")):
+        cancel.check()
         time.sleep(0.5)
     previous = None
     while time.time() < deadline:
+        cancel.check()
         sizes = tuple(path.stat().st_size for path in sorted(out.glob(f"**/{RAW_EXPORT}")))
         if sizes and sizes == previous:
             return

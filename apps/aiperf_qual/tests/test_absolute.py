@@ -1253,3 +1253,21 @@ def test_a_probe_stalled_on_its_error_body_is_released_by_cancellation(monkeypat
                         lambda call, timeout: (_ for _ in ()).throw(urllib.error.HTTPError(call.full_url, 400, "e", {}, Body())))
     with pytest.raises(RuntimeError, match="probe rejected: bad request"):
         absolute._probe({"url": "http://u"}, "generate", {"prompt": "p"})
+
+
+
+def test_waiting_for_aiperf_exports_observes_cancellation(tmp_path):
+    import threading
+    import time
+
+    from trtmc_aiperf_qual import aiperf_runner, cancel
+
+    timer = threading.Timer(0.5, cancel.EVENT.set)
+    timer.start()
+    began = time.time()
+    try:
+        with pytest.raises(cancel.Cancelled):
+            aiperf_runner._wait_ready(tmp_path, timeout_s=60)  # AIPerf exited without its exports
+    finally:
+        cancel.EVENT.clear()
+    assert time.time() - began < 3
