@@ -547,7 +547,8 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
     for item in model["absolute"]:
         problems = plans[item["suite"]]
         if native_error or item["suite"] not in runs:
-            results.append(error_entry(item, len(problems), f"native side: {native_error or 'not run'}"))
+            results.append({**error_entry(item, len(problems), f"native side: {native_error or 'not run'}"),
+                            "candidate_replicas": candidate_replicas, "candidate_mps": candidate_mps})
         else:
             entry = judge(item, problems, candidate[item["suite"]], runs[item["suite"]])
             entry["native"] = {"backend": native.get("backend"), "precision": native.get("precision"), "mode": "eager",
@@ -568,10 +569,10 @@ def candidate_entries(environment: Environment, service: Mapping[str, Any], mode
                       native_error: str | None) -> list[dict[str, Any]]:
     """TRTMC's answers on the candidate server (or its copies: ``service["replicas"]``), judged against the
     native ones (errors become entries, so the Perf measurement still runs)."""
+    copies = {"candidate_replicas": int(service.get("replicas") or 1), "candidate_mps": bool(service.get("mps"))}
     try:
         candidate = run_candidate(environment, service, model, plans, out)
     except Exception as error:  # noqa: BLE001 - the entries carry the failure
-        return [error_entry(item, len(plans[item["suite"]]), f"TRTMC side: {type(error).__name__}: {error}")
-                for item in model["absolute"]]
-    return entries(model, plans, candidate, native, native_error, candidate_replicas=int(service.get("replicas") or 1),
-                   candidate_mps=bool(service.get("mps")))
+        return [{**error_entry(item, len(plans[item["suite"]]), f"TRTMC side: {type(error).__name__}: {error}"),
+                 **copies} for item in model["absolute"]]
+    return entries(model, plans, candidate, native, native_error, **copies)

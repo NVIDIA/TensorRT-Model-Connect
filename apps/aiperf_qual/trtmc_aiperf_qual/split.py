@@ -87,6 +87,18 @@ def check_resume(out_root: Path, plan: Mapping[str, Any]) -> None:
                           f"({', '.join(sorted(held)[:5])}...): use a fresh --out-root or --rerun")
 
 
+def set_aside_results(out_root: Path) -> list[str]:
+    """``run-all --rerun`` under an assignment: every previous result in the root is set aside before the new plan
+    is written, so an interrupted rerun leaves no old result to be read under the new plan."""
+    from .campaign import set_aside
+
+    held = [directory for directory in sorted(out_root.iterdir()) if directory.is_dir()
+            and not KEPT_ASIDE.search(directory.name) and _final(directory)] if out_root.is_dir() else []
+    for directory in held:
+        set_aside(directory)
+    return [directory.name for directory in held]
+
+
 def _final(directory: Path) -> str | None:
     """The kind of final result in a profile directory (what ``summary`` reads): the report's mode,
     "build-failed", "error", or None."""

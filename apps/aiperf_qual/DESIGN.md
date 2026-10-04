@@ -480,8 +480,8 @@ The formal run starts only when every gate holds; each is recorded in PR #1550.
    the per-Task pilot actual / predicted factors, phase costs, the failure allowance and deadlines) and the exact
    `run-all` command per host, archived in the PR. Execution order and times are recorded apart from the plan: each
    host's `campaign.jsonl` gives every profile's host, position, and start time.
-8. **Provenance**: every report names where and with what it ran: the host and GPU (UUID, driver, maximum and
-   application clocks, power limit, persistence and compute mode) and the TensorRT and CUDA libraries TRTMC's
+8. **Provenance**: every report names where and with what it ran: the host and GPU (UUID, driver, maximum
+   clocks, power limit, persistence and compute mode) and the TensorRT and CUDA libraries TRTMC's
    servers actually mapped (`host`); the reference interpreter's fingerprint (`platform`); the bundle that was
    qualified (`bundle`: its and its receipt's sha256, since TensorRT rebuilds differ); each side's Acc copies and
    MPS use; the run key (model configuration, code, dependencies); and the frozen samples and seeds. A root that

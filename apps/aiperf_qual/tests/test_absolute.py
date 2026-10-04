@@ -626,6 +626,10 @@ def test_concurrent_trtmc_copies_make_the_workload_times_incomparable():
     assert alone["workload_perf"]["light"] == "green" and alone["candidate_replicas"] == 1
     assert copies["workload_perf"]["light"] == "white" and "TRTMC ran as 4" in copies["workload_perf"]["note"]
     assert copies["candidate_replicas"] == 4
+    failed = absolute.entries({"absolute": [{"suite": "s", "gate": {"margin": 1.0}}]}, {"s": []}, {"s": {}}, native,
+                              "native exploded",
+                              candidate_replicas=4, candidate_mps=True)[0]
+    assert failed["status"] == "error" and failed["candidate_replicas"] == 4 and failed["candidate_mps"]
 
 
 

@@ -184,8 +184,8 @@ def loaded_libraries(group: int, names: tuple[str, ...] = LIBRARY_NAMES) -> list
     return sorted(found)
 
 
-GPU_FIELDS = ("uuid", "name", "driver_version", "clocks.max.sm", "clocks.max.mem", "clocks.applications.graphics",
-              "power.limit", "persistence_mode", "compute_mode")
+GPU_FIELDS = ("uuid", "name", "driver_version", "clocks.max.sm", "clocks.max.mem", "power.limit", "persistence_mode",
+              "compute_mode")
 
 
 def gpu_identity(environment: Environment) -> dict[str, Any]:

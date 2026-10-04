@@ -56,6 +56,17 @@ def test_a_root_resumes_only_under_its_own_assignment_host_and_inputs(tmp_path):
     split.check_resume(empty, plan)  # no results to relabel
 
 
+def test_a_rerun_sets_every_previous_result_aside_before_its_plan(tmp_path):
+    assignment = split.assign(MODELS, LEDGER, ["h1", "h2"])
+    old = root(tmp_path, "old", assignment, "h1", {"a": "formal", "e": "error", "b": "formal"})
+    (old / "partial").mkdir()  # no result: left as it is
+    assert split.set_aside_results(old) == ["a", "b", "e"]
+    remaining = sorted(path.name for path in old.iterdir() if path.is_dir())
+    assert "partial" in remaining and not {"a", "b", "e"} & set(remaining)
+    problems = split.merge_check(assignment, [old])
+    assert all(f"{name}: no formal result" in problems for name in "abcde")  # the old ones count no more
+
+
 def test_both_interpreters_count_among_the_campaign_inputs(monkeypatch):
     monkeypatch.setattr(split, "harness_digest", lambda: "h")
     monkeypatch.setattr(split, "code_digests", lambda environment, model: {"serving": "s", "family": ""})
@@ -132,7 +143,7 @@ def test_the_libraries_a_server_group_mapped_are_recorded():
 
 
 def test_the_report_records_the_gpu_it_ran_on(tmp_path, monkeypatch):
-    line = "GPU-aaaa, NVIDIA GB300, 595.58.03, 2032, 3996, 2032, 1400.00, Enabled, Default\n"
+    line = "GPU-aaaa, NVIDIA GB300, 595.58.03, 2070, 3996, 1400.00, Enabled, Default\n"
     monkeypatch.setattr(services.subprocess, "run",
                         lambda command, **kwargs: subprocess.CompletedProcess(command, 0, stdout=line))
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
