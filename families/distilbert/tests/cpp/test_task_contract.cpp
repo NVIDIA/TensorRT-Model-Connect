@@ -87,7 +87,7 @@ class RecordingModule final : public trtmc::ITrtModule {
 
     int calls{0};
     std::int32_t hidden{2};
-    std::int64_t capacity{16};
+    std::int64_t capacity{512};
     std::vector<std::int32_t> last_input_ids;
     std::vector<float> hidden_buffer;
 };
