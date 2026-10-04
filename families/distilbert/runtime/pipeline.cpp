@@ -52,6 +52,19 @@ bool engine_mask_is_int32(const ITrtModule& module) {
     return false;
 }
 
+// Largest sequence the loaded engine accepts for input_ids, taken from its
+// active optimization profile (dynamic input) or its fixed shape.
+std::size_t input_capacity(const ITrtModule& module) {
+    const std::string name = "input_ids";
+    const auto shape =
+        module.input_is_dynamic(name)
+            ? module.input_profile_shape(name, module.profile_idx(), ProfileShapeSelector::kMax)
+            : module.tensor_shape(name);
+    if (shape.empty() || shape.back() <= 0)
+        throw std::runtime_error("EncoderPipeline: engine reports no usable input_ids capacity");
+    return static_cast<std::size_t>(shape.back());
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
@@ -93,6 +106,8 @@ EncoderPipeline::run_encoder(const std::vector<std::int32_t>& input_ids) const {
     const auto n = input_ids.size();
     if (n == 0)
         throw std::invalid_argument("EncoderPipeline: text produced no tokens");
+    if (n > input_capacity(*encoder_))
+        throw std::invalid_argument("EncoderPipeline: input exceeds engine capacity");
     std::vector<int32_t> mask_i32(n, 1);
     std::vector<float> mask_f32(n, 1.0f);
 

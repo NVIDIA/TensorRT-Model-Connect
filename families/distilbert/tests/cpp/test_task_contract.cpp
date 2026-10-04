@@ -72,7 +72,7 @@ class RecordingModule final : public trtmc::ITrtModule {
     std::vector<int64_t> tensor_shape(const std::string&) const override { return {}; }
     std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
                                              trtmc::ProfileShapeSelector) const override {
-        return {};
+        return {capacity};
     }
     int32_t optimization_profile_count() const override { return 1; }
     void* device_ptr(const std::string&) const override { return nullptr; }
@@ -87,6 +87,7 @@ class RecordingModule final : public trtmc::ITrtModule {
 
     int calls{0};
     std::int32_t hidden{2};
+    std::int64_t capacity{16};
     std::vector<std::int32_t> last_input_ids;
     std::vector<float> hidden_buffer;
 };
@@ -234,6 +235,13 @@ void test_unsupported_config_and_empty_input() {
         },
         "this family has no runtime configuration; an unknown option must fail");
     require(module->calls == 0, "a rejected config must fail before the engine ever runs");
+
+    const std::vector<std::int32_t> oversized(static_cast<std::size_t>(module->capacity) + 1, 7);
+    const trtmc::internal::TextToPooledFeaturesRequest oversized_request{
+        trtmc::Span<const std::int32_t>{oversized.data(), oversized.size()}};
+    rejects<std::invalid_argument>([&] { pipeline->run(oversized_request, {}); },
+                                   "a sequence beyond the engine capacity must be rejected");
+    require(module->calls == 0, "an oversized input must fail before the engine runs");
 
     const std::vector<std::int32_t> empty_ids;
     const trtmc::internal::TextToPooledFeaturesRequest empty_request{
