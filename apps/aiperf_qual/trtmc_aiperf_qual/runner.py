@@ -628,6 +628,13 @@ def _order_timings(environment: Environment, model: Mapping[str, Any], out: Path
     return result
 
 
+def _loaded(out: Path) -> list[str]:
+    """The libraries TRTMC's servers mapped in this run (each server directory's record), all of them."""
+    from .services import LOADED_LIBRARIES
+
+    return sorted({path for record in out.glob(f"*/{LOADED_LIBRARIES}") for path in json.loads(record.read_text())})
+
+
 def _bundle_identity(out: Path) -> dict[str, Any] | None:
     """The build record's identity of the bundle that was qualified (build.json, written by the campaign)."""
     path = out / "build.json"
@@ -787,7 +794,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
                        f"{environment.values.get('environment_file', '<environment.yaml>')} --out {out}",
               "family": model.get("family"), "started": started,
               "platform": {"id": platform_id(fingerprint), **fingerprint},
-              "host": gpu_identity(environment),
+              "host": {**gpu_identity(environment), "trtmc_libraries": _loaded(out)},
               "bundle": _bundle_identity(out),
               "accuracy_source": model.get("accuracy_source"),
               **({"accuracy_note": model["accuracy_note"]} if model.get("accuracy_note") else {}),

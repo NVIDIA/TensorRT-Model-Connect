@@ -397,11 +397,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 models = shard(models, *parse_shard(arguments.shard))
             extra = None
             if arguments.assignment:
-                from .split import campaign_inputs, digest, host_models
+                from .split import campaign_inputs, check_resume, digest, host_models
 
                 assignment = json.loads(arguments.assignment.read_text())
                 models = host_models(assignment, str(arguments.host), models)
                 extra = {"host": arguments.host, "assignment": digest(assignment), "inputs": campaign_inputs(environment)}
+                if not arguments.rerun:
+                    check_resume(arguments.out_root, extra)
             write_plan(arguments.out_root, [model["model"] for model in models], config_errors, extra)
             records = run_all(environment, models, arguments.out_root, rerun=arguments.rerun,
                               prefetch_next=not arguments.no_prefetch, keep_order=bool(arguments.assignment))

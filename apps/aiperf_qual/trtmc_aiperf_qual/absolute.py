@@ -558,8 +558,7 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
             if concurrent and entry.get("workload_perf", {}).get("pairs"):
                 entry["workload_perf"] = {**entry["workload_perf"], "light": "white",
                                           "note": f"{'; '.join(concurrent)}: model-call times are not comparable"}
-            if candidate_replicas > 1:
-                entry["candidate_replicas"], entry["candidate_mps"] = candidate_replicas, candidate_mps
+            entry["candidate_replicas"], entry["candidate_mps"] = candidate_replicas, candidate_mps
             results.append(entry)
     return results
 

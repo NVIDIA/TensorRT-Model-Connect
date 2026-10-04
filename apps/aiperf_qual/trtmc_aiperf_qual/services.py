@@ -157,9 +157,31 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
     url = f"http://127.0.0.1:{port}"
     try:
         info = _wait_ready(process, url, out)
+        if backend == "trtmc":  # which TensorRT and CUDA libraries the loaded bundle actually runs on
+            (out / LOADED_LIBRARIES).write_text(json.dumps(loaded_libraries(process.pid), indent=2) + "\n")
         yield {"url": url, "info": info, "records": out / "records.jsonl"}
     finally:
         _stop(process)
+
+
+LOADED_LIBRARIES = "loaded-libraries.json"
+LIBRARY_NAMES = ("libnvinfer", "libnvonnxparser", "libcudart", "libcublas", "libcudnn")
+
+
+def loaded_libraries(group: int, names: tuple[str, ...] = LIBRARY_NAMES) -> list[str]:
+    """The TensorRT and CUDA shared libraries mapped by the processes of a server's process group (its worker
+    loads TensorRT at run time, from wherever the library path resolves it)."""
+    found: set[str] = set()
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            if int(stat.read_text().rsplit(") ", 1)[1].split()[2]) != group:
+                continue
+            maps = (stat.parent / "maps").read_text()
+        except (OSError, IndexError, ValueError):
+            continue
+        found.update(line.split()[-1] for line in maps.splitlines()
+                     if "/" in line and any(name in line.rsplit("/", 1)[-1] for name in names))
+    return sorted(found)
 
 
 GPU_FIELDS = ("uuid", "name", "driver_version", "clocks.max.sm", "clocks.max.mem", "clocks.applications.graphics",
@@ -167,8 +189,8 @@ GPU_FIELDS = ("uuid", "name", "driver_version", "clocks.max.sm", "clocks.max.mem
 
 
 def gpu_identity(environment: Environment) -> dict[str, Any]:
-    """Where a result was measured: the host, the GPU (UUID, driver, clocks, power limit, persistence and compute
-    mode), and the TensorRT libraries of the TRTMC runtime; fields that cannot be read are absent."""
+    """Where a result was measured: the host and the GPU (UUID, driver, clocks, power limit, persistence and
+    compute mode); fields that cannot be read are absent. The libraries TRTMC ran on are ``loaded_libraries``."""
     identity: dict[str, Any] = {"hostname": socket.gethostname()}
     selector = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
     try:
@@ -178,9 +200,6 @@ def gpu_identity(environment: Environment) -> dict[str, Any]:
         identity["gpu"] = dict(zip(GPU_FIELDS, (value.strip() for value in line.split(","))))
     except (OSError, subprocess.SubprocessError, IndexError):
         pass
-    runtime = Path(str(environment.values.get("runtime_root") or ""))
-    if runtime.is_dir():
-        identity["tensorrt"] = sorted(path.name for path in runtime.rglob("libnvinfer.so.*"))
     return identity
 
 

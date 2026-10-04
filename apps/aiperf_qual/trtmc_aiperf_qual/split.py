@@ -65,25 +65,43 @@ def campaign_inputs(environment: Environment) -> dict[str, Any]:
     dependencies of the harness and serving interpreters (families' own code is in each profile's run key)."""
     code = code_digests(environment, {})
     code.pop("family", None)
-    pythons = sorted({str(environment.values.get("serve_python") or ""), sys.executable} - {""})
+    serve = str(environment.values.get("serve_python") or "")
     return {"harness": harness_digest(), "code": code,
-            "dependencies": {Path(python).name: dependencies_digest(python) for python in pythons}}
+            "dependencies": {"harness": dependencies_digest(sys.executable),
+                             "serving": dependencies_digest(serve) if serve and Path(serve).exists() else ""}}
+
+
+def check_resume(out_root: Path, plan: Mapping[str, Any]) -> None:
+    """A root that already holds results continues only under the same assignment, host, and campaign inputs:
+    otherwise its results would be relabelled (the run keys do not include them)."""
+    path = out_root / PLAN
+    if not path.is_file():
+        return
+    existing = json.loads(path.read_text())
+    if all(existing.get(key) == plan.get(key) for key in ("assignment", "host", "inputs")):
+        return
+    held = [directory.name for directory in out_root.iterdir()
+            if directory.is_dir() and not KEPT_ASIDE.search(directory.name) and _final(directory)]
+    if held:
+        raise ConfigError(f"{out_root} holds results run under another assignment, host, or campaign inputs "
+                          f"({', '.join(sorted(held)[:5])}...): use a fresh --out-root or --rerun")
 
 
 def _final(directory: Path) -> str | None:
-    """The kind of final result in a profile directory: the report's mode, "build-failed", or None."""
+    """The kind of final result in a profile directory (what ``summary`` reads): the report's mode,
+    "build-failed", "error", or None."""
     if (directory / "report.json").is_file():
         return json.loads((directory / "report.json").read_text()).get("mode")
     build = directory / "build.json"
     if build.is_file() and json.loads(build.read_text()).get("status") == "failed":
         return "build-failed"
-    return None
+    return "error" if (directory / "error.json").is_file() else None
 
 
 def merge_check(assignment: Mapping[str, Any], roots: Sequence[Path]) -> list[str]:
     """Why the result roots do not merge into the assignment's matrix ([] when they do): each host's root ran
     under this assignment with the same campaign inputs, holds only its own profiles, and every profile has
-    exactly one formal result (a formal report or a failed build) across the roots."""
+    exactly one formal result (a formal report, a failed build, or a harness error) across the roots."""
     problems: list[str] = []
     expected = digest(assignment)
     owner: dict[str, str] = {}
@@ -104,7 +122,7 @@ def merge_check(assignment: Mapping[str, Any], roots: Sequence[Path]) -> list[st
                 continue
             if directory.name not in assigned:
                 problems.append(f"{root}: {directory.name} is assigned to another host")
-            elif kind not in ("formal", "build-failed"):
+            elif kind not in ("formal", "build-failed", "error"):
                 problems.append(f"{root}: {directory.name} is a {kind} result")
             elif directory.name in owner:
                 problems.append(f"{directory.name}: results in {owner[directory.name]} and {root}")

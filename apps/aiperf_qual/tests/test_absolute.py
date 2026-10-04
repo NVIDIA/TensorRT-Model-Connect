@@ -623,7 +623,7 @@ def test_concurrent_trtmc_copies_make_the_workload_times_incomparable():
         alone = absolute.entries({"absolute": [{"suite": "s"}]}, {"s": []}, {"s": {}}, native, None)[0]
         copies = absolute.entries({"absolute": [{"suite": "s"}]}, {"s": []}, {"s": {}}, native, None,
                                   candidate_replicas=4)[0]
-    assert alone["workload_perf"]["light"] == "green" and "candidate_replicas" not in alone
+    assert alone["workload_perf"]["light"] == "green" and alone["candidate_replicas"] == 1
     assert copies["workload_perf"]["light"] == "white" and "TRTMC ran as 4" in copies["workload_perf"]["note"]
     assert copies["candidate_replicas"] == 4
 

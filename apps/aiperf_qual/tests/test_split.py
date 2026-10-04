@@ -42,6 +42,29 @@ def test_a_host_runs_exactly_its_share_in_the_assigned_order():
         split.host_models(broken, "h1", MODELS)
 
 
+def test_a_root_resumes_only_under_its_own_assignment_host_and_inputs(tmp_path):
+    assignment = split.assign(MODELS, LEDGER, ["h1", "h2"])
+    plan = {"host": "h1", "assignment": split.digest(assignment), "inputs": {"harness": "x"}}
+    split.check_resume(tmp_path / "fresh", plan)  # nothing there yet
+    old = root(tmp_path, "old", assignment, "h1", {"a": "formal"})
+    split.check_resume(old, plan)  # the same plan continues
+    with pytest.raises(ConfigError, match="use a fresh --out-root"):
+        split.check_resume(old, {**plan, "assignment": "another"})
+    with pytest.raises(ConfigError):
+        split.check_resume(old, {**plan, "inputs": {"harness": "y"}})
+    empty = root(tmp_path, "empty", assignment, "h2", {})
+    split.check_resume(empty, plan)  # no results to relabel
+
+
+def test_both_interpreters_count_among_the_campaign_inputs(monkeypatch):
+    monkeypatch.setattr(split, "harness_digest", lambda: "h")
+    monkeypatch.setattr(split, "code_digests", lambda environment, model: {"serving": "s", "family": ""})
+    monkeypatch.setattr(split, "dependencies_digest", lambda python: f"deps of {python}")
+    inputs = split.campaign_inputs(Environment({"serve_python": __file__}))
+    assert inputs["dependencies"] == {"harness": f"deps of {split.sys.executable}", "serving": f"deps of {__file__}"}
+    assert inputs["code"] == {"serving": "s"}
+
+
 def root(tmp_path, name, assignment, host, results, inputs=None):
     path = tmp_path / name
     path.mkdir()
@@ -51,6 +74,8 @@ def root(tmp_path, name, assignment, host, results, inputs=None):
         (path / profile).mkdir()
         if kind == "build-failed":
             (path / profile / "build.json").write_text(json.dumps({"status": "failed"}))
+        elif kind == "error":
+            (path / profile / "error.json").write_text(json.dumps({"category": "error"}))
         else:
             (path / profile / "report.json").write_text(json.dumps({"mode": kind}))
     return path
@@ -73,6 +98,9 @@ def test_the_roots_merge_only_when_disjoint_complete_formal_and_alike(tmp_path):
     twin = root(tmp_path, "twin", assignment, "h1", {"a": "formal"})
     problems = split.merge_check(assignment, [one, twin, two])
     assert "host h1: 2 result roots" in problems and any("a: results in" in problem for problem in problems)
+    wrong = root(tmp_path, "wrong", assignment, "h2", {"b": "formal", "c": "error", "d": "formal", "a": "error"})
+    problems = split.merge_check(assignment, [one, wrong])
+    assert problems == [f"{wrong}: a is assigned to another host"]  # an error result is a result too
     stale = root(tmp_path, "stale", {**assignment, "rule": "older"}, "h2", {})
     assert any("not run under this assignment" in problem for problem in split.merge_check(assignment, [one, stale]))
 
@@ -86,13 +114,28 @@ def test_the_bundle_that_was_qualified_is_identified_by_its_bytes(tmp_path):
                         "receipt_sha256": hashlib.sha256(b"{}").hexdigest()}
 
 
-def test_the_report_records_the_gpu_and_runtime_it_ran_on(tmp_path, monkeypatch):
-    (tmp_path / "lib").mkdir()
-    (tmp_path / "lib" / "libnvinfer.so.10.14.1").write_bytes(b"")
+def test_the_libraries_a_server_group_mapped_are_recorded():
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        for _ in range(50):
+            libraries = services.loaded_libraries(child.pid, names=("libc", "libpython"))
+            if libraries:
+                break
+            __import__("time").sleep(0.1)
+        assert libraries and all("/" in path for path in libraries)
+        assert services.loaded_libraries(child.pid + 10**7) == []  # no such group
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_the_report_records_the_gpu_it_ran_on(tmp_path, monkeypatch):
     line = "GPU-aaaa, NVIDIA GB300, 595.58.03, 2032, 3996, 2032, 1400.00, Enabled, Default\n"
     monkeypatch.setattr(services.subprocess, "run",
                         lambda command, **kwargs: subprocess.CompletedProcess(command, 0, stdout=line))
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     identity = services.gpu_identity(Environment({"runtime_root": str(tmp_path)}))
     assert identity["gpu"]["uuid"] == "GPU-aaaa" and identity["gpu"]["power.limit"] == "1400.00"
-    assert identity["tensorrt"] == ["libnvinfer.so.10.14.1"] and identity["hostname"]
+    assert identity["hostname"]
