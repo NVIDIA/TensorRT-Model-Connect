@@ -5,6 +5,7 @@
 
 #include "families/electra/runtime/pipeline.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -106,26 +107,38 @@ EncoderPipeline::run_encoder(const std::vector<std::int32_t>& input_ids) const {
     const auto n = input_ids.size();
     if (n == 0)
         throw std::invalid_argument("EncoderPipeline: text produced no tokens");
-    if (n > input_capacity(*encoder_))
+    const auto capacity = input_capacity(*encoder_);
+    if (n > capacity)
         throw std::invalid_argument("EncoderPipeline: input exceeds engine capacity");
-    std::vector<int32_t> mask_i32(n, 1);
-    std::vector<float> mask_f32(n, 1.0f);
 
-    auto ids_copy = input_ids;
+    // The engine is built with a fixed padded input length, and the runtime
+    // copies only the bytes it is given into a persistent device buffer of that
+    // length. Sending just the n real tokens would leave the previous call's
+    // tokens and attention mask in the tail, so a shorter input after a longer
+    // one would attend to stale tokens. Always send the full padded length:
+    // ids padded with 0 and the attention mask 0 beyond the real tokens.
+    const std::size_t length = encoder_->input_is_dynamic("input_ids") ? n : capacity;
+    std::vector<int32_t> ids_padded(length, 0);
+    std::copy(input_ids.begin(), input_ids.end(), ids_padded.begin());
+    std::vector<int32_t> mask_i32(length, 0);
+    std::vector<float> mask_f32(length, 0.0f);
+    std::fill(mask_i32.begin(), mask_i32.begin() + static_cast<std::ptrdiff_t>(n), 1);
+    std::fill(mask_f32.begin(), mask_f32.begin() + static_cast<std::ptrdiff_t>(n), 1.0f);
+
     Tensor ids_t;
-    ids_t.data = ids_copy.data();
-    ids_t.shape = {static_cast<int64_t>(n)};
+    ids_t.data = ids_padded.data();
+    ids_t.shape = {static_cast<int64_t>(length)};
     ids_t.dtype = DType::kInt32;
 
     // Match the engine's expected dtype for the attention mask.
     Tensor mask_t;
     if (engine_mask_is_int32(*encoder_)) {
         mask_t.data = mask_i32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.shape = {static_cast<int64_t>(length)};
         mask_t.dtype = DType::kInt32;
     } else {
         mask_t.data = mask_f32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.shape = {static_cast<int64_t>(length)};
         mask_t.dtype = DType::kFloat32;
     }
 
