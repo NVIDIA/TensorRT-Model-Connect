@@ -4,7 +4,7 @@
   "hf_revision": "ceaa69c7bc5e512b5007106a7ccbb7daf24b2c79",
   "bundle": "xlnet-base-tp4.bundle",
   "family": "xlnet",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "testcases": [
     {
       "name": "xlnet-base-tp4",

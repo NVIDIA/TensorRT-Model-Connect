@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace trtmc::mpnet_factory {
@@ -45,8 +46,10 @@ std::int32_t require_tensor_parallel_size(const nlohmann::json& config) {
 }
 
 std::string require_task(const BundleInfo& info) {
-    if (info.task == IEncoding::kTask || info.task == IEmbedding::kTask ||
-        info.task == IReranking::kTask) {
+    const std::string_view task = info.task;
+    if (task == internal::ITextToPooledFeatures::kTask ||
+        task == internal::ITextToEmbedding::kTask ||
+        task == internal::ITextPairToRelevance::kTask) {
         return info.task;
     }
     throw std::runtime_error("MPNet does not implement task: " + info.task);
