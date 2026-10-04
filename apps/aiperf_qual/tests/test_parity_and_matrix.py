@@ -218,3 +218,25 @@ def test_an_order_check_that_cannot_start_is_unresolved(tmp_path, monkeypatch):
     result = runner.order_check(Environment({}), {"model": "m", "performance": {"l1": {"max_ci_percent": 5.0}}}, tmp_path)
     assert result["status"] == "unresolved" and "no env" in result["problems"][0]
     assert '"unresolved"' in (tmp_path / "order.json").read_text()
+
+
+def test_the_order_check_command_builds_a_missing_bundle_and_skips_a_failed_build(tmp_path, monkeypatch, capsys):
+    import json
+
+    from trtmc_aiperf_qual import bundles, cli, models, runner, services
+
+    built, checked = [], []
+    monkeypatch.setattr(cli, "load_environment", lambda path: Environment({}))
+    monkeypatch.setattr(models, "resolve_model", lambda name, environment: {"model": name})
+    monkeypatch.setattr(services, "reference_python", lambda environment, model: "python")
+    monkeypatch.setattr(bundles, "ensure_bundle", lambda environment, model, out, python: built.append(model["model"]) or
+                        {"status": "failed" if model["model"] == "broken" else "built", "reason": "no engine"})
+    monkeypatch.setattr(runner, "order_check", lambda environment, model, out: checked.append(model["model"]) or
+                        {"model": model["model"], "status": "within-limit", "order_effect": {}, "largest": 0.0,
+                         "problems": []})
+    code = cli.main(["order-check", "--environment", str(tmp_path / "env.yaml"), "--profile", "broken", "--profile", "ok",
+                     "--out-root", str(tmp_path / "order")])
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert code == 0 and built == ["broken", "ok"] and checked == ["ok"]
+    assert lines[0]["status"] == "build-failed" and lines[1]["status"] == "within-limit"
+    assert json.loads((tmp_path / "order" / "ok" / "build.json").read_text())["status"] == "built"

@@ -427,12 +427,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                                               for host, seconds in assignment["predicted_s"].items()}}))
             return 0
         if arguments.command == "order-check":
+            from .bundles import ensure_bundle
             from .runner import order_check
+            from .services import reference_python
 
             for name in arguments.profile:
                 out = arguments.out_root / name
                 out.mkdir(parents=True, exist_ok=True)
-                result = order_check(environment, resolve_model(name, environment), out)
+                model = resolve_model(name, environment)
+                build = ensure_bundle(environment, model, out, reference_python(environment, model))  # reused if built
+                (out / "build.json").write_text(json.dumps(build, indent=2))
+                if build["status"] == "failed":
+                    print(json.dumps({"model": name, "status": "build-failed", "reason": build.get("reason")}), flush=True)
+                    continue
+                result = order_check(environment, model, out)
                 print(json.dumps({key: result[key] for key in ("model", "status", "order_effect", "largest", "problems")}),
                       flush=True)
             return 0
