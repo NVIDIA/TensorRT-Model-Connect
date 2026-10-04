@@ -18,6 +18,7 @@ ports: {reference: 8900, candidate: 8901}
 # native_replicas: 4                     # gold-scored native runs: copies of the HF adapter that fit the GPU (default 1)
 # candidate_replicas: 4                  # TRTMC's Acc answers: copies of the server that fit the GPU (default 1)
 # acc_mps: true                          # the copies share the GPU through their own CUDA MPS daemon (default off)
+# acc_overlap: true                     # both sides answer Acc at once under one MPS daemon (default off)
 gpu_lock: /path/to/state/gpu.lock                       # optional: serializes timing with builds on this GPU
 build_env: {}                                           # optional extra environment of bundle builds
 

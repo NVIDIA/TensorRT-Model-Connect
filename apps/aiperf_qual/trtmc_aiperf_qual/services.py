@@ -350,15 +350,19 @@ def mps(environment: Environment, directory: Path) -> Iterator[dict[str, str]]:
 
 @contextmanager
 def serving_replicas(environment: Environment, model: dict[str, Any], backend: str, out: Path, *, count: int,
-                     **options: Any) -> Iterator[dict[str, Any]]:
+                     mps_env: Mapping[str, str] | None = None, **options: Any) -> Iterator[dict[str, Any]]:
     """Up to ``count`` copies of one server on the GPU, as many as its free memory holds (the first copy
     measures what one needs; the others then start together); yields the first copy's service with ``urls`` of
     all and ``replicas``. Each copy still serves one request at a time; clients spread their requests over
-    ``urls``."""
+    ``urls``. ``mps_env``: an MPS daemon's variables the caller already runs (both sides' copies at once), instead
+    of a daemon of their own."""
     base = int(environment["ports"]["candidate" if backend == "trtmc" else "reference"])
     before = gpu_memory_mib() if count > 1 else None
     with ExitStack() as stack:
-        shared = stack.enter_context(mps(environment, out.parent / f"{out.name}-mps")) if count > 1 else {}
+        if mps_env is not None:
+            shared = dict(mps_env)
+        else:
+            shared = stack.enter_context(mps(environment, out.parent / f"{out.name}-mps")) if count > 1 else {}
         first = stack.enter_context(serving(environment, model, backend, out, extra_env=shared, **options))
         urls = [first["url"]]
         # The other copies start together (sized above for their peak); each one that starts serves.

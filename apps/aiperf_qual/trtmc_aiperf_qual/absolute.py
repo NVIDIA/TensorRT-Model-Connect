@@ -23,9 +23,11 @@ import functools
 import json
 import re
 import statistics
+import threading
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from . import gold_metrics, noninferiority
 from .aiperf_runner import run_aiperf
@@ -537,7 +539,8 @@ def keeps_artifacts(model: Mapping[str, Any]) -> bool:
 
 
 def run_native(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],
-               out: Path, probe_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
+               out: Path, probe_request: Mapping[str, Any] | None = None, *, mps_env: Mapping[str, str] | None = None,
+               started: Callable[[], None] | None = None) -> dict[str, Any]:
     """Every benchmark on the native model: the reference adapter, eager, at the first precision of
     ``timing_precisions`` it serves. The adapter runs as up to ``native_replicas`` (environment) copies
     that fit on the GPU, each answering one problem at a time: the answers do not change, its model-call
@@ -550,7 +553,9 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
             count = 1 if environment.values.get("smoke") else int(environment.values.get("native_replicas") or 1)
             with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{precision}",
                                   count=count, mode="eager", precision=precision, python=python,
-                                  keep_artifacts=keeps_artifacts(model)) as service:
+                                  keep_artifacts=keeps_artifacts(model), mps_env=mps_env) as service:
+                if started is not None:  # the copies hold their memory: the other side may size its own
+                    started()
                 if probe_request is not None:
                     _probe(service, model["operation"], probe_request)
                 runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
@@ -564,6 +569,37 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
     raise RuntimeError("; ".join(errors)[:1500])
 
 
+def overlapped_acc(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],
+                   out: Path, probe_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Both sides' Acc answers at once (environment ``acc_overlap``): under one MPS daemon the native copies start
+    first (sized alone), then TRTMC's (sized against what is left), and both sides' requests run concurrently; the
+    answers are those of each side alone (one request at a time per copy). Returns the native side or its error,
+    and TRTMC's runs with its copies or its error; the caller falls back to one side after the other."""
+    from .services import mps
+
+    result: dict[str, Any] = {}
+    ready = threading.Event()
+    with mps(environment, out / "acc-mps") as shared, ThreadPoolExecutor(max_workers=1) as pool:
+        native = pool.submit(run_native, environment, model, python, plans, out, probe_request, mps_env=shared,
+                             started=ready.set)
+        while not ready.wait(1) and not native.done():
+            pass
+        try:
+            with serving_replicas(environment, dict(model), "trtmc", out / "candidate-acc",
+                                  count=int(environment.values.get("candidate_replicas") or 1),
+                                  keep_artifacts=keeps_artifacts(model), mps_env=shared) as service:
+                result["candidate"] = run_candidate(environment, service, model, plans, out)
+                result["copies"] = {"candidate_replicas": int(service.get("replicas") or 1),
+                                    "candidate_mps": bool(service.get("mps"))}
+        except Exception as error:  # noqa: BLE001 - TRTMC then answers on its own, after the native side
+            result["candidate_error"] = f"{type(error).__name__}: {error}"[:1500]
+        try:
+            result["native"] = native.result()
+        except Exception as error:  # noqa: BLE001 - the native side then runs on its own
+            result["native_error"] = f"{type(error).__name__}: {error}"[:1500]
+    return result
+
+
 def run_candidate(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
                   plans: Mapping[str, Sequence], out: Path) -> dict[str, Any]:
     return {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]], out / "absolute-trtmc")
@@ -572,7 +608,7 @@ def run_candidate(environment: Environment, service: Mapping[str, Any], model: M
 
 def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: Mapping[str, Any],
             native: Mapping[str, Any], native_error: str | None, candidate_replicas: int = 1,
-            candidate_mps: bool = False) -> list[dict[str, Any]]:
+            candidate_mps: bool = False, concurrent_sides: bool = False) -> list[dict[str, Any]]:
     results = []
     runs = native.get("runs") or {}
     for item in model["absolute"]:
@@ -587,10 +623,13 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
                                **({"fallback_from": native["fallback_from"]} if native.get("fallback_from") else {})}
             concurrent = [f"{side} ran as {copies} concurrent copies" for side, copies in
                           (("native", native.get("replicas", 1)), ("TRTMC", candidate_replicas)) if copies > 1]
+            concurrent += ["both sides answered at once"] if concurrent_sides else []
             if concurrent and entry.get("workload_perf", {}).get("pairs"):
                 entry["workload_perf"] = {**entry["workload_perf"], "light": "white",
                                           "note": f"{'; '.join(concurrent)}: model-call times are not comparable"}
             entry["candidate_replicas"], entry["candidate_mps"] = candidate_replicas, candidate_mps
+            if concurrent_sides:
+                entry["sides_concurrent"] = True
             results.append(entry)
     return results
 

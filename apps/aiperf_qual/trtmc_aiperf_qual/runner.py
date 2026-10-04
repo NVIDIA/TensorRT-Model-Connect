@@ -520,8 +520,17 @@ def _candidate(environment: Environment, model: Mapping[str, Any], l1: Mapping[s
                performance: list, out: Path, absolute_runs: Mapping[str, Any] | None = None) -> None:
     """TRTMC's Acc answers, then its L1 timing. With ``candidate_replicas`` (environment, not in smoke mode) above
     one, the answers come from that many copies of the server that fit the GPU, each answering one request at a
-    time (the same engine and requests: the same answers), and L1 times a single server started afterwards."""
+    time (the same engine and requests: the same answers), and L1 times a single server started afterwards.
+    Answers already given alongside the native side (``absolute_runs["answered"]``) are judged as they are."""
     keep = absolute.keeps_artifacts(model)
+    if absolute_runs and absolute_runs.get("answered"):  # TRTMC answered alongside the native side
+        answered = absolute_runs["answered"]
+        accuracy.extend(absolute.entries(model, absolute_runs["plans"], answered["candidate"], absolute_runs["native"],
+                                         absolute_runs["native_error"], candidate_replicas=answered["candidate_replicas"],
+                                         candidate_mps=answered["candidate_mps"], concurrent_sides=True))
+        absolute_runs = None
+        if not l1:
+            return
     copies = 1 if environment.values.get("smoke") else int(environment.values.get("candidate_replicas") or 1)
     if absolute_runs and copies > 1:
         with serving_replicas(environment, dict(model), "trtmc", out / "candidate-acc", count=copies,
@@ -740,6 +749,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
         timed_suites = (phases.run("perf_requests", lambda: perf_suites(environment, model, perf_suite)) or []) if l1 else []
     if l1 and not timed_suites:
         l1 = None  # the timed requests could not be built: the phase error says why
+    overlap_notes: dict[str, str] = {}
     with gpu_exclusive(environment):
         reference_perf = _reference_perf(environment, model, l1, timed_suites, python, phases, out) if l1 else {}
         absolute_runs = None
@@ -749,13 +759,23 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
                                                      f"TRTMC cannot serve the model: {phases.errors['absolute_probe'][:500]}")
                                 for item in model["absolute"])
             else:
-                native = phases.run("absolute_native", lambda: absolute.run_native(
-                    environment, model, python, plans, out, perf_suite.samples[0]["request"] if perf_suite else None),
-                    retries=retries(environment))
+                probe = perf_suite.samples[0]["request"] if perf_suite else None
+                overlapped: dict[str, Any] = {}
+                if environment.values.get("acc_overlap") and not environment.values.get("smoke"):
+                    overlapped = phases.run("acc_overlap", lambda: absolute.overlapped_acc(
+                        environment, model, python, plans, out, probe)) or {}
+                    overlap_notes.update({key: overlapped[key] for key in ("native_error", "candidate_error")
+                                          if key in overlapped})
+                native = overlapped.get("native")
+                if native is None:  # the native side on its own: no overlap, or it failed there
+                    native = phases.run("absolute_native", lambda: absolute.run_native(
+                        environment, model, python, plans, out, probe), retries=retries(environment))
                 if native:
                     phases.errors.pop("absolute_native", None)
                 absolute_runs = {"plans": plans, "native": native or {},
                                  "native_error": phases.errors.get("absolute_native")}
+                if "candidate" in overlapped:  # TRTMC answered alongside: _candidate judges and times L1 only
+                    absolute_runs["answered"] = {"candidate": overlapped["candidate"], **overlapped["copies"]}
         marks = (len(accuracy), len(performance_l1))
 
         def undo() -> None:  # a failed attempt's partial entries
@@ -807,7 +827,8 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
               "provenance": {"aiperf": importlib.metadata.version("aiperf"),
                              "plugins": importlib.metadata.version("trtmc-aiperf-plugins"),
                              "perf_suite": perf_suite.manifest if perf_suite else None,
-                             "timed_requests": [suite.manifest for suite in timed_suites]}}
+                             "timed_requests": [suite.manifest for suite in timed_suites],
+                             **({"acc_overlap_fallback": overlap_notes} if overlap_notes else {})}}
     result["accuracy"] += missing_results(model, result["accuracy"], phases.errors)
     result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)),
                                       expected_modes=len(timed_suites) if l1 else 0)

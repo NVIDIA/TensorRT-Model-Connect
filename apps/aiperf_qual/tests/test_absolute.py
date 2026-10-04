@@ -1025,3 +1025,88 @@ def test_the_selection_tokenizer_is_pinned_to_the_commit_its_revision_resolves_t
     absolute.pinned_revision.cache_clear()
     assert absolute.pinned_revision("gated/model", "main") == "d" * 40  # offline: the cached snapshot's commit
     absolute.pinned_revision.cache_clear()
+
+
+def test_both_sides_answer_at_once_trtmc_sized_after_the_native_copies(tmp_path, monkeypatch):
+    """Under one MPS daemon the native copies start first, then TRTMC's, and both sides' requests overlap; a side
+    that fails is reported for its own fallback while the other's answers stand."""
+    import threading
+    import time
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual import services
+    from trtmc_aiperf_qual.config import Environment
+
+    events, lock = [], threading.Lock()
+
+    def note(event):
+        with lock:
+            events.append(event)
+
+    def fake_replicas(fail=None):
+        @contextmanager
+        def serving_replicas(environment, model, backend, out, *, count, mps_env=None, **options):
+            assert mps_env == {"CUDA_MPS_PIPE_DIRECTORY": "p"}  # one daemon for both sides
+            if fail == backend:
+                raise services.ServiceError(f"{backend} did not start")
+            note(("up", backend))
+            yield {"url": backend, "replicas": count, "mps": True}
+            note(("down", backend))
+        return serving_replicas
+
+    @contextmanager
+    def daemon(environment, directory):
+        yield {"CUDA_MPS_PIPE_DIRECTORY": "p"}
+
+    def side(environment, service, model, item, problems, out):
+        note(("answering", service["url"]))
+        time.sleep(0.2)
+        note(("answered", service["url"]))
+        return {"records": {}}
+
+    monkeypatch.setattr(services, "mps", daemon)
+    monkeypatch.setattr(absolute, "serving_replicas", fake_replicas())
+    monkeypatch.setattr(absolute, "run_side", side)
+    model = {"operation": "generate", "absolute": [{"suite": "s"}],
+             "reference": {"backend": "reference", "perf_precision": "fp16", "precision": "fp32"}}
+    environment = Environment({"native_replicas": 8, "candidate_replicas": 4})
+    result = absolute.overlapped_acc(environment, model, "python", {"s": []}, tmp_path)
+    assert events.index(("up", "reference")) < events.index(("up", "trtmc"))
+    assert events.index(("answering", "trtmc")) < events.index(("answered", "reference"))  # at once
+    assert result["native"]["replicas"] == 8 and result["copies"] == {"candidate_replicas": 4, "candidate_mps": True}
+
+    events.clear()
+    monkeypatch.setattr(absolute, "serving_replicas", fake_replicas(fail="trtmc"))
+    result = absolute.overlapped_acc(environment, model, "python", {"s": []}, tmp_path)
+    assert "trtmc did not start" in result["candidate_error"] and result["native"]["runs"] == {"s": {"records": {}}}
+    monkeypatch.setattr(absolute, "serving_replicas", fake_replicas(fail="reference"))
+    result = absolute.overlapped_acc(environment, model, "python", {"s": []}, tmp_path)
+    assert "reference did not start" in result["native_error"] and "candidate" in result
+
+
+def test_answers_given_alongside_are_judged_and_only_l1_starts_a_server(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual import runner
+    from trtmc_aiperf_qual.config import Environment
+
+    started = []
+
+    @contextmanager
+    def single(environment, model, backend, out, **options):
+        started.append(out.name)
+        yield {"url": "u", "info": {}}
+
+    judged = {"suite": "s", "status": "pass", "workload_perf": {"pairs": 3, "light": "green"}}
+    monkeypatch.setattr(runner, "serving", single)
+    monkeypatch.setattr(absolute, "judge", lambda *args: dict(judged))
+    accuracy = []
+    native = {"backend": "reference", "precision": "fp16", "replicas": 8, "mps": True, "runs": {"s": {}}}
+    runner._candidate(Environment({"candidate_replicas": 4}), {"absolute": [{"suite": "s"}]}, {"suite": {}}, [], {},
+                      accuracy, [], tmp_path, absolute_runs={"plans": {"s": []}, "native": native, "native_error": None,
+                                                             "answered": {"candidate": {"s": {}}, "candidate_replicas": 4,
+                                                                          "candidate_mps": True}})
+    assert started == ["candidate"]  # the L1 server only
+    entry = accuracy[0]
+    assert entry["sides_concurrent"] and entry["workload_perf"]["light"] == "white"
+    assert "both sides answered at once" in entry["workload_perf"]["note"]
