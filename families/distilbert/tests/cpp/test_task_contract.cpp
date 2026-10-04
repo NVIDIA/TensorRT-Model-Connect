@@ -5,7 +5,9 @@
 
 #include "families/distilbert/runtime/pipeline.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
@@ -36,17 +38,29 @@ class RecordingModule final : public trtmc::ITrtModule {
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
         ++calls;
         const auto& ids_tensor = inputs.at("input_ids");
-        if (inputs.find("attention_mask") == inputs.end())
-            throw std::runtime_error("RecordingModule: missing attention_mask");
-        const auto n = static_cast<std::int64_t>(ids_tensor.numel());
+        const auto& mask_tensor = inputs.at("attention_mask");
+        last_input_length = static_cast<std::int64_t>(ids_tensor.numel());
         const auto* ids = static_cast<const std::int32_t*>(ids_tensor.data);
-        last_input_ids.assign(ids, ids + n);
-        hidden_buffer.assign(static_cast<std::size_t>(n) * hidden, 0.0F);
-        for (std::int64_t i = 0; i < n; ++i)
+        last_input_ids.assign(ids, ids + last_input_length);
+
+        // Like the real runtime: copy only the bytes supplied into persistent
+        // fixed-length device buffers, leaving whatever an earlier call wrote
+        // beyond them.
+        std::memcpy(buffer_ids.data(), ids_tensor.data,
+                    std::min(ids_tensor.nbytes(), buffer_ids.size() * sizeof(std::int32_t)));
+        std::memcpy(buffer_mask.data(), mask_tensor.data,
+                    std::min(mask_tensor.nbytes(), buffer_mask.size() * sizeof(float)));
+        valid_seen = 0;
+        for (const float value : buffer_mask)
+            valid_seen += value > 0.0F ? 1 : 0;
+
+        hidden_buffer.assign(static_cast<std::size_t>(capacity) * hidden, 0.0F);
+        for (std::int64_t i = 0; i < capacity; ++i)
             for (std::int32_t h = 0; h < hidden; ++h)
                 hidden_buffer[static_cast<std::size_t>(i) * hidden + h] =
                     static_cast<float>(2 * i + h + 1);
-        return {{"hidden_states", {hidden_buffer.data(), {n, hidden}, trtmc::DType::kFloat32}}};
+        return {
+            {"hidden_states", {hidden_buffer.data(), {capacity, hidden}, trtmc::DType::kFloat32}}};
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
     void forward_device_async(const trtmc::DeviceTensorMap&) override {}
@@ -69,7 +83,7 @@ class RecordingModule final : public trtmc::ITrtModule {
     }
     bool has_output(const std::string& name) const override { return name == "hidden_states"; }
     trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
-    std::vector<int64_t> tensor_shape(const std::string&) const override { return {}; }
+    std::vector<int64_t> tensor_shape(const std::string&) const override { return {capacity}; }
     std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
                                              trtmc::ProfileShapeSelector) const override {
         return {capacity};
@@ -79,7 +93,7 @@ class RecordingModule final : public trtmc::ITrtModule {
     void bind_external(const std::string&, void*) override {}
     void bind_external(const std::string&, void*, const std::vector<int64_t>&) override {}
     int32_t input_rank(const std::string&) const override { return 1; }
-    bool input_is_dynamic(const std::string&) const override { return true; }
+    bool input_is_dynamic(const std::string&) const override { return false; }
     void reset_execution_context() override {}
     void set_timing_label(std::string) override {}
     bool ok() const override { return true; }
@@ -88,9 +102,27 @@ class RecordingModule final : public trtmc::ITrtModule {
     int calls{0};
     std::int32_t hidden{2};
     std::int64_t capacity{512};
+    std::int64_t last_input_length{0};
+    std::int64_t valid_seen{0};
+    std::vector<std::int32_t> buffer_ids = std::vector<std::int32_t>(512, 0);
+    std::vector<float> buffer_mask = std::vector<float>(512, 0.0F);
     std::vector<std::int32_t> last_input_ids;
     std::vector<float> hidden_buffer;
 };
+
+// True when the engine received exactly `expected` followed by zero padding to
+// the engine's fixed input length.
+bool sent_ids(const RecordingModule& module, const std::vector<std::int32_t>& expected) {
+    if (module.last_input_length != module.capacity ||
+        module.last_input_ids.size() != static_cast<std::size_t>(module.capacity))
+        return false;
+    for (std::size_t i = 0; i < module.last_input_ids.size(); ++i) {
+        const std::int32_t want = i < expected.size() ? expected[i] : 0;
+        if (module.last_input_ids[i] != want)
+            return false;
+    }
+    return true;
+}
 
 void require(bool value, const char* message) {
     if (!value)
@@ -136,8 +168,8 @@ void test_pooled_features_binding_and_cls_extraction() {
 
     const auto result = pipeline->run(trtmc::internal::TextToPooledFeaturesRequest{"ab"}, {});
     require(tokenizer->calls == 1, "plain text must be tokenized exactly once");
-    require(module->last_input_ids == std::vector<std::int32_t>({'a', 'b'}),
-            "the engine must receive the tokenizer's own ids");
+    require(sent_ids(*module, {'a', 'b'}),
+            "the engine must receive the tokenizer's own ids, zero padded to its length");
     require(result.values.size() == 2 && near(result.values[0], 1.0F) &&
                 near(result.values[1], 2.0F),
             "pooled features must be exactly the CLS row, not pooled or normalized");
@@ -155,7 +187,7 @@ void test_pooled_features_accepts_token_ids_without_tokenizing() {
         trtmc::Span<const std::int32_t>{ids.data(), ids.size()}};
     const auto result = pipeline->run(request, {});
     require(tokenizer->calls == 0, "pre-tokenized ids must bypass the tokenizer entirely");
-    require(module->last_input_ids == ids, "the engine must receive the supplied ids verbatim");
+    require(sent_ids(*module, ids), "the engine must receive the supplied ids, zero padded");
     require(result.values.size() == 2 && near(result.values[0], 1.0F) &&
                 near(result.values[1], 2.0F),
             "token-id input must still extract the CLS row");
@@ -208,6 +240,25 @@ void test_relevance_single_pair_and_batch() {
     require(batch.scores.size() == 3, "one score must be returned per input document, in order");
     for (const auto score : batch.scores)
         require(near(score, 1.0F), "batch scoring must reuse the exact same pair-scoring logic");
+}
+
+void test_shorter_input_after_longer_sees_no_stale_tokens() {
+    RecordingModule* module = nullptr;
+    FakeTokenizer* tokenizer = nullptr;
+    auto pipeline = make_pipeline(std::string(trtmc::internal::ITextToPooledFeatures::kTask),
+                                  &module, &tokenizer);
+    const std::vector<std::int32_t> longer(30, 5);
+    const std::vector<std::int32_t> shorter(5, 6);
+    pipeline->run(trtmc::internal::TextToPooledFeaturesRequest{trtmc::Span<const std::int32_t>{
+                      longer.data(), longer.size()}},
+                  {});
+    require(module->valid_seen == 30, "the first call must expose exactly its own tokens");
+    pipeline->run(trtmc::internal::TextToPooledFeaturesRequest{trtmc::Span<const std::int32_t>{
+                      shorter.data(), shorter.size()}},
+                  {});
+    require(module->valid_seen == 5,
+            "a shorter input after a longer one must not leave stale tokens attended to");
+    require(sent_ids(*module, shorter), "the shorter input must overwrite the whole padded buffer");
 }
 
 void test_each_mode_rejects_the_other_tasks() {
@@ -275,6 +326,7 @@ int main() {
         test_pooled_features_accepts_token_ids_without_tokenizing();
         test_embedding_mean_pools_and_normalizes();
         test_relevance_single_pair_and_batch();
+        test_shorter_input_after_longer_sees_no_stale_tokens();
         test_each_mode_rejects_the_other_tasks();
         test_unsupported_config_and_empty_input();
         test_constructor_validates_its_dependencies();
