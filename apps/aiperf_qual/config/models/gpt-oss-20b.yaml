@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The checkpoint's MXFP4 experts run in bf16 in Transformers (fp16 and fp32 fail with a dtype mismatch): the native
+# model runs at bf16 only, so Perf against it is perf-inconclusive (another precision than the fp16 candidate).
+reference:
+  timing_precision: bf16

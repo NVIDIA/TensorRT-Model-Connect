@@ -1,0 +1,690 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Build fixed-sample suites from AIPerf benchmarks, our manifests, ETTh1 windows, or catalog testcases."""
+
+from __future__ import annotations
+
+import base64
+import csv
+import hashlib
+import io
+import json
+import math
+import os
+import random
+import statistics
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from .config import ConfigError, Environment, require
+
+
+def canonical(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def request_sha(request: Mapping[str, Any]) -> str:
+    return sha256_text(canonical(request))
+
+
+@dataclass(frozen=True)
+class Suite:
+    name: str
+    key: str
+    samples: list[dict[str, Any]]
+    manifest: dict[str, Any]
+
+    def write_inputs(self, path: Path) -> Path:
+        """AIPerf single_turn file: each turn text is the JSON operation request."""
+        with open(path, "w") as handle:
+            for sample in self.samples:
+                handle.write(json.dumps({"text": json.dumps({"request": sample["request"]})}) + "\n")
+        return path
+
+
+def with_latent_seeds(suite: Suite, base: int = 1000) -> Suite:
+    """Each sample with its own ``latent_seed`` (base + index): trtmc-perf-serve then gives TRTMC and
+    the native model the same initial diffusion noise (latent replay)."""
+    samples = []
+    for index, sample in enumerate(suite.samples):
+        request = {**sample["request"], "latent_seed": base + index}
+        samples.append({**sample, "request": request, "request_sha": request_sha(request)})
+    key = sha256_text(canonical({"suite": suite.key, "latent_seed_base": base}))
+    return Suite(suite.name, key, samples, {**suite.manifest, "key": key, "latent_seed_base": base})
+
+
+def single_request_suite(name: str, request: Mapping[str, Any], manifest: Mapping[str, Any]) -> Suite:
+    """A one-sample suite (a timed request) under its own name and key."""
+    sample = {"sample_id": name, "task": name, "request": dict(request), "request_sha": request_sha(request)}
+    key = sha256_text(canonical({"suite": name, "samples": [sample["request_sha"]]}))
+    return Suite(name, key, [sample], {**manifest, "suite": name, "key": key, "samples": 1})
+
+
+def limit_suite(suite: Suite, count: int) -> Suite:
+    """The first ``count`` samples (a new suite key)."""
+    if len(suite.samples) <= count:
+        return suite
+    samples = suite.samples[:count]
+    key = sha256_text(canonical({"suite": suite.key, "limited_to": count}))
+    return Suite(suite.name, key, samples, {**suite.manifest, "key": key, "samples": count, "limited_to": count})
+
+
+def select(records: Sequence[dict[str, Any]], selection: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Deterministic selection: first N, every k-th (stride to N), class-balanced (``stratified`` over a
+    field), a seeded random sample (``seeded``, stratified over ``field`` when given: each value's
+    records shuffled, then taken round-robin), or explicit indices; optionally per task."""
+    if selection.get("per_task"):
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for record in records:
+            groups.setdefault(record.get("task", ""), []).append(record)
+        inner = {key: value for key, value in selection.items() if key != "per_task"}
+        return [item for task in groups for item in select(groups[task], inner)]
+    method = require(selection, "method", "selection")
+    if method == "first":
+        return list(records[: int(require(selection, "count", "selection"))])
+    if method == "stride":
+        count = int(require(selection, "count", "selection"))
+        step = max(len(records) // count, 1)
+        return list(records[::step][:count])
+    if method == "stratified":  # round-robin across the values of a field, in record order
+        count, field = int(require(selection, "count", "selection")), require(selection, "field", "selection")
+        groups = {}
+        for position, record in enumerate(records):
+            groups.setdefault(json.dumps(record.get(field), sort_keys=True), []).append((position, record))
+        chosen = [group[depth] for depth in range(max(map(len, groups.values()), default=0))
+                  for group in groups.values() if depth < len(group)][:count]
+        return [record for _, record in sorted(chosen, key=lambda pair: pair[0])]
+    if method == "seeded":  # DESIGN.md 4.4: seeded stratified sampling, records in their sampled order
+        count, field = int(require(selection, "count", "selection")), selection.get("field")
+        generator = random.Random(int(selection.get("seed", SELECTION_SEED)))
+        groups = {}
+        for record in records:
+            groups.setdefault(json.dumps(record.get(field), sort_keys=True) if field else "", []).append(record)
+        for members in groups.values():
+            generator.shuffle(members)
+        return [group[depth] for depth in range(max(map(len, groups.values()), default=0))
+                for group in groups.values() if depth < len(group)][:count]
+    if method == "indices":
+        indices = require(selection, "indices", "selection")
+        if any(index >= len(records) for index in indices):
+            raise ConfigError(f"selection index out of range for {len(records)} records")
+        return [records[index] for index in indices]
+    raise ConfigError(f"unknown selection method {method!r}")
+
+
+def _aiperf_public_records(source: Mapping[str, Any], selection: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Selected rows of an AIPerf public dataset, as registered (and pinned) in the plugin registry."""
+    from aiperf.plugin import plugins
+    from aiperf.plugin.enums import PluginType
+
+    name = require(source, "dataset", "source")
+    loader = plugins.get_class(PluginType.PUBLIC_DATASET_LOADER, name)
+    meta = plugins.get_public_dataset_loader_metadata(name)
+    revision = getattr(loader, "hf_revision", None)
+    if not revision:
+        raise ConfigError(f"public dataset {name!r} is not pinned; register a pinned loader in trtmc-aiperf-plugins")
+    return _hf_rows(name, meta, revision, source, selection)
+
+
+def _hf_dataset_records(source: Mapping[str, Any], selection: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Selected rows of a Hugging Face dataset at a pinned revision (``hf_dataset``): ``dataset``,
+    ``subset``, ``split``, ``revision``, and the ``prompt_column`` / ``image_column`` /
+    ``audio_column`` / ``label_column`` it reads; ``columns`` copies further fields."""
+    from types import SimpleNamespace
+
+    meta = SimpleNamespace(hf_dataset_name=require(source, "dataset", "source"), hf_subset=source.get("subset"),
+                           hf_split=require(source, "split", "source"), streaming=bool(source.get("streaming")),
+                           data_files=source.get("data_files"),
+                           **{f"{role}_column": source.get(f"{role}_column") for role in ("prompt", "image", "audio")})
+    return _hf_rows(meta.hf_dataset_name, meta, require(source, "revision", "source"), source, selection)
+
+
+VBENCH_RELATIONS = {"on the left of": "left of", "on the right of": "right of", "on the top of": "above",
+                    "on the bottom of": "below"}
+
+
+def vbench_object_records(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """VBench's object dimensions (object class, multiple objects, color, spatial relationship) as
+    GenEval-style requirements of each prompt."""
+    records = []
+    for row in rows:
+        info, prompt = row.get("auxiliary_info") or {}, row["prompt_en"]
+        for dimension in row["dimension"]:
+            if dimension == "object_class":
+                include = [{"class": info[dimension]["object"], "count": 1}]
+            elif dimension == "multiple_objects":
+                include = [{"class": name.strip(), "count": 1} for name in info[dimension]["object"].split(" and ")]
+            elif dimension == "color":
+                color = info[dimension]["color"]
+                name = prompt.split(f" {color} ", 1)[-1].split(",")[0].strip()
+                include = [{"class": name, "count": 1, "color": color}]
+            elif dimension == "spatial_relationship":
+                relation = info[dimension]["spatial_relationship"]
+                include = [{"class": relation["object_b"], "count": 1},
+                           {"class": relation["object_a"], "count": 1,
+                            "position": [VBENCH_RELATIONS[relation["relationship"]], 0]}]
+            else:
+                continue
+            records.append({"id": str(len(records)), "prompt": prompt, "task": dimension,
+                            "label": {"tag": dimension, "include": include, "prompt": prompt}})
+    return records
+
+
+def _url_jsonl_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """Records of a JSONL (or JSON list) file at ``url``, verified against ``sha256`` and cached below the
+    datasets cache (``url_jsonl``); ``label_record`` makes the whole record the gold label, and
+    ``transform: vbench_objects`` turns VBench's prompt list into GenEval-style requirements."""
+    import urllib.request
+
+    digest = require(source, "sha256", "source")
+    path = Path(environment["hf_datasets_cache"]) / "downloads" / f"{digest}.jsonl"
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(require(source, "url", "source"), timeout=120) as response:
+            data = response.read()
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise ConfigError(f"{source['url']} does not match sha256 {digest}")
+        path.write_bytes(data)
+    text = path.read_text()
+    records = json.loads(text) if text.lstrip().startswith("[") else [json.loads(line) for line in text.split("\n")
+                                                                      if line.strip()]
+    if source.get("transform") == "vbench_objects":
+        return vbench_object_records(records)
+    return [{**record, "id": str(index), **({"label": dict(record)} if source.get("label_record") else {}),
+             **({"task": record.get(source["task_field"])} if source.get("task_field") else {})}
+            for index, record in enumerate(records)]
+
+
+def _image_archive_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """Images of a class-per-folder archive in a Hugging Face dataset repository (``image_archive``):
+    ``repo``, ``revision``, ``filename``; the folder name is the integer class label. The archive is
+    extracted once below the environment's datasets cache."""
+    import tarfile
+
+    from huggingface_hub import hf_hub_download
+
+    archive = Path(hf_hub_download(require(source, "repo", "source"), require(source, "filename", "source"),
+                                   repo_type="dataset", revision=require(source, "revision", "source")))
+    root = Path(environment["hf_datasets_cache"]) / "archives" / f"{source['revision']}-{archive.name}"
+    done = root / ".extracted"
+    if not done.is_file():
+        root.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(archive) as handle:
+            handle.extractall(root, filter="data")
+        done.write_text(source["filename"])
+    records = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix.lower() in (".jpeg", ".jpg", ".png") and path.parent.name.isdigit():
+            records.append({"id": f"{path.parent.name}/{path.name}", "image": str(path), "label": int(path.parent.name)})
+    return records
+
+
+def polygon_mask(polygon: Any, size: Sequence[int]) -> Any:
+    """A COCO polygon (flat [x, y, ...], or a list of them) rasterized as a boolean [height, width] mask."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    parts = polygon if polygon and isinstance(polygon[0], (list, tuple)) else [polygon]
+    canvas = Image.new("L", (int(size[0]), int(size[1])), 0)
+    draw = ImageDraw.Draw(canvas)
+    for part in parts:
+        if len(part) >= 6:
+            draw.polygon([(float(part[i]), float(part[i + 1])) for i in range(0, len(part) - 1, 2)], fill=1)
+    return np.asarray(canvas, dtype=bool)
+
+
+def _interior_point(polygon: Any, size: Sequence[int]) -> tuple[float, float]:
+    """The mask pixel nearest the mask's centroid, normalized to [0, 1] (a point prompt inside the object)."""
+    import numpy as np
+
+    mask = polygon_mask(polygon, size)
+    rows, columns = np.nonzero(mask)
+    if not len(rows):
+        return 0.5, 0.5
+    nearest = int(np.argmin((rows - rows.mean()) ** 2 + (columns - columns.mean()) ** 2))
+    return (float(columns[nearest]) + 0.5) / size[0], (float(rows[nearest]) + 0.5) / size[1]
+
+
+def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
+             selection: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Only selected rows are decoded. Audio becomes WAV (the TRTMC worker reads WAV); images keep
+    their original encoded bytes."""
+    import io
+
+    import datasets
+    import soundfile
+    # Streaming datasets (for example LibriSpeech, whose config spans ~30 GB of train splits) are read
+    # from the requested split only; media stay encoded until a row is selected.
+    # ``data_files`` limits the download to the split's shards (for example ImageNet's validation parquet).
+    # The dataset card lists every split, so a partial download skips the split verification.
+    files = ({"data_files": meta.data_files, "verification_mode": "no_checks"}
+             if getattr(meta, "data_files", None) else {})
+    table = datasets.load_dataset(meta.hf_dataset_name, meta.hf_subset, split=meta.hf_split, revision=revision,
+                                  streaming=bool(meta.streaming), **files)
+    roles = {role: getattr(meta, f"{role}_column") for role in ("prompt", "image", "audio")
+             if getattr(meta, f"{role}_column", None)}
+    for role in ("image", "audio"):
+        if role in roles:
+            feature = datasets.Image if role == "image" else datasets.Audio
+            table = table.cast_column(roles[role], feature(decode=False))
+    label_column = source.get("label_column")
+    if source.get("label_image"):  # an annotation image (e.g. a class map), kept encoded until scored
+        table = table.cast_column(label_column, datasets.Image(decode=False))
+    if meta.streaming:
+        table = list(table)
+    candidates = range(len(table))
+    if source.get("where"):  # rows whose columns equal the given values (read before any media is decoded)
+        columns = {name: (table[name] if not meta.streaming else [row[name] for row in table]) for name in source["where"]}
+        candidates = [index for index in candidates
+                      if all(columns[name][index] == value for name, value in source["where"].items())]
+    # A stratified selection reads its field (the label column) before any media are decoded.
+    field = selection.get("field") if selection.get("method") in ("stratified", "seeded") else None
+    column = (label_column if field == "label" else field) if field else None
+    values = (table[column] if not meta.streaming else [row[column] for row in table]) if column else None
+    # ``cluster_column``: the independent unit of a row (a speaker, an image) the bootstrap resamples;
+    # ``one_per_cluster`` keeps a cluster's first row only (independent pairs for a paired test).
+    cluster_column = source.get("cluster_column")
+    clusters = ((table[cluster_column] if not meta.streaming else [row[cluster_column] for row in table])
+                if cluster_column else None)
+    if clusters is not None and source.get("one_per_cluster"):
+        seen: set[str] = set()
+        candidates = [index for index in candidates
+                      if not (str(clusters[index]) in seen or seen.add(str(clusters[index])))]
+    chosen = select([{"id": f"{name}/{index}", "row": index, **({field: values[index]} if column else {}),
+                      **({"cluster": str(clusters[index])} if clusters is not None else {})}
+                     for index in candidates], selection)
+    records = []
+    for item in chosen:
+        row = table[item["row"]]
+        record: dict[str, Any] = {"id": item["id"], **({"cluster": item["cluster"]} if "cluster" in item else {})}
+        if "prompt" in roles:
+            record["prompt"] = row[roles["prompt"]]
+        if "image" in roles:
+            record["image"] = _encoded_media(row[roles["image"]], ".png")
+        if "audio" in roles:
+            audio, rate = soundfile.read(io.BytesIO(row[roles["audio"]]["bytes"]), dtype="float32")
+            buffer = io.BytesIO()
+            soundfile.write(buffer, audio, rate, format="WAV", subtype="PCM_16")
+            record["audio"] = {"$file": {"suffix": ".wav", "b64": base64.b64encode(buffer.getvalue()).decode()}}
+        if label_column:
+            record["label"] = row[label_column]
+        if source.get("label_image"):
+            record["label"] = {"png_b64": base64.b64encode(row[label_column]["bytes"]).decode()}
+        if source.get("polygon_label") and "image" in roles:  # an object mask as a polygon, with a point inside it
+            from PIL import Image
+
+            with Image.open(io.BytesIO(row[roles["image"]]["bytes"])) as image:
+                size = list(image.size)
+            polygon = row[source["polygon_label"]]
+            record["label"] = {"polygon": polygon, "image_size": size}
+            record["point_x"], record["point_y"] = _interior_point(polygon, size)
+        if source.get("label_with_image_size") and "image" in roles:  # e.g. a box scored in normalized units
+            from PIL import Image
+
+            with Image.open(io.BytesIO(row[roles["image"]]["bytes"])) as image:
+                record["label"] = {"value": record.get("label"), "image_size": list(image.size)}
+        for column in source.get("columns", []):
+            record[column] = row[column]
+        if source.get("task_column"):  # per-sample category (a metric may grade categories differently)
+            record["task"] = row[source["task_column"]]
+        records.append(record)
+    return records
+
+
+def _encoded_media(value: Mapping[str, Any], default_suffix: str) -> dict[str, Any]:
+    from PIL import Image
+
+    data = value["bytes"]
+    with Image.open(io.BytesIO(data)) as image:
+        suffix = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}.get(image.format or "", default_suffix)
+    return {"$file": {"suffix": suffix, "b64": base64.b64encode(data).decode()}}
+
+
+def _field(record: Mapping[str, Any], name: str) -> Any:
+    """A record field; dotted names reach into nested objects and lists (``media.0.path``)."""
+    value: Any = record
+    for part in name.split("."):
+        value = value[int(part)] if isinstance(value, list) else value[part]
+    return value
+
+
+def _verified(source: Mapping[str, Any], environment: Environment) -> Path:
+    path = environment.path("data_root") / require(source, "path", "source")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != require(source, "sha256", "source"):
+        raise ConfigError(f"{path} sha256 {digest} does not match the suite definition")
+    return path
+
+
+def _hf_file(source: Mapping[str, Any]) -> Path:
+    """One file of a Hugging Face dataset repository at a pinned revision (``hf_file`` sources)."""
+    from huggingface_hub import hf_hub_download
+
+    return Path(hf_hub_download(require(source, "repo", "source"), require(source, "filename", "source"),
+                                revision=require(source, "revision", "source"), repo_type="dataset"))
+
+
+def _read_records(path: Path) -> Any:
+    """JSON, JSONL (optionally gzip-compressed), or TSV content."""
+    import gzip
+
+    if path.name.endswith(".jsonl.gz"):
+        return [json.loads(line) for line in gzip.decompress(path.read_bytes()).decode().split("\n") if line.strip()]
+    if path.suffix == ".jsonl":
+        return [json.loads(line) for line in path.read_text().split("\n") if line.strip()]
+    if path.suffix == ".tsv":
+        return list(csv.DictReader(io.StringIO(path.read_text()), delimiter="\t"))
+    return json.loads(path.read_text())
+
+
+def _json_manifest_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """Records from a sha256-verified JSON, JSONL, or TSV manifest under data_root, or (``hf_file``) one
+    file of a Hugging Face dataset at a pinned revision.
+
+    ``file_fields`` (dotted names reach nested values) are resolved relative to the manifest
+    directory, so ``*_path`` request fields are inlined (``square_crop`` fields become their centered
+    square once selected); ``explode`` turns each record into one record per listed text field.
+    """
+    path = _hf_file(source) if source.get("kind") == "hf_file" else _verified(source, environment)
+    data = _read_records(path)
+    records = data[source["records"]] if source.get("records") else data
+    id_field = source.get("id_field", "id")
+    records = [{**record, "id": str(record[id_field]) if id_field in record else str(index)}
+               for index, record in enumerate(records)]
+    for field in source.get("file_fields", []):
+        for record in records:
+            record[field] = str(path.parent / _field(record, field))
+    explode = source.get("explode")
+    if explode:
+        records = [{**record, "id": f"{record['id']}:{field}", "text": record[field]}
+                   for record in records for field in explode]
+    extract = source.get("extract")
+    if extract:  # a field rewritten to the first group of a pattern (e.g. the sentence inside a chat prompt)
+        import re
+
+        pattern = re.compile(extract["pattern"], re.DOTALL)
+        records = [{**record, extract["field"]: pattern.search(record[extract["field"]]).group(1)} for record in records]
+    groups = source.get("retrieval_groups")
+    if groups:  # each query, then its candidate documents, as consecutive text samples
+        records = [item for record in records for item in (
+            [{"id": f"{record['id']}:query", "text": record[groups["query"]], "task": "query",
+              "label": list(record[groups["relevant"]])}]
+            + [{"id": f"{record['id']}:doc{index}", "text": text, "task": "document"}
+               for index, text in enumerate(record[groups["documents"]])])]
+    if source.get("label_field"):  # a gold label for absolute-accuracy scoring
+        records = [{**record, "label": _field(record, source["label_field"])} for record in records]
+    if source.get("label_fields"):  # a gold label made of several fields (e.g. a program's tests)
+        records = [{**record, "label": {name: record[name] for name in source["label_fields"]}} for record in records]
+    return records
+
+
+def _square_crop(path: Path, cache: Path) -> Path:
+    """The centered square of an image (cached by content), so models that resize their condition
+    image to a fixed square and models that keep its aspect ratio see the same input."""
+    from PIL import Image
+
+    target = cache / "trtmc-derived" / f"{hashlib.sha256(path.read_bytes()).hexdigest()[:24]}-square.png"
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(path) as image:
+            rgb = image.convert("RGB")
+            side = min(rgb.size)
+            left, top = (rgb.width - side) // 2, (rgb.height - side) // 2
+            rgb.crop((left, top, left + side, top + side)).save(target)
+    return target
+
+
+SELECTION_SEED = 20261003  # the seeded selections of every suite (DESIGN.md 4.4)
+ETTH1_TRAIN_ROWS = 8640  # the standard split's training months: the scaler of the scored MSE
+
+
+def _etth1_window_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """Seeded ETTh1 forecast windows: every ``stride`` hours of the test range, shuffled with ``seed``;
+    ``past_values`` is row-major [time, column] in the raw units the models take. The gold future
+    carries each column's training mean and standard deviation, so the MSE is scored on scaled values
+    (the standard protocol)."""
+    rows = list(csv.DictReader(io.StringIO(_verified(source, environment).read_text())))
+    window = require(source, "window", "source")
+    columns, context = window.get("columns", ["OT"]), int(window.get("context_length", 512))
+    start, end = int(window.get("test_target_start", 11520)), int(window.get("test_end", 14400))
+    prediction = int(window.get("prediction_length", 0))
+    stride = int(window.get("stride", 24))
+    starts = list(range(start - context, end - context - prediction + 1, stride))
+    random.Random(int(source.get("seed", 20260715))).shuffle(starts)
+    if len(rows) < end or not starts:
+        raise ConfigError("ETTh1 data cannot satisfy the configured window")
+    train = [[float(row[column]) for row in rows[:ETTH1_TRAIN_ROWS]] for column in columns]
+    scaler = {"mean": [statistics.fmean(values) for values in train], "std": [statistics.pstdev(values) for values in train]}
+    # Windows overlap within context + horizon hours: the bootstrap resamples moving blocks of that many
+    # consecutive windows (DESIGN.md 4.3), so each record carries its position in the series.
+    records, block = [], math.ceil((context + prediction) / stride)
+    for index, first in enumerate(starts):
+        values = [float(row[column]) for row in rows[first:first + context] for column in columns]
+        record = {"id": f"etth1-{index:04d}", "series": {"position": (first - (start - context)) // stride,
+                                                         "block": block}, "request": {
+            "past_values": values, "observed_mask": [1.0] * len(values), "frequency": int(window.get("frequency", 0))}}
+        if source.get("gold"):  # the observed future the forecast is scored against (row-major [time, column])
+            future = rows[first + context:first + context + prediction]
+            record["label"] = {"values": [float(row[column]) for row in future for column in columns],
+                               "mean": scaler["mean"], "std": scaler["std"]}
+        records.append(record)
+    return records
+
+
+# Generation controls a request may leave at -1 ("model default"): TRTMC then applies the family's
+# default and a Diffusers reference the pipeline's (FLUX.1-schnell: 4 vs 28 steps), so both sides
+# would do different work. A timed request must state them.
+MODEL_DEFAULT_FIELDS = ("num_steps", "num_inference_steps", "num_sampling_steps", "guidance_scale", "cfg_scale",
+                        "num_frames", "video_num_frames")
+
+
+def unstated_defaults(request: Mapping[str, Any]) -> list[str]:
+    """The generation controls ``request`` leaves to each side's default (-1)."""
+    return [field for field in MODEL_DEFAULT_FIELDS if request.get(field) in (-1, -1.0)]
+
+
+def _catalog_testcase_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """The catalog testcase request (``profile`` is a catalog name or a model descriptor file),
+    resolved by trtmc-perf-serve exactly as trtmc-bench does."""
+    repo = environment.path("repo")
+    env = {**os.environ, "HF_HUB_OFFLINE": "1",
+           "PYTHONPATH": f"{repo}/apps/perf_serving:{repo}/apps/benchmark:{repo}/core/builder:{repo}"}
+    with tempfile.TemporaryDirectory() as scratch:
+        output = Path(scratch) / "payload.jsonl"
+        command = [str(environment["serve_python"]), "-m", "trtmc_perf_serving", "payload", "--manifest-root",
+                   str(repo / "families"), "--profile", require(source, "profile", "source"), "--output", str(output)]
+        if source.get("testcase"):
+            command += ["--testcase", source["testcase"]]
+        subprocess.run(command, check=True, cwd=repo, env=env, capture_output=True, text=True)
+        request = json.loads(output.read_text())["payload"]["request"]
+    return [{"id": source.get("testcase") or source["profile"], "request": request}]
+
+
+SCIFACT = ("mteb/scifact", "cf10ab6856b15b0e670ef8ae5dae4e266c12d035")
+RERANK_CANDIDATES = 20
+
+
+def _bm25_top(query: str, documents: Sequence[list[str]], frequencies: Mapping[str, int], average: float,
+              count: int, k1: float = 1.5, b: float = 0.75) -> list[int]:
+    """Okapi BM25 ranking of tokenized ``documents`` for ``query``: the indices of the best ``count``."""
+    import math as _math
+
+    total = len(documents)
+    terms = query.lower().split()
+    scores = []
+    for index, words in enumerate(documents):
+        counts: dict[str, int] = {}
+        for word in words:
+            counts[word] = counts.get(word, 0) + 1
+        score = 0.0
+        for term in terms:
+            if term in counts:
+                idf = _math.log(1 + (total - frequencies[term] + 0.5) / (frequencies[term] + 0.5))
+                tf = counts[term]
+                score += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * len(words) / average))
+        scores.append((-score, index))
+    return [index for _, index in sorted(scores)[:count]]
+
+
+def _scifact_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """SciFact (BEIR, pinned) test queries with their relevance judgments. ``mode: retrieval``: every test
+    query, then every corpus document (title and text), the query's label being its relevant documents'
+    positions among them (smoke mode: one query, its relevant documents, and nine others). ``mode: rerank``:
+    per query its BM25 top-20 documents as one request, the label the relevant ones' positions."""
+    repo, revision = SCIFACT
+    corpus = _read_records(_hf_file({"repo": repo, "filename": "corpus.jsonl", "revision": revision}))
+    queries = {row["_id"]: row["text"] for row in _read_records(_hf_file({"repo": repo, "filename": "queries.jsonl",
+                                                                          "revision": revision}))}
+    qrels: dict[str, list[str]] = {}
+    for row in _read_records(_hf_file({"repo": repo, "filename": "qrels/test.tsv", "revision": revision})):
+        if int(row["score"]) > 0:
+            qrels.setdefault(row["query-id"], []).append(row["corpus-id"])
+    texts = {row["_id"]: f"{row.get('title', '')} {row['text']}".strip() for row in corpus}
+    order = [row["_id"] for row in corpus]
+    if source.get("mode") == "rerank":
+        words = [texts[doc].lower().split() for doc in order]
+        frequencies: dict[str, int] = {}
+        for document in words:
+            for word in set(document):
+                frequencies[word] = frequencies.get(word, 0) + 1
+        average = sum(map(len, words)) / len(words)
+        records = []
+        for query_id, relevant in qrels.items():
+            top = [order[index] for index in _bm25_top(queries[query_id], words, frequencies, average, RERANK_CANDIDATES)]
+            records.append({"id": f"scifact/{query_id}", "query": queries[query_id], "documents": [texts[doc] for doc in top],
+                            "label": [position for position, doc in enumerate(top) if doc in relevant]})
+        return records
+    query_ids = list(qrels)
+    documents = order
+    if environment.values.get("smoke"):
+        query_ids = query_ids[:1]
+        relevant = set(qrels[query_ids[0]])
+        documents = [doc for doc in order if doc in relevant] + [doc for doc in order if doc not in relevant][:9]
+    position = {doc: index for index, doc in enumerate(documents)}
+    return ([{"id": f"scifact/{query_id}", "text": queries[query_id], "task": "query",
+              "label": [position[doc] for doc in qrels[query_id] if doc in position]} for query_id in query_ids]
+            + [{"id": f"scifact-doc/{doc}", "text": texts[doc], "task": "document"} for doc in documents])
+
+
+HUMANEVAL = ("openai/openai_humaneval", "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544")
+MBPP = ("google-research-datasets/mbpp", "4bb6404fdc6cacfda99d4ac4205087b89d32030c")
+# The completions' stop sequences (bigcode-evaluation-harness): HumanEval completes a function body,
+# MBPP writes whole functions after its docstring prompt.
+HUMANEVAL_STOPS = ["\nclass ", "\ndef ", "\n#", "\n@", "\nprint(", "\nif ", "\n```"]
+MBPP_STOPS = ["\nclass ", "\nassert ", '\n"""', "\nprint(", "\nif ", "\n```"]
+
+
+def _code_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
+    """HumanEval (164) and MBPP's full test split (500) at pinned revisions. MBPP's prompt is the description
+    and its first test in a docstring, as bigcode-evaluation-harness writes it for base models (the test
+    names the function); gold is the prompt, the tests, and the stop sequences."""
+    import datasets
+
+    cache = {"cache_dir": str(environment["hf_datasets_cache"])} if environment.values.get("hf_datasets_cache") else {}
+    records = []
+    humaneval = datasets.load_dataset(HUMANEVAL[0], split="test", revision=HUMANEVAL[1], **cache)
+    for row in humaneval:
+        records.append({"id": row["task_id"], "task": "humaneval", "request": {"prompt": row["prompt"]},
+                        "label": {"prompt": row["prompt"], "test_code": f"{row['test']}\n\ncheck({row['entry_point']})",
+                                  "stops": HUMANEVAL_STOPS}})
+    mbpp = datasets.load_dataset(MBPP[0], "full", split="test", revision=MBPP[1], **cache)
+    for row in mbpp:
+        prompt = f'"""\n{row["text"]}\n{row["test_list"][0]}\n"""\n'
+        tests = "\n".join([row.get("test_setup_code") or "", *row["test_list"]])
+        records.append({"id": f"mbpp/{row['task_id']}", "task": "mbpp", "request": {"prompt": prompt},
+                        "label": {"prompt": prompt, "test_code": tests, "stops": MBPP_STOPS}})
+    if environment.values.get("smoke"):  # one problem of each benchmark (the suite's smoke_samples is 2)
+        return [next(record for record in records if record["task"] == task) for task in ("humaneval", "mbpp")]
+    return records
+
+
+def _family_input_records(source: Mapping[str, Any], selection: Mapping[str, Any],
+                          environment: Environment) -> list[dict[str, Any]]:
+    """Inputs a family prepares itself (``family_inputs``: its ``module`` run with ``--count`` and ``--output``
+    in the model's reference environment, ``python``), for example decoded recorded observations."""
+    repo = environment.path("repo")
+    output = Path(environment["hf_datasets_cache"]) / "trtmc-family-inputs" / Path(source["module"]).parent.name
+    count = int(selection.get("count", 1))
+    completed = subprocess.run([str(require(source, "python", "source")), str(repo / source["module"]), "--count",
+                                str(count), "--output", str(output)], capture_output=True, text=True, timeout=3600,
+                               cwd=repo, env={**os.environ, "PYTHONPATH": f"{repo}:{repo}/apps/perf_serving"})
+    if completed.returncode:
+        raise ConfigError(f"{source['module']} failed: {completed.stderr[-600:]}")
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suite:
+    from trtmc_perf_serving.files import inline_files
+
+    source = definition["source"]
+    kind = require(source, "kind", "source")
+    selection = definition["selection"]
+    if environment.values.get("smoke") and kind in ("aiperf_public", "hf_dataset"):  # decode only what smoke sends
+        selection = {"method": "first", "count": int(definition.get("smoke_samples", 1))}
+    if kind == "aiperf_public":
+        records = _aiperf_public_records(source, selection)
+        selection = {"method": "first", "count": len(records)}  # already selected before decoding
+    elif kind == "hf_dataset":
+        records = _hf_dataset_records(source, selection)
+        selection = {"method": "first", "count": len(records)}  # already selected before decoding
+    elif kind == "image_archive":
+        records = _image_archive_records(source, environment)
+    elif kind == "url_jsonl":
+        records = _url_jsonl_records(source, environment)
+    elif kind in ("json_manifest", "hf_file"):
+        records = _json_manifest_records(source, environment)
+    elif kind == "scifact":
+        records = _scifact_records(source, environment)
+    elif kind == "catalog_testcase":
+        records = _catalog_testcase_records(source, environment)
+    elif kind == "etth1_windows":
+        records = _etth1_window_records(source, environment)
+    elif kind == "code_benchmarks":
+        records = _code_records(source, environment)
+    elif kind == "family_inputs":
+        records = _family_input_records(source, {"count": 1} if environment.values.get("smoke") else selection,
+                                        environment)
+    elif kind == "inline":
+        records = [dict(record) for record in require(source, "records", "source")]
+    else:
+        raise ConfigError(f"unknown suite source kind {kind!r}")
+    # base_profile: the profile's catalog testcase request is the base every sample overrides
+    # (for example a generation's size, steps, and seed around a dataset prompt).
+    base = (_catalog_testcase_records({"profile": definition["base_profile"]}, environment)[0]["request"]
+            if definition.get("base_profile") else {})
+    samples = []
+    chosen = select(records, selection)
+    if environment.values.get("smoke"):  # one logical problem (``smoke_samples`` requests, default 1)
+        chosen = chosen[:int(definition.get("smoke_samples", 1))]
+    for record in chosen:
+        for field in source.get("square_crop", []):  # only the selected images
+            record = {**record, field: str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))}
+        request = {**base, **(record.get("request") or {})}
+        request.update(definition.get("request") or {})
+        for source_field, request_field in (definition.get("fields") or {}).items():
+            request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
+        if isinstance(request.get("prompt"), str) and (definition.get("prompt_prefix") or definition.get("prompt_suffix")):
+            request["prompt"] = f"{definition.get('prompt_prefix', '')}{request['prompt']}{definition.get('prompt_suffix', '')}"
+        request = inline_files(request)
+        sample = {"sample_id": record["id"], "task": record.get("task", definition["suite"]),
+                  "request": request, "request_sha": request_sha(request)}
+        if "label" in record:
+            sample["label"] = record["label"]
+        if "cluster" in record:  # the independent unit the bootstrap resamples
+            sample["cluster"] = str(record["cluster"])
+        if "series" in record:  # a time-series window: its position and the moving-block length
+            sample["series"] = dict(record["series"])
+        samples.append(sample)
+    key = sha256_text(canonical({"suite": definition["suite"], "version": definition["version"],
+                                 "samples": [sample["request_sha"] for sample in samples]}))
+    manifest = {"suite": definition["suite"], "version": definition["version"], "key": key,
+                "source": dict(source), "selection": dict(definition["selection"]), "samples": len(samples),
+                **({"base_profile": definition["base_profile"]} if definition.get("base_profile") else {})}
+    return Suite(definition["suite"], key, samples, manifest)

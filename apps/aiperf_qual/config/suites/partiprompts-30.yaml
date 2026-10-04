@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Thirty PartiPrompts covering all twelve categories (prompts of 6-25 words, evenly spaced within each
+# category), around each model's catalog request (size, frames, steps, guidance, seed). Used by the
+# replay_parity check of image generation (its first prompts) and the media L2 sweep.
+suite: partiprompts-30
+version: 1
+base: catalog
+source:
+  kind: json_manifest
+  path: PartiPrompts/PartiPrompts.tsv
+  sha256: fab29e41bb512a169b56acab4cf2a41dcb675e285df2efcde6640c7dd3c440eb
+selection:
+  method: indices
+  indices: [68, 69, 254, 269, 272, 319, 335, 340, 342, 345, 364, 525, 579, 592, 597, 624, 626, 674, 710, 802,
+            837, 851, 958, 1001, 1093, 1341, 1364, 1367, 1457, 1491]
+fields: {Prompt: prompt}

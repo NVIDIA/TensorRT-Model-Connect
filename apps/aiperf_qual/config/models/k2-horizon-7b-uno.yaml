@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A LoRA adapter on IFM/K2-Horizon-7B without tokenizer files: no chat template renders the 5-shot
+# conversation, so MMLU goes through the completions route (lighteval's plain prompt).
+absolute: [{name: mmlu, endpoint: completions}]
+
+reference:
+  requirements: families/k2_horizon_uno/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  trust_remote_code: true  # the checkpoint's own modeling code
+  model: IFM/K2-Horizon-7B  # the adapter's base model (the checkpoint holds the adapter only)
+  revision: 586b03f0fd1fbbf2f13eeafc33749e95ae34dd10

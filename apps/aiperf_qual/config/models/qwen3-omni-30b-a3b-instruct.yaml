@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GSM8K is off for now (config/tasks.yaml).
+absolute: [mmlu]
+
+reference:
+  adapter: families/qwen3_omni/tests/native_reference.py  # the thinker without audio, the fixed system prompt
+  requirements: families/qwen3_omni/requirements.txt  # the family's dependencies, layered on the serving interpreter

@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A speech-conditioned causal LM: the generic speech-seq2seq adapter cannot load it; the family's native
+# pipeline (chat template, greedy transcript) is the reference.
+reference:
+  requirements: families/glmasr/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  adapter: families/glmasr/tests/native_reference.py

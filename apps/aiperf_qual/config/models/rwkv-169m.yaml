@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# MMLU is near chance at this size: LAMBADA last-word prediction discriminates. Its passages need a
+# 256-token bundle (the catalog's is 32), which is built as rwkv-169m-qual.
+absolute: [lambada]

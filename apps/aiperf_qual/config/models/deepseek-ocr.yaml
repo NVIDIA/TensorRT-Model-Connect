@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The family's OCR output contract for the Perf output check.
+performance:
+  l1:
+    output_grader_params: {max_distance: 0.5}
+# An OCR model: OCRBench only.
+absolute: [ocrbench]
+
+reference:
+  adapter: families/deepseek_ocr/tests/native_reference.py  # the checkpoint's own model.infer (no processor)
+  # The official reference runs at bf16 only (the candidate is fp16): Perf against it is perf-inconclusive.
+  timing_precision: bf16
+  requirements: families/deepseek_ocr/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  trust_remote_code: true  # the checkpoint's own modeling code

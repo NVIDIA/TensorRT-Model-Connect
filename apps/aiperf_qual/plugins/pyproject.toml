@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trtmc-aiperf-plugins"
+version = "0.1.0"
+description = "TRTMC plugins for AIPerf: task endpoint, server-time metric, pinned datasets, parity accuracy"
+requires-python = ">=3.11"
+dependencies = ["aiperf==0.13.0"]
+
+[project.entry-points."aiperf.plugins"]
+trtmc = "trtmc_aiperf_plugins:plugins.yaml"
+
+[tool.setuptools]
+packages = ["trtmc_aiperf_plugins"]
+
+[tool.setuptools.package-data]
+trtmc_aiperf_plugins = ["plugins.yaml"]

@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/yolov10/tests/native_reference.py  # the Ultralytics archive (no generic adapter)
+  prepare: families/yolov10/tests/native_prepare.py
+  requirements: families/yolov10/requirements.txt  # the family's dependencies, layered on the serving interpreter

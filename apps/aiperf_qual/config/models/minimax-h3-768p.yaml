@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The native weights (351 GB) exceed the GPU: the native pipeline offloads idle components to host memory,
+# and its Perf is against that offloaded baseline (DESIGN.md Section 9).
+reference:
+  adapter: families/minimax_h3/tests/native_reference.py  # Diffusers' ModularPipeline (t2va), as the family's E2E reference
+  options: {cpu_offload: true}
+  requirements: families/minimax_h3/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+# MiniMax-H3's released weights are CFG-distilled: neither TRTMC nor the Diffusers pipeline takes guidance; 1.0
+# (no guidance) is stated so no request leaves it to a default.
+request: {guidance_scale: 1.0, cfg_scale: 1.0}
