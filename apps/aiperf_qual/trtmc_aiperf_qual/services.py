@@ -375,13 +375,14 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
                         break
                     except BaseException as error:  # noqa: BLE001 - interrupted while waiting: wait on
                         failure = failure or error
-            for copy, future in zip(copies, started):  # all done: every copy that started stops with the rest
-                error = future.exception()
-                if error is None:
-                    stack.push(copy)
-                    urls.append(future.result()["url"])
-                elif not isinstance(error, ServiceError):  # a copy that did not start leaves the others serving
-                    failure = failure or error
+                # All done; registered before the pool shuts down: every copy that started stops with the rest.
+                for copy, future in zip(copies, started):
+                    error = future.exception()
+                    if error is None:
+                        stack.push(copy)
+                        urls.append(future.result()["url"])
+                    elif not isinstance(error, ServiceError):  # a copy that did not start leaves the others serving
+                        failure = failure or error
             if failure is not None:
                 raise failure
         yield {**first, "urls": urls, "replicas": len(urls), "mps": bool(shared)}

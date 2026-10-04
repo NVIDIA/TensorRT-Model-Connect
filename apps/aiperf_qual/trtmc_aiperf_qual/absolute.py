@@ -72,16 +72,25 @@ COMMIT = re.compile(r"[0-9a-f]{40}")
 @functools.lru_cache(maxsize=None)
 def pinned_revision(name: str, revision: str | None) -> str | None:
     """The commit a tokenizer revision resolves to now, so every selection (the plan and both sides' AIPerf runs)
-    loads exactly it; a commit or a local directory as given, and the revision as given when the hub cannot
-    resolve it (the plugin then does not cache that selection)."""
+    loads exactly it: the hub's answer, else (offline, gated) the commit of the cached snapshot the revision
+    resolves to; a commit or a local directory as given; the revision as given when neither resolves it (the
+    plugin then does not cache that selection)."""
     if Path(name).is_dir() or (revision and COMMIT.fullmatch(revision)):
         return revision
     try:
         from huggingface_hub import HfApi
 
         return HfApi().model_info(name, revision=revision or None).sha or revision
-    except Exception:  # noqa: BLE001 - offline, gated, or unknown: left as given
+    except Exception:  # noqa: BLE001 - offline, gated, or unknown: the cached snapshot's commit, else as given
+        pass
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        found = try_to_load_from_cache(name, "tokenizer_config.json", revision=revision or None)
+    except Exception:  # noqa: BLE001
         return revision
+    cached = Path(found).parent.name if isinstance(found, str) and Path(found).parent.parent.name == "snapshots" else ""
+    return cached if COMMIT.fullmatch(cached) else revision
 
 
 def selection_environment(environment: Environment, model: Mapping[str, Any], item: Mapping[str, Any]) -> dict[str, str]:

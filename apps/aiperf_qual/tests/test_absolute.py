@@ -963,6 +963,20 @@ def test_an_interrupt_while_copies_start_still_stops_every_started_copy(tmp_path
     assert len(waits) == 2
     assert sorted(name for kind, name in events if kind == "stop") == ["acc", "acc-replica1", "acc-replica2"]
 
+    class Interrupted(concurrent.futures.ThreadPoolExecutor):
+        def __exit__(self, *exc):
+            super().__exit__(*exc)
+            raise KeyboardInterrupt  # Ctrl-C while the pool shuts down
+
+    events.clear()
+    monkeypatch.setattr(services, "wait", concurrent.futures.wait)
+    monkeypatch.setattr(services, "ThreadPoolExecutor", Interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        with services.serving_replicas(Environment({"ports": {"candidate": 9000}}), {}, "trtmc", tmp_path / "acc",
+                                       count=3):
+            pass
+    assert sorted(name for kind, name in events if kind == "stop") == ["acc", "acc-replica1", "acc-replica2"]
+
 
 
 def test_the_plugin_selections_are_warmed_and_a_failure_is_left_to_the_run(monkeypatch):
@@ -1001,6 +1015,13 @@ def test_the_selection_tokenizer_is_pinned_to_the_commit_its_revision_resolves_t
     assert absolute.pinned_revision("org/model", None) == "b" * 40
     assert absolute.pinned_revision("org/model", "c" * 40) == "c" * 40  # already a commit
     assert absolute.pinned_revision(str(tmp_path), "main") == "main"  # a local directory
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda name, filename, revision=None: None)
     assert absolute.pinned_revision("gated/model", "main") == "main"  # unresolved: left as given (not cached)
     assert asked == [("org/model", None), ("gated/model", "main")]
+    snapshot = tmp_path / "hub" / "snapshots" / ("d" * 40)
+    snapshot.mkdir(parents=True)
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache",
+                        lambda name, filename, revision=None: str(snapshot / filename))
+    absolute.pinned_revision.cache_clear()
+    assert absolute.pinned_revision("gated/model", "main") == "d" * 40  # offline: the cached snapshot's commit
     absolute.pinned_revision.cache_clear()
