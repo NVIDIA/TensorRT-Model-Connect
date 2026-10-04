@@ -883,3 +883,94 @@ def test_the_other_copies_start_together_and_every_started_copy_stops(tmp_path, 
             pass
     assert sorted(name for kind, name in events if kind == "stop") == sorted(name for kind, name in events
                                                                              if kind == "start")
+
+
+def test_a_selection_is_cached_only_under_an_immutable_tokenizer(tmp_path):
+    """The tokenizer's identity is part of the key: a local tokenizer by its contents, a hub one by its cached
+    snapshot commit; one whose identity cannot be told is never cached."""
+    import asyncio
+
+    from trtmc_aiperf_plugins import benchmarks
+
+    calls = []
+
+    class Fake:
+        environ = None
+
+        async def load_problems(self, tasks, n_shots, enable_cot):
+            calls.append(1)
+            return [problem("t")]
+
+    Fake.load_problems = benchmarks._cached(Fake.load_problems)
+    loader = Fake()
+    loader.environ = {"TRTMC_ACCURACY_CACHE": str(tmp_path / "cache"),
+                      "TRTMC_ACCURACY_TOKENIZER": "no-such-org/no-such-tokenizer-2026"}
+    asyncio.run(loader.load_problems(None, 0, False))
+    asyncio.run(loader.load_problems(None, 0, False))
+    assert len(calls) == 2 and not (tmp_path / "cache").exists()  # unknown identity: no cache
+
+    local = tmp_path / "tokenizer"
+    local.mkdir()
+    (local / "tokenizer.json").write_text("v1")
+    loader.environ = {"TRTMC_ACCURACY_CACHE": str(tmp_path / "cache"), "TRTMC_ACCURACY_TOKENIZER": str(local)}
+    asyncio.run(loader.load_problems(None, 0, False))
+    asyncio.run(loader.load_problems(None, 0, False))
+    assert len(calls) == 3  # cached under v1
+    (local / "tokenizer.json").write_text("v2")
+    asyncio.run(loader.load_problems(None, 0, False))
+    assert len(calls) == 4 and len(list((tmp_path / "cache").glob("*.json"))) == 2
+
+
+def test_an_interrupt_while_copies_start_still_stops_every_started_copy(tmp_path, monkeypatch):
+    """Interrupted while waiting on a copy's start, the orchestration waits on, registers every copy that
+    started, and only then raises the interrupt: no copy outlives the call."""
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual import services
+    from trtmc_aiperf_qual.config import Environment
+
+    events = []
+
+    @contextmanager
+    def serving(environment, model, backend, out, *, extra_env=None, port=None, **options):
+        events.append(("start", out.name))
+        try:
+            yield {"url": f"http://{out.name}"}
+        finally:
+            events.append(("stop", out.name))
+
+    class InterruptedOnce:
+        def __init__(self, fn):
+            self.value, self.waits = fn(), 0
+
+        def done(self):
+            return self.waits > 1
+
+        def result(self):
+            self.waits += 1
+            if self.waits == 1:
+                raise KeyboardInterrupt  # Ctrl-C while the start is still under way
+            return self.value
+
+    class Pool:
+        def __init__(self, max_workers):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def submit(self, fn):
+            return InterruptedOnce(fn)
+
+    monkeypatch.setattr(services, "serving", serving)
+    monkeypatch.setattr(services, "ThreadPoolExecutor", Pool)
+    monkeypatch.setattr(services, "replicas_that_fit", lambda before, after, wanted: wanted)
+    monkeypatch.setattr(services, "gpu_memory_mib", lambda: (0, 1))
+    with pytest.raises(KeyboardInterrupt):
+        with services.serving_replicas(Environment({"ports": {"candidate": 9000}}), {}, "trtmc", tmp_path / "acc",
+                                       count=3):
+            pass
+    assert sorted(name for kind, name in events if kind == "stop") == ["acc", "acc-replica1", "acc-replica2"]

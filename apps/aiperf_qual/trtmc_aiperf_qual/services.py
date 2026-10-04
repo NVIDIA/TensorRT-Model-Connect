@@ -370,15 +370,19 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
             with ThreadPoolExecutor(max_workers=len(copies)) as pool:
                 started = [pool.submit(copy.__enter__) for copy in copies]
                 for copy, future in zip(copies, started):  # every copy that started is stopped with the rest
-                    try:
-                        service = future.result()
-                    except ServiceError:  # this copy did not start; the others serve
-                        continue
-                    except BaseException as error:  # noqa: BLE001 - raised once the started copies are registered
-                        failure = failure or error
-                        continue
-                    stack.push(copy)
-                    urls.append(service["url"])
+                    service = None
+                    while service is None:
+                        try:
+                            service = future.result()
+                        except ServiceError:  # this copy did not start; the others serve
+                            break
+                        except BaseException as error:  # noqa: BLE001 - raised once the started copies are registered
+                            failure = failure or error
+                            if future.done():  # the start itself failed; else interrupted while waiting: wait on
+                                break
+                    if service is not None:
+                        stack.push(copy)
+                        urls.append(service["url"])
             if failure is not None:
                 raise failure
         yield {**first, "urls": urls, "replicas": len(urls), "mps": bool(shared)}

@@ -305,10 +305,37 @@ BENCHMARKS: dict[str, type] = {"trtmc_mmlu": PinnedMMLU, "trtmc_gsm8k": PinnedGS
                                "trtmc_bart_denoise": BartDenoise}
 
 
+def _tokenizer_identity(environ: Mapping[str, str]) -> str | None:
+    """The tokenizer the length filter uses, immutably: a local directory's file contents, else the commit of the
+    cached Hugging Face snapshot its revision resolves to; "" without a tokenizer; None when it cannot be told
+    (then nothing is cached)."""
+    import hashlib
+
+    name = environ.get("TRTMC_ACCURACY_TOKENIZER")
+    if not name:
+        return ""
+    from pathlib import Path
+
+    if Path(name).is_dir():
+        digest = hashlib.sha256()
+        for path in sorted(item for item in Path(name).rglob("*") if item.is_file()):
+            digest.update(str(path.relative_to(name)).encode() + b"\0" + path.read_bytes())
+        return digest.hexdigest()
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        found = try_to_load_from_cache(name, "tokenizer_config.json",
+                                       revision=environ.get("TRTMC_ACCURACY_TOKENIZER_REVISION") or None)
+    except Exception:  # noqa: BLE001 - an unknown identity disables the cache
+        return None
+    return Path(found).parent.name if isinstance(found, str) and Path(found).parent.parent.name == "snapshots" else None
+
+
 def _selection_key(loader: Any, tasks: list[str] | None, n_shots: int, enable_cot: bool,
-                   environ: Mapping[str, str]) -> str:
-    """Everything a selection depends on: the benchmark and its arguments, every TRTMC_ACCURACY_* setting, this
-    module's source, and the AIPerf and Transformers versions (prompt format, tokenization)."""
+                   environ: Mapping[str, str]) -> str | None:
+    """Everything a selection depends on: the benchmark and its arguments, every TRTMC_ACCURACY_* setting, the
+    tokenizer's immutable identity, this module's source, and the AIPerf and Transformers versions (prompt format,
+    tokenization); None when the tokenizer's identity is unknown."""
     import hashlib
     import importlib.metadata
     import json
@@ -319,10 +346,14 @@ def _selection_key(loader: Any, tasks: list[str] | None, n_shots: int, enable_co
         except importlib.metadata.PackageNotFoundError:
             return None
 
+    tokenizer = _tokenizer_identity(environ)
+    if tokenizer is None:
+        return None
     settings = {key: value for key, value in environ.items()
                 if key.startswith("TRTMC_ACCURACY_") and key != "TRTMC_ACCURACY_CACHE"}
     text = json.dumps({"benchmark": type(loader).__qualname__, "tasks": tasks, "n_shots": n_shots, "cot": enable_cot,
-                       "settings": settings, "source": hashlib.sha256(open(__file__, "rb").read()).hexdigest(),
+                       "settings": settings, "tokenizer": tokenizer,
+                       "source": hashlib.sha256(open(__file__, "rb").read()).hexdigest(),
                        "aiperf": version("aiperf"), "transformers": version("transformers")}, sort_keys=True)
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -336,17 +367,23 @@ def _cached(load: Callable) -> Callable:
 
     @functools.wraps(load)
     async def cached(self: Any, tasks: list[str] | None, n_shots: int, enable_cot: bool) -> list[BenchmarkProblem]:
+        import tempfile
+
         environ = os.environ if getattr(self, "environ", None) is None else self.environ
         if not environ.get("TRTMC_ACCURACY_CACHE"):
             return await load(self, tasks, n_shots, enable_cot)
-        path = Path(environ["TRTMC_ACCURACY_CACHE"]) / f"{_selection_key(self, tasks, n_shots, enable_cot, environ)}.json"
-        if path.is_file():
-            return [BenchmarkProblem.model_validate(item) for item in json.loads(path.read_text())]
+        directory = Path(environ["TRTMC_ACCURACY_CACHE"])
+        key = _selection_key(self, tasks, n_shots, enable_cot, environ)
+        if key and (directory / f"{key}.json").is_file():
+            return [BenchmarkProblem.model_validate(item) for item in json.loads((directory / f"{key}.json").read_text())]
         chosen = await load(self, tasks, n_shots, enable_cot)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        partial = path.with_name(f"{path.name}.{os.getpid()}.partial")
-        partial.write_text(json.dumps([problem.model_dump(mode="json") for problem in chosen]))
-        os.replace(partial, path)
+        key = _selection_key(self, tasks, n_shots, enable_cot, environ)  # the tokenizer the load resolved
+        if key:
+            directory.mkdir(parents=True, exist_ok=True)
+            handle, partial = tempfile.mkstemp(dir=directory, prefix=f"{key}.", suffix=".partial")
+            with os.fdopen(handle, "w") as stream:
+                stream.write(json.dumps([problem.model_dump(mode="json") for problem in chosen]))
+            os.replace(partial, directory / f"{key}.json")
         return chosen
 
     return cached
