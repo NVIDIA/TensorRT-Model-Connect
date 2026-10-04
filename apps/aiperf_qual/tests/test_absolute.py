@@ -1342,3 +1342,51 @@ def test_queries_and_server_stops_are_short_once_cancelled(tmp_path, monkeypatch
     finally:
         cancel.EVENT.clear()
     assert cancel.output([sys.executable, "-c", "print('ok')"], 10).strip() == "ok"
+
+
+
+def test_an_interrupt_while_waiting_for_the_other_side_cancels_it_before_teardown(tmp_path, monkeypatch):
+    """TRTMC has answered and waits for the native side; Ctrl-C then sets cancellation before TRTMC's copies stop
+    (their short grace), and the native side, still answering, stops promptly too."""
+    import _thread
+    import threading
+    import time
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual import cancel, services
+    from trtmc_aiperf_qual.config import Environment
+
+    stopped = {}
+
+    @contextmanager
+    def serving_replicas(environment, model, backend, out, *, count, mps_env=None, reserve_mib=0, **options):
+        try:
+            yield {"url": backend, "replicas": 1, "mps": True, "footprint_mib": 1}
+        finally:
+            stopped[backend] = cancel.EVENT.is_set()
+
+    @contextmanager
+    def daemon(environment, directory):
+        yield {"CUDA_MPS_PIPE_DIRECTORY": "p"}
+
+    def side(environment, service, model, item, problems, out):
+        for _ in range(100 if service["url"] == "reference" else 1):  # native answers slowly, cancellably
+            cancel.check()
+            time.sleep(0.05)
+        return {"records": {"greedy": {0: {}}}}
+
+    monkeypatch.setattr(services, "mps", daemon)
+    monkeypatch.setattr(absolute, "serving_replicas", serving_replicas)
+    monkeypatch.setattr(absolute, "run_side", side)
+    model = {"operation": "generate", "absolute": [{"suite": "s"}],
+             "reference": {"backend": "reference", "perf_precision": "fp16", "precision": "fp32"}}
+    timer = threading.Timer(1.5, _thread.interrupt_main)  # TRTMC done, native still answering
+    began = time.time()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            absolute.overlapped_acc(Environment({}), model, "python", {"s": [{}]}, tmp_path)
+    finally:
+        timer.cancel()
+    assert time.time() - began < 4.5  # the native side did not run its remaining answers
+    assert stopped == {"trtmc": True, "reference": True} and not cancel.EVENT.is_set()  # set for teardown, then cleared

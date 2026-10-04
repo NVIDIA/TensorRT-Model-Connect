@@ -649,8 +649,13 @@ def overlapped_acc(environment: Environment, model: Mapping[str, Any], python: s
                             cancel.EVENT.set()
                         raise
                     finally:  # TRTMC's copies stay until the native side has answered too, then both sides stop
-                        native_answered()
-                        release.set()
+                        try:
+                            native_answered()
+                        except BaseException:  # an interrupt during this wait: both sides stop, briefly
+                            cancel.EVENT.set()
+                            raise
+                        finally:
+                            release.set()
                     gap = incomplete(model, plans, candidate)
                     if gap:
                         result["candidate_error"] = f"incomplete: {gap}"
