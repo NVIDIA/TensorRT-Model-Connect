@@ -110,10 +110,11 @@ def _final(directory: Path) -> str | None:
     return "error" if (directory / "error.json").is_file() else None
 
 
-def merge_check(assignment: Mapping[str, Any], roots: Sequence[Path]) -> list[str]:
+def merge_check(assignment: Mapping[str, Any], roots: Sequence[Path], mode: str = "formal") -> list[str]:
     """Why the result roots do not merge into the assignment's matrix ([] when they do): each host's root ran
     under this assignment with the same campaign inputs, holds only its own profiles, and every profile has
-    exactly one formal result (a formal report, a failed build, or a harness error) across the roots."""
+    exactly one result of ``mode`` (a formal report, or a smoke one when checking smoke roots; a failed build; a
+    harness error) across the roots."""
     problems: list[str] = []
     expected = digest(assignment)
     owner: dict[str, str] = {}
@@ -134,7 +135,7 @@ def merge_check(assignment: Mapping[str, Any], roots: Sequence[Path]) -> list[st
                 continue
             if directory.name not in assigned:
                 problems.append(f"{root}: {directory.name} is assigned to another host")
-            elif kind not in ("formal", "build-failed", "error"):
+            elif kind not in (mode, "build-failed", "error"):
                 problems.append(f"{root}: {directory.name} is a {kind} result")
             elif directory.name in owner:
                 problems.append(f"{directory.name}: results in {owner[directory.name]} and {root}")
@@ -147,5 +148,5 @@ def merge_check(assignment: Mapping[str, Any], roots: Sequence[Path]) -> list[st
         problems.append("the roots ran with different campaign inputs (harness, code, runtime, or dependencies)")
     for name in sorted(name for names in assignment["hosts"].values() for name in names):
         if name not in owner:
-            problems.append(f"{name}: no formal result")
+            problems.append(f"{name}: no {mode} result")
     return problems

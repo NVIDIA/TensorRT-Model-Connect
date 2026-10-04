@@ -66,12 +66,17 @@ def tree_digest(root: str) -> str:
 
 @functools.lru_cache(maxsize=None)
 def runtime_digest(worker: str, runtime_root: str) -> str:
-    """sha256 of the TRTMC worker binary and the runtime libraries' names, sizes, and modification times."""
-    digest = hashlib.sha256(Path(worker).read_bytes() if Path(worker).is_file() else b"")
-    for path in sorted(Path(runtime_root).rglob("*")) if Path(runtime_root).is_dir() else []:
-        if path.is_file():
-            stat = path.stat()
-            digest.update(f"{path.relative_to(runtime_root)}\0{stat.st_size}\0{stat.st_mtime_ns}\0".encode())
+    """sha256 over the contents of what a run loads from the TRTMC build: the worker binary and the shared libraries
+    under the runtime root (by relative path). Build logs and timestamps are left out, so two hosts that built the
+    same sources agree."""
+    digest = hashlib.sha256()
+    if Path(worker).is_file():
+        digest.update(b"worker\0" + hashlib.sha256(Path(worker).read_bytes()).digest())
+    root = Path(runtime_root)
+    libraries = sorted({path for pattern in ("*.so", "*.so.*") for path in root.rglob(pattern) if path.is_file()}) \
+        if root.is_dir() else []
+    for path in libraries:
+        digest.update(str(path.relative_to(root)).encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
 
 
@@ -97,6 +102,9 @@ def dependencies_digest(python: str) -> str:
                                 timeout=300, check=True).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
+    # A package installed from a local path names that path (a temporary directory for the AIPerf plugins); its
+    # code is in the harness and code digests, so only its name and the local origin count here.
+    frozen = re.sub(r"^(\S+) @ file://\S+$", r"\1 @ local", frozen, flags=re.MULTILINE)
     return hashlib.sha256(frozen.encode()).hexdigest()
 
 

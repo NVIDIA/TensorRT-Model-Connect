@@ -112,6 +112,10 @@ def test_the_roots_merge_only_when_disjoint_complete_formal_and_alike(tmp_path):
     wrong = root(tmp_path, "wrong", assignment, "h2", {"b": "formal", "c": "error", "d": "formal", "a": "error"})
     problems = split.merge_check(assignment, [one, wrong])
     assert problems == [f"{wrong}: a is assigned to another host"]  # an error result is a result too
+    smoke_one = root(tmp_path, "s1", assignment, "h1", {"a": "smoke", "e": "smoke"})
+    smoke_two = root(tmp_path, "s2", assignment, "h2", {"b": "smoke", "c": "build-failed", "d": "smoke"})
+    assert split.merge_check(assignment, [smoke_one, smoke_two], "smoke") == []  # smoke roots, checked as such
+    assert "a: no formal result" in split.merge_check(assignment, [smoke_one, smoke_two])
     stale = root(tmp_path, "stale", {**assignment, "rule": "older"}, "h2", {})
     assert any("not run under this assignment" in problem for problem in split.merge_check(assignment, [one, stale]))
 
@@ -150,3 +154,38 @@ def test_the_report_records_the_gpu_it_ran_on(tmp_path, monkeypatch):
     identity = services.gpu_identity(Environment({"runtime_root": str(tmp_path)}))
     assert identity["gpu"]["uuid"] == "GPU-aaaa" and identity["gpu"]["power.limit"] == "1400.00"
     assert identity["hostname"]
+
+
+def test_two_hosts_that_built_the_same_runtime_agree_on_its_digest(tmp_path):
+    """The runtime digest covers what a run loads (the worker and shared libraries, by content), not build logs or
+    timestamps, so separately built hosts compare equal; a changed library changes it."""
+    import os
+
+    from trtmc_aiperf_qual import campaign
+
+    def tree(name, log, library=b"engine code"):
+        root = tmp_path / name
+        (root / "lib").mkdir(parents=True)
+        (root / "trtmc_benchmark_worker").write_bytes(b"worker")
+        (root / "lib" / "libtrtmc.so.1").write_bytes(library)
+        (root / ".ninja_log").write_text(log)
+        os.utime(root / "lib" / "libtrtmc.so.1", (1, len(name)))
+        return root
+
+    one, two = tree("h1", "built in 108619 ms"), tree("h22", "built in 108529 ms")
+    digest = lambda root: campaign.runtime_digest.__wrapped__(str(root / "trtmc_benchmark_worker"), str(root))  # noqa: E731
+    assert digest(one) == digest(two)
+    assert digest(tree("h333", "x", library=b"other engine code")) != digest(one)
+
+
+def test_a_local_install_path_does_not_split_the_dependency_digest(monkeypatch):
+    import subprocess
+
+    from trtmc_aiperf_qual import campaign
+
+    freezes = iter(["aiperf==0.13.0\ntrtmc-aiperf-plugins @ file:///tmp/trtmc-plugins.jJgIu4\n",
+                    "aiperf==0.13.0\ntrtmc-aiperf-plugins @ file:///tmp/trtmc-plugins.wEcs4l\n",
+                    "aiperf==0.14.0\ntrtmc-aiperf-plugins @ file:///tmp/trtmc-plugins.wEcs4l\n"])
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=next(freezes)))
+    first, second, third = (campaign.dependencies_digest.__wrapped__("python") for _ in range(3))
+    assert first == second != third

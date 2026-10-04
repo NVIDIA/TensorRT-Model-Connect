@@ -270,6 +270,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                                    "is fetched next to it)")
     merge.add_argument("--assignment", type=Path, help="a formal multi-host run: refuse to merge unless the roots "
                                                       "pass merge-check against this assignment")
+    merge.add_argument("--smoke", action="store_true", help="with --assignment: the roots hold smoke results")
     split = commands.add_parser("assign", help="freeze the formal run's profile -> host assignment from a ledger "
                                                "(DESIGN.md Section 9)")
     split.add_argument("--environment", type=Path, required=True)
@@ -280,6 +281,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     merge_check = commands.add_parser("merge-check", help="verify that hosts' result roots form the assignment's "
                                                           "matrix: disjoint, complete, formal, same campaign inputs")
     merge_check.add_argument("--assignment", type=Path, required=True)
+    merge_check.add_argument("--smoke", action="store_true", help="check smoke roots (results of run-all --smoke)")
     merge_check.add_argument("roots", nargs="+", type=Path)
     plan = commands.add_parser("plan", help="print the derived configuration of this machine's models "
                                             "(and its exclusions)")
@@ -326,7 +328,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "merge-check":
             from .split import merge_check
 
-            problems = merge_check(json.loads(arguments.assignment.read_text()), arguments.roots)
+            problems = merge_check(json.loads(arguments.assignment.read_text()), arguments.roots,
+                                   "smoke" if arguments.smoke else "formal")
             print("\n".join(problems) if problems else "the roots form the assignment's matrix")
             return 1 if problems else 0
         if arguments.command == "summary":
@@ -340,7 +343,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if arguments.assignment:
                     from .split import merge_check
 
-                    problems = merge_check(json.loads(arguments.assignment.read_text()), roots)
+                    problems = merge_check(json.loads(arguments.assignment.read_text()), roots,
+                                           "smoke" if arguments.smoke else "formal")
                     if problems:
                         print("\n".join(["trtmc-aiperf-qual: the roots do not merge:", *problems]), file=sys.stderr)
                         return 1
