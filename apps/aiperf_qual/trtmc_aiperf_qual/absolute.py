@@ -527,10 +527,14 @@ def _probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any
 
     call = urllib.request.Request(f"{service['url']}/v1/tasks/{operation}", data=json.dumps({"request": request}).encode(),
                                   headers={"Content-Type": "application/json"})
-    try:
-        cancel.wait_for(lambda: urllib.request.urlopen(call, timeout=3600).read())
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-400:]}") from error
+
+    def send() -> None:  # the whole exchange, an error body included, inside the cancellable wait
+        try:
+            urllib.request.urlopen(call, timeout=3600).read()
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-400:]}") from error
+
+    cancel.wait_for(send)
 
 
 def keeps_artifacts(model: Mapping[str, Any]) -> bool:

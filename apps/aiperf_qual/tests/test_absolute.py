@@ -1209,3 +1209,47 @@ def test_a_blocking_request_is_released_by_cancellation_and_one_copy_is_measured
     with services.serving_replicas(Environment({"ports": {"reference": 8900}}), {}, "reference", tmp_path / "n",
                                    count=1) as service:
         assert service["replicas"] == 1 and service["footprint_mib"] == 8000  # the other side reserves for it
+
+
+
+def test_a_probe_stalled_on_its_error_body_is_released_by_cancellation(monkeypatch):
+    import threading
+    import time
+    import urllib.error
+    import urllib.request
+
+    from trtmc_aiperf_qual import cancel
+
+    class StalledBody:
+        def read(self):
+            time.sleep(30)  # error headers arrived; the body never does
+            return b""
+
+        def close(self):
+            pass
+
+    def urlopen(call, timeout):
+        raise urllib.error.HTTPError(call.full_url, 500, "error", {}, StalledBody())
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    timer = threading.Timer(0.5, cancel.EVENT.set)
+    timer.start()
+    began = time.time()
+    try:
+        with pytest.raises(cancel.Cancelled):
+            absolute._probe({"url": "http://u"}, "generate", {"prompt": "p"})
+    finally:
+        cancel.EVENT.clear()
+    assert time.time() - began < 3
+
+    class Body:
+        def read(self):
+            return b"bad request"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda call, timeout: (_ for _ in ()).throw(urllib.error.HTTPError(call.full_url, 400, "e", {}, Body())))
+    with pytest.raises(RuntimeError, match="probe rejected: bad request"):
+        absolute._probe({"url": "http://u"}, "generate", {"prompt": "p"})
