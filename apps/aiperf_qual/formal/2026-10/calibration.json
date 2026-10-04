@@ -1,0 +1,732 @@
+{
+ "about": "Inputs of the formal-run ledger (DESIGN.md Section 9): the smoke-based prediction per profile, the pilot's measured wall seconds, and the per-Task ratios of pilot time to prediction; ledger.py derives ledger.json.",
+ "blocked": [
+  "dinov3-convnext-tiny-pretrain-lvd1689m",
+  "dinov3-vits16-pretrain-lvd1689m",
+  "s1-mini-fp16"
+ ],
+ "blocked_seconds": 600,
+ "failure_allowance": 0.1,
+ "gate_hours_per_host": 22,
+ "pilot_seconds": {
+  "bark-small": 2459,
+  "bert-base-uncased": 131,
+  "falcon-rw-1b": 414,
+  "flux-schnell": 906,
+  "lfm2-350m-fp16": 544,
+  "minimax-h3-768p": 10901,
+  "phi4-multimodal": 3049,
+  "qwen-image-edit-2511": 4470,
+  "qwen3-vl-2b": 921,
+  "qwen35-4b": 975,
+  "qwen36-27b": 5264,
+  "resnet50-a1-in1k": 190,
+  "sana-wm-bidirectional": 6421,
+  "wan22-ti2v-5b": 5036,
+  "whisper-tiny-fp16": 267
+ },
+ "small_task_ratio": 1.5,
+ "smoke_predictions": {
+  "act-aloha-sim-transfer-cube": {
+   "predicted_s": 57,
+   "task": "robot_control"
+  },
+  "albert-base": {
+   "predicted_s": 79,
+   "task": "encoding"
+  },
+  "all-minilm-l6-v2": {
+   "predicted_s": 112,
+   "task": "embedding"
+  },
+  "all-mpnet-base-v2": {
+   "predicted_s": 109,
+   "task": "encoding"
+  },
+  "bark-large": {
+   "predicted_s": 3485,
+   "task": "audio_generation"
+  },
+  "bark-small": {
+   "predicted_s": 2979,
+   "task": "audio_generation"
+  },
+  "bart-base": {
+   "predicted_s": 843,
+   "task": "text_generation"
+  },
+  "bert-base-uncased": {
+   "predicted_s": 83,
+   "task": "encoding"
+  },
+  "bge-small-en-v1.5": {
+   "predicted_s": 112,
+   "task": "encoding"
+  },
+  "bloom-560m": {
+   "predicted_s": 432,
+   "task": "text_generation"
+  },
+  "camembert-base": {
+   "predicted_s": 73,
+   "task": "encoding"
+  },
+  "canary-1b-v2": {
+   "predicted_s": 976,
+   "task": "transcription"
+  },
+  "chronos-bolt-tiny-official": {
+   "predicted_s": 78,
+   "task": "time_series_forecast"
+  },
+  "codegen-350m": {
+   "predicted_s": 1762,
+   "task": "text_generation"
+  },
+  "convbert-base": {
+   "predicted_s": 104,
+   "task": "encoding"
+  },
+  "convnext-tiny-in12k-ft-in1k": {
+   "predicted_s": 132,
+   "task": "image_to_class_scores"
+  },
+  "crossvit-9-240-in1k": {
+   "predicted_s": 172,
+   "task": "classification"
+  },
+  "deberta-base": {
+   "predicted_s": 107,
+   "task": "encoding"
+  },
+  "deepseek-ocr": {
+   "predicted_s": 683,
+   "task": "vision_language_generation"
+  },
+  "deepseek-v2-lite": {
+   "predicted_s": 1927,
+   "task": "text_generation"
+  },
+  "deepseek-v2-tiny": {
+   "predicted_s": 98,
+   "task": "text_generation"
+  },
+  "densenet121-ra-in1k": {
+   "predicted_s": 184,
+   "task": "image_to_class_scores"
+  },
+  "detr-resnet-50": {
+   "predicted_s": 81,
+   "task": "object_detection"
+  },
+  "distilbert-base-uncased": {
+   "predicted_s": 67,
+   "task": "encoding"
+  },
+  "distilgpt2": {
+   "predicted_s": 486,
+   "task": "text_generation"
+  },
+  "dm-nfnet-f0-dm-in1k": {
+   "predicted_s": 155,
+   "task": "classification"
+  },
+  "dm-nfnet-f3-dm-in1k": {
+   "predicted_s": 295,
+   "task": "classification"
+  },
+  "dpn68b-ra-in1k": {
+   "predicted_s": 165,
+   "task": "classification"
+  },
+  "dpn92-mx-in1k": {
+   "predicted_s": 288,
+   "task": "classification"
+  },
+  "dpr-ctx-encoder": {
+   "predicted_s": 118,
+   "task": "encoding"
+  },
+  "efficientnet-b0-ra-in1k": {
+   "predicted_s": 153,
+   "task": "image_to_class_scores"
+  },
+  "electra-base-discriminator": {
+   "predicted_s": 78,
+   "task": "encoding"
+  },
+  "falcon-rw-1b": {
+   "predicted_s": 4277,
+   "task": "text_generation"
+  },
+  "falcon3-1b": {
+   "predicted_s": 420,
+   "task": "text_generation"
+  },
+  "fast-foundation-stereo": {
+   "predicted_s": 531,
+   "task": "stereo_disparity"
+  },
+  "flux-2-dev": {
+   "predicted_s": 6025,
+   "task": "image_generation"
+  },
+  "flux-2-dev-fp8": {
+   "predicted_s": 4930,
+   "task": "image_generation"
+  },
+  "flux-schnell": {
+   "predicted_s": 4830,
+   "task": "image_generation"
+  },
+  "fnet-base": {
+   "predicted_s": 91,
+   "task": "encoding"
+  },
+  "gemma-2-2b": {
+   "predicted_s": 540,
+   "task": "text_generation"
+  },
+  "gemma-3-12b": {
+   "predicted_s": 3072,
+   "task": "text_generation"
+  },
+  "gemma-3-1b": {
+   "predicted_s": 694,
+   "task": "text_generation"
+  },
+  "gemma-3-270m": {
+   "predicted_s": 525,
+   "task": "text_generation"
+  },
+  "gemma-3-4b": {
+   "predicted_s": 554,
+   "task": "text_generation"
+  },
+  "ghostnet-100-in1k": {
+   "predicted_s": 169,
+   "task": "image_to_class_scores"
+  },
+  "glm-4-9b": {
+   "predicted_s": 748,
+   "task": "text_generation"
+  },
+  "glmasr-nano-fp16": {
+   "predicted_s": 2256,
+   "task": "transcription"
+  },
+  "gpt-neo-125m": {
+   "predicted_s": 316,
+   "task": "text_generation"
+  },
+  "gpt-oss-20b": {
+   "predicted_s": 3285,
+   "task": "text_generation"
+  },
+  "gpt2-125m": {
+   "predicted_s": 273,
+   "task": "text_generation"
+  },
+  "granite-3.1-2b": {
+   "predicted_s": 700,
+   "task": "text_generation"
+  },
+  "hrnet-w18-ms-aug-in1k": {
+   "predicted_s": 248,
+   "task": "classification"
+  },
+  "inception-resnet-v2-tf-in1k": {
+   "predicted_s": 223,
+   "task": "image_to_class_scores"
+  },
+  "inception-v3-tv-in1k": {
+   "predicted_s": 159,
+   "task": "image_to_class_scores"
+  },
+  "inception-v4-tf-in1k": {
+   "predicted_s": 181,
+   "task": "image_to_class_scores"
+  },
+  "internlm2-1.8b": {
+   "predicted_s": 402,
+   "task": "text_generation"
+  },
+  "internvl3-2b": {
+   "predicted_s": 1648,
+   "task": "vision_language_generation"
+  },
+  "internvl3-8b": {
+   "predicted_s": 1237,
+   "task": "vision_language_generation"
+  },
+  "k2-horizon-7b": {
+   "predicted_s": 2912,
+   "task": "text_generation"
+  },
+  "k2-horizon-7b-uno": {
+   "predicted_s": 1724,
+   "task": "text_generation"
+  },
+  "lance-3b-x2t-image": {
+   "predicted_s": 216,
+   "task": "vision_language_generation"
+  },
+  "lfm2-1.2b": {
+   "predicted_s": 650,
+   "task": "text_generation"
+  },
+  "lfm2-2.6b": {
+   "predicted_s": 1828,
+   "task": "text_generation"
+  },
+  "lfm2-350m-bf16-model-card": {
+   "predicted_s": 2329,
+   "task": "text_generation"
+  },
+  "lfm2-350m-fp16": {
+   "predicted_s": 1177,
+   "task": "text_generation"
+  },
+  "lfm2-700m": {
+   "predicted_s": 664,
+   "task": "text_generation"
+  },
+  "locateanything-3b": {
+   "predicted_s": 936,
+   "task": "vision_language_generation"
+  },
+  "magpie-tts-357m": {
+   "predicted_s": 2633,
+   "task": "audio_generation"
+  },
+  "mamba-130m": {
+   "predicted_s": 576,
+   "task": "text_generation"
+  },
+  "marian-en-ru": {
+   "predicted_s": 1148,
+   "task": "text_generation"
+  },
+  "minicpm5-2b": {
+   "predicted_s": 651,
+   "task": "text_generation"
+  },
+  "minimax-h3-768p": {
+   "predicted_s": 10592,
+   "task": "image_generation"
+  },
+  "minitron-4b-depth": {
+   "predicted_s": 677,
+   "task": "text_generation"
+  },
+  "minitron-4b-width": {
+   "predicted_s": 7653,
+   "task": "text_generation"
+  },
+  "mistral-7b": {
+   "predicted_s": 700,
+   "task": "text_generation"
+  },
+  "mixtral-stories-15m": {
+   "predicted_s": 340,
+   "task": "text_generation"
+  },
+  "mnasnet-100-rmsp-in1k": {
+   "predicted_s": 143,
+   "task": "classification"
+  },
+  "mobilenetv2-100-ra-in1k": {
+   "predicted_s": 133,
+   "task": "image_to_class_scores"
+  },
+  "mobilenetv3-large-100-ra-in1k": {
+   "predicted_s": 144,
+   "task": "image_to_class_scores"
+  },
+  "mobilenetv4-conv-large": {
+   "predicted_s": 153,
+   "task": "image_to_class_scores"
+  },
+  "mobilenetv4-conv-medium": {
+   "predicted_s": 144,
+   "task": "image_to_class_scores"
+  },
+  "mobilenetv4-conv-small": {
+   "predicted_s": 137,
+   "task": "image_to_class_scores"
+  },
+  "mobilenetv4-conv-small-050": {
+   "predicted_s": 133,
+   "task": "image_to_class_scores"
+  },
+  "mobilevit-s-cvnets-in1k": {
+   "predicted_s": 172,
+   "task": "classification"
+  },
+  "mobilevit-xxs-cvnets-in1k": {
+   "predicted_s": 173,
+   "task": "classification"
+  },
+  "modernbert-base": {
+   "predicted_s": 86,
+   "task": "encoding"
+  },
+  "moge-2-vitl": {
+   "predicted_s": 102,
+   "task": "monocular_geometry"
+  },
+  "multilingual-e5-small": {
+   "predicted_s": 139,
+   "task": "embedding"
+  },
+  "nemotron-3.5-asr-streaming-0.6b": {
+   "predicted_s": 932,
+   "task": "transcription_streaming"
+  },
+  "nemotron-embed-vl-1b-v2": {
+   "predicted_s": 189,
+   "task": "embedding"
+  },
+  "nemotron-h-nano-9b": {
+   "predicted_s": 1946,
+   "task": "text_generation"
+  },
+  "nemotron-hindi-4b": {
+   "predicted_s": 612,
+   "task": "text_generation"
+  },
+  "nemotron-labs-diffusion-8b": {
+   "predicted_s": 1641,
+   "task": "text_generation"
+  },
+  "nemotron-mini-4b": {
+   "predicted_s": 659,
+   "task": "text_generation"
+  },
+  "nemotron-nano-4b": {
+   "predicted_s": 652,
+   "task": "text_generation"
+  },
+  "nemotron-rerank-vl-1b-v2": {
+   "predicted_s": 144,
+   "task": "reranking"
+  },
+  "nemotron-speech-streaming-en-0.6b": {
+   "predicted_s": 299,
+   "task": "transcription_streaming"
+  },
+  "nllb-200-distilled-600m": {
+   "predicted_s": 1396,
+   "task": "text_generation"
+  },
+  "olmo-1b": {
+   "predicted_s": 663,
+   "task": "text_generation"
+  },
+  "olmo2-1b": {
+   "predicted_s": 379,
+   "task": "text_generation"
+  },
+  "opt-125m": {
+   "predicted_s": 557,
+   "task": "text_generation"
+  },
+  "paraphrase-multilingual-minilm-l12-v2": {
+   "predicted_s": 130,
+   "task": "encoding"
+  },
+  "patchtsmixer-granite-official": {
+   "predicted_s": 62,
+   "task": "time_series_forecast"
+  },
+  "patchtst-granite-official": {
+   "predicted_s": 45,
+   "task": "time_series_forecast"
+  },
+  "personaplex-7b": {
+   "predicted_s": 492,
+   "task": "speech_to_speech"
+  },
+  "phi-moe": {
+   "predicted_s": 1259,
+   "task": "text_generation"
+  },
+  "phi3-mini": {
+   "predicted_s": 589,
+   "task": "text_generation"
+  },
+  "phi4-multimodal": {
+   "predicted_s": 4779,
+   "task": "vision_language_generation"
+  },
+  "pixart-sigma-1024": {
+   "predicted_s": 1872,
+   "task": "image_generation"
+  },
+  "pythia-70m": {
+   "predicted_s": 233,
+   "task": "text_generation"
+  },
+  "qwen-image": {
+   "predicted_s": 3644,
+   "task": "image_generation"
+  },
+  "qwen-image-2512": {
+   "predicted_s": 3393,
+   "task": "image_generation"
+  },
+  "qwen-image-edit-2511": {
+   "predicted_s": 5172,
+   "task": "image_edit"
+  },
+  "qwen25vl-3b": {
+   "predicted_s": 448,
+   "task": "vision_language_generation"
+  },
+  "qwen3-0.6b-fp16": {
+   "predicted_s": 686,
+   "task": "text_generation"
+  },
+  "qwen3-0.6b-fp8": {
+   "predicted_s": 1922,
+   "task": "text_generation"
+  },
+  "qwen3-0.6b-topp": {
+   "predicted_s": 1822,
+   "task": "text_generation"
+  },
+  "qwen3-4b-instruct-2507": {
+   "predicted_s": 861,
+   "task": "text_generation"
+  },
+  "qwen3-moe-30b-a3b": {
+   "predicted_s": 4859,
+   "task": "text_generation"
+  },
+  "qwen3-moe-tiny-random": {
+   "predicted_s": 76,
+   "task": "text_generation"
+  },
+  "qwen3-omni-30b-a3b-instruct": {
+   "predicted_s": 3114,
+   "task": "text_generation"
+  },
+  "qwen3-vl-2b": {
+   "predicted_s": 2797,
+   "task": "vision_language_generation"
+  },
+  "qwen35-0.8b": {
+   "predicted_s": 742,
+   "task": "text_generation"
+  },
+  "qwen35-2b": {
+   "predicted_s": 813,
+   "task": "text_generation"
+  },
+  "qwen35-4b": {
+   "predicted_s": 1932,
+   "task": "text_generation"
+  },
+  "qwen35-9b": {
+   "predicted_s": 2335,
+   "task": "text_generation"
+  },
+  "qwen36-27b": {
+   "predicted_s": 7061,
+   "task": "text_generation"
+  },
+  "qwen38-27b": {
+   "predicted_s": 7040,
+   "task": "text_generation"
+  },
+  "regnety-040-ra3-in1k": {
+   "predicted_s": 163,
+   "task": "image_to_class_scores"
+  },
+  "repvgg-a2-rvgg-in1k": {
+   "predicted_s": 130,
+   "task": "classification"
+  },
+  "res2net50-26w-4s-in1k": {
+   "predicted_s": 153,
+   "task": "classification"
+  },
+  "res2net50d-in1k": {
+   "predicted_s": 152,
+   "task": "classification"
+  },
+  "res2next50-in1k": {
+   "predicted_s": 148,
+   "task": "classification"
+  },
+  "resnest50d-in1k": {
+   "predicted_s": 161,
+   "task": "image_to_class_scores"
+  },
+  "resnet50-a1-in1k": {
+   "predicted_s": 132,
+   "task": "image_to_class_scores"
+  },
+  "riva-translate-4b": {
+   "predicted_s": 2469,
+   "task": "text_generation"
+  },
+  "roberta-base": {
+   "predicted_s": 80,
+   "task": "encoding"
+  },
+  "roberta-large": {
+   "predicted_s": 97,
+   "task": "encoding"
+  },
+  "rwkv-169m": {
+   "predicted_s": 450,
+   "task": "text_generation"
+  },
+  "sam-vit-base": {
+   "predicted_s": 2079,
+   "task": "prompted_segmentation"
+  },
+  "sam3": {
+   "predicted_s": 552,
+   "task": "text_prompted_segmentation"
+  },
+  "sana-wm-bidirectional": {
+   "predicted_s": 6513,
+   "task": "world_model_generation"
+  },
+  "segformer-b0-ade": {
+   "predicted_s": 111,
+   "task": "segmentation"
+  },
+  "senet154-gluon-in1k": {
+   "predicted_s": 503,
+   "task": "classification"
+  },
+  "seresnet50-a1-in1k": {
+   "predicted_s": 145,
+   "task": "classification"
+  },
+  "stablelm2-1.6b": {
+   "predicted_s": 1196,
+   "task": "text_generation"
+  },
+  "starcoder2-3b": {
+   "predicted_s": 4112,
+   "task": "text_generation"
+  },
+  "swin-tiny-patch4-window7-224-ms-in1k": {
+   "predicted_s": 173,
+   "task": "image_to_class_scores"
+  },
+  "t5-small": {
+   "predicted_s": 258,
+   "task": "text_generation"
+  },
+  "timesfm-2.0-500m-official": {
+   "predicted_s": 139,
+   "task": "time_series_forecast"
+  },
+  "timm-vit-base-p16-224-augreg-in21k-ft-in1k": {
+   "predicted_s": 150,
+   "task": "image_to_class_scores"
+  },
+  "tinyllama-1.1b": {
+   "predicted_s": 674,
+   "task": "text_generation"
+  },
+  "vgg16-tv-in1k": {
+   "predicted_s": 115,
+   "task": "classification"
+  },
+  "wan21-t2v-1.3b": {
+   "predicted_s": 928,
+   "task": "image_generation"
+  },
+  "wan22-ti2v-5b": {
+   "predicted_s": 4957,
+   "task": "image_generation"
+  },
+  "whisper-large-v3-turbo": {
+   "predicted_s": 176,
+   "task": "transcription"
+  },
+  "whisper-small-fp16": {
+   "predicted_s": 207,
+   "task": "transcription"
+  },
+  "whisper-tiny-fp16": {
+   "predicted_s": 169,
+   "task": "transcription"
+  },
+  "xception41-tf-in1k": {
+   "predicted_s": 148,
+   "task": "classification"
+  },
+  "xcit-nano-12-p16-224-fb-in1k": {
+   "predicted_s": 200,
+   "task": "image_to_class_scores"
+  },
+  "xcit-tiny-12-p16-224-fb-in1k": {
+   "predicted_s": 204,
+   "task": "image_to_class_scores"
+  },
+  "xglm-564m": {
+   "predicted_s": 446,
+   "task": "text_generation"
+  },
+  "xlm-roberta-base": {
+   "predicted_s": 104,
+   "task": "encoding"
+  },
+  "xlnet-base": {
+   "predicted_s": 99,
+   "task": "encoding"
+  },
+  "yolo11n": {
+   "predicted_s": 92,
+   "task": "object_detection"
+  },
+  "yolov10n": {
+   "predicted_s": 66,
+   "task": "object_detection"
+  },
+  "yolov10s": {
+   "predicted_s": 58,
+   "task": "object_detection"
+  },
+  "yolov10x": {
+   "predicted_s": 57,
+   "task": "object_detection"
+  },
+  "yolov5n": {
+   "predicted_s": 87,
+   "task": "object_detection"
+  },
+  "yolov8n": {
+   "predicted_s": 73,
+   "task": "object_detection"
+  },
+  "z-image-turbo": {
+   "predicted_s": 3244,
+   "task": "image_generation"
+  }
+ },
+ "still_image_ratio": 0.5,
+ "task_ratios": {
+  "audio_generation": 0.83,
+  "image_edit": 1.0,
+  "text_generation": 0.5,
+  "vision_language_generation": 0.4,
+  "world_model_generation": 1.0
+ },
+ "video_markers": [
+  "wan2",
+  "minimax",
+  "sana-wm",
+  "ltx",
+  "cosmos",
+  "hunyuan",
+  "video"
+ ]
+}
