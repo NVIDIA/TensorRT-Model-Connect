@@ -946,8 +946,10 @@ def test_an_interrupt_while_copies_start_still_stops_every_started_copy(tmp_path
 
     waits = []
 
+    from trtmc_aiperf_qual import cancel
+
     def interrupted_once(futures):
-        waits.append(1)
+        waits.append(cancel.EVENT.is_set())
         if len(waits) == 1:
             raise KeyboardInterrupt  # Ctrl-C while the starts are under way
         return concurrent.futures.wait(futures)
@@ -960,7 +962,7 @@ def test_an_interrupt_while_copies_start_still_stops_every_started_copy(tmp_path
         with services.serving_replicas(Environment({"ports": {"candidate": 9000}}), {}, "trtmc", tmp_path / "acc",
                                        count=3):
             pass
-    assert len(waits) == 2
+    assert waits == [False, True] and not cancel.EVENT.is_set()  # the starts were told to give up; flag restored
     assert sorted(name for kind, name in events if kind == "stop") == ["acc", "acc-replica1", "acc-replica2"]
 
     class Interrupted(concurrent.futures.ThreadPoolExecutor):
@@ -1175,3 +1177,35 @@ def test_a_cancelled_run_stops_its_aiperf_process_promptly(tmp_path):
     finally:
         cancel.EVENT.clear()
     assert time.time() - began < 5
+
+
+
+def test_a_blocking_request_is_released_by_cancellation_and_one_copy_is_measured(tmp_path, monkeypatch):
+    import threading
+    import time
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual import cancel, services
+    from trtmc_aiperf_qual.config import Environment
+
+    timer = threading.Timer(0.5, cancel.EVENT.set)
+    timer.start()
+    began = time.time()
+    try:
+        with pytest.raises(cancel.Cancelled):
+            cancel.wait_for(lambda: time.sleep(30))  # a probe whose server never answers
+    finally:
+        cancel.EVENT.clear()
+    assert time.time() - began < 3
+    assert cancel.wait_for(lambda: 42) == 42
+
+    @contextmanager
+    def serving(environment, model, backend, out, *, extra_env=None, port=None, **options):
+        yield {"url": "u"}
+
+    memory = iter([(1000, 250_000), (9000, 250_000)])
+    monkeypatch.setattr(services, "serving", serving)
+    monkeypatch.setattr(services, "gpu_memory_mib", lambda: next(memory))
+    with services.serving_replicas(Environment({"ports": {"reference": 8900}}), {}, "reference", tmp_path / "n",
+                                   count=1) as service:
+        assert service["replicas"] == 1 and service["footprint_mib"] == 8000  # the other side reserves for it

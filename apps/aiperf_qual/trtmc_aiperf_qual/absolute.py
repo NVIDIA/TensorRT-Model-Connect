@@ -528,7 +528,7 @@ def _probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any
     call = urllib.request.Request(f"{service['url']}/v1/tasks/{operation}", data=json.dumps({"request": request}).encode(),
                                   headers={"Content-Type": "application/json"})
     try:
-        urllib.request.urlopen(call, timeout=3600).read()
+        cancel.wait_for(lambda: urllib.request.urlopen(call, timeout=3600).read())
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-400:]}") from error
 
@@ -611,18 +611,19 @@ def overlapped_acc(environment: Environment, model: Mapping[str, Any], python: s
     with mps(environment, out / "acc-mps") as shared:
         pool = ThreadPoolExecutor(max_workers=1)
         try:
-            native = pool.submit(run_native, environment, model, python, plans, out, probe_request, mps_env=shared,
-                                 precisions=timing_precisions(model["reference"])[:1], started=up, go=go)
+            # The native side's servers and runs in a directory of the overlap's own: a fallback run keeps them.
+            native = pool.submit(run_native, environment, model, python, plans, out / "acc-overlap", probe_request,
+                                 mps_env=shared, precisions=timing_precisions(model["reference"])[:1], started=up, go=go)
             while not ready.wait(1) and not native.done():
                 pass
             reserve = int((REPLICA_GROWTH - 1) * native_copies.get("footprint", 0) * native_copies.get("replicas", 0))
             try:
-                with serving_replicas(environment, dict(model), "trtmc", out / "candidate-acc",
+                with serving_replicas(environment, dict(model), "trtmc", out / "acc-overlap" / "candidate-acc",
                                       count=int(environment.values.get("candidate_replicas") or 1),
                                       keep_artifacts=keeps_artifacts(model), mps_env=shared,
                                       reserve_mib=reserve) as service:
                     go.set()
-                    candidate = run_candidate(environment, service, model, plans, out)
+                    candidate = run_candidate(environment, service, model, plans, out / "acc-overlap")
                     gap = incomplete(model, plans, candidate)
                     if gap:
                         result["candidate_error"] = f"incomplete: {gap}"

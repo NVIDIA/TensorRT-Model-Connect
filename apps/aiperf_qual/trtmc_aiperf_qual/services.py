@@ -387,7 +387,7 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
     caller already runs (both sides' copies at once), instead of a daemon of their own; ``reserve_mib``: memory
     held back for the other side's growth while it runs."""
     count = min(count, MAX_COPIES)
-    before = gpu_memory_mib() if count > 1 else None
+    before = gpu_memory_mib()  # one copy's footprint, also when it is the only one (the other side reserves for it)
     with ExitStack() as stack:
         if mps_env is not None:
             shared = dict(mps_env)
@@ -404,12 +404,18 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
             failure: BaseException | None = None
             with ThreadPoolExecutor(max_workers=len(copies)) as pool:
                 started = [pool.submit(copy.__enter__) for copy in copies]
+                cancelled_here = False
                 while True:  # every start finishes before any outcome is read; an interrupt is raised afterwards
                     try:
                         wait(started)
                         break
                     except BaseException as error:  # noqa: BLE001 - interrupted while waiting: wait on
                         failure = failure or error
+                        if not cancel.EVENT.is_set():  # the starts still under way give up instead of finishing
+                            cancel.EVENT.set()
+                            cancelled_here = True
+                if cancelled_here:
+                    cancel.EVENT.clear()
                 # All done; registered before the pool shuts down: every copy that started stops with the rest.
                 for copy, future in zip(copies, started):
                     error = future.exception()
