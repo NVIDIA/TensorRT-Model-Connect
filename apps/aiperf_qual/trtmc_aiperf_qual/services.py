@@ -13,6 +13,7 @@ import socket
 import subprocess
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -351,21 +352,35 @@ def mps(environment: Environment, directory: Path) -> Iterator[dict[str, str]]:
 def serving_replicas(environment: Environment, model: dict[str, Any], backend: str, out: Path, *, count: int,
                      **options: Any) -> Iterator[dict[str, Any]]:
     """Up to ``count`` copies of one server on the GPU, as many as its free memory holds (the first copy
-    measures what one needs); yields the first copy's service with ``urls`` of all and ``replicas``. Each
-    copy still serves one request at a time; clients spread their requests over ``urls``."""
+    measures what one needs; the others then start together); yields the first copy's service with ``urls`` of
+    all and ``replicas``. Each copy still serves one request at a time; clients spread their requests over
+    ``urls``."""
     base = int(environment["ports"]["candidate" if backend == "trtmc" else "reference"])
     before = gpu_memory_mib() if count > 1 else None
     with ExitStack() as stack:
         shared = stack.enter_context(mps(environment, out.parent / f"{out.name}-mps")) if count > 1 else {}
         first = stack.enter_context(serving(environment, model, backend, out, extra_env=shared, **options))
         urls = [first["url"]]
-        for index in range(1, replicas_that_fit(before, gpu_memory_mib() if before else None, count)):
-            try:
-                extra = stack.enter_context(serving(environment, model, backend, out.parent / f"{out.name}-replica{index}",
-                                                    port=base + REPLICA_PORT_OFFSET + index, extra_env=shared, **options))
-            except ServiceError:  # the copies started so far serve
-                break
-            urls.append(extra["url"])
+        # The other copies start together (sized above for their peak); each one that starts serves.
+        copies = [serving(environment, model, backend, out.parent / f"{out.name}-replica{index}",
+                          port=base + REPLICA_PORT_OFFSET + index, extra_env=shared, **options)
+                  for index in range(1, replicas_that_fit(before, gpu_memory_mib() if before else None, count))]
+        if copies:
+            failure: BaseException | None = None
+            with ThreadPoolExecutor(max_workers=len(copies)) as pool:
+                started = [pool.submit(copy.__enter__) for copy in copies]
+                for copy, future in zip(copies, started):  # every copy that started is stopped with the rest
+                    try:
+                        service = future.result()
+                    except ServiceError:  # this copy did not start; the others serve
+                        continue
+                    except BaseException as error:  # noqa: BLE001 - raised once the started copies are registered
+                        failure = failure or error
+                        continue
+                    stack.push(copy)
+                    urls.append(service["url"])
+            if failure is not None:
+                raise failure
         yield {**first, "urls": urls, "replicas": len(urls), "mps": bool(shared)}
 
 

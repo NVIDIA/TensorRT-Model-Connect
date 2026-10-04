@@ -68,6 +68,8 @@ def tokenizer_source(model: Mapping[str, Any]) -> tuple[str, str | None]:
 def selection_environment(environment: Environment, model: Mapping[str, Any], item: Mapping[str, Any]) -> dict[str, str]:
     """TRTMC_ACCURACY_* settings of the plugin's problem selection (identical for both sides)."""
     environ = {"HF_DATASETS_CACHE": str(environment["hf_datasets_cache"]),
+               # One selection per settings: the plan's, read back by both sides' AIPerf runs.
+               "TRTMC_ACCURACY_CACHE": str(Path(environment["hf_datasets_cache"]) / "trtmc-accuracy-selections"),
                "TRTMC_ACCURACY_TOKEN_LIMIT": str(model["candidate"]["max_sequence_length"]),
                # The chat route counts the prompt as rendered (else a 128-token allowance when the tokenizer has
                # no template); plain completions add at most a BOS token.

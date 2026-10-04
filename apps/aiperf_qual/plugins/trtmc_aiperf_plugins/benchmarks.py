@@ -17,6 +17,9 @@ environment because AIPerf does not forward benchmark options:
                                   TRTMC_ACCURACY_TOKENIZER_REVISION; TRTMC_ACCURACY_TRUST_REMOTE_CODE=1)
   TRTMC_ACCURACY_CHAT=1           count the prompt as the chat template renders it (the chat route)
   TRTMC_ACCURACY_TEMPLATE_MARGIN  tokens reserved around the prompt when it is not rendered (default 128)
+  TRTMC_ACCURACY_CACHE            a directory for selections: the first load under the same settings (the
+                                  harness's plan) writes the chosen problems, later ones (each side's AIPerf run)
+                                  read the same file instead of loading and tokenizing the dataset again
   HF_DATASETS_CACHE               the datasets cache (shared by the harness and AIPerf's processes)
 """
 
@@ -300,6 +303,57 @@ class FirstWordGrader(BaseGrader):
 BENCHMARKS: dict[str, type] = {"trtmc_mmlu": PinnedMMLU, "trtmc_gsm8k": PinnedGSM8K, "trtmc_math500": PinnedMath500,
                                "trtmc_lambada": Lambada, "trtmc_tinystories": TinyStories,
                                "trtmc_bart_denoise": BartDenoise}
+
+
+def _selection_key(loader: Any, tasks: list[str] | None, n_shots: int, enable_cot: bool,
+                   environ: Mapping[str, str]) -> str:
+    """Everything a selection depends on: the benchmark and its arguments, every TRTMC_ACCURACY_* setting, this
+    module's source, and the AIPerf and Transformers versions (prompt format, tokenization)."""
+    import hashlib
+    import importlib.metadata
+    import json
+
+    def version(package: str) -> str | None:
+        try:
+            return importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            return None
+
+    settings = {key: value for key, value in environ.items()
+                if key.startswith("TRTMC_ACCURACY_") and key != "TRTMC_ACCURACY_CACHE"}
+    text = json.dumps({"benchmark": type(loader).__qualname__, "tasks": tasks, "n_shots": n_shots, "cot": enable_cot,
+                       "settings": settings, "source": hashlib.sha256(open(__file__, "rb").read()).hexdigest(),
+                       "aiperf": version("aiperf"), "transformers": version("transformers")}, sort_keys=True)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _cached(load: Callable) -> Callable:
+    """``load_problems`` through TRTMC_ACCURACY_CACHE (when set): one selection per settings, shared by every
+    process that loads it, written atomically."""
+    import functools
+    import json
+    from pathlib import Path
+
+    @functools.wraps(load)
+    async def cached(self: Any, tasks: list[str] | None, n_shots: int, enable_cot: bool) -> list[BenchmarkProblem]:
+        environ = os.environ if getattr(self, "environ", None) is None else self.environ
+        if not environ.get("TRTMC_ACCURACY_CACHE"):
+            return await load(self, tasks, n_shots, enable_cot)
+        path = Path(environ["TRTMC_ACCURACY_CACHE"]) / f"{_selection_key(self, tasks, n_shots, enable_cot, environ)}.json"
+        if path.is_file():
+            return [BenchmarkProblem.model_validate(item) for item in json.loads(path.read_text())]
+        chosen = await load(self, tasks, n_shots, enable_cot)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(f"{path.name}.{os.getpid()}.partial")
+        partial.write_text(json.dumps([problem.model_dump(mode="json") for problem in chosen]))
+        os.replace(partial, path)
+        return chosen
+
+    return cached
+
+
+for _benchmark in BENCHMARKS.values():
+    _benchmark.load_problems = _cached(_benchmark.load_problems)
 
 
 def problems(benchmark: str, tasks: list[str] | None, n_shots: int, environ: Mapping[str, str]) -> list[Any]:

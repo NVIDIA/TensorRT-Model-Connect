@@ -454,6 +454,11 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   subject over 20 subjects, the native chat rendering): Qwen3.5-0.8B 5.0 -> 53.3 (5 -> 57 parsed), Qwen3-0.6B
   6.7 -> 48.3, MiniCPM5-2B 11.7 -> 68.3, and the base Falcon3-1B 53.3 -> 51.7 (60 parsed either way). Five-shot
   prompts, which make chat models answer with a letter too, do not fit the 256-token bundles (Section 2).
+- **Fixed costs per profile** (the pilot's lfm2-350m spent about 660 of 870 s outside its Acc requests): the Acc
+  problem selection (MMLU: loading 57 subjects and rendering every prompt for the length filter, about 48 s) runs
+  once per settings and is read back by both sides' AIPerf runs (`TRTMC_ACCURACY_CACHE`, keyed by every
+  selection setting, the plugin source, and the AIPerf and Transformers versions), so both sides read the same
+  file; and after the first copy has measured its footprint the other copies start together instead of one by one.
 - **Retries and deadlines**: a failed GPU phase runs once more (not in smoke mode); every AIPerf run (Acc, Perf,
   generation for the media checks, L2) takes the ledger's per-profile deadline from the environment's
   `deadlines` map.

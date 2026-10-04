@@ -805,3 +805,81 @@ def test_only_the_runs_own_mps_processes_are_signalled(tmp_path, monkeypatch):
     services._mps_stop({"CUDA_MPS_PIPE_DIRECTORY": str(tmp_path / "pipe")}, tmp_path)  # pid 999 is not an MPS program
     assert killed == []
     assert not services._ours(1, str(tmp_path / "pipe"))  # init: not an MPS program of this run
+
+
+def test_a_selection_is_loaded_once_per_settings_and_shared(tmp_path):
+    """The plan's selection is written once and read back by later loads under the same settings (each side's
+    AIPerf run); any other setting is another selection; without TRTMC_ACCURACY_CACHE nothing is cached."""
+    import asyncio
+
+    from trtmc_aiperf_plugins import benchmarks
+
+    calls = []
+
+    class Fake:
+        environ = None
+
+        async def load_problems(self, tasks, n_shots, enable_cot):
+            calls.append(dict(self.environ))
+            return [problem("t", prompt=f"q{len(calls)}")]
+
+    Fake.load_problems = benchmarks._cached(Fake.load_problems)
+    loader = Fake()
+    loader.environ = {"TRTMC_ACCURACY_CACHE": str(tmp_path), "TRTMC_ACCURACY_PER_TASK": "40"}
+    first = asyncio.run(loader.load_problems(None, 0, False))
+    again = asyncio.run(loader.load_problems(None, 0, False))
+    assert len(calls) == 1 and [p.prompt for p in again] == [p.prompt for p in first] == ["q1"]
+    loader.environ = {**loader.environ, "TRTMC_ACCURACY_PER_TASK": "20"}
+    assert asyncio.run(loader.load_problems(None, 0, False))[0].prompt == "q2" and len(calls) == 2
+    loader.environ = {"TRTMC_ACCURACY_PER_TASK": "40"}
+    asyncio.run(loader.load_problems(None, 0, False))
+    assert len(calls) == 3 and not list(tmp_path.glob("*.partial"))
+    assert all(benchmarks.BENCHMARKS[name].load_problems.__wrapped__ for name in ("trtmc_mmlu", "trtmc_lambada"))
+
+
+def test_the_other_copies_start_together_and_every_started_copy_stops(tmp_path, monkeypatch):
+    import threading
+    import time
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual import services
+    from trtmc_aiperf_qual.config import Environment
+
+    events, lock = [], threading.Lock()
+
+    def fake(fail=None):
+        @contextmanager
+        def serving(environment, model, backend, out, *, extra_env=None, port=None, **options):
+            time.sleep(0.3)  # a copy loading
+            if fail and out.name.endswith(fail[0]):
+                raise fail[1]
+            with lock:
+                events.append(("start", out.name))
+            try:  # as services.serving: the server stops whatever ends its use
+                yield {"url": f"http://{out.name}"}
+            finally:
+                with lock:
+                    events.append(("stop", out.name))
+        return serving
+
+    environment = Environment({"ports": {"candidate": 9000, "reference": 9100}})
+    monkeypatch.setattr(services, "replicas_that_fit", lambda before, after, wanted: wanted)
+    monkeypatch.setattr(services, "gpu_memory_mib", lambda: (0, 1))
+    monkeypatch.setattr(services, "serving", fake())
+    began = time.time()
+    with services.serving_replicas(environment, {}, "trtmc", tmp_path / "acc", count=4) as service:
+        assert service["replicas"] == 4
+    assert time.time() - began < 1.0  # 0.3 s for the first, 0.3 s for the other three together
+    assert sum(event[0] == "stop" for event in events) == 4
+
+    events.clear()
+    monkeypatch.setattr(services, "serving", fake(("replica2", services.ServiceError("no memory"))))
+    with services.serving_replicas(environment, {}, "trtmc", tmp_path / "acc", count=4) as service:
+        assert service["replicas"] == 3
+    events.clear()
+    monkeypatch.setattr(services, "serving", fake(("replica2", OSError("disk"))))
+    with pytest.raises(OSError):
+        with services.serving_replicas(environment, {}, "trtmc", tmp_path / "acc", count=4):
+            pass
+    assert sorted(name for kind, name in events if kind == "stop") == sorted(name for kind, name in events
+                                                                             if kind == "start")
