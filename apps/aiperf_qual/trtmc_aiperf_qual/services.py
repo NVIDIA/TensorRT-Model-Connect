@@ -13,7 +13,7 @@ import socket
 import subprocess
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -369,20 +369,19 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
             failure: BaseException | None = None
             with ThreadPoolExecutor(max_workers=len(copies)) as pool:
                 started = [pool.submit(copy.__enter__) for copy in copies]
-                for copy, future in zip(copies, started):  # every copy that started is stopped with the rest
-                    service = None
-                    while service is None:
-                        try:
-                            service = future.result()
-                        except ServiceError:  # this copy did not start; the others serve
-                            break
-                        except BaseException as error:  # noqa: BLE001 - raised once the started copies are registered
-                            failure = failure or error
-                            if future.done():  # the start itself failed; else interrupted while waiting: wait on
-                                break
-                    if service is not None:
-                        stack.push(copy)
-                        urls.append(service["url"])
+                while True:  # every start finishes before any outcome is read; an interrupt is raised afterwards
+                    try:
+                        wait(started)
+                        break
+                    except BaseException as error:  # noqa: BLE001 - interrupted while waiting: wait on
+                        failure = failure or error
+            for copy, future in zip(copies, started):  # all done: every copy that started stops with the rest
+                error = future.exception()
+                if error is None:
+                    stack.push(copy)
+                    urls.append(future.result()["url"])
+                elif not isinstance(error, ServiceError):  # a copy that did not start leaves the others serving
+                    failure = failure or error
             if failure is not None:
                 raise failure
         yield {**first, "urls": urls, "replicas": len(urls), "mps": bool(shared)}

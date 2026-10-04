@@ -907,7 +907,11 @@ def test_a_selection_is_cached_only_under_an_immutable_tokenizer(tmp_path):
                       "TRTMC_ACCURACY_TOKENIZER": "no-such-org/no-such-tokenizer-2026"}
     asyncio.run(loader.load_problems(None, 0, False))
     asyncio.run(loader.load_problems(None, 0, False))
-    assert len(calls) == 2 and not (tmp_path / "cache").exists()  # unknown identity: no cache
+    assert len(calls) == 2 and not (tmp_path / "cache").exists()  # a mutable revision online: no cache
+    loader.environ = {**loader.environ, "TRTMC_ACCURACY_TOKENIZER_REVISION": "a" * 40}
+    asyncio.run(loader.load_problems(None, 0, False))
+    asyncio.run(loader.load_problems(None, 0, False))
+    assert len(calls) == 3  # a pinned commit: cached
 
     local = tmp_path / "tokenizer"
     local.mkdir()
@@ -915,15 +919,16 @@ def test_a_selection_is_cached_only_under_an_immutable_tokenizer(tmp_path):
     loader.environ = {"TRTMC_ACCURACY_CACHE": str(tmp_path / "cache"), "TRTMC_ACCURACY_TOKENIZER": str(local)}
     asyncio.run(loader.load_problems(None, 0, False))
     asyncio.run(loader.load_problems(None, 0, False))
-    assert len(calls) == 3  # cached under v1
+    assert len(calls) == 4  # cached under v1
     (local / "tokenizer.json").write_text("v2")
     asyncio.run(loader.load_problems(None, 0, False))
-    assert len(calls) == 4 and len(list((tmp_path / "cache").glob("*.json"))) == 2
+    assert len(calls) == 5 and len(list((tmp_path / "cache").glob("*.json"))) == 3  # pinned, v1, v2
 
 
 def test_an_interrupt_while_copies_start_still_stops_every_started_copy(tmp_path, monkeypatch):
-    """Interrupted while waiting on a copy's start, the orchestration waits on, registers every copy that
-    started, and only then raises the interrupt: no copy outlives the call."""
+    """Interrupted while waiting on the copies' starts, the orchestration waits on until every start finished,
+    registers every copy that started, and only then raises the interrupt: no copy outlives the call."""
+    import concurrent.futures
     from contextlib import contextmanager
 
     from trtmc_aiperf_qual import services
@@ -939,38 +944,63 @@ def test_an_interrupt_while_copies_start_still_stops_every_started_copy(tmp_path
         finally:
             events.append(("stop", out.name))
 
-    class InterruptedOnce:
-        def __init__(self, fn):
-            self.value, self.waits = fn(), 0
+    waits = []
 
-        def done(self):
-            return self.waits > 1
-
-        def result(self):
-            self.waits += 1
-            if self.waits == 1:
-                raise KeyboardInterrupt  # Ctrl-C while the start is still under way
-            return self.value
-
-    class Pool:
-        def __init__(self, max_workers):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def submit(self, fn):
-            return InterruptedOnce(fn)
+    def interrupted_once(futures):
+        waits.append(1)
+        if len(waits) == 1:
+            raise KeyboardInterrupt  # Ctrl-C while the starts are under way
+        return concurrent.futures.wait(futures)
 
     monkeypatch.setattr(services, "serving", serving)
-    monkeypatch.setattr(services, "ThreadPoolExecutor", Pool)
+    monkeypatch.setattr(services, "wait", interrupted_once)
     monkeypatch.setattr(services, "replicas_that_fit", lambda before, after, wanted: wanted)
     monkeypatch.setattr(services, "gpu_memory_mib", lambda: (0, 1))
     with pytest.raises(KeyboardInterrupt):
         with services.serving_replicas(Environment({"ports": {"candidate": 9000}}), {}, "trtmc", tmp_path / "acc",
                                        count=3):
             pass
+    assert len(waits) == 2
     assert sorted(name for kind, name in events if kind == "stop") == ["acc", "acc-replica1", "acc-replica2"]
+
+
+
+def test_the_plugin_selections_are_warmed_and_a_failure_is_left_to_the_run(monkeypatch):
+    from trtmc_aiperf_qual import campaign
+    from trtmc_aiperf_qual.config import Environment
+
+    planned = []
+
+    def plan(environment, model, item):
+        planned.append(item["suite"])
+        if item["suite"] == "broken":
+            raise OSError("dataset unreachable")
+
+    monkeypatch.setattr(absolute, "plan", plan)
+    model = {"absolute": [{"suite": "mmlu-0shot", "plugin": "trtmc_mmlu"}, {"suite": "stsb", "metric": "spearman"},
+                          {"suite": "broken", "plugin": "trtmc_lambada"}]}
+    campaign.warm_selections(Environment({}), model)  # no exception: the run's own plan reports it
+    assert planned == ["mmlu-0shot", "broken"]
+
+
+
+def test_the_selection_tokenizer_is_pinned_to_the_commit_its_revision_resolves_to(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    asked = []
+
+    class Api:
+        def model_info(self, name, revision=None):
+            asked.append((name, revision))
+            if name == "gated/model":
+                raise OSError("401")
+            return type("Info", (), {"sha": "b" * 40})()
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    absolute.pinned_revision.cache_clear()
+    assert absolute.pinned_revision("org/model", None) == "b" * 40
+    assert absolute.pinned_revision("org/model", "c" * 40) == "c" * 40  # already a commit
+    assert absolute.pinned_revision(str(tmp_path), "main") == "main"  # a local directory
+    assert absolute.pinned_revision("gated/model", "main") == "main"  # unresolved: left as given (not cached)
+    assert asked == [("org/model", None), ("gated/model", "main")]
+    absolute.pinned_revision.cache_clear()

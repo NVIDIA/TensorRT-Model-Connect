@@ -306,9 +306,9 @@ BENCHMARKS: dict[str, type] = {"trtmc_mmlu": PinnedMMLU, "trtmc_gsm8k": PinnedGS
 
 
 def _tokenizer_identity(environ: Mapping[str, str]) -> str | None:
-    """The tokenizer the length filter uses, immutably: a local directory's file contents, else the commit of the
-    cached Hugging Face snapshot its revision resolves to; "" without a tokenizer; None when it cannot be told
-    (then nothing is cached)."""
+    """The tokenizer the length filter uses, immutably: a local directory's file contents, a pinned commit, or
+    (offline, where loads resolve from the local cache too) the commit of the cached snapshot its revision
+    resolves to; "" without a tokenizer; None for a mutable revision online (then nothing is cached)."""
     import hashlib
 
     name = environ.get("TRTMC_ACCURACY_TOKENIZER")
@@ -321,11 +321,18 @@ def _tokenizer_identity(environ: Mapping[str, str]) -> str | None:
         for path in sorted(item for item in Path(name).rglob("*") if item.is_file()):
             digest.update(str(path.relative_to(name)).encode() + b"\0" + path.read_bytes())
         return digest.hexdigest()
+    import re
+
+    revision = environ.get("TRTMC_ACCURACY_TOKENIZER_REVISION") or None
+    if revision and re.fullmatch(r"[0-9a-f]{40}", revision):
+        return revision
+    offline = str(environ.get("HF_HUB_OFFLINE", os.environ.get("HF_HUB_OFFLINE", ""))).lower() in ("1", "true", "yes", "on")
+    if not offline:
+        return None
     try:
         from huggingface_hub import try_to_load_from_cache
 
-        found = try_to_load_from_cache(name, "tokenizer_config.json",
-                                       revision=environ.get("TRTMC_ACCURACY_TOKENIZER_REVISION") or None)
+        found = try_to_load_from_cache(name, "tokenizer_config.json", revision=revision)
     except Exception:  # noqa: BLE001 - an unknown identity disables the cache
         return None
     return Path(found).parent.name if isinstance(found, str) and Path(found).parent.parent.name == "snapshots" else None

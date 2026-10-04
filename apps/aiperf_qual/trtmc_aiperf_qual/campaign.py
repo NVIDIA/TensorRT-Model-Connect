@@ -141,6 +141,20 @@ def set_aside(out: Path) -> Path | None:
     return kept
 
 
+def warm_selections(environment: Environment, model: Mapping[str, Any]) -> None:
+    """The plugin benchmarks' Acc selections (dataset loading and length filtering), computed into the shared
+    selection cache while the bundle builds; the run's own plan reads them back. Best effort: a failure here
+    leaves the plan to compute (and report) it."""
+    from . import absolute
+
+    for item in model.get("absolute") or []:
+        if not item.get("metric") and item.get("plugin"):
+            try:
+                absolute.plan(environment, model, item)
+            except Exception:  # noqa: BLE001 - the run's plan recomputes and reports it
+                pass
+
+
 def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[str, Any]:
     """Build the bundle when missing, qualify, and apply the bundle retention policy. A previous run
     in ``out`` is set aside first."""
@@ -150,12 +164,14 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
     (out / RUN_KEY).write_text(run_key(environment, model) + "\n")
     bundle_policy, _ = retention.policies(environment)
     record: dict[str, Any] = {"profile": model["model"], "task": model.get("task")}
-    try:
-        python = reference_python(environment, model)  # the family's requirements, as CI builds
-        prefetch(environment, model)  # outside the GPU lock the build takes
-        build = bundles.ensure_bundle(environment, model, out, python)
-    except Exception as error:  # noqa: BLE001 - recorded; a batch goes on with the next model
-        build = {"status": "failed", "reason": _error(error)}
+    with ThreadPoolExecutor(max_workers=1) as warm:
+        warm.submit(warm_selections, environment, model)  # CPU work while the GPU builds
+        try:
+            python = reference_python(environment, model)  # the family's requirements, as CI builds
+            prefetch(environment, model)  # outside the GPU lock the build takes
+            build = bundles.ensure_bundle(environment, model, out, python)
+        except Exception as error:  # noqa: BLE001 - recorded; a batch goes on with the next model
+            build = {"status": "failed", "reason": _error(error)}
     (out / "build.json").write_text(json.dumps({**record, **build}, indent=2))
     if build["status"] == "failed":
         record.update(category="build-failed", reason=build.get("reason", ""))

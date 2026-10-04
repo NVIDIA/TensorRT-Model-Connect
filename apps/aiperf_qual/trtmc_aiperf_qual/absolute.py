@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -65,6 +66,24 @@ def tokenizer_source(model: Mapping[str, Any]) -> tuple[str, str | None]:
     return candidate
 
 
+COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+@functools.lru_cache(maxsize=None)
+def pinned_revision(name: str, revision: str | None) -> str | None:
+    """The commit a tokenizer revision resolves to now, so every selection (the plan and both sides' AIPerf runs)
+    loads exactly it; a commit or a local directory as given, and the revision as given when the hub cannot
+    resolve it (the plugin then does not cache that selection)."""
+    if Path(name).is_dir() or (revision and COMMIT.fullmatch(revision)):
+        return revision
+    try:
+        from huggingface_hub import HfApi
+
+        return HfApi().model_info(name, revision=revision or None).sha or revision
+    except Exception:  # noqa: BLE001 - offline, gated, or unknown: left as given
+        return revision
+
+
 def selection_environment(environment: Environment, model: Mapping[str, Any], item: Mapping[str, Any]) -> dict[str, str]:
     """TRTMC_ACCURACY_* settings of the plugin's problem selection (identical for both sides)."""
     environ = {"HF_DATASETS_CACHE": str(environment["hf_datasets_cache"]),
@@ -76,8 +95,9 @@ def selection_environment(environment: Environment, model: Mapping[str, Any], it
                "TRTMC_ACCURACY_TEMPLATE_MARGIN": "128" if item.get("endpoint") == "chat" else "8",
                "TRTMC_ACCURACY_SEED": str(SELECTION_SEED),
                "TRTMC_ACCURACY_TOKENIZER": tokenizer_source(model)[0]}
-    if tokenizer_source(model)[1]:
-        environ["TRTMC_ACCURACY_TOKENIZER_REVISION"] = str(tokenizer_source(model)[1])
+    revision = pinned_revision(*tokenizer_source(model))
+    if revision:
+        environ["TRTMC_ACCURACY_TOKENIZER_REVISION"] = str(revision)
     if model["reference"].get("trust_remote_code"):
         environ["TRTMC_ACCURACY_TRUST_REMOTE_CODE"] = "1"
     if item.get("endpoint") == "chat":
