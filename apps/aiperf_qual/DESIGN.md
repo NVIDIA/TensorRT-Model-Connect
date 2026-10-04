@@ -474,8 +474,11 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   eager answers vary between runs as they do anyway). The two backends' copies listen on disjoint ports, a
   server must answer as its own backend, and a bound port is refused (an earlier draft let TRTMC's copies fail
   to bind and native servers answer in their place). A side that fails or leaves a problem unanswered there
-  answers on its own afterwards (`provenance.acc_overlap_fallback`); an interrupt cancels the other side's
-  AIPerf runs and server starts. L1 is timed only after every copy and the daemon have stopped, one server at a
+  answers on its own afterwards (`provenance.acc_overlap_fallback`). No copy of either side stops before both
+  sides have answered: on GB300 TRTMC's copies leaving the shared MPS server while the native copies still
+  answered stalled the native side (qwen3-vl-2b's OCRBench made no progress after TRTMC finished). An interrupt
+  cancels the other side's AIPerf runs, server starts, probes, and GPU queries, and servers then get a short
+  grace before they are killed. L1 is timed only after every copy and the daemon have stopped, one server at a
   time; the Acc requests' own times are white (`sides_concurrent`).
 - **Retries and deadlines**: a failed GPU phase runs once more (not in smoke mode); every AIPerf run (Acc, Perf,
   generation for the media checks, L2) takes the ledger's per-profile deadline from the environment's

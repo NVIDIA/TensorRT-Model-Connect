@@ -41,3 +41,30 @@ def wait_for(call: Callable[[], T]) -> T:
     if "error" in outcome:
         raise outcome["error"]
     return outcome["value"]
+
+
+def output(command: list[str], timeout_s: float) -> str:
+    """A short query's standard output (for example nvidia-smi), waited on in one-second steps that observe
+    cancellation; the process is killed and reaped on cancellation or at its deadline (TimeoutExpired), and a
+    failing exit raises CalledProcessError."""
+    import subprocess
+    import time
+
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    deadline = time.time() + timeout_s
+    try:
+        while True:
+            try:
+                stdout, _ = process.communicate(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                check()
+                if time.time() > deadline:
+                    raise
+    except BaseException:
+        process.kill()
+        process.communicate()
+        raise
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, command)
+    return stdout

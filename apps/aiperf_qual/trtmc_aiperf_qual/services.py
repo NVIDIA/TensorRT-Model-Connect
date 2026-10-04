@@ -227,8 +227,8 @@ def _port_free(port: int) -> bool:
 def gpu_memory_mib() -> tuple[int, int] | None:
     """(used, total) MiB of the first visible GPU, or None without nvidia-smi."""
     try:
-        line = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
-                              capture_output=True, text=True, timeout=60, check=True).stdout.splitlines()[0]
+        line = cancel.output(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                             60).splitlines()[0]
         used, total = (int(value) for value in line.split(","))
         return used, total
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
@@ -414,7 +414,7 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
                         if not cancel.EVENT.is_set():  # the starts still under way give up instead of finishing
                             cancel.EVENT.set()
                             cancelled_here = True
-                if cancelled_here:
+                if cancelled_here and isinstance(failure, Exception):  # an interrupt keeps it set: teardown is short
                     cancel.EVENT.clear()
                 # All done; registered before the pool shuts down: every copy that started stops with the rest.
                 for copy, future in zip(copies, started):
@@ -444,10 +444,13 @@ def _wait_ready(process: subprocess.Popen, url: str, out: Path, timeout_s: float
     raise ServiceError("server did not become ready")
 
 
+STOP_S, CANCELLED_STOP_S = 120, 10  # a server's grace to stop; shorter once the run is cancelled
+
+
 def _stop(process: subprocess.Popen) -> None:
     try:
         os.killpg(process.pid, signal.SIGINT)
-        process.wait(120)
+        process.wait(CANCELLED_STOP_S if cancel.EVENT.is_set() else STOP_S)
     except ProcessLookupError:
         pass
     except subprocess.TimeoutExpired:

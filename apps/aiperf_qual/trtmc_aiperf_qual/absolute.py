@@ -545,7 +545,8 @@ def keeps_artifacts(model: Mapping[str, Any]) -> bool:
 def run_native(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],
                out: Path, probe_request: Mapping[str, Any] | None = None, *, mps_env: Mapping[str, str] | None = None,
                precisions: Sequence[str] | None = None, started: Callable[[Mapping[str, Any]], None] | None = None,
-               go: threading.Event | None = None) -> dict[str, Any]:
+               go: threading.Event | None = None, finished: threading.Event | None = None,
+               release: threading.Event | None = None) -> dict[str, Any]:
     """Every benchmark on the native model: the reference adapter, eager, at the first precision of
     ``timing_precisions`` it serves. The adapter runs as up to ``native_replicas`` (environment) copies
     that fit on the GPU, each answering one problem at a time: the answers do not change, its model-call
@@ -559,15 +560,21 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
             with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{precision}",
                                   count=count, mode="eager", precision=precision, python=python,
                                   keep_artifacts=keeps_artifacts(model), mps_env=mps_env) as service:
-                if started is not None:  # the copies hold their memory, idle: the other side may size its own
-                    started(service)
-                while go is not None and not go.wait(1):  # the other side's copies are starting
-                    cancel.check()
-                if probe_request is not None:
-                    _probe(service, model["operation"], probe_request)
-                runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
-                                                out / f"absolute-native-{precision}")
-                        for item in model["absolute"]}
+                try:
+                    if started is not None:  # the copies hold their memory, idle: the other side may size its own
+                        started(service)
+                    while go is not None and not go.wait(1):  # the other side's copies are starting
+                        cancel.check()
+                    if probe_request is not None:
+                        _probe(service, model["operation"], probe_request)
+                    runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
+                                                    out / f"absolute-native-{precision}")
+                            for item in model["absolute"]}
+                finally:  # sharing an MPS daemon, no copy leaves while the other side's copies still answer
+                    if finished is not None:
+                        finished.set()
+                    while release is not None and not release.wait(1):
+                        cancel.check()
             return {"backend": "reference", "precision": precision, "runs": runs, "replicas": service["replicas"],
                     "mps": bool(service.get("mps")),
                     **({"fallback_from": "; ".join(errors)[:600]} if errors else {})}
@@ -600,13 +607,15 @@ def overlapped_acc(environment: Environment, model: Mapping[str, Any], python: s
     at the first native precision, sized alone, and wait idle; TRTMC's copies then start, sized against what is
     left with the native copies' growth held back; then both sides answer concurrently. Each copy answers one
     request at a time, so the answers are each side's own. Returns the native side or its error and TRTMC's runs
-    with its copies or its error (an incomplete side is an error): the caller lets that side answer alone. An
-    interrupt cancels the native side's work before the daemon stops."""
+    with its copies or its error (an incomplete side is an error): the caller lets that side answer alone. No copy
+    of either side stops before both sides have answered (a client leaving the shared MPS server stalled the other
+    side's copies on GB300). An interrupt cancels the native side's work before the daemon stops."""
     from .runner import timing_precisions
     from .services import REPLICA_GROWTH, mps
 
     result: dict[str, Any] = {}
     ready, go, native_copies = threading.Event(), threading.Event(), {}
+    native_finished, release = threading.Event(), threading.Event()
 
     def up(service: Mapping[str, Any]) -> None:
         native_copies.update(replicas=int(service.get("replicas") or 1), footprint=service.get("footprint_mib") or 0)
@@ -617,7 +626,13 @@ def overlapped_acc(environment: Environment, model: Mapping[str, Any], python: s
         try:
             # The native side's servers and runs in a directory of the overlap's own: a fallback run keeps them.
             native = pool.submit(run_native, environment, model, python, plans, out / "acc-overlap", probe_request,
-                                 mps_env=shared, precisions=timing_precisions(model["reference"])[:1], started=up, go=go)
+                                 mps_env=shared, precisions=timing_precisions(model["reference"])[:1], started=up, go=go,
+                                 finished=native_finished, release=release)
+
+            def native_answered() -> None:  # a client leaving the shared MPS server can stall the others' work
+                while not (native_finished.wait(1) or native.done() or cancel.EVENT.is_set()):
+                    pass
+
             while not ready.wait(1) and not native.done():
                 pass
             reserve = int((REPLICA_GROWTH - 1) * native_copies.get("footprint", 0) * native_copies.get("replicas", 0))
@@ -627,7 +642,15 @@ def overlapped_acc(environment: Environment, model: Mapping[str, Any], python: s
                                       keep_artifacts=keeps_artifacts(model), mps_env=shared,
                                       reserve_mib=reserve) as service:
                     go.set()
-                    candidate = run_candidate(environment, service, model, plans, out / "acc-overlap")
+                    try:
+                        candidate = run_candidate(environment, service, model, plans, out / "acc-overlap")
+                    except BaseException as error:
+                        if not isinstance(error, Exception):  # an interrupt: the native side stops too
+                            cancel.EVENT.set()
+                        raise
+                    finally:  # TRTMC's copies stay until the native side has answered too, then both sides stop
+                        native_answered()
+                        release.set()
                     gap = incomplete(model, plans, candidate)
                     if gap:
                         result["candidate_error"] = f"incomplete: {gap}"
@@ -638,6 +661,7 @@ def overlapped_acc(environment: Environment, model: Mapping[str, Any], python: s
             except Exception as error:  # noqa: BLE001 - TRTMC then answers on its own, after the native side
                 result["candidate_error"] = f"{type(error).__name__}: {error}"[:1500]
             go.set()  # the native side answers even when TRTMC could not start
+            release.set()
             try:
                 native_result = native.result()
                 gap = incomplete(model, plans, native_result["runs"])

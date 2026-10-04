@@ -962,7 +962,8 @@ def test_an_interrupt_while_copies_start_still_stops_every_started_copy(tmp_path
         with services.serving_replicas(Environment({"ports": {"candidate": 9000}}), {}, "trtmc", tmp_path / "acc",
                                        count=3):
             pass
-    assert waits == [False, True] and not cancel.EVENT.is_set()  # the starts were told to give up; flag restored
+    assert waits == [False, True] and cancel.EVENT.is_set()  # the starts were told to give up; teardown is short
+    cancel.EVENT.clear()
     assert sorted(name for kind, name in events if kind == "stop") == ["acc", "acc-replica1", "acc-replica2"]
 
     class Interrupted(concurrent.futures.ThreadPoolExecutor):
@@ -1271,3 +1272,73 @@ def test_waiting_for_aiperf_exports_observes_cancellation(tmp_path):
     finally:
         cancel.EVENT.clear()
     assert time.time() - began < 3
+
+
+@pytest.mark.parametrize("slower", ["reference", "trtmc"])
+def test_no_copy_leaves_the_shared_daemon_while_the_other_side_answers(tmp_path, monkeypatch, slower):
+    """Whichever side finishes first keeps its copies until the other side has answered (a client leaving the
+    shared MPS server stalled the other side's copies on GB300)."""
+    import threading
+    import time
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual import services
+    from trtmc_aiperf_qual.config import Environment
+
+    events, lock = [], threading.Lock()
+
+    def note(event):
+        with lock:
+            events.append(event)
+
+    @contextmanager
+    def serving_replicas(environment, model, backend, out, *, count, mps_env=None, reserve_mib=0, **options):
+        yield {"url": backend, "replicas": count, "mps": True, "footprint_mib": 1}
+        note(("down", backend))
+
+    @contextmanager
+    def daemon(environment, directory):
+        yield {"CUDA_MPS_PIPE_DIRECTORY": "p"}
+
+    def side(environment, service, model, item, problems, out):
+        time.sleep(1.5 if service["url"] == slower else 0.1)
+        note(("answered", service["url"]))
+        return {"records": {"greedy": {0: {}}}}
+
+    monkeypatch.setattr(services, "mps", daemon)
+    monkeypatch.setattr(absolute, "serving_replicas", serving_replicas)
+    monkeypatch.setattr(absolute, "run_side", side)
+    model = {"operation": "generate", "absolute": [{"suite": "s"}],
+             "reference": {"backend": "reference", "perf_precision": "fp16", "precision": "fp32"}}
+    result = absolute.overlapped_acc(Environment({"native_replicas": 2, "candidate_replicas": 2}), model, "python",
+                                     {"s": [{}]}, tmp_path)
+    assert "native" in result and "candidate" in result
+    last_answer = max(events.index(("answered", backend)) for backend in ("reference", "trtmc"))
+    assert all(events.index(("down", backend)) > last_answer for backend in ("reference", "trtmc"))
+
+
+
+def test_queries_and_server_stops_are_short_once_cancelled(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    import threading
+    import time
+
+    from trtmc_aiperf_qual import cancel, services
+
+    timer = threading.Timer(0.5, cancel.EVENT.set)
+    timer.start()
+    began = time.time()
+    try:
+        with pytest.raises(cancel.Cancelled):
+            cancel.output([sys.executable, "-c", "import time; time.sleep(60)"], 60)  # a stalled nvidia-smi
+        assert time.time() - began < 3
+        stubborn = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGINT, "
+                                     "signal.SIG_IGN); time.sleep(600)"], start_new_session=True)
+        time.sleep(0.5)
+        began = time.time()
+        services._stop(stubborn)  # ignores SIGINT: killed after the cancelled run's short grace
+        assert stubborn.poll() is not None and time.time() - began < services.CANCELLED_STOP_S + 3
+    finally:
+        cancel.EVENT.clear()
+    assert cancel.output([sys.executable, "-c", "print('ok')"], 10).strip() == "ok"
