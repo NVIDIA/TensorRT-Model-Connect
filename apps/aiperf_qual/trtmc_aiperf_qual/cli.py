@@ -93,7 +93,8 @@ def current_settings(model: dict, environment) -> dict:
         return model
     gates = {item["suite"]: item.get("gate") for item in current["absolute"]}
     absolute = [{**item, "gate": gates.get(item["suite"]) or item.get("gate")} for item in model.get("absolute", [])]
-    judging = ("output_grader", "output_grader_params", "margin_percent", "max_ci_percent", "not_equivalent")
+    judging = ("output_grader", "output_grader_params", "margin_percent", "max_ci_percent", "guard_percent",
+               "not_equivalent")
     l1 = {**model["performance"]["l1"],
           **{key: value for key, value in current["performance"]["l1"].items() if key in judging}}
     return {**model, "absolute": absolute, "supplementary": current["supplementary"],
@@ -185,6 +186,7 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
             verdict = judge.judge_performance(item["candidate"], item["reference"],
                                               margin_percent=float(l1.get("margin_percent", 5)),
                                               max_ci_percent=float(l1.get("max_ci_percent", 5)),
+                                              guard_percent=float(l1.get("guard_percent", 0)),
                                               outputs_match=bool(check.get("match")),
                                               output_reason=str(check.get("reason", "")),
                                               not_equivalent=l1.get("not_equivalent"),
@@ -445,7 +447,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(json.dumps({"model": name, "status": "build-failed", "reason": build.get("reason")}), flush=True)
                     continue
                 result = order_check(environment, model, out)
-                print(json.dumps({key: result[key] for key in ("model", "status", "order_effect", "largest", "problems")}),
+                print(json.dumps({key: result.get(key) for key in ("model", "status", "order_effect", "speedup_effect",
+                                                                   "largest", "problems")}),
                       flush=True)
             return 0
         if arguments.command == "matrix":

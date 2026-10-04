@@ -152,24 +152,36 @@ shortfall is resolved by execution, never by a smaller `n` (Section 9).
   (a public passage filling the bundle minus 32 generated tokens, greedy). A catalog request leaving
   generation work to each side's default (`num_steps`, `guidance_scale`, `num_frames` at -1) is an
   error until `config/models` states it.
-- Measurement per request and side: warmup 3, 12 requests per run, 5 runs (checkpoints above the large
-  size: warmup 1, 3 requests, 5 runs; generative media and speech output: warmup 1, 3 requests, 3 runs); statistic:
-  the server-side model-call p50 per run.
+- Measurement per request and side: the request sent back to back for 10 s (settle), then warmup 3, 12 requests
+  per run, 5 runs (checkpoints above the large size: no settle, warmup 1, 3 requests, 5 runs; generative media and
+  speech output: no settle, warmup 1, 3 requests, 3 runs); statistic: the server-side model-call p50 per run. The
+  settle exists because a fresh server times short requests slower for its first seconds (order check, October
+  2026: qwen3-0.6b native 58.6, 58.4, 53.4, 54.5, 54.0 ms over its five runs; hrnet TRTMC 2.12 down to 1.90 ms),
+  which the three warmup requests (milliseconds of work) do not absorb and which put the run spread above the 5%
+  gate; the slow classes' run spreads stayed at or below 2.1% in the pilot without it.
 - Speedup `S = native / TRTMC`; its 90% two-sided interval (95% one-sided per bound) is Welch's t
-  interval of `log(native) - log(TRTMC)` over the runs. **green**: lower bound > 1.05; **red**: upper
-  bound < 0.95; **perf-inconclusive** (white): either side's 95% half-width exceeds 5% of its mean, the
-  work differs, the native model ran at another precision, or the GPU was busy or not measured; **yellow** (not
-  demonstrably faster): otherwise. Every request of the model must be green to pass.
+  interval of `log(native) - log(TRTMC)` over the runs. **green**: lower bound > 1.05 x (1 + g); **red**: upper
+  bound < 0.95 / (1 + g), with the guard g (`guard_percent`, below); **perf-inconclusive** (white): either
+  side's 95% half-width exceeds 5% of its mean, the work differs, the native model ran at another precision, or
+  the GPU was busy or not measured; **yellow** (not demonstrably faster): otherwise. Every request of the model
+  must be green to pass.
 - Work equivalence is checked on **every** timed response, not the first: equal output tokens for text,
   equal height/width/frames/steps for media, equal audio length (10 ms) for speech; any mismatch is
   `perf-inconclusive`. A catalog request that samples is timed as its greedy variant (temperature 0,
   same lengths and shapes) so both sides do the same work; sampling stays in Acc. A model that cannot
   decode greedily (Bark) is timed as shipped and is `perf-inconclusive` whenever lengths differ.
-- Order: the native model is timed before TRTMC. Before the formal run, on each host, five models (one per server
-  size class, including the largest) are timed twice in both orders. Where both servers fit, an order
-  effect above 2% switches to interleaved runs; where they do not, the native model is timed again after
-  TRTMC (native, TRTMC, native) and the model is `perf-inconclusive` if its two native timings differ by
-  more than 2%.
+- Order and server instance: the native model is timed before TRTMC, each side by one server instance. The
+  interval covers the runs of that instance, not the instance or the order: before the formal run, the order check
+  (Section 12.1, gate 3) times profiles of every server size class twice in both orders, each timing by a fresh
+  instance, on both hosts. Each request's speedup effect compounds the two sides' ratios of second to first timing,
+  each in its worse direction (`max(r, 1/r)`), and the guard g is the largest of them, rounded up to a whole
+  percent; it widens the margin on both sides, so measured effects of that size cannot by themselves turn a yellow
+  light green or red. It is an empirical allowance from the sampled instances, not a bound for unseen ones. In
+  October 2026 TRTMC's two timings agreed within 0.5% in the resolved checks, while native eager timings differed
+  by up to 8.6% in either direction (nemotron-nano-4b 8.6% faster in its second timing, a 9.4% speedup effect;
+  xcit-nano 3.3% slower); instance, position, and elapsed time change together in the check, so the cause is not
+  isolated. Neither interleaving runs nor a second native timing (such a spread against a 2% tolerance would whiten
+  most text generation, at about three hours a host) addresses it at an acceptable cost.
 - `torch.compile` and the L2 serving sweep are opt-in reports outside the category.
 
 ### 4.7 Model category
@@ -405,10 +417,11 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   verdict whose Acc or Perf is `error` is `smoke-fail`. Each side's depth, mask, or disparity artifact is read at
   that side's own size before the sizes are compared, so a size difference fails only between readable outputs.
 - **Order check** (Section 4.6): `trtmc-aiperf-qual order-check --profile P` times a profile's L1 requests in both
-  orders (native then TRTMC, TRTMC then native) and reports each side's order effect (its second timing relative to
-  its first). Before the formal run it runs on each host, on five profiles spanning that host's server sizes,
-  including the largest dense one; an effect above 2% switches that size class to interleaved runs or native,
-  TRTMC, native timing on that host.
+  orders (native then TRTMC, TRTMC then native), each timing by a fresh server, and reports each side's order effect
+  (its second timing relative to its first) and each request's speedup effect (both sides' ratios, each in its
+  worse direction, compounded). Before the formal run it runs on each host, on five profiles spanning that host's
+  server sizes, including the largest dense one; a speedup effect above the Perf guard (`guard_percent`) is
+  `above-limit`: the guard is then too narrow and is raised to cover it before the formal run.
   The effect counts only when all four measurements are valid on their own (every request succeeded and is timed,
   every response carries work evidence, the GPU was measured idle before every run, at least two runs within
   `max_ci_percent`) and each order's two sides did the same work; otherwise, or when a measurement or the check
@@ -451,6 +464,12 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   long requests, a cost choice resting on the pilot so far (half-widths with three runs: FLUX.1-schnell TRTMC 0.63%,
   native 0.21%; Bark-small 1.73%, 2.19%): every media and speech profile of the pilot is checked before the counts
   freeze (Section 12.1), and if any is white on the CI gate those categories move to five runs too.
+- **Settle before timing** (Section 4.6): the order check (gate 3) found the first runs after a server starts
+  slower for short requests: qwen3-0.6b native 58.6 and 58.4 ms, then 53.4 to 54.5 ms (95% half-width 5.62%,
+  white); hrnet-w18 TRTMC 2.12, 1.99, then 1.91 ms (5.84%); the pilot had the same on qwen35-4b native (5.83%) and
+  qwen3-vl-2b TRTMC (5.35%). Three warmup requests of a few milliseconds each do not absorb it. Each side of a
+  default-class request therefore first sends the timed request back to back for 10 s; the ledger counts 10 s per
+  side and request (about 0.6 hours a host).
 - **MMLU answer format**: lighteval's 0-shot prompt gets one added sentence, "Answer with the letter of the
   correct option only.", and an 8-token answer budget (lighteval: 5), on the completion and chat routes alike;
   AIPerf's grader is unchanged. Without it, instruction-tuned models open with an explanation and give no letter
@@ -493,10 +512,9 @@ The formal run starts only when every gate holds; each is recorded in PR #1550.
    22 hours on each of the two GB300s for its share (Section 9), failure allowance included; otherwise the levers
    of Section 9, then a report to the owner.
 3. **Order**: the order check (above) runs on both hosts, on profiles covering the server size classes of each
-   host's share (five per host, including the largest dense one assigned to it), with a resolved result each; where
-   an effect exceeds 2% on a host, that size class's mitigation (interleaved runs, or native, TRTMC, native timing
-   that is `perf-inconclusive` when the two native timings differ by more than 2%) is implemented and tested, and its
-   cost is in that host's ledger. The single-server L1 and the verified MPS shutdown hold on each host.
+   host's share (five per host, including the largest dense one assigned to it), with a resolved result each, and
+   every resolved speedup effect lies within the Perf guard (`guard_percent`, Section 4.6); a larger effect raises
+   the guard. The single-server L1 and the verified MPS shutdown hold on each host.
 4. **Blocked profiles**: DINOv3's kNN scorer once the checkpoints are accessible; Lance's resident adapter; s1-mini
    once the catalog builds it. A profile still blocked is reported with its reason, not dropped.
 5. **Smoke rerun**: every ready profile `smoke-pass` (or an accepted, reported finding) on the final code.

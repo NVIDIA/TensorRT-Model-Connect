@@ -194,14 +194,16 @@ def measurement_problems(stats: Mapping[str, Any], max_ci_percent: float) -> lis
 
 def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any], *, margin_percent: float,
                       max_ci_percent: float, outputs_match: bool, output_reason: str,
-                      not_equivalent: str | None = None, candidate_precision: str | None = None) -> dict[str, Any]:
+                      not_equivalent: str | None = None, candidate_precision: str | None = None,
+                      guard_percent: float = 0.0) -> dict[str, Any]:
     """Light of one reference mode (DESIGN.md 4.6). white: the comparison is invalid (work or outputs
     differ, the native model ran at another precision than ``candidate_precision``, a busy GPU) or a
     side's runs spread more than ``max_ci_percent``; otherwise green / red when the speedup interval lies
-    beyond the margin, yellow when it does not. A side whose runs did not complete every request, or that
-    exported no model-call time, is an ``error`` light."""
+    beyond the margin widened by the guard (the server-instance effect the order check measured, which the
+    runs of one instance do not show), yellow when it does not. A side whose runs did not complete every
+    request, or that exported no model-call time, is an ``error`` light."""
     result = {"candidate": dict(candidate), "reference": dict(reference), "margin_percent": margin_percent,
-              "output_check": {"match": outputs_match, "reason": output_reason}}
+              "guard_percent": guard_percent, "output_check": {"match": outputs_match, "reason": output_reason}}
     errors = [f"{side}: {stats['incomplete']}" for side, stats in (("candidate", candidate), ("reference", reference))
               if stats.get("incomplete")]
     errors += [f"{side} has no {METRIC}" for side, stats in (("candidate", candidate), ("reference", reference))
@@ -245,12 +247,16 @@ def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any]
     if reasons:
         return {**result, "light": "white", "reasons": reasons}
     low, high = interval[1], interval[2]
-    if low > 1 + margin_percent / 100:
+    guard = 1 + guard_percent / 100
+    faster, slower = (1 + margin_percent / 100) * guard, (1 - margin_percent / 100) / guard
+    if low > faster:
         return {**result, "light": "green", "reasons": []}
-    if high < 1 - margin_percent / 100:
-        return {**result, "light": "red", "reasons": [f"TRTMC slower: speedup interval {low:.3f}..{high:.3f}"]}
-    return {**result, "light": "yellow", "reasons": [f"not faster by {margin_percent}%: speedup interval "
-                                                     f"{low:.3f}..{high:.3f}"]}
+    if high < slower:
+        return {**result, "light": "red", "reasons": [f"TRTMC slower: speedup interval {low:.3f}..{high:.3f} "
+                                                      f"below {slower:.3f}"]}
+    return {**result, "light": "yellow", "reasons": [f"not faster by {margin_percent}% beyond the {guard_percent}% "
+                                                     f"guard: speedup interval {low:.3f}..{high:.3f}, green above "
+                                                     f"{faster:.3f}"]}
 
 
 def first_observation(raw_records: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:

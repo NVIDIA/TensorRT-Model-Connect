@@ -728,5 +728,18 @@
   "cosmos",
   "hunyuan",
   "video"
- ]
+ ],
+ "settle": {
+  "seconds": 10,
+  "timed_requests": {
+   "text_generation": 2
+  },
+  "unsettled_tasks": [
+   "audio_generation",
+   "speech_to_speech",
+   "image_generation",
+   "image_edit",
+   "world_model_generation"
+  ]
+ }
 }

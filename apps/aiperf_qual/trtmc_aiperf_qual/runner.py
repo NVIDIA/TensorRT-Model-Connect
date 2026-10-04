@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import math
 import statistics
 import time
 import traceback
@@ -173,6 +174,18 @@ def probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any]
         raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-600:]}") from error
 
 
+def settle(service: Mapping[str, Any], operation: str, request: Mapping[str, Any], seconds: float,
+           timeout_s: float) -> int:
+    """The timed request sent back to back for ``seconds`` before a side's first timed run (DESIGN.md 4.6: a
+    fresh server times short requests slower for its first seconds), each within the run deadline ``timeout_s``;
+    returns how many were sent."""
+    deadline, sent = time.monotonic() + seconds, 0
+    while time.monotonic() < deadline:
+        absolute._probe(service, operation, request, timeout_s)  # cancellable; a rejected or late request raises
+        sent += 1
+    return sent
+
+
 def candidate_probe(environment: Environment, model: Mapping[str, Any], suite: Suite | None, out: Path,
                     phases: "_Phases", *, serviceability: bool, l1: bool) -> list[Suite]:
     """One TRTMC server before any native work: it must serve the first request (when Acc runs) and sizes the
@@ -240,6 +253,9 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
                  "--request-count", str(measurement["requests"])]
     if int(measurement.get("warmup", 0)) > 0:
         arguments += ["--warmup-request-count", str(measurement["warmup"])]
+    settle_s = float(measurement.get("settle_s", 0))
+    settled = (settle(service, model["operation"], suite.samples[0]["request"], settle_s,
+                      absolute.run_timeout(environment, model)) if settle_s > 0 else 0)
     # AIPerf 0.13.0's --num-profile-runs breaks endpoints with tokenizes_input: false (trtmc_task);
     # the repetitions run here.
     runs, busy, per_run, work, untimed = [], [], [], [], 0
@@ -260,6 +276,8 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
     stats["work_missing"] = sum(signature is None for signature in work)
     stats["client_latency_p50_ms"] = judge.median_client_latency(runs[-1].raw_records())
     stats["aiperf_exit"] = max(run.exit_code for run in runs)
+    if settled:
+        stats["settle_requests"] = settled
     expected_runs, problems = int(measurement.get("runs", 1)), []
     if len(runs) < expected_runs:
         problems.append(f"{len(runs)} of {expected_runs} runs completed")
@@ -555,6 +573,7 @@ def _candidate(environment: Environment, model: Mapping[str, Any], l1: Mapping[s
                 match, reason = output_check(l1, candidate_output, outputs, mode, sampled)
                 verdict = judge.judge_performance(stats, reference_stats, margin_percent=float(l1["margin_percent"]),
                                                   max_ci_percent=float(l1["max_ci_percent"]),
+                                                  guard_percent=float(l1.get("guard_percent", 0)),
                                                   outputs_match=match, output_reason=reason,
                                                   not_equivalent=l1.get("not_equivalent"),
                                                   candidate_precision=model["reference"].get("perf_precision"))
@@ -566,16 +585,18 @@ def _candidate(environment: Environment, model: Mapping[str, Any], l1: Mapping[s
                                     "reference_backend": info.get("backend"), **verdict})
 
 
-ORDER_EFFECT_LIMIT = 0.02  # DESIGN.md 4.6: an order effect above this changes how the two sides are timed
 
 
 def order_check(environment: Environment, model: Mapping[str, Any], out: Path) -> dict[str, Any]:
     """DESIGN.md 4.6: the model's L1 requests timed twice in both orders (native then TRTMC, TRTMC then native),
     against native eager at its timing precision. Each side's order effect is its p50 when timed second relative
-    to its p50 when timed first (native after TRTMC vs native first; TRTMC after native vs TRTMC first). The
+    to its p50 when timed first (native after TRTMC vs native first; TRTMC after native vs TRTMC first); a
+    request's speedup effect compounds both sides' ratios, each in its worse direction, and ``largest`` is the
+    largest of them, compared with the Perf guard. The
     effect is resolved only when all four measurements are valid (``judge.measurement_problems``) and each
     order's two sides did the same work; otherwise, or when a measurement or the check itself fails, the
-    check is ``unresolved``, never within the limit. A previous ``order.json`` is removed first."""
+    check is ``unresolved``, never within the limit. The limit is the Perf guard (``guard_percent``): an effect
+    above it means the guard is too narrow for this host. A previous ``order.json`` is removed first."""
     order = out / "order.json"
     order.unlink(missing_ok=True)
     result: dict[str, Any] = {"model": model["model"], "status": "unresolved", "order_effect": None, "largest": None,
@@ -631,9 +652,13 @@ def _order_timings(environment: Environment, model: Mapping[str, Any], out: Path
     if not problems:
         effects = {side: {suite.name: p50[f"{side}_second"][suite.name] / p50[f"{side}_first"][suite.name] - 1
                           for suite in suites} for side in ("native", "trtmc")}
-        largest = max(abs(value) for side in effects.values() for value in side.values())
-        result |= {"order_effect": effects, "largest": largest, "above_limit": largest > ORDER_EFFECT_LIMIT,
-                   "status": "above-limit" if largest > ORDER_EFFECT_LIMIT else "within-limit"}
+        # What the effects can do to a speedup: each side's ratio in its worse direction, the two compounded.
+        speedup = {suite.name: math.prod(max(1 + effects[side][suite.name], 1 / (1 + effects[side][suite.name]))
+                                         for side in effects) - 1 for suite in suites}
+        largest = max(speedup.values())
+        limit = float(l1.get("guard_percent", 0)) / 100
+        result |= {"order_effect": effects, "speedup_effect": speedup, "largest": largest, "limit": limit,
+                   "above_limit": largest > limit, "status": "above-limit" if largest > limit else "within-limit"}
     return result
 
 

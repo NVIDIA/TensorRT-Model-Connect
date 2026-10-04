@@ -77,6 +77,23 @@ def test_perf_white_when_unstable_or_outputs_differ():
     assert unproven["light"] == "white" and "no work evidence" in unproven["reasons"][0]
 
 
+def test_the_instance_guard_widens_both_bounds_of_the_perf_light():
+    """green needs the interval above 1.05 x (1 + guard), red below 0.95 / (1 + guard): an effect of a server
+    instance up to the guard cannot by itself turn a yellow light green or red."""
+    def side(p50):
+        return {"p50_ms": p50, "ci_percent": 0.1, "per_run_p50_ms": [p50 * 0.999, p50, p50 * 1.001], "work": [[]]}
+
+    common = dict(margin_percent=5, max_ci_percent=5, outputs_match=True, output_reason="")
+    native = side(110.0)
+    assert judge.judge_performance(side(100.0), native, **common)["light"] == "green"  # 1.10 > 1.05
+    guarded = judge.judge_performance(side(100.0), native, guard_percent=9, **common)
+    assert guarded["light"] == "yellow" and guarded["guard_percent"] == 9 and "1.145" in guarded["reasons"][0]
+    assert judge.judge_performance(side(90.0), native, guard_percent=9, **common)["light"] == "green"  # 1.22
+    assert judge.judge_performance(side(100.0), side(90.0), **common)["light"] == "red"  # 0.90 < 0.95
+    assert judge.judge_performance(side(100.0), side(90.0), guard_percent=9, **common)["light"] == "yellow"
+    assert judge.judge_performance(side(100.0), side(85.0), guard_percent=9, **common)["light"] == "red"  # < 0.872
+
+
 def test_across_runs_confidence_interval():
     stats = judge.across_runs([10.0, 10.2, 9.8])
     assert stats["runs"] == 3 and abs(stats["p50_ms"] - 10.0) < 1e-9
@@ -547,6 +564,74 @@ def test_incomplete_perf_runs_and_missing_exports_are_errors_not_lights():
     result = {"accuracy": [{"suite": "s", "status": "pass"}],
               "performance_l1": [{"reference_mode": "eager", "light": broken["light"]}]}
     assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["category"] == "error"
+
+
+def test_a_side_settles_on_its_request_before_the_first_timed_run(tmp_path, monkeypatch):
+    """Short requests: the timed request is sent back to back for settle_s before run_01 (a fresh server times
+    them slower at first); the slow classes do not settle."""
+    from types import SimpleNamespace
+
+    import yaml
+
+    from trtmc_aiperf_qual import absolute, runner
+    from trtmc_aiperf_qual.models import LARGE_MODEL_MEASUREMENT
+    from trtmc_aiperf_qual.suites import single_request_suite
+
+    clock, events = [0.0], []
+
+    def probe(service, operation, request, timeout_s):
+        assert timeout_s == 60  # each settling request within the run deadline
+        events.append(("settle", request["text"]))
+        clock[0] += 3.0  # each settling request takes 3 s
+
+    body = json.dumps({"trtmc_timing": {"model_call_ms": 2.0}, "trtmc_observation": {"label": 1}})
+    record = {"status": 200, "metadata": {"request_start_ns": 0, "request_end_ns": 3_000_000}, "responses": [{"text": body}]}
+
+    def aiperf(environment, out, arguments, timeout_s):
+        events.append(("run", out.name))
+        return SimpleNamespace(raw_records=lambda: [record] * 2, exit_code=0, directory=out)
+
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(absolute, "_probe", probe)
+    monkeypatch.setattr(runner, "run_aiperf", aiperf)
+    monkeypatch.setattr(runner, "gpu_busy_percent", lambda: 0.0)
+    monkeypatch.setattr(absolute, "run_timeout", lambda environment, model: 60)
+    suite = single_request_suite("s", {"text": "x"}, {})
+    service, model = {"url": "http://127.0.0.1:1"}, {"operation": "classify"}
+    measurement = {"settle_s": 10, "warmup": 3, "requests": 2, "runs": 2}
+    _, stats = runner._perf_run(None, service, model, suite, measurement, tmp_path / "t", "mean")
+    assert events == [("settle", "x")] * 4 + [("run", "run_01"), ("run", "run_02")]  # 0, 3, 6, 9 s < 10 s
+    assert stats["settle_requests"] == 4 and stats["p50_ms"] == 2.0
+    events.clear()
+    _, stats = runner._perf_run(None, service, model, suite, {**measurement, "settle_s": 0}, tmp_path / "u", "mean")
+    assert events == [("run", "run_01"), ("run", "run_02")] and "settle_requests" not in stats
+
+    tasks = yaml.safe_load((Path(__file__).parents[1] / "config" / "tasks.yaml").read_text())
+    assert tasks["defaults"]["performance"]["l1"]["measurement"]["settle_s"] == 10
+    slow = [entry["performance"]["l1"]["measurement"] for entry in tasks["tasks"].values()
+            if "measurement" in ((entry.get("performance") or {}).get("l1") or {})]
+    assert slow and all(item["settle_s"] == 0 for item in slow) and LARGE_MODEL_MEASUREMENT["settle_s"] == 0
+
+
+def test_a_large_checkpoint_takes_its_class_and_keeps_the_profile_measurement(tmp_path, monkeypatch):
+    """The large-checkpoint class replaces the Task's measurement before the profile's own settings apply."""
+    import shutil
+
+    from trtmc_aiperf_qual import models
+    from trtmc_aiperf_qual.config import Environment
+
+    root = tmp_path / "config"
+    shutil.copytree(Path(__file__).parents[1] / "config", root)
+    environment = Environment({"repo": str(REPOSITORY)})
+    monkeypatch.setattr(models, "checkpoint_bytes", lambda *args: 17 * 2**30)
+    measurement = lambda: models.resolve_model("albert-base", environment, root)["performance"]["l1"]["measurement"]  # noqa: E731
+    assert measurement() == models.LARGE_MODEL_MEASUREMENT
+    (root / "models" / "albert-base.yaml").write_text("performance: {l1: {measurement: {settle_s: 20}}}\n")
+    assert measurement() == {**models.LARGE_MODEL_MEASUREMENT, "settle_s": 20}
+    (root / "models" / "albert-base.yaml").write_text("performance: {l1: {measurement: {requests: 3}}}\n")
+    assert measurement() == {**models.LARGE_MODEL_MEASUREMENT, "requests": 3}  # still the class, not the default
+    monkeypatch.setattr(models, "checkpoint_bytes", lambda *args: 2**30)
+    assert measurement()["settle_s"] == 10 and measurement()["requests"] == 3
 
 
 def test_one_checkpoint_serves_the_bundle_and_the_reference():

@@ -11,7 +11,8 @@ The scheme, its statistics, and its per-Task contracts are in [DESIGN.md](DESIGN
   when it is shown to exceed it, `inconclusive` otherwise. Tasks without a gold set compare outputs with
   the native model (conversion parity). Random-weight test models are Perf only (`accuracy_source: none`).
 - **Perf**: TRTMC must be faster than the native model (eager) at the candidate's precision: the speedup's
-  90% interval lies above 1.05, on every timed request, with the same work on both sides.
+  90% interval lies above 1.05 x (1 + guard) (the 5% margin widened by the largest server-instance and order effect
+  the order check measured, `guard_percent`), on every timed request, with the same work on both sides.
 
 ## Design
 

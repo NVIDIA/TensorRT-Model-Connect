@@ -167,7 +167,7 @@ def _order_check(tmp_path, monkeypatch, measurements):
     monkeypatch.setattr(runner, "_perf_run", lambda *args: (None, dict(next(measurements))))
     model = {"model": "m", "operation": "generate", "reference": {"perf_precision": "fp16", "precision": "fp32"},
              "performance": {"l1": {"suite": {}, "max_ci_percent": 5.0, "aggregation": {"eager": "mean"},
-                                    "measurement": {"warmup": 0, "requests": 1, "runs": 3}}}}
+                                    "guard_percent": 4, "measurement": {"warmup": 0, "requests": 1, "runs": 3}}}}
     return runner.order_check(Environment({}), model, tmp_path)
 
 
@@ -176,11 +176,26 @@ def timing(p50_ms, **extra):
             "gpu_busy_percent": 0.0, **extra}
 
 
-def test_the_order_check_reports_each_sides_effect(tmp_path, monkeypatch):
+def test_the_order_check_reports_each_sides_effect_against_the_perf_guard(tmp_path, monkeypatch):
     result = _order_check(tmp_path, monkeypatch, [timing(10.0), timing(2.02), timing(2.0), timing(10.5)])
     assert result["order_effect"]["native"]["catalog"] == pytest.approx(0.05)  # native slower after TRTMC
     assert result["order_effect"]["trtmc"]["catalog"] == pytest.approx(2.02 / 2.0 - 1)
+    assert result["speedup_effect"]["catalog"] == pytest.approx(1.05 * 1.01 - 1)  # both sides compound
+    assert result["limit"] == 0.04  # the Perf guard
     assert result["status"] == "above-limit" and result["above_limit"] and (tmp_path / "order.json").is_file()
+
+
+@pytest.mark.parametrize("native_second, trtmc_second, status", [
+    (10.3, 2.0, "within-limit"),   # native +3% within the 4% guard
+    (9.62, 2.0, "within-limit"),   # native -3.8%: 1/0.962 = 1.0395
+    (9.6, 2.0, "above-limit"),     # native -4%: 1/0.96 = 1.0417 exceeds the guard in the speedup
+    (10.25, 1.96, "above-limit"),  # native +2.5%, TRTMC -2%: each within, together 1.0459
+])
+def test_the_order_check_bounds_the_effect_on_the_speedup(tmp_path, monkeypatch, native_second, trtmc_second, status):
+    """A side's ratio counts in its worse direction (a 4% decrease is a 4.17% speedup change) and the two sides'
+    ratios compound, so the guard covers what the measured effects can do to a speedup."""
+    result = _order_check(tmp_path, monkeypatch, [timing(10.0), timing(trtmc_second), timing(2.0), timing(native_second)])
+    assert result["status"] == status
 
 
 @pytest.mark.parametrize("invalid", [

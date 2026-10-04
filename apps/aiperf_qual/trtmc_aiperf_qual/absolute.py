@@ -521,7 +521,7 @@ def error_entry(item: Mapping[str, Any], expected: int, error: str) -> dict[str,
             "error": error[:800]}
 
 
-def _probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any]) -> None:
+def _probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any], timeout_s: float = 3600) -> None:
     import urllib.error
     import urllib.request
 
@@ -530,7 +530,7 @@ def _probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any
 
     def send() -> None:  # the whole exchange, an error body included, inside the cancellable wait
         try:
-            urllib.request.urlopen(call, timeout=3600).read()
+            urllib.request.urlopen(call, timeout=timeout_s).read()
         except urllib.error.HTTPError as error:
             raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-400:]}") from error
 

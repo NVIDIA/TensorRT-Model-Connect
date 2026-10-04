@@ -20,9 +20,13 @@ defaults:
     l1:
       suite: catalog
       reference_modes: [eager]
-      measurement: {warmup: 3, requests: 12, runs: 5}
+      # settle_s: the request sent back to back first (a fresh server times short requests slower at first).
+      measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5}
       aggregation: {candidate: mean, eager: mean, compile: best}
       margin_percent: 5
+      # The green / red bounds widen by this (multiplicatively): the largest speedup effect of server instances and
+      # timing order that the order check measured on the formal hosts (DESIGN.md 4.6; October 2026: 9.4%).
+      guard_percent: 10
       max_ci_percent: 5
 
 # Benchmarks. gate: `margin` (points of the metric) and optionally `relative_margin` (a fraction of the native
@@ -165,10 +169,10 @@ tasks:
     supplementary: [{check: tts_intelligibility, suite: seedtts-en-200, asr_model: openai/whisper-large-v3-turbo,
                      asr_revision: 41f01f3fe87f28c78e2fbf8b568835947dd65ed9,
                      gate: {margin: 2.0, relative_margin: 0.10}}]
-    performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
+    performance: {l1: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}}
   speech_to_speech:
     absolute: [speech_parity]
-    performance: {l1: {output_grader: parity_audio, measurement: {warmup: 1, requests: 3, runs: 3}}}
+    performance: {l1: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}}
 
   # Perf only checks that both sides generate the same geometry (frames, height, width): diffusion
   # content diverges across precisions. Acc is the gold-referenced checks below (GenEval, VBench CLIP-T);
@@ -203,7 +207,7 @@ tasks:
                      detector_threshold: 0.2, gate: {margin: 1.0}}]
     performance:
       l1: &media_l1 {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
-                     measurement: {warmup: 1, requests: 3, runs: 3}}
+                     measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
   image_edit:  # edit inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
     # Edits of ten Imagenette images with the same initial noise on both sides (latent replay),

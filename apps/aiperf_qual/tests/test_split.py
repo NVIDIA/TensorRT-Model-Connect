@@ -146,6 +146,32 @@ def test_the_libraries_a_server_group_mapped_are_recorded():
         child.wait()
 
 
+def test_a_servers_memory_is_recorded_per_numa_node(tmp_path):
+    """Anonymous and file mappings apart; a private file mapping with one written (copy-on-write) page stays a
+    file mapping."""
+    import sys
+
+    data = tmp_path / "data"
+    data.write_bytes(b"\0" * (64 << 20))
+    script = ("import mmap, time\n"
+              f"f = open({str(data)!r}, 'r+b'); m = mmap.mmap(f.fileno(), 0, flags=mmap.MAP_PRIVATE)\n"
+              "sum(m[i] for i in range(0, len(m), 4096)); m[0] = 1\n"
+              "x = bytearray(64 << 20); open(" + repr(str(tmp_path / "ready")) + ", 'w').close(); time.sleep(30)\n")
+    child = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+    try:
+        for _ in range(100):
+            if (tmp_path / "ready").exists():
+                break
+            __import__("time").sleep(0.1)
+        held = services.memory_nodes(child.pid)
+        anonymous, files = (sum(held[kind].values()) for kind in ("anonymous_mappings_gib", "file_mappings_gib"))
+        assert 0.06 <= anonymous < 0.12 and files >= 0.06 and held["node_free_gib"]  # 64 MiB of each, somewhere
+        assert services.memory_nodes(child.pid + 10**7)["anonymous_mappings_gib"] == {}  # no such group
+    finally:
+        child.kill()
+        child.wait()
+
+
 def test_the_report_records_the_gpu_it_ran_on(tmp_path, monkeypatch):
     line = "GPU-aaaa, NVIDIA GB300, 595.58.03, 2070, 3996, 1400.00, Enabled, Default\n"
     monkeypatch.setattr(services.subprocess, "run",

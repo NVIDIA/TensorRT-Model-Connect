@@ -34,7 +34,7 @@ PRECISIONS = ("fp16", "bf16", "fp32")
 # Checkpoints above this size (bytes) measure fewer requests per run: native references of large models
 # take seconds per request, and three runs still give the confidence interval.
 LARGE_CHECKPOINT_BYTES = 16 * 2**30
-LARGE_MODEL_MEASUREMENT = {"warmup": 1, "requests": 3, "runs": 5}
+LARGE_MODEL_MEASUREMENT = {"settle_s": 0, "warmup": 1, "requests": 3, "runs": 5}
 
 
 def checkpoint_bytes(hf_id: str, revision: str | None) -> int | None:
@@ -205,8 +205,11 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         l1["suite"] = {**source["suite_definition"], "suite": f"{profile}-{name}-first", "selection": {"method": "first", "count": 1}}
     l1["suite"] = _suite(l1["suite"], profile, config.get("request"))
     size = checkpoint_bytes(catalog_model.hf_id, revision)
-    if size and size > LARGE_CHECKPOINT_BYTES and l1["measurement"]["requests"] > LARGE_MODEL_MEASUREMENT["requests"]:
-        l1["measurement"] = dict(LARGE_MODEL_MEASUREMENT)
+    task_measurement = deep_merge(tasks["defaults"], tasks["tasks"][catalog_model.task])["performance"]["l1"]["measurement"]
+    if size and size > LARGE_CHECKPOINT_BYTES and task_measurement["requests"] > LARGE_MODEL_MEASUREMENT["requests"]:
+        # The class replaces the Task's measurement; the profile's own measurement settings still apply on top.
+        stated = ((override.get("performance") or {}).get("l1") or {}).get("measurement") or {}
+        l1["measurement"] = deep_merge(LARGE_MODEL_MEASUREMENT, stated)
         l1["measurement_reason"] = f"checkpoint {size / 2**30:.0f} GiB > {LARGE_CHECKPOINT_BYTES / 2**30:.0f} GiB"
     bundle = f"{build.get('name', profile)}/{build.get('bundle', catalog_model.bundle_name)}"
     reference_model = reference.pop("model", None)

@@ -170,10 +170,45 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             (out / LOADED_LIBRARIES).write_text(json.dumps(loaded_libraries(process.pid), indent=2) + "\n")
         yield {"url": url, "info": info, "records": out / "records.jsonl"}
     finally:
-        _stop(process)
+        try:  # the record never keeps a server from stopping
+            (out / MEMORY_NODES).write_text(json.dumps(memory_nodes(process.pid), indent=2) + "\n")
+        finally:
+            _stop(process)
 
 
 LOADED_LIBRARIES = "loaded-libraries.json"
+MEMORY_NODES = "memory-nodes.json"
+
+
+def memory_nodes(group: int) -> dict[str, dict[str, float]]:
+    """Where a server's process group holds its memory, per NUMA node, and each node's free GiB, read before it
+    stops: the resident GiB of its anonymous mappings (heap, stacks) and of its file mappings (a file mapping's
+    copy-on-write pages count with it; numa_maps does not split a mapping's nodes by kind). Where GPU memory is a
+    NUMA node of its own (GB300), CPU memory placed there is slower for the CPU: a diagnostic of timing
+    differences between server instances."""
+    held: dict[str, dict[str, float]] = {"anonymous_mappings_gib": {}, "file_mappings_gib": {}, "node_free_gib": {}}
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            if int(stat.read_text().rsplit(") ", 1)[1].split()[2]) != group:
+                continue
+            lines = (stat.parent / "numa_maps").read_text().splitlines()
+        except (OSError, IndexError, ValueError):
+            continue
+        for line in lines:
+            fields = line.split()
+            page = next((int(field[18:]) * 1024 for field in fields if field.startswith("kernelpagesize_kB=")), 4096)
+            kind = held["file_mappings_gib" if " file=" in line else "anonymous_mappings_gib"]
+            for field in fields:
+                node, _, pages = field.partition("=")
+                if node[:1] == "N" and node[1:].isdigit() and pages.isdigit():
+                    kind[node] = kind.get(node, 0.0) + int(pages) * page / 2**30
+    for meminfo in sorted(Path("/sys/devices/system/node").glob("node[0-9]*/meminfo")):
+        try:
+            free = next(line.split()[3] for line in meminfo.read_text().splitlines() if "MemFree:" in line)
+            held["node_free_gib"][f"N{meminfo.parent.name[4:]}"] = int(free) / 2**20
+        except (OSError, StopIteration, IndexError, ValueError):
+            continue
+    return {kind: {node: round(value, 3) for node, value in nodes.items()} for kind, nodes in held.items()}
 LIBRARY_NAMES = ("libnvinfer", "libnvonnxparser", "libcudart", "libcublas", "libcudnn")
 
 
