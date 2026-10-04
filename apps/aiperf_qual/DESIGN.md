@@ -10,7 +10,9 @@ scheme; its results are archived.
    Hugging Face / PyTorch) model on the qualified workloads and faster than it.
 2. Acc and Perf verdicts are statistically defined and reproducible; the scheme stays simple and a new
    model of a known Task needs no configuration.
-3. One GB300 qualifies all ready models within 24 hours (Section 9 states what is inside the budget).
+3. All ready models are qualified within 24 hours on two GB300s, each running a disjoint share of the
+   profiles (Section 9 states what is inside the budget; the owner chose two GPUs over a smaller `n` when the
+   pilot put one GPU at about 42 hours).
 4. No dependency on `qualification_tests/benchmark_qualification`: no imports, no reading of
    `families/*/tests/benchmark/*`. `apps/benchmark` (catalog, `resolve_case`, `trtmc-bench` builds, the
    worker) is the TRTMC side and stays.
@@ -282,12 +284,16 @@ once, so a hung phase costs at most its deadline twice. Outside: one-time prepar
 dataset downloads, reference environments, scorer checkpoints). The smoke run records every model's
 build, start, peak memory, and per-request times; a pilot runs one representative model per Task at the
 formal `n`; together they give a per-model ledger, and the formal run starts only when the ledger
-predicts at most 22 hours. Memory: a native model whose weights exceed 240 GB (MiniMax-H3, 351 GB) runs
+predicts at most 22 hours on each GPU. **Two GPUs** (2026-10-04, the owner's choice over a smaller `n`): the
+pilot-calibrated ledger put one GB300 at about 42 hours (46 with the failure allowance). The profiles are split
+between two GB300 hosts of the same platform (equal fingerprints), longest ledger time first, each to the host
+with less predicted time; every verdict compares TRTMC with the native model on the same host and GPU, so the
+split cannot bias Acc or Perf, and the two result trees merge into one matrix (the profiles are disjoint). Memory: a native model whose weights exceed 240 GB (MiniMax-H3, 351 GB) runs
 with layers offloaded to host memory (Accelerate `device_map`), its Perf labelled as against an
 offloaded baseline. Levers when the ledger exceeds 22 hours: one native server reused for L1 and Acc,
 native replicas where the measured throughput gain is real, TRTMC replicas for the Acc answers (Section 12),
-the candidate probe reused as the candidate server. If it still exceeds 22 hours, the excess Tasks are reported to the owner; `n` is not reduced
-silently.
+CUDA MPS for those copies (Section 12), the candidate probe reused as the candidate server. If it still exceeds
+22 hours on a GPU, the excess Tasks are reported to the owner; `n` is not reduced silently.
 
 ## 10. Smoke mode
 
@@ -448,7 +454,8 @@ The formal run starts only when every gate holds; each is recorded in PR #1550.
 
 1. **Pilot**: one representative profile per Task completes at the formal `n` (Section 9), on the final code.
 2. **Ledger**: the per-model ledger from the smoke run and the pilot's steady-state request times predicts at most
-   22 hours on one GB300, failure allowance included; otherwise the levers of Section 9, then a report to the owner.
+   22 hours on each of the two GB300s for its share (Section 9), failure allowance included; otherwise the levers
+   of Section 9, then a report to the owner.
 3. **Order**: the order check (above) runs on five profiles across the server sizes with a resolved result each;
    where an effect exceeds 2%, the size class's mitigation (interleaved runs, or native, TRTMC, native timing that is
    `perf-inconclusive` when the two native timings differ by more than 2%) is implemented and tested.
