@@ -863,7 +863,7 @@ def test_the_other_copies_start_together_and_every_started_copy_stops(tmp_path, 
         return serving
 
     environment = Environment({"ports": {"candidate": 9000, "reference": 9100}})
-    monkeypatch.setattr(services, "replicas_that_fit", lambda before, after, wanted: wanted)
+    monkeypatch.setattr(services, "replicas_that_fit", lambda before, after, wanted, reserve_mib=0: wanted)
     monkeypatch.setattr(services, "gpu_memory_mib", lambda: (0, 1))
     monkeypatch.setattr(services, "serving", fake())
     began = time.time()
@@ -954,7 +954,7 @@ def test_an_interrupt_while_copies_start_still_stops_every_started_copy(tmp_path
 
     monkeypatch.setattr(services, "serving", serving)
     monkeypatch.setattr(services, "wait", interrupted_once)
-    monkeypatch.setattr(services, "replicas_that_fit", lambda before, after, wanted: wanted)
+    monkeypatch.setattr(services, "replicas_that_fit", lambda before, after, wanted, reserve_mib=0: wanted)
     monkeypatch.setattr(services, "gpu_memory_mib", lambda: (0, 1))
     with pytest.raises(KeyboardInterrupt):
         with services.serving_replicas(Environment({"ports": {"candidate": 9000}}), {}, "trtmc", tmp_path / "acc",
@@ -1045,12 +1045,12 @@ def test_both_sides_answer_at_once_trtmc_sized_after_the_native_copies(tmp_path,
 
     def fake_replicas(fail=None):
         @contextmanager
-        def serving_replicas(environment, model, backend, out, *, count, mps_env=None, **options):
+        def serving_replicas(environment, model, backend, out, *, count, mps_env=None, reserve_mib=0, **options):
             assert mps_env == {"CUDA_MPS_PIPE_DIRECTORY": "p"}  # one daemon for both sides
             if fail == backend:
                 raise services.ServiceError(f"{backend} did not start")
-            note(("up", backend))
-            yield {"url": backend, "replicas": count, "mps": True}
+            note(("up", backend, reserve_mib))
+            yield {"url": backend, "replicas": count, "mps": True, "footprint_mib": 1000}
             note(("down", backend))
         return serving_replicas
 
@@ -1062,7 +1062,7 @@ def test_both_sides_answer_at_once_trtmc_sized_after_the_native_copies(tmp_path,
         note(("answering", service["url"]))
         time.sleep(0.2)
         note(("answered", service["url"]))
-        return {"records": {}}
+        return {"records": {"greedy": {index: {} for index in range(len(problems))}}}
 
     monkeypatch.setattr(services, "mps", daemon)
     monkeypatch.setattr(absolute, "serving_replicas", fake_replicas())
@@ -1070,17 +1070,19 @@ def test_both_sides_answer_at_once_trtmc_sized_after_the_native_copies(tmp_path,
     model = {"operation": "generate", "absolute": [{"suite": "s"}],
              "reference": {"backend": "reference", "perf_precision": "fp16", "precision": "fp32"}}
     environment = Environment({"native_replicas": 8, "candidate_replicas": 4})
-    result = absolute.overlapped_acc(environment, model, "python", {"s": []}, tmp_path)
-    assert events.index(("up", "reference")) < events.index(("up", "trtmc"))
-    assert events.index(("answering", "trtmc")) < events.index(("answered", "reference"))  # at once
+    result = absolute.overlapped_acc(environment, model, "python", {"s": [{}, {}]}, tmp_path)
+    up = [event for event in events if event[0] == "up"]
+    assert up == [("up", "reference", 0), ("up", "trtmc", 4000)]  # native first; its growth (0.5 x 1000 x 8) held back
+    assert events.index(("up", "trtmc", 4000)) < events.index(("answering", "reference"))  # native waited, idle
+    assert events.index(("answering", "trtmc")) < events.index(("answered", "reference"))  # then both at once
     assert result["native"]["replicas"] == 8 and result["copies"] == {"candidate_replicas": 4, "candidate_mps": True}
 
     events.clear()
     monkeypatch.setattr(absolute, "serving_replicas", fake_replicas(fail="trtmc"))
-    result = absolute.overlapped_acc(environment, model, "python", {"s": []}, tmp_path)
-    assert "trtmc did not start" in result["candidate_error"] and result["native"]["runs"] == {"s": {"records": {}}}
+    result = absolute.overlapped_acc(environment, model, "python", {"s": [{}]}, tmp_path)
+    assert "trtmc did not start" in result["candidate_error"] and result["native"]["runs"]["s"]["records"]
     monkeypatch.setattr(absolute, "serving_replicas", fake_replicas(fail="reference"))
-    result = absolute.overlapped_acc(environment, model, "python", {"s": []}, tmp_path)
+    result = absolute.overlapped_acc(environment, model, "python", {"s": [{}]}, tmp_path)
     assert "reference did not start" in result["native_error"] and "candidate" in result
 
 
@@ -1110,3 +1112,66 @@ def test_answers_given_alongside_are_judged_and_only_l1_starts_a_server(tmp_path
     entry = accuracy[0]
     assert entry["sides_concurrent"] and entry["workload_perf"]["light"] == "white"
     assert "both sides answered at once" in entry["workload_perf"]["note"]
+
+
+
+def test_a_side_that_did_not_answer_every_problem_is_incomplete():
+    model, plans = {"absolute": [{"suite": "s"}, {"suite": "t"}]}, {"s": [{}, {}], "t": [{}]}
+    whole = {"s": {"records": {"greedy": {0: {"correct": False}, 1: {"correct": True}}}},
+             "t": {"observations": {"greedy": {0: {}}}}}
+    assert absolute.incomplete(model, plans, whole) is None  # a wrong answer is an answer
+    assert "1 of 2 answered" in absolute.incomplete(model, plans, {**whole, "s": {"records": {"greedy": {0: {}}}}})
+    failed = {**whole, "s": {**whole["s"], "failed": {"greedy": "1 requests failed: HTTP 500"}}}
+    assert "HTTP 500" in absolute.incomplete(model, plans, failed)
+    assert "t: not run" == absolute.incomplete(model, plans, {"s": whole["s"]})
+
+
+def test_the_two_sides_copies_never_share_a_port_and_a_foreign_server_is_refused(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import services
+    from trtmc_aiperf_qual.config import Environment
+
+    environment = Environment({"ports": {"candidate": 8901, "reference": 8900}, "repo": str(tmp_path),
+                               "bundle_root": str(tmp_path), "runtime_root": str(tmp_path), "worker": "w",
+                               "serve_python": "python"})
+    ports = {backend: {services.copy_port(environment, backend, index) for index in range(services.MAX_COPIES)}
+             for backend in ("trtmc", "reference")}
+    assert not ports["trtmc"] & ports["reference"] and len(ports["trtmc"]) == services.MAX_COPIES
+
+    class Process:
+        pid = 1
+
+        def poll(self):
+            return None
+
+    stopped = []
+    monkeypatch.setattr(services.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(services, "_wait_ready", lambda process, url, out: {"backend": "reference"})
+    monkeypatch.setattr(services, "_stop", lambda process: stopped.append(process))
+    monkeypatch.setattr(services, "_port_free", lambda port: True)
+    model = {"catalog_profile": "m", "candidate": {"bundle": "b"}, "reference": {}}
+    with pytest.raises(services.ServiceError, match="answered as 'reference'"):
+        with services.serving(environment, model, "trtmc", tmp_path / "srv"):
+            pass
+    assert stopped  # the server this run started is stopped
+    monkeypatch.setattr(services, "_port_free", lambda port: False)
+    with pytest.raises(services.ServiceError, match="in use"):
+        with services.serving(environment, model, "trtmc", tmp_path / "srv2"):
+            pass
+
+
+def test_a_cancelled_run_stops_its_aiperf_process_promptly(tmp_path):
+    import sys
+    import threading
+    import time
+
+    from trtmc_aiperf_qual import aiperf_runner, cancel
+
+    timer = threading.Timer(0.5, cancel.EVENT.set)
+    timer.start()
+    began = time.time()
+    try:
+        with open(tmp_path / "log", "w") as log, pytest.raises(cancel.Cancelled):
+            aiperf_runner._run([sys.executable, "-c", "import time; time.sleep(60)"], log, {}, 3600)
+    finally:
+        cancel.EVENT.clear()
+    assert time.time() - began < 5

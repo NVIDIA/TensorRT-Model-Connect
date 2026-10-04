@@ -7,12 +7,14 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from . import cancel
 from .config import Environment
 
 READY_MARKER = ".aiperf_results_ready.json"
@@ -57,6 +59,29 @@ class AiperfRun:
                 if item.get("benchmark_phase") == "profiling"]
 
 
+def _run(command: Sequence[str], log: Any, env: Mapping[str, str], timeout_s: float) -> int:
+    """AIPerf in a process group of its own, stopped (the whole group) at its deadline (TimeoutExpired), when the
+    run is cancelled (``cancel.Cancelled``), or on any interrupt of this thread."""
+    process = subprocess.Popen(list(command), stdout=log, stderr=subprocess.STDOUT, env=dict(env),
+                               start_new_session=True)
+    deadline = time.time() + timeout_s
+    try:
+        while True:
+            try:
+                return process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                cancel.check()
+                if time.time() > deadline:
+                    raise subprocess.TimeoutExpired(list(command), timeout_s) from None
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        raise
+
+
 def run_aiperf(environment: Environment, out: Path, arguments: Sequence[str], *,
                env: Mapping[str, str] | None = None, timeout_s: float = 7200) -> AiperfRun:
     shutil.rmtree(out, ignore_errors=True)
@@ -72,8 +97,7 @@ def run_aiperf(environment: Environment, out: Path, arguments: Sequence[str], *,
     client_env.update(env or {})
     (out.parent / f"{out.name}.command.json").write_text(json.dumps(command))
     with open(out.parent / f"{out.name}.log", "w") as log:
-        code = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, env=client_env,
-                              timeout=timeout_s).returncode
+        code = _run(command, log, client_env, timeout_s)
     _wait_ready(out)
     return AiperfRun(out, code, command)
 

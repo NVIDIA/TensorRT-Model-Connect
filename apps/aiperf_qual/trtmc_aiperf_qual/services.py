@@ -18,6 +18,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
+from . import cancel
 from .config import Environment
 
 
@@ -30,7 +31,10 @@ class GpuStateError(BaseException):
     BaseException, so no phase, precision fallback, or per-model handler swallows it: the run stops."""
 
 
-REPLICA_PORT_OFFSET = 10  # replica i > 0 listens on <port> + 10 + i
+# Copy i > 0 of a backend listens on <its port> + offset + i: the two backends' copies never share a port (both
+# sides' copies run at once with acc_overlap), for up to MAX_COPIES copies a side.
+REPLICA_PORT_OFFSETS = {"trtmc": 20, "reference": 50}
+MAX_COPIES = 16
 REPLICA_HEADROOM_MIB = 24 * 1024  # GPU memory left free next to the replicas
 REPLICA_GROWTH = 1.5  # a replica's peak over its memory once loaded (activations, KV cache)
 
@@ -153,11 +157,15 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
         env.pop("HF_HUB_OFFLINE", None)
     env.update(extra_env or {})
     (out / "command.json").write_text(json.dumps(command))
+    if not _port_free(port):  # another server there would answer for this one
+        raise ServiceError(f"port {port} is in use")
     process = subprocess.Popen(command, stdout=open(out / "server.log", "w"), stderr=subprocess.STDOUT,
                                env=env, cwd=repo, start_new_session=True)
     url = f"http://127.0.0.1:{port}"
     try:
         info = _wait_ready(process, url, out)
+        if info.get("backend") != backend:
+            raise ServiceError(f"port {port} answered as {info.get('backend')!r}, not this {backend} server")
         if backend == "trtmc":  # which TensorRT and CUDA libraries the loaded bundle actually runs on
             (out / LOADED_LIBRARIES).write_text(json.dumps(loaded_libraries(process.pid), indent=2) + "\n")
         yield {"url": url, "info": info, "records": out / "records.jsonl"}
@@ -204,6 +212,18 @@ def gpu_identity(environment: Environment) -> dict[str, Any]:
     return identity
 
 
+def _port_free(port: int) -> bool:
+    import socket as sockets
+
+    with sockets.socket(sockets.AF_INET, sockets.SOCK_STREAM) as probe:
+        probe.setsockopt(sockets.SOL_SOCKET, sockets.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
 def gpu_memory_mib() -> tuple[int, int] | None:
     """(used, total) MiB of the first visible GPU, or None without nvidia-smi."""
     try:
@@ -215,13 +235,21 @@ def gpu_memory_mib() -> tuple[int, int] | None:
         return None
 
 
-def replicas_that_fit(before: tuple[int, int] | None, after: tuple[int, int] | None, wanted: int) -> int:
+def replicas_that_fit(before: tuple[int, int] | None, after: tuple[int, int] | None, wanted: int,
+                      reserve_mib: int = 0) -> int:
     """How many copies of a server fit: ``after`` (one copy loaded) - ``before`` is one copy's memory;
-    each needs REPLICA_GROWTH times that at its peak, with REPLICA_HEADROOM_MIB left free."""
+    each needs REPLICA_GROWTH times that at its peak, with REPLICA_HEADROOM_MIB and ``reserve_mib`` left free."""
     if wanted <= 1 or before is None or after is None:
         return 1
     one = max(after[0] - before[0], 1)
-    return max(1, min(wanted, int((after[1] - before[0] - REPLICA_HEADROOM_MIB) // (one * REPLICA_GROWTH))))
+    room = after[1] - before[0] - REPLICA_HEADROOM_MIB - reserve_mib
+    return max(1, min(wanted, int(room // (one * REPLICA_GROWTH))))
+
+
+def copy_port(environment: Environment, backend: str, index: int) -> int:
+    """Copy ``index`` of a backend's server: its configured port, then <port> + offset + index (disjoint)."""
+    base = int(environment["ports"]["candidate" if backend == "trtmc" else "reference"])
+    return base if index == 0 else base + REPLICA_PORT_OFFSETS[backend] + index
 
 
 MPS_CONTROL = re.compile(r"Control (\d+)\] Starting control daemon")
@@ -350,13 +378,15 @@ def mps(environment: Environment, directory: Path) -> Iterator[dict[str, str]]:
 
 @contextmanager
 def serving_replicas(environment: Environment, model: dict[str, Any], backend: str, out: Path, *, count: int,
-                     mps_env: Mapping[str, str] | None = None, **options: Any) -> Iterator[dict[str, Any]]:
+                     mps_env: Mapping[str, str] | None = None, reserve_mib: int = 0,
+                     **options: Any) -> Iterator[dict[str, Any]]:
     """Up to ``count`` copies of one server on the GPU, as many as its free memory holds (the first copy
     measures what one needs; the others then start together); yields the first copy's service with ``urls`` of
     all and ``replicas``. Each copy still serves one request at a time; clients spread their requests over
-    ``urls``. ``mps_env``: an MPS daemon's variables the caller already runs (both sides' copies at once), instead
-    of a daemon of their own."""
-    base = int(environment["ports"]["candidate" if backend == "trtmc" else "reference"])
+    ``urls`` and ``footprint_mib`` (one copy's memory, when measured). ``mps_env``: an MPS daemon's variables the
+    caller already runs (both sides' copies at once), instead of a daemon of their own; ``reserve_mib``: memory
+    held back for the other side's growth while it runs."""
+    count = min(count, MAX_COPIES)
     before = gpu_memory_mib() if count > 1 else None
     with ExitStack() as stack:
         if mps_env is not None:
@@ -366,9 +396,10 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
         first = stack.enter_context(serving(environment, model, backend, out, extra_env=shared, **options))
         urls = [first["url"]]
         # The other copies start together (sized above for their peak); each one that starts serves.
+        after = gpu_memory_mib() if before else None
         copies = [serving(environment, model, backend, out.parent / f"{out.name}-replica{index}",
-                          port=base + REPLICA_PORT_OFFSET + index, extra_env=shared, **options)
-                  for index in range(1, replicas_that_fit(before, gpu_memory_mib() if before else None, count))]
+                          port=copy_port(environment, backend, index), extra_env=shared, **options)
+                  for index in range(1, replicas_that_fit(before, after, count, reserve_mib))]
         if copies:
             failure: BaseException | None = None
             with ThreadPoolExecutor(max_workers=len(copies)) as pool:
@@ -389,12 +420,14 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
                         failure = failure or error
             if failure is not None:
                 raise failure
-        yield {**first, "urls": urls, "replicas": len(urls), "mps": bool(shared)}
+        yield {**first, "urls": urls, "replicas": len(urls), "mps": bool(shared),
+               "footprint_mib": max(after[0] - before[0], 0) if before and after else None}
 
 
 def _wait_ready(process: subprocess.Popen, url: str, out: Path, timeout_s: float = 1800) -> dict[str, Any]:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
+        cancel.check()
         if process.poll() is not None:
             raise ServiceError(f"server exited {process.returncode}: {(out / 'server.log').read_text()[-600:]}")
         try:

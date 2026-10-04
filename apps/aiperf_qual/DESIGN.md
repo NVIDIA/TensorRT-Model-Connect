@@ -463,11 +463,15 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   copies start together instead of one by one. Measured on lfm2-350m: 913 -> 737 s per profile (MMLU's AIPerf
   start 48 -> 4 s; copies started in 22 and 14 s instead of 53 and 48).
 - **Both sides' Acc at once** (`acc_overlap`, on for GB300): under one MPS daemon the native copies start first
-  (sized alone), then TRTMC's (sized against what is left), and both sides' Acc requests run concurrently; each
-  copy still answers one request at a time, so the answers are each side's own (TRTMC's reproduce a single
-  server's exactly; native eager answers vary between runs as they do anyway). A side that fails there answers
-  on its own afterwards (`provenance.acc_overlap_fallback`); L1 is timed only after every copy and the daemon
-  have stopped, one server at a time; the Acc requests' own times are white (`sides_concurrent`).
+  (at the first native precision, sized alone) and wait idle; TRTMC's copies then start, sized against what is
+  left with the native copies' growth held back; then both sides answer concurrently. Each copy still answers
+  one request at a time, so the answers are each side's own (TRTMC's reproduce a single server's exactly; native
+  eager answers vary between runs as they do anyway). The two backends' copies listen on disjoint ports, a
+  server must answer as its own backend, and a bound port is refused (an earlier draft let TRTMC's copies fail
+  to bind and native servers answer in their place). A side that fails or leaves a problem unanswered there
+  answers on its own afterwards (`provenance.acc_overlap_fallback`); an interrupt cancels the other side's
+  AIPerf runs and server starts. L1 is timed only after every copy and the daemon have stopped, one server at a
+  time; the Acc requests' own times are white (`sides_concurrent`).
 - **Retries and deadlines**: a failed GPU phase runs once more (not in smoke mode); every AIPerf run (Acc, Perf,
   generation for the media checks, L2) takes the ledger's per-profile deadline from the environment's
   `deadlines` map.

@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from . import gold_metrics, noninferiority
+from . import cancel, gold_metrics, noninferiority
 from .aiperf_runner import run_aiperf
 from .config import Environment
 from .judge import light
@@ -540,7 +540,8 @@ def keeps_artifacts(model: Mapping[str, Any]) -> bool:
 
 def run_native(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],
                out: Path, probe_request: Mapping[str, Any] | None = None, *, mps_env: Mapping[str, str] | None = None,
-               started: Callable[[], None] | None = None) -> dict[str, Any]:
+               precisions: Sequence[str] | None = None, started: Callable[[Mapping[str, Any]], None] | None = None,
+               go: threading.Event | None = None) -> dict[str, Any]:
     """Every benchmark on the native model: the reference adapter, eager, at the first precision of
     ``timing_precisions`` it serves. The adapter runs as up to ``native_replicas`` (environment) copies
     that fit on the GPU, each answering one problem at a time: the answers do not change, its model-call
@@ -548,14 +549,16 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
     from .runner import timing_precisions
 
     errors = []
-    for precision in timing_precisions(model["reference"]):
+    for precision in precisions or timing_precisions(model["reference"]):
         try:
             count = 1 if environment.values.get("smoke") else int(environment.values.get("native_replicas") or 1)
             with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{precision}",
                                   count=count, mode="eager", precision=precision, python=python,
                                   keep_artifacts=keeps_artifacts(model), mps_env=mps_env) as service:
-                if started is not None:  # the copies hold their memory: the other side may size its own
-                    started()
+                if started is not None:  # the copies hold their memory, idle: the other side may size its own
+                    started(service)
+                while go is not None and not go.wait(1):  # the other side's copies are starting
+                    cancel.check()
                 if probe_request is not None:
                     _probe(service, model["operation"], probe_request)
                 runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
@@ -569,34 +572,82 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
     raise RuntimeError("; ".join(errors)[:1500])
 
 
+def incomplete(model: Mapping[str, Any], plans: Mapping[str, Sequence], runs: Mapping[str, Any]) -> str | None:
+    """Why one side's Acc runs did not answer every problem (failed or missing requests, a suite not run), or
+    None. Wrong answers are answers: only what never came back counts."""
+    for item in model["absolute"]:
+        side = runs.get(item["suite"])
+        if side is None:
+            return f"{item['suite']}: not run"
+        if side.get("failed"):
+            return f"{item['suite']}: {next(iter(side['failed'].values()))}"
+        answered = side.get("observations") if "observations" in side else side.get("records")
+        for name, found in (answered or {}).items():
+            if len(found) < len(plans[item["suite"]]):
+                return f"{item['suite']} ({name}): {len(found)} of {len(plans[item['suite']])} answered"
+        if not answered:
+            return f"{item['suite']}: no answers"
+    return None
+
+
 def overlapped_acc(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],
                    out: Path, probe_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Both sides' Acc answers at once (environment ``acc_overlap``): under one MPS daemon the native copies start
-    first (sized alone), then TRTMC's (sized against what is left), and both sides' requests run concurrently; the
-    answers are those of each side alone (one request at a time per copy). Returns the native side or its error,
-    and TRTMC's runs with its copies or its error; the caller falls back to one side after the other."""
-    from .services import mps
+    """Both sides' Acc answers at once (environment ``acc_overlap``), under one MPS daemon: the native copies start
+    at the first native precision, sized alone, and wait idle; TRTMC's copies then start, sized against what is
+    left with the native copies' growth held back; then both sides answer concurrently. Each copy answers one
+    request at a time, so the answers are each side's own. Returns the native side or its error and TRTMC's runs
+    with its copies or its error (an incomplete side is an error): the caller lets that side answer alone. An
+    interrupt cancels the native side's work before the daemon stops."""
+    from .runner import timing_precisions
+    from .services import REPLICA_GROWTH, mps
 
     result: dict[str, Any] = {}
-    ready = threading.Event()
-    with mps(environment, out / "acc-mps") as shared, ThreadPoolExecutor(max_workers=1) as pool:
-        native = pool.submit(run_native, environment, model, python, plans, out, probe_request, mps_env=shared,
-                             started=ready.set)
-        while not ready.wait(1) and not native.done():
-            pass
+    ready, go, native_copies = threading.Event(), threading.Event(), {}
+
+    def up(service: Mapping[str, Any]) -> None:
+        native_copies.update(replicas=int(service.get("replicas") or 1), footprint=service.get("footprint_mib") or 0)
+        ready.set()
+
+    with mps(environment, out / "acc-mps") as shared:
+        pool = ThreadPoolExecutor(max_workers=1)
         try:
-            with serving_replicas(environment, dict(model), "trtmc", out / "candidate-acc",
-                                  count=int(environment.values.get("candidate_replicas") or 1),
-                                  keep_artifacts=keeps_artifacts(model), mps_env=shared) as service:
-                result["candidate"] = run_candidate(environment, service, model, plans, out)
-                result["copies"] = {"candidate_replicas": int(service.get("replicas") or 1),
-                                    "candidate_mps": bool(service.get("mps"))}
-        except Exception as error:  # noqa: BLE001 - TRTMC then answers on its own, after the native side
-            result["candidate_error"] = f"{type(error).__name__}: {error}"[:1500]
-        try:
-            result["native"] = native.result()
-        except Exception as error:  # noqa: BLE001 - the native side then runs on its own
-            result["native_error"] = f"{type(error).__name__}: {error}"[:1500]
+            native = pool.submit(run_native, environment, model, python, plans, out, probe_request, mps_env=shared,
+                                 precisions=timing_precisions(model["reference"])[:1], started=up, go=go)
+            while not ready.wait(1) and not native.done():
+                pass
+            reserve = int((REPLICA_GROWTH - 1) * native_copies.get("footprint", 0) * native_copies.get("replicas", 0))
+            try:
+                with serving_replicas(environment, dict(model), "trtmc", out / "candidate-acc",
+                                      count=int(environment.values.get("candidate_replicas") or 1),
+                                      keep_artifacts=keeps_artifacts(model), mps_env=shared,
+                                      reserve_mib=reserve) as service:
+                    go.set()
+                    candidate = run_candidate(environment, service, model, plans, out)
+                    gap = incomplete(model, plans, candidate)
+                    if gap:
+                        result["candidate_error"] = f"incomplete: {gap}"
+                    else:
+                        result["candidate"] = candidate
+                        result["copies"] = {"candidate_replicas": int(service.get("replicas") or 1),
+                                            "candidate_mps": bool(service.get("mps"))}
+            except Exception as error:  # noqa: BLE001 - TRTMC then answers on its own, after the native side
+                result["candidate_error"] = f"{type(error).__name__}: {error}"[:1500]
+            go.set()  # the native side answers even when TRTMC could not start
+            try:
+                native_result = native.result()
+                gap = incomplete(model, plans, native_result["runs"])
+                if gap:
+                    result["native_error"] = f"incomplete: {gap}"
+                else:
+                    result["native"] = native_result
+            except Exception as error:  # noqa: BLE001 - the native side then runs on its own
+                result["native_error"] = f"{type(error).__name__}: {error}"[:1500]
+        except BaseException:
+            cancel.EVENT.set()  # the native side's AIPerf runs and server starts stop now
+            raise
+        finally:
+            pool.shutdown(wait=True)  # its servers stopped before the daemon does
+            cancel.EVENT.clear()
     return result
 
 
