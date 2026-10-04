@@ -3,7 +3,7 @@
   "hf_id": "sentence-transformers/all-mpnet-base-v2",
   "bundle": "all-mpnet-base-v2-tp4.bundle",
   "family": "mpnet",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "testcases": [
     {
       "name": "all-mpnet-base-v2-tp4",
