@@ -127,10 +127,13 @@ class PluginDescriptorV1(ctypes.Structure):
 for raw_path in sys.argv[4:]:
     path = Path(raw_path)
     library = ctypes.CDLL(path, mode=os.RTLD_NOW | ctypes.RTLD_LOCAL)
+    name = path.name
+    # Family CLI adapters use a C ABI, not a Runtime plugin descriptor.
+    if name.startswith("libtrtmc_cli_"):
+        continue
     descriptor_function = library.trtmc_plugin_descriptor_v1
     descriptor_function.restype = ctypes.POINTER(PluginDescriptorV1)
     descriptor = descriptor_function().contents
-    name = path.name
     if name.startswith("libtrtmc_backend_"):
         expected_kind, expected_id = 1, name.removeprefix("libtrtmc_backend_").removesuffix(".so")
     elif name.startswith("libtrtmc_model_"):

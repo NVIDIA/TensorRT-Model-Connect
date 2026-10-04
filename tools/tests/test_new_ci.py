@@ -1264,14 +1264,10 @@ const struct PluginDescriptorV1 *trtmc_plugin_descriptor_v1(void) {{ return &des
     with pytest.raises(CiError, match="trtmc_plugin_descriptor_v1"):
         load_native_libraries(tmp_path, ("alpha", "beta"))
 
-    compile_library(
-        library,
-        plugin_source(
-            2,
-            "beta",
-            "extern void missing_symbol(void); void beta_symbol(void) { missing_symbol(); }",
-        ),
-    )
+    compile_library("libtrtmc_model_beta.so", plugin_source(2, "beta", "void beta_symbol(void) {}"))
+    unresolved = "extern void missing_symbol(void); void beta_symbol(void) { missing_symbol(); }"
+    source = plugin_source(2, "beta", unresolved) if library == "libtrtmc_model_beta.so" else unresolved
+    compile_library(library, source)
     with pytest.raises(CiError, match="undefined symbol: missing_symbol"):
         load_native_libraries(tmp_path, ("alpha", "beta"))
 
