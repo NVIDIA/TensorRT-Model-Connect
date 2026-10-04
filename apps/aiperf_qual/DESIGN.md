@@ -424,7 +424,7 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
 - **s1-mini** does not build from the catalog (`trtmc build` cannot choose between the `qwen` and `s1_mini`
   families): a TRTMC finding, reported as a build failure.
 - **Replicas for Acc answers**: the native adapter (`native_replicas`) and the TRTMC server (`candidate_replicas`)
-  answer Acc problems as up to four copies that fit the GPU's free memory (the first copy measures one copy's
+  answer Acc problems as up to eight copies (GB300) that fit the GPU's free memory (the first copy measures one copy's
   footprint; a copy that fails to start leaves the ones running). Each copy loads the same checkpoint or bundle and
   answers one request at a time, with nothing batched across requests, so the answers equal one server's; the pilot
   measures the throughput gain. L1 is timed on a single server started after the copies stopped, and the Acc
