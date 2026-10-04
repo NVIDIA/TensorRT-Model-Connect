@@ -5,6 +5,7 @@
 
 #include "families/depth_anything/runtime/pipeline.h"
 #include "trtmc/runtime/family_factory.h"
+#include "trtmc/runtime/plugin_abi.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <nlohmann/json.hpp>
@@ -47,6 +48,8 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 
 } // namespace
 } // namespace trtmc::depth_anything
+
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("depth_anything")
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)

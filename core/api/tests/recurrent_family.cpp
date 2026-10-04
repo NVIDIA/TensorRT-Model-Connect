@@ -471,6 +471,8 @@ extern "C" void trtmc_test_recurrent_release_waiters() {
 extern "C" void trtmc_test_recurrent_allocation_hook(AllocationHook hook) {
     allocation_hook.store(hook);
 }
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("recurrent_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     return new Model(context.reader.info().task);
 }

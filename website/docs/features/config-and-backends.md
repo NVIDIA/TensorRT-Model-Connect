@@ -35,7 +35,6 @@ Both are loaded from the same required runtime root as the family DSO:
 
 ```bash
 trtmc run model.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "Hello"
 ```
 

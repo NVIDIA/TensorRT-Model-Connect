@@ -217,6 +217,8 @@ class RtxBackend final : public IBackend {
 
 } // namespace trtmc
 
+TRTMC_DEFINE_BACKEND_PLUGIN_V1("trt_rtx")
+
 extern "C" trtmc::IBackend* trtmc_create_backend() {
     try {
         return new trtmc::RtxBackend();

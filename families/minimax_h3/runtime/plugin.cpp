@@ -71,6 +71,8 @@ MiniMaxH3ModuleLoader make_loader(IBackend& backend, PlanMap plans) {
 } // namespace
 } // namespace trtmc::minimax_h3_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("minimax_h3")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("minimax_h3 does not support --kv-cache-size");

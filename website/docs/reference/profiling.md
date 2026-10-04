@@ -14,7 +14,6 @@ First prove that the same bundle and request complete normally:
 
 ```bash
 trtmc run model.bundle \
-  --runtime-root /opt/trtmc/lib \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --seed 1234
@@ -39,9 +38,9 @@ Hold these inputs constant across comparisons:
 - Use family-owned tests and reference comparisons to establish correctness
   before interpreting a speedup.
 
-Profile loading separately from steady-state task execution. The public CLI
-requires `--runtime-root`; include its exact directory in the evidence so the
-loaded shared objects are reproducible.
+Profile loading separately from steady-state task execution. Record the exact
+runtime directory printed by automatic discovery in the evidence so the loaded
+shared objects are reproducible.
 
 ## Interpreting results
 

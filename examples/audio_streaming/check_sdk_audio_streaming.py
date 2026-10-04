@@ -10,6 +10,7 @@ from pathlib import Path
 import struct
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -53,7 +54,7 @@ def main() -> None:
         }
         for name, source in dependencies.items():
             assert source.is_file(), source
-            (layout / name).symlink_to(source)
+            shutil.copy2(source, layout / name)
         installed_environment = dict(os.environ)
         installed_environment["LD_LIBRARY_PATH"] = str(layout) + (
             ":" + os.environ["LD_LIBRARY_PATH"] if os.environ.get("LD_LIBRARY_PATH") else ""

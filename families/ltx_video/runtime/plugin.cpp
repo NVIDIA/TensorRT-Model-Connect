@@ -32,6 +32,8 @@ std::string section_text(const BundleReader& bundle, const char* name) {
 } // namespace
 } // namespace trtmc::ltx_video_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("ltx_video")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("ltx_video does not support --kv-cache-size");

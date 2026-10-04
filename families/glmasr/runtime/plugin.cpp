@@ -20,6 +20,8 @@ std::vector<char> required(const trtmc::BundleReader& b, const char* name) {
 }
 } // namespace
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("glmasr")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     using namespace trtmc;
     if (context.kv_cache_size_bytes != 0)

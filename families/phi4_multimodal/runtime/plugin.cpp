@@ -77,6 +77,8 @@ Phi4MultimodalKvCacheNames build_kv_names(const nlohmann::json& config, std::int
 } // namespace
 } // namespace trtmc::phi4_multimodal_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("phi4_multimodal")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("phi4_multimodal does not support --kv-cache-size");

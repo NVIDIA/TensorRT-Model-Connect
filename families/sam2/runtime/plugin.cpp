@@ -40,6 +40,8 @@ NativePlanModuleFactory makeModuleFactory(IBackend& backend) {
 } // namespace
 } // namespace trtmc::sam2
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("sam2")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("sam2 does not support --kv-cache-size");
