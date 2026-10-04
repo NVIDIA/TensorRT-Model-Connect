@@ -3,7 +3,7 @@
   "hf_id": "distilbert/distilbert-base-uncased",
   "bundle": "distilbert-base-uncased-tp4.bundle",
   "family": "distilbert",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "testcases": [
     {
       "name": "distilbert-base-uncased-tp4",
