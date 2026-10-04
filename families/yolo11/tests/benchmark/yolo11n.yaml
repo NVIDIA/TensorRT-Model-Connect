@@ -7,7 +7,7 @@ candidate:
   family: yolo11
   checkpoint: Ultralytics/YOLO11
   revision: 8b8ac7d1fae7468f85dbf89670dd66f41f485aab
-  task: object_detection
+  task: image_to_boxes
   precision: fp16
   bundle: yolo11n.bundle
   build:

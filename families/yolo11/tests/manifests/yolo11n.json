@@ -4,7 +4,7 @@
   "hf_revision": "8b8ac7d1fae7468f85dbf89670dd66f41f485aab",
   "bundle": "yolo11n.bundle",
   "family": "yolo11",
-  "task": "object_detection",
+  "task": "image_to_boxes",
   "precision": "fp16",
   "testcases": [
     {
