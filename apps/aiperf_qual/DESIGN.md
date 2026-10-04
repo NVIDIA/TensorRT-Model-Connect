@@ -286,8 +286,13 @@ build, start, peak memory, and per-request times; a pilot runs one representativ
 formal `n`; together they give a per-model ledger, and the formal run starts only when the ledger
 predicts at most 22 hours on each GPU. **Two GPUs** (2026-10-04, the owner's choice over a smaller `n`): the
 pilot-calibrated ledger put one GB300 at about 42 hours (46 with the failure allowance), copies and MPS
-included: about 23 hours per host even when perfectly balanced, so this ledger does not yet authorize the
-launch; further savings count only once measured, and no saving already in the ledger counts twice. The profiles are split
+included: about 23 hours per host even when perfectly balanced, so that ledger did not authorize the launch. The
+reductions measured since (Section 12: shared Acc selections computed during the build, copies started together,
+eight copies a side, both sides' Acc at once) bring the calibrated ledger to 36.7 hours of GPU time for the 174
+profiles (pilot times where a profile was piloted with them; otherwise the smoke-based prediction times its Task's
+measured ratio: text generation 0.50, vision-language 0.40, small Tasks 1.5, video and edits 1.0, other still images
+0.5; 600 s each for the three blocked profiles); the frozen assignment gives each host 87 profiles and 18.4 hours,
+20.2 with the failure allowance. The profiles are split
 between two GB300 hosts of the same platform (equal base fingerprints) by a frozen assignment
 (`trtmc-aiperf-qual assign`: checkpoint groups by ledger time, longest first, each to the host with less
 predicted time, ties by name; `run-all --assignment A --host H` runs that host's share in its order). Each verdict
