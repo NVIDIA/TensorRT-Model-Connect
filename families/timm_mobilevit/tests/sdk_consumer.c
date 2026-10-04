@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
                                  &error) != TRTMC_OK)
         goto cleanup;
     if (field_count != 0) {
-        fprintf(stderr, "MobileNetV3 must expose no runtime Config fields\n");
+        fprintf(stderr, "MobileViT must expose no runtime Config fields\n");
         goto cleanup;
     }
     request.image =
@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
     if (task->result_view(result, &view, &error) != TRTMC_OK)
         goto cleanup;
     if (!view.count || view.kind != TRTMC_SCORE_LOGIT) {
-        fprintf(stderr, "MobileNetV3 must provide complete, unnormalized logits\n");
+        fprintf(stderr, "MobileViT must provide complete, unnormalized logits\n");
         goto cleanup;
     }
     for (i = 0; i < view.count; ++i) {

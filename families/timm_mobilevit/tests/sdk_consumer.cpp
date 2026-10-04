@@ -64,14 +64,14 @@ int main(int argc, char** argv) {
             auto model = trtmc::Model::load(argv[1], options);
             const auto task = model.task<trtmc::ImageToClassScores>();
             if (!task.config_fields().empty())
-                throw std::runtime_error("MobileNetV3 must expose no runtime Config fields");
+                throw std::runtime_error("MobileViT must expose no runtime Config fields");
             return task.run({trtmc::ImageInput({input.data(), input.size()}, height, width)});
         }();
         input.clear();
         input.shrink_to_fit();
         const auto scores = result.scores();
         if (scores.empty() || result.kind() != TRTMC_SCORE_LOGIT)
-            throw std::runtime_error("MobileNetV3 must provide complete, unnormalized logits");
+            throw std::runtime_error("MobileViT must provide complete, unnormalized logits");
         std::size_t top = 0;
         for (std::size_t i = 0; i < scores.size(); ++i) {
             if (!std::isfinite(scores[i]))
