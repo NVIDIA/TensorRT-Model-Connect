@@ -12,6 +12,7 @@ command, TRTMC core and family source digest, package versions) and rebuilds it 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import time
@@ -114,9 +115,25 @@ def ensure_bundle(environment: Environment, model: Mapping[str, Any], out: Path,
     seconds = round(time.time() - started)
     if code == 0 and path.is_file():
         reused = before[1] is not None and _state(path) == before
-        return {"status": "reused" if reused else "built", "bundle": str(path), "seconds": seconds}
+        return {"status": "reused" if reused else "built", "bundle": str(path), "seconds": seconds, **identity(path)}
     reason = _failure_reason(log) if code is not None else f"build timed out after {BUILD_TIMEOUT_S} s"
     return {"status": "failed", "exit": code, "reason": reason, "log": str(log), "seconds": seconds}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while chunk := handle.read(16 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def identity(path: Path) -> dict[str, Any]:
+    """The bundle that received the verdict: TensorRT builds are not bit-reproducible, so the build inputs alone
+    do not identify it (DESIGN.md Section 12). sha256 of the bundle file and of its trtmc-bench receipt."""
+    receipt = path.with_suffix(path.suffix + ".benchmark.json")
+    return {"bundle_bytes": path.stat().st_size, "bundle_sha256": file_sha256(path),
+            "receipt_sha256": file_sha256(receipt) if receipt.is_file() else None}
 
 
 def cached(environment: Environment, model: Mapping[str, Any]) -> bool:

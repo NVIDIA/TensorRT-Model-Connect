@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import time
 import traceback
@@ -202,9 +203,11 @@ def _finished(out: Path, key: str | None = None) -> str | None:
 
 
 def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root: Path, *,
-            rerun: bool = False, prefetch_next: bool = True) -> list[dict[str, Any]]:
+            rerun: bool = False, prefetch_next: bool = True, keep_order: bool = False) -> list[dict[str, Any]]:
+    """Each profile in turn (grouped by checkpoint, or in the given order with ``keep_order``: an assignment's);
+    campaign.jsonl records the host, start time, and outcome of each."""
     _, hf_policy = retention.policies(environment)
-    ordered = order(models)
+    ordered = list(models) if keep_order else order(models)
     remaining = collections.Counter(repo for model in ordered for repo in checkpoints(model))
     out_root.mkdir(parents=True, exist_ok=True)
     records = []
@@ -213,6 +216,7 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
             profile, out = model["model"], out_root / model["model"]
             if prefetch_next and index + 1 < len(ordered):
                 downloads.submit(prefetch, environment, ordered[index + 1])
+            started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             finished = _finished(out, run_key(environment, model))
             if finished and not rerun:
                 record = {"profile": profile, "status": "skipped", "category": finished}
@@ -224,6 +228,7 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
                 if remaining[repo] == 0 and hf_policy == "delete_unused":
                     record.setdefault("checkpoints_deleted", []).append(
                         retention.delete_checkpoint(Path(environment["hf_hub_cache"]), repo))
+            record = {**record, "host": socket.gethostname(), "position": index + 1, "started_at": started_at}
             log.write(json.dumps(record) + "\n")
             log.flush()
             print(json.dumps(record), flush=True)
@@ -238,11 +243,13 @@ PLAN = "plan.json"
 HARNESS_FAILURES = ("error", "build-failed")
 
 
-def write_plan(out_root: Path, selected: Sequence[str], config_errors: Sequence[Mapping[str, Any]]) -> None:
-    """Record every profile a batch must report, so a missing result shows as ``not-run``."""
+def write_plan(out_root: Path, selected: Sequence[str], config_errors: Sequence[Mapping[str, Any]],
+               extra: Mapping[str, Any] | None = None) -> None:
+    """Record every profile a batch must report, so a missing result shows as ``not-run`` (with ``extra``: the
+    host, the assignment's digest, and the campaign inputs of a multi-host run)."""
     out_root.mkdir(parents=True, exist_ok=True)
-    (out_root / PLAN).write_text(json.dumps({"selected": list(selected), "config_errors": list(config_errors)},
-                                            indent=2) + "\n")
+    (out_root / PLAN).write_text(json.dumps({"selected": list(selected), "config_errors": list(config_errors),
+                                             **dict(extra or {})}, indent=2) + "\n")
 
 
 def exit_code(records: Sequence[Mapping[str, Any]], config_errors: Sequence[Mapping[str, Any]],

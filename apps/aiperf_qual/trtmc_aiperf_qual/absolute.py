@@ -526,6 +526,7 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
                                                 out / f"absolute-native-{precision}")
                         for item in model["absolute"]}
             return {"backend": "reference", "precision": precision, "runs": runs, "replicas": service["replicas"],
+                    "mps": bool(service.get("mps")),
                     **({"fallback_from": "; ".join(errors)[:600]} if errors else {})}
         except Exception as error:  # noqa: BLE001 - the next precision
             errors.append(f"{precision}: {type(error).__name__}: {str(error)[-300:]}")
@@ -539,7 +540,8 @@ def run_candidate(environment: Environment, service: Mapping[str, Any], model: M
 
 
 def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: Mapping[str, Any],
-            native: Mapping[str, Any], native_error: str | None, candidate_replicas: int = 1) -> list[dict[str, Any]]:
+            native: Mapping[str, Any], native_error: str | None, candidate_replicas: int = 1,
+            candidate_mps: bool = False) -> list[dict[str, Any]]:
     results = []
     runs = native.get("runs") or {}
     for item in model["absolute"]:
@@ -549,7 +551,7 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
         else:
             entry = judge(item, problems, candidate[item["suite"]], runs[item["suite"]])
             entry["native"] = {"backend": native.get("backend"), "precision": native.get("precision"), "mode": "eager",
-                               "replicas": native.get("replicas", 1),
+                               "replicas": native.get("replicas", 1), "mps": bool(native.get("mps")),
                                **({"fallback_from": native["fallback_from"]} if native.get("fallback_from") else {})}
             concurrent = [f"{side} ran as {copies} concurrent copies" for side, copies in
                           (("native", native.get("replicas", 1)), ("TRTMC", candidate_replicas)) if copies > 1]
@@ -557,7 +559,7 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
                 entry["workload_perf"] = {**entry["workload_perf"], "light": "white",
                                           "note": f"{'; '.join(concurrent)}: model-call times are not comparable"}
             if candidate_replicas > 1:
-                entry["candidate_replicas"] = candidate_replicas
+                entry["candidate_replicas"], entry["candidate_mps"] = candidate_replicas, candidate_mps
             results.append(entry)
     return results
 
@@ -572,4 +574,5 @@ def candidate_entries(environment: Environment, service: Mapping[str, Any], mode
     except Exception as error:  # noqa: BLE001 - the entries carry the failure
         return [error_entry(item, len(plans[item["suite"]]), f"TRTMC side: {type(error).__name__}: {error}")
                 for item in model["absolute"]]
-    return entries(model, plans, candidate, native, native_error, candidate_replicas=int(service.get("replicas") or 1))
+    return entries(model, plans, candidate, native, native_error, candidate_replicas=int(service.get("replicas") or 1),
+                   candidate_mps=bool(service.get("mps")))

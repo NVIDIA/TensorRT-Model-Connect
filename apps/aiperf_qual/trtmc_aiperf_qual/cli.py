@@ -252,6 +252,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     batch.add_argument("--out-root", type=Path, required=True, help="one output directory per profile below it")
     batch.add_argument("--profile", action="append", help="only these profiles")
     batch.add_argument("--shard", help="INDEX/COUNT: this host's share (profiles sharing a checkpoint stay together)")
+    batch.add_argument("--assignment", type=Path, help="a frozen multi-host assignment (`assign`): run --host's "
+                                                      "profiles in its order")
+    batch.add_argument("--host", help="this host's name in --assignment")
     batch.add_argument("--rerun", action="store_true", help="rerun profiles that already have a result")
     batch.add_argument("--smoke", action="store_true", help="smoke mode (results under <out-root>/smoke)")
     batch.add_argument("--no-prefetch", action="store_true",
@@ -265,6 +268,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                        help="result roots of a previous run: TRTMC p50 slower by >5%% is noted as a regression")
     merge.add_argument("--html", type=Path, help="also write a failure-first HTML report here (remote evidence "
                                                    "is fetched next to it)")
+    merge.add_argument("--assignment", type=Path, help="a formal multi-host run: refuse to merge unless the roots "
+                                                      "pass merge-check against this assignment")
+    split = commands.add_parser("assign", help="freeze the formal run's profile -> host assignment from a ledger "
+                                               "(DESIGN.md Section 9)")
+    split.add_argument("--environment", type=Path, required=True)
+    split.add_argument("--profile", action="append", help="only these profiles")
+    split.add_argument("--ledger", type=Path, required=True, help="JSON: profile -> predicted seconds")
+    split.add_argument("--host", action="append", required=True, help="host names, in tie order")
+    split.add_argument("--output", type=Path, required=True)
+    merge_check = commands.add_parser("merge-check", help="verify that hosts' result roots form the assignment's "
+                                                          "matrix: disjoint, complete, formal, same campaign inputs")
+    merge_check.add_argument("--assignment", type=Path, required=True)
+    merge_check.add_argument("roots", nargs="+", type=Path)
     plan = commands.add_parser("plan", help="print the derived configuration of this machine's models "
                                             "(and its exclusions)")
     plan.add_argument("--environment", type=Path, required=True)
@@ -307,6 +323,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "rejudge":
             return rejudge_reports(arguments.outs, load_environment(arguments.environment)
                                    if arguments.environment else None)
+        if arguments.command == "merge-check":
+            from .split import merge_check
+
+            problems = merge_check(json.loads(arguments.assignment.read_text()), arguments.roots)
+            print("\n".join(problems) if problems else "the roots form the assignment's matrix")
+            return 1 if problems else 0
         if arguments.command == "summary":
             import tempfile
 
@@ -315,6 +337,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             with tempfile.TemporaryDirectory(prefix="trtmc-aiperf-summary-") as fetched:
                 store = arguments.html.parent / f"{arguments.html.stem}-evidence" if arguments.html else Path(fetched)
                 roots = fetch_roots(arguments.roots, arguments.ssh, store, evidence=bool(arguments.html))
+                if arguments.assignment:
+                    from .split import merge_check
+
+                    problems = merge_check(json.loads(arguments.assignment.read_text()), roots)
+                    if problems:
+                        print("\n".join(["trtmc-aiperf-qual: the roots do not merge:", *problems]), file=sys.stderr)
+                        return 1
                 baseline = fetch_roots(arguments.baseline, arguments.ssh, Path(fetched) / "baseline")
                 text, counts = summary(roots, baseline)
                 if arguments.html:
@@ -366,10 +395,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(json.dumps({"profile": name, "category": "config-error", "reason": str(error)}), flush=True)
             if arguments.shard:
                 models = shard(models, *parse_shard(arguments.shard))
-            write_plan(arguments.out_root, [model["model"] for model in models], config_errors)
+            extra = None
+            if arguments.assignment:
+                from .split import campaign_inputs, digest, host_models
+
+                assignment = json.loads(arguments.assignment.read_text())
+                models = host_models(assignment, str(arguments.host), models)
+                extra = {"host": arguments.host, "assignment": digest(assignment), "inputs": campaign_inputs(environment)}
+            write_plan(arguments.out_root, [model["model"] for model in models], config_errors, extra)
             records = run_all(environment, models, arguments.out_root, rerun=arguments.rerun,
-                              prefetch_next=not arguments.no_prefetch)
+                              prefetch_next=not arguments.no_prefetch, keep_order=bool(arguments.assignment))
             return exit_code(records, config_errors, smoke=arguments.smoke)
+        if arguments.command == "assign":
+            from .split import assign
+
+            names, _ = machine_list()
+            models = []
+            for name in names:
+                try:
+                    models.append(resolve_model(name, environment))
+                except ConfigError as error:
+                    print(json.dumps({"profile": name, "category": "config-error", "reason": str(error)}), flush=True)
+            assignment = assign(models, json.loads(arguments.ledger.read_text()), arguments.host)
+            arguments.output.write_text(json.dumps(assignment, indent=2) + "\n")
+            print(json.dumps({"hosts": {host: len(names) for host, names in assignment["hosts"].items()},
+                              "predicted_h": {host: round(seconds / 3600, 2)
+                                              for host, seconds in assignment["predicted_s"].items()}}))
+            return 0
         if arguments.command == "order-check":
             from .runner import order_check
 

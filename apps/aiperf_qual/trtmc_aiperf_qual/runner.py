@@ -25,7 +25,8 @@ from . import absolute, edits, geneval, intelligibility, judge, replay_parity, s
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
 from .report import write_report
-from .services import gpu_exclusive, platform_fingerprint, platform_id, reference_python, serving, serving_replicas
+from .services import (gpu_exclusive, gpu_identity, platform_fingerprint, platform_id, reference_python, serving,
+                       serving_replicas)
 from .suites import Suite, build_suite, request_sha, single_request_suite, unstated_defaults
 
 from trtmc_aiperf_plugins.accuracy import COMPARATORS
@@ -627,6 +628,15 @@ def _order_timings(environment: Environment, model: Mapping[str, Any], out: Path
     return result
 
 
+def _bundle_identity(out: Path) -> dict[str, Any] | None:
+    """The build record's identity of the bundle that was qualified (build.json, written by the campaign)."""
+    path = out / "build.json"
+    if not path.is_file():
+        return None
+    build = json.loads(path.read_text())
+    return {key: build.get(key) for key in ("status", "bundle", "bundle_bytes", "bundle_sha256", "receipt_sha256")}
+
+
 SMOKE_MEASUREMENT = {"warmup": 0, "requests": 1, "runs": 1}
 PHASE_RETRIES = 1  # a GPU phase that fails before producing its result runs once more (DESIGN.md Section 9)
 
@@ -777,6 +787,8 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
                        f"{environment.values.get('environment_file', '<environment.yaml>')} --out {out}",
               "family": model.get("family"), "started": started,
               "platform": {"id": platform_id(fingerprint), **fingerprint},
+              "host": gpu_identity(environment),
+              "bundle": _bundle_identity(out),
               "accuracy_source": model.get("accuracy_source"),
               **({"accuracy_note": model["accuracy_note"]} if model.get("accuracy_note") else {}),
               **({"coverage": model["coverage"]} if model.get("coverage") else {}),

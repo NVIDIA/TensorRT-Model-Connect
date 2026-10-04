@@ -9,6 +9,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import time
 import urllib.request
@@ -159,6 +160,28 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
         yield {"url": url, "info": info, "records": out / "records.jsonl"}
     finally:
         _stop(process)
+
+
+GPU_FIELDS = ("uuid", "name", "driver_version", "clocks.max.sm", "clocks.max.mem", "clocks.applications.graphics",
+              "power.limit", "persistence_mode", "compute_mode")
+
+
+def gpu_identity(environment: Environment) -> dict[str, Any]:
+    """Where a result was measured: the host, the GPU (UUID, driver, clocks, power limit, persistence and compute
+    mode), and the TensorRT libraries of the TRTMC runtime; fields that cannot be read are absent."""
+    identity: dict[str, Any] = {"hostname": socket.gethostname()}
+    selector = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
+    try:
+        line = subprocess.run(["nvidia-smi", *(["-i", selector] if selector else []), f"--query-gpu={','.join(GPU_FIELDS)}",
+                               "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=60,
+                              check=True).stdout.splitlines()[0]
+        identity["gpu"] = dict(zip(GPU_FIELDS, (value.strip() for value in line.split(","))))
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    runtime = Path(str(environment.values.get("runtime_root") or ""))
+    if runtime.is_dir():
+        identity["tensorrt"] = sorted(path.name for path in runtime.rglob("libnvinfer.so.*"))
+    return identity
 
 
 def gpu_memory_mib() -> tuple[int, int] | None:

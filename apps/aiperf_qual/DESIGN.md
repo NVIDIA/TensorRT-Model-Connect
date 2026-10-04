@@ -165,7 +165,7 @@ shortfall is resolved by execution, never by a smaller `n` (Section 9).
   `perf-inconclusive`. A catalog request that samples is timed as its greedy variant (temperature 0,
   same lengths and shapes) so both sides do the same work; sampling stays in Acc. A model that cannot
   decode greedily (Bark) is timed as shipped and is `perf-inconclusive` whenever lengths differ.
-- Order: the native model is timed before TRTMC. Before the formal run, five models (one per server
+- Order: the native model is timed before TRTMC. Before the formal run, on each host, five models (one per server
   size class, including the largest) are timed twice in both orders. Where both servers fit, an order
   effect above 2% switches to interleaved runs; where they do not, the native model is timed again after
   TRTMC (native, TRTMC, native) and the model is `perf-inconclusive` if its two native timings differ by
@@ -285,10 +285,18 @@ dataset downloads, reference environments, scorer checkpoints). The smoke run re
 build, start, peak memory, and per-request times; a pilot runs one representative model per Task at the
 formal `n`; together they give a per-model ledger, and the formal run starts only when the ledger
 predicts at most 22 hours on each GPU. **Two GPUs** (2026-10-04, the owner's choice over a smaller `n`): the
-pilot-calibrated ledger put one GB300 at about 42 hours (46 with the failure allowance). The profiles are split
-between two GB300 hosts of the same platform (equal fingerprints), longest ledger time first, each to the host
-with less predicted time; every verdict compares TRTMC with the native model on the same host and GPU, so the
-split cannot bias Acc or Perf, and the two result trees merge into one matrix (the profiles are disjoint). Memory: a native model whose weights exceed 240 GB (MiniMax-H3, 351 GB) runs
+pilot-calibrated ledger put one GB300 at about 42 hours (46 with the failure allowance), copies and MPS
+included: about 23 hours per host even when perfectly balanced, so this ledger does not yet authorize the
+launch; further savings count only once measured, and no saving already in the ledger counts twice. The profiles are split
+between two GB300 hosts of the same platform (equal base fingerprints) by a frozen assignment
+(`trtmc-aiperf-qual assign`: checkpoint groups by ledger time, longest first, each to the host with less
+predicted time, ties by name; `run-all --assignment A --host H` runs that host's share in its order). Each verdict
+compares TRTMC with the native model on one host and GPU, so the assignment, made from predicted times before any
+outcome, selects nothing by result; the merged matrix is a set of host-conditional per-profile verdicts, each
+naming its host and GPU, and claims no host-independent ranking of families or sizes. `summary --assignment A`
+merges only roots that pass `merge-check`: every root ran under the assignment (its digest and host in
+`plan.json`) with the same campaign inputs (harness, serving and TRTMC code, runtime, interpreter dependencies),
+holds only its host's profiles, and every assigned profile has exactly one formal result. Memory: a native model whose weights exceed 240 GB (MiniMax-H3, 351 GB) runs
 with layers offloaded to host memory (Accelerate `device_map`), its Perf labelled as against an
 offloaded baseline. Levers when the ledger exceeds 22 hours: one native server reused for L1 and Acc,
 native replicas where the measured throughput gain is real, TRTMC replicas for the Acc answers (Section 12),
@@ -307,7 +315,8 @@ model is not `smoke-pass`.
 ## 11. Review gates
 
 codex (`gpt-6-astra`) reviews this design, the decoupling change, the per-model configuration, the
-smoke results, and the formal run before each lands in PR #1550.
+smoke results, and the formal run before each lands in PR #1550; for the formal run that includes the frozen
+assignment and ledger and both hosts' gate evidence (Section 12.1).
 
 ## 12. Settled during implementation (revision 5)
 
@@ -392,8 +401,9 @@ smoke results, and the formal run before each lands in PR #1550.
   that side's own size before the sizes are compared, so a size difference fails only between readable outputs.
 - **Order check** (Section 4.6): `trtmc-aiperf-qual order-check --profile P` times a profile's L1 requests in both
   orders (native then TRTMC, TRTMC then native) and reports each side's order effect (its second timing relative to
-  its first). Before the formal run it runs on five profiles spanning the server sizes, including the largest
-  dense one; an effect above 2% switches that size class to interleaved runs or native, TRTMC, native timing.
+  its first). Before the formal run it runs on each host, on five profiles spanning that host's server sizes,
+  including the largest dense one; an effect above 2% switches that size class to interleaved runs or native,
+  TRTMC, native timing on that host.
   The effect counts only when all four measurements are valid on their own (every request succeeded and is timed,
   every response carries work evidence, the GPU was measured idle before every run, at least two runs within
   `max_ci_percent`) and each order's two sides did the same work; otherwise, or when a measurement or the check
@@ -456,12 +466,23 @@ The formal run starts only when every gate holds; each is recorded in PR #1550.
 2. **Ledger**: the per-model ledger from the smoke run and the pilot's steady-state request times predicts at most
    22 hours on each of the two GB300s for its share (Section 9), failure allowance included; otherwise the levers
    of Section 9, then a report to the owner.
-3. **Order**: the order check (above) runs on five profiles across the server sizes with a resolved result each;
-   where an effect exceeds 2%, the size class's mitigation (interleaved runs, or native, TRTMC, native timing that is
-   `perf-inconclusive` when the two native timings differ by more than 2%) is implemented and tested.
+3. **Order**: the order check (above) runs on both hosts, on profiles covering the server size classes of each
+   host's share (five per host, including the largest dense one assigned to it), with a resolved result each; where
+   an effect exceeds 2% on a host, that size class's mitigation (interleaved runs, or native, TRTMC, native timing
+   that is `perf-inconclusive` when the two native timings differ by more than 2%) is implemented and tested, and its
+   cost is in that host's ledger. The single-server L1 and the verified MPS shutdown hold on each host.
 4. **Blocked profiles**: DINOv3's kNN scorer once the checkpoints are accessible; Lance's resident adapter; s1-mini
    once the catalog builds it. A profile still blocked is reported with its reason, not dropped.
 5. **Smoke rerun**: every ready profile `smoke-pass` (or an accepted, reported finding) on the final code.
 6. **Frozen inputs**: the per-suite counts, sample manifests, and pinned revisions frozen; the execution matrix
-   regenerated from them.
+   regenerated from them; the assignment file (profile inventory, profile -> host lists in planned order, the
+   rule, the ledger seconds per profile, predicted totals per host) with the ledger's sources (smoke predictions,
+   the per-Task pilot actual / predicted factors, phase costs, the failure allowance and deadlines) and the exact
+   `run-all` command per host, archived in the PR. Execution order and times are recorded apart from the plan: each
+   host's `campaign.jsonl` gives every profile's host, position, and start time.
+8. **Provenance**: every report names where and with what it ran: the host and GPU (UUID, driver, maximum and
+   application clocks, power limit, persistence and compute mode) and the TRTMC runtime's TensorRT libraries
+   (`host`); the reference interpreter's fingerprint (`platform`); the bundle that was qualified (`bundle`: its and
+   its receipt's sha256, since TensorRT rebuilds differ); each side's Acc copies and MPS use; the run key (model
+   configuration, code, dependencies); and the frozen samples and seeds.
 7. **Review**: codex approves the final code, the smoke results, the pilot, and the ledger (Section 11).
