@@ -156,6 +156,8 @@ def plan(environment: Environment, model: Mapping[str, Any], item: Mapping[str, 
             samples = _head_truncated(model, samples, int(item["truncate_tokens"]))
         if item.get("fit_prompt"):  # text prompts on a generation bundle: the shipped length decides
             samples = _fitted(model, samples, int(item.get("min_new_tokens", 16)))
+        if item.get("pair_format"):  # reranking pairs on an encoder bundle: the shipped length decides
+            samples = _pairs_fitted(model, samples, str(item["pair_format"]))
         return [{"task": sample.get("task", suite.name), "gold": sample.get("label"), "sample_id": sample["sample_id"],
                  "request": sample["request"], "request_sha": sample["request_sha"],
                  **{key: sample[key] for key in ("cluster", "series") if key in sample}} for sample in samples]
@@ -186,6 +188,49 @@ def _fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], min_
         request["max_new_tokens"] = min(int(request.get("max_new_tokens", budget)), budget)
         kept.append({**sample, "request": request, "request_sha": request_sha(request)})
     return kept
+
+
+PAIR_MARGIN_TOKENS = 4  # the bundle's own tokenizer may count a pair a few tokens apart from Transformers'
+
+
+def _candidate_tokenizer(model: Mapping[str, Any]) -> Any:
+    from transformers import AutoTokenizer
+
+    name, revision = tokenizer_source(model)
+    return AutoTokenizer.from_pretrained(name, revision=revision,
+                                         trust_remote_code=bool(model["reference"].get("trust_remote_code")))
+
+
+def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]],
+                  pair_format: str) -> list[dict[str, Any]]:
+    """Reranking samples whose documents keep their head, so that each query-document pair, as the bundle's
+    reranker forms it (``pair_format`` with ``{query}`` and ``{document}``), fits the bundle's
+    max_sequence_length (a margin of PAIR_MARGIN_TOKENS); the same documents go to both sides (DESIGN.md Section
+    2)."""
+    length = int(model["candidate"].get("max_sequence_length") or 0)
+    if not length:
+        return list(samples)
+    tokenizer = _candidate_tokenizer(model)
+    limit = length - PAIR_MARGIN_TOKENS
+
+    def excess(query: str, document: str) -> int:
+        text = pair_format.format(query=query, document=document)
+        return len(tokenizer(text, add_special_tokens=True)["input_ids"]) - limit
+
+    result = []
+    for sample in samples:
+        request = dict(sample["request"])
+        query, documents = str(request["query"]), []
+        for document in request["documents"]:
+            ids = tokenizer(str(document), add_special_tokens=False)["input_ids"]
+            keep, text = len(ids), str(document)
+            while keep > 0 and (over := excess(query, text)) > 0:  # decoding can merge tokens: check again
+                keep = max(0, keep - over)
+                text = tokenizer.decode(ids[:keep], skip_special_tokens=True)
+            documents.append(text)
+        request["documents"] = documents
+        result.append({**sample, "request": request, "request_sha": request_sha(request)})
+    return result
 
 
 def _head_truncated(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:

@@ -1390,3 +1390,28 @@ def test_an_interrupt_while_waiting_for_the_other_side_cancels_it_before_teardow
         timer.cancel()
     assert time.time() - began < 4.5  # the native side did not run its remaining answers
     assert stopped == {"trtmc": True, "reference": True} and not cancel.EVENT.is_set()  # set for teardown, then cleared
+
+
+def test_rerank_documents_keep_their_head_so_each_pair_fits_the_bundle(monkeypatch):
+    """Each document is cut so that the pair, formed as the bundle's reranker forms it, fits max_sequence_length
+    (less the margin); a short document is left alone; both sides then send the same documents."""
+    from trtmc_aiperf_qual.suites import request_sha
+
+    class Words:  # one token per word, plus one special token at the start
+        def __call__(self, text, add_special_tokens=True):
+            return {"input_ids": ([0] if add_special_tokens else []) + list(range(1, len(text.split()) + 1))}
+
+        def decode(self, ids, skip_special_tokens=True):
+            return " ".join(f"w{index}" for index in ids)
+
+    monkeypatch.setattr(absolute, "_candidate_tokenizer", lambda model: Words())
+    model = {"candidate": {"max_sequence_length": 20}, "reference": {}}
+    long, short = " ".join(f"w{index}" for index in range(1, 41)), "a short one"
+    request = {"query": "what is it", "documents": [long, short]}
+    sample = {"sample_id": "q", "request": request, "request_sha": request_sha(request)}
+    fitted = absolute._pairs_fitted(model, [sample], "question:{query} passage:{document}")[0]
+    pair = lambda document: Words()("question:what is it passage:" + document)["input_ids"]  # noqa: E731
+    assert len(pair(fitted["request"]["documents"][0])) == 20 - absolute.PAIR_MARGIN_TOKENS
+    assert fitted["request"]["documents"][0].startswith("w1 w2") and fitted["request"]["documents"][1] == short
+    assert fitted["request_sha"] == request_sha(fitted["request"]) != sample["request_sha"]
+    assert absolute._pairs_fitted({"candidate": {}, "reference": {}}, [sample], "{query}{document}") == [sample]

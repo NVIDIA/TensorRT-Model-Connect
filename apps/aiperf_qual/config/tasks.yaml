@@ -63,8 +63,10 @@ benchmarks:
   # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance.
   encoder_parity: {suite: encoder-parity, suite_definition: stsbenchmark-sentences-400, metric: vector_parity,
                    gate: {min_cosine: 0.999, max_relative_l2: 0.02}}
-  # SciFact reranking of fixed BM25 top-20 candidates (nDCG@10).
-  rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-bm25-300, metric: rerank_ndcg, gate: {margin: 1.0}}
+  # SciFact reranking of fixed BM25 top-20 candidates (nDCG@10). Each document keeps its head so that the pair, as
+  # the bundle's reranker forms it (`pair_format`, the eagle_vlm runtime's), fits the bundle; both sides get it.
+  rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-bm25-300, metric: rerank_ndcg, gate: {margin: 1.0},
+           pair_format: "question:{query} \n \n passage:{document}"}
   # SciFact retrieval over the whole corpus (nDCG@10); documents keep their first 256 tokens on both sides
   # (encoders cut longer inputs differently).
   retrieval: {suite: scifact-retrieval, suite_definition: scifact-retrieval-corpus, metric: retrieval_ndcg10,
