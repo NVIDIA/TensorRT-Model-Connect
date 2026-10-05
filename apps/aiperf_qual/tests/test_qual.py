@@ -702,6 +702,26 @@ def test_a_new_run_sets_the_previous_directory_aside_so_its_pass_cannot_stand(tm
     assert len(kept) == 1 and (kept[0] / "report.json").is_file()  # the old evidence is kept, not shown
 
 
+def test_a_phase_past_its_deadline_runs_once_more_and_its_error_is_kept_on_resume(tmp_path):
+    """DESIGN.md Section 9: a run past its deadline fails its phase, which runs once more; failing again, the
+    profile is an error, a result a resumed run-all keeps."""
+    from trtmc_aiperf_qual import campaign, runner
+
+    attempts = []
+
+    def hung():
+        attempts.append(1)
+        raise TimeoutError("AIPerf run past its deadline")
+
+    phases = runner._Phases(tmp_path)
+    assert phases.run("absolute_native", hung, retries=runner.PHASE_RETRIES) is None
+    assert len(attempts) == 2 and "TimeoutError" in phases.errors["absolute_native"]
+    out = tmp_path / "profile"
+    out.mkdir()
+    (out / "report.json").write_text(json.dumps({"verdict": {"category": "error"}}))
+    assert campaign._finished(out) == "error"
+
+
 def test_box_parity_holds_matched_boxes_to_their_confidence():
     from trtmc_aiperf_plugins.accuracy import compare_boxes
 
