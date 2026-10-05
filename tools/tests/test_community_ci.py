@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import shlex
+
 import json
 import os
 import shutil
@@ -806,7 +808,10 @@ def test_gpu_status_and_cleanup_fail_closed(
     )
     job = workflow["jobs"]["provision-and-test"]
     steps = {step["name"]: step for step in job["steps"]}
-    assert steps["Reserve a GPU instance"]["id"] == "reserve"
+    reserve = steps["Reserve a GPU instance"]
+    assert reserve["id"] == "reserve"
+    assert "python3 -m tools.brev_exec provision" in reserve["run"]
+    assert 'echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"' in reserve["run"]
     test_step = steps["Build the GPU image and validate the exact PR merge"]
     assert "sudo docker build -f Dockerfile.dev.x86-gpu" in test_step["run"]
     assert "huggingface-hub==0.36.0" in test_step["run"]
@@ -825,10 +830,8 @@ def test_gpu_status_and_cleanup_fail_closed(
     assert "${{" not in result["run"]
     cleanup = steps["Always tear down the GPU instance"]
     assert cleanup["if"] == "${{ always() && steps.reserve.outputs.instance_name != '' }}"
-    assert cleanup["env"] == {
-        "INSTANCE_NAME": "${{ steps.test.outputs.instance_name || steps.reserve.outputs.instance_name }}"
-    }
-    assert 'echo "instance_name=$INSTANCE_NAME" >> "$GITHUB_OUTPUT"' in test_step["run"]
+    assert cleanup["env"] == {"INSTANCE_NAME": "${{ steps.reserve.outputs.instance_name }}"}
+    assert test_step["env"]["INSTANCE_NAME"] == "${{ steps.reserve.outputs.instance_name }}"
     assert cleanup["run"] == 'brev delete "$INSTANCE_NAME" || true'
     assert job["outputs"] == {"conclusion": "${{ steps.result.outputs.conclusion }}"}
     cleanup_job = workflow["jobs"]["cleanup"]
@@ -853,17 +856,18 @@ def test_gpu_status_and_cleanup_fail_closed(
         "delete trtmc-gpu-ci-123-2-r3",
     ]
     # Execute the real workflow script with remote operations stubbed. A copy
-    # can leave a partial token even when it reports failure; each affected VM
-    # must receive cleanup before replacement, including when deletion fails.
+    # can leave a partial token even when it reports failure. The ready VM must
+    # receive token cleanup on every exit; test failures must not replace it.
     trace = tmp_path / "auth-trace"
     stubs = r"""
 sleep() { :; }
 timeout() { shift; "$@"; }
 brev() {
+  printf 'argv %s\n' "$*" >> "$AUTH_TRACE"
+  test -z "${HF_TOKEN+x}" || exit 99
   case "$1" in
     copy)
       printf 'copy %s\n' "${3%%:*}" >> "$AUTH_TRACE"
-      test -z "${HF_TOKEN+x}" || exit 99
       test "$AUTH_FAILURE" != copy || return 1
       ;;
     exec)
@@ -876,9 +880,16 @@ brev() {
       printf 'delete %s\n' "$2" >> "$AUTH_TRACE"
       return 1
       ;;
+    create)
+      printf 'create %s\n' "$2" >> "$AUTH_TRACE"
+      return 1
+      ;;
   esac
 }
 python3() {
+  test "$1" = -m && test "$2" = tools.brev_exec || exit 98
+  test "$3" != provision || exit 98
+  test -z "${HF_TOKEN+x}" || exit 99
   printf 'coordinate %s\n' "$INSTANCE_NAME" >> "$AUTH_TRACE"
   test "$AUTH_FAILURE" != exit || exit 17
   test "$AUTH_FAILURE" != coordinate
@@ -914,14 +925,18 @@ python3() {
     assert auth_result.returncode == (17 if failure == "exit" else 1 if failure else 0)
     events = trace.read_text(encoding="utf-8").splitlines()
     copied = {event.removeprefix("copy ") for event in events if event.startswith("copy ")}
-    assert len(copied) == (3 if failure in {"copy", "coordinate"} else 1)
+    assert copied == {"trtmc-gpu-ci-123-2"}
+    assert len([event for event in events if event.startswith("coordinate ")]) == (
+        0 if failure == "copy" else 1
+    )
+    assert not any(event.startswith(("create ", "delete ")) for event in events)
     for instance in copied:
         cleanup_index = events.index(f"cleanup {instance}")
         assert cleanup_index > events.index(f"copy {instance}")
-        if f"delete {instance}" in events:
-            assert cleanup_index < events.index(f"delete {instance}")
     assert not list(tmp_path.glob("trtmc-checkpoint-token.*"))
-    assert "test-checkpoint-secret" not in auth_result.stdout + auth_result.stderr
+    assert "test-checkpoint-secret" not in (
+        auth_result.stdout + auth_result.stderr + trace.read_text(encoding="utf-8")
+    )
     assert ("VM teardown is still required" in auth_result.stderr) is cleanup_fails
     assert 'timeout 30s brev exec "$checkpoint_instance"' in test_step["run"]
     publish = workflow["jobs"]["publish"]["steps"][0]
@@ -1089,17 +1104,16 @@ def test_gpu_impact_executes_only_trusted_base_code(
     )
 
 
-@pytest.mark.parametrize("create_exitcode", [0, 1])
+@pytest.mark.parametrize("provision_exitcode", [0, 1])
 def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
     tmp_path: Path,
-    create_exitcode: int,
+    provision_exitcode: int,
 ) -> None:
     output = tmp_path / "output"
     calls = tmp_path / "brev-calls"
     brev = tmp_path / "brev"
     brev.write_text(
-        '#!/bin/bash\nprintf "%s\\n" "$*" >> "$BREV_CALLS"\n'
-        'if [ "$1" = "create" ]; then exit "$CREATE_EXITCODE"; fi\n',
+        '#!/bin/bash\nprintf "%s\\n" "$*" >> "$BREV_CALLS"\n',
         encoding="utf-8",
     )
     brev.chmod(0o755)
@@ -1107,7 +1121,7 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
         **os.environ,
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
         "BREV_CALLS": str(calls),
-        "CREATE_EXITCODE": str(create_exitcode),
+        "PROVISION_EXITCODE": str(provision_exitcode),
         "GPU_TYPE": "L40",
         "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "2",
@@ -1117,7 +1131,17 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
         [
             "bash",
             "-c",
-            _workflow_step_script(
+            r"""
+python3() {
+  printf 'provision %s\n' "$*" >> "$BREV_CALLS"
+  test "$1" = -m && test "$2" = tools.brev_exec && test "$3" = provision || return 99
+  # A fallback attempt is published even when it fails readiness. Teardown
+  # must use that latest durable output, rather than the initial base name.
+  printf 'instance_name=trtmc-gpu-ci-123-2-r2\n' >> "$GITHUB_OUTPUT"
+  return "$PROVISION_EXITCODE"
+}
+"""
+            + _workflow_step_script(
                 "community-ci.yml", "provision-and-test", "Reserve a GPU instance"
             ),
         ],
@@ -1126,9 +1150,14 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
         text=True,
         check=False,
     )
-    assert result.returncode == create_exitcode, result.stdout + result.stderr
-    instance_name = "trtmc-gpu-ci-123-2"
-    assert output.read_text(encoding="utf-8") == f"instance_name={instance_name}\n"
+    assert result.returncode == provision_exitcode, result.stdout + result.stderr
+    instance_name = "trtmc-gpu-ci-123-2-r2"
+    outputs = output.read_text(encoding="utf-8").splitlines()
+    assert outputs == [
+        "instance_name=trtmc-gpu-ci-123-2",
+        f"instance_name={instance_name}",
+    ]
+    assert dict(line.split("=", 1) for line in outputs)["instance_name"] == instance_name
     cleanup = subprocess.run(
         [
             "bash",
@@ -1146,7 +1175,8 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
     )
     assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
     assert calls.read_text(encoding="utf-8").splitlines() == [
-        f"create {instance_name} -g L40 --timeout 600",
+        "provision -m tools.brev_exec provision --instance trtmc-gpu-ci-123-2 "
+        "--gpu L40 --timeout 1200 --attempts 3 --fallback-provider aws",
         f"delete {instance_name}",
     ]
 
@@ -1908,3 +1938,316 @@ def test_promoted_cpu_compatibility_uses_the_actual_stable_result(
         steps["Require every public CPU stage"]["if"]
         == "${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}"
     )
+
+
+# Execute the checked-in shell scripts. These functions replace only external
+# provider and coordinator operations, and preserve their real shell exit codes.
+STUBS = r"""
+sleep() { :; }
+timeout() { shift; "$@"; }
+brev() {
+  printf 'brev\t%s\n' "$*" >> "$TRACE"
+  case "$1" in
+    copy)
+      test -z "${HF_TOKEN+x}" || return 98
+      test "$(stat -c '%a' "$2")" = 600 || return 97
+      test "$(cat "$2")" = "$EXPECTED_TOKEN" || return 96
+      printf 'token-private\t%s\n' "${3%%:*}" >> "$TRACE"
+      test "$COPY_FAILS" != true || return 9
+      ;;
+    exec)
+      if [[ "$3" == "rm -f -- "* ]]; then
+        printf 'token-cleanup\t%s\n' "$2" >> "$TRACE"
+        test "$CLEANUP_FAILS" != true || return 8
+      elif [[ "$3" == "git init "* && -n "${LOCAL_GIT_SETUP:-}" ]]; then
+        bash -c "$LOCAL_GIT_SETUP"
+        return "$?"
+      elif [[ "$3" == "git init "* && "$FETCH_FAILS_ONCE" == true ]]; then
+        if [ ! -f "$FETCH_ATTEMPT" ]; then
+          touch "$FETCH_ATTEMPT"
+          return 7
+        fi
+      fi
+      ;;
+    create|delete) return 0 ;;
+    *) return 95 ;;
+  esac
+}
+python3() {
+  test "$1" = -m || return 94
+  case "$2:$3" in
+    tools.brev_exec:provision)
+      printf 'provision\t%s\n' "$*" >> "$TRACE"
+      printf 'instance_name=%s\n' "$RESERVED_INSTANCE" >> "$GITHUB_OUTPUT"
+      return "$PROVISION_EXIT"
+      ;;
+    tools.brev_exec:*)
+      test -z "${HF_TOKEN+x}" || return 93
+      printf 'coordinate\t%s\n' "$*" >> "$TRACE"
+      return "$COORDINATOR_EXIT"
+      ;;
+    *) return 92 ;;
+  esac
+}
+"""
+
+
+@pytest.fixture
+def gpu_job():
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    return workflow["jobs"]["provision-and-test"]
+
+
+class JobHarness:
+    def __init__(self, tmp_path: Path, job: dict):
+        self.directory = tmp_path
+        self.steps = {step.get("id", step["name"]): step for step in job["steps"]}
+        self.trace = tmp_path / "trace"
+        self.environment = {
+            **os.environ,
+            "TRACE": str(self.trace),
+            "FETCH_ATTEMPT": str(tmp_path / "fetch-attempt"),
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_REPOSITORY": "example/repository",
+            "GPU_TYPE": "L40S",
+            "RESERVED_INSTANCE": "trtmc-gpu-ci-123-2-r2",
+            "PROVISION_EXIT": "0",
+            "COORDINATOR_EXIT": "0",
+            "COPY_FAILS": "false",
+            "CLEANUP_FAILS": "false",
+            "FETCH_FAILS_ONCE": "false",
+            "CI_SHA": "a" * 40,
+            "MERGE_SHA": "b" * 40,
+            "FAMILIES": '["bert"]',
+            "DIRECT_FAMILIES": '["bert"]',
+            "ADDED_FAMILIES": "[]",
+            "SCOPE": "families",
+            "CUDA_ARCHITECTURES": "89",
+            "HF_TOKEN": "workflow-test-checkpoint-token",
+            "EXPECTED_TOKEN": "workflow-test-checkpoint-token",
+        }
+
+    def run(self, step: str, **updates: str) -> subprocess.CompletedProcess:
+        output = self.directory / f"{step.replace(' ', '-')}-output"
+        return subprocess.run(
+            ["bash", "-c", STUBS + self.steps[step]["run"]],
+            cwd=REPO_ROOT,
+            env={**self.environment, "GITHUB_OUTPUT": str(output), **updates},
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    def events(self, kind: str) -> list[str]:
+        if not self.trace.exists():
+            return []
+        prefix = f"{kind}\t"
+        return [
+            line.removeprefix(prefix)
+            for line in self.trace.read_text().splitlines()
+            if line.startswith(prefix)
+        ]
+
+    def reserve_output(self) -> str:
+        values = dict(
+            line.split("=", 1)
+            for line in (self.directory / "reserve-output").read_text().splitlines()
+        )
+        return values["instance_name"]
+
+
+def test_failed_blocking_reservation_stops_normal_test_admission(tmp_path, gpu_job):
+    harness = JobHarness(tmp_path, gpu_job)
+    reserve, test_step = harness.steps["reserve"], harness.steps["test"]
+    # GitHub gives ordinary steps an implicit success() condition. A failed
+    # readiness helper must not be hidden or overridden by an always() test.
+    assert reserve.get("continue-on-error", False) is False
+    assert test_step.get("continue-on-error", False) is False
+    assert test_step.get("if") in (None, "success()", "${{ success() }}")
+    assert test_step["env"]["INSTANCE_NAME"] == "${{ steps.reserve.outputs.instance_name }}"
+    result = harness.run("reserve", PROVISION_EXIT="23")
+    if result.returncode == 0:
+        harness.run("test", INSTANCE_NAME=harness.reserve_output())
+    assert result.returncode == 23, result.stdout + result.stderr
+    provisioned = harness.events("provision")
+    assert len(provisioned) == 1
+    assert "--instance trtmc-gpu-ci-123-2" in provisioned[0]
+    assert "--gpu L40S" in provisioned[0]
+    assert not harness.events("coordinate")
+    assert not harness.events("brev")
+    # Even an unsuccessful helper leaves the actual attempted name available
+    # for the job's always-run teardown.
+    cleanup = harness.steps["Always tear down the GPU instance"]
+    assert cleanup["env"]["INSTANCE_NAME"] == "${{ steps.reserve.outputs.instance_name }}"
+    assert "always()" in cleanup["if"]
+    result = harness.run(
+        "Always tear down the GPU instance", INSTANCE_NAME=harness.reserve_output()
+    )
+    assert result.returncode == 0
+    assert harness.events("brev") == ["delete trtmc-gpu-ci-123-2-r2"]
+
+
+@pytest.mark.parametrize("coordinator_exit", [0, 17])
+def test_gpu_coordinator_runs_once_on_the_ready_instance(tmp_path, gpu_job, coordinator_exit):
+    harness = JobHarness(tmp_path, gpu_job)
+    reserve = harness.run("reserve")
+    assert reserve.returncode == 0, reserve.stdout + reserve.stderr
+    instance = harness.reserve_output()
+    result = harness.run("test", INSTANCE_NAME=instance, COORDINATOR_EXIT=str(coordinator_exit))
+    assert result.returncode == coordinator_exit, result.stdout + result.stderr
+    assert len(harness.events("provision")) == 1
+    coordinated = harness.events("coordinate")
+    assert len(coordinated) == 1
+    assert f"--instance {instance}" in coordinated[0]
+    remote = harness.events("brev")
+    assert not any(call.startswith(("create ", "delete ")) for call in remote)
+    assert not any(call == f"exec {instance} true" for call in remote)
+    assert harness.events("token-private") == [instance]
+    assert harness.events("token-cleanup") == [instance]
+    assert not list(tmp_path.glob("trtmc-checkpoint-token.*"))
+    assert harness.environment["EXPECTED_TOKEN"] not in (
+        result.stdout + result.stderr + harness.trace.read_text()
+    )
+    output = tmp_path / "test-output"
+    assert (output.exists() and "conclusion=success" in output.read_text()) == (
+        coordinator_exit == 0
+    )
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_failed_token_copy_cleans_up_without_model_execution_or_reprovision(
+    tmp_path, gpu_job, cleanup_fails
+):
+    harness = JobHarness(tmp_path, gpu_job)
+    instance = harness.environment["RESERVED_INSTANCE"]
+    result = harness.run(
+        "test", INSTANCE_NAME=instance, COPY_FAILS="true", CLEANUP_FAILS=str(cleanup_fails).lower()
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not harness.events("coordinate")
+    assert not harness.events("provision")
+    remote = harness.events("brev")
+    assert not any(call.startswith(("create ", "delete ")) for call in remote)
+    assert harness.events("token-private")
+    assert set(harness.events("token-private")) == {instance}
+    assert harness.events("token-cleanup") == [instance]
+    assert not list(tmp_path.glob("trtmc-checkpoint-token.*"))
+    assert harness.environment["EXPECTED_TOKEN"] not in (
+        result.stdout + result.stderr + harness.trace.read_text()
+    )
+    assert ("VM teardown is still required" in result.stderr) is cleanup_fails
+
+
+def test_dependency_network_retry_does_not_repeat_gpu_test_or_replace_vm(tmp_path, gpu_job):
+    harness = JobHarness(tmp_path, gpu_job)
+    instance = harness.environment["RESERVED_INSTANCE"]
+    result = harness.run("test", INSTANCE_NAME=instance, FETCH_FAILS_ONCE="true")
+    assert result.returncode == 0, result.stdout + result.stderr
+    fetches = [
+        call for call in harness.events("brev") if call.startswith(f"exec {instance} git init ")
+    ]
+    assert len(fetches) == 2
+    assert len(harness.events("coordinate")) == 1
+    assert not harness.events("provision")
+    assert not any(call.startswith(("create ", "delete ")) for call in harness.events("brev"))
+
+
+def test_fetch_retry_recovers_after_origin_was_already_configured(tmp_path, gpu_job):
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(origin)], capture_output=True, check=True, text=True
+    )
+    subprocess.run(
+        ["git", "-C", str(origin), "fast-import", "--quiet"],
+        input=(
+            "blob\nmark :1\ndata 8\nfixture\n\n"
+            "commit refs/heads/main\n"
+            "committer Test <test@example.com> 1 +0000\n"
+            "data 7\nfixture\nM 100644 :1 fixture.txt\n\ndone\n"
+        ),
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    merge_sha = subprocess.run(
+        ["git", "-C", str(origin), "rev-parse", "refs/heads/main"],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.strip()
+    harness = JobHarness(tmp_path, gpu_job)
+    setup_line = next(
+        line.strip()
+        for line in harness.steps["test"]["run"].splitlines()
+        if line.strip().startswith('retry_backoff brev exec "$INSTANCE_NAME" "git init ')
+    )
+    # Run the workflow's actual remote setup against a local Git repository.
+    # The first fetch fails after init/origin configuration has already happened.
+    clone = tmp_path / "clone"
+    setup_command = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'retry_backoff() { "$@"; }\nbrev() { printf \'%s\\n\' "$3"; }\n' + setup_line,
+        ],
+        env={**harness.environment, "MERGE_SHA": merge_sha},
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.strip()
+    setup_command = setup_command.replace("/tmp/model_connect", shlex.quote(str(clone)))
+    setup_command = setup_command.replace(
+        f"https://github.com/{harness.environment['GITHUB_REPOSITORY']}.git",
+        shlex.quote(origin.as_uri()),
+    )
+    git_shim = r"""
+git() {
+  if [ "$1" = fetch ] && [ ! -f "$FETCH_ATTEMPT" ]; then
+    touch "$FETCH_ATTEMPT"
+    return 7
+  fi
+  command git "$@"
+}
+"""
+    instance = harness.environment["RESERVED_INSTANCE"]
+    result = harness.run(
+        "test",
+        INSTANCE_NAME=instance,
+        MERGE_SHA=merge_sha,
+        LOCAL_GIT_SETUP=git_shim + setup_command,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual_sha = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "HEAD"],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.strip()
+    assert actual_sha == merge_sha
+    assert (clone / "fixture.txt").read_text() == "fixture\n"
+    fetches = [
+        call for call in harness.events("brev") if call.startswith(f"exec {instance} git init ")
+    ]
+    assert len(fetches) == 2
+    assert len(harness.events("coordinate")) == 1
+    assert not harness.events("provision")
+    assert not any(call.startswith(("create ", "delete ")) for call in harness.events("brev"))
+
+
+def test_independent_cleanup_removes_every_possible_reservation_name(tmp_path, gpu_job):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    cleanup = workflow["jobs"]["cleanup"]
+    assert "always()" in cleanup["if"]
+    assert "provision-and-test" in cleanup["needs"]
+    job = {"steps": cleanup["steps"]}
+    harness = JobHarness(tmp_path, job)
+    result = harness.run("Delete the deterministic GPU instance")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert harness.events("brev") == [
+        "delete trtmc-gpu-ci-123-2",
+        "delete trtmc-gpu-ci-123-2-r2",
+        "delete trtmc-gpu-ci-123-2-r3",
+    ]
