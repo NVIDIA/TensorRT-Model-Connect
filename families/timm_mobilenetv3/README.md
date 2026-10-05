@@ -17,8 +17,8 @@ Build a new bundle with this family version; the old `classification` bundle
 mode is not retained. The existing CLI command remains simple:
 
 ```sh
-trtmc build timm/mobilenetv3_large_100.ra_in1k -o mobilenetv3.bundle
-trtmc classify mobilenetv3.bundle --image photo.jpg
+trtmc timm_mobilenetv3 build timm/mobilenetv3_large_100.ra_in1k -o mobilenetv3.bundle
+trtmc timm_mobilenetv3 classify mobilenetv3.bundle --image photo.jpg
 ```
 
 ## Validation
