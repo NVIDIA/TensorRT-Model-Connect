@@ -128,15 +128,89 @@ DEFAULT_PROBE_IMAGE = (
     "nvidia/cuda:13.0.2-base-ubuntu24.04"
     "@sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701"
 )
-POLL_INTERVAL = 5.0
+POLL_INTERVAL = 20.0
 CLI_TIMEOUT = 30.0
 PROBE_TIMEOUT = 180.0
 CLEANUP_TIMEOUT = 60.0
 ATTEMPT_TIMEOUT = 600.0
+DIAGNOSTIC_INTERVAL = 120.0
+
+_STATE_VALUES = frozenset(
+    {
+        "RUNNING",
+        "STARTING",
+        "STOPPING",
+        "STOPPED",
+        "DEPLOYING",
+        "DELETING",
+        "DELETED",
+        "TERMINATED",
+        "FAILURE",
+        "FAILED",
+        "UNHEALTHY",
+        "UNAVAILABLE",
+        "HEALTHY",
+        "PENDING",
+        "BUILDING",
+        "COMPLETED",
+        "CREATE_FAILED",
+        "READY",
+        "NOT READY",
+        "",
+    }
+)
+_UNIT_VALUES = frozenset(
+    {
+        "loaded",
+        "not-found",
+        "masked",
+        "error",
+        "bad-setting",
+        "merged",
+        "stub",
+        "active",
+        "inactive",
+        "failed",
+        "activating",
+        "deactivating",
+        "reloading",
+        "maintenance",
+        "refreshing",
+        "running",
+        "exited",
+        "dead",
+        "start",
+        "start-pre",
+        "start-post",
+        "stop",
+        "stop-post",
+        "auto-restart",
+        "waiting",
+        "listening",
+        "success",
+        "exit-code",
+        "signal",
+        "timeout",
+        "core-dump",
+        "watchdog",
+        "start-limit-hit",
+        "resources",
+        "protocol",
+        "oom-kill",
+        "exec-condition",
+        "assert",
+        "dependency",
+        "canceled",
+    }
+)
 
 
 class ProvisionError(RuntimeError):
     """Provisioning did not establish the complete readiness contract."""
+
+
+class InventoryError(ProvisionError):
+    """Inventory visibility is unknown; retry without replacing the allocation."""
 
 
 def _remaining(deadline: float) -> float:
@@ -174,7 +248,18 @@ def _run(
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.communicate()
+        # An escaped daemon may retain the pipes after the CLI group is gone.
+        # Drain only within the remaining deadline; do not wait for that daemon.
+        try:
+            process.communicate(timeout=max(0.0, min(1.0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+            try:
+                process.wait(timeout=max(0.0, min(1.0, deadline - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                pass
         if isinstance(error, KeyboardInterrupt):
             raise
         raise ProvisionError(f"brev {command[1]} exceeded its bounded wait") from None
@@ -187,22 +272,25 @@ def _pause(deadline: float) -> None:
 
 def _instance(name: str, deadline: float) -> dict[str, str] | None:
     _remaining(deadline)
-    result = _run(["brev", "ls", "--json"], deadline)
+    try:
+        result = _run(["brev", "ls", "--json"], deadline)
+    except (ProvisionError, OSError):
+        raise InventoryError("Brev inventory query unavailable") from None
     if result.returncode:
-        raise ProvisionError(f"Brev inventory failed (exit {result.returncode})")
+        raise InventoryError(f"Brev inventory failed (exit {result.returncode})")
     try:
         document = json.loads(result.stdout)
     except (ValueError, TypeError):
-        raise ProvisionError("Brev inventory did not return valid JSON") from None
+        raise InventoryError("Brev inventory did not return valid JSON") from None
     if not isinstance(document, dict) or "workspaces" not in document:
-        raise ProvisionError("Brev inventory must contain the workspaces collection")
+        raise InventoryError("Brev inventory must contain the workspaces collection")
     records = document["workspaces"]
     if records is None:
         records = []
     if not isinstance(records, list) or any(
         not isinstance(row, dict) or not isinstance(row.get("name"), str) for row in records
     ):
-        raise ProvisionError("Brev workspaces must be an array of named instance records or null")
+        raise InventoryError("Brev workspaces must be an array of named instance records or null")
     matching = [row for row in records if row.get("name") == name]
     if len(matching) > 1:
         raise ProvisionError("Brev inventory returned duplicate exact instance names")
@@ -211,10 +299,34 @@ def _instance(name: str, deadline: float) -> dict[str, str] | None:
     row = matching[0]
     for key in ("id", "status", "build_status", "shell_status", "health_status"):
         if not isinstance(row.get(key), str):
-            raise ProvisionError(f"Brev inventory omitted a string {key}")
+            raise InventoryError(f"Brev inventory omitted a string {key}")
     if not row["id"]:
-        raise ProvisionError("Brev inventory omitted the instance ID")
+        raise InventoryError("Brev inventory omitted the instance ID")
     return row
+
+
+def _inventory(name: str, deadline: float, start: float) -> dict[str, str] | None:
+    while True:
+        try:
+            return _instance(name, deadline)
+        except InventoryError as error:
+            _log(start, f"{name}: {error}; retrying inventory on the same allocation")
+            _pause(deadline)
+
+
+def _state(row: dict[str, str]) -> str:
+    fields = {
+        key: row[key] if row[key] in _STATE_VALUES else "UNKNOWN"
+        for key in ("status", "build_status", "shell_status", "health_status")
+    }
+    for key in ("id", "instance_type"):
+        value = row.get(key, "")
+        fields[key] = (
+            value
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value)
+            else "UNKNOWN"
+        )
+    return json.dumps(fields)
 
 
 def _ready(row: dict[str, str]) -> bool:
@@ -237,27 +349,110 @@ def _probe(image: str, marker: str) -> str:
     return "\n".join(
         (
             "set -eu",
+            "phase() {",
+            '  key="$1"; shift',
+            '  if "$@" >/dev/null 2>&1; then code=0; else code=$?; fi',
+            '  printf \'TRTMC_PHASE_%s=%s\\n\' "$key" "$code"',
+            '  return "$code"',
+            "}",
             "if command -v cloud-init >/dev/null 2>&1; then",
-            "  sudo -n cloud-init status --wait",
+            "  phase cloud_init sudo -n cloud-init status --wait",
             "else",
-            "  printf '%s\\n' 'TRTMC_CLOUD_INIT=not-installed'",
+            "  printf '%s\\n' 'TRTMC_PHASE_cloud_init=not_installed'",
             "fi",
-            "sudo -n docker info >/dev/null",
-            "nvidia-smi --query-gpu=uuid --format=csv,noheader",
-            f"sudo -n docker run --rm --gpus all {shlex.quote(image)} "
+            "phase docker sudo -n docker info",
+            "phase host_gpu nvidia-smi --query-gpu=uuid --format=csv,noheader",
+            f"phase container_gpu sudo -n docker run --rm --gpus all {shlex.quote(image)} "
             "nvidia-smi --query-gpu=uuid --format=csv,noheader",
             f"printf '%s\\n' {shlex.quote(marker)}",
         )
     )
 
 
+def _diagnostics() -> str:
+    """Read fixed infrastructure facts without exposing logs, user data or environment."""
+    return "\n".join(
+        (
+            "set -u",
+            "if command -v cloud-init >/dev/null 2>&1; then",
+            "  if output=$(sudo -n cloud-init status 2>/dev/null); then code=0; else code=$?; fi",
+            "  printf 'TRTMC_DIAG_CLOUD_EXIT=%s\\n' \"$code\"",
+            "  printf '%s\\n' \"$output\" | awk '/^status: (not run|disabled|running|done|error)$/ "
+            '{value=substr($0,9); gsub(/ /,"_",value); print "TRTMC_DIAG_CLOUD_STATE=" value}\'',
+            "else printf '%s\\n' 'TRTMC_DIAG_CLOUD_STATE=not_installed'; fi",
+            "for unit in docker cloud-init cloud-final jupyter cloudflared; do",
+            '  sudo -n systemctl show "$unit.service" --no-pager '
+            "--property=LoadState,ActiveState,SubState,Result,NRestarts 2>/dev/null | "
+            'awk -v unit="$unit" -F= \'{print "TRTMC_DIAG_UNIT_" unit "_" $1 "=" $2}\'',
+            "done",
+            "if sudo -n test -r /var/log/brev-workspace.log 2>/dev/null; then",
+            "  printf '%s\\n' 'TRTMC_DIAG_SETUP_READABLE=1'",
+            '  sudo -n awk \'$0 == "------ Setup Begin ------" {begin++} '
+            '$0 == "------ Setup End ------" {end++} '
+            '$0 == "------ Success ------" {success++} '
+            '$0 == "------ Failure ------" {failure++} '
+            'END {printf "TRTMC_DIAG_SETUP_BEGIN=%d\\nTRTMC_DIAG_SETUP_END=%d\\n'
+            'TRTMC_DIAG_SETUP_SUCCESS=%d\\nTRTMC_DIAG_SETUP_FAILURE=%d\\n", '
+            "begin,end,success,failure}' /var/log/brev-workspace.log 2>/dev/null",
+            "else printf '%s\\n' 'TRTMC_DIAG_SETUP_READABLE=0'; fi",
+            "if nvidia-smi --query-gpu=uuid --format=csv,noheader >/dev/null 2>&1; "
+            "then code=0; else code=$?; fi",
+            "printf 'TRTMC_DIAG_HOST_GPU_EXIT=%s\\n' \"$code\"",
+            "exit 0",
+        )
+    )
+
+
+def _safe_lines(output: str) -> list[str]:
+    result = []
+    for line in output.splitlines():
+        if re.fullmatch(
+            r"TRTMC_PHASE_(cloud_init|docker|host_gpu|container_gpu)=(not_installed|[0-9]{1,3})",
+            line,
+        ):
+            result.append(line)
+        elif re.fullmatch(
+            r"TRTMC_DIAG_(CLOUD_EXIT|HOST_GPU_EXIT|SETUP_(READABLE|BEGIN|END|SUCCESS|FAILURE))=[0-9]{1,9}",
+            line,
+        ):
+            result.append(line)
+        elif re.fullmatch(
+            r"TRTMC_DIAG_CLOUD_STATE=(not_installed|not_run|disabled|running|done|error)", line
+        ):
+            result.append(line)
+        else:
+            match = re.fullmatch(
+                r"TRTMC_DIAG_UNIT_(docker|cloud-init|cloud-final|jupyter|cloudflared)_"
+                r"(LoadState|ActiveState|SubState|Result|NRestarts)=(.*)",
+                line,
+            )
+            if match and (
+                match[3] in _UNIT_VALUES
+                or (match[2] == "NRestarts" and re.fullmatch(r"[0-9]{1,9}", match[3]))
+            ):
+                result.append(line)
+    return result
+
+
+def _diagnose(name: str, deadline: float, start: float) -> None:
+    try:
+        result = _run(["brev", "exec", name, _diagnostics()], deadline, CLI_TIMEOUT)
+    except (ProvisionError, OSError):
+        _log(start, f"{name}: bootstrap diagnostic unavailable within its bounded wait")
+        return
+    _log(start, f"{name}: bootstrap diagnostic CLI exit {result.returncode}")
+    for line in _safe_lines(result.stdout):
+        _log(start, f"{name}: {line}")
+
+
 def _wait_ready(name: str, image: str, deadline: float, start: float) -> None:
     identity: str | None = None
     previous_state = ""
+    next_diagnostic = start
     marker = f"TRTMC_GPU_READY_{secrets.token_hex(16)}"
     while True:
         _remaining(deadline)
-        row = _instance(name, deadline)
+        row = _inventory(name, deadline, start)
         if row is None:
             _log(start, f"{name}: not yet visible in inventory")
             _pause(deadline)
@@ -265,9 +460,7 @@ def _wait_ready(name: str, image: str, deadline: float, start: float) -> None:
         if identity is not None and row["id"] != identity:
             raise ProvisionError("the instance ID changed while waiting for readiness")
         identity = row["id"]
-        state = json.dumps(
-            {key: row[key] for key in ("status", "build_status", "shell_status", "health_status")}
-        )
+        state = _state(row)
         if state != previous_state:
             _log(start, f"{name}: {state}")
             previous_state = state
@@ -279,10 +472,13 @@ def _wait_ready(name: str, image: str, deadline: float, start: float) -> None:
             except ProvisionError:
                 _log(start, f"{name}: readiness probe exceeded its bounded wait")
             else:
+                for line in _safe_lines(result.stdout):
+                    _log(start, f"{name}: {line}")
+                _log(start, f"{name}: readiness probe CLI exit {result.returncode}")
                 if result.returncode == 0 and marker in result.stdout.splitlines():
                     # Bind the remote receipt to an instance that remains ready,
                     # rather than trusting an earlier inventory snapshot.
-                    current = _instance(name, deadline)
+                    current = _inventory(name, deadline, start)
                     if current is None or current["id"] != identity:
                         raise ProvisionError(
                             "the instance disappeared or was replaced during its readiness probe"
@@ -296,6 +492,13 @@ def _wait_ready(name: str, image: str, deadline: float, start: float) -> None:
                 _log(
                     start, f"{name}: readiness probe has not established the complete GPU contract"
                 )
+        elif (
+            row["status"] == "RUNNING"
+            and row["build_status"] == "BUILDING"
+            and time.monotonic() >= next_diagnostic
+        ):
+            _diagnose(name, deadline, start)
+            next_diagnostic = time.monotonic() + DIAGNOSTIC_INTERVAL
         _pause(deadline)
 
 
@@ -310,34 +513,48 @@ def _publish_name(name: str) -> None:
 def _cleanup(name: str, deadline: float, start: float, uncertain_create: bool = False) -> None:
     """Do not replace an instance while its deletion remains unconfirmed."""
     allocation_seen = False
-    try:
-        allocation_seen = _instance(name, deadline) is not None
-    except ProvisionError:
-        pass
-    try:
-        result = _run(["brev", "delete", name], deadline)
-        _log(start, f"{name}: delete requested (exit {result.returncode})")
-    except ProvisionError:
-        _log(start, f"{name}: delete request timed out; confirming absence")
+    delete_pending = True
+    delete_attempted = False
+    previous_state = ""
+    identity: str | None = None
     while True:
         try:
             row = _instance(name, deadline)
-            if row is None and (not uncertain_create or allocation_seen):
+            if row is None and delete_attempted and (not uncertain_create or allocation_seen):
                 _log(start, f"{name}: deletion confirmed by exact name")
                 return
-            if row is not None and not allocation_seen:
+            if row is not None:
+                if identity is not None and row["id"] != identity:
+                    break
+                identity = row["id"]
+                state = _state(row)
+                if state != previous_state:
+                    _log(start, f"{name}: cleanup inventory {state}")
+                    previous_state = state
+                # Also delete a late allocation from a timed-out create.
+                delete_pending = delete_pending or not allocation_seen
                 allocation_seen = True
-                # A timed-out create may finish after the first delete. Delete
-                # the late allocation rather than starting a second paid VM.
-                _run(["brev", "delete", name], deadline)
+        except InventoryError:
+            _log(start, f"{name}: cleanup inventory unavailable; absence remains unconfirmed")
         except ProvisionError:
-            _log(start, f"{name}: could not confirm deletion yet")
+            break
+        if delete_pending:
+            delete_attempted = True
+            try:
+                result = _run(["brev", "delete", name], deadline)
+                delete_pending = result.returncode != 0
+                _log(start, f"{name}: delete requested (exit {result.returncode})")
+                if not delete_pending:
+                    # Confirm immediately when a slow delete leaves only a few
+                    # seconds of the cleanup budget; later polling stays paced.
+                    continue
+            except (ProvisionError, OSError):
+                _log(start, f"{name}: delete request unavailable; retrying within cleanup budget")
         try:
             _pause(deadline)
         except ProvisionError:
-            raise ProvisionError(
-                f"cleanup of {name} is unconfirmed; refusing replacement"
-            ) from None
+            break
+    raise ProvisionError(f"cleanup of {name} is unconfirmed; refusing replacement") from None
 
 
 def provision(
@@ -370,12 +587,14 @@ def provision(
         # that may never be needed. Every attempt still shares the total budget.
         attempt_deadline = min(active_deadline, time.monotonic() + ATTEMPT_TIMEOUT)
         name = instance if attempt == 1 else f"{instance}-r{attempt}"
-        if _instance(name, attempt_deadline) is not None:
+        if _inventory(name, attempt_deadline, start) is not None:
             raise ProvisionError(
                 f"instance {name} already exists; refusing to reuse an earlier allocation"
             )
         chosen_provider = provider if attempt == 1 else fallback_provider
-        command = ["brev", "create", name, "-g", gpu, "--detached"]
+        # CI does not need Jupyter. Request the official CLI opt-out; the pinned
+        # CLI omits false from JSON, so this is not proof of server-side disablement.
+        command = ["brev", "create", name, "-g", gpu, "--detached", "--jupyter=false"]
         if chosen_provider:
             command.extend(("--provider", chosen_provider))
         # Persist the name before even a timed-out create can allocate remotely.

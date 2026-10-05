@@ -11,6 +11,7 @@ from tools import brev_exec as brev_provision
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -750,6 +751,11 @@ class FakeBrev:
                     self.events.append("inventory:absent")
                 stdout = json.dumps({"workspaces": rows})
         elif action == "exec":
+            if "TRTMC_DIAG_" in command[-1]:
+                self.events.append("diagnostic")
+                return subprocess.CompletedProcess(
+                    command, 0, "TRTMC_DIAG_CLOUD_STATE=done\nTRTMC_DIAG_HOST_GPU_EXIT=0\n", ""
+                )
             self.events.append("probe")
             outcome = self.probe_results.pop(0) if self.probe_results else "ready"
             if outcome == "ready":
@@ -804,7 +810,7 @@ def test_building_is_gated_before_actual_probe(fake: FakeBrev, clock: FakeClock)
     probe_index = fake.events.index("probe")
     assert fake.events[:probe_index].count("inventory:BUILDING") == 2
     assert fake.events[probe_index - 1] == "inventory:COMPLETED"
-    assert clock.now == 10
+    assert clock.now == 2 * brev_provision.POLL_INTERVAL
     assert not any(command[1] == "delete" for command in fake.commands)
 
 
@@ -899,7 +905,7 @@ def test_slow_aws_boot_can_use_remaining_budget_after_failed_first_vm(
                 fake.states = [_row(fake.name)]
         if command[1] == "delete" and fake.name == "gpu":
             clock.now += 55
-        if command[1] == "exec":
+        if command[1] == "exec" and "TRTMC_DIAG_" not in command[-1]:
             # Image pull and the actual Docker GPU probe follow SSH bring-up.
             if clock.now + 45 >= deadline:
                 clock.now = deadline
@@ -911,8 +917,9 @@ def test_slow_aws_boot_can_use_remaining_budget_after_failed_first_vm(
 
     assert brev_provision.provision("gpu", "L40") == "gpu-r2"
     assert fake.creates == ["gpu", "gpu-r2"]
-    assert replacement_started == 655
-    assert clock.now == 1030
+    assert replacement_started >= 655
+    assert clock.now >= replacement_started + 330 + 45
+    assert clock.now <= 1200
 
 
 def test_ambiguous_create_with_absent_inventory_never_starts_fallback(
@@ -1033,3 +1040,202 @@ def test_cli_failure_and_interruption_have_nonzero_results(monkeypatch: pytest.M
 
     monkeypatch.setattr(brev_provision, "provision", failed)
     assert brev_provision.main(["provision", "--instance", "gpu", "--gpu", "L40"]) == 1
+
+
+@pytest.mark.parametrize("point", ["initial", "before_probe", "after_probe"])
+@pytest.mark.parametrize("invalid_json", [False, True])
+def test_inventory_read_error_retains_the_same_vm(
+    fake: FakeBrev, monkeypatch: pytest.MonkeyPatch, point: str, invalid_json: bool, capsys
+) -> None:
+    failed = False
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT):
+        nonlocal failed
+        reached = {
+            "initial": fake.name is None,
+            "before_probe": fake.name is not None and "probe" not in fake.events,
+            "after_probe": "probe" in fake.events,
+        }[point]
+        if command[1] == "ls" and reached and not failed:
+            failed = True
+            fake.commands.append(command)
+            return subprocess.CompletedProcess(
+                command, 0 if invalid_json else 1, "private-token-invalid-json", "private-token"
+            )
+        return fake(command, deadline, cap)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert brev_provision.provision("gpu", "L40") == "gpu"
+    assert failed
+    assert fake.creates == ["gpu"]
+    assert not any(command[1] == "delete" for command in fake.commands)
+    assert fake.events.count("probe") == 1
+    assert "private-token" not in capsys.readouterr().err
+
+
+def test_unknown_initial_inventory_never_allocates(
+    fake: FakeBrev, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable(command, deadline, cap=brev_provision.CLI_TIMEOUT):
+        fake.commands.append(command)
+        assert command[1] == "ls"
+        return subprocess.CompletedProcess(command, 1, "", "unavailable")
+
+    monkeypatch.setattr(brev_provision, "_run", unavailable)
+    with pytest.raises(brev_provision.ProvisionError, match="deadline expired"):
+        brev_provision.provision("gpu", "L40", timeout=30)
+    assert not fake.creates
+    assert not any(command[1] in {"create", "delete"} for command in fake.commands)
+    assert clock.now <= 30
+
+
+def test_delete_is_retried_before_confirmed_absence_and_fallback(
+    fake: FakeBrev, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    fake.states = [_row("gpu", status="FAILURE", build_status="CREATE_FAILED")]
+    failures = 0
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT):
+        nonlocal failures
+        if command[1] == "delete" and failures < 2:
+            failures += 1
+            fake.commands.append(command)
+            fake.events.append("delete:gpu")
+            return subprocess.CompletedProcess(command, 1, "", "private-delete-token")
+        return fake(command, deadline, cap)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert brev_provision.provision("gpu", "L40") == "gpu-r2"
+    assert fake.events.count("delete:gpu") == 3
+    first_delete = fake.events.index("delete:gpu")
+    fallback = fake.events.index("create:gpu-r2")
+    assert "inventory:absent" in fake.events[first_delete:fallback]
+    stderr = capsys.readouterr().err
+    assert "cleanup inventory" in stderr
+    assert "private-delete-token" not in stderr
+
+
+def test_missing_cleanup_inventory_does_not_skip_the_delete_request(
+    fake: FakeBrev, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake.name = "gpu"
+    missing = True
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT):
+        nonlocal missing
+        if command[1] == "ls" and missing:
+            missing = False
+            fake.events.append("inventory:temporarily-absent")
+            return subprocess.CompletedProcess(command, 0, '{"workspaces":[]}', "")
+        return fake(command, deadline, cap)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    brev_provision._cleanup("gpu", 60, 0)
+    assert fake.events == ["inventory:temporarily-absent", "delete:gpu", "inventory:absent"]
+
+
+def test_ambiguous_cleanup_inventory_never_deletes_or_confirms_absence(fake: FakeBrev) -> None:
+    fake.name = "gpu"
+    fake.inventory_result = json.dumps({"workspaces": [_row("gpu"), _row("gpu", id="other")]})
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision._cleanup("gpu", 60, 0)
+    assert not any(command[1] == "delete" for command in fake.commands)
+
+
+def test_successful_bootstrap_diagnostics_cannot_admit_building(
+    fake: FakeBrev, clock: FakeClock
+) -> None:
+    fake.states = [_row("gpu", build_status="BUILDING", shell_status="NOT READY")]
+    with pytest.raises(brev_provision.ProvisionError):
+        brev_provision.provision("gpu", "L40", attempts=1, timeout=90)
+    assert fake.creates == ["gpu"]
+    assert "diagnostic" in fake.events
+    assert "probe" not in fake.events
+    assert clock.now <= 90
+
+
+def test_ci_requests_the_official_jupyter_opt_out(fake: FakeBrev) -> None:
+    assert brev_provision.provision("gpu", "L40") == "gpu"
+    create = next(command for command in fake.commands if command[1] == "create")
+    assert "--jupyter=false" in create
+
+
+def test_diagnostics_print_only_safe_public_fields(monkeypatch: pytest.MonkeyPatch, capsys):
+    output = "\n".join(
+        (
+            "password=private-bootstrap-token",
+            "TRTMC_DIAG_CLOUD_STATE=done",
+            "TRTMC_DIAG_CLOUD_EXIT=2",
+            "TRTMC_DIAG_UNIT_docker_ActiveState=active",
+            "TRTMC_DIAG_UNIT_cloud-final_Result=private-bootstrap-token",
+            "TRTMC_DIAG_UNIT_jupyter_Environment=private-bootstrap-token",
+            "TRTMC_DIAG_SETUP_SUCCESS=1 private-bootstrap-token",
+            "TRTMC_DIAG_SETUP_FAILURE=0",
+        )
+    )
+
+    def run(command, deadline, cap):
+        assert cap == brev_provision.CLI_TIMEOUT
+        return subprocess.CompletedProcess(command, 0, output, "private-bootstrap-token")
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    brev_provision._diagnose("gpu", time.monotonic() + 30, time.monotonic())
+    stderr = capsys.readouterr().err
+    assert "private-bootstrap-token" not in stderr
+    assert "TRTMC_DIAG_CLOUD_EXIT=2" in stderr
+    assert "TRTMC_DIAG_UNIT_docker_ActiveState=active" in stderr
+    assert "TRTMC_DIAG_SETUP_FAILURE=0" in stderr
+
+
+@pytest.mark.parametrize("value", [None, 42, "private\ntoken"])
+def test_optional_diagnostic_metadata_cannot_break_or_inject_state(value):
+    row = _row("gpu", instance_type=value)
+    state = json.loads(brev_provision._state(row))
+    assert state["instance_type"] == "UNKNOWN"
+    assert state["id"] == "allocation-gpu"
+
+
+@pytest.mark.parametrize("phase,code", [("cloud_init", 2), ("docker", 3), ("host_gpu", 14)])
+def test_actual_probe_reports_failed_phase_without_success_marker_or_secret(phase, code):
+    stubs = r"""
+cloud-init() { printf 'private-probe-token\n'; test "$FAIL_PHASE" != cloud_init || return "$FAIL_CODE"; }
+sudo() { shift; "$@"; }
+docker() { printf 'private-probe-token\n'; test "$FAIL_PHASE" != docker || return "$FAIL_CODE"; }
+nvidia-smi() { printf 'private-probe-token\n'; test "$FAIL_PHASE" != host_gpu || return "$FAIL_CODE"; }
+"""
+    result = subprocess.run(
+        ["bash", "-c", stubs + brev_provision._probe("image", "actual-ready-receipt")],
+        env={**os.environ, "FAIL_PHASE": phase, "FAIL_CODE": str(code)},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == code
+    assert f"TRTMC_PHASE_{phase}={code}" in result.stdout.splitlines()
+    assert "actual-ready-receipt" not in result.stdout
+    assert "private-probe-token" not in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process sessions required")
+def test_timeout_does_not_wait_for_escaped_child_holding_pipes(tmp_path):
+    child_pid = tmp_path / "escaped-pid"
+    cli = tmp_path / "escaped_cli.py"
+    cli.write_text(
+        "import subprocess,sys,time\nfrom pathlib import Path\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'], "
+        "start_new_session=True)\n"
+        f"Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(brev_provision.ProvisionError, match="bounded wait"):
+            brev_provision._run([sys.executable, str(cli)], started + 0.5)
+        assert time.monotonic() - started < 2
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
