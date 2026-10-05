@@ -414,46 +414,85 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
     assert len({name for kind, _, name in events if kind == "start"}) == 3
 
 
+@pytest.mark.parametrize("token_from_file", [False, True])
 def test_checkpoint_staging_forwards_only_network_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    token_from_file: bool,
 ) -> None:
-    """Checkpoint staging receives networking configuration but no unrelated environment."""
+    """Only trusted staging receives credentials, never contributor containers."""
     image = "sha256:" + "c" * 64
     runs: list[tuple[list[str], dict]] = []
+    token_file = tmp_path / "checkpoint-token"
 
     def docker(command, **kwargs):
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
         if "--stage-family" in command or command[:2] == ["docker", "run"]:
+            assert not token_file.exists()
+            if token_from_file:
+                assert "HF_TOKEN" not in os.environ
             runs.append((command, kwargs))
             return subprocess.CompletedProcess(command, 0)
         assert command[:3] == ["docker", "rm", "--force"]
         return subprocess.CompletedProcess(command, 1, stderr=f"No such container: {command[-1]}")
 
     monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
-    community_gpu_ci.run_containers(
-        tmp_path,
-        {
-            "TRTMC_GPU_SCOPE": "families",
-            "TRTMC_GPU_FAMILIES": '["alpha"]',
-            "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
-            "TRTMC_GPU_ADDED_FAMILIES": "[]",
-            "HTTPS_PROXY": "https://proxy.example",
-            "UNRELATED_SECRET": "secret-value",
-        },
-        "test-image",
-    )
+    env = {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": '["alpha"]',
+        "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        "HTTPS_PROXY": "https://proxy.example",
+        "UNRELATED_SECRET": "secret-value",
+    }
+    if token_from_file:
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        for key in (
+            "HF_TOKEN",
+            "HF_ENDPOINT",
+            "HTTP_PROXY",
+            "NO_PROXY",
+            "REQUESTS_CA_BUNDLE",
+            "SSL_CERT_FILE",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        token_file.write_text("checkpoint-secret", encoding="utf-8")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "community_gpu_ci.py",
+                "--containers",
+                "--repository",
+                str(tmp_path),
+                "--checkpoint-token-file",
+                str(token_file),
+            ],
+        )
+        assert community_gpu_ci.main() == 0
+        assert not token_file.exists()
+    else:
+        env["HF_TOKEN"] = "checkpoint-secret"
+        community_gpu_ci.run_containers(tmp_path, env, "test-image")
 
     assert len(runs) == 2
     (stage, stage_options), (family, family_options) = runs
     assert stage[:2] == [sys.executable, str(Path(community_gpu_ci.__file__).resolve())]
     assert "--stage-family" in stage
     assert "secret-value" not in stage
-    assert stage_options["env"] == {"HTTPS_PROXY": "https://proxy.example"}
+    assert stage_options["env"] == {
+        "HTTPS_PROXY": "https://proxy.example",
+        "HF_TOKEN": "checkpoint-secret",
+    }
+    assert "checkpoint-secret" not in str(stage)
     assert "--family" in family
     assert "env" not in family_options
     assert not any("UNRELATED_SECRET" in value or "secret-value" in value for value in family)
+    assert "HF_TOKEN" not in str(family)
+    assert "checkpoint-secret" not in str(family)
+    assert str(token_file) not in str(family)
     assert "TRTMC_CHECKPOINTS_PRESTAGED=1" in family
     stage_cache = str(Path(stage[stage.index("--cache-dir") + 1]).parent)
     family_cache = next(
