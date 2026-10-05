@@ -18,8 +18,6 @@ from typing import Any, Mapping
 
 from families.locateanything.tests.hf_reference import (_LocalTokenizer, _load_config, _repair_rotary_buffers,
                                                          manual_chat_prompt)
-from trtmc_perf_serving.backends.base import BackendError, Invocation
-from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, load_image, required, timed
 
 UNUSED_IMPORTS = ("cv2", "decord", "lmdb")
 IMAGE_SIZE, PATCH = 448, 14
@@ -41,9 +39,10 @@ def patchified(image: Any) -> dict[str, Any]:
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         if spec.precision != "fp32":
-            raise BackendError("the official LocateAnything reference runs at fp32")
+            raise self.host.Error("the official LocateAnything reference runs at fp32")
         import torch
         from huggingface_hub import snapshot_download
         from transformers import AutoModel
@@ -58,10 +57,11 @@ class Adapter:
                                                torch_dtype=torch.float32).to(spec.device).eval()
         _repair_rotary_buffers(self.model)
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         torch, device = self.torch, self.spec.device
         prompt, steps = str(request.get("prompt", "")), int(request.get("max_new_tokens", 32))
-        image = load_image(str(required(request, "image_path")))  # decoded before the call (preloaded)
+        # decoded before the call (preloaded)
+        image = self.host.load_image(str(self.host.required(request, "image_path")))
 
         def run() -> Any:
             inputs = patchified(image)
@@ -76,7 +76,7 @@ class Adapter:
                     do_sample=False)
             return output, int(input_ids.shape[-1])
 
-        (output, prompt_tokens), model_ms = timed(run)
+        (output, prompt_tokens), model_ms = self.host.timed(run)
         if isinstance(output, str):
             text = output
         elif isinstance(output, (list, tuple)) and output and isinstance(output[0], str):
@@ -87,4 +87,4 @@ class Adapter:
                                          skip_special_tokens=True)
         text = str(text).strip()
         token_ids = self.tokenizer.encode(text, add_special_tokens=False)
-        return invocation({"text": text, "token_ids": token_ids, "output_tokens": len(token_ids)}, model_ms)
+        return self.host.invocation({"text": text, "token_ids": token_ids, "output_tokens": len(token_ids)}, model_ms)

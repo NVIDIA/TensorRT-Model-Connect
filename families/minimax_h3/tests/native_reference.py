@@ -14,13 +14,11 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from trtmc_perf_serving.backends.base import Invocation
-from trtmc_perf_serving.backends.reference.common import (ReferenceSpec, invocation, required, tensor_observation,
-                                                          timed)
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         import torch
         from diffusers import ComponentsManager, ModularPipeline
         from huggingface_hub import snapshot_download
@@ -36,17 +34,18 @@ class Adapter:
         pipeline.load_components(dtype=spec.dtype, pretrained_model_name_or_path=directory, local_files_only=True)
         self.pipeline = pipeline if manager is not None else pipeline.to(spec.device)
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         kwargs: dict[str, Any] = {
-            "prompt": str(required(request, "prompt")), "height": int(required(request, "height")),
-            "width": int(required(request, "width")), "num_inference_steps": int(required(request, "num_steps")),
+            "prompt": str(self.host.required(request, "prompt")),
+            "height": int(self.host.required(request, "height")), "width": int(self.host.required(request, "width")),
+            "num_inference_steps": int(self.host.required(request, "num_steps")),
             "generator": self.torch.Generator().manual_seed(max(int(request.get("seed", 0)), 0))}
         if int(request.get("num_frames", 1)) > 1:
             kwargs["num_frames"] = int(request["num_frames"])
         if request.get("negative_prompt"):
             kwargs["negative_prompt"] = str(request["negative_prompt"])
-        videos, model_ms = timed(lambda: self.pipeline(output="videos", output_type="np", **kwargs))
+        videos, model_ms = self.host.timed(lambda: self.pipeline(output="videos", output_type="np", **kwargs))
         frames = np.asarray(videos[0])
-        return invocation({**tensor_observation(frames, artifact_base), "media_type": "video",
-                           "num_frames": int(frames.shape[0]), "height": int(frames.shape[1]),
-                           "width": int(frames.shape[2])}, model_ms)
+        return self.host.invocation({**self.host.tensor_observation(frames, artifact_base), "media_type": "video",
+                                     "num_frames": int(frames.shape[0]), "height": int(frames.shape[1]),
+                                     "width": int(frames.shape[2])}, model_ms)

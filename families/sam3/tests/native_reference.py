@@ -9,15 +9,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from trtmc_perf_serving.backends.base import Invocation
-from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, load_image, required, timed
 
 THRESHOLD = 0.5
 MASK_THRESHOLD = 0.5
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         from transformers import Sam3Model, Sam3Processor
 
         self.spec = spec
@@ -25,13 +24,13 @@ class Adapter:
         self.model = Sam3Model.from_pretrained(spec.model, dtype=spec.dtype,
                                                **spec.pretrained_kwargs()).to(spec.device).eval()
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
-        image = load_image(str(required(request, "image_path"))).convert("RGB")
-        encoded = self.processor(images=image, text=str(required(request, "prompt")), return_tensors="pt")
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
+        image = self.host.load_image(str(self.host.required(request, "image_path"))).convert("RGB")
+        encoded = self.processor(images=image, text=str(self.host.required(request, "prompt")), return_tensors="pt")
         inputs = {name: value.to(self.spec.device) if hasattr(value, "to") else value for name, value in encoded.items()}
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(self.spec.dtype)
-        outputs, model_ms = timed(lambda: self.model(**inputs))
+        outputs, model_ms = self.host.timed(lambda: self.model(**inputs))
         result = self.processor.post_process_instance_segmentation(
             outputs, threshold=THRESHOLD, mask_threshold=MASK_THRESHOLD,
             target_sizes=inputs["original_sizes"].cpu().tolist())[0]
@@ -40,6 +39,7 @@ class Adapter:
         boxes = result["boxes"].detach().float().cpu().reshape(-1, 4)
         height, width = (int(value) for value in masks.shape[-2:]) if masks.ndim == 3 else (image.height, image.width)
         count = int(masks.shape[0]) if masks.ndim == 3 else 0
-        return invocation({"segmented_images": 1, "num_masks": count, "height": height, "width": width,
-                           "mask_kind": "binary", "masks": masks.reshape(-1).tolist(), "iou_scores": scores.tolist(),
-                           "boxes": boxes.tolist(), "box_coordinates": "original_image_pixels_xyxy"}, model_ms)
+        return self.host.invocation({"segmented_images": 1, "num_masks": count, "height": height, "width": width,
+                                     "mask_kind": "binary", "masks": masks.reshape(-1).tolist(),
+                                     "iou_scores": scores.tolist(), "boxes": boxes.tolist(),
+                                     "box_coordinates": "original_image_pixels_xyxy"}, model_ms)

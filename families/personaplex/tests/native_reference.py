@@ -13,18 +13,16 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from trtmc_perf_serving.backends.base import BackendError, Invocation
-from trtmc_perf_serving.backends.reference.common import (ReferenceSpec, invocation, load_audio, required,
-                                                           tensor_observation, timed)
 
 COMPAT = Path(__file__).resolve().parent / "tests/personaplex_audio_compat"  # the family's sphn audio shim
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         source = Path(sys.prefix) / "trtmc-reference/personaplex"
         if not (source / "moshi/moshi/offline.py").is_file():
-            raise BackendError(f"the PersonaPlex reference is not prepared: {source}")
+            raise self.host.Error(f"the PersonaPlex reference is not prepared: {source}")
         sys.path[:0] = [str(COMPAT), str(source / "moshi"), str(source)]
         from huggingface_hub import hf_hub_download
         from moshi.models import LMGen, loaders
@@ -45,13 +43,14 @@ class Adapter:
             streaming.streaming_forever(1)
         warmup(self.mimi, self.other_mimi, self.generator, spec.device, self.frame_size)
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         import torch
         from moshi.models.lm import _iterate_audio, encode_from_sphn
 
         frames = int(request.get("max_new_tokens", 300))
         # Mono at Mimi's rate (librosa resampling): the environment's sphn stand-in reads 24 kHz files only.
-        source_audio = load_audio(str(required(request, "audio_path")), int(self.mimi.sample_rate))[None, :]
+        audio_path = str(self.host.required(request, "audio_path"))
+        source_audio = self.host.load_audio(audio_path, int(self.mimi.sample_rate))[None, :]
         for streaming in (self.mimi, self.other_mimi, self.generator):
             streaming.reset_streaming()
 
@@ -69,10 +68,10 @@ class Adapter:
                         return chunks
             return chunks
 
-        chunks, model_ms = timed(run)
+        chunks, model_ms = self.host.timed(run)
         if not chunks:
-            raise BackendError("the native PersonaPlex produced no speech frames")
+            raise self.host.Error("the native PersonaPlex produced no speech frames")
         audio = torch.cat(chunks).cpu().numpy().astype(np.float32)
         rate = int(self.mimi.sample_rate)
-        return invocation({**tensor_observation(audio, artifact_base), "sample_rate": rate, "output_tokens": len(chunks),
-                           "audio_seconds": audio.size / rate}, model_ms)
+        return self.host.invocation({**self.host.tensor_observation(audio, artifact_base), "sample_rate": rate,
+                                     "output_tokens": len(chunks), "audio_seconds": audio.size / rate}, model_ms)

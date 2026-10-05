@@ -13,9 +13,6 @@ import random
 from pathlib import Path
 from typing import Any, Mapping
 
-from trtmc_perf_serving.backends.base import BackendError, Invocation
-from trtmc_perf_serving.backends.reference.common import (ReferenceSpec, invocation, required, tensor_observation,
-                                                          timed)
 
 ARCHIVE = "magpie_tts_multilingual_357m.nemo"
 SAMPLE_RATE = 22_050
@@ -35,9 +32,10 @@ def _seed(torch: Any, value: int) -> None:
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         if spec.precision != "fp32":
-            raise BackendError("the Magpie TTS reference runs at fp32")
+            raise self.host.Error("the Magpie TTS reference runs at fp32")
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         import fsspec
         import torch
@@ -57,17 +55,17 @@ class Adapter:
         self.model = MagpieTTSModel.restore_from(restore_path=archive).eval().to(spec.device)
         self.default_steps = self.model.inference_parameters.max_decoder_steps
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         steps = int(request.get("max_new_tokens") or 0)
         self.model.inference_parameters.max_decoder_steps = steps if steps > 0 else self.default_steps
-        prompt = str(required(request, "prompt"))
+        prompt = str(self.host.required(request, "prompt"))
 
         def run() -> Any:
             _seed(self.torch, int(request.get("seed", 42)))
             return self.model.do_tts(transcript=prompt, language="en", use_cfg=True)
 
-        (audio, length), model_ms = timed(run)
+        (audio, length), model_ms = self.host.timed(run)
         count = int(length.item()) if length.numel() else int(audio.numel())
         samples = audio.detach().float().cpu().reshape(-1)[:count]
-        return invocation({**tensor_observation(samples, artifact_base), "sample_rate": SAMPLE_RATE,
-                           "audio_seconds": count / SAMPLE_RATE}, model_ms)
+        return self.host.invocation({**self.host.tensor_observation(samples, artifact_base), "sample_rate": SAMPLE_RATE,
+                                     "audio_seconds": count / SAMPLE_RATE}, model_ms)

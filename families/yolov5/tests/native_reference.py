@@ -12,14 +12,12 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from trtmc_perf_serving.backends.base import BackendError, Invocation
-from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, load_image, required, timed
 
 SIZE = 640  # the letterboxed input side
 DTYPES = ("fp16", "fp32")
 
 
-def _model_directory(spec: ReferenceSpec) -> Path:
+def _model_directory(spec: Any) -> Path:
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(repo_id=spec.model, revision=spec.revision,
@@ -57,7 +55,8 @@ HEAD_SOURCES = (17, 20, 23)  # the stages feeding the three detection levels
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         import copy
 
         import torch
@@ -66,13 +65,13 @@ class Adapter:
         from families.yolov5.checkpoint import _collect, _install_placeholders
 
         if spec.precision not in DTYPES:
-            raise BackendError(f"YOLOv5 reference runs at fp16 or fp32, not {spec.precision}")
+            raise self.host.Error(f"YOLOv5 reference runs at fp16 or fp32, not {spec.precision}")
         self.spec, dtype = spec, spec.dtype
         _install_placeholders()
         blob = torch.load(str(_model_directory(spec) / ARCHIVE), map_location="cpu", weights_only=False)
         archive = blob.get("model") if isinstance(blob, dict) else None
         if archive is None:
-            raise BackendError(f"{ARCHIVE} has no model entry")
+            raise self.host.Error(f"{ARCHIVE} has no model entry")
         layout = copy.deepcopy(archive.__dict__["yaml"])
         layout["head"].pop()  # the Detect layer: decoded below
         stages, _ = parse_model(layout, ch=3, verbose=False)
@@ -83,7 +82,7 @@ class Adapter:
         missing, _ = stages.load_state_dict({name: value for name, value in body.items()
                                              if not name.startswith(f"{head}.")}, strict=False)
         if missing:
-            raise BackendError(f"YOLOv5 checkpoint lacks tensors: {missing[:5]}")
+            raise self.host.Error(f"YOLOv5 checkpoint lacks tensors: {missing[:5]}")
         for module in stages.modules():
             if isinstance(module, torch.nn.BatchNorm2d):
                 module.eps = 1e-3
@@ -125,7 +124,8 @@ class Adapter:
         return torch.cat((corners[order], best[survivors][order, None],
                           labels[survivors][order, None].to(dtype=self.spec.dtype)), dim=1)
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
-        pixels, geometry = _letterbox(load_image(str(required(request, "image_path"))), self.spec.dtype)
-        kept, model_ms = timed(lambda: self._decode(pixels, float(request.get("score_threshold", 0.25))))
-        return invocation(_observation(kept.detach().float().cpu().tolist(), geometry), model_ms)
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
+        image = self.host.load_image(str(self.host.required(request, "image_path")))
+        pixels, geometry = _letterbox(image, self.spec.dtype)
+        kept, model_ms = self.host.timed(lambda: self._decode(pixels, float(request.get("score_threshold", 0.25))))
+        return self.host.invocation(_observation(kept.detach().float().cpu().tolist(), geometry), model_ms)

@@ -12,14 +12,12 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from trtmc_perf_serving.backends.base import BackendError, Invocation
-from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, load_image, required, timed
 
 SIZE = 640  # the letterboxed input side
 DTYPES = ("fp16", "fp32")
 
 
-def _model_directory(spec: ReferenceSpec) -> Path:
+def _model_directory(spec: Any) -> Path:
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(repo_id=spec.model, revision=spec.revision,
@@ -54,7 +52,8 @@ def _observation(rows: list[list[float]], geometry: Mapping[str, Any]) -> dict[s
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         import json
 
         from ultralytics import YOLO
@@ -62,23 +61,24 @@ class Adapter:
         from families.yolov10.checkpoint import Checkpoint
 
         if spec.precision not in DTYPES:
-            raise BackendError(f"YOLOv10 reference runs at fp16 or fp32, not {spec.precision}")
+            raise self.host.Error(f"YOLOv10 reference runs at fp16 or fp32, not {spec.precision}")
         self.spec = spec
         directory = _model_directory(spec)
         architecture = json.loads((directory / "config.json").read_text()).get("model")
         if architecture not in ("yolov10n.yaml", "yolov10s.yaml", "yolov10x.yaml"):
-            raise BackendError(f"unsupported YOLOv10 architecture {architecture!r}")
+            raise self.host.Error(f"unsupported YOLOv10 architecture {architecture!r}")
         model = YOLO(architecture, task="detect").model
         checkpoint = Checkpoint.open(directory, framework="pt")
         state = {name[len("model."):]: reader.get_tensor(name) for name, reader in checkpoint.tensor_map.items()
                  if name.startswith("model.")}
         missing, _ = model.load_state_dict(state, strict=False)
         if missing:
-            raise BackendError(f"YOLOv10 checkpoint lacks tensors: {missing[:5]}")
+            raise self.host.Error(f"YOLOv10 checkpoint lacks tensors: {missing[:5]}")
         self.model = model.eval().to(device="cuda", dtype=spec.dtype)
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
-        pixels, geometry = _letterbox(load_image(str(required(request, "image_path"))), self.spec.dtype)
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
+        image = self.host.load_image(str(self.host.required(request, "image_path")))
+        pixels, geometry = _letterbox(image, self.spec.dtype)
         threshold = float(request.get("score_threshold", 0.25))
 
         def run() -> Any:
@@ -86,5 +86,5 @@ class Adapter:
             rows = (raw[0] if isinstance(raw, (list, tuple)) else raw)[0]
             return rows[rows[:, 4] >= threshold]
 
-        kept, model_ms = timed(run)
-        return invocation(_observation(kept.detach().float().cpu().tolist(), geometry), model_ms)
+        kept, model_ms = self.host.timed(run)
+        return self.host.invocation(_observation(kept.detach().float().cpu().tolist(), geometry), model_ms)

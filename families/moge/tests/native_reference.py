@@ -14,15 +14,13 @@ from typing import Any, Mapping
 import numpy as np
 
 from families.moge.tests.reference_support import OfficialReference
-from trtmc_perf_serving.backends.base import Invocation
-from trtmc_perf_serving.backends.reference.common import (ReferenceSpec, deferred_files, invocation, load_image, required,
-                                                           timed)
 
 CHECKPOINT = "model.pt"
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         from huggingface_hub import hf_hub_download
 
         self.spec = spec
@@ -30,12 +28,13 @@ class Adapter:
         checkpoint = hf_hub_download(spec.model, CHECKPOINT, revision=spec.revision)
         self.reference = OfficialReference(source, Path(checkpoint))
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         # Decoded before the timed call (preloaded), as the official read_image does: RGB in [0, 1].
-        pixels = np.asarray(load_image(str(required(request, "image_path"))), dtype=np.float32) / 255.0
+        image = self.host.load_image(str(self.host.required(request, "image_path")))
+        pixels = np.asarray(image, dtype=np.float32) / 255.0
         fov_x = float(request["fov_x"]) if request.get("fov_x") is not None else None
-        arrays, model_ms = timed(lambda: self.reference.infer(pixels, num_tokens=int(request.get("num_tokens", 1800)),
-                                                              fov_x=fov_x))
+        tokens = int(request.get("num_tokens", 1800))
+        arrays, model_ms = self.host.timed(lambda: self.reference.infer(pixels, num_tokens=tokens, fov_x=fov_x))
         depth = np.asarray(arrays["depth"], dtype="<f4")
         height, width = depth.shape
         paths = {"points_artifact": Path(f"{artifact_base}.points.f32"), "depth_artifact": Path(f"{artifact_base}.depth.f32"),
@@ -45,4 +44,5 @@ class Adapter:
         observation = {"geometry_images": 1, "height": height, "width": width,
                        "valid_pixels": int(np.asarray(arrays["mask"]).astype(bool).sum()), "units": "meters",
                        **{name: str(path.resolve()) for name, path in paths.items()}}
-        return invocation(deferred_files(observation, files), model_ms)  # written after the timed call
+        # written after the timed call
+        return self.host.invocation(self.host.deferred_files(observation, files), model_ms)

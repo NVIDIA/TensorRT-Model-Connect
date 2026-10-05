@@ -162,7 +162,8 @@ it).
   (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
 - Model whose native pipeline the generic adapters cannot run: `families/<family>/tests/native_reference.py`
-  (an `Adapter(spec)` with `invoke(request, artifact_base)`), named by `reference.adapter`.
+  (an `Adapter(spec, host)` with `invoke(request, artifact_base)`; it imports nothing from the applications and
+  reaches the serving mechanics through `host`), named by `reference.adapter`.
 - Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in
   `config/models/<profile>.yaml`; the report names the bundle it qualified.
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,

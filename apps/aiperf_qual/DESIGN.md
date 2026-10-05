@@ -255,8 +255,11 @@ Native paths: the generic adapters in `perf_serving/backends/reference/` (model-
 where a family's native pipeline needs its own code (SAM3, MoGe, ACT, FoundationStereo, PersonaPlex,
 Sana-WM today; any further gap the smoke run finds), the family owns it in
 `families/<family>/tests/native_reference.py` (outside `tests/benchmark`), implementing the adapter interface
-(`Adapter(spec).invoke(request, artifact_base) -> Invocation`), named by `reference.adapter` in
-`config/models`. A family that needs an upstream checkout provides `families/<family>/tests/native_prepare.py`,
+(`Adapter(spec, host).invoke(request, artifact_base)`), named by `reference.adapter` in `config/models`. The file
+imports nothing from the applications (a family must not depend on a consumer of its API, AGENTS.md): the serving
+backend hands it `host` (`perf_serving` `NativeHost`), the model-agnostic mechanics of the request's fields and
+pre-decoded input files, the timed call, output tensors and files written after it, the result, and the rejection
+of a request. A family that needs an upstream checkout provides `families/<family>/tests/native_prepare.py`,
 run once when its reference environment is created (`reference.prepare`).
 
 ## 8. Reproducibility

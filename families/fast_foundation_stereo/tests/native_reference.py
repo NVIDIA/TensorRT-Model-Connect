@@ -15,22 +15,20 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from trtmc_perf_serving.backends.base import BackendError, Invocation
-from trtmc_perf_serving.backends.reference.common import (ReferenceSpec, deferred_files, invocation, load_image, required,
-                                                           timed)
 
 PROFILE = {"height": 700, "width": 700, "max_disp": 192, "valid_iters": 8}
 WEIGHTS = "weights/23-36-37/model_best_bp2_serialize.pth"
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         import torch
 
         self.spec = spec
         root = Path(sys.prefix) / "trtmc-reference/Fast-FoundationStereo"
         if not (root / WEIGHTS).is_file():
-            raise BackendError(f"the Fast-FoundationStereo reference is not prepared: {root}")
+            raise self.host.Error(f"the Fast-FoundationStereo reference is not prepared: {root}")
         previous = Path.cwd()
         try:  # upstream imports and the pickled model resolve their modules relative to the checkout
             os.chdir(root)
@@ -45,19 +43,20 @@ class Adapter:
         self.model, self.padder, self.amp_dtype = model.cuda().eval(), InputPadder, AMP_DTYPE
 
     def _image(self, path: str) -> np.ndarray:
-        pixels = np.asarray(load_image(path), dtype=np.uint8)  # decoded before the timed call (preloaded)
+        pixels = np.asarray(self.host.load_image(path), dtype=np.uint8)  # decoded before the timed call (preloaded)
         if pixels.shape != (PROFILE["height"], PROFILE["width"], 3):
-            raise BackendError(f"stereo images must be {PROFILE['height']}x{PROFILE['width']} RGB, got {pixels.shape}")
+            raise self.host.Error(
+                f"stereo images must be {PROFILE['height']}x{PROFILE['width']} RGB, got {pixels.shape}")
         return pixels
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         import torch
 
         for key, value in PROFILE.items():
             if int(request.get(key, value)) != value:
-                raise BackendError(f"the reference runs the 700x700 profile ({key}={value})")
-        left = torch.as_tensor(self._image(str(required(request, "left_image_path")))).cuda().float()[None].permute(0, 3, 1, 2)
-        right = torch.as_tensor(self._image(str(required(request, "right_image_path")))).cuda().float()[None].permute(0, 3, 1, 2)
+                raise self.host.Error(f"the reference runs the 700x700 profile ({key}={value})")
+        left, right = (torch.as_tensor(self._image(str(self.host.required(request, f"{side}_image_path"))))
+                       .cuda().float()[None].permute(0, 3, 1, 2) for side in ("left", "right"))
         padder = self.padder(left.shape, divis_by=32, force_square=False)
         left, right = padder.pad(left, right)
 
@@ -66,10 +65,11 @@ class Adapter:
                 return self.model.forward(left, right, iters=PROFILE["valid_iters"], test_mode=True,
                                           optimize_build_volume="pytorch1")
 
-        disparity, model_ms = timed(run)
+        disparity, model_ms = self.host.timed(run)
         values = np.clip(padder.unpad(disparity.float()).cpu().numpy().reshape(PROFILE["height"], PROFILE["width"]),
                          0, None).astype("<f4", copy=False)
         artifact = Path(f"{artifact_base}.disparity.f32")
         observation = {"height": PROFILE["height"], "width": PROFILE["width"], "element_count": int(values.size),
                        "disparity_artifact": str(artifact.resolve())}
-        return invocation(deferred_files(observation, {artifact: values}), model_ms)  # written after the timed call
+        # written after the timed call
+        return self.host.invocation(self.host.deferred_files(observation, {artifact: values}), model_ms)

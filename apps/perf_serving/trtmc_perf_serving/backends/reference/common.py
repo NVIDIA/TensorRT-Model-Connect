@@ -35,8 +35,8 @@ class ReferenceSpec:
     deterministic: bool = False
     # Adapter-specific options, e.g. {"processor_kwargs": {...}} for remote-code processors.
     options: Mapping[str, Any] = field(default_factory=dict)
-    # A family's own native pipeline: a Python file defining ``Adapter(spec)`` with
-    # ``invoke(request, artifact_base) -> Invocation`` (families/<family>/tests/native_reference.py).
+    # A family's own native pipeline: a Python file defining ``Adapter(spec, host)`` with
+    # ``invoke(request, artifact_base)`` (families/<family>/tests/native_reference.py); see ``NativeHost``.
     adapter: str | None = None
 
     @property
@@ -200,3 +200,22 @@ def load_audio(path: str, sample_rate: int) -> np.ndarray:
 
 def invocation(observation: Mapping[str, Any], model_call_ms: float, **extra: Any) -> Invocation:
     return Invocation(observation=dict(observation), model_call_ms=model_call_ms, extra=extra)
+
+
+class NativeHost:
+    """What this backend hands a family's native pipeline: ``Adapter(spec, host)``. The family file imports
+    nothing from this package (a family must not depend on an application); it reaches the backend's
+    model-agnostic mechanics through ``host``: the request's fields and its input files, decoded before the timed
+    call (``required``, ``load_image``, ``load_audio``, ``load_bytes``), the timed model call (``timed``), output
+    tensors and files written after it (``tensor_observation``, ``deferred_files``), the result
+    (``invocation``), and the rejection of a request (``raise host.Error(...)``)."""
+
+    Error = BackendError
+    required = staticmethod(required)
+    timed = staticmethod(timed)
+    load_image = staticmethod(load_image)
+    load_audio = staticmethod(load_audio)
+    load_bytes = staticmethod(load_bytes)
+    tensor_observation = staticmethod(tensor_observation)
+    deferred_files = staticmethod(deferred_files)
+    invocation = staticmethod(invocation)

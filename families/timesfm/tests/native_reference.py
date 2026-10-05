@@ -10,24 +10,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from trtmc_perf_serving.backends.base import Invocation
-from trtmc_perf_serving.backends.reference.common import (ReferenceSpec, invocation, required, tensor_observation,
-                                                          timed)
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         import transformers
 
         self.spec = spec
         self.model = transformers.TimesFmModelForPrediction.from_pretrained(
             spec.model, dtype=spec.dtype, **spec.pretrained_kwargs()).eval().to(spec.device)
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         import torch
 
         context = int(self.model.config.context_length)
-        raw = [float(value) for value in required(request, "past_values")]
+        raw = [float(value) for value in self.host.required(request, "past_values")]
         count = min(len(raw), context)
         values, padding = [0.0] * context, [1] * context
         values[-count:], padding[-count:] = raw[-count:], [0] * count
@@ -42,5 +40,5 @@ class Adapter:
             output = self.model._postprocess_output(decoded.last_hidden_state, (decoded.loc, decoded.scale))
             return output[:, -1, : self.model.config.horizon_length, 0]
 
-        forecast, model_ms = timed(run)
-        return invocation(tensor_observation(forecast, artifact_base, inline=True), model_ms)
+        forecast, model_ms = self.host.timed(run)
+        return self.host.invocation(self.host.tensor_observation(forecast, artifact_base, inline=True), model_ms)

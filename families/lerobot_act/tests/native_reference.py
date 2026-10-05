@@ -14,28 +14,29 @@ from typing import Any, Mapping
 import numpy as np
 
 from families.lerobot_act.tests.official_reference import load_policy, predict_actions
-from trtmc_perf_serving.backends.base import BackendError, Invocation
-from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, load_bytes, load_image, required, timed
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         from huggingface_hub import snapshot_download
 
         if spec.precision != "fp32":
-            raise BackendError("the ACT reference runs at fp32")
+            raise self.host.Error("the ACT reference runs at fp32")
         self.spec = spec
         checkpoint = Path(snapshot_download(spec.model, revision=spec.revision))
         self.torch, self.policy, self.config, self.device = load_policy(Path(sys.prefix) / "trtmc-reference/lerobot",
                                                                          checkpoint)
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         # The recorded observation, decoded before the timed call (preloaded), as the official load_observation does.
-        pixels = np.asarray(load_image(str(required(request, "image_path"))), dtype=np.float32)
-        state = np.frombuffer(load_bytes(str(required(request, "state_path"))), dtype="<f4")
+        pixels = np.asarray(self.host.load_image(str(self.host.required(request, "image_path"))), dtype=np.float32)
+        state = np.frombuffer(self.host.load_bytes(str(self.host.required(request, "state_path"))), dtype="<f4")
         if pixels.shape != (480, 640, 3) or state.shape != (14,):
-            raise BackendError("the ACT observation does not have the qualified shape (480x640 RGB, 14 state values)")
-        actions, model_ms = timed(lambda: predict_actions(self.torch, self.policy, self.config, self.device, pixels, state))
-        return invocation({"action_steps": int(actions.shape[0]), "action_dim": int(actions.shape[1]),
-                           "action_values": int(actions.size), "actions": actions.reshape(-1).tolist(),
-                           "axes": ["step", "action_component"]}, model_ms)
+            raise self.host.Error(
+                "the ACT observation does not have the qualified shape (480x640 RGB, 14 state values)")
+        actions, model_ms = self.host.timed(
+            lambda: predict_actions(self.torch, self.policy, self.config, self.device, pixels, state))
+        return self.host.invocation({"action_steps": int(actions.shape[0]), "action_dim": int(actions.shape[1]),
+                                     "action_values": int(actions.size), "actions": actions.reshape(-1).tolist(),
+                                     "axes": ["step", "action_component"]}, model_ms)

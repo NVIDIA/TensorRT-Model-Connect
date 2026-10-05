@@ -13,14 +13,13 @@ from typing import Any, Mapping
 
 import soundfile
 
-from trtmc_perf_serving.backends.base import Invocation
-from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, load_audio, required, timed
 
 SAMPLE_RATE = 16_000
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         import torch
         from huggingface_hub import snapshot_download
         from nemo.collections.asr.models import ASRModel
@@ -32,8 +31,8 @@ class Adapter:
             raise FileNotFoundError(f"no .nemo archive in {spec.model}")
         self.model = ASRModel.restore_from(str(archives[0]), map_location="cpu").eval().to(spec.device)
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
-        audio = load_audio(str(required(request, "audio_path")), SAMPLE_RATE)
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
+        audio = self.host.load_audio(str(self.host.required(request, "audio_path")), SAMPLE_RATE)
         wav = artifact_base.with_suffix(".input.wav")
         wav.parent.mkdir(parents=True, exist_ok=True)
         soundfile.write(wav, audio, SAMPLE_RATE, subtype="PCM_16")
@@ -44,10 +43,10 @@ class Adapter:
             with precision:
                 return self.model.transcribe([str(wav)], batch_size=1)
 
-        values, model_ms = timed(run)
+        values, model_ms = self.host.timed(run)
         value = values[0] if isinstance(values, tuple) else values
         value = value[0] if isinstance(value, list) and value else value
         text = str(getattr(value, "text", value) if not isinstance(value, Mapping) else value.get("text", ""))
         seconds = len(audio) / SAMPLE_RATE
-        return invocation({"text": text, "input_audio_seconds": seconds}, model_ms,
-                          realtime_factor=seconds / (model_ms / 1000.0))
+        return self.host.invocation({"text": text, "input_audio_seconds": seconds}, model_ms,
+                                    realtime_factor=seconds / (model_ms / 1000.0))

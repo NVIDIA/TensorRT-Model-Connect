@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..base import BackendUnavailable, Invocation
-from .common import MODES, ReferenceSpec
+from .common import MODES, NativeHost, ReferenceSpec
 
 # Operations whose references need upstream checkouts (PersonaPlex, MoGe, LeRobot,
 # Fast-FoundationStereo, Boltz, ...) are served only by the TRTMC backend for now.
@@ -37,7 +37,8 @@ def supported_operations() -> tuple[str, ...]:
 
 
 def _family_adapter(path: str) -> type:
-    """``Adapter`` of a family's native pipeline file (model-specific code stays in its family)."""
+    """``Adapter`` of a family's native pipeline file (model-specific code stays in its family; it gets this
+    backend's mechanics as ``Adapter(spec, host)``, see ``NativeHost``)."""
     import importlib.util
     import sys
 
@@ -75,7 +76,7 @@ class ReferenceBackend:
             from ...platform import apply_deterministic_numerics
 
             self._numerics = {"deterministic": True, **apply_deterministic_numerics()}
-        self._adapter = adapter_cls(spec)
+        self._adapter = adapter_cls(spec, NativeHost()) if spec.adapter else adapter_cls(spec)
 
     def describe(self) -> Mapping[str, Any]:
         spec = self._spec

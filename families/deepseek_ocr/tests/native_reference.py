@@ -12,14 +12,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from trtmc_perf_serving.backends.base import BackendError, Invocation
-from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, required, timed
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         if spec.precision != "bf16":
-            raise BackendError("the official DeepSeek-OCR reference runs at bf16")
+            raise self.host.Error("the official DeepSeek-OCR reference runs at bf16")
         from transformers import AutoModel, AutoTokenizer
 
         self.spec = spec
@@ -29,14 +28,14 @@ class Adapter:
                                                attn_implementation="eager", **options).to(spec.device).eval()
         self.scratch = tempfile.TemporaryDirectory(prefix="deepseek-ocr-")
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         prompt = str(request.get("prompt", ""))
         if "<image>" not in prompt:
             prompt = f"<image>\n{prompt}"
-        image = str(required(request, "image_path"))
-        text, model_ms = timed(lambda: self.model.infer(
+        image = str(self.host.required(request, "image_path"))
+        text, model_ms = self.host.timed(lambda: self.model.infer(
             self.tokenizer, prompt=prompt, image_file=image, output_path=self.scratch.name, base_size=1024,
             image_size=768, crop_mode=True, save_results=False, eval_mode=True))
         text = str(text or "")
         token_ids = self.tokenizer(text, add_special_tokens=False).input_ids
-        return invocation({"text": text, "token_ids": token_ids, "output_tokens": len(token_ids)}, model_ms)
+        return self.host.invocation({"text": text, "token_ids": token_ids, "output_tokens": len(token_ids)}, model_ms)

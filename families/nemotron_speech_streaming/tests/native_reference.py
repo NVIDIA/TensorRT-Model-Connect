@@ -16,14 +16,12 @@ from typing import Any, Mapping
 
 import soundfile
 
-from trtmc_perf_serving.backends.base import Invocation
-from trtmc_perf_serving.backends.reference.common import ReferenceSpec, invocation, load_audio, required, timed
 
 SAMPLE_RATE = 16_000
 OPTIONAL_CTC_KEYS = frozenset({"ctc_decoder.decoder_layers.0.bias", "ctc_decoder.decoder_layers.0.weight"})
 
 
-def _archive(spec: ReferenceSpec) -> Path:
+def _archive(spec: Any) -> Path:
     from huggingface_hub import snapshot_download
 
     snapshot = Path(snapshot_download(spec.model, revision=spec.revision, allow_patterns=["*.nemo"]))
@@ -51,7 +49,8 @@ def _load_prompted(archive: Path, device: str) -> Any:
 
 
 class Adapter:
-    def __init__(self, spec: ReferenceSpec) -> None:
+    def __init__(self, spec: Any, host: Any) -> None:
+        self.host = host
         import torch
         from nemo.collections.asr.models import ASRModel
 
@@ -76,8 +75,8 @@ class Adapter:
 
             self.model.forward = forward_with_extended_prompt
 
-    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
-        audio = load_audio(str(required(request, "audio_path")), SAMPLE_RATE)
+    def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
+        audio = self.host.load_audio(str(self.host.required(request, "audio_path")), SAMPLE_RATE)
         wav, manifest = artifact_base.with_suffix(".input.wav"), artifact_base.with_suffix(".manifest.jsonl")
         wav.parent.mkdir(parents=True, exist_ok=True)
         soundfile.write(wav, audio, SAMPLE_RATE, subtype="PCM_16")
@@ -94,10 +93,10 @@ class Adapter:
             with precision:
                 return self.model.transcribe(str(manifest), **options)
 
-        values, model_ms = timed(run)
+        values, model_ms = self.host.timed(run)
         value = values[0] if isinstance(values, tuple) else values
         value = value[0] if isinstance(value, list) and value else value
         text = str(getattr(value, "text", value) if not isinstance(value, Mapping) else value.get("text", ""))
         seconds = len(audio) / SAMPLE_RATE
-        return invocation({"text": text, "input_audio_seconds": seconds}, model_ms,
-                          realtime_factor=seconds / (model_ms / 1000.0))
+        return self.host.invocation({"text": text, "input_audio_seconds": seconds}, model_ms,
+                                    realtime_factor=seconds / (model_ms / 1000.0))
