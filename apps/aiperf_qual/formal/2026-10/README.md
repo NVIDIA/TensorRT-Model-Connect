@@ -24,11 +24,20 @@ Each host runs its share in the assigned order, then the merged result is checke
 trtmc-aiperf-qual assign --environment gb300-perf-serving.yaml --ledger ledger.json --host h1 --host h2 \
     --output assignment.json                      # reproduces assignment.json
 trtmc-aiperf-qual run-all --environment gb300-perf-serving.yaml --assignment assignment.json --host h1 \
-    --out-root /runs/results/formal
+    --no-prefetch --out-root /runs/results/formal
 # after both hosts finished
 trtmc-aiperf-qual merge-check --assignment assignment.json h1-root h2-root
 trtmc-aiperf-qual summary --assignment assignment.json h1-root h2-root --output summary.md --html summary.html
 ```
+
+Each host runs a copy of `gb300-perf-serving.yaml` whose `repo` is the checked-out commit under test and whose
+`retention.bundle` is `delete_built_unless_error` (a bundle the run built is deleted after its profile; each host
+starts with about 300 GB free and its own share's existing bundles).
+
+`--no-prefetch`: a checkpoint downloaded while another profile is timed skews that timing (the gate-1 pilot's
+patchtst-granite-official went white while personaplex-7b's 15 GB downloaded), so each profile resolves its own
+checkpoints before its build; every checkpoint of either share is cached on its host beforehand (one 0.2 GB one
+was not). Nothing else runs on a host during the run.
 
 Every host's `plan.json` records the assignment's digest, its host name, and the campaign inputs; `campaign.jsonl`
 records each profile's host, position, and start time; every report records the host, GPU, TensorRT libraries, and

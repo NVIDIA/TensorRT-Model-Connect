@@ -302,7 +302,9 @@ a failure), 1 + 2p under `acc_overlap` (one attempt alongside TRTMC first); nati
 TRTMC Acc 2, 3 under `acc_overlap`; TRTMC L1 2; supplementary checks, which have no phase retry, p for their native
 generation and up to two more precisions for replay parity; the order check one per measurement. Repetitions within
 an attempt (timed runs, seeds) stop at the first expired deadline. A phase that fails its last attempt leaves the
-profile an `error`, a result that a resumed `run-all` keeps. Outside: one-time preparation (checkpoint and
+profile an `error`, a result that a resumed `run-all` keeps. Native eager timing is CPU-bound and sensitive to other work on the host: the formal run
+downloads no checkpoint during another profile's timing (`run-all --no-prefetch`; the shares' checkpoints are
+cached beforehand), and nothing else runs on its hosts. Outside: one-time preparation (checkpoint and
 dataset downloads, reference environments, scorer checkpoints). The smoke run records every model's
 build, start, peak memory, and per-request times; a pilot runs one representative model per Task at the
 formal `n`; together they give a per-model ledger, and the formal run starts only when the ledger
