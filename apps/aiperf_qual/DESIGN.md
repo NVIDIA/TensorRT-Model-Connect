@@ -296,10 +296,13 @@ Inside the budget: bundle builds (v7: 94 builds, mean 109 s, 2.8 h in total), se
 requests at the frozen `n`, scorers, bootstrap, Perf, and a failure allowance (one retry of a phase that
 fails before producing a result; 10% of the ledger). Every AIPerf run and settle request has a deadline of three
 times its profile's ledger time (at least 10 minutes; the environment's `ledger`); a run past its deadline is
-stopped and fails its attempt. Each phase runs once more after a failure, so a hung run costs its deadline at most
-twice; a native Acc workload tries each of its p native precisions in turn in both of those attempts (2p), plus
-one attempt alongside TRTMC first under `acc_overlap` (1 + 2p; for example 5 with fp16 and fp32). A phase that
-fails again leaves the profile an `error`, a result that a resumed `run-all` keeps. Outside: one-time preparation (checkpoint and
+stopped and fails its attempt. Attempts, each costing at most one deadline when the run hangs every time (p: the
+native precisions tried in turn, for example 2 with fp16 and fp32): native Acc 2p (the phase runs once more after
+a failure), 1 + 2p under `acc_overlap` (one attempt alongside TRTMC first); native L1 2p per reference mode;
+TRTMC Acc 2, 3 under `acc_overlap`; TRTMC L1 2; supplementary checks, which have no phase retry, p for their native
+generation and up to two more precisions for replay parity; the order check one per measurement. Repetitions within
+an attempt (timed runs, seeds) stop at the first expired deadline. A phase that fails its last attempt leaves the
+profile an `error`, a result that a resumed `run-all` keeps. Outside: one-time preparation (checkpoint and
 dataset downloads, reference environments, scorer checkpoints). The smoke run records every model's
 build, start, peak memory, and per-request times; a pilot runs one representative model per Task at the
 formal `n`; together they give a per-model ledger, and the formal run starts only when the ledger
