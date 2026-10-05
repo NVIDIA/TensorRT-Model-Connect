@@ -218,11 +218,11 @@ revisions (`mteb/stsbenchmark-sts`, `mteb/scifact`) with the transformation in t
 | BART | WikiText-103 span denoising | 1,000 | chrF++ of the reconstruction (up), 1 pt | replaces exact-span accuracy (native 5.1%) |
 | TinyStories model | TinyStories last word | 2,000 | accuracy (up), 1 pt | |
 | random-weight LMs (2) | none | - | conversion parity of L1 outputs | Perf-only |
-| VLMs (6) | MMStar val (AIPerf `mmstar`) | all 1,500 | accuracy (up), 1.5 pt | min_native 30 |
-| OCR VLMs (deepseek-ocr, VLMs with OCR) | OCRBench | all 1,000 | contains-match (up), 2 pt | |
+| VLMs (5) and deepseek-ocr | OCRBench | all 1,000 | contains-match (up), 2 pt | MMStar dropped for VLMs (Section 12) |
+| lance-3b-x2t-image | MMStar val (AIPerf `mmstar`) | all 1,500 | accuracy (up), 1.5 pt | min_native 30 |
 | grounding VLM (locateanything) | RefCOCO val, one expression per image | 1,500 | IoU >= 0.5 (up), 1.5 pt | |
-| ASR (5) | LibriSpeech test-clean (AIPerf `librispeech`) | 1,000, 25 per speaker | WER (down), max(0.3 pt, 5% of native) | speaker clusters |
-| streaming ASR (2) | same | 1,000 | WER (down), max(0.5 pt, 10%) | TRTMC streams; native streams when its adapter supports it, else offline (labelled) |
+| ASR (5) | LibriSpeech test-clean (AIPerf `librispeech`) | 500, 12-13 per speaker | WER (down), max(0.3 pt, 5% of native) | speaker clusters |
+| streaming ASR (2) | same | 500 | WER (down), max(0.5 pt, 10%) | TRTMC streams; native streams when its adapter supports it, else offline (labelled) |
 | classification (37) | ImageNetV2 matched-frequency | all 10,000 | top-1 (up), 0.5 pt | |
 | image features (DINOv3, 2) | ImageNetV2 kNN: gallery 5 per class, disjoint test 5 per class | 5,000 | top-1 (up), 1 pt | L2-normalized pooled feature, k = 20 cosine-weighted (T = 0.07), each side its own gallery |
 | sentence embedders (7) | STS-B test (`mteb/stsbenchmark-sts`) + SciFact retrieval (`mteb/scifact`, full 5,183-doc corpus, 300 test queries) | all | Spearman (up), 0.5 pt; nDCG@10 (up), 1 pt | the model's own pooling (sentence-transformers config) on both sides |
@@ -476,6 +476,14 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   long requests, a cost choice resting on the pilot so far (half-widths with three runs: FLUX.1-schnell TRTMC 0.63%,
   native 0.21%; Bark-small 1.73%, 2.19%): every media and speech profile of the pilot is checked before the counts
   freeze (Section 12.1), and if any is white on the CI gate those categories move to five runs too.
+- **Data volumes** (the owner's decision, 2026-10-05, from the paired evidence so far): the five general VLMs answer
+  OCRBench only. Both VLM defects measured at the formal counts showed on either benchmark (qwen3-vl-2b OCRBench -26,
+  MMStar -11 points; phi4-multimodal -19 and -32), OCRBench reads fine image detail, and TRTMC answers MMStar slowly
+  (phi4-multimodal 29 min, OCRBench 1 min). LibriSpeech is 500 utterances: the pilots' 90% WER intervals at 1,000
+  (half-widths 0.11-0.14 points against margins of 0.40-0.50) put the required count at 150-360. MMLU keeps 40 per
+  subject. The other counts stay: either their answers take seconds (ImageNetV2, LAMBADA, COCO, ADE20K, ETTh1) or
+  their intervals are already near the margin (GenEval with 23% discordance, VBench, MagicBrush, SAM, STS-B, SciFact,
+  Seed-TTS). The ledger predates these reductions and overstates the two Tasks' time.
 - **Settle before timing** (Section 4.6): the order check (gate 3) found the first runs after a server starts
   slower for short requests: qwen3-0.6b native 58.6 and 58.4 ms, then 53.4 to 54.5 ms (95% half-width 5.62%,
   white); hrnet-w18 TRTMC 2.12, 1.99, then 1.91 ms (5.84%); the pilot had the same on qwen35-4b native (5.83%) and

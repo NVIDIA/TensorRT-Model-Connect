@@ -53,10 +53,10 @@ benchmarks:
            gate: {margin: 1.5}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
   ocrbench: {suite: ocrbench, suite_definition: ocrbench-1000, metric: contains, min_native: 10.0,
              gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
-  librispeech: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-1000, metric: wer,
+  librispeech: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-500, metric: wer,
                 gate: {margin: 0.3, relative_margin: 0.05}}
   # Streaming TRTMC vs the native transcription: a wider margin.
-  librispeech_streaming: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-1000,
+  librispeech_streaming: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-500,
                           metric: wer, gate: {margin: 0.5, relative_margin: 0.10}}
   sts: {suite: stsb, suite_definition: stsbenchmark-pairs-1379, metric: sts_spearman, gate: {margin: 0.5}}
   # Raw encoders (BERT, RoBERTa, ...: STS-B is not their task): conversion parity of the encode output (the
@@ -124,7 +124,10 @@ tasks:
     performance: {l1: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}}
 
   vision_language_generation:
-    absolute: [mmstar, ocrbench]
+    # OCRBench alone (the owner's choice, October 2026): it caught both VLM conversion defects MMStar caught
+    # (qwen3-vl-2b -26 vs -11 points, phi4-multimodal -19 vs -32) and TRTMC answers MMStar slowly (phi4-multimodal:
+    # 29 min against 1 min for OCRBench). MMStar stays for profiles that state it.
+    absolute: [ocrbench]
     performance: {l1: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}}
 
   classification: &classify
