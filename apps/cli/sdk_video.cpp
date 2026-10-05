@@ -88,12 +88,13 @@ nlohmann::json write_audio_video(const AudioVideoGenerationResult& result,
         return {{"worker", true}};
     auto json = write_frames(frames, result.timestamps_seconds(), directory);
     const auto audio = result.audio();
+    if (!audio.sample_rate || *audio.sample_rate == 0)
+        throw std::runtime_error("text_to_audio_video result has no audio sample rate");
     const auto audio_path = (std::filesystem::path(directory) / "audio.wav").string();
-    io::write_wav_interleaved(audio.samples,
-                              static_cast<std::int32_t>(audio.sample_rate.value_or(0)),
+    io::write_wav_interleaved(audio.samples, static_cast<std::int32_t>(*audio.sample_rate),
                               static_cast<std::int32_t>(audio.channels), audio_path);
     json["audio"] = audio_path;
-    json["audio_sample_rate"] = audio.sample_rate.value_or(0);
+    json["audio_sample_rate"] = *audio.sample_rate;
     json["audio_channels"] = audio.channels;
     json["audio_start_seconds"] = result.audio_start_seconds();
     json["setup_ms"] = result.video_view().setup_ms;
