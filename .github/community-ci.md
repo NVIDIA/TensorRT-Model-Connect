@@ -80,6 +80,27 @@ test criteria remain owned by the source under test. The GPU runner selects
 timm ViT, Whisper, and directly changed or added families. Docs-only changes
 skip GPU. Missing public assets fail visibly rather than count as coverage.
 
+### Blocking GPU reservation
+
+The workflow calls `python3 -m tools.brev_exec provision` once before admitting any
+project build or model test. The entrypoint reserves a VM through the pinned Brev
+CLI and waits for `RUNNING`, completed environment setup, and shell readiness.
+It then checks SSH, cloud-init completion when installed, the Docker daemon,
+host GPU visibility, and GPU access from a digest-pinned CUDA probe container.
+Brev's create exit code alone is not a readiness guarantee.
+
+The reservation has one 20-minute deadline, including CLI waits and failed-attempt
+cleanup. It may try up to three instance names, using the AWS fallback for later
+attempts. Each name is published before creation so teardown can target a partial
+allocation. A replacement is admitted only after the failed allocation's deletion
+has been confirmed; uncertain cleanup fails the reservation.
+
+Once reservation succeeds, dependency setup and model validation use that VM.
+The workflow invokes the family coordinator once and preserves its failure
+result. Model failures cannot enter the provisioning retry loop. The readiness
+gate checks the starting environment; family resource requirements and behavior
+under load remain separate validation concerns.
+
 ### Sequential family containers
 
 One GPU execution reserves one Brev VM and builds one base image. The coordinator

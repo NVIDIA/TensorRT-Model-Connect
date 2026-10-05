@@ -905,13 +905,17 @@ jobs:
           # Publish the deterministic name before creation so a timeout after
           # allocation cannot suppress best-effort cleanup.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
-          brev create "$instance_name" -g "$GPU_TYPE" --timeout 600
+          python3 -m tools.brev_exec provision \
+            --instance "$instance_name" \
+            --gpu "$GPU_TYPE" \
+            --timeout 1200 \
+            --attempts 3 \
+            --fallback-provider aws
 
       - name: Build the GPU image and validate the exact PR merge
         id: test
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
-          GPU_TYPE: ${{ vars.TRTMC_COMMUNITY_GPU_TYPE || 'L40' }}
           MERGE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
           PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
           FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
@@ -943,9 +947,8 @@ jobs:
           trap 'rm -f "$checkpoint_token"; cleanup_checkpoint_token' EXIT
           printf '%s' "$HF_TOKEN" > "$checkpoint_token"
           unset HF_TOKEN
-          # A dropped SSH session to the Brev host (transient network flake,
-          # not the vpc.pool.count quota issue) otherwise fails the whole job
-          # on any single blip. Retry each remote step a few times instead.
+          # Provisioning has already verified this VM. Retry setup transfers
+          # on the same VM; model validation below executes once.
           retry() {
             local attempts=3 delay=20 n=1
             until "$@"; do
@@ -959,11 +962,7 @@ jobs:
             done
           }
 
-          # Network blips reaching github.com/nvcr.io from the GPU host
-          # (SSH itself stays up) can take longer than 40s to clear than
-          # a dead instance does, so give these steps a longer, capped
-          # exponential backoff instead of the fast fixed-delay retry()
-          # used for the dead-instance SSH probe.
+          # Allow bounded backoff for remote dependency setup on this VM.
           retry_backoff() {
             local attempts=6 delay=20 max_delay=160 n=1
             until "$@"; do
@@ -978,26 +977,6 @@ jobs:
               if [ "$delay" -gt "$max_delay" ]; then
                 delay=$max_delay
               fi
-            done
-          }
-
-          # Measured directly (2026-10-01): a freshly created --provider aws
-          # instance (g6e.xlarge) can take ~5.5 minutes for SSH to come up on
-          # a perfectly healthy instance, vs ~70-90s for the default
-          # (non-aws) instance types. The fast retry() probe budget above is
-          # tuned for the non-aws case and would misdiagnose a slow-but-alive
-          # aws instance as dead. Give aws-provisioned instances a probe
-          # budget with enough margin over that measured worst case instead.
-          retry_probe_aws() {
-            local attempts=6 delay=20 n=1
-            until "$@"; do
-              if [ "$n" -ge "$attempts" ]; then
-                echo "::error::Command failed after $attempts attempts: $*" >&2
-                return 1
-              fi
-              echo "Attempt $n/$attempts failed, retrying in ${delay}s: $*" >&2
-              sleep "$delay"
-              n=$((n + 1))
             done
           }
 
@@ -1025,101 +1004,50 @@ jobs:
             echo "::endgroup::"
           }
 
-          # Some SSH failures mean the instance itself never became usable
-          # (e.g. the provider reports InsufficientCapacity after Brev already
-          # reported success), so retrying the same command against it can
-          # never succeed. Run the whole remote sequence as one unit so a
-          # failure here can fall back to reserving a fresh instance instead.
-          run_on_instance() {
-            # Brev's CLI can report "Success! Created" for an instance that
-            # never finished provisioning; such an instance never answers
-            # SSH. Probe SSH first so this is caught immediately instead of
-            # spending the full git fetch retry budget against a dead
-            # instance. Confirmed with Brev: this is a known CLI bug where
-            # provisioning failures are not propagated to the exit code.
-            if [ "${INSTANCE_PROVIDER_AWS:-false}" = "true" ]; then
-              retry_probe_aws brev exec "$INSTANCE_NAME" "true" || return 1
-            else
-              retry brev exec "$INSTANCE_NAME" "true" || return 1
-            fi
-            retry_backoff brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || { capture_git_fetch_diagnostics; return 1; }
-            # The host coordinator and container entrypoint belong to the chosen
-            # CI commit. Neither imports contributor code outside the container.
-            [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
-            retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py" || { capture_git_fetch_diagnostics; return 1; }
-            # A freshly created instance's SSH session may not have its Docker
-            # group membership yet. The first live GPU run reached this point
-            # and failed on docker.sock, so do not depend on propagation timing.
-            retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements" || return 1
-            # Checkpoints are downloaded by the trusted coordinator before the
-            # family container switches Hugging Face into offline mode.
-            # Ubuntu host images do not ship ensurepip by default, so the
-            # staging venv needs python3-venv installed before creation.
-            retry_backoff brev exec "$INSTANCE_NAME" "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-venv" || return 1
-            retry_backoff brev exec "$INSTANCE_NAME" "python3 -m venv /tmp/trtmc-community-stage-venv && /tmp/trtmc-community-stage-venv/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0" || return 1
+          # The blocking reservation is the only stage that may replace a VM.
+          # Setup or family failures must not enter another provisioning cycle.
+          retry_backoff brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git config remote.origin.url https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || { capture_git_fetch_diagnostics; exit 1; }
+          # The host coordinator and container entrypoint belong to the chosen
+          # CI commit. Neither imports contributor code outside the container.
+          [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py" || { capture_git_fetch_diagnostics; exit 1; }
+          # A freshly created instance's SSH session may not have its Docker
+          # group membership yet. The first live GPU run reached this point
+          # and failed on docker.sock, so do not depend on propagation timing.
+          retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements" || exit 1
+          # Checkpoints are downloaded by the trusted coordinator before the
+          # family container switches Hugging Face into offline mode.
+          # Ubuntu host images do not ship ensurepip by default, so the
+          # staging venv needs python3-venv installed before creation.
+          retry_backoff brev exec "$INSTANCE_NAME" "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-venv" || exit 1
+          retry_backoff brev exec "$INSTANCE_NAME" "python3 -m venv /tmp/trtmc-community-stage-venv && /tmp/trtmc-community-stage-venv/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0" || exit 1
 
-            # Copy into a private directory outside source and checkpoint mounts.
-            # The trusted coordinator consumes and unlinks the token before any
-            # contributor container starts; VM teardown also covers failed copies.
-            retry brev exec "$INSTANCE_NAME" "install -d -m 0700 $remote_auth" || return 1
-            checkpoint_instance="$INSTANCE_NAME"
-            retry brev copy "$checkpoint_token" "$INSTANCE_NAME:$remote_auth/token" || return 1
+          # Copy into a private directory outside source and checkpoint mounts.
+          # The trusted coordinator consumes and unlinks the token before any
+          # contributor container starts; VM teardown also covers failed copies.
+          retry brev exec "$INSTANCE_NAME" "install -d -m 0700 $remote_auth" || exit 1
+          checkpoint_instance="$INSTANCE_NAME"
+          retry brev copy "$checkpoint_token" "$INSTANCE_NAME:$remote_auth/token" || exit 1
 
-            # Each selected family gets a fresh container on this one VM. The
-            # coordinator waits for its removal before starting the next family,
-            # and aggregates failures after all families have been attempted.
-            # Repository credentials are not forwarded to contributor code.
-            # tools.brev_exec caches its remote result keyed by this run's
-            # result file, so a retry after a dropped connection is safe.
-            echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
-            retry_backoff python3 -m tools.brev_exec \
-              --instance "$INSTANCE_NAME" \
-              --log /tmp/gpu-ci-output.log \
-              --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-              -- sudo env \
-              "TRTMC_GPU_SCOPE=$SCOPE" \
-              "TRTMC_GPU_FAMILIES=$FAMILIES" \
-              "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
-              "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
-              "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
-              /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect --checkpoint-token-file "$remote_auth/token" || return 1
-          }
-
-          max_instance_attempts=3
-          instance_attempt=1
-          INSTANCE_PROVIDER_AWS=false
-          while true; do
-            if run_on_instance; then
-              cleanup_checkpoint_token
-              break
-            fi
-            # Attempt file removal before deleting or replacing this VM, even
-            # if copy/launch failed before the coordinator could consume it.
-            cleanup_checkpoint_token
-            if [ "$instance_attempt" -ge "$max_instance_attempts" ]; then
-              echo "::error::GPU instance unusable after $max_instance_attempts attempts (including re-creation)"
-              exit 1
-            fi
-            # brev ls and brev create's own duplicate-name check are not
-            # consistent with each other: brev ls can report a name as
-            # cleared while brev create still rejects it as a duplicate
-            # ("workspace already exists"), so waiting on brev ls cannot
-            # reliably avoid a collision. Use a new unique name per retry
-            # instead of reusing and waiting for the old one to clear.
-            old_instance_name="$INSTANCE_NAME"
-            brev delete "$old_instance_name" || true
-            instance_attempt=$((instance_attempt + 1))
-            INSTANCE_NAME="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-r${instance_attempt}"
-            echo "Instance $old_instance_name appears unusable (e.g. InsufficientCapacity); reserving a fresh instance $INSTANCE_NAME..."
-            # Brev confirmed (2026-09-30) this is a Nebius regional capacity
-            # constraint; their suggested workaround is to steer retries to
-            # a different provider until Nebius capacity frees up.
-            retry brev create "$INSTANCE_NAME" -g "$GPU_TYPE" --provider aws --timeout 600
-            INSTANCE_PROVIDER_AWS=true
-            # Keep teardown targeting the instance actually in use, even if
-            # this job ultimately fails after exhausting every attempt.
-            echo "instance_name=$INSTANCE_NAME" >> "$GITHUB_OUTPUT"
-          done
+          # Each selected family gets a fresh container on this one VM. The
+          # coordinator waits for its removal before starting the next family,
+          # and aggregates failures after all families have been attempted.
+          # Repository credentials are not forwarded to contributor code.
+          # tools.brev_exec preserves the remote application's real result.
+          # The workflow does not retry or replace the VM for that result.
+          echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
+          python3 -m tools.brev_exec \
+            --instance "$INSTANCE_NAME" \
+            --log /tmp/gpu-ci-output.log \
+            --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -- sudo env \
+            "TRTMC_GPU_SCOPE=$SCOPE" \
+            "TRTMC_GPU_FAMILIES=$FAMILIES" \
+            "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
+            "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
+            /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect --checkpoint-token-file "$remote_auth/token"
+          cleanup_checkpoint_token
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
@@ -1144,9 +1072,9 @@ jobs:
       - name: Always tear down the GPU instance
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
         env:
-          # A retry may have replaced the original instance; fall back to
-          # the initial reservation only if no retry ever happened.
-          INSTANCE_NAME: ${{ steps.test.outputs.instance_name || steps.reserve.outputs.instance_name }}
+          # The blocking reservation publishes each attempted name before
+          # creation, including the verified replacement returned on success.
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
         run: brev delete "$INSTANCE_NAME" || true
 
       - name: Upload the smoke-test log
@@ -1197,8 +1125,8 @@ jobs:
       - name: Delete the deterministic GPU instance
         run: |
           set -euo pipefail
-          # Backstop for the per-attempt names a retry may have created
-          # (see provision-and-test); harmless if none of them exist.
+          # Backstop for every name the blocking reservation may have created,
+          # including if the hosted runner was cancelled during provisioning.
           brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
           for attempt in 2 3; do
             brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-r${attempt}" || true

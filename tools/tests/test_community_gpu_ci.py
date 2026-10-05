@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import shlex
+import time
+from tools import brev_exec as brev_provision
+
 import json
 import os
 import subprocess
@@ -660,3 +664,372 @@ def test_eagle_vlm_declares_remote_processor_http_dependency() -> None:
     )
 
     assert "requests==2.32.5" in requirements.splitlines()
+
+
+def _row(name: str, **changes: str) -> dict[str, str]:
+    row = {
+        "name": name,
+        "id": f"allocation-{name}",
+        "status": "RUNNING",
+        "build_status": "COMPLETED",
+        "shell_status": "READY",
+        "health_status": "HEALTHY",
+    }
+    row.update(changes)
+    return row
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        assert seconds >= 0
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    clock = FakeClock()
+    monkeypatch.setattr(brev_provision.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(brev_provision.time, "sleep", clock.sleep)
+    return clock
+
+
+class FakeBrev:
+    """Implement CLI responses without launching or contacting a cloud VM."""
+
+    def __init__(self, output: Path) -> None:
+        self.output = output
+        self.name: str | None = None
+        self.creates: list[str] = []
+        self.commands: list[list[str]] = []
+        self.events: list[str] = []
+        self.states: list[dict[str, str]] = []
+        self.probe_results: list[str] = []
+        self.delete_succeeds = True
+        self.inventory_result: str | None = None
+
+    def __call__(
+        self,
+        command: list[str],
+        deadline: float,
+        cap: float = brev_provision.CLI_TIMEOUT,
+    ) -> subprocess.CompletedProcess[str]:
+        assert deadline > brev_provision.time.monotonic()
+        assert cap > 0
+        self.commands.append(command)
+        action = command[1]
+        stdout = ""
+        code = 0
+        if action == "create":
+            name = command[2]
+            assert (
+                self.output.read_text(encoding="utf-8").splitlines()[-1] == f"instance_name={name}"
+            )
+            assert "--detached" in command
+            self.creates.append(name)
+            self.name = name
+            self.events.append(f"create:{name}")
+        elif action == "ls":
+            if self.inventory_result is not None and self.name is not None:
+                stdout = self.inventory_result
+            else:
+                rows = []
+                if self.name is not None:
+                    row = self.states[0] if self.states else _row(self.name)
+                    if len(self.states) > 1:
+                        self.states.pop(0)
+                    row = {**row, "name": self.name}
+                    rows.append(row)
+                    self.events.append(f"inventory:{row['build_status']}")
+                else:
+                    self.events.append("inventory:absent")
+                stdout = json.dumps({"workspaces": rows})
+        elif action == "exec":
+            self.events.append("probe")
+            outcome = self.probe_results.pop(0) if self.probe_results else "ready"
+            if outcome == "ready":
+                marker = shlex.split(command[-1].splitlines()[-1])[-1]
+                stdout = f"GPU-123\nGPU-123\n{marker}\n"
+            elif outcome == "missing-marker":
+                stdout = "Brev reports success without the remote receipt\n"
+            else:
+                code = 1
+        elif action == "delete":
+            self.events.append(f"delete:{command[2]}")
+            if self.delete_succeeds:
+                self.name = None
+                self.states = []
+            else:
+                code = 1
+        else:
+            raise AssertionError(f"unexpected Brev command {action}")
+        return subprocess.CompletedProcess(command, code, stdout, "")
+
+
+@pytest.fixture
+def fake(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, clock: FakeClock) -> FakeBrev:
+    output = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    fake = FakeBrev(output)
+    monkeypatch.setattr(brev_provision, "_run", fake)
+    return fake
+
+
+def test_create_exit_zero_then_failure_is_rejected(fake: FakeBrev) -> None:
+    fake.states = [_row("gpu", status="FAILURE", build_status="CREATE_FAILED")]
+
+    with pytest.raises(brev_provision.ProvisionError, match="failed after 1 attempts"):
+        brev_provision.provision("gpu", "L40", attempts=1)
+
+    assert "probe" not in fake.events
+    assert fake.creates == ["gpu"]
+    assert "delete:gpu" in fake.events
+    assert fake.name is None
+
+
+def test_building_is_gated_before_actual_probe(fake: FakeBrev, clock: FakeClock) -> None:
+    fake.states = [
+        _row("gpu", build_status="BUILDING", shell_status="NOT READY"),
+        _row("gpu", build_status="BUILDING", shell_status="NOT READY"),
+        _row("gpu"),
+    ]
+
+    assert brev_provision.provision("gpu", "L40") == "gpu"
+
+    probe_index = fake.events.index("probe")
+    assert fake.events[:probe_index].count("inventory:BUILDING") == 2
+    assert fake.events[probe_index - 1] == "inventory:COMPLETED"
+    assert clock.now == 10
+    assert not any(command[1] == "delete" for command in fake.commands)
+
+
+@pytest.mark.parametrize("health", ["UNAVAILABLE", "UNHEALTHY"])
+def test_initial_health_sync_waits_without_an_extra_vm(fake: FakeBrev, health: str) -> None:
+    fake.states = [
+        _row("gpu", status="STARTING", health_status=health),
+        _row("gpu", health_status=health),
+        _row("gpu"),
+    ]
+
+    assert brev_provision.provision("gpu", "L40") == "gpu"
+
+    assert fake.creates == ["gpu"]
+    assert fake.events.count("probe") == 1
+
+
+@pytest.mark.parametrize(
+    "failure", ["SSH failure", "Docker failure", "GPU failure", "missing-marker"]
+)
+def test_readiness_failure_then_success_reuses_same_vm(fake: FakeBrev, failure: str) -> None:
+    fake.probe_results = [failure, "ready"]
+
+    assert brev_provision.provision("gpu", "L40") == "gpu"
+
+    assert fake.creates == ["gpu"]
+    assert fake.events.count("probe") == 2
+    script = next(command[-1] for command in fake.commands if command[1] == "exec")
+    assert "cloud-init status --wait" in script
+    assert "sudo -n docker info" in script
+    assert "docker run --rm --gpus all" in script
+    assert brev_provision.DEFAULT_PROBE_IMAGE in script
+
+
+def test_retry_deletes_and_confirms_old_vm_before_fallback(fake: FakeBrev) -> None:
+    fake.states = [_row("gpu", status="FAILURE")]
+
+    assert brev_provision.provision("gpu", "L40") == "gpu-r2"
+
+    assert fake.creates == ["gpu", "gpu-r2"]
+    delete_index = fake.events.index("delete:gpu")
+    replacement_index = fake.events.index("create:gpu-r2")
+    assert "inventory:absent" in fake.events[delete_index:replacement_index]
+    assert [command for command in fake.commands if command[1] == "create"][1][-2:] == [
+        "--provider",
+        "aws",
+    ]
+    assert fake.output.read_text(encoding="utf-8").splitlines() == [
+        "instance_name=gpu",
+        "instance_name=gpu-r2",
+    ]
+
+
+def test_failed_delete_with_visible_vm_blocks_replacement(fake: FakeBrev, clock: FakeClock) -> None:
+    fake.states = [_row("gpu", status="FAILURE")]
+    fake.delete_succeeds = False
+
+    with pytest.raises(brev_provision.ProvisionError, match="cleanup.*unconfirmed"):
+        brev_provision.provision("gpu", "L40", timeout=80)
+
+    assert fake.creates == ["gpu"]
+    assert fake.name == "gpu"
+    assert clock.now <= 80
+
+
+def test_overall_deadline_bounds_all_probe_attempts_and_cleanup(
+    fake: FakeBrev, clock: FakeClock
+) -> None:
+    fake.probe_results = ["GPU failure"] * 30
+
+    with pytest.raises(brev_provision.ProvisionError):
+        brev_provision.provision("gpu", "L40", timeout=30)
+
+    assert clock.now <= 30
+    assert fake.name is None
+    assert len(fake.creates) <= 3
+
+
+def test_slow_aws_boot_can_use_remaining_budget_after_failed_first_vm(
+    fake: FakeBrev, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replacement_started = 0.0
+
+    def run(command: list[str], deadline: float, cap: float = brev_provision.CLI_TIMEOUT):
+        nonlocal replacement_started
+        if command[1] == "create" and command[2] == "gpu-r2":
+            replacement_started = clock.now
+        if command[1] == "ls" and fake.name is not None:
+            if fake.name == "gpu" or clock.now < replacement_started + 330:
+                fake.states = [_row(fake.name, build_status="BUILDING", shell_status="NOT READY")]
+            else:
+                fake.states = [_row(fake.name)]
+        if command[1] == "delete" and fake.name == "gpu":
+            clock.now += 55
+        if command[1] == "exec":
+            # Image pull and the actual Docker GPU probe follow SSH bring-up.
+            if clock.now + 45 >= deadline:
+                clock.now = deadline
+                raise brev_provision.ProvisionError("probe exhausted its readiness budget")
+            clock.now += 45
+        return fake(command, deadline, cap)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+
+    assert brev_provision.provision("gpu", "L40") == "gpu-r2"
+    assert fake.creates == ["gpu", "gpu-r2"]
+    assert replacement_started == 655
+    assert clock.now == 1030
+
+
+def test_ambiguous_create_with_absent_inventory_never_starts_fallback(
+    fake: FakeBrev, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(command: list[str], deadline: float, cap: float = brev_provision.CLI_TIMEOUT):
+        if command[1] == "create":
+            # The API may allocate after this local client has timed out.
+            assert fake.output.read_text(encoding="utf-8").strip() == "instance_name=gpu"
+            fake.creates.append(command[2])
+            clock.now = deadline
+            raise brev_provision.ProvisionError("create timed out")
+        if command[1] == "delete":
+            return subprocess.CompletedProcess(command, 1, "", "not visible yet")
+        return fake(command, deadline, cap)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+
+    with pytest.raises(brev_provision.ProvisionError, match="cleanup.*unconfirmed"):
+        brev_provision.provision("gpu", "L40", timeout=40)
+
+    assert fake.creates == ["gpu"]
+    assert clock.now <= 40
+
+
+@pytest.mark.parametrize(
+    "document",
+    ["banner\n{}", "[]", "{}", '{"workspaces": {}}', '{"workspaces": [{}]}'],
+)
+def test_invalid_inventory_cannot_be_ready_or_confirm_deletion(
+    fake: FakeBrev, document: str
+) -> None:
+    fake.name = "gpu"
+    fake.inventory_result = document
+
+    with pytest.raises(brev_provision.ProvisionError):
+        brev_provision._instance("gpu", 10)
+
+
+def test_exact_name_matching_and_null_empty_collection(fake: FakeBrev) -> None:
+    fake.name = "gpu"
+    fake.inventory_result = json.dumps({"workspaces": [_row("gpu-r2")]})
+    assert brev_provision._instance("gpu", 10) is None
+    fake.inventory_result = '{"workspaces": null}'
+    assert brev_provision._instance("gpu", 10) is None
+
+
+def test_existing_exact_name_is_not_reused_or_deleted(fake: FakeBrev) -> None:
+    fake.name = "gpu"
+
+    with pytest.raises(brev_provision.ProvisionError, match="already exists"):
+        brev_provision.provision("gpu", "L40")
+
+    assert not fake.creates
+    assert not any(command[1] in {"exec", "delete"} for command in fake.commands)
+
+
+def test_replaced_id_cannot_inherit_previous_readiness_receipt(fake: FakeBrev) -> None:
+    fake.states = [_row("gpu"), _row("gpu", id="different-allocation")]
+
+    with pytest.raises(brev_provision.ProvisionError, match="failed after 1 attempts"):
+        brev_provision.provision("gpu", "L40", attempts=1)
+
+    assert fake.name is None
+
+
+def test_interruption_cleans_up_without_new_allocation(
+    fake: FakeBrev, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(command: list[str], deadline: float, cap: float = brev_provision.CLI_TIMEOUT):
+        if command[1] == "exec":
+            raise KeyboardInterrupt
+        return fake(command, deadline, cap)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+
+    with pytest.raises(KeyboardInterrupt):
+        brev_provision.provision("gpu", "L40")
+
+    assert fake.creates == ["gpu"]
+    assert fake.name is None
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/proc").exists(), reason="Linux process groups required"
+)
+def test_hung_cli_and_ssh_child_are_killed_at_subprocess_deadline(tmp_path: Path) -> None:
+    child_pid = tmp_path / "child-pid"
+    fake_cli = tmp_path / "hung_brev.py"
+    fake_cli.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    start = time.monotonic()
+
+    with pytest.raises(brev_provision.ProvisionError, match="bounded wait"):
+        brev_provision._run([sys.executable, str(fake_cli)], start + 0.5)
+
+    assert time.monotonic() - start < 2
+    child_stat = Path(f"/proc/{child_pid.read_text(encoding='utf-8')}/stat")
+    if child_stat.exists():
+        assert child_stat.read_text(encoding="utf-8").split()[2] == "Z"
+
+
+def test_cli_failure_and_interruption_have_nonzero_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(brev_provision, "provision", interrupted)
+    assert brev_provision.main(["provision", "--instance", "gpu", "--gpu", "L40"]) == 130
+
+    def failed(*args, **kwargs):
+        raise brev_provision.ProvisionError("not ready")
+
+    monkeypatch.setattr(brev_provision, "provision", failed)
+    assert brev_provision.main(["provision", "--instance", "gpu", "--gpu", "L40"]) == 1
