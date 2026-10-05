@@ -121,8 +121,25 @@ def prepare(
     Raises:
         Exception: Dependency, upstream build or artifact validation failed.
     """
-    package = installed_package(target)
+    provider_path = getattr(request, "edge_provider", None)
+    provider_identity = None
+    if provider_path is not None:
+        if draft_dir is not None:
+            raise ValueError("Versioned Llama providers currently admit autoregressive builds only")
+        from . import provider
+
+        probe_file = staging / "provider-identity.json"
+        command, env = provider.command(provider_path, "probe", "--output", str(probe_file))
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write("Provider probe argv: " + json.dumps(command) + "\n")
+            log.flush()
+            subprocess.run(command, env=env, check=True, stdout=log, stderr=subprocess.STDOUT)
+        provider_identity = json.loads(probe_file.read_text())
+        package = provider.descriptor(provider_path)
+    else:
+        package = installed_package(target)
     weight_format = request_weight_format(request, raw)
+    embedded_weights = provider_identity is not None and provider_identity["version"] == "0.10.0"
     checkpoint = staging / "edge_llm/checkpoint"
     sources = [(Path(request.model_dir), checkpoint)]
     if draft_dir is not None:
@@ -134,8 +151,10 @@ def prepare(
                 source.suffix in {".json", ".safetensors", ".bin", ".model", ".jinja"}
                 or source.name in {"merges.txt", "vocab.txt"}
             ):
+                if embedded_weights and source.suffix in {".safetensors", ".bin"}:
+                    continue  # The ONNX engine embeds weights; do not duplicate them in the bundle.
                 shutil.copy2(source, destination / source.name)
-        if not list(destination.glob("*.safetensors")) and not list(destination.glob("*.bin")):
+        if not list(source_dir.glob("*.safetensors")) and not list(source_dir.glob("*.bin")):
             raise ValueError("Edge direct builder requires a safetensors or bin checkpoint")
     config = ModelConfig.from_json(json.dumps(raw))
     default_limit = (
@@ -161,7 +180,7 @@ def prepare(
         "--components",
         "llm",
         "--plugin-path",
-        package["plugin"],
+        package.get("plugin", ""),
         "--dense",
         "fp16",
         "--max-input-len",
@@ -177,8 +196,29 @@ def prepare(
         command.extend(["--spec-type", "eagle3", "--draft-model-dir", str(checkpoint / "draft")])
     if request.verbose:
         command.append("--verbose")
+    env = None
+    if provider_path is not None:
+        build_input = staging / "provider-build.json"
+        build_input.write_text(
+            json.dumps(
+                {
+                    "identity": provider_identity,
+                    "checkpoint": str(
+                        Path(request.model_dir).resolve() if embedded_weights else checkpoint
+                    ),
+                    "engine": str(engine),
+                    "limit": limit,
+                }
+            ),
+            encoding="utf-8",
+        )
+        command, env = provider.command(provider_path, "build", "--input", str(build_input))
     with log_path.open("a", encoding="utf-8") as log:
-        subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT, cwd=staging)
+        log.write("Edge build argv: " + json.dumps(command) + "\n")
+        log.flush()
+        subprocess.run(
+            command, env=env, check=True, stdout=log, stderr=subprocess.STDOUT, cwd=staging
+        )
     engine_files = (
         ("spec_base.engine", "spec_draft.engine", "base_config.json", "draft_config.json")
         if draft_dir is not None
@@ -188,10 +228,17 @@ def prepare(
         *engine_files,
         "tokenizer.json",
         "tokenizer_config.json",
-        "processed_chat_template.json",
+        (
+            "chat_template.jinja"
+            if provider_identity is not None and provider_identity["version"] == "0.11.0"
+            else "processed_chat_template.json"
+        ),
     ):
         if not (engine / name).is_file() or (engine / name).stat().st_size == 0:
             raise ValueError(f"Edge builder did not produce required artifact: {name}")
+    if embedded_weights:
+        # Only transient export products, never the input checkpoint or engine assets.
+        shutil.rmtree(staging / "edge_llm/onnx")
     files = {}
     for directory in (engine, checkpoint):
         for path in sorted(directory.rglob("*")):
@@ -200,8 +247,16 @@ def prepare(
             if path.is_file():
                 files[path.relative_to(staging).as_posix()] = path
     return files, {
-        "version": 1,
-        "edge_revision": EDGE_REVISION,
+        "version": 2 if provider_identity is not None else 1,
+        "edge_revision": provider_identity["revision"] if provider_identity else EDGE_REVISION,
+        **(
+            {
+                "provider": provider_identity,
+                "build_flow": "onnx" if provider_identity["version"] == "0.10.0" else "direct",
+            }
+            if provider_identity
+            else {}
+        ),
         "target": target,
         "precision": "fp16",
         "weight_format": weight_format,

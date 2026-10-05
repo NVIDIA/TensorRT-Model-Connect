@@ -639,6 +639,9 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "cmake/edge_llm/Install.cmake.in",
         "cmake/edge_llm/Prepare.cmake.in",
         "cmake/edge_llm/README.md",
+        "cmake/edge_llm/provider/installation.py",
+        "cmake/edge_llm/provider/provider.cpp",
+        "cmake/edge_llm/provider/provider.h",
     }
     expected_third_party = {
         "third_party/stb/stb_image.h",
@@ -1129,6 +1132,7 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
     optional = pyproject.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
     assert set(re.findall(r"^([a-z][a-z0-9_-]*)\s*=", optional, re.MULTILINE)) == {
         "cutedsl",
+        "edgellm",
         "serve",
         "test",
     }

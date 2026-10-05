@@ -52,6 +52,7 @@ test = [
     "uvicorn>=0.30,<0.53",
 ]
 cutedsl = ["nvidia-cutlass-dsl==4.7.1"]
+edgellm = ["tensorrt-edgellm==0.11.0"]
 
 [tool.conan-py-build.wheel]
 packages = [

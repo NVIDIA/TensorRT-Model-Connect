@@ -69,11 +69,15 @@ class LlamaBuildRequest(BuildRequest):
     """Ordinary build inputs plus an explicitly requested Llama execution recipe."""
 
     execution: BuildExecutionInputs | None = None
+    edge_provider: Path | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.family != "llama":
             raise ValueError("LlamaBuildRequest requires the llama family")
+        if self.edge_provider is not None:
+            from .provider import descriptor
+            descriptor(self.edge_provider)
         if self.execution is not None:
             if not isinstance(self.execution, BuildExecutionInputs):
                 raise TypeError("execution must be BuildExecutionInputs")
@@ -86,4 +90,14 @@ def with_execution(request: BuildRequest, execution: BuildExecutionInputs) -> Ll
     return LlamaBuildRequest(
         **{field.name: getattr(request, field.name) for field in fields(BuildRequest)},
         execution=execution,
+        edge_provider=getattr(request, "edge_provider", None),
+    )
+
+
+def with_provider(request: BuildRequest, path: Path) -> LlamaBuildRequest:
+    """Attach a local installation without changing shared build arguments."""
+    request = coerce_request(request)
+    return LlamaBuildRequest(
+        **{field.name: getattr(request, field.name) for field in fields(BuildRequest)},
+        execution=getattr(request, "execution", None), edge_provider=path.resolve(),
     )

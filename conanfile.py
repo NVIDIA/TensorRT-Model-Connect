@@ -119,6 +119,9 @@ class TensorRTModelConnectConan(ConanFile):
             keep_path=False,
         )
         copy(self, "libtrtmc_cli_*.so", src=str(build), dst=str(module_bin), keep_path=False)
+        copy(self, "libtrtmc_edge_provider_*.so", src=str(build), dst=str(module_bin), keep_path=False)
+        # Descriptors belong to the deployment, not the distributable package.
+        copy(self, "*.py", src=str(build / "edge_llm"), dst=str(module_bin / "edge_llm"))
         expected_cli_libraries = set()
         for declaration in sorted((source / "families").glob("*/cli.json")):
             copy(
@@ -209,6 +212,7 @@ class TensorRTModelConnectConan(ConanFile):
             *backends,
             *module_bin.glob("libtrtmc_model_*.so"),
             *module_bin.glob("libtrtmc_cli_*.so"),
+            *module_bin.glob("libtrtmc_edge_provider_*.so"),
         ):
             runpaths = ["$ORIGIN", "$ORIGIN/../../tensorrt_libs", "/usr/local/cuda/lib64"]
             if any(

@@ -161,4 +161,32 @@ This path skips CI-only Python profiles and unrelated model DSOs. Continue to
 ownership and backend boundaries are documented in the
 [AI-Native Horizontal Scaling Architecture](../architecture/ai-native-horizontal-scaling.md).
 
+## Optional versioned Edge-LLM installation
+
+The Llama design-example route can use an existing source-built Edge installation
+or the optional PyPI wheel dependency. Install the wheel extra from this checkout:
+
+```sh
+python -m pip install '.[edgellm]'
+```
+
+The extra pins `tensorrt-edgellm==0.11.0`; it is optional and is not installed
+by inference. The family also accepts an explicit native Python module and
+plugin from an official source build. Exact 0.10.0 uses upstream ONNX export
+and its builder; exact 0.11.0 uses its direct builder and runtime bindings.
+Existing 0.10.1 CMake SDK deployments are unchanged.
+
+Build the `trtmc_model_llama` target to include its provider DSOs and workers.
+The new provider path does not require `TRTMC_ENABLE_EDGELLM=ON`; that option
+continues to provision the separate legacy SDK. Configure the local installation
+descriptor and use Llama's family-owned `--edge-provider` option as documented
+in the [Llama Edge guide](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/llama/edge_llm/README.md#versioned-providers-design-example).
+No shared CLI option or core model-routing switch is added.
+
+Source and wheel installations use the same interface, not an assumption that
+their serialized engines are interchangeable. Bundles verify the actual native
+library identity at runtime. This initial example is limited to ordinary dense
+FP16 Llama on Linux x86_64 SM80, batch1/TP1; it does not qualify other families,
+precisions or new speculative profiles.
+
 {/* Collaborative review anchor: batch 2. */}

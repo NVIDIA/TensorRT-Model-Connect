@@ -1,7 +1,7 @@
 # Llama Edge-LLM execution
 
-This family owns complete-network offload to the official GitHub Edge-LLM
-0.10.1 snapshot, revision `e8b29522938901f6df19ebeedd4b69bc8edbcd97`.
+This family owns complete-network offload to Edge-LLM. The existing SDK route
+uses the official GitHub 0.10.1 snapshot, revision `e8b29522938901f6df19ebeedd4b69bc8edbcd97`.
 CMake provisions the optional native SDK separately. Builds use its experimental
 Python builder; inference uses its persistent C++ `LLMInferenceRuntime` API.
 There is no implicit installation, download, cross-compilation or cross-family
@@ -150,3 +150,142 @@ publication. The legacy flat build command remains available for its existing
 ordinary options; new family options use `trtmc llama build`.
 Help is offline and does not need a local checkpoint. No shared parser hook or
 family registry entry is added.
+
+## Versioned providers: design example
+
+The opt-in provider route supports exact releases **0.10.0** and **0.11.0**
+without changing Model Connect's shared build or runtime selection. It currently
+admits ordinary dense FP16 Llama generation on Linux x86_64 SM80, batch1/TP1.
+The existing 0.10.1 SDK route, including its EAGLE3 profile, is retained;
+`--edge-provider` does not yet implement speculative decoding.
+
+```text
+Llama CLI / request
+  -> Llama edge_llm builder -> selected installation's Python builder
+  -> bundle (release + native-library identity + engine assets)
+
+Llama runtime
+  -> exact-version provider DSO (small C-compatible function table)
+  -> persistent isolated worker -> selected installation's C++ LLMRuntime
+```
+
+The worker calls upstream Python bindings to the C++ runtime; it is not a
+second inference implementation. One worker/runtime is retained per live
+Model Connect task, with serialized requests. Isolation prevents different
+Edge/TensorRT plugin versions from sharing one process's native loader state.
+It adds a process and IPC boundary, so latency and concurrent-version GPU
+memory usage still need performance qualification.
+
+Ownership and compatibility:
+
+- `edge_llm/provider.py` owns the release-specific builder calls, request
+  mapping, capacity checks, and runtime behavior. The C++ family adapter selects
+  the provider from bundle metadata; the core has no Edge routing.
+- `cmake/edge_llm/provider/` contains only the opaque-handle ABI, process
+  transport, and installation identity mechanics. No model or family dispatch
+  is placed there. Provider DSOs expose `trtmc_edge_provider_v1`; no Edge/STL
+  types, exceptions, or allocated objects cross that boundary.
+- The descriptor is trusted, machine-local deployment configuration, **not**
+  executable content read from a model bundle. Python paths and native library
+  paths are explicit. Nothing is downloaded or installed during build/run.
+- A bundle records the exact Edge release, runtime/plugin SHA-256, TensorRT
+  version, CUDA runtime version, architecture and SM. Runtime mismatches fail
+  closed, rather than silently rebuilding or choosing another release.
+  Source and wheel origins use the same contract, but their different native
+  binaries are not assumed to make existing engines interchangeable.
+- Generic packaging copies provider DSOs and workers, never machine-local
+  descriptors. Existing native fallback on Edge preparation failure still warns;
+  a successful native fallback is not proof that this provider worked.
+
+### Wheel installation
+
+The optional `edgellm` dependency selects `tensorrt-edgellm==0.11.0`.
+A source checkout can install it with `python -m pip install '.[edgellm]'`;
+a Model Connect wheel exposes the same extra. The plain installation does not
+require Edge, and there is no runtime pip invocation.
+
+Create an absolute-path descriptor, for example `/opt/providers/0.11.0.json`:
+
+```json
+{
+  "schema_version": 1,
+  "version": "0.11.0",
+  "python": "/opt/edge-0.11/bin/python",
+  "library_paths": ["/opt/tensorrt/lib", "/opt/cuda/lib64"]
+}
+```
+
+The selected interpreter must have the Edge package and its dependencies.
+The public wheel's `tensorrt_edgellm.runtime.load()` selects its native payload.
+`library_paths` is optional when the native dependencies already resolve.
+
+### Source installation
+
+Use the official release source and native build prerequisites, including its
+Python bindings and plugin. For 0.10.0, the upstream CuTe preparation requires
+`nvidia-cutlass-dsl[cu13]==4.6.1`; generate native CuTe artifacts before enabling
+them in CMake. Disabling CuTe did not build the unmodified 0.10.0 SDK in the
+recorded environment. Do not cross-compile.
+
+A source build supplies the same descriptor plus explicit module locations:
+
+```json
+{
+  "schema_version": 1,
+  "version": "0.10.0",
+  "python": "/opt/edge-0.10/bin/python",
+  "python_paths": ["/opt/TensorRT-Edge-LLM-0.10.0"],
+  "library_paths": ["/opt/tensorrt/lib", "/opt/cuda/lib64"],
+  "native_module": "/opt/edge-build/pybind/_edgellm_runtime.cpython-312-x86_64-linux-gnu.so",
+  "plugin": "/opt/edge-build/libNvInfer_edgellm_plugin.so"
+}
+```
+
+Use the actual extension filename produced by that interpreter's native build.
+0.10.0 requires the source module; 0.11.0 accepts either that explicit-module
+form or the wheel selector. Both validate the loaded package's exact version
+and hash the actual native libraries. The interface does not depend on how
+those files were installed.
+
+The family maps 0.10.0 to upstream ONNX export and `LLMBuilder` with embedded
+weights; 0.11.0 maps to upstream's direct builder with external checkpoint
+weights. Embedded engines omit redundant original checkpoint weight shards
+from the bundle. These are release-specific choices, not global Model Connect
+build modes.
+
+### Build and deploy
+
+```sh
+trtmc llama build /models/Llama-3.2-1B-Instruct --precision fp16 \
+  --max-sequence-length 256 --edge-provider /opt/providers/0.11.0.json \
+  -o /scratch/llama.bundle
+
+mkdir -p /opt/trtmc/lib/edge_llm/providers
+cp /opt/providers/0.11.0.json /opt/trtmc/lib/edge_llm/providers/0.11.0.json
+trtmc run /scratch/llama.bundle --runtime-root /opt/trtmc/lib \
+  --prompt "What is the capital of France? Answer in one word." \
+  --use-chat-template true --max-new-tokens 32 --temperature 0 --top-k 1 --top-p 1
+```
+
+For a CMake build, the runtime root is the build directory. For a packaged
+installation, it is `tensorrt_model_connect/bin`. The descriptor must sit next
+to the selected family/provider DSOs under `edge_llm/providers/<version>.json`;
+it is not copied from the builder's filesystem into the bundle.
+
+Both releases reject unsupported controls and clipped requests without
+weakening the family contract. 0.11.0 can check exact prompt capacity before
+execution; 0.10.0 exposes prompt counts only afterwards, so that release may
+execute before rejecting an over-capacity request. It never returns that
+clipped result as success. Worker startup/transport failures propagate,
+with bounded IPC and teardown; they do not select a different backend.
+
+### Evidence boundary
+
+This is a versioning design example, not catalog-wide qualification.
+New source/wheel build, inference, independent-reference, packaging and CI
+results are reported separately in its review. The earlier 0.10.1 table above
+does not qualify either new release. The 0.10.0 source and 0.11.0 wheel Llama-3.2-1B comparisons recorded
+exact Edge/HF tokens on capital, arithmetic and raw-continuation prompts, but
+both implementations answered `14` for `9 + 7`: the existing semantic gate
+correctly remained failed. Matching an incorrect reference is not semantic
+qualification.

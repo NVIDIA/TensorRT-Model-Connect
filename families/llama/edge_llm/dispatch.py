@@ -95,7 +95,7 @@ def build(request, writer, native, *, draft_dir: Path | None = None) -> None:
     if sys.platform != "linux":
         native(request, writer)
         return
-    if draft_dir is None and not edge_llm.package_present():
+    if draft_dir is None and getattr(request, "edge_provider", None) is None and not edge_llm.package_present():
         native(request, writer)
         return
     capacity = config.get("max_position_embeddings")

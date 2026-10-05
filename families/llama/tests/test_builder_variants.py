@@ -214,6 +214,7 @@ def test_edge_cli_help_is_family_owned(tmp_path, capsys):
     help_text = capsys.readouterr().out
     assert "--execution-variant {eagle3}" in help_text
     assert "--companion" in help_text
+    assert "--edge-provider" in help_text
 
 
 def test_edge_request_preserves_fields_and_family_owner(tmp_path):
@@ -231,6 +232,29 @@ def test_edge_request_preserves_fields_and_family_owner(tmp_path):
     execution = BuildExecutionInputs("eagle3", (NamedCheckpoint("draft", draft),))
     assert cli.execution_inputs(None) is None
     extended = with_execution(request, execution)
+    import json
+    import sys
+    from families.llama.edge_llm.config import with_provider
+    from families.llama.edge_llm.provider import descriptor, validate_capacity
+    provider_file = tmp_path / "provider.json"
+    provider_file.write_text(json.dumps({
+        "schema_version": 1, "version": "0.11.0", "python": sys.executable,
+    }))
+    selected = with_provider(request, provider_file)
+    assert selected.edge_provider == provider_file.resolve()
+    assert with_execution(selected, execution).edge_provider == selected.edge_provider
+    assert coerce_request(selected) is selected
+    assert descriptor(provider_file)["version"] == "0.11.0"
+    provider_file.write_text(json.dumps({
+        "schema_version": 1, "version": "0.10.1", "python": sys.executable,
+    }))
+    with pytest.raises(ValueError, match="0.10.0 or 0.11.0"):
+        with_provider(request, provider_file)
+    marker = {"max_input_length": 64, "max_sequence_length": 128}
+    validate_capacity([64], marker, 64)
+    for counts, generated in (([64], 65), ([65], 1), ([], 1), ([0], 1), ([1], 0)):
+        with pytest.raises(ValueError, match="exceed bundle capacity"):
+            validate_capacity(counts, marker, generated)
     for field in fields(BuildRequest):
         assert getattr(extended, field.name) is getattr(request, field.name)
     with pytest.raises(ValueError, match="requires the llama family"):

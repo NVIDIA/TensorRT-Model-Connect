@@ -132,6 +132,14 @@
           "action": "append",
           "default": [],
           "help": "Local companion checkpoint as ROLE=LOCAL_DIR"
+        },
+        {
+          "name": "edge_provider",
+          "flags": [
+            "--edge-provider"
+          ],
+          "type": "path",
+          "help": "Local Edge 0.10.0 or 0.11.0 provider descriptor (source build or wheel)"
         }
       ]
     },

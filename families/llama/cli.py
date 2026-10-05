@@ -16,7 +16,7 @@ from tensorrt_model_connect.model_support import load_model_metadata, resolve_fa
 from .build_request import BuildRequest
 
 from .edge_llm.cli import execution_inputs
-from .edge_llm.config import with_execution
+from .edge_llm.config import with_execution, with_provider
 
 
 def build_bundle(request: BuildRequest, output: Path) -> None:
@@ -41,6 +41,7 @@ def build(
     verbose: bool = False,
     fp32_layers: list[int] | tuple[int, ...] = (),
     dynamic_kv_cache: bool = False,
+    edge_provider: Path | None = None,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
@@ -59,5 +60,7 @@ def build(
     )
     if execution is not None:
         request = with_execution(request, execution)
+    if edge_provider is not None:
+        request = with_provider(request, edge_provider)
     build_bundle(request, output)
     return 0

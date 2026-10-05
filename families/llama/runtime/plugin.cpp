@@ -10,6 +10,9 @@
 #include "families/llama/runtime/speculative/pipeline.h"
 #include "families/llama/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
+#ifdef TRTMC_HAS_EDGE_PROVIDER
+#include "families/llama/runtime/edge_llm/provider_adapter.h"
+#endif
 #ifdef TRTMC_HAS_EDGE_LLM
 #include "families/llama/runtime/edge_llm/adapter.h"
 #endif
@@ -227,6 +230,11 @@ ITask* create(const FamilyContext& context) {
     if (context.reader.find_section("edge_llm.json")) {
         if (context.kv_cache_size_bytes != 0)
             throw std::invalid_argument("Llama Edge does not support --kv-cache-size overrides");
+#ifdef TRTMC_HAS_EDGE_PROVIDER
+        const auto edge_bytes = context.reader.read_section("edge_llm.json");
+        if (nlohmann::json::parse(edge_bytes.begin(), edge_bytes.end()).value("version", 0) == 2)
+            return edge_llm::create_provider(context.reader);
+#endif
 #ifdef TRTMC_HAS_EDGE_LLM
         return edge_llm::create(context.reader);
 #else
