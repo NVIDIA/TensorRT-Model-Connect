@@ -176,12 +176,16 @@ shortfall is resolved by execution, never by a smaller `n` (Section 9).
   instance, on both hosts. Each request's speedup effect compounds the two sides' ratios of second to first timing,
   each in its worse direction (`max(r, 1/r)`), and the guard g is the largest of them, rounded up to a whole
   percent; it widens the margin on both sides, so measured effects of that size cannot by themselves turn a yellow
-  light green or red. It is an empirical allowance from the sampled instances, not a bound for unseen ones. In
-  October 2026 TRTMC's two timings agreed within 0.5% in the resolved checks, while native eager timings differed
-  by up to 8.6% in either direction (nemotron-nano-4b 8.6% faster in its second timing, a 9.4% speedup effect;
-  xcit-nano 3.3% slower); instance, position, and elapsed time change together in the check, so the cause is not
-  isolated. Neither interleaving runs nor a second native timing (such a spread against a 2% tolerance would whiten
-  most text generation, at about three hours a host) addresses it at an acceptable cost.
+  light green or red. It is an empirical allowance from the sampled instances, not a bound for unseen ones, and one
+  guard serves every class (the owner's choice over a guard per measurement class). In October 2026 (twelve
+  checks on the two hosts, the default class with its settle) TRTMC's two timings agreed within 1% (2.5% on
+  1-2 ms requests), while native eager timings differed by up to 11% in either direction: qwen36-27b 11% slower
+  in its second timing on host 1 (11.4% speedup effect, the largest; the same direction in a second check),
+  olmo-1b 9.6% faster on host 2 but within 1.4% on host 1; diffusion and image editing within 1.8%. Native
+  instance, position, and elapsed time change together in the check and the server's memory stayed on the CPU's
+  NUMA node, so the cause is not isolated. g = 12%. Neither interleaving runs nor a second native timing (such a
+  spread against a 2% tolerance would whiten most text generation, at about three hours a host) addresses it at an
+  acceptable cost.
 - `torch.compile` and the L2 serving sweep are opt-in reports outside the category.
 
 ### 4.7 Model category
@@ -303,8 +307,8 @@ reductions measured since (Section 12: shared Acc selections computed during the
 eight copies a side, both sides' Acc at once) bring the calibrated ledger to 36.7 hours of GPU time for the 174
 profiles (pilot times where a profile was piloted with them; otherwise the smoke-based prediction times its Task's
 measured ratio: text generation 0.50, vision-language 0.40, small Tasks 1.5, video and edits 1.0, other still images
-0.5; 600 s each for the three blocked profiles); the frozen assignment gives each host 87 profiles and 18.4 hours,
-20.2 with the failure allowance. The profiles are split
+0.5; 600 s each for the three blocked profiles), 38.0 with the settle the order check added (Section 4.6); the
+frozen assignment gives each host 87 profiles and 19.0 hours, 20.9 with the failure allowance. The profiles are split
 between two GB300 hosts of the same platform (equal base fingerprints) by a frozen assignment
 (`trtmc-aiperf-qual assign`: checkpoint groups by ledger time, longest first, each to the host with less
 predicted time, ties by name; `run-all --assignment A --host H` runs that host's share in its order). Each verdict
@@ -469,7 +473,8 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   white); hrnet-w18 TRTMC 2.12, 1.99, then 1.91 ms (5.84%); the pilot had the same on qwen35-4b native (5.83%) and
   qwen3-vl-2b TRTMC (5.35%). Three warmup requests of a few milliseconds each do not absorb it. Each side of a
   default-class request therefore first sends the timed request back to back for 10 s; the ledger counts 10 s per
-  side and request (about 0.6 hours a host).
+  side and request (about 0.6 hours a host). Rerun with the settle, the same checks resolve (qwen3-0.6b native
+  1.83%, hrnet TRTMC 2.68% and 3.87%), and nemotron-nano-4b's speedup effect fell from 9.4% to 2.2%.
 - **MMLU answer format**: lighteval's 0-shot prompt gets one added sentence, "Answer with the letter of the
   correct option only.", and an 8-token answer budget (lighteval: 5), on the completion and chat routes alike;
   AIPerf's grader is unchanged. Without it, instruction-tuned models open with an explanation and give no letter

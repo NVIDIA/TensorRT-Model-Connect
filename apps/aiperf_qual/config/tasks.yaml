@@ -25,8 +25,8 @@ defaults:
       aggregation: {candidate: mean, eager: mean, compile: best}
       margin_percent: 5
       # The green / red bounds widen by this (multiplicatively): the largest speedup effect of server instances and
-      # timing order that the order check measured on the formal hosts (DESIGN.md 4.6; October 2026: 9.4%).
-      guard_percent: 10
+      # timing order that the order check measured on the formal hosts (DESIGN.md 4.6; October 2026: 11.4%).
+      guard_percent: 12
       max_ci_percent: 5
 
 # Benchmarks. gate: `margin` (points of the metric) and optionally `relative_margin` (a fraction of the native

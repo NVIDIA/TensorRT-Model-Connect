@@ -147,25 +147,39 @@ def test_the_libraries_a_server_group_mapped_are_recorded():
 
 
 def test_a_servers_memory_is_recorded_per_numa_node(tmp_path):
-    """Anonymous and file mappings apart; a private file mapping with one written (copy-on-write) page stays a
-    file mapping."""
+    """Anonymous and file mappings apart: a private file mapping with a written (copy-on-write) page stays a file
+    mapping, and a buffer allocated afterwards adds to the anonymous mappings only."""
     import sys
+    import time
 
     data = tmp_path / "data"
     data.write_bytes(b"\0" * (64 << 20))
-    script = ("import mmap, time\n"
+    step = tmp_path / "step"
+    script = ("import mmap, os, time\n"
               f"f = open({str(data)!r}, 'r+b'); m = mmap.mmap(f.fileno(), 0, flags=mmap.MAP_PRIVATE)\n"
               "sum(m[i] for i in range(0, len(m), 4096)); m[0] = 1\n"
-              "x = bytearray(64 << 20); open(" + repr(str(tmp_path / "ready")) + ", 'w').close(); time.sleep(30)\n")
+              f"open({str(step)!r} + '1', 'w').close()\n"
+              f"while not os.path.exists({str(step)!r} + 'go'): time.sleep(0.05)\n"
+              "x = bytearray(64 << 20)\n"
+              f"open({str(step)!r} + '2', 'w').close(); time.sleep(30)\n")
     child = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+
+    def reached(name):
+        for _ in range(200):
+            if (tmp_path / f"step{name}").exists():
+                return services.memory_nodes(child.pid)
+            time.sleep(0.05)
+        raise AssertionError(f"the child did not reach step {name}")
+
+    total = lambda held, kind: sum(held[kind].values())  # noqa: E731
     try:
-        for _ in range(100):
-            if (tmp_path / "ready").exists():
-                break
-            __import__("time").sleep(0.1)
-        held = services.memory_nodes(child.pid)
-        anonymous, files = (sum(held[kind].values()) for kind in ("anonymous_mappings_gib", "file_mappings_gib"))
-        assert 0.06 <= anonymous < 0.12 and files >= 0.06 and held["node_free_gib"]  # 64 MiB of each, somewhere
+        mapped = reached("1")
+        (tmp_path / "stepgo").touch()
+        allocated = reached("2")
+        assert total(mapped, "file_mappings_gib") >= 0.06 and mapped["node_free_gib"]  # the 64 MiB file mapping
+        grown = total(allocated, "anonymous_mappings_gib") - total(mapped, "anonymous_mappings_gib")
+        assert 0.05 <= grown <= 0.09  # the 64 MiB buffer
+        assert abs(total(allocated, "file_mappings_gib") - total(mapped, "file_mappings_gib")) < 0.01
         assert services.memory_nodes(child.pid + 10**7)["anonymous_mappings_gib"] == {}  # no such group
     finally:
         child.kill()

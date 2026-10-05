@@ -4,10 +4,10 @@ The frozen inputs of the formal run on two GB300 hosts (DESIGN.md Section 9 and 
 
 | File | What it holds |
 |---|---|
-| `calibration.json` | The ledger's inputs: each profile's smoke-based prediction (`smoke_predictions`), the pilot's measured wall seconds (`pilot_seconds`), and the measured ratios of pilot time to prediction per Task (`task_ratios`, `small_task_ratio`, `still_image_ratio`; video and edits 1.0), the allowance for the three blocked profiles, the failure allowance (10%), and the per-host gate (22 hours). |
+| `calibration.json` | The ledger's inputs: each profile's smoke-based prediction (`smoke_predictions`), the pilot's measured wall seconds (`pilot_seconds`), and the measured ratios of pilot time to prediction per Task (`task_ratios`, `small_task_ratio`, `still_image_ratio`; video and edits 1.0), the allowance for the three blocked profiles, the failure allowance (10%), the per-host gate (22 hours), and the settle (`settle`). |
 | `ledger.py` | Derives the ledger from `calibration.json`: `python ledger.py calibration.json > ledger.json`. |
-| `ledger.json` | Predicted seconds per profile (174 profiles, 36.7 hours of GPU time). |
-| `assignment.json` | `trtmc-aiperf-qual assign` over `ledger.json` for hosts `h1` and `h2`: checkpoint groups longest first, each to the host with less predicted time, ties by name, then host order; each host's list is its planned order. 87 profiles and 18.4 hours a host (20.2 with the failure allowance). |
+| `ledger.json` | Predicted seconds per profile (174 profiles, 38.0 hours of GPU time, the settle of DESIGN.md 4.6 included: 10 s per side and timed request of the default class). |
+| `assignment.json` | `trtmc-aiperf-qual assign` over `ledger.json` for hosts `h1` and `h2`: checkpoint groups longest first, each to the host with less predicted time, ties by name, then host order; each host's list is its planned order. 87 profiles and 19.0 hours a host (20.9 with the failure allowance). |
 
 The ratios come from the pilot at the formal sample sizes with the final configuration (eight Acc copies a side under
 one CUDA MPS daemon, both sides' Acc at once, shared Acc selections computed during the build, copies started
