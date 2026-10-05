@@ -5,4 +5,4 @@
 absolute: [{name: etth1, window: {columns: [OT], context_length: 2048, prediction_length: 128, stride: 24, frequency: 0}}]
 
 reference:
-  adapter: families/timesfm/tests/native_reference.py  # TimesFM's decoder (no generic time-series adapter)
+  adapter: families/timesfm/reference/adapter.py  # TimesFM's decoder (no generic time-series adapter)

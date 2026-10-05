@@ -610,7 +610,8 @@ def _family_input_records(source: Mapping[str, Any], selection: Mapping[str, Any
     """Inputs a family prepares itself (``family_inputs``: its ``module`` run with ``--count`` and ``--output``
     in the model's reference environment, ``python``), for example decoded recorded observations."""
     repo = environment.path("repo")
-    output = Path(environment["hf_datasets_cache"]) / "trtmc-family-inputs" / Path(source["module"]).parent.name
+    # one directory per family (families/<family>/reference/inputs.py)
+    output = Path(environment["hf_datasets_cache"]) / "trtmc-family-inputs" / Path(source["module"]).parent.parent.name
     count = int(selection.get("count", 1))
     completed = subprocess.run([str(require(source, "python", "source")), str(repo / source["module"]), "--count",
                                 str(count), "--output", str(output)], capture_output=True, text=True, timeout=3600,

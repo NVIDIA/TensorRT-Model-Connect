@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Fast-FoundationStereo's native pipeline for the trtmc-perf-serve reference backend (``disparity``): the
-pinned official source and serialized checkpoint (native_prepare.py) on the 700x700 profile (max disparity 192,
+pinned official source and serialized checkpoint (reference/prepare.py) on the 700x700 profile (max disparity 192,
 8 refinement iterations, padded to multiples of 32, autocast as upstream), writing the disparity file the TRTMC
 worker writes (``<artifact>.disparity.f32``)."""
 

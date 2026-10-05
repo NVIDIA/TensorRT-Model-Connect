@@ -47,7 +47,7 @@ def _absolute_assets(value: Any, root: Path) -> Any:
 
 def _descriptor(model: Mapping[str, Any], work: Path, python: str | None) -> Path | None:
     """A model descriptor with config/models' build overrides (None: the catalog manifest as is). A
-    ``model_directory`` (relative to the reference environment, prepared by the family's tests/native_prepare.py)
+    ``model_directory`` (relative to the reference environment, prepared by the family's reference/prepare.py)
     replaces the checkpoint for families whose build reads an upstream checkout."""
     candidate = model["candidate"]
     if not candidate.get("build") and not candidate.get("model_directory"):

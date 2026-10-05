@@ -2,6 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 reference:
-  adapter: families/yolov8/tests/native_reference.py  # the Ultralytics archive (no generic adapter)
-  prepare: families/yolov8/tests/native_prepare.py
+  adapter: families/yolov8/reference/adapter.py  # the Ultralytics archive (no generic adapter)
+  prepare: families/yolov8/reference/prepare.py
   requirements: families/yolov8/requirements.txt  # the family's dependencies, layered on the serving interpreter

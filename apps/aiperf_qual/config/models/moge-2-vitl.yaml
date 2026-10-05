@@ -2,6 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 reference:
-  adapter: families/moge/tests/native_reference.py  # the pinned official MoGe source (no generic adapter)
-  prepare: families/moge/tests/native_prepare.py
+  adapter: families/moge/reference/adapter.py  # the pinned official MoGe source (no generic adapter)
+  prepare: families/moge/reference/prepare.py
   requirements: families/moge/requirements.txt  # the family's dependencies, layered on the serving interpreter

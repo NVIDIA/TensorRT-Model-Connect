@@ -46,9 +46,9 @@ with a `candidate.build` exception is qualified for that bundle only, and the re
 | `family.py` (family accuracy cases, reference attribution, isolated re-check), `cli.py` family refresh | deleted; Acc is Section 6 only |
 | `suites._qualification_perf_records` (family performance request) | the catalog testcase (`trtmc-perf-serve payload`, i.e. `resolve_case`) plus the near-capacity request; per-model `performance.l1` overrides where a catalog request leaves work unstated |
 | `gold_metrics.coco_map` importing `benchmark_qualification.accuracy` | `pycocotools` COCOeval |
-| `perf_serving/backends/script.py` (family reference scripts via `reference_harness`) and native fallback loops (`absolute.run_native`, `generation.py`, `runner._reference_perf`) | generic adapters by operation; a family's own native pipeline in `families/<family>/tests/native_reference.py` behind the same adapter interface (Section 7) |
+| `perf_serving/backends/script.py` (family reference scripts via `reference_harness`) and native fallback loops (`absolute.run_native`, `generation.py`, `runner._reference_perf`) | generic adapters by operation; a family's own native pipeline in `families/<family>/reference/adapter.py` behind the same adapter interface (Section 7) |
 | `perf_serving reference-env` reading qualification cases | `reference-env --requirements families/<family>/requirements.txt` (the family's own dependency file) layered on the serving interpreter; `--no-build-isolation` where declared |
-| `bundles._descriptor` `model_directory` (an environment hook prepared upstream checkouts) | catalog builds with the serving interpreter; native upstream checkouts by the family's `native_prepare.py` (Section 7); a model that cannot build from its catalog entry is a recorded build failure |
+| `bundles._descriptor` `model_directory` (an environment hook prepared upstream checkouts) | catalog builds with the serving interpreter; native upstream checkouts by the family's `reference/prepare.py` (Section 7); a model that cannot build from its catalog entry is a recorded build failure |
 | tests and docs asserting family cases, windows, script backends | rewritten |
 
 Acceptance: a unit test scans `apps/aiperf_qual` and `apps/perf_serving` sources for
@@ -254,12 +254,12 @@ rework state, never a formal outcome).
 Native paths: the generic adapters in `perf_serving/backends/reference/` (model-agnostic, by operation);
 where a family's native pipeline needs its own code (SAM3, MoGe, ACT, FoundationStereo, PersonaPlex,
 Sana-WM today; any further gap the smoke run finds), the family owns it in
-`families/<family>/tests/native_reference.py` (outside `tests/benchmark`), implementing the adapter interface
+`families/<family>/reference/adapter.py`, implementing the adapter interface
 (`Adapter(spec, host).invoke(request, artifact_base)`), named by `reference.adapter` in `config/models`. The file
 imports nothing from the applications (a family must not depend on a consumer of its API, AGENTS.md): the serving
 backend hands it `host` (`perf_serving` `NativeHost`), the model-agnostic mechanics of the request's fields and
 pre-decoded input files, the timed call, output tensors and files written after it, the result, and the rejection
-of a request. A family that needs an upstream checkout provides `families/<family>/tests/native_prepare.py`,
+of a request. A family that needs an upstream checkout provides `families/<family>/reference/prepare.py`,
 run once when its reference environment is created (`reference.prepare`).
 
 ## 8. Reproducibility
@@ -355,18 +355,18 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
 - **Build exceptions** (Section 2), each named in `config/models` and in the report: DETR's catalog engine is
   796x1333 and rejects every COCO image whose DETR resize (shortest edge 800) is taller than 796 rows, so COCO runs
   on a 1333x1333 build of the same checkpoint; Fast-FoundationStereo and SANA-WM build from the upstream model
-  directory their family's `native_prepare.py` prepares (`candidate.model_directory`), as the catalog cannot build
+  directory their family's `reference/prepare.py` prepares (`candidate.model_directory`), as the catalog cannot build
   them from the Hugging Face repository alone.
-- **Native paths** (Section 7) under `families/<family>/tests/native_reference.py` (with `native_prepare.py` and
-  `native_inputs.py` next to it): the family's `tests/` directory is where the repository keeps reference code
-  (its architecture rules require family production code to be reachable from `model.py` and free of
-  environment side channels): GLM-ASR (a speech-conditioned causal
+- **Native paths** (Section 7) in `families/<family>/reference/` (`adapter.py`, with `prepare.py` and `inputs.py`
+  where needed), the family's validation code next to `tests/` rather than in it: the repository's architecture
+  rules hold `reference/` to what they hold `tests/` to (an entry point of its own, not reached from `model.py`;
+  environment access allowed, as it is no build or runtime code): GLM-ASR (a speech-conditioned causal
   LM), Magpie TTS, Canary and the Nemotron streaming ASR models (NeMo archives), DeepSeek-OCR (its own
   `model.infer`, bf16 only, so its Perf is perf-inconclusive), LocateAnything (its official loading and
   prompt contract, fp32 only), Phi-4 Multimodal (its own processor and causal LM), Nemotron Labs Diffusion
   (`ar_generate`, the catalog's autoregressive mode, which every request carries), SAM3, MoGe-2, ACT, Fast-FoundationStereo, PersonaPlex, SANA-WM, YOLOv5 / v8 / v10 / 11 (Ultralytics
   archives), Chronos-Bolt and TimesFM (no generic time-series adapter). Inputs a family must prepare itself
-  (decoded LeRobot frames, the Middlebury 700x700 profile) come from its `native_inputs.py` (`family_inputs`
+  (decoded LeRobot frames, the Middlebury 700x700 profile) come from its `reference/inputs.py` (`family_inputs`
   suites), run in its reference environment.
 - **Raw encoders**: TRTMC's `encode` returns the first-token hidden state, so the conversion parity compares that
   vector (cosine and relative L2 error), not every token.

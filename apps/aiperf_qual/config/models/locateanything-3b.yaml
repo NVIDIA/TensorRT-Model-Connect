@@ -5,7 +5,7 @@
 absolute: [refcoco]
 
 reference:
-  adapter: families/locateanything/tests/native_reference.py  # the family's official loading and prompt contract
+  adapter: families/locateanything/reference/adapter.py  # the family's official loading and prompt contract
   # The official reference runs at fp32 only (the candidate is fp16): Perf against it is perf-inconclusive.
   timing_precision: fp32
   requirements: families/locateanything/requirements.txt  # the family's dependencies, layered on the serving interpreter

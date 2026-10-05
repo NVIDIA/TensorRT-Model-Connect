@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 reference:
-  adapter: families/chronos_bolt/tests/native_reference.py  # the chronos package's pipeline (a T5 model)
+  adapter: families/chronos_bolt/reference/adapter.py  # the chronos package's pipeline (a T5 model)
   requirements: families/chronos_bolt/requirements.txt  # the family's dependencies, layered on the serving interpreter
 
 # The model's forecast window: its input columns, context, and horizon (model card / config).

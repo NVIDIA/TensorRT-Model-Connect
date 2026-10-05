@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Stereo conversion-parity inputs: the 15 Middlebury v3 trainingQ scenes (pinned archives) cropped / padded to
-the 700x700 profile by the family's preparation; ``python native_inputs.py --count N --output DIR`` prints the
+the 700x700 profile by the family's preparation; ``python inputs.py --count N --output DIR`` prints the
 first N as JSON records (left and right image paths; the ground truth rides along)."""
 
 from __future__ import annotations

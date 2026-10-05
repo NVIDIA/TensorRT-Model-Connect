@@ -5,4 +5,4 @@
 # pipeline (chat template, greedy transcript) is the reference.
 reference:
   requirements: families/glmasr/requirements.txt  # the family's dependencies, layered on the serving interpreter
-  adapter: families/glmasr/tests/native_reference.py
+  adapter: families/glmasr/reference/adapter.py

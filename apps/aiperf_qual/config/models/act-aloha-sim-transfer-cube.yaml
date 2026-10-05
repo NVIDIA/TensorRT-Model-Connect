@@ -2,6 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 reference:
-  adapter: families/lerobot_act/tests/native_reference.py  # the pinned LeRobot source (no generic adapter)
-  prepare: families/lerobot_act/tests/native_prepare.py
+  adapter: families/lerobot_act/reference/adapter.py  # the pinned LeRobot source (no generic adapter)
+  prepare: families/lerobot_act/reference/prepare.py
   requirements: families/lerobot_act/requirements.txt  # the family's dependencies, layered on the serving interpreter

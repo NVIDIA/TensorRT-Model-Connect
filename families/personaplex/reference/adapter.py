@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """PersonaPlex's native pipeline for the trtmc-perf-serve reference backend (``speak``): the pinned official
-moshi source (native_prepare.py), loaded once; per request the user audio is encoded frame by frame and the
+moshi source (reference/prepare.py), loaded once; per request the user audio is encoded frame by frame and the
 greedy LMGen answers (at most ``max_new_tokens`` speech frames), decoded to 24 kHz audio."""
 
 from __future__ import annotations

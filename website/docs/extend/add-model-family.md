@@ -13,12 +13,21 @@ families/my_family/
 ├── runtime/
 │   ├── CMakeLists.txt
 │   └── plugin.cpp
+├── reference/                # optional; the unconverted model for the AIPerf qualification
+│   ├── adapter.py            # its native pipeline, Adapter(spec, host)
+│   ├── prepare.py            # optional; one-time setup of its reference environment
+│   └── inputs.py             # optional; inputs only this family can prepare
 └── tests/
     ├── test_support.py       # dependency-free identity/default-task policy
     ├── test_e2e.py
     ├── manifests/<case>.json
     └── thresholds/<testcase>.json  # optional numeric override
 ```
+
+`reference/` is needed only when the generic Hugging Face / Diffusers adapters of `apps/perf_serving` cannot run
+the original checkpoint. It is validation code, held to the same architecture rules as `tests/`, and it imports
+nothing from the applications: the serving backend passes its mechanics as `host`
+([perf_serving README](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/perf_serving/README.md)).
 
 Families can also own their complete CLI through `cli.json` and lazy handlers.
 See [Family-Owned CLI Commands](./family-cli.md). This is independent of the

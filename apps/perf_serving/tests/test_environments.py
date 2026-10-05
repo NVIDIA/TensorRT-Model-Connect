@@ -70,7 +70,7 @@ def test_family_native_files_import_nothing_from_the_applications():
     import ast
 
     root = Path(__file__).resolve().parents[3]
-    files = sorted(root.glob("families/*/tests/native_*.py"))
+    files = sorted(root.glob("families/*/reference/*.py"))
     assert files
     for file in files:
         for node in ast.walk(ast.parse(file.read_text())):
@@ -84,8 +84,8 @@ def test_family_adapters_load_from_their_file(tmp_path):
     from trtmc_perf_serving.backends.reference import ReferenceBackend
     from trtmc_perf_serving.backends.reference.common import ReferenceSpec
 
-    adapter = tmp_path / "fam" / "native_reference.py"
-    adapter.parent.mkdir()
+    adapter = tmp_path / "fam" / "reference" / "adapter.py"
+    adapter.parent.mkdir(parents=True)
     adapter.write_text("class Adapter:\n    def __init__(self, spec, host):\n        self.spec, self.host = spec, host\n")
     backend = ReferenceBackend(ReferenceSpec(operation="world_model", model="m", adapter=str(adapter)))
     assert backend.describe()["adapter"] == "Adapter"

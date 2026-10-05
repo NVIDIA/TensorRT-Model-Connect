@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """SANA-WM's native pipeline for the trtmc-perf-serve reference backend (``world_model``): the pinned official
-SANA source and model (native_prepare.py) with its refiner and local stage-1 text encoder, loaded once; per request
+SANA source and model (reference/prepare.py) with its refiner and local stage-1 text encoder, loaded once; per request
 the image is resized and center-cropped, the action string becomes the camera trajectory and the request's
 intrinsics follow the crop, and the official pipeline renders the video (THWC frames in 0-1)."""
 

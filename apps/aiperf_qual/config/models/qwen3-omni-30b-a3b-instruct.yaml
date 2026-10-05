@@ -4,5 +4,5 @@
 absolute: [mmlu]
 
 reference:
-  adapter: families/qwen3_omni/tests/native_reference.py  # the thinker without audio, the fixed system prompt
+  adapter: families/qwen3_omni/reference/adapter.py  # the thinker without audio, the fixed system prompt
   requirements: families/qwen3_omni/requirements.txt  # the family's dependencies, layered on the serving interpreter

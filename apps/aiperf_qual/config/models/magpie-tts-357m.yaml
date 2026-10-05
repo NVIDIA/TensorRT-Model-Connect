@@ -8,5 +8,5 @@ performance:
       max_log_spectral_distance: 1000000000.0}
 
 reference:
-  adapter: families/magpie_tts/tests/native_reference.py  # NeMo's MagpieTTSModel (no generic adapter loads it)
+  adapter: families/magpie_tts/reference/adapter.py  # NeMo's MagpieTTSModel (no generic adapter loads it)
   requirements: families/magpie_tts/requirements.txt  # the family's dependencies, layered on the serving interpreter

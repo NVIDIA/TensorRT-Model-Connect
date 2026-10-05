@@ -107,7 +107,7 @@ Generic Python reference adapters exist for `generate`, `translate`, `encode`,
 whose native pipeline they cannot run (an upstream checkout such as PersonaPlex,
 MoGe, LeRobot, Fast-FoundationStereo, SANA-WM; Ultralytics archives; a
 speech-conditioned LM) is served by its family's own adapter:
-`--reference-adapter families/<family>/tests/native_reference.py`, a file defining
+`--reference-adapter families/<family>/reference/adapter.py`, a file defining
 `Adapter(spec, host)` with `invoke(request, artifact_base)`. The family file imports nothing
 from this package: `host` (`NativeHost`) carries the backend's model-agnostic mechanics (the
 request's fields and pre-decoded input files, the timed call, output tensors and files written

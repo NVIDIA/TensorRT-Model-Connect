@@ -36,7 +36,7 @@ class ReferenceSpec:
     # Adapter-specific options, e.g. {"processor_kwargs": {...}} for remote-code processors.
     options: Mapping[str, Any] = field(default_factory=dict)
     # A family's own native pipeline: a Python file defining ``Adapter(spec, host)`` with
-    # ``invoke(request, artifact_base)`` (families/<family>/tests/native_reference.py); see ``NativeHost``.
+    # ``invoke(request, artifact_base)`` (families/<family>/reference/adapter.py); see ``NativeHost``.
     adapter: str | None = None
 
     @property

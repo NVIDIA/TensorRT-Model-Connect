@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """MoGe-2's native pipeline for the trtmc-perf-serve reference backend (``infer_geometry``): the pinned official
-source (native_prepare.py) through the family's reference loader, writing the geometry files the TRTMC worker
+source (reference/prepare.py) through the family's reference loader, writing the geometry files the TRTMC worker
 writes (``<artifact>.depth.f32``, ``.points.f32``, ``.mask.u8``) and reporting their paths."""
 
 from __future__ import annotations

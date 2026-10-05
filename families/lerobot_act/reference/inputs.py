@@ -4,7 +4,7 @@
 """ACT conversion-parity inputs: recorded observations of the pinned LeRobot dataset
 (lerobot/aloha_sim_transfer_cube_human), episode 0, every eighth frame, as the camera PNG and the 14-value
 state file the control request takes. Run in the family's environment (it decodes the dataset video):
-``python native_inputs.py --count N --output DIR`` prints the records as JSON."""
+``python inputs.py --count N --output DIR`` prints the records as JSON."""
 
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """ACT's native pipeline for the trtmc-perf-serve reference backend (``control``): the pinned LeRobot source
-(native_prepare.py) through the family's official loader, one action chunk per recorded observation, reported
+(reference/prepare.py) through the family's official loader, one action chunk per recorded observation, reported
 as the TRTMC worker reports it (``actions`` row-major [step, component])."""
 
 from __future__ import annotations

@@ -2,6 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 reference:
-  adapter: families/personaplex/tests/native_reference.py  # the pinned official moshi source (no generic adapter)
-  prepare: families/personaplex/tests/native_prepare.py
+  adapter: families/personaplex/reference/adapter.py  # the pinned official moshi source (no generic adapter)
+  prepare: families/personaplex/reference/prepare.py
   requirements: families/personaplex/requirements.txt  # the family's dependencies, layered on the serving interpreter

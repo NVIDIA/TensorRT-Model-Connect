@@ -18,7 +18,7 @@ The scheme, its statistics, and its per-Task contracts are in [DESIGN.md](DESIGN
 
 | Layer | What | Model-specific? |
 |---|---|---|
-| Execution | Two HTTP servers speaking the same `/v1/tasks/{operation}` protocol: TRTMC (`trtmc-perf-serve --backend trtmc`, later `trtmc-server`) and the native reference (`--backend reference`: the generic adapter of the operation, or a family's own pipeline, `families/<family>/tests/native_reference.py`). AIPerf sends every request. | No (adapters: per family) |
+| Execution | Two HTTP servers speaking the same `/v1/tasks/{operation}` protocol: TRTMC (`trtmc-perf-serve --backend trtmc`, later `trtmc-server`) and the native reference (`--backend reference`: the generic adapter of the operation, or a family's own pipeline, `families/<family>/reference/adapter.py`). AIPerf sends every request. | No (adapters: per family) |
 | Task | `config/tasks.yaml`: per catalog Task, its benchmarks (`absolute`) and checks (`supplementary`), and Perf settings. | No |
 | Model | Derived from the catalog entry and its Task. `config/models/<profile>.yaml` holds only exceptions. | Only exceptions |
 
@@ -40,7 +40,7 @@ DESIGN.md Section 4.
 
 Conversion-parity benchmarks (`gold_metrics.PARITY`) compare each output with the native one within a
 tolerance: raw encoders' vectors, MoGe geometry, ACT action chunks, stereo disparities, PersonaPlex speech.
-Inputs a family prepares itself come from its `native_inputs.py` (`family_inputs` suites).
+Inputs a family prepares itself come from its `reference/inputs.py` (`family_inputs` suites).
 
 Checks for every model of a Task (`supplementary`): text-to-speech round-trip WER (corpus, bootstrap) and
 audio validity; GenEval-style pass rate for text-to-image families that take caller latents (the same
@@ -161,7 +161,7 @@ it).
   `benchmarks`, scored by `gold_metrics.py` or an AIPerf grader) and the Perf output check
   (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
-- Model whose native pipeline the generic adapters cannot run: `families/<family>/tests/native_reference.py`
+- Model whose native pipeline the generic adapters cannot run: `families/<family>/reference/adapter.py`
   (an `Adapter(spec, host)` with `invoke(request, artifact_base)`; it imports nothing from the applications and
   reaches the serving mechanics through `host`), named by `reference.adapter`.
 - Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in

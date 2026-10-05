@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Middlebury v3 trainingQ (the official archives), all 15 scenes cropped / padded to the 700x700 profile by the
-# family (families/fast_foundation_stereo/tests/native_inputs.py); compared with the native model's disparities.
+# family (families/fast_foundation_stereo/reference/inputs.py); compared with the native model's disparities.
 suite: middlebury-q-700-15
 version: 1
 source:
   kind: family_inputs
-  module: families/fast_foundation_stereo/tests/native_inputs.py
+  module: families/fast_foundation_stereo/reference/inputs.py
 selection: {method: first, count: 15}

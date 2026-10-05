@@ -45,7 +45,7 @@ def _family_adapter(path: str) -> type:
     file = Path(path).resolve()
     if not file.is_file():
         raise BackendUnavailable(f"family native adapter not found: {file}")
-    name = f"trtmc_family_native_{file.parent.name}"
+    name = f"trtmc_family_native_{file.parent.parent.name}"  # families/<family>/reference/adapter.py
     spec = importlib.util.spec_from_file_location(name, file)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module

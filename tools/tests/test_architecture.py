@@ -192,6 +192,16 @@ def _family_local_imports(
     return imports
 
 
+# A family's code that only validates it and never builds or runs it: its tests, and the unconverted model's
+# pipeline that the AIPerf qualification loads by path (reference/: adapter.py, prepare.py, inputs.py).
+VALIDATION_DIRECTORIES = ("tests", "reference")
+
+
+def _is_family_validation(family: Path, path: Path) -> bool:
+    parts = path.relative_to(family).parts
+    return "tests" in parts or (len(parts) > 1 and parts[0] in VALIDATION_DIRECTORIES)
+
+
 def _reachable_family_python(family: Path) -> set[Path]:
     modules = {
         _family_module_name(family, path): path
@@ -206,7 +216,7 @@ def _reachable_family_python(family: Path) -> set[Path]:
     root_paths = [
         family / "model.py",
         family / "support.py",
-        *(family / "tests").rglob("*.py"),
+        *(path for directory in VALIDATION_DIRECTORIES for path in (family / directory).rglob("*.py")),
     ]
     pending = [_family_module_name(family, path) for path in root_paths if path.is_file()]
     declaration = family / "cli.json"
@@ -1093,7 +1103,7 @@ def test_reachable_family_python_has_no_environment_or_profile_side_channel() ->
         if profile_requirements.is_dir() and any(profile_requirements.iterdir()):
             violations.append(f"{family.name}:python_profile_requirements")
         for path in family.rglob("*.py"):
-            if "tests" in path.relative_to(family).parts:
+            if _is_family_validation(family, path):
                 continue
             source = path.read_text(encoding="utf-8")
             for token in forbidden_source:
