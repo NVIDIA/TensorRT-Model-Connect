@@ -1123,6 +1123,7 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
         "BREV_CALLS": str(calls),
         "PROVISION_EXITCODE": str(provision_exitcode),
         "GPU_TYPE": "L40",
+        "GPU_PROVIDER": "auto",
         "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "2",
         "GITHUB_OUTPUT": str(output),
@@ -1318,8 +1319,22 @@ def test_community_trigger_rejects_stale_or_invalid_pr_metadata(tmp_path, fault)
         assert not output.exists()
 
 
-@pytest.mark.parametrize("lane,ref", [("stable", "main"), ("dev", "main"), ("dev", "ci/developer")])
-def test_community_lane_dispatch_preserves_snapshot_and_request_identity(tmp_path, lane, ref):
+@pytest.mark.parametrize(
+    "lane,ref,gpu_provider",
+    [
+        ("stable", "main", "auto"),
+        ("dev", "main", "auto"),
+        ("dev", "ci/developer", "auto"),
+        ("dev", "ci/developer", ""),
+        ("stable", "main", "aws"),
+        ("stable", "main", "nebius"),
+        ("dev", "ci/developer", "aws"),
+        ("dev", "ci/developer", "nebius"),
+    ],
+)
+def test_community_lane_dispatch_preserves_snapshot_and_request_identity(
+    tmp_path, lane, ref, gpu_provider
+):
     fake = tmp_path / "gh"
     fake.write_text(
         """#!/usr/bin/env python3
@@ -1358,6 +1373,7 @@ else:
             "CI_REF": ref,
             "CI_ENTRY_BRANCH": "main",
             "AUTOMATIC_GPU": "true",
+            "GPU_PROVIDER": gpu_provider,
             "STABLE_RUN_ID": "99" if lane == "stable" else "",
             "STATUS_CONTEXT": f"{lane.title()} Community CI",
             "GITHUB_SERVER_URL": "https://github.com",
@@ -1378,6 +1394,12 @@ else:
     assert payload["inputs"]["pr_number"] == "17"
     assert len(payload["inputs"]["request_id"]) == 32
     assert payload["return_run_details"] is True
+    if lane == "dev" and gpu_provider in {"aws", "nebius"}:
+        assert payload["inputs"]["gpu_provider"] == gpu_provider
+    else:
+        # Stable/main has not declared this Dev-only input. Automatic and
+        # default requests must also retain the original provider selection.
+        assert "gpu_provider" not in payload["inputs"]
     assert output.read_text() == f"run_id=42\nci_ref={ref}\n"
 
 
@@ -2012,6 +2034,7 @@ class JobHarness:
             "GITHUB_RUN_ATTEMPT": "2",
             "GITHUB_REPOSITORY": "example/repository",
             "GPU_TYPE": "L40S",
+            "GPU_PROVIDER": "auto",
             "RESERVED_INSTANCE": "trtmc-gpu-ci-123-2-r2",
             "PROVISION_EXIT": "0",
             "COORDINATOR_EXIT": "0",
@@ -2088,6 +2111,64 @@ def test_failed_blocking_reservation_stops_normal_test_admission(tmp_path, gpu_j
     )
     assert result.returncode == 0
     assert harness.events("brev") == ["delete trtmc-gpu-ci-123-2-r2"]
+
+
+@pytest.mark.parametrize(
+    "provider,expected",
+    [
+        ("auto", None),
+        ("aws", "aws"),
+        ("nebius", "nebius"),
+        ("AWS", False),
+        ("aws;$(printf unexpected-provider-command)", False),
+    ],
+)
+def test_manual_gpu_provider_reaches_the_helper_as_one_argument(
+    tmp_path, gpu_job, provider, expected
+):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    choice = workflow[True]["workflow_dispatch"]["inputs"]["gpu_provider"]
+    assert choice["type"] == "choice"
+    assert choice["default"] == "auto"
+    assert choice["options"] == ["auto", "aws", "nebius"]
+    reserve = next(step for step in gpu_job["steps"] if step.get("id") == "reserve")
+    assert reserve["env"]["GPU_PROVIDER"] == "${{ inputs.gpu_provider || 'auto' }}"
+    arguments = tmp_path / "helper-arguments"
+    script = r"""
+python3() {
+  printf '%s\0' "$@" > "$HELPER_ARGUMENTS"
+}
+""" + reserve["run"]
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "HELPER_ARGUMENTS": str(arguments),
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2",
+            "GPU_TYPE": "L40S",
+            "GPU_PROVIDER": provider,
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if expected is False:
+        assert result.returncode != 0
+        assert not arguments.exists()
+        assert "unexpected-provider-command" not in result.stdout
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = arguments.read_bytes().decode().split("\0")[:-1]
+    assert argv[:3] == ["-m", "tools.brev_exec", "provision"]
+    if expected is None:
+        assert "--provider" not in argv
+    else:
+        assert argv.count("--provider") == 1
+        assert argv[argv.index("--provider") + 1] == expected
+    assert argv[argv.index("--gpu") + 1] == "L40S"
+    assert argv[argv.index("--instance") + 1] == "trtmc-gpu-ci-123-2"
 
 
 @pytest.mark.parametrize("coordinator_exit", [0, 17])

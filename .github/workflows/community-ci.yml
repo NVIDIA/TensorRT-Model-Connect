@@ -28,6 +28,12 @@ on:
         required: false
         default: false
         type: boolean
+      gpu_provider:
+        description: Dev GPU provider for manual qualification
+        required: false
+        default: auto
+        type: choice
+        options: [auto, aws, nebius]
       ci_lane:
         description: CI implementation role (filled automatically)
         required: false
@@ -249,6 +255,7 @@ jobs:
           CI_ENTRY_BRANCH: ${{ github.ref_name }}
           AUTOMATIC_GPU: ${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}
           RUN_GPU_SMOKE: ${{ inputs.run_gpu_smoke || false }}
+          GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
         run: |
           set -euo pipefail
           if [ "$LANE" = stable ] && [ -n "${STABLE_RUN_ID:-}" ] \
@@ -271,6 +278,7 @@ jobs:
             --arg lane "$LANE" \
             --arg snapshot "$SOURCE_SNAPSHOT" \
             --arg dispatch_nonce "$dispatch_nonce" \
+            --arg gpu_provider "${GPU_PROVIDER:-auto}" \
             --argjson run_gpu_smoke "${RUN_GPU_SMOKE:-false}" \
             '{
               ref: $ref,
@@ -282,7 +290,8 @@ jobs:
                 request_id: $dispatch_nonce,
                 run_gpu_smoke: $run_gpu_smoke
               }
-            }' > "$payload"
+            } | if $lane == "dev" and $gpu_provider != "auto"
+                then .inputs.gpu_provider = $gpu_provider else . end' > "$payload"
           dispatched="$(gh api --method POST \
             -H 'X-GitHub-Api-Version: 2026-03-10' \
             "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/dispatches" \
@@ -899,15 +908,24 @@ jobs:
         id: reserve
         env:
           GPU_TYPE: ${{ vars.TRTMC_COMMUNITY_GPU_TYPE || 'L40' }}
+          GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
         run: |
           set -euo pipefail
           instance_name="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gpu_provider="${GPU_PROVIDER:-auto}"
+          provider_args=()
+          case "$gpu_provider" in
+            auto) ;;
+            aws|nebius) provider_args=(--provider "$gpu_provider") ;;
+            *) echo "::error::Unknown GPU provider for qualification."; exit 1 ;;
+          esac
           # Publish the deterministic name before creation so a timeout after
           # allocation cannot suppress best-effort cleanup.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
           python3 -m tools.brev_exec provision \
             --instance "$instance_name" \
             --gpu "$GPU_TYPE" \
+            "${provider_args[@]}" \
             --timeout 1200 \
             --attempts 3 \
             --fallback-provider aws

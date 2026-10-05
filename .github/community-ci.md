@@ -64,6 +64,9 @@ PR snapshot; with dual running enabled it also publishes the paired Stable resul
 Selecting `main` manually starts Stable and, when enabled, Dev. Keep the internal
 snapshot, lane, and request inputs at their defaults. Manual starts require
 maintain or admin access. `run_gpu_smoke` retains the existing manual GPU opt-in.
+For Dev qualification, `gpu_provider` can select AWS or Nebius explicitly.
+Its default `auto` retains Brev's normal selection. The override is forwarded
+only to Dev executions; Stable does not receive this experimental input.
 
 ## Dev GPU experiment
 
