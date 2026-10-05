@@ -89,11 +89,19 @@ It then checks SSH, cloud-init completion when installed, the Docker daemon,
 host GPU visibility, and GPU access from a digest-pinned CUDA probe container.
 Brev's create exit code alone is not a readiness guarantee.
 
+CI requests Jupyter disabled because the job uses Docker rather than notebooks.
+Transient inventory reads are retried on the same VM within the reservation
+deadline. While Brev still reports initialization in progress, bounded read-only
+diagnostics report cloud-init, service states, and fixed setup markers without
+printing credentials, environment values, or complete bootstrap logs. These
+diagnostics do not admit project or model execution.
+
 The reservation has one 20-minute deadline, including CLI waits and failed-attempt
 cleanup. It may try up to three instance names, using the AWS fallback for later
 attempts. Each name is published before creation so teardown can target a partial
 allocation. A replacement is admitted only after the failed allocation's deletion
-has been confirmed; uncertain cleanup fails the reservation.
+has been confirmed in Brev's inventory; uncertain cleanup fails the reservation.
+Failed deletion requests are retried within the cleanup budget.
 
 Once reservation succeeds, dependency setup and model validation use that VM.
 The workflow invokes the family coordinator once and preserves its failure
