@@ -52,6 +52,13 @@ bool engine_mask_is_int32(const ITrtModule& module) {
     return false;
 }
 
+void require_encoder_output(const std::vector<float>& values, int32_t actual_len, int32_t hidden) {
+    if (hidden <= 0 || actual_len <= 0 ||
+        static_cast<std::size_t>(actual_len) > values.size() / static_cast<std::size_t>(hidden)) {
+        throw std::runtime_error("EncoderPipeline: encoder output shape mismatch");
+    }
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
@@ -100,9 +107,7 @@ EncoderPipeline::run(const trtmc::internal::TextToPooledFeaturesRequest& request
 
     const int32_t hidden = infer_output_hidden_dim(*encoder_);
     const auto actual_len = static_cast<int32_t>(ids.size());
-    if (hidden <= 0 || actual_len <= 0 || static_cast<int32_t>(raw_floats.size()) < hidden) {
-        return result;
-    }
+    require_encoder_output(raw_floats, actual_len, hidden);
 
     result.values.assign(raw_floats.begin(), raw_floats.begin() + hidden);
     return result;
@@ -130,10 +135,7 @@ EncoderPipeline::run(const trtmc::internal::TextToTokenFeaturesRequest& request,
     const auto actual_len = static_cast<int32_t>(ids.size());
 
     trtmc::internal::TokenFeaturesResult result;
-    if (hidden <= 0 || actual_len <= 0 ||
-        static_cast<int32_t>(raw_floats.size()) < actual_len * hidden) {
-        return result;
-    }
+    require_encoder_output(raw_floats, actual_len, hidden);
 
     // Build the [actual_len, hidden] feature matrix.
     result.features.values.assign(raw_floats.begin(), raw_floats.begin() + actual_len * hidden);
@@ -171,10 +173,7 @@ EncoderPipeline::run(const trtmc::internal::TextToEmbeddingRequest& request,
 
     const int32_t hidden = infer_output_hidden_dim(*encoder_);
     const auto actual_len = static_cast<int32_t>(ids.size());
-    if (hidden <= 0 || actual_len <= 0 ||
-        static_cast<int32_t>(raw_floats.size()) < actual_len * hidden) {
-        return result;
-    }
+    require_encoder_output(raw_floats, actual_len, hidden);
 
     result.values = mean_pool_and_normalize(raw_floats.data(), actual_len, hidden);
     return result;

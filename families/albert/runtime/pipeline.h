@@ -5,11 +5,12 @@
 
 #pragma once
 
-// EncoderPipeline: single-pass encoder models (ALBERT embedding, encoding, reranking).
-// Implements IModel with three semantic Task interfaces:
-//   text_to_token_features  (was: encoding)
-//   text_to_embedding       (was: embedding)
-//   text_pair_to_relevance  (was: reranking)
+// EncoderPipeline: single-pass ALBERT models.
+// Implements IModel with four semantic Task interfaces:
+//   text_to_pooled_features (primary; preserves legacy encoding CLS output)
+//   text_to_token_features  (full token hidden states)
+//   text_to_embedding       (mean pooled and L2 normalized)
+//   text_pair_to_relevance  (cross-encoder score)
 
 #include "families/albert/runtime/tokenizer.h"
 #include "trtmc/internal/features.h"

@@ -5,16 +5,18 @@
 
 /*
  * Minimal C++ SDK consumer for the albert family.
- * Exercises text_to_pooled_features, text_to_token_features, text_to_embedding, and text_pair_to_relevance
- * through the public C++ convenience wrappers (trtmc/trtmc.hpp + trtmc/features.hpp).
+ * Exercises text_to_pooled_features, text_to_token_features, text_to_embedding, and
+ * text_pair_to_relevance through the public C++ convenience wrappers (trtmc/trtmc.hpp +
+ * trtmc/features.hpp).
  *
  * Usage:
  *   sdk_consumer_albert_cpp <bundle_path> <runtime_root>
  *
  * Environment:
- *   TRTMC_ALBERT_TEXT       input text for pooled/token-features and embedding (default: "hello world")
- *   TRTMC_ALBERT_QUERY      query string for relevance test (default: "What is AI?")
- *   TRTMC_ALBERT_DOCUMENT   document string for relevance test (default: "AI is intelligence.")
+ *   TRTMC_ALBERT_TEXT - Defaults to hello world.
+ *   TRTMC_ALBERT_QUERY - Defaults to an AI
+ * question.
+ *   TRTMC_ALBERT_DOCUMENT - Defaults to an AI statement.
  */
 
 #include <cstdlib>
@@ -65,7 +67,7 @@ int main(int argc, char** argv) {
             trtmc::TextToTokenFeaturesRequest req{text};
             auto result = tok_task.run(req);
 
-            if (result.features().count == 0)
+            if (result.features().values.empty())
                 throw std::runtime_error("text_to_token_features: empty feature matrix");
             if (result.tokens().empty())
                 throw std::runtime_error("text_to_token_features: empty token list");
