@@ -26,3 +26,4 @@ candidate_replicas: 8                    # TRTMC's Acc answers: copies of the se
 acc_mps: true                            # the Acc copies share the GPU's SMs through their own CUDA MPS daemon
 acc_overlap: true                        # both sides answer Acc at once under one MPS daemon (L1 stays single)
 gpu_lock: /state/gpu.lock                # serializes timing phases with bundle builds on this host
+ledger: apps/aiperf_qual/formal/2026-10/ledger.json   # run deadlines: 3x a profile's ledger time, >= 10 min

@@ -39,12 +39,30 @@ from .suites import SELECTION_SEED, build_suite, request_sha
 WORKLOAD_MARGIN_PERCENT = 5.0
 # A request answers within seconds; whole-benchmark runs of large native models take hours.
 RUN_TIMEOUT_S = 12 * 3600
+# DESIGN.md Section 9: a deadline is three times the ledger's time, at least ten minutes.
+DEADLINE_FACTOR, MIN_DEADLINE_S = 3, 600
+
+
+@functools.lru_cache(maxsize=None)
+def _ledger(path: str) -> dict[str, float]:
+    return {name: float(seconds) for name, seconds in json.loads(Path(path).read_text()).items()}
 
 
 def run_timeout(environment: Environment, model: Mapping[str, Any]) -> float:
-    """An AIPerf run's deadline: the ledger's for the profile (environment ``deadlines``), else RUN_TIMEOUT_S."""
-    deadline = (environment.values.get("deadlines") or {}).get(model.get("catalog_profile"))
-    return float(deadline) if deadline else RUN_TIMEOUT_S
+    """An AIPerf run's deadline: the profile's in the environment's ``deadlines``, else three times its time in the
+    environment's ``ledger`` (a ledger.json; relative to the repository), at least ten minutes, else
+    RUN_TIMEOUT_S. Every run of a profile gets its whole-profile deadline, so no single run is cut short."""
+    profile = model.get("catalog_profile")
+    deadline = (environment.values.get("deadlines") or {}).get(profile)
+    if deadline:
+        return float(deadline)
+    ledger = environment.values.get("ledger")
+    if ledger:
+        path = Path(ledger) if Path(ledger).is_absolute() else environment.path("repo") / ledger
+        seconds = _ledger(str(path)).get(str(profile))
+        if seconds is not None:
+            return max(MIN_DEADLINE_S, DEADLINE_FACTOR * seconds)
+    return RUN_TIMEOUT_S
 
 
 @functools.lru_cache(maxsize=None)

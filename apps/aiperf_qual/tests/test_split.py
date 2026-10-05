@@ -120,6 +120,19 @@ def test_the_roots_merge_only_when_disjoint_complete_formal_and_alike(tmp_path):
     assert any("not run under this assignment" in problem for problem in split.merge_check(assignment, [one, stale]))
 
 
+def test_a_runs_deadline_comes_from_the_ledger(tmp_path):
+    """DESIGN.md Section 9: three times the profile's ledger time, at least ten minutes; an explicit deadline wins;
+    a profile the ledger does not list keeps the default."""
+    from trtmc_aiperf_qual import absolute
+
+    (tmp_path / "ledger.json").write_text(json.dumps({"big": 1000, "small": 60}))
+    environment = Environment({"repo": str(tmp_path), "ledger": "ledger.json", "deadlines": {"pinned": 42}})
+    timeout = lambda name: absolute.run_timeout(environment, {"catalog_profile": name})  # noqa: E731
+    assert timeout("big") == 3000 and timeout("small") == 600 and timeout("pinned") == 42
+    assert timeout("unlisted") == absolute.RUN_TIMEOUT_S
+    assert absolute.run_timeout(Environment({}), {"catalog_profile": "big"}) == absolute.RUN_TIMEOUT_S
+
+
 def test_the_bundle_that_was_qualified_is_identified_by_its_bytes(tmp_path):
     bundle = tmp_path / "m.bundle"
     bundle.write_bytes(b"engine")
