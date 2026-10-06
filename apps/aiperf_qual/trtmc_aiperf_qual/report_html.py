@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .campaign import SIGNAL_NAMES, SIGNALS, ms, request_label, signal, signal_reason
+from .campaign import SIGNAL_NAMES, SIGNALS, ms, reported_perf, request_label, signal, signal_reason
 from .report import acc_value, counted
 
 EVIDENCE = ("report.md", "report.json", "build.json", "build/build.log", "error.json", "phase-errors.log",
@@ -172,7 +172,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
         body.append(f"<tr class='m' data-result='{results[profile]}' data-k='{_e(key)}'><td>{_dot(results[profile])}</td>"
                     f"<td><b>{_e(profile)}</b><br><small>{_e(row.get('task') or '-')}</small></td>"
                     f"<td>{_accuracy_cell(row.get('accuracy', []))}</td>"
-                    f"<td>{_performance_cell(profile, row.get('perf', []))}</td>"
+                    f"<td>{_performance_cell(profile, reported_perf(row))}</td>"
                     f"<td class='reason'>{_e(signal_reason(profile, row))}"
                     + (f"<br>rerun on the fixed harness: {_dot(reruns[profile])}" if profile in reruns else "")
                     + f"</td><td class='evidence'>{details}</td></tr>")
@@ -189,8 +189,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                 + f"<p><b>{len(rows)} models · {tally['green'] + tally['yellow']} pass (Green + Yellow)</b> · "
                 f"{_e(counted_line)}</p>{legend}"
                 "<p class='muted'>Accuracy: each benchmark's value on both sides (TRTMC · native). Performance: server "
-                "model-call time p50 of each timed request (catalog: the catalog's own request; long prompt: a prompt "
-                "filling the bundle's sequence length). Expand <i>evidence</i> for gates, failing samples with both "
+                "model-call time p50 of the catalog's own request (other timed requests are in the evidence). Expand <i>evidence</i> for gates, failing samples with both "
                 "outputs, timing details, files, and the reproduction command.</p>"
                 "<input id='q' placeholder='filter (model, Task, result, host)' oninput='f()'><table><thead><tr>"
                 "<th>Result</th><th>Model / Task</th><th>Accuracy (TRTMC · native)</th><th>Performance p50 (TRTMC · "

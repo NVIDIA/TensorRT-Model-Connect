@@ -341,14 +341,19 @@ def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
 SIGNALS = ("white", "red", "yellow", "green")
 SIGNAL_NAMES = {"white": "White", "red": "Red", "yellow": "Yellow", "green": "Green"}
 NO_VERDICT = {"error", "config-error", "build-failed", "not-run", "excluded"}
-NOT_COMPARED = {"not-comparable", "not-covered", "perf-inconclusive"}
+NOT_COMPARED = {"not-comparable", "not-covered"}
+
+
+def reported_perf(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The timed requests the results report: the catalog's own (the near-capacity request stays in the evidence,
+    owner's choice for now)."""
+    return [item for item in row.get("perf", []) if "near-capacity" not in str(item.get("request") or "")]
 
 
 def request_label(profile: str, item: Mapping[str, Any]) -> str:
-    """A timed request named without its model: ``catalog``, ``long prompt`` (the near-capacity request)."""
+    """A timed request named without its model (``catalog``, ``catalog-en``)."""
     name = str(item.get("request") or item.get("reference_mode") or "")
-    name = name[len(profile) + 1:] if name.startswith(profile + "-") else name
-    return name.replace("catalog-near-capacity", "long prompt")
+    return name[len(profile) + 1:] if name.startswith(profile + "-") else name
 
 
 def _judged(row: Mapping[str, Any], status: str) -> list[Mapping[str, Any]]:
@@ -360,10 +365,11 @@ def signal(row: Mapping[str, Any]) -> str:
     category = row["category"]
     if category in NO_VERDICT:
         return "white"
-    lights = [item.get("light") for item in row.get("perf", [])]
+    perf = reported_perf(row)
+    lights = [item.get("light") for item in perf]
     if category == "acc-issue" or _judged(row, "fail") or "red" in lights:
         return "red"
-    if category in NOT_COMPARED or "white" in lights:
+    if category in NOT_COMPARED or "white" in lights or (category == "perf-inconclusive" and not perf):
         return "white"
     if category == "acc-inconclusive" or "yellow" in lights:
         return "yellow"
@@ -372,7 +378,7 @@ def signal(row: Mapping[str, Any]) -> str:
 
 def signal_reason(profile: str, row: Mapping[str, Any]) -> str:
     """Why the row is not Green, in one plain sentence per benchmark or request."""
-    result, perf = signal(row), row.get("perf", [])
+    result, perf = signal(row), reported_perf(row)
     if result == "green":
         return plain(row.get("notes", ""))[:300]
     if row["category"] in NO_VERDICT:
@@ -492,7 +498,7 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
         row = rows[profile]
         reason = signal_reason(profile, row).replace("|", "/").replace("\n", " ")
         lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {row['root']} | "
-                     f"{_accuracy_text(row['accuracy'])} | {_perf_text(profile, row['perf'])} | {reason} |")
+                     f"{_accuracy_text(row['accuracy'])} | {_perf_text(profile, reported_perf(row))} | {reason} |")
     return "\n".join(lines) + "\n", counts
 
 

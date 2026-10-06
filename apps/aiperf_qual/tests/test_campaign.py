@@ -719,3 +719,25 @@ def test_perf_is_white_when_the_native_model_ran_at_another_precision():
 def test_long_prompts_are_not_taken_for_asset_paths(tmp_path):
     long_prompt = "Context filler. " * 100
     assert bundles._absolute_assets([{"prompt": long_prompt}], tmp_path) == [{"prompt": long_prompt}]
+
+
+def test_results_follow_the_owners_four_colours_on_the_catalog_request():
+    def row(category, lights, acc=()):
+        return {"category": category, "accuracy": list(acc),
+                "perf": [{"request": f"m-{name}", "light": light} for name, light in lights.items()]}
+
+    green = {"catalog": "green"}
+    assert campaign.signal(row("pass", green)) == "green"
+    assert campaign.signal(row("perf-issue", {"catalog": "green", "catalog-near-capacity": "yellow"})) == "green"
+    assert campaign.signal(row("perf-issue", {"catalog": "yellow"})) == "yellow"  # about equal: a pass
+    assert campaign.signal(row("perf-issue", {"catalog": "red"})) == "red"
+    assert campaign.signal(row("perf-inconclusive", {"catalog": "white"})) == "white"
+    assert campaign.signal(row("acc-inconclusive", green)) == "yellow"
+    assert campaign.signal(row("acc-issue", green)) == "red"
+    assert campaign.signal(row("not-comparable", green)) == "white"
+    assert campaign.signal(row("error", green)) == "white" and campaign.signal(row("build-failed", {})) == "white"
+    informational = {"suite": "replay", "status": "fail", "informational": True}
+    assert campaign.signal(row("pass", green, [informational])) == "green"
+    shown = campaign.reported_perf(row("pass", {"catalog": "green", "catalog-near-capacity": "red"}))
+    assert [campaign.request_label("m", item) for item in shown] == ["catalog"]
+    assert campaign.signal_reason("m", row("perf-issue", {"catalog": "yellow"})) == "catalog: TRTMC about equal to native"
