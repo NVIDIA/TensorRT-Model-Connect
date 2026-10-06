@@ -34,6 +34,13 @@ with a `candidate.build` exception is qualified for that bundle only, and the re
   all 1,140 fit 512. Problems are filtered by their **rendered** length (the chat template applied, plus
   special and reserved output tokens), not a fixed allowance; the report lists retained problems per
   subject.
+- An input TRTMC still rejects as beyond the bundle's shipped capacity (HTTP 422 `backend_rejected_request` whose
+  message exceeds a prompt or cache length or an input limit: "prompt exceeds the prefill profile", "exceeds the
+  model's fixed KV cache capacity", Canary's 30-second single segment; for example a family that adds its own
+  system prompt) is out of scope like an unfitted prompt: the problem leaves the comparison on both sides, and the
+  entry reports how many did (`out_of_capacity`, with TRTMC's message). Only TRTMC's rejections count, and not in a
+  corpus whose rows refer to each other (STS pairs, a retrieval query and its documents), where the problem stays
+  missing. Any other failed request stays a missing answer (an `error`).
 - A near-capacity request per text model (Section 4.3) exercises the shipped length.
 - The v7 `-qual` rebuilds (4,096 / 2,048 tokens) are not repeated: 17 families could not serve them;
   that remains a tracked TRTMC finding and a later `long_context` check, not part of this verdict.
@@ -422,7 +429,8 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   `*_path` input; the MoGe, Fast-FoundationStereo, and ACT adapters read the preloaded data), and output artifacts
   (MoGe, Fast-FoundationStereo, SANA-WM) are written after it, as on the TRTMC side. Time-series references return
   their forecast values inline, as TRTMC does.
-- **Missing outputs** are missing answers (an `error`), never a wrong answer or a zero score: generated media
+- **Missing outputs** are missing answers (an `error`), never a wrong answer or a zero score (except a problem
+  beyond the bundle's capacity, Section 2): generated media
   (GenEval, edits) without an image, and for every corpus metric an output without the field it reads, well
   formed (a forecast of the horizon's length with finite values, a finite vector, a mask of the image's size).
 - **Smoke coverage**: a sampled model's smoke run keeps every configured seed (one problem), so the seed-mean
@@ -453,7 +461,9 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   families): a TRTMC finding, reported as a build failure.
 - **Replicas for Acc answers**: the native adapter (`native_replicas`) and the TRTMC server (`candidate_replicas`)
   answer Acc problems as up to eight copies (GB300) that fit the GPU's free memory (the first copy measures one copy's
-  footprint; a copy that fails to start leaves the ones running). Each copy loads the same checkpoint or bundle and
+  footprint; a copy that fails to start leaves the ones running). Native copies that run out of GPU memory on some
+  problems (a large input on several copies at once) answer again on their own as half as many copies, down to one
+  (`copies_reduced` in the entry). Each copy loads the same checkpoint or bundle and
   answers one request at a time, with nothing batched across requests, so the answers equal one server's; the pilot
   measures the throughput gain. L1 is timed on a single server started after the copies stopped, and the Acc
   requests' own model-call times (`workload_perf`) are white when either side ran as copies. Smoke runs use one

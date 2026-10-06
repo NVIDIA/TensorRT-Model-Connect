@@ -73,8 +73,8 @@ def _accuracy(items: Sequence[Mapping[str, Any]]) -> str:
             f"<tr><td>{_e(f.get('sample_id') or f.get('conversation_id'))}</td><td>{_e(f.get('explanation'))}</td>"
             f"<td><pre>{_e(f.get('actual'))}</pre></td><td><pre>{_e(f.get('expected'))}</pre></td></tr>"
             for f in item.get("failures", []))
-        error = "".join(f"<pre>{_e(text)}</pre>" for text in (item.get("error"), "; ".join(item.get("reasons", [])))
-                        if text)
+        error = "".join(f"<pre>{_e(text)}</pre>" for text in (item.get("error"), "; ".join(item.get("reasons", [])),
+                                                              "; ".join(item.get("notes", []))) if text)
         table = (f"<table><tr><th>sample</th><th>reason</th><th>TRTMC</th><th>native</th></tr>{rows}</table>"
                  if rows else "")
         parts.append(f"<div>{head}{error}{table}</div>")

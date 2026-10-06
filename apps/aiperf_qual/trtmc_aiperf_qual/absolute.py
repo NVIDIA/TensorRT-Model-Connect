@@ -278,7 +278,8 @@ def _arguments(model: Mapping[str, Any], item: Mapping[str, Any], service: Mappi
 
 
 def _suite_side(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
-                item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], out: Path) -> dict[str, Any]:
+                item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], out: Path, *,
+                capacity: bool = False) -> dict[str, Any]:
     """A gold suite through AIPerf's trtmc_task endpoint: the observation and timing of every problem."""
     out.parent.mkdir(parents=True, exist_ok=True)
     inputs = out.parent / f"{out.name}.inputs.jsonl"
@@ -289,9 +290,14 @@ def _suite_side(environment: Environment, service: Mapping[str, Any], model: Map
                                         *_targets(service, f"/v1/tasks/{model['operation']}"), "--input-file", str(inputs), "--custom-dataset-type", "single_turn",
                                         "--dataset-sampling-strategy", "sequential",
                                         "--request-count", str(len(problems))], timeout_s=run_timeout(environment, model))
-    by_request, timing_by_request = {}, {}
+    by_request, timing_by_request, rejected, failing = {}, {}, {}, []
     for record in run.raw_records():
         if record.get("status") != 200 or not record.get("responses"):
+            reason = capacity_rejection(record) if capacity else None
+            if reason and "request" in (record.get("payload") or {}):
+                rejected[request_sha(record["payload"]["request"])] = reason
+            else:
+                failing.append(record)
             continue
         body = json.loads(record["responses"][-1]["text"])
         key = request_sha(record["payload"]["request"])
@@ -302,14 +308,23 @@ def _suite_side(environment: Environment, service: Mapping[str, Any], model: Map
                     if problem["request_sha"] in by_request}
     found = {index: timing_by_request[problem["request_sha"]] for index, problem in enumerate(problems)
              if problem["request_sha"] in timing_by_request}
-    return {"observations": {"greedy": observations}, "exit": {"greedy": run.exit_code}, "timings": {"greedy": found}}
+    side = {"observations": {"greedy": observations}, "exit": {"greedy": run.exit_code}, "timings": {"greedy": found}}
+    out_of_capacity = {index: rejected[problem["request_sha"]] for index, problem in enumerate(problems)
+                       if problem["request_sha"] in rejected and problem["request_sha"] not in by_request}
+    if out_of_capacity:
+        side["rejected"] = {"greedy": out_of_capacity}
+    if failing:
+        side["failed"] = {"greedy": failed_reason(failing, len(failing))}
+    return side
 
 
 def run_side(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
-             item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], out: Path) -> dict[str, Any]:
-    """Graded records per repetition ({seed or "greedy": {problem index: record}}) and the AIPerf exits."""
+             item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], out: Path, *,
+             capacity: bool = False) -> dict[str, Any]:
+    """Graded records per repetition ({seed or "greedy": {problem index: record}}) and the AIPerf exits. With
+    ``capacity`` (TRTMC's side), problems the bundle rejects as beyond its capacity are recorded apart."""
     if item.get("metric"):
-        return _suite_side(environment, service, model, item, problems, out / item["suite"])
+        return _suite_side(environment, service, model, item, problems, out / item["suite"], capacity=capacity)
     count = len(problems)
     runs: dict[str, Any] = {"records": {}, "exit": {}, "timings": {}}
     for seed in item.get("seeds") or [None]:  # smoke too: the seed-mean scorer of a sampled model runs
@@ -317,14 +332,21 @@ def run_side(environment: Environment, service: Mapping[str, Any], model: Mappin
         run = run_aiperf(environment, out / f"{item['suite']}-{name}", _arguments(model, item, service, count, seed),
                          env=selection_environment(environment, model, item), timeout_s=run_timeout(environment, model))
         raw = run.raw_records()
-        # AIPerf grades a failed request as an empty (wrong) answer: it is a missing answer instead.
-        failed = {int(record["metadata"]["session_num"]) for record in raw if unanswered(record)}
+        # A problem the bundle cannot hold leaves the comparison on both sides (``out_of_capacity``); AIPerf grades
+        # any other failed request as an empty (wrong) answer: it is a missing answer instead.
+        rejected = {int(record["metadata"]["session_num"]): reason for record in raw
+                    if capacity and (reason := capacity_rejection(record))}
+        failing = [record for record in raw
+                   if unanswered(record) and int(record["metadata"]["session_num"]) not in rejected]
+        failed = {int(record["metadata"]["session_num"]) for record in failing}
         runs["records"][name] = {int(record["session_num"]): record for record in run.accuracy_records()
-                                 if int(record["session_num"]) not in failed}
+                                 if int(record["session_num"]) not in failed | set(rejected)}
         runs["exit"][name] = run.exit_code
         runs["timings"][name] = timings(raw)
+        if rejected:
+            runs.setdefault("rejected", {})[name] = rejected
         if failed:
-            runs.setdefault("failed", {})[name] = failed_reason(raw, len(failed))
+            runs.setdefault("failed", {})[name] = failed_reason(failing, len(failed))
     return runs
 
 
@@ -335,6 +357,31 @@ def unanswered(record: Mapping[str, Any]) -> bool:
         return True
     error = record.get("error")
     return bool(error) and not (isinstance(error, Mapping) and error.get("type") == "InvalidInferenceResultError")
+
+
+# Words of TRTMC's prompt-length rejections (the near-capacity request's search).
+CAPACITY_WORDS = ("exceed", "capacity", "exhaust")
+# TRTMC's rejection of an input beyond the bundle's shipped capacity: exceeding its prompt or cache length or an
+# input limit ("prompt exceeds the prefill profile", "exceeds the model's fixed KV cache capacity", "exceeded its
+# fixed cache length", "exceeds the bundle's single-segment limit"), not any other rejected request.
+CAPACITY_LIMIT = re.compile(r"\b(exceed|exhaust)\w*\b.*\b(prefill profile|kv ?cache|cache length|max_length|max_seq_len"
+                            r"|max_input_duration|segment limit|engine capacity)", re.IGNORECASE)
+
+
+def capacity_rejection(record: Mapping[str, Any]) -> str | None:
+    """TRTMC's message when it rejected the request (HTTP 422, ``backend_rejected_request``) because the input
+    exceeds the bundle's capacity, else None (DESIGN.md Section 2: such a problem is out of scope)."""
+    error = record.get("error")
+    if record.get("status") != 422 or not isinstance(error, Mapping):
+        return None
+    try:  # the server's JSON error body inside AIPerf's error
+        body = json.loads(error.get("message") or "")["error"]
+    except (TypeError, ValueError, KeyError):
+        return None
+    message = str(body.get("message") or "") if isinstance(body, Mapping) else ""
+    if body.get("code") != "backend_rejected_request" or not CAPACITY_LIMIT.search(message):
+        return None
+    return message[:300]
 
 
 def failed_reason(raw_records: Sequence[Mapping[str, Any]], count: int) -> str:
@@ -577,6 +624,49 @@ def judge(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], candid
     return entry
 
 
+def rejected(side: Mapping[str, Any]) -> dict[int, str]:
+    """The problems a side's backend rejected as beyond the bundle's capacity, in any repetition."""
+    return {index: reason for found in (side.get("rejected") or {}).values() for index, reason in found.items()}
+
+
+def _kept(side: Mapping[str, Any], keep: Sequence[int]) -> dict[str, Any]:
+    """``side`` with only the problems ``keep`` (old indices), renumbered in that order."""
+    new = {old: index for index, old in enumerate(keep)}
+    renumbered = {key: {name: {new[old]: value for old, value in found.items() if old in new}
+                        for name, found in (side.get(key) or {}).items()}
+                  for key in ("records", "observations", "timings") if key in side}
+    return {**side, **renumbered, "rejected": {}}
+
+
+# Corpus metrics whose rows refer to each other (sentence pairs, a query and its documents): a row cannot leave alone.
+STRUCTURED_METRICS = {"sts_spearman", "retrieval_ndcg", "retrieval_ndcg10"}
+
+
+def judge_in_capacity(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], candidate: Mapping[str, Any],
+                      native: Mapping[str, Any]) -> dict[str, Any]:
+    """``judge`` over the problems within the bundle's capacity: one TRTMC rejected as exceeding it (prompt or
+    cache length, an input limit) leaves the comparison on both sides, and the entry reports how many did
+    (DESIGN.md Section 2). In a corpus whose rows refer to each other it stays a missing answer."""
+    beyond = rejected(candidate)
+    if not beyond:
+        return judge(item, problems, candidate, native)
+    note = (f"{len(beyond)} of {len(problems)} problems exceed the TRTMC bundle's capacity"
+            f" ({next(iter(beyond.values()))})")
+    if item.get("metric") in STRUCTURED_METRICS:
+        entry = judge(item, problems, candidate, native)
+        return {**entry, "out_of_capacity": len(beyond), "notes": [*entry.get("notes", []), note]}
+    keep = [index for index in range(len(problems)) if index not in beyond]
+    note += " and are left out on both sides"
+    if not keep:
+        return {**error_entry(item, len(problems), f"every problem exceeds the bundle's capacity: {note}"),
+                "out_of_capacity": len(beyond)}
+    entry = judge(item, [problems[index] for index in keep], _kept(candidate, keep), _kept(native, keep))
+    failures = [{**failure, "sample_id": f"{task}/{keep[int(index)]}"}  # the request's own index in the raw evidence
+                for failure in entry.get("failures", []) for task, index in [failure["sample_id"].rsplit("/", 1)]]
+    return {**entry, **({"failures": failures} if "failures" in entry else {}), "out_of_capacity": len(beyond),
+            "notes": [*entry.get("notes", []), note]}
+
+
 def error_entry(item: Mapping[str, Any], expected: int, error: str) -> dict[str, Any]:
     return {"suite": item["suite"], "source": "absolute", "benchmark": item.get("plugin") or item.get("metric"),
             "status": "error",
@@ -609,7 +699,7 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
                out: Path, probe_request: Mapping[str, Any] | None = None, *, mps_env: Mapping[str, str] | None = None,
                precisions: Sequence[str] | None = None, started: Callable[[Mapping[str, Any]], None] | None = None,
                go: threading.Event | None = None, finished: threading.Event | None = None,
-               release: threading.Event | None = None) -> dict[str, Any]:
+               release: threading.Event | None = None, copies: int | None = None) -> dict[str, Any]:
     """Every benchmark on the native model: the reference adapter, eager, at the first precision of
     ``timing_precisions`` it serves. The adapter runs as up to ``native_replicas`` (environment) copies
     that fit on the GPU, each answering one problem at a time: the answers do not change, its model-call
@@ -619,7 +709,7 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
     errors = []
     for precision in precisions or timing_precisions(model["reference"]):
         try:
-            count = 1 if environment.values.get("smoke") else int(environment.values.get("native_replicas") or 1)
+            count = copies or native_copies(environment)
             with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{precision}",
                                   count=count, mode="eager", precision=precision, python=python,
                                   keep_artifacts=keeps_artifacts(model), mps_env=mps_env) as service:
@@ -646,6 +736,27 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
     raise RuntimeError("; ".join(errors)[:1500])
 
 
+def native_copies(environment: Environment) -> int:
+    return 1 if environment.values.get("smoke") else int(environment.values.get("native_replicas") or 1)
+
+
+def run_native_alone(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],
+                     out: Path, probe_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The native side on its own (no overlap, or it failed there). When its copies ran out of GPU memory on
+    some problems (a large input on each of several copies at once), it answers again as half as many copies,
+    down to one, each attempt in a directory of its own."""
+    copies, reduced = native_copies(environment), []
+    while True:
+        where = out / f"native-{copies}-copies" if reduced else out
+        native = run_native(environment, model, python, plans, where, probe_request, copies=copies)
+        started = int(native.get("replicas") or copies)  # fewer may have fit the GPU
+        gap = incomplete(model, plans, native["runs"])
+        if not gap or started == 1 or "out of memory" not in gap.lower():
+            return {**native, **({"copies_reduced": "; ".join(reduced)[:600]} if reduced else {})}
+        reduced.append(f"{started} copies: {gap}"[:300])
+        copies = max(1, started // 2)
+
+
 def incomplete(model: Mapping[str, Any], plans: Mapping[str, Sequence], runs: Mapping[str, Any]) -> str | None:
     """Why one side's Acc runs did not answer every problem (failed or missing requests, a suite not run), or
     None. Wrong answers are answers: only what never came back counts."""
@@ -657,7 +768,8 @@ def incomplete(model: Mapping[str, Any], plans: Mapping[str, Sequence], runs: Ma
             return f"{item['suite']}: {next(iter(side['failed'].values()))}"
         answered = side.get("observations") if "observations" in side else side.get("records")
         for name, found in (answered or {}).items():
-            if len(found) < len(plans[item["suite"]]):
+            beyond = len((side.get("rejected") or {}).get(name) or {})  # out of scope: not a missing answer
+            if len(found) + beyond < len(plans[item["suite"]]):
                 return f"{item['suite']} ({name}): {len(found)} of {len(plans[item['suite']])} answered"
         if not answered:
             return f"{item['suite']}: no answers"
@@ -750,7 +862,8 @@ def overlapped_acc(environment: Environment, model: Mapping[str, Any], python: s
 
 def run_candidate(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
                   plans: Mapping[str, Sequence], out: Path) -> dict[str, Any]:
-    return {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]], out / "absolute-trtmc")
+    return {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]], out / "absolute-trtmc",
+                                    capacity=True)
             for item in model["absolute"]}
 
 
@@ -765,10 +878,11 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
             results.append({**error_entry(item, len(problems), f"native side: {native_error or 'not run'}"),
                             "candidate_replicas": candidate_replicas, "candidate_mps": candidate_mps})
         else:
-            entry = judge(item, problems, candidate[item["suite"]], runs[item["suite"]])
+            entry = judge_in_capacity(item, problems, candidate[item["suite"]], runs[item["suite"]])
             entry["native"] = {"backend": native.get("backend"), "precision": native.get("precision"), "mode": "eager",
                                "replicas": native.get("replicas", 1), "mps": bool(native.get("mps")),
-                               **({"fallback_from": native["fallback_from"]} if native.get("fallback_from") else {})}
+                               **({"fallback_from": native["fallback_from"]} if native.get("fallback_from") else {}),
+                               **({"copies_reduced": native["copies_reduced"]} if native.get("copies_reduced") else {})}
             concurrent = [f"{side} ran as {copies} concurrent copies" for side, copies in
                           (("native", native.get("replicas", 1)), ("TRTMC", candidate_replicas)) if copies > 1]
             concurrent += ["both sides answered at once"] if concurrent_sides else []

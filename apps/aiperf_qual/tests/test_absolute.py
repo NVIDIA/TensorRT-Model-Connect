@@ -1061,7 +1061,7 @@ def test_both_sides_answer_at_once_trtmc_sized_after_the_native_copies(tmp_path,
     def daemon(environment, directory):
         yield {"CUDA_MPS_PIPE_DIRECTORY": "p"}
 
-    def side(environment, service, model, item, problems, out):
+    def side(environment, service, model, item, problems, out, *, capacity=False):
         note(("answering", service["url"]))
         time.sleep(0.2)
         note(("answered", service["url"]))
@@ -1300,7 +1300,7 @@ def test_no_copy_leaves_the_shared_daemon_while_the_other_side_answers(tmp_path,
     def daemon(environment, directory):
         yield {"CUDA_MPS_PIPE_DIRECTORY": "p"}
 
-    def side(environment, service, model, item, problems, out):
+    def side(environment, service, model, item, problems, out, *, capacity=False):
         time.sleep(1.5 if service["url"] == slower else 0.1)
         note(("answered", service["url"]))
         return {"records": {"greedy": {0: {}}}}
@@ -1369,7 +1369,7 @@ def test_an_interrupt_while_waiting_for_the_other_side_cancels_it_before_teardow
     def daemon(environment, directory):
         yield {"CUDA_MPS_PIPE_DIRECTORY": "p"}
 
-    def side(environment, service, model, item, problems, out):
+    def side(environment, service, model, item, problems, out, *, capacity=False):
         for _ in range(100 if service["url"] == "reference" else 1):  # native answers slowly, cancellably
             cancel.check()
             time.sleep(0.05)
@@ -1415,3 +1415,141 @@ def test_rerank_documents_keep_their_head_so_each_pair_fits_the_bundle(monkeypat
     assert fitted["request"]["documents"][0].startswith("w1 w2") and fitted["request"]["documents"][1] == short
     assert fitted["request_sha"] == request_sha(fitted["request"]) != sample["request_sha"]
     assert absolute._pairs_fitted({"candidate": {}, "reference": {}}, [sample], "{query}{document}") == [sample]
+
+
+def _rejection(session, message):
+    body = '{"error":{"message":"%s","type":"invalid_request_error","code":"backend_rejected_request"}}' % message
+    return {"metadata": {"session_num": session}, "status": 422, "responses": [],
+            "error": {"code": 422, "type": "Unprocessable Entity", "message": body}}
+
+
+def test_a_problem_beyond_the_bundles_capacity_leaves_both_sides_and_is_reported(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from trtmc_aiperf_qual.config import Environment
+
+    raw = [{"metadata": {"session_num": index}, "status": 200, "responses": []} for index in range(3)]
+    raw.append(_rejection(3, "Qwen3-Omni Thinker prompt exceeds its prefill profile"))
+    graded = [{"session_num": index, "passed": True} for index in range(3)] + [{"session_num": 3, "passed": False}]
+    run = SimpleNamespace(raw_records=lambda: raw, accuracy_records=lambda: graded, exit_code=1)
+    model = {"candidate": {"max_sequence_length": 256, "checkpoint": "m"}, "reference": {}}
+    environment = Environment({"hf_datasets_cache": str(tmp_path)})
+    with patch.object(absolute, "run_aiperf", return_value=run):
+        trtmc = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{}] * 4, tmp_path, capacity=True)
+        native = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{}] * 4, tmp_path)
+    assert "rejected" not in native and "prefill profile" in native["failed"]["greedy"]  # only TRTMC's side
+    assert "failed" not in trtmc and list(trtmc["records"]["greedy"]) == [0, 1, 2]
+    assert trtmc["rejected"] == {"greedy": {3: "Qwen3-Omni Thinker prompt exceeds its prefill profile"}}
+    assert absolute.incomplete({"absolute": [ITEM]}, {ITEM["suite"]: [{}] * 4}, {ITEM["suite"]: trtmc}) is None
+    problems = [{"task": "t", "gold": " A"}] * 4
+    assert absolute.judge_in_capacity(ITEM, problems, side({0: True, 1: True, 2: True, 3: True}), native)[
+        "status"] == "error"  # a native rejection removes nothing
+    native = side({0: True, 1: True, 2: True, 3: False})
+    entry = absolute.judge_in_capacity(ITEM, problems, trtmc, native)
+    assert entry["expected_samples"] == entry["samples"] == 3 and entry["out_of_capacity"] == 1
+    assert entry["metrics"]["trtmc_score"] == entry["metrics"]["native_score"] == 100.0
+    worse = absolute.judge_in_capacity(ITEM, problems, {**trtmc, "records": {"greedy": {
+        0: {"passed": True}, 1: {"passed": True}, 2: {"passed": False, "actual": "B"}}}}, native)
+    assert worse["failures"][0]["sample_id"] == "t/2"
+    first = {**trtmc, "rejected": {"greedy": {0: "exceeds its prefill profile"}},
+             "records": {"greedy": {1: {"passed": False, "actual": "B"}, 2: {"passed": True}, 3: {"passed": True}}}}
+    shifted = absolute.judge_in_capacity(ITEM, problems, first, side({0: True, 1: True, 2: True, 3: True}))
+    assert shifted["failures"][0]["sample_id"] == "t/1"  # the request's own index, not its renumbered one
+    assert "1 of 4 problems exceed the TRTMC bundle's capacity" in entry["notes"][0]
+    assert "prefill profile" in entry["notes"][0]
+    everything = {**trtmc, "records": {"greedy": {}}, "rejected": {"greedy": {i: "exceeds" for i in range(4)}}}
+    assert absolute.judge_in_capacity(ITEM, problems, everything, native)["status"] == "error"
+
+
+def test_any_other_rejection_stays_a_missing_answer():
+    record = _rejection(0, "TensorRT enqueue failed")
+    assert absolute.capacity_rejection(record) is None
+    for message in ("Boltz-2 residue metadata exceeds atom inventory", "Llama prefill engine has no valid profile capacity",
+                    "SANA-WM native text cache update exceeds cache tensor size"):
+        assert absolute.capacity_rejection(_rejection(0, message)) is None
+    for message in ("Qwen sequence exceeds the model's fixed KV cache capacity", "seq_len exceeds max_length",
+                    "Canary input exceeds the bundle's single-segment limit of 30.000000 seconds"):
+        assert absolute.capacity_rejection(_rejection(0, message)) == message
+    assert absolute.capacity_rejection({**_rejection(0, "exceeds"), "status": 200, "error": None}) is None
+    plain = {"metadata": {"session_num": 0}, "status": 500, "error": {"message": "the context capacity is full"}}
+    assert absolute.capacity_rejection(plain) is None  # not the backend's rejected-request code
+
+
+def test_gold_suite_outputs_beyond_capacity_are_dropped_from_the_corpus_on_both_sides():
+    item = {"suite": "librispeech-test-clean", "metric": "wer", "gate": {"margin": 0.2, "relative_margin": 0.03}}
+    problems = [{"gold": "a b c d e f g h i j", "task": "t"}] * 20
+    same = {i: {"text": "a b c d e f g h i j"} for i in range(20)}
+    native = {"observations": {"greedy": same}, "exit": {}, "timings": {"greedy": {}}}
+    trtmc = {"observations": {"greedy": {i: same[i] for i in range(18)}}, "exit": {}, "timings": {"greedy": {}},
+             "rejected": {"greedy": {18: "Canary input exceeds the bundle's single-segment limit of 30 seconds",
+                                     19: "CanaryKvCache batched decoder exceeded its fixed cache length"}}}
+    entry = absolute.judge_in_capacity(item, problems, trtmc, native)
+    assert entry["status"] != "error" and entry["samples"] == entry["expected_samples"] == 18
+    assert entry["out_of_capacity"] == 2 and "2 of 20 problems" in entry["notes"][0]
+    assert absolute.judge(item, problems, {**trtmc, "rejected": {}}, native)["status"] == "error"  # unaccounted
+    pairs = {"suite": "stsb", "metric": "sts_spearman", "gate": {"margin": 1.0}}
+    paired = absolute.judge_in_capacity(pairs, problems, trtmc, native)  # rows that pair up cannot leave alone
+    assert paired["status"] == "error" and paired["out_of_capacity"] == 2 and "2 of 20" in paired["notes"][0]
+
+
+def test_a_gold_suite_keeps_why_a_request_failed(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.suites import request_sha
+
+    problems = [{"request": {"image_path": f"{index}.png"}} for index in range(2)]
+    problems = [{**problem, "request_sha": request_sha(problem["request"])} for problem in problems]
+    ok = {"status": 200, "payload": {"request": problems[0]["request"]},
+          "responses": [{"text": '{"trtmc_observation": {"text": "a"}}'}], "metadata": {"session_num": 0}}
+    oom = {"status": 500, "payload": {"request": problems[1]["request"]}, "responses": [],
+           "error": {"message": "OutOfMemoryError: CUDA out of memory"}, "metadata": {"session_num": 1}}
+    run = SimpleNamespace(raw_records=lambda: [ok, oom], exit_code=1)
+    item = {"suite": "ocrbench", "metric": "contains", "gate": {}}
+    model = {"operation": "generate", "reference": {}, "candidate": {}}
+    with patch.object(absolute, "run_aiperf", return_value=run):
+        found = absolute.run_side(Environment({}), {"url": "u"}, model, item, problems, tmp_path)
+    assert list(found["observations"]["greedy"]) == [0] and "out of memory" in found["failed"]["greedy"]
+    plans = {"ocrbench": problems}
+    assert "out of memory" in absolute.incomplete({"absolute": [item]}, plans, {"ocrbench": found})
+
+
+def test_native_copies_out_of_memory_answer_again_as_half_as_many(tmp_path):
+    from unittest.mock import patch
+
+    from trtmc_aiperf_qual.config import Environment
+
+    attempts = []
+
+    def run_native(environment, model, python, plans, out, probe_request=None, *, copies=None, **kwargs):
+        attempts.append((copies, out))
+        oom = copies > 2
+        side = {"records": {"greedy": {0: {}} if oom else {0: {}, 1: {}}}}
+        if oom:
+            side["failed"] = {"greedy": "1 requests failed: OutOfMemoryError: CUDA out of memory"}
+        return {"backend": "reference", "runs": {"s": side}, "replicas": min(copies, fit)}
+
+    fit = 8
+
+    model, plans = {"absolute": [{"suite": "s"}]}, {"s": [{}, {}]}
+    with patch.object(absolute, "run_native", run_native):
+        native = absolute.run_native_alone(Environment({"native_replicas": 8}), model, "python", plans, tmp_path)
+    assert [copies for copies, _ in attempts] == [8, 4, 2] and native["replicas"] == 2
+    assert attempts[0][1] == tmp_path and attempts[1][1] == tmp_path / "native-4-copies"
+    assert "8 copies" in native["copies_reduced"] and "out of memory" in native["copies_reduced"]
+    attempts.clear()
+    fit = 3  # only three copies fit: the next attempt halves what started, not the configured eight
+    with patch.object(absolute, "run_native", run_native):
+        absolute.run_native_alone(Environment({"native_replicas": 8}), model, "python", plans, tmp_path)
+    assert [copies for copies, _ in attempts] == [8, 1]
+
+    def other_failure(*args, copies=None, **kwargs):
+        attempts.append((copies, None))
+        return {"runs": {"s": {"records": {"greedy": {0: {}}}, "failed": {"greedy": "HTTP 500: bad input"}}}}
+
+    attempts.clear()
+    with patch.object(absolute, "run_native", other_failure):
+        absolute.run_native_alone(Environment({"native_replicas": 8}), model, "python", plans, tmp_path)
+    assert [copies for copies, _ in attempts] == [8]  # only running out of memory makes fewer copies help
