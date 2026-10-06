@@ -1,0 +1,81 @@
+{
+  "schema": "trtmc.canvas-padding-classification/v1",
+  "predicate": "family runtime source that resizes an image and places it on a fixed engine canvas with constant fill / aspect-preserving pad / letterbox, so engine input contains non-image pixels; classified by whether the consumer is padding-sensitive without a mask or the pad is undone/matches reference",
+  "instructions": "Every families/*/runtime source that matches the padded-canvas predicate in tools/tests/test_canvas_padding_contracts.py must have an entry here. Statuses: CONFIRMED_SAME_MECHANISM (needs a guard), CANDIDATE_NEEDS_VALIDATION (owner-local reference-parity check pending), INTENTIONAL_EXCEPTION, NOT_APPLICABLE. Move a candidate only with owner-local evidence.",
+  "families": {
+    "deepseek_ocr": {
+      "status": "CANDIDATE_NEEDS_VALIDATION",
+      "evidence": "aspect_preserve_chw zero-pad to square (top-left) before vision encoder; Owner-local padding behaviour vs. the family's HF/reference preprocessing and vision-encoder padding sensitivity has not been run; pad-to-square path is reference-dependent."
+    },
+    "detr": {
+      "status": "CONFIRMED_SAME_MECHANISM",
+      "evidence": "families/detr/runtime/image_preprocess_seam.cpp zero-fills fixed canvas; model.py has no pixel_mask input; pipeline.cpp scales boxes by original size; issue #1546 AP 45.4 vs 0.5",
+      "guard": {
+        "any_of": [
+          "resized_h\\s*!=\\s*out_h\\s*\\|\\|\\s*resized_w\\s*!=\\s*out_w[^}]*require padding",
+          "add_input\\(\\s*[\\\"']pixel_mask[\\\"']"
+        ],
+        "files": [
+          "families/detr/runtime/image_preprocess_seam.cpp",
+          "families/detr/model.py"
+        ]
+      }
+    },
+    "fast_foundation_stereo": {
+      "status": "INTENTIONAL_EXCEPTION",
+      "evidence": "stereo_pipeline.cpp kPadTop/kPadLeft edge pad inside an explicit 700x700 contract; rejects other sizes (invalid_argument 'requires 700x700 rectified images')"
+    },
+    "internvl": {
+      "status": "CANDIDATE_NEEDS_VALIDATION",
+      "evidence": "aspect_preserve_chw / pad_center_chw; Owner-local padding behaviour vs. the family's HF/reference preprocessing and vision-encoder padding sensitivity has not been run; pad-to-square path is reference-dependent."
+    },
+    "lance": {
+      "status": "CANDIDATE_NEEDS_VALIDATION",
+      "evidence": "aspect_preserve_chw / pad_center_chw; Owner-local padding behaviour vs. the family's HF/reference preprocessing and vision-encoder padding sensitivity has not been run; pad-to-square path is reference-dependent."
+    },
+    "locateanything": {
+      "status": "CANDIDATE_NEEDS_VALIDATION",
+      "evidence": "aspect_preserve_chw / pad_center_chw; Owner-local padding behaviour vs. the family's HF/reference preprocessing and vision-encoder padding sensitivity has not been run; pad-to-square path is reference-dependent."
+    },
+    "phi4_multimodal": {
+      "status": "CANDIDATE_NEEDS_VALIDATION",
+      "evidence": "aspect_preserve_chw / pad_center_chw; Owner-local padding behaviour vs. the family's HF/reference preprocessing and vision-encoder padding sensitivity has not been run; pad-to-square path is reference-dependent."
+    },
+    "qwen_image": {
+      "status": "NOT_APPLICABLE",
+      "evidence": "pipeline.h 'zero-pad' concerns text-encoder hidden states with an explicit attention_mask, not image pixels"
+    },
+    "qwen_vl": {
+      "status": "CANDIDATE_NEEDS_VALIDATION",
+      "evidence": "aspect_preserve_merge_group_chw selected in model.py when fixed_h != fixed_w, zero-pad to fixed profile; Owner-local padding behaviour vs. the family's HF/reference preprocessing and vision-encoder padding sensitivity has not been run; pad-to-square path is reference-dependent."
+    },
+    "rt_detr_v2": {
+      "status": "NOT_APPLICABLE",
+      "evidence": "unmerged PR #1579 only; direct resize, no padding; must be re-scanned if merged (gate INV covers families/* automatically)"
+    },
+    "sam": {
+      "status": "CANDIDATE_NEEDS_VALIDATION",
+      "evidence": "sam_image_preprocess_seam.h longest-side resize + top-left zero pad of normalized pixels, no mask; expected to mirror the SAM reference processor (pad after normalize) but not verified here. Owner-local padding behaviour vs. the family's HF/reference preprocessing and vision-encoder padding sensitivity has not been run; pad-to-square path is reference-dependent."
+    },
+    "sam2": {
+      "status": "CANDIDATE_NEEDS_VALIDATION",
+      "evidence": "sam2_preprocess.cpp/.cu use direct Pillow-style resize to engine contract size; no canvas padding found by static scan; not run"
+    },
+    "yolo11": {
+      "status": "NOT_APPLICABLE",
+      "evidence": "letterbox pad undone in pipeline"
+    },
+    "yolov10": {
+      "status": "NOT_APPLICABLE",
+      "evidence": "letterbox pad undone in pipeline"
+    },
+    "yolov5": {
+      "status": "NOT_APPLICABLE",
+      "evidence": "letterbox pad with pad_value; pipeline undoes pad_x/pad_y and scale; conv detector with no positional padding sensitivity contract"
+    },
+    "yolov8": {
+      "status": "NOT_APPLICABLE",
+      "evidence": "letterbox pad undone in pipeline.cpp (removes padding then scale)"
+    }
+  }
+}

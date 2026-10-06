@@ -123,6 +123,7 @@ class SourceQualityChecks:
                 "tools/tests/test_community_ci.py",
                 "tools/tests/test_public_source_hygiene.py",
                 "tools/tests/test_new_ci.py",
+                "tools/tests/test_canvas_padding_contracts.py",
                 "tools/tests/test_pr_metadata.py",
                 "-q",
                 "-p",

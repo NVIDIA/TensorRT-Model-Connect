@@ -594,7 +594,9 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     expected_tools -= migrated_qualification
     expected_tool_tests = {
         "tools/tests/__init__.py",
+        "tools/tests/canvas_padding_classification.json",
         "tools/tests/test_architecture.py",
+        "tools/tests/test_canvas_padding_contracts.py",
         "tools/tests/test_coderabbit_config.py",
         "tools/tests/test_community_ci.py",
         "tools/tests/test_community_gpu_ci.py",

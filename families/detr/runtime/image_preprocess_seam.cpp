@@ -114,6 +114,9 @@ std::vector<float> preprocess_detr_image(const float* image_pixels, int32_t imag
         throw std::invalid_argument(
             "detr input resize dimensions exceed the engine input dimensions");
     }
+    // The engine exposes no pixel_mask input, so zero padding would be read as image content
+    // (position embedding and attention) and boxes are scaled by the original image size.
+    // Fail closed instead of silently producing wrong boxes (issue #1546).
     if (resized_h != out_h || resized_w != out_w) {
         throw std::invalid_argument(
             "detr input resize dimensions require padding, but the engine has no pixel_mask input");
