@@ -230,14 +230,15 @@ def test_summary_merges_result_roots(tmp_path):
     (first / "report.json").write_text(json.dumps({
         "task": "text_generation", "verdict": {"category": "pass"},
         "accuracy": [{"suite": "mmlu", "passed": 10, "samples": 10, "required_passes": 9}],
-        "performance_l1": [{"reference_mode": "eager", "light": "green", "speedup": 2.5}]}))
+        "performance_l1": [{"reference_mode": "eager", "light": "green", "speedup": 2.5,
+                            "candidate": {"p50_ms": 4.0}, "reference": {"p50_ms": 10.0}}]}))
     failed = tmp_path / "gb300-2/b"
     failed.mkdir(parents=True)
     (failed / "build.json").write_text(json.dumps({"task": "classification", "status": "failed",
                                                    "reason": "error: checkpoint is gated"}))
     text, counts = campaign.summary([tmp_path / "gb300-1", tmp_path / "gb300-2"])
     assert counts == {"pass": 1, "build-failed": 1}
-    assert "| a | text_generation | gb300-1 | pass | mmlu 10/10 (need 9) | eager green 2.50x |" in text
+    assert "| a | text_generation | gb300-1 | pass | mmlu 10/10 within tolerance (need 9) | eager green: TRTMC 4.0 ms, native 10.0 ms |" in text
     assert "| b | classification | gb300-2 | build-failed |" in text and "checkpoint is gated" in text
 
 

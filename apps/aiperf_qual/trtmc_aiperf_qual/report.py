@@ -33,6 +33,49 @@ def counted(item: Mapping[str, Any], limit: int = 3) -> str:
     return ": ".join(part for part in (samples, ", ".join(values)) if part) or "—"
 
 
+# What a gold-scored entry's score is, by its metric (right/wrong benchmarks score the percent answered right).
+SCORE_NAMES = {"wer": "WER %", "chrf": "chrF++", "coco_map": "COCO mAP", "miou": "mIoU %", "mask_iou": "mask IoU %",
+               "sts_spearman": "Spearman x100", "rerank_ndcg": "nDCG", "retrieval_ndcg": "nDCG",
+               "retrieval_ndcg10": "nDCG@10", "forecast_mse": "MSE", "precomputed_mean": "mean score"}
+
+
+METRIC_NAMES = {"candidate_vs_native_psnr_db": "PSNR vs native (dB)", "candidate_vs_native_ssim": "SSIM vs native",
+                "candidate_vs_reference_psnr_db": "PSNR vs fp32 (dB)"}
+
+
+def score_name(item: Mapping[str, Any]) -> str:
+    benchmark = str(item.get("benchmark") or "")
+    if benchmark in SCORE_NAMES:
+        return SCORE_NAMES[benchmark]
+    if "(" in benchmark and benchmark.rstrip(")").rsplit("(", 1)[-1] in SCORE_NAMES:  # an AIPerf corpus metric
+        return SCORE_NAMES[benchmark.rstrip(")").rsplit("(", 1)[-1]]
+    if (item.get("metrics") or {}).get("units") is not None:
+        return benchmark.split(" (")[0] or "score"
+    return "accuracy %"
+
+
+def values(item: Mapping[str, Any]) -> str:
+    """Both sides' values of an Acc entry and what they cover, without test statistics: ``accuracy %: TRTMC 70.62,
+    native 70.67 (1947 of 2241 problems)``, ``400/400 within tolerance``."""
+    metrics = item.get("metrics") or {}
+    expected, samples = item.get("expected_samples"), item.get("samples")
+    if "trtmc_score" in metrics:
+        count = metrics["units"] if metrics.get("units") is not None else samples
+        of = f" of {expected}" if expected and samples is not None and samples < expected else ""
+        unit = "items" if metrics.get("units") is not None else "problems"
+        return (f"{score_name(item)}: TRTMC {_fmt(metrics['trtmc_score'], 2)}, native {_fmt(metrics['native_score'], 2)}"
+                f" ({count}{of} {unit})")
+    if item.get("required_passes") is not None:
+        return f"{item.get('passed')}/{samples or item['required_passes']} within tolerance"
+    found = [f"{METRIC_NAMES.get(name, name)} {value:.4g}" for name, value in metrics.items()
+             if isinstance(value, float) and (name in METRIC_NAMES or not name.startswith("native_vs"))][:3]
+    if found:
+        return ", ".join(found)
+    if item.get("passed") is not None and samples:
+        return f"{item['passed']}/{samples}"
+    return f"{samples} of {expected} answered" if expected else "—"
+
+
 def _media_l2(l2: Mapping[str, Any]) -> list[str]:
     speedup = f" · TRTMC {l2['speedup']:.2f}x faster per call" if l2.get("speedup") else ""
     memory = f", peak memory {l2['memory_ratio']:.2f}x native" if l2.get("memory_ratio") else ""

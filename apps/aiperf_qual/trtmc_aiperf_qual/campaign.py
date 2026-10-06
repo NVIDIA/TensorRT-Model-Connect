@@ -29,7 +29,7 @@ from . import bundles, retention
 from .bundles import prefetch
 from .config import Environment
 from .models import checkpoints
-from .report import counted
+from .report import values
 from .services import reference_python
 
 KEPT_ASIDE = re.compile(r"\.\d{10}$")  # <profile>.<unix time> of a previous run
@@ -325,13 +325,17 @@ def _accuracy_text(items: Sequence[Mapping[str, Any]]) -> str:
         need = (f"need {item['required_passes']}" if item.get("required_passes") is not None
                 else f"gate {json.dumps(item.get('gate', {}))}")
         status = f"{item['status']} " if item.get("status") else ""
-        return f"{item['suite']} {status}{counted(item)} ({need}{extra})"
+        return f"{item['suite']} {status}{values(item)} ({need}{extra})"
     return "; ".join(one(item) for item in items)
 
 
 def _perf_text(items: Sequence[Mapping[str, Any]]) -> str:
-    return ", ".join(f"{item['reference_mode']}{'/' + item['request'] if item.get('request') else ''} {item['light']}"
-                     + (f" {item['speedup']:.2f}x" if item.get("speedup") else "") for item in items)
+    def ms(side: Mapping[str, Any] | None) -> str:
+        value = (side or {}).get("p50_ms")
+        return f"{value:.1f} ms" if isinstance(value, (int, float)) else "—"
+
+    return ", ".join(f"{item.get('request') or item['reference_mode']} {item['light']}: TRTMC {ms(item.get('candidate'))}, "
+                     f"native {ms(item.get('reference'))}" for item in items)
 
 
 def run_context(roots: Sequence[Path]) -> str:

@@ -13,10 +13,11 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .report import counted
+from .report import counted, values
 
 EVIDENCE = ("report.md", "report.json", "build.json", "build/build.log", "error.json", "phase-errors.log",
             "candidate/server.log")
@@ -143,34 +144,49 @@ def _status_class(status: str) -> str:
 
 
 def _accuracy_cell(items: Sequence[Mapping[str, Any]]) -> str:
-    """Each benchmark's status and its scores (TRTMC vs native, or passes of a parity check)."""
+    """Each benchmark's status and both sides' values (or the passes of a parity check)."""
     lines = [f'<span class="{_status_class(str(item.get("status", "")))}">{_e(item.get("suite"))}: '
              f'{_e(item.get("status", "—"))}</span>' + (" <small>(informational)</small>" if item.get("informational")
-                                                         else "") + f"<br><small>{_e(counted(item))}</small>"
+                                                         else "") + f"<br><small>{_e(values(item))}</small>"
              for item in items]
     return "<br>".join(lines) or '<span class="muted">—</span>'
 
 
+def _time(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{value:.0f} ms" if value >= 100 else f"{value:.1f} ms" if value >= 1 else f"{value:.3f} ms"
+
+
 def _performance_cell(items: Sequence[Mapping[str, Any]]) -> str:
-    """Each timed request's light and TRTMC's speedup over the native model."""
+    """Each timed request's light and both sides' server model-call time (p50)."""
     lines = []
     for item in items:
         light = item.get("light", "")
-        speedup = f" {item['speedup']:.2f}x" if isinstance(item.get("speedup"), (int, float)) else ""
-        lines.append(f"<span class='light' style='background:{LIGHT_COLORS.get(light, '#6e7781')}'>{_e(light)}</span>"
-                     f"{_e(speedup)} <small>{_e(item.get('request') or item.get('reference_mode') or '')}</small>")
+        candidate, reference = item.get("candidate") or {}, item.get("reference") or {}
+        lines.append(f"<span class='light' style='background:{LIGHT_COLORS.get(light, '#6e7781')}'>{_e(light)}</span> "
+                     f"<small>{_e(item.get('request') or item.get('reference_mode') or '')}</small><br>"
+                     f"TRTMC {_e(_time(candidate.get('p50_ms')))} · native {_e(_time(reference.get('p50_ms')))}"
+                     + (f" <small>({_e(reference['precision'])})</small>" if reference.get("precision") else ""))
     return "<br>".join(lines) or '<span class="muted">—</span>'
 
 
+def _plain(text: str) -> str:
+    """A reason without the server's JSON error envelope: its message only."""
+    return re.sub(r'\{"error":\{"message":"((?:[^"\\]|\\.)*)".*?\}\}', r"\1", text)
+
+
 def _reason(row: Mapping[str, Any]) -> str:
-    """The first reason the category is not a pass: a failed build or run, a benchmark, then a timed request."""
+    """The first reason the category is not a pass: a failed build or run, a benchmark, then a timed request
+    (its verdict only; the times are in the Performance column)."""
     if row.get("category") == "pass":
         return ""
     found = [str(item.get("error") or "; ".join(item.get("reasons", []))) for item in row.get("accuracy", [])
              if item.get("status") != "pass" and not item.get("informational")]
-    found += ["; ".join(item.get("reasons", [])) for item in row.get("perf", []) if item.get("light") != "green"]
+    found += [f"{item.get('request') or item.get('reference_mode')}: {item['reasons'][0].split(':')[0]}"
+              for item in row.get("perf", []) if item.get("light") != "green" and item.get("reasons")]
     found = [text for text in [row.get("notes", ""), *found] if text]
-    return found[0][:300] if found else ""
+    return _plain(found[0])[:300] if found else ""
 
 
 def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], rank: Mapping[str, int],
@@ -208,8 +224,8 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                 "verdict, not a failed gate. Expand <i>evidence</i> for gates, failing samples with both outputs, Perf "
                 "details, files, and the reproduction command.</p>"
                 f"<table class='counts'>{summary}</table><input id='q' placeholder='filter (model, Task, category, host)' "
-                "oninput='f()'><table><thead><tr><th>Model</th><th>Task</th><th>Accuracy</th><th>Performance (speedup "
-                "vs native)</th><th>Result / reason</th><th>Evidence</th></tr></thead><tbody>"
+                "oninput='f()'><table><thead><tr><th>Model</th><th>Task</th><th>Accuracy (TRTMC, native)</th><th>Performance "
+                "(server model-call time p50)</th><th>Result / reason</th><th>Evidence</th></tr></thead><tbody>"
                 f"{''.join(body)}</tbody></table>")
     output.write_text(document)
     return output
