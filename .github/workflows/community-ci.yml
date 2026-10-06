@@ -907,28 +907,44 @@ jobs:
       - name: Reserve a GPU instance
         id: reserve
         env:
-          GPU_TYPE: ${{ vars.TRTMC_COMMUNITY_GPU_TYPE || 'L40' }}
+          INSTANCE_TYPE: g6.4xlarge
           GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
         run: |
           set -euo pipefail
           instance_name="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          lease_file="$RUNNER_TEMP/trtmc-gpu-ci-lease.json"
           gpu_provider="${GPU_PROVIDER:-auto}"
-          provider_args=()
+          instance_type="${INSTANCE_TYPE:-g6.4xlarge}"
+          recovery_args=()
           case "$gpu_provider" in
-            auto) ;;
-            aws|nebius) provider_args=(--provider "$gpu_provider") ;;
+            auto|aws) ;;
+            nebius)
+              instance_type=gpu-l40s-a.1gpu-16vcpu-64gb
+              recovery_args=(--recover-nebius-start-limit)
+              ;;
             *) echo "::error::Unknown GPU provider for qualification."; exit 1 ;;
           esac
-          # Publish the deterministic name before creation so a timeout after
-          # allocation cannot suppress best-effort cleanup.
+          # The helper persists its lease before creating one exact catalog
+          # type. The deterministic name also covers cancellation before upload.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
           python3 -m tools.brev_exec provision \
             --instance "$instance_name" \
-            --gpu "$GPU_TYPE" \
-            "${provider_args[@]}" \
+            --instance-type "$instance_type" \
+            --disk-gb 500 \
+            --min-free-disk-gb 200 \
+            --lease-file "$lease_file" \
+            "${recovery_args[@]}" \
             --timeout 1200 \
-            --attempts 3 \
-            --fallback-provider aws
+            --attempts 1
+
+      - name: Preserve the GPU instance lease
+        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gpu-ci-lease-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Build the GPU image and validate the exact PR merge
         id: test
@@ -1022,8 +1038,7 @@ jobs:
             echo "::endgroup::"
           }
 
-          # The blocking reservation is the only stage that may replace a VM.
-          # Setup or family failures must not enter another provisioning cycle.
+          # Setup and family failures stay on this single reserved instance.
           retry_backoff brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git config remote.origin.url https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || { capture_git_fetch_diagnostics; exit 1; }
           # The host coordinator and container entrypoint belong to the chosen
           # CI commit. Neither imports contributor code outside the container.
@@ -1058,6 +1073,7 @@ jobs:
             --instance "$INSTANCE_NAME" \
             --log /tmp/gpu-ci-output.log \
             --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --timeout 2700 \
             -- sudo env \
             "TRTMC_GPU_SCOPE=$SCOPE" \
             "TRTMC_GPU_FAMILIES=$FAMILIES" \
@@ -1090,10 +1106,23 @@ jobs:
       - name: Always tear down the GPU instance
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
         env:
-          # The blocking reservation publishes each attempted name before
-          # creation, including the verified replacement returned on success.
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
-        run: brev delete "$INSTANCE_NAME" || true
+        run: |
+          set -euo pipefail
+          python3 -m tools.brev_exec cleanup \
+            --instance "$INSTANCE_NAME" \
+            --lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" \
+            --timeout 900
+
+      - name: Preserve the final GPU instance lease
+        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gpu-ci-lease-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload the smoke-test log
         if: always()
@@ -1115,10 +1144,19 @@ jobs:
     environment:
       name: gpu-ci-dispatch
       deployment: false
-    timeout-minutes: 10
-    permissions: {}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
 
     steps:
+      - name: Check out trusted GPU cleanup
+        id: cleanup-checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - name: Install the pinned Brev CLI
         env:
           BREV_VERSION: 0.6.335
@@ -1136,19 +1174,32 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Log in to Brev
+        id: cleanup-login
         env:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
         run: brev login --api-key "$BREV_API_KEY"
 
-      - name: Delete the deterministic GPU instance
+      - name: Recover the GPU instance lease
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Backstop for every name the blocking reservation may have created,
-          # including if the hosted runner was cancelled during provisioning.
-          brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
-          for attempt in 2 3; do
-            brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-r${attempt}" || true
-          done
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "gpu-ci-lease-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --dir "$RUNNER_TEMP/gpu-ci-lease"
+
+      - name: Delete the deterministic GPU instance
+        if: ${{ always() && steps.cleanup-checkout.outcome == 'success' && steps.cleanup-login.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          # A missing artifact never suppresses the cancellation backstop.
+          # The trusted helper verifies identity and observes actual absence.
+          python3 -m tools.brev_exec cleanup \
+            --instance "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --lease-file "$RUNNER_TEMP/gpu-ci-lease/trtmc-gpu-ci-lease.json" \
+            --timeout 900
 
   publish:
     name: ${{ github.event_name == 'pull_request' && 'Stable Community CI' || inputs.ci_lane == 'dev' && 'Dev Community CI' || 'Stable Community CI' }} result
