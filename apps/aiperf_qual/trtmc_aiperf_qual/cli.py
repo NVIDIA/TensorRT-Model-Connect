@@ -270,6 +270,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                        help="result roots of a previous run: TRTMC p50 slower by >5%% is noted as a regression")
     merge.add_argument("--html", type=Path, help="also write a failure-first HTML report here (remote evidence "
                                                    "is fetched next to it)")
+    merge.add_argument("--title", default="TRTMC vs native qualification", help="the HTML report's title")
+    merge.add_argument("--link", action="append", default=[], metavar="LABEL=HREF",
+                       help="a related page linked under the HTML report's title (for example an appendix)")
     merge.add_argument("--assignment", type=Path, help="a formal multi-host run: refuse to merge unless the roots "
                                                       "pass merge-check against this assignment")
     merge.add_argument("--smoke", action="store_true", help="with --assignment: the roots hold smoke results")
@@ -359,7 +362,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     rows, _, rank = collect(roots)
                     if baseline:
                         annotate_regressions(rows, collect(baseline)[0])
-                    render(rows, counts, rank, arguments.html, context=run_context(roots))
+                    links = [tuple(link.split("=", 1)) for link in arguments.link]
+                    if any(len(link) != 2 for link in links):
+                        print("trtmc-aiperf-qual: --link takes LABEL=HREF", file=sys.stderr)
+                        return 2
+                    render(rows, counts, rank, arguments.html, title=arguments.title, context=run_context(roots),
+                           links=links)
             if arguments.output:
                 arguments.output.write_text(text)
                 print(json.dumps(dict(counts)))

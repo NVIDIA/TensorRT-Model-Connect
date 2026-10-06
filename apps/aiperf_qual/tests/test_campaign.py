@@ -419,7 +419,9 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
                                                               "explanation": "answer differs", "actual": "B",
                                                               "expected": "C"}]}]}))
     rows, counts, rank = campaign.collect([root])
-    page = render(rows, counts, rank, tmp_path / "report.html", context=campaign.run_context([root])).read_text()
+    page = render(rows, counts, rank, tmp_path / "report.html", context=campaign.run_context([root]),
+                  links=[("Reruns", "reruns/report.html")]).read_text()
+    assert '<a href="reruns/report.html">Reruns</a>' in page
     assert page.index(">bad<") < page.index(">good<") and "answer differs" in page
     assert 'href="gb300-1/bad/report.md"' in page and "trtmc-aiperf-qual run --profile bad" in page
     bad = page[page.index(">bad<"):page.index(">good<")]

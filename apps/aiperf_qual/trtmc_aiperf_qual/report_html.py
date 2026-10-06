@@ -190,12 +190,14 @@ def _reason(row: Mapping[str, Any]) -> str:
 
 
 def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], rank: Mapping[str, int],
-           output: Path, title: str = "TRTMC vs native qualification", context: str = "") -> Path:
+           output: Path, title: str = "TRTMC vs native qualification", context: str = "",
+           links: Sequence[tuple[str, str]] = ()) -> Path:
     base = output.parent.resolve()
     order = sorted(rows, key=lambda p: (rank.get(rows[p]["category"], 99), rows[p].get("task") or "", p))
     ranked = sorted(counts, key=lambda c: rank.get(c, 99))
     summary = "".join(f"<tr><td class='{_css_class(c)} cat'>{_e(c)}</td><td>{counts[c]}</td></tr>" for c in ranked)
     tally = " · ".join(f"{counts[c]} {_e(c)}" for c in ranked)
+    related = " · ".join(f'<a href="{_e(href)}">{_e(label)}</a>' for label, href in links)
     body = []
     for profile in order:
         row = rows[profile]
@@ -216,6 +218,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
     document = (f"<!doctype html><meta charset='utf-8'><title>{_e(title)}</title><style>{STYLE}</style>"
                 f"<script>{SCRIPT}</script><h1>{_e(title)}</h1>"
                 + (f"<p>{_e(context)}</p>" if context else "")
+                + (f"<p>{related}</p>" if related else "")
                 + f"<p>{len(rows)} models · {tally}.</p>"
                 "<p>Errors and failed gates first. Acc compares TRTMC with the native model on the same problems (a "
                 "paired non-inferiority test against each benchmark's margin, or a parity tolerance); Perf lights compare "
