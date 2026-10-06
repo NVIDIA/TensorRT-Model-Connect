@@ -272,6 +272,14 @@ def test_qwen38_marker_has_one_owner() -> None:
             "dinov3",
         ),
         (
+            ModelMetadata({"architecture": "vit_base_patch16_dinov3_qkvb"}, {}),
+            "dinov3",
+        ),
+        (
+            ModelMetadata({"architectures": ["vit_base_patch16_dinov3_qkvb"]}, {}),
+            "dinov3",
+        ),
+        (
             ModelMetadata(
                 {},
                 {},

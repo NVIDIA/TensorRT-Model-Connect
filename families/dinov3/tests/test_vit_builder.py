@@ -14,6 +14,7 @@ from safetensors.numpy import save_file
 
 pytest.importorskip("tensorrt", reason="TensorRT is required for DINOv3 builder imports")
 
+from families.dinov3 import graph_ops  # noqa: E402
 from families.dinov3 import model as dinov3_model  # noqa: E402
 from families.dinov3.config import ModelConfig  # noqa: E402
 
@@ -157,6 +158,29 @@ def _write_tiny_timm_vit(root: Path) -> tuple[dict, dict[str, np.ndarray]]:
     return config, tensors
 
 
+def test_rope_tables_encode_prefix_as_identity() -> None:
+    prefix_tokens = 3
+    cosine, sine = graph_ops._rope_tables(
+        num_prefix_tokens=prefix_tokens,
+        grid_h=2,
+        grid_w=2,
+        head_dim=8,
+        theta=100.0,
+    )
+    patch_cosine, patch_sine = graph_ops._rope_tables(
+        num_prefix_tokens=0,
+        grid_h=2,
+        grid_w=2,
+        head_dim=8,
+        theta=100.0,
+    )
+
+    np.testing.assert_array_equal(cosine[:prefix_tokens], 1.0)
+    np.testing.assert_array_equal(sine[:prefix_tokens], 0.0)
+    np.testing.assert_array_equal(cosine[prefix_tokens:], patch_cosine)
+    np.testing.assert_array_equal(sine[prefix_tokens:], patch_sine)
+
+
 @pytest.mark.parametrize("layer_prefix", ["layer", "model.layer"])
 @pytest.mark.parametrize("use_gated_mlp", [False, True])
 def test_vit_loader_accepts_hf_namespaces_and_mlp_variants(
@@ -273,6 +297,48 @@ def test_timm_dinov3_qkvb_config_normalizes_before_metadata(tmp_path: Path) -> N
     assert metadata["intermediate_size"] == 1536
     assert metadata["num_hidden_layers"] == 12
     assert metadata["num_attention_heads"] == 6
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"architecture": "vit_base_patch16_dinov3_qkvb"},
+        {"architectures": ["vit_base_patch16_dinov3_qkvb"]},
+    ],
+    ids=("singular-architecture", "plural-architectures"),
+)
+def test_timm_dinov3_base_qkvb_preserves_fixed_image_size(
+    tmp_path: Path, identity: dict
+) -> None:
+    sparse = {
+        **identity,
+        "num_classes": 0,
+        "num_features": 768,
+        "global_pool": "avg",
+        "image_size": 736,
+        "pretrained_cfg": {"input_size": [3, 256, 256]},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(sparse), encoding="utf-8")
+    config = ModelConfig.from_dir(tmp_path)
+
+    metadata = dinov3_model._Dinov3Model().get_bundle_config_overrides(config)
+
+    assert config.model_type == "dinov3_vit"
+    assert config.architectures == ["DINOv3ViTModel"]
+    assert config.hidden_size == 768
+    assert config.intermediate_size == 3072
+    assert config.num_hidden_layers == 12
+    assert config.num_attention_heads == 12
+    assert config.num_key_value_heads == 12
+    assert config.raw["image_size"] == 736
+    assert metadata["model_type"] == "dinov3_vit"
+    assert metadata["dinov3_architecture"] == "vit"
+    assert metadata["sequence_length"] == 2121
+    assert metadata["input_image_h"] == 736
+    assert metadata["input_image_w"] == 736
+    assert metadata["hidden_size"] == 768
+    assert metadata["intermediate_size"] == 3072
+    assert metadata["num_attention_heads"] == 12
 
 
 def test_vit_config_and_bundle_metadata_preserve_hf_contract(tmp_path: Path) -> None:

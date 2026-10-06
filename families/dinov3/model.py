@@ -33,18 +33,12 @@ from .checkpoint_mapper import (
 )
 
 
-_TIMM_DINOV3_VIT_ARCHITECTURE = "vit_small_patch16_dinov3_qkvb"
-_TIMM_DINOV3_VIT_CONFIG = {
+_TIMM_DINOV3_VIT_COMMON_CONFIG = {
     "model_type": "dinov3_vit",
     "architectures": ["DINOv3ViTModel"],
-    "image_size": 224,
     "patch_size": 16,
     "num_channels": 3,
-    "hidden_size": 384,
-    "intermediate_size": 1536,
     "num_hidden_layers": 12,
-    "num_attention_heads": 6,
-    "num_key_value_heads": 6,
     "hidden_act": "gelu",
     "layer_norm_eps": 1.0e-5,
     "rope_theta": 100.0,
@@ -57,34 +51,59 @@ _TIMM_DINOV3_VIT_CONFIG = {
     "use_gated_mlp": False,
 }
 
+_TIMM_DINOV3_VIT_PROFILES = {
+    "vit_small_patch16_dinov3_qkvb": {
+        **_TIMM_DINOV3_VIT_COMMON_CONFIG,
+        "image_size": 224,
+        "hidden_size": 384,
+        "intermediate_size": 1536,
+        "num_attention_heads": 6,
+        "num_key_value_heads": 6,
+    },
+    "vit_base_patch16_dinov3_qkvb": {
+        **_TIMM_DINOV3_VIT_COMMON_CONFIG,
+        "image_size": 256,
+        "hidden_size": 768,
+        "intermediate_size": 3072,
+        "num_attention_heads": 12,
+        "num_key_value_heads": 12,
+    },
+}
 
-def _is_timm_dinov3_vit_config(config: ModelConfig) -> bool:
+
+def _timm_dinov3_vit_profile(config: ModelConfig) -> dict | None:
     model_type = str(getattr(config, "model_type", "") or "").lower()
     architecture = str(config.raw.get("architecture", "") or "").lower()
-    return _TIMM_DINOV3_VIT_ARCHITECTURE in {model_type, architecture}
+    architectures = tuple(str(name).lower() for name in config.architectures)
+    for name in (model_type, architecture, *architectures):
+        profile = _TIMM_DINOV3_VIT_PROFILES.get(name)
+        if profile is not None:
+            return profile
+    return None
 
 
 def _normalize_timm_dinov3_vit_config(config: ModelConfig) -> None:
-    """Expand the exact public timm mirror config into the HF ViT contract."""
-    if not _is_timm_dinov3_vit_config(config):
+    """Expand a supported public timm mirror config into the HF ViT contract."""
+    profile = _timm_dinov3_vit_profile(config)
+    if profile is None:
         return
 
+    normalized = {
+        **profile,
+        "architectures": list(profile["architectures"]),
+        "image_size": config.raw.get("image_size", profile["image_size"]),
+    }
     config.model_type = "dinov3_vit"
     config.architectures = ["DINOv3ViTModel"]
-    config.hidden_size = 384
-    config.intermediate_size = 1536
-    config.num_hidden_layers = 12
-    config.num_attention_heads = 6
-    config.num_key_value_heads = 6
-    config.rms_norm_eps = 1.0e-5
-    config.rope_theta = 100.0
-    config.hidden_act = "gelu"
-    config.raw.update(
-        {
-            **_TIMM_DINOV3_VIT_CONFIG,
-            "architectures": list(_TIMM_DINOV3_VIT_CONFIG["architectures"]),
-        }
-    )
+    config.hidden_size = int(normalized["hidden_size"])
+    config.intermediate_size = int(normalized["intermediate_size"])
+    config.num_hidden_layers = int(normalized["num_hidden_layers"])
+    config.num_attention_heads = int(normalized["num_attention_heads"])
+    config.num_key_value_heads = int(normalized["num_key_value_heads"])
+    config.rms_norm_eps = float(normalized["layer_norm_eps"])
+    config.rope_theta = float(normalized["rope_theta"])
+    config.hidden_act = str(normalized["hidden_act"])
+    config.raw.update(normalized)
     config.raw["_dinov3_checkpoint_layout"] = "timm"
 
 
@@ -325,7 +344,7 @@ def build_vit_engine(
 ) -> bytes:
     cfg = config.raw.get("_dinov3_config") or resolve_vit_config(config.raw)
     work_dtype, work_trt_dtype = _work_types(precision)
-    builder, network, builder_config = graph_ops.new_network(verbose)
+    builder, network, builder_config = graph_ops.new_network(verbose, optimization_level=3)
 
     image_h = cfg["image_h"]
     image_w = cfg["image_w"]
@@ -651,12 +670,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.dynamic_kv_cache:
         raise NotImplementedError("dinov3 does not support dynamic_kv_cache")
 
-    if request.image_height is not None:
-        raise NotImplementedError("dinov3 does not support image_height")
-
-    if request.image_width is not None:
-        raise NotImplementedError("dinov3 does not support image_width")
-
     if request.video_num_frames is not None:
         raise NotImplementedError("dinov3 does not support video_num_frames")
 
@@ -670,12 +683,23 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("dinov3 supports only task=image_features")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
+    _normalize_timm_dinov3_vit_config(config)
     if str(config.model_type).lower() not in {
         "dinov3_vit",
         "dinov3_convnext",
-        _TIMM_DINOV3_VIT_ARCHITECTURE,
+        *_TIMM_DINOV3_VIT_PROFILES,
     }:
         raise ValueError(f"DINOv3 does not support model_type={config.model_type!r}")
+    if request.image_height is not None or request.image_width is not None:
+        if config.model_type != "dinov3_vit":
+            raise NotImplementedError(
+                "dinov3 image size overrides are supported only for ViT checkpoints"
+            )
+        if request.image_height is None or request.image_width is None:
+            raise ValueError("dinov3 requires image_height and image_width together")
+        image_h = _positive_int(request.image_height, "image_height")
+        image_w = _positive_int(request.image_width, "image_width")
+        config.raw["image_size"] = image_h if image_h == image_w else [image_h, image_w]
     precision = str(request.precision).lower()
     max_sequence_length = _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     if request.quantization not in {None, "none"}:

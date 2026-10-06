@@ -218,6 +218,22 @@ def _asset(raw: str) -> Path:
     return path
 
 
+def _decoded_rgb_asset(manifest: dict, case: dict, tmp_path: Path) -> Path:
+    from PIL import Image
+
+    output = tmp_path / "decoded-input.png"
+    if not output.is_file():
+        image = Image.open(_asset(case["test_image"])).convert("RGB")
+        if case.get("fixed_size_input", False):
+            image_height = int(manifest.get("image_height", 224))
+            image_width = int(manifest.get("image_width", 224))
+            image = image.resize(
+                (image_width, image_height), resample=Image.Resampling.BILINEAR
+            )
+        image.save(output)
+    return output
+
+
 def _cosine(left, right) -> float:
     a = np.asarray(left, dtype=np.float64).reshape(-1)
     b = np.asarray(right, dtype=np.float64).reshape(-1)
@@ -245,7 +261,7 @@ def _native(
         case,
         "extract-features",
         "--image",
-        str(_asset(case["test_image"])),
+        str(_decoded_rgb_asset(manifest, case, tmp_path)),
     )
 
 
@@ -255,19 +271,26 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     import transformers
     from PIL import Image
 
-    images = Image.open(_asset(case["test_image"])).convert("RGB")
+    images = Image.open(_decoded_rgb_asset(manifest, case, tmp_path)).convert("RGB")
     if str(manifest["hf_id"]).startswith("timm/"):
         import timm
 
         config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
         architecture = config.get("architecture")
-        if architecture != "vit_small_patch16_dinov3_qkvb":
+        if architecture not in {
+            "vit_small_patch16_dinov3_qkvb",
+            "vit_base_patch16_dinov3_qkvb",
+        }:
             raise ValueError(f"unsupported timm DINOv3 architecture: {architecture!r}")
+        image_height = int(manifest.get("image_height", 224))
+        image_width = int(manifest.get("image_width", 224))
+        image_size = image_height if image_height == image_width else (image_height, image_width)
         model = (
             timm.create_model(
                 architecture,
                 pretrained=False,
-                img_size=224,
+                img_size=image_size,
+                dynamic_img_size=False,
                 checkpoint_path=str(model_dir / "model.safetensors"),
             )
             .to("cuda")
@@ -275,7 +298,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         )
         processor = transformers.DINOv3ViTImageProcessorFast(
             do_resize=True,
-            size={"height": 224, "width": 224},
+            size={"height": image_height, "width": image_width},
             resample=2,
             do_rescale=True,
             rescale_factor=1 / 255,
