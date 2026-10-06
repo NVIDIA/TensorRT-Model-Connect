@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Self-contained, failure-first HTML report over result roots (``summary --html``).
 
-Every model row shows its category, the Acc results (status, gate, failing samples with the TRTMC
-and native outputs side by side), the Perf comparison per reference mode (light, labelled TRTMC and
-native p50, reasons), links to the evidence files next to its result, and a reproduction command.
-Rows are ordered errors and failed gates first.
+One row per model: its Task, the Acc result of every benchmark and the Perf light of every timed request side
+by side, the category with its first reason, and the evidence to expand (Acc gates and failing samples with the
+TRTMC and native outputs side by side, the Perf comparison per reference mode, links to the evidence files next
+to its result, and a reproduction command). Rows are ordered errors and failed gates first.
 """
 
 from __future__ import annotations
@@ -22,12 +22,15 @@ EVIDENCE = ("report.md", "report.json", "build.json", "build/build.log", "error.
             "candidate/server.log")
 LIGHT_COLORS = {"green": "#1a7f37", "yellow": "#9a6700", "red": "#cf222e", "white": "#6e7781", "n/a": "#6e7781"}
 STYLE = """
-body{font:14px/1.45 system-ui,sans-serif;margin:24px;color:#1f2328}h1{font-size:22px}
-table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #d0d7de;padding:4px 8px;text-align:left;
-vertical-align:top}th{background:#f6f8fa}.cat{font-weight:600}.fail{color:#cf222e}.pass{color:#1a7f37}
-.warn{color:#9a6700}details{margin:4px 0}summary{cursor:pointer}code,pre{font:12px ui-monospace,monospace}
-pre{white-space:pre-wrap;background:#f6f8fa;padding:6px;margin:4px 0}.light{display:inline-block;padding:0 6px;
-border-radius:8px;color:#fff;font-size:12px}#q{width:320px;padding:4px;margin:8px 0}
+body{font:14px/1.45 system-ui,sans-serif;margin:2rem;max-width:1700px;color:#1f2328}h1{font-size:22px}
+table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:.45rem;text-align:left;
+vertical-align:top}th{background:#eee;position:sticky;top:0}tr.error{background:#fff0ed}tr.failed{background:#fff9eb}
+tr.warn{background:#fbfbf2}.cat{font-weight:600}.fail{color:#ad2828}.pass{color:#167348}.warn{color:#895b00}
+details{margin:4px 0}summary{cursor:pointer}code,pre{font:12px ui-monospace,monospace}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f5f5;padding:.5rem;margin:4px 0;max-height:22rem;
+overflow:auto}.light{display:inline-block;padding:0 6px;border-radius:8px;color:#fff;font-size:12px}
+small,.muted{color:#555}td.evidence{min-width:14rem}td.evidence table{width:auto}td.reason{max-width:30rem}
+.counts{width:auto}#q{width:320px;padding:4px;margin:8px 0}
 """
 SCRIPT = """
 function f(){const q=document.getElementById('q').value.toLowerCase();
@@ -129,12 +132,54 @@ def _ms(value: Any) -> str:
     return f"{value:.3f}" if isinstance(value, (int, float)) else "—"
 
 
+def _row_class(category: str) -> str:
+    if category in ("error", "config-error", "build-failed", "not-run"):
+        return "error"
+    return {"fail": "failed", "warn": "warn"}.get(_css_class(category), "")
+
+
+def _status_class(status: str) -> str:
+    return "pass" if status == "pass" else "fail" if status in ("fail", "error") else "warn"
+
+
+def _accuracy_cell(items: Sequence[Mapping[str, Any]]) -> str:
+    """Each benchmark's status and its scores (TRTMC vs native, or passes of a parity check)."""
+    lines = [f'<span class="{_status_class(str(item.get("status", "")))}">{_e(item.get("suite"))}: '
+             f'{_e(item.get("status", "—"))}</span>' + (" <small>(informational)</small>" if item.get("informational")
+                                                         else "") + f"<br><small>{_e(counted(item))}</small>"
+             for item in items]
+    return "<br>".join(lines) or '<span class="muted">—</span>'
+
+
+def _performance_cell(items: Sequence[Mapping[str, Any]]) -> str:
+    """Each timed request's light and TRTMC's speedup over the native model."""
+    lines = []
+    for item in items:
+        light = item.get("light", "")
+        speedup = f" {item['speedup']:.2f}x" if isinstance(item.get("speedup"), (int, float)) else ""
+        lines.append(f"<span class='light' style='background:{LIGHT_COLORS.get(light, '#6e7781')}'>{_e(light)}</span>"
+                     f"{_e(speedup)} <small>{_e(item.get('request') or item.get('reference_mode') or '')}</small>")
+    return "<br>".join(lines) or '<span class="muted">—</span>'
+
+
+def _reason(row: Mapping[str, Any]) -> str:
+    """The first reason the category is not a pass: a failed build or run, a benchmark, then a timed request."""
+    if row.get("category") == "pass":
+        return ""
+    found = [str(item.get("error") or "; ".join(item.get("reasons", []))) for item in row.get("accuracy", [])
+             if item.get("status") != "pass" and not item.get("informational")]
+    found += ["; ".join(item.get("reasons", [])) for item in row.get("perf", []) if item.get("light") != "green"]
+    found = [text for text in [row.get("notes", ""), *found] if text]
+    return found[0][:300] if found else ""
+
+
 def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], rank: Mapping[str, int],
-           output: Path, title: str = "TRTMC vs native qualification") -> Path:
+           output: Path, title: str = "TRTMC vs native qualification", context: str = "") -> Path:
     base = output.parent.resolve()
     order = sorted(rows, key=lambda p: (rank.get(rows[p]["category"], 99), rows[p].get("task") or "", p))
-    summary = "".join(f"<tr><td class='{_css_class(c)} cat'>{_e(c)}</td><td>{counts[c]}</td></tr>"
-                      for c in sorted(counts, key=lambda c: rank.get(c, 99)))
+    ranked = sorted(counts, key=lambda c: rank.get(c, 99))
+    summary = "".join(f"<tr><td class='{_css_class(c)} cat'>{_e(c)}</td><td>{counts[c]}</td></tr>" for c in ranked)
+    tally = " · ".join(f"{counts[c]} {_e(c)}" for c in ranked)
     body = []
     for profile in order:
         row = rows[profile]
@@ -144,18 +189,27 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                    f"<p>{_links(Path(directory) if directory else None, base)}</p>"
                    + (f"<p>reproduce: <code>{_e(row['repro'])}</code></p>" if row.get("repro") else "")
                    + "</details>")
-        lights = " ".join(f"<span class='light' style='background:{LIGHT_COLORS.get(p.get('light'), '#6e7781')}'>"
-                          f"{_e(p.get('reference_mode'))} {_e(p.get('light'))}</span>" for p in row.get("perf", []))
         key = f"{profile} {row.get('task') or ''} {row['category']} {row.get('root')}".lower()
-        body.append(f"<tr class='m' data-k='{_e(key)}'><td><b>{_e(profile)}</b></td><td>{_e(row.get('task') or '-')}"
-                    f"</td><td>{_e(row.get('root'))}</td><td class='{_css_class(row['category'])} cat'>"
-                    f"{_e(row['category'])}</td><td>{lights}</td><td>{_e(row.get('notes', ''))[:400]}{details}</td></tr>")
+        reason = _reason(row)
+        body.append(f"<tr class='m {_row_class(row['category'])}' data-k='{_e(key)}'><td><b>{_e(profile)}</b>"
+                    f"<br><small>{_e(row.get('root'))}</small></td><td>{_e(row.get('task') or '-')}</td>"
+                    f"<td>{_accuracy_cell(row.get('accuracy', []))}</td><td>{_performance_cell(row.get('perf', []))}</td>"
+                    f"<td class='reason'><span class='{_css_class(row['category'])} cat'>{_e(row['category'])}</span>"
+                    + (f"<br><small>{_e(reason)}</small>" if reason else "")
+                    + f"</td><td class='evidence'>{details}</td></tr>")
     document = (f"<!doctype html><meta charset='utf-8'><title>{_e(title)}</title><style>{STYLE}</style>"
-                f"<script>{SCRIPT}</script><h1>{_e(title)}</h1><p>{len(rows)} models; errors and failed gates "
-                "first. Lights compare TRTMC with the native model (green faster, yellow similar, red slower, "
-                "white not comparable); a light never changes the Acc outcome.</p>"
-                f"<table style='width:auto'>{summary}</table><input id='q' placeholder='filter' oninput='f()'>"
-                "<table><tr><th>model</th><th>Task</th><th>root</th><th>category</th><th>Perf</th><th>notes</th></tr>"
-                f"{''.join(body)}</table>")
+                f"<script>{SCRIPT}</script><h1>{_e(title)}</h1>"
+                + (f"<p>{_e(context)}</p>" if context else "")
+                + f"<p>{len(rows)} models · {tally}.</p>"
+                "<p>Errors and failed gates first. Acc compares TRTMC with the native model on the same problems (a "
+                "paired non-inferiority test against each benchmark's margin, or a parity tolerance); Perf lights compare "
+                "their server model-call times (green faster, yellow similar, red slower, white not comparable), and a "
+                "light never changes the Acc outcome. <i>error</i> and <i>build-failed</i> mean the run produced no "
+                "verdict, not a failed gate. Expand <i>evidence</i> for gates, failing samples with both outputs, Perf "
+                "details, files, and the reproduction command.</p>"
+                f"<table class='counts'>{summary}</table><input id='q' placeholder='filter (model, Task, category, host)' "
+                "oninput='f()'><table><thead><tr><th>Model</th><th>Task</th><th>Accuracy</th><th>Performance (speedup "
+                "vs native)</th><th>Result / reason</th><th>Evidence</th></tr></thead><tbody>"
+                f"{''.join(body)}</tbody></table>")
     output.write_text(document)
     return output

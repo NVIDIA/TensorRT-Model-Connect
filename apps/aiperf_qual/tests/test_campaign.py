@@ -418,9 +418,12 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
                                                               "explanation": "answer differs", "actual": "B",
                                                               "expected": "C"}]}]}))
     rows, counts, rank = campaign.collect([root])
-    page = render(rows, counts, rank, tmp_path / "report.html").read_text()
+    page = render(rows, counts, rank, tmp_path / "report.html", context=campaign.run_context([root])).read_text()
     assert page.index(">bad<") < page.index(">good<") and "answer differs" in page
     assert 'href="gb300-1/bad/report.md"' in page and "trtmc-aiperf-qual run --profile bad" in page
+    bad = page[page.index(">bad<"):page.index(">good<")]
+    assert "class='m failed'" in page and "s: fail" in bad and "1/2" in bad  # Acc side by side, its own column
+    assert "gb300-1: host -" in page and "2 models · 1 acc-issue · 1 pass" in page
 
 
 def test_aggregate_results_report_metrics_not_a_zero_pass_count():

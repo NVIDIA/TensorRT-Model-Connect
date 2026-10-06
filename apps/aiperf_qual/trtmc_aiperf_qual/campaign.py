@@ -334,6 +334,28 @@ def _perf_text(items: Sequence[Mapping[str, Any]]) -> str:
                      + (f" {item['speedup']:.2f}x" if item.get("speedup") else "") for item in items)
 
 
+def run_context(roots: Sequence[Path]) -> str:
+    """Which run the roots hold: each root's host, the assignment and campaign inputs it ran under (``plan.json``),
+    and when its first and last results started."""
+    import datetime
+    import hashlib
+
+    def day(stamp: float) -> str:
+        return datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    parts = []
+    for root in roots:
+        plan = json.loads((root / PLAN).read_text()) if (root / PLAN).is_file() else {}
+        times = [row["time"] for row in (_row(path) for path in root.iterdir() if path.is_dir()) if row]
+        inputs = plan.get("inputs")
+        digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:12] if inputs else ""
+        parts.append(f"{root.name}: host {plan.get('host') or '-'}"
+                     + (f", assignment {str(plan['assignment'])[:12]}" if plan.get("assignment") else "")
+                     + (f", campaign inputs {digest}" if digest else "")
+                     + (f", {day(min(times))} to {day(max(times))}" if times else ""))
+    return " · ".join(parts)
+
+
 def collect(roots: Sequence[Path]) -> tuple[dict[str, dict[str, Any]], collections.Counter, dict[str, int]]:
     """The latest result of every planned or reported profile under the given roots; profiles a
     root's model list excluded are listed unless another root holds a result for them."""

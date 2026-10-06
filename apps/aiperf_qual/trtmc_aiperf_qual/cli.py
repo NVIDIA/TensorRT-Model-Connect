@@ -337,7 +337,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "summary":
             import tempfile
 
-            from .campaign import fetch_roots, summary
+            from .campaign import fetch_roots, run_context, summary
 
             with tempfile.TemporaryDirectory(prefix="trtmc-aiperf-summary-") as fetched:
                 store = arguments.html.parent / f"{arguments.html.stem}-evidence" if arguments.html else Path(fetched)
@@ -359,7 +359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     rows, _, rank = collect(roots)
                     if baseline:
                         annotate_regressions(rows, collect(baseline)[0])
-                    render(rows, counts, rank, arguments.html)
+                    render(rows, counts, rank, arguments.html, context=run_context(roots))
             if arguments.output:
                 arguments.output.write_text(text)
                 print(json.dumps(dict(counts)))
