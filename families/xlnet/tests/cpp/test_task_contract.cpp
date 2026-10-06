@@ -124,6 +124,8 @@ bool sent_ids(const RecordingModule& module, const std::vector<std::int32_t>& ex
     return true;
 }
 
+constexpr std::int64_t kVocabSize = 1000;
+
 void require(bool value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
@@ -150,7 +152,7 @@ make_pipeline(std::string mode, RecordingModule** module_out, FakeTokenizer** to
     *module_out = module.get();
     *tokenizer_out = tokenizer.get();
     return std::make_unique<trtmc::EncoderPipeline>(std::move(module), std::move(mode),
-                                                    std::move(tokenizer));
+                                                    std::move(tokenizer), kVocabSize);
 }
 
 void test_pooled_features_binding_and_cls_extraction() {
@@ -261,6 +263,37 @@ void test_shorter_input_after_longer_sees_no_stale_tokens() {
     require(sent_ids(*module, shorter), "the shorter input must overwrite the whole padded buffer");
 }
 
+void test_token_ids_must_index_the_vocabulary() {
+    RecordingModule* module = nullptr;
+    FakeTokenizer* tokenizer = nullptr;
+    auto pipeline = make_pipeline(std::string(trtmc::internal::ITextToPooledFeatures::kTask),
+                                  &module, &tokenizer);
+    for (const std::int32_t bad : {-1, static_cast<std::int32_t>(kVocabSize)}) {
+        const std::vector<std::int32_t> ids{3, bad};
+        rejects<std::invalid_argument>(
+            [&] {
+                pipeline->run(
+                    trtmc::internal::TextToPooledFeaturesRequest{
+                        trtmc::Span<const std::int32_t>{ids.data(), ids.size()}},
+                    {});
+            },
+            "a token id outside the vocabulary must be rejected");
+    }
+    require(module->calls == 0, "an out-of-range id must fail before the engine runs");
+    const std::vector<std::int32_t> edge{0, static_cast<std::int32_t>(kVocabSize) - 1};
+    pipeline->run(trtmc::internal::TextToPooledFeaturesRequest{trtmc::Span<const std::int32_t>{
+                      edge.data(), edge.size()}},
+                  {});
+    require(module->calls == 1, "the first and last vocabulary ids must be accepted");
+    rejects<std::runtime_error>(
+        [&] {
+            trtmc::EncoderPipeline(std::make_unique<RecordingModule>(),
+                                   std::string(trtmc::internal::ITextToPooledFeatures::kTask),
+                                   std::make_shared<FakeTokenizer>(), 0);
+        },
+        "a non-positive vocabulary size must be rejected");
+}
+
 void test_each_mode_rejects_the_other_tasks() {
     RecordingModule* module = nullptr;
     FakeTokenizer* tokenizer = nullptr;
@@ -306,14 +339,14 @@ void test_constructor_validates_its_dependencies() {
         [&] {
             trtmc::EncoderPipeline(nullptr,
                                    std::string(trtmc::internal::ITextToPooledFeatures::kTask),
-                                   std::make_shared<FakeTokenizer>());
+                                   std::make_shared<FakeTokenizer>(), kVocabSize);
         },
         "a null engine module must be rejected");
     rejects<std::runtime_error>(
         [&] {
             trtmc::EncoderPipeline(std::make_unique<RecordingModule>(),
                                    std::string(trtmc::internal::ITextToPooledFeatures::kTask),
-                                   nullptr);
+                                   nullptr, kVocabSize);
         },
         "a missing tokenizer must be rejected");
 }
@@ -327,6 +360,7 @@ int main() {
         test_embedding_mean_pools_and_normalizes();
         test_relevance_single_pair_and_batch();
         test_shorter_input_after_longer_sees_no_stale_tokens();
+        test_token_ids_must_index_the_vocabulary();
         test_each_mode_rejects_the_other_tasks();
         test_unsupported_config_and_empty_input();
         test_constructor_validates_its_dependencies();

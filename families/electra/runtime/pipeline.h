@@ -37,7 +37,7 @@ class EncoderPipeline final : public internal::IModel,
                               public internal::ITextQueryDocumentsToRelevance {
   public:
     EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string mode,
-                    std::shared_ptr<ITokenizer> tokenizer);
+                    std::shared_ptr<ITokenizer> tokenizer, std::int64_t vocab_size);
 
     const char* task() const noexcept override { return mode_.c_str(); }
     std::vector<internal::TaskInstance> task_bindings() override;
@@ -63,6 +63,8 @@ class EncoderPipeline final : public internal::IModel,
     // ITextPairToRelevance::kTask: the bundle's single declared primary task.
     std::string mode_;
     std::shared_ptr<ITokenizer> tokenizer_;
+    // Size of the model vocabulary: caller-supplied token ids must index it.
+    std::int64_t vocab_size_;
 };
 
 } // namespace trtmc

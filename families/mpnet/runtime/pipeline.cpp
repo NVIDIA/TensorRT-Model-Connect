@@ -71,12 +71,15 @@ std::size_t input_capacity(const ITrtModule& module) {
 // ─── EncoderPipeline ───
 
 EncoderPipeline::EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string mode,
-                                 std::shared_ptr<ITokenizer> tokenizer)
-    : encoder_(std::move(encoder)), mode_(std::move(mode)), tokenizer_(std::move(tokenizer)) {
+                                 std::shared_ptr<ITokenizer> tokenizer, std::int64_t vocab_size)
+    : encoder_(std::move(encoder)), mode_(std::move(mode)), tokenizer_(std::move(tokenizer)),
+      vocab_size_(vocab_size) {
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("EncoderPipeline: invalid encoder module");
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
+    if (vocab_size_ <= 0)
+        throw std::runtime_error("EncoderPipeline: vocabulary size must be positive");
 }
 
 void EncoderPipeline::require_mode(std::string_view expected) const {
@@ -99,6 +102,12 @@ std::vector<std::int32_t> EncoderPipeline::resolve_ids(const internal::TextSourc
     if (const auto* view = std::get_if<std::string_view>(&text))
         return tokenizer_->encode(std::string(*view));
     const auto ids = std::get<Span<const std::int32_t>>(text);
+    // Caller-supplied ids feed the embedding gather directly; an out-of-range id
+    // would silently produce wrong features, so reject it before inference.
+    for (const auto id : ids) {
+        if (id < 0 || id >= vocab_size_)
+            throw std::invalid_argument("EncoderPipeline: token id outside the model vocabulary");
+    }
     return {ids.begin(), ids.end()};
 }
 
