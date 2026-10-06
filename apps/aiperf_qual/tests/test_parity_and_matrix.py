@@ -33,7 +33,9 @@ def test_parity_entries_pass_only_when_every_output_matches():
     off = side([{"values": [1.0, 0.0]}, {"values": [1.0, 0.0]}])
     entry = absolute.judge(item, problems, off, native)
     assert entry["status"] == "fail" and entry["passed"] == 1 and entry["failures"][0]["sample_id"] == "b"
-    assert absolute.judge(item, problems, side([{"values": [1.0, 0.0]}]), native)["status"] == "error"
+    missed = absolute.judge(item, problems, side([{"values": [1.0, 0.0]}]), native)  # TRTMC's miss: outside
+    assert missed["status"] == "fail" and missed["passed"] == 1 and missed["failures"][0]["explanation"] == absolute.NO_ANSWER
+    assert absolute.judge(item, problems, native, side([{"values": [1.0, 0.0]}]))["status"] == "error"  # native miss
 
 
 def test_action_and_disparity_parity(tmp_path):

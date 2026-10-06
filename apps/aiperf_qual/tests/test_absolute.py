@@ -75,7 +75,7 @@ def test_equal_scores_pass_and_report_both_accuracies_and_agreement():
     assert absolute.judge(ITEM, problems, side(answers), side(answers))["status"] == "inconclusive"
 
 
-def test_a_regression_beyond_the_margin_fails_and_a_missing_answer_is_an_error():
+def test_a_regression_beyond_the_margin_fails_and_a_missing_answer_is_trtmcs_miss_or_an_error():
     problems = [{"task": "t", "gold": " A"}] * 200
     native = {index: True for index in range(200)}
     trtmc = {index: index >= 8 for index in range(200)}  # 8 answers lost: 4 points, all one-sided
@@ -85,8 +85,11 @@ def test_a_regression_beyond_the_margin_fails_and_a_missing_answer_is_an_error()
     within = absolute.judge({**ITEM, "gate": {"margin": 5.0}}, problems, side(trtmc), side(native))
     assert within["status"] == "inconclusive"  # below the margin, but not shown to be
     assert "TRTMC 96.00 vs native 100.00" in counted(entry)
-    incomplete = absolute.judge(ITEM, problems, side({index: True for index in range(199)}), side(native))
-    assert incomplete["status"] == "error" and incomplete["counts"]["missing_trtmc"] == 1
+    missed = absolute.judge(ITEM, problems, side({index: True for index in range(199)}), side(native))
+    assert missed["samples"] == 200 and missed["counts"]["native_only"] == 1  # TRTMC's miss is a wrong answer
+    assert "1 problems without a TRTMC answer are counted as wrong" in missed["notes"][0]
+    incomplete = absolute.judge(ITEM, problems, side(native), side({index: True for index in range(199)}))
+    assert incomplete["status"] == "error" and incomplete["counts"]["missing_native"] == 1  # a native miss is not
 
 
 def test_rejudge_reapplies_a_gate_to_the_recorded_counts():
@@ -202,7 +205,9 @@ def test_corpus_entries_gate_on_the_margin_relative_to_the_native_score():
     assert entry["status"] == "fail" and entry["metrics"]["test"]["margin_points"] == pytest.approx(0.3)
     assert absolute.judge(item, problems, native, native)["status"] == "pass"
     missing = {**native, "observations": {"greedy": {i: {"text": "a"} for i in range(19)}}}
-    assert absolute.judge(item, problems, missing, native)["status"] == "error"
+    missed = absolute.judge(item, problems, missing, native)  # TRTMC's missing transcript scores as empty
+    assert missed["status"] == "fail" and missed["samples"] == 20 and "counted as wrong" in missed["notes"][0]
+    assert absolute.judge(item, problems, native, missing)["status"] == "error"  # a native miss stays missing
     # 3% of a native WER of 10 is 0.3 points, more than the 0.2-point margin
     assert noninferiority.margin(item["gate"], 10.0) == pytest.approx(0.3)
 
@@ -403,7 +408,7 @@ def test_precomputed_scores_compare_as_a_corpus_mean():
     assert tight["status"] == "inconclusive"  # exactly at the margin
 
 
-def test_failed_requests_are_missing_answers_not_wrong_ones(tmp_path):
+def test_trtmcs_failed_requests_are_wrong_answers_with_their_reason(tmp_path):
     from types import SimpleNamespace
 
     from unittest.mock import patch
@@ -423,7 +428,8 @@ def test_failed_requests_are_missing_answers_not_wrong_ones(tmp_path):
     assert list(side_result["records"]["greedy"]) == [0] and "enqueue failed" in side_result["failed"]["greedy"]
     native = {"records": {"greedy": {0: {"passed": True}, 1: {"passed": True}}}, "exit": {}}
     entry = absolute.judge(item, [{"task": "t", "gold": "A"}] * 2, side_result, native)
-    assert entry["status"] == "error" and "enqueue failed" in entry["reasons"][0]
+    assert entry["samples"] == 2 and entry["counts"]["native_only"] == 1 and "enqueue failed" in entry["notes"][0]
+    assert entry["failures"][0]["actual"] == absolute.NO_ANSWER
 
 
 def test_the_native_side_tries_the_next_precision(tmp_path):
@@ -1487,7 +1493,8 @@ def test_gold_suite_outputs_beyond_capacity_are_dropped_from_the_corpus_on_both_
     entry = absolute.judge_in_capacity(item, problems, trtmc, native)
     assert entry["status"] != "error" and entry["samples"] == entry["expected_samples"] == 18
     assert entry["out_of_capacity"] == 2 and "2 of 20 problems" in entry["notes"][0]
-    assert absolute.judge(item, problems, {**trtmc, "rejected": {}}, native)["status"] == "error"  # unaccounted
+    unaccounted = absolute.judge(item, problems, {**trtmc, "rejected": {}}, native)  # not a capacity rejection
+    assert unaccounted["samples"] == 20 and "2 problems without a TRTMC answer" in unaccounted["notes"][0]
     pairs = {"suite": "stsb", "metric": "sts_spearman", "gate": {"margin": 1.0}}
     paired = absolute.judge_in_capacity(pairs, problems, trtmc, native)  # rows that pair up cannot leave alone
     assert paired["status"] == "error" and paired["out_of_capacity"] == 2 and "2 of 20" in paired["notes"][0]

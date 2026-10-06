@@ -40,7 +40,7 @@ with a `candidate.build` exception is qualified for that bundle only, and the re
   system prompt) is out of scope like an unfitted prompt: the problem leaves the comparison on both sides, and the
   entry reports how many did (`out_of_capacity`, with TRTMC's message). Only TRTMC's rejections count, and not in a
   corpus whose rows refer to each other (STS pairs, a retrieval query and its documents), where the problem stays
-  missing. Any other failed request stays a missing answer (an `error`).
+  missing. Any other problem TRTMC does not answer counts as TRTMC's wrong answer (Section 7).
 - A near-capacity request per text model (Section 4.3) exercises the shipped length.
 - The v7 `-qual` rebuilds (4,096 / 2,048 tokens) are not repeated: 17 families could not serve them;
   that remains a tracked TRTMC finding and a later `long_context` check, not part of this verdict.
@@ -429,10 +429,14 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   `*_path` input; the MoGe, Fast-FoundationStereo, and ACT adapters read the preloaded data), and output artifacts
   (MoGe, Fast-FoundationStereo, SANA-WM) are written after it, as on the TRTMC side. Time-series references return
   their forecast values inline, as TRTMC does.
-- **Missing outputs** are missing answers (an `error`), never a wrong answer or a zero score (except a problem
-  beyond the bundle's capacity, Section 2): generated media
-  (GenEval, edits) without an image, and for every corpus metric an output without the field it reads, well
-  formed (a forecast of the horizon's length with finite values, a finite vector, a mask of the image's size).
+- **Missing outputs** (owner's rule, after the formal run): a problem the native model answered and TRTMC did
+  not (a failed or rejected request, an unusable output) counts as TRTMC's wrong answer: a wrong right/wrong
+  answer, a parity sample outside the tolerance, an empty transcript or translation for WER and chrF; the entry
+  says how many and why. Exceptions: a problem beyond the bundle's capacity leaves both sides (Section 2), and a
+  corpus metric without an empty answer (vectors, masks, detections, forecasts) keeps it missing. A problem the
+  native model did not answer stays missing evidence (an `error`): generated media (GenEval, edits) without an
+  image, and for every corpus metric an output without the field it reads, well formed (a forecast of the
+  horizon's length with finite values, a finite vector, a mask of the image's size).
 - **Smoke coverage**: a sampled model's smoke run keeps every configured seed (one problem), so the seed-mean
   scorer runs; the combined code suite sends one HumanEval and one MBPP problem. A conversion-parity output that is
   missing or unreadable on either side (no vector or action chunk, no size, an unreadable artifact, no audio digest,

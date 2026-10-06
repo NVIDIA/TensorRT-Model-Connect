@@ -426,6 +426,33 @@ def workload_perf(candidate: Mapping[int, Mapping[str, Any]], native: Mapping[in
             "prompt_tokens_p50": statistics.median(prompts) if prompts else None}
 
 
+NO_ANSWER = "(no TRTMC answer)"
+# Corpus metrics where a missing TRTMC output scores as an empty one (an empty transcript or translation).
+EMPTY_ANSWERS = {"wer": {"text": ""}, "chrf": {"text": ""}}
+
+
+def _unanswered_note(count: int, candidate: Mapping[str, Any]) -> str:
+    reason = next(iter((candidate.get("failed") or {}).values()), "")
+    return f"{count} problems without a TRTMC answer are counted as wrong" + (f" ({reason})" if reason else "")
+
+
+def _missing_as_wrong(candidate: Mapping[str, Any], native: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """``candidate`` with a wrong answer for every problem the native side answered and TRTMC did not: a
+    request TRTMC failed or rejected is TRTMC's miss, not missing evidence (a native miss stays one)."""
+    records, missed = {}, set()
+    for name, theirs in (native.get("records") or {}).items():
+        mine = dict((candidate.get("records") or {}).get(name) or {})
+        for index in theirs:
+            if index not in mine:
+                mine[index] = {"passed": False, "unparsed": True, "actual": NO_ANSWER}
+                missed.add(index)
+        records[name] = mine
+    if not missed:
+        return dict(candidate), None
+    filled = {**candidate, "records": {**(candidate.get("records") or {}), **records}}
+    return filled, _unanswered_note(len(missed), candidate)
+
+
 def _correct(record: Mapping[str, Any] | None) -> bool | None:
     return None if record is None else bool(record.get("passed"))
 
@@ -509,6 +536,8 @@ def judge_corpus(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]],
     expected = len(problems)
     mine = gold_metrics.answered(item["metric"], problems, candidate["observations"]["greedy"])
     theirs = gold_metrics.answered(item["metric"], problems, native["observations"]["greedy"])
+    missed = sorted(set(theirs) - set(mine)) if item["metric"] in EMPTY_ANSWERS else []
+    mine = {**mine, **{index: dict(EMPTY_ANSWERS[item["metric"]]) for index in missed}}
     paired = len(set(mine) & set(theirs))
     entry: dict[str, Any] = {"suite": item["suite"], "source": "absolute", "benchmark": item["metric"],
                              "endpoint": "trtmc_task", "expected_samples": expected, "samples": paired, "passed": None,
@@ -525,6 +554,8 @@ def judge_corpus(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]],
                         "higher_is_better": comparison["higher_is_better"], "units": comparison["units"], "test": test}
     entry["workload_perf"] = workload_perf(candidate["timings"]["greedy"], native["timings"]["greedy"])
     entry["status"], entry["reasons"] = status(entry)
+    if missed:
+        entry["notes"] = [_unanswered_note(len(missed), candidate)]
     return entry
 
 
@@ -536,13 +567,16 @@ def judge_parity(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]],
     mine, theirs = candidate["observations"]["greedy"], native["observations"]["greedy"]
     expected = len(problems)
     paired = sorted(set(mine) & set(theirs))
+    missed = sorted(set(theirs) - set(mine))  # TRTMC's misses: samples outside the tolerance
     entry: dict[str, Any] = {"suite": item["suite"], "source": "absolute", "benchmark": item["metric"],
-                             "endpoint": "trtmc_task", "expected_samples": expected, "samples": len(paired),
+                             "endpoint": "trtmc_task", "expected_samples": expected,
+                             "samples": len(paired) + len(missed),
                              "gate": dict(item["gate"]), "aiperf_exit": {"trtmc": candidate["exit"], "native": native["exit"]}}
-    if len(paired) < expected:
+    if len(paired) + len(missed) < expected:
         return {**entry, "passed": None, "status": "error",
-                "reasons": [f"{expected - len(paired)} of {expected} problems lack an output on one side"]}
+                "reasons": [f"{expected - len(paired) - len(missed)} of {expected} problems lack a native output"]}
     results = [(index, *compare(mine[index], theirs[index], item["gate"])) for index in paired]
+    results += [(index, False, NO_ANSWER) for index in missed]
     unreadable = [reason for _, ok, reason in results if ok is None]
     if unreadable:  # an output missing or unreadable is missing evidence, never a failure
         return {**entry, "passed": None, "status": "error",
@@ -580,6 +614,7 @@ def judge(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], candid
         return judge_corpus(item, problems, candidate, native)
     if item.get("metric"):
         candidate, native = _graded(item, problems, candidate), _graded(item, problems, native)
+    candidate, unanswered_note = _missing_as_wrong(candidate, native)
     expected = len(problems)
     entry: dict[str, Any] = {"suite": item["suite"], "source": "absolute",
                              "benchmark": item.get("plugin") or item["metric"],
@@ -621,6 +656,8 @@ def judge(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], candid
     entry["workload_perf"] = workload_perf(candidate.get("timings", {}).get(first, {}),
                                            native.get("timings", {}).get(first, {}))
     entry["status"], entry["reasons"] = status(entry)
+    if unanswered_note:
+        entry["notes"] = [*entry.get("notes", []), unanswered_note]
     return entry
 
 
