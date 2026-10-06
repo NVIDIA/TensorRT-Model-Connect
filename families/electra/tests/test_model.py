@@ -90,6 +90,7 @@ def test_build_accepts_every_semantic_task(tmp_path: Path, monkeypatch, task: st
     assert writer.sections["header"]["task"] == task
     assert writer.sections["engine.plan"] == b"plan"
     assert writer.sections["runtime.json"]["tensor_parallel_size"] == 1
+    assert writer.sections["runtime.json"]["vocab_size"] == 100
 
 
 @pytest.mark.parametrize("task", ["encoding", "embedding", "reranking"])
