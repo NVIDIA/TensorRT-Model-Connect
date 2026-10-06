@@ -353,7 +353,7 @@ model is not `smoke-pass`.
 
 ## 11. Review gates
 
-codex (`gpt-6-astra`) reviews this design, the decoupling change, the per-model configuration, the
+An independent model reviewer checks this design, the decoupling change, the per-model configuration, the
 smoke results, and the formal run before each lands in PR #1550; for the formal run that includes the frozen
 assignment and ledger and both hosts' gate evidence (Section 12.1).
 
