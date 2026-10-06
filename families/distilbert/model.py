@@ -314,6 +314,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         {
             **_tokenizer_runtime_contract(model_dir),
             "tensor_parallel_size": parallel.tp_size,
+            "vocab_size": _positive_int(config.vocab_size, "vocab_size"),
         },
     )
     for filename in _BUNDLE_FILES:
