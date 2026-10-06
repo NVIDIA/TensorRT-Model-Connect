@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Self-contained, failure-first HTML report over result roots (``summary --html``).
 
-One row per model: its Task, the Acc result of every benchmark and the Perf light of every timed request side
-by side, the category with its first reason, and the evidence to expand (Acc gates and failing samples with the
+One row per model: its result (White, Red, Yellow, Green: ``campaign.signal``), its Task, both sides' Acc values
+and Perf times side by side, one plain reason, and the evidence to expand (Acc gates and failing samples with the
 TRTMC and native outputs side by side, the Perf comparison per reference mode, links to the evidence files next
-to its result, and a reproduction command). Rows are ordered errors and failed gates first.
+to its result, and a reproduction command). Rows are ordered White, Red, Yellow, Green.
 """
 
 from __future__ import annotations
@@ -13,11 +13,11 @@ from __future__ import annotations
 import html
 import json
 import os
-import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .report import counted, values
+from .campaign import SIGNAL_NAMES, SIGNALS, ms, request_label, signal, signal_reason
+from .report import acc_value, counted
 
 EVIDENCE = ("report.md", "report.json", "build.json", "build/build.log", "error.json", "phase-errors.log",
             "candidate/server.log")
@@ -25,8 +25,12 @@ LIGHT_COLORS = {"green": "#1a7f37", "yellow": "#9a6700", "red": "#cf222e", "whit
 STYLE = """
 body{font:14px/1.45 system-ui,sans-serif;margin:2rem;max-width:1700px;color:#1f2328}h1{font-size:22px}
 table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:.45rem;text-align:left;
-vertical-align:top}th{background:#eee;position:sticky;top:0}tr.error{background:#fff0ed}tr.failed{background:#fff9eb}
-tr.warn{background:#fbfbf2}.cat{font-weight:600}.fail{color:#ad2828}.pass{color:#167348}.warn{color:#895b00}
+vertical-align:top}th{background:#eee;position:sticky;top:0}
+.signal{display:inline-flex;align-items:center;gap:.35rem;font-weight:600;
+white-space:nowrap}.dot{width:.8rem;height:.8rem;border-radius:50%;display:inline-block;border:1px solid #8c959f}
+.dot.green{background:#5c9600}.dot.yellow{background:#e0b000}.dot.red{background:#b93434}.dot.white{background:#fff}
+tr[data-result=white]{background:#f6f8fa}tr[data-result=red]{background:#fff0ed}tr[data-result=yellow]{background:#fffbea}
+.t-green{color:#3d6b00}.t-yellow{color:#8a6a00}.t-red{color:#b93434}.t-white{color:#57606a}.fail{color:#ad2828}.pass{color:#167348}.warn{color:#895b00}
 details{margin:4px 0}summary{cursor:pointer}code,pre{font:12px ui-monospace,monospace}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f5f5;padding:.5rem;margin:4px 0;max-height:22rem;
 overflow:auto}.light{display:inline-block;padding:0 6px;border-radius:8px;color:#fff;font-size:12px}
@@ -41,14 +45,6 @@ for(const r of document.querySelectorAll('tr.m')){r.style.display=r.dataset.k.in
 
 def _e(value: Any) -> str:
     return html.escape(str(value if value is not None else ""))
-
-
-def _css_class(category: str) -> str:
-    if category in ("pass",):
-        return "pass"
-    if category in ("error", "config-error", "build-failed", "not-run", "acc-issue", "acc-session-state", "perf-issue"):
-        return "fail"
-    return "warn"
 
 
 def _links(directory: Path | None, base: Path) -> str:
@@ -133,102 +129,71 @@ def _ms(value: Any) -> str:
     return f"{value:.3f}" if isinstance(value, (int, float)) else "—"
 
 
-def _row_class(category: str) -> str:
-    if category in ("error", "config-error", "build-failed", "not-run"):
-        return "error"
-    return {"fail": "failed", "warn": "warn"}.get(_css_class(category), "")
-
-
-def _status_class(status: str) -> str:
-    return "pass" if status == "pass" else "fail" if status in ("fail", "error") else "warn"
+def _dot(result: str, text: str = "") -> str:
+    return f"<span class='signal'><span class='dot {result}'></span>{_e(text or SIGNAL_NAMES[result])}</span>"
 
 
 def _accuracy_cell(items: Sequence[Mapping[str, Any]]) -> str:
-    """Each benchmark's status and both sides' values (or the passes of a parity check)."""
-    lines = [f'<span class="{_status_class(str(item.get("status", "")))}">{_e(item.get("suite"))}: '
-             f'{_e(item.get("status", "—"))}</span>' + (" <small>(informational)</small>" if item.get("informational")
-                                                         else "") + f"<br><small>{_e(values(item))}</small>"
-             for item in items]
+    """Each benchmark's values only (TRTMC · native), coloured by its own outcome."""
+    tone = {"pass": "t-green", "fail": "t-red", "inconclusive": "t-yellow"}
+    lines = [f"<span class='{tone.get(str(item.get('status')), 't-white')}'>{_e(acc_value(item))}</span>"
+             for item in items if not item.get("informational")]  # informational checks stay in the evidence
     return "<br>".join(lines) or '<span class="muted">—</span>'
 
 
-def _time(value: Any) -> str:
-    if not isinstance(value, (int, float)):
-        return "—"
-    return f"{value:.0f} ms" if value >= 100 else f"{value:.1f} ms" if value >= 1 else f"{value:.3f} ms"
-
-
-def _performance_cell(items: Sequence[Mapping[str, Any]]) -> str:
-    """Each timed request's light and both sides' server model-call time (p50)."""
-    lines = []
-    for item in items:
-        light = item.get("light", "")
-        candidate, reference = item.get("candidate") or {}, item.get("reference") or {}
-        lines.append(f"<span class='light' style='background:{LIGHT_COLORS.get(light, '#6e7781')}'>{_e(light)}</span> "
-                     f"<small>{_e(item.get('request') or item.get('reference_mode') or '')}</small><br>"
-                     f"TRTMC {_e(_time(candidate.get('p50_ms')))} · native {_e(_time(reference.get('p50_ms')))}"
-                     + (f" <small>({_e(reference['precision'])})</small>" if reference.get("precision") else ""))
+def _performance_cell(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
+    """Each timed request's server model-call time p50 on both sides, coloured by its light."""
+    lines = [f"<span class='t-{_e(item.get('light') or 'white')}'>{_e(request_label(profile, item))}: TRTMC "
+             f"{_e(ms((item.get('candidate') or {}).get('p50_ms')))} · native "
+             f"{_e(ms((item.get('reference') or {}).get('p50_ms')))}</span>" for item in items]
     return "<br>".join(lines) or '<span class="muted">—</span>'
-
-
-def _plain(text: str) -> str:
-    """A reason without the server's JSON error envelope: its message only."""
-    return re.sub(r'\{"error":\{"message":"((?:[^"\\]|\\.)*)".*?\}\}', r"\1", text)
-
-
-def _reason(row: Mapping[str, Any]) -> str:
-    """The first reason the category is not a pass: a failed build or run, a benchmark, then a timed request
-    (its verdict only; the times are in the Performance column)."""
-    if row.get("category") == "pass":
-        return ""
-    found = [str(item.get("error") or "; ".join(item.get("reasons", []))) for item in row.get("accuracy", [])
-             if item.get("status") != "pass" and not item.get("informational")]
-    found += [f"{item.get('request') or item.get('reference_mode')}: {item['reasons'][0].split(':')[0]}"
-              for item in row.get("perf", []) if item.get("light") != "green" and item.get("reasons")]
-    found = [text for text in [row.get("notes", ""), *found] if text]
-    return _plain(found[0])[:300] if found else ""
 
 
 def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], rank: Mapping[str, int],
            output: Path, title: str = "TRTMC vs native qualification", context: str = "",
-           links: Sequence[tuple[str, str]] = ()) -> Path:
-    base = output.parent.resolve()
-    order = sorted(rows, key=lambda p: (rank.get(rows[p]["category"], 99), rows[p].get("task") or "", p))
-    ranked = sorted(counts, key=lambda c: rank.get(c, 99))
-    summary = "".join(f"<tr><td class='{_css_class(c)} cat'>{_e(c)}</td><td>{counts[c]}</td></tr>" for c in ranked)
-    tally = " · ".join(f"{counts[c]} {_e(c)}" for c in ranked)
+           links: Sequence[tuple[str, str]] = (), reruns: Mapping[str, str] | None = None) -> Path:
+    """``reruns``: profile -> its result in a linked appendix (shown under the reason)."""
+    base, reruns = output.parent.resolve(), reruns or {}
+    results = {profile: signal(row) for profile, row in rows.items()}
+    order = sorted(rows, key=lambda p: (SIGNALS.index(results[p]), rows[p].get("task") or "", p))
+    tally = {result: sum(1 for value in results.values() if value == result) for result in SIGNALS}
     related = " · ".join(f'<a href="{_e(href)}">{_e(label)}</a>' for label, href in links)
     body = []
     for profile in order:
         row = rows[profile]
         directory = row.get("directory")
-        details = (f"<details><summary>evidence</summary>{_accuracy(row.get('accuracy', []))}"
+        details = (f"<details><summary>evidence</summary><p>harness category: {_e(row['category'])} · host "
+                   f"{_e(row.get('root'))}</p>{_accuracy(row.get('accuracy', []))}"
                    f"{_performance(row.get('perf', []))}{_sweep(row.get('l2') or {})}"
                    f"<p>{_links(Path(directory) if directory else None, base)}</p>"
                    + (f"<p>reproduce: <code>{_e(row['repro'])}</code></p>" if row.get("repro") else "")
                    + "</details>")
-        key = f"{profile} {row.get('task') or ''} {row['category']} {row.get('root')}".lower()
-        reason = _reason(row)
-        body.append(f"<tr class='m {_row_class(row['category'])}' data-k='{_e(key)}'><td><b>{_e(profile)}</b>"
-                    f"<br><small>{_e(row.get('root'))}</small></td><td>{_e(row.get('task') or '-')}</td>"
-                    f"<td>{_accuracy_cell(row.get('accuracy', []))}</td><td>{_performance_cell(row.get('perf', []))}</td>"
-                    f"<td class='reason'><span class='{_css_class(row['category'])} cat'>{_e(row['category'])}</span>"
-                    + (f"<br><small>{_e(reason)}</small>" if reason else "")
+        key = f"{profile} {row.get('task') or ''} {results[profile]} {row.get('root')}".lower()
+        body.append(f"<tr class='m' data-result='{results[profile]}' data-k='{_e(key)}'><td>{_dot(results[profile])}</td>"
+                    f"<td><b>{_e(profile)}</b><br><small>{_e(row.get('task') or '-')}</small></td>"
+                    f"<td>{_accuracy_cell(row.get('accuracy', []))}</td>"
+                    f"<td>{_performance_cell(profile, row.get('perf', []))}</td>"
+                    f"<td class='reason'>{_e(signal_reason(profile, row))}"
+                    + (f"<br>rerun on the fixed harness: {_dot(reruns[profile])}" if profile in reruns else "")
                     + f"</td><td class='evidence'>{details}</td></tr>")
+    legend = ("<p>" + _dot("green") + " pass · " + _dot("yellow") + " Perf about equal to native (counts as a pass), "
+              "or an Acc difference not shown either way · " + _dot("red") + " Acc or Perf worse than native beyond "
+              "its margin · " + _dot("white") + " no valid comparison: an error or a failed build (environment or "
+              "runtime), or the comparison does not apply (the native model below a benchmark's floor, timings that "
+              "cannot be compared).</p>")
+    counted_line = " · ".join(f"{SIGNAL_NAMES[result]} {tally[result]}" for result in SIGNALS)
     document = (f"<!doctype html><meta charset='utf-8'><title>{_e(title)}</title><style>{STYLE}</style>"
                 f"<script>{SCRIPT}</script><h1>{_e(title)}</h1>"
                 + (f"<p>{_e(context)}</p>" if context else "")
                 + (f"<p>{related}</p>" if related else "")
-                + f"<p>{len(rows)} models · {tally}.</p>"
-                "<p>Errors and failed gates first. Acc compares TRTMC with the native model on the same problems (a "
-                "paired non-inferiority test against each benchmark's margin, or a parity tolerance); Perf lights compare "
-                "their server model-call times (green faster, yellow similar, red slower, white not comparable), and a "
-                "light never changes the Acc outcome. <i>error</i> and <i>build-failed</i> mean the run produced no "
-                "verdict, not a failed gate. Expand <i>evidence</i> for gates, failing samples with both outputs, Perf "
-                "details, files, and the reproduction command.</p>"
-                f"<table class='counts'>{summary}</table><input id='q' placeholder='filter (model, Task, category, host)' "
-                "oninput='f()'><table><thead><tr><th>Model</th><th>Task</th><th>Accuracy (TRTMC, native)</th><th>Performance "
-                "(server model-call time p50)</th><th>Result / reason</th><th>Evidence</th></tr></thead><tbody>"
-                f"{''.join(body)}</tbody></table>")
+                + f"<p><b>{len(rows)} models · {tally['green'] + tally['yellow']} pass (Green + Yellow)</b> · "
+                f"{_e(counted_line)}</p>{legend}"
+                "<p class='muted'>Accuracy: each benchmark's value on both sides (TRTMC · native). Performance: server "
+                "model-call time p50 of each timed request (catalog: the catalog's own request; long prompt: a prompt "
+                "filling the bundle's sequence length). Expand <i>evidence</i> for gates, failing samples with both "
+                "outputs, timing details, files, and the reproduction command.</p>"
+                "<input id='q' placeholder='filter (model, Task, result, host)' oninput='f()'><table><thead><tr>"
+                "<th>Result</th><th>Model / Task</th><th>Accuracy (TRTMC · native)</th><th>Performance p50 (TRTMC · "
+                f"native)</th><th>Reason</th><th>Evidence</th></tr></thead><tbody>{''.join(body)}</tbody></table>")
     output.write_text(document)
     return output

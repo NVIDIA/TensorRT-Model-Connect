@@ -238,8 +238,9 @@ def test_summary_merges_result_roots(tmp_path):
                                                    "reason": "error: checkpoint is gated"}))
     text, counts = campaign.summary([tmp_path / "gb300-1", tmp_path / "gb300-2"])
     assert counts == {"pass": 1, "build-failed": 1}
-    assert "| a | text_generation | gb300-1 | pass | mmlu 10/10 within tolerance (need 9) | eager green: TRTMC 4.0 ms, native 10.0 ms |" in text
-    assert "| b | classification | gb300-2 | build-failed |" in text and "checkpoint is gated" in text
+    assert "| Green | a | text_generation | gb300-1 | mmlu: 10/10 within tolerance | eager: TRTMC 4.0 ms · native 10.0 ms |" in text
+    assert "| White | b | classification | gb300-2 |" in text and "checkpoint is gated" in text
+    assert "1 pass (Green + Yellow)" in text and "| White | 1 |" in text
 
 
 CATALOG = [selection.Profile("qwen3-0.6b-fp16", "text_generation", "Qwen/Qwen3-0.6B", None),
@@ -299,7 +300,7 @@ def test_summary_lists_excluded_models_unless_a_result_exists(tmp_path):
     (other / "report.json").write_text(json.dumps({"task": "text_generation", "verdict": {"category": "pass"}}))
     text, counts = campaign.summary([tmp_path / "gb300-2", root])
     assert counts == {"pass": 1, "excluded": 1}
-    assert "| flux-2-dev | image_generation | gb300-1 | excluded |" in text and "80 GB GPU" in text
+    assert "| White | flux-2-dev | image_generation | gb300-1 |" in text and "80 GB GPU" in text
 
 
 def test_preflight_reports_missing_paths_and_interpreters(tmp_path):
@@ -336,7 +337,7 @@ def test_summary_fetches_remote_result_roots_over_ssh(tmp_path):
     roots = campaign.fetch_roots([f"gb300-1=nvidia@host:{remote}"], str(fake_ssh), tmp_path / "fetched")
     assert roots == [tmp_path / "fetched/gb300-1"] and not (roots[0] / "a/big.bin").exists()
     text, counts = campaign.summary(roots)
-    assert counts == {"pass": 1} and "| a | classification | gb300-1 | pass |" in text
+    assert counts == {"pass": 1} and "| Green | a | classification | gb300-1 |" in text
     local = tmp_path / "local-root"
     local.mkdir()
     assert campaign.fetch_roots([str(local)], str(fake_ssh), tmp_path / "fetched") == [local]
@@ -375,7 +376,7 @@ def test_summary_keeps_the_latest_result_of_a_profile_run_on_several_roots(tmp_p
             {"task": "image_generation", "started": started, "verdict": {"category": category}}))
     for order in ([tmp_path / "gb300-1", tmp_path / "gb300-2"], [tmp_path / "gb300-2", tmp_path / "gb300-1"]):
         text, counts = campaign.summary(order)
-        assert counts == {"acc-issue": 1} and "| m | image_generation | gb300-1 | acc-issue |" in text
+        assert counts == {"acc-issue": 1} and "| Red | m | image_generation | gb300-1 |" in text
 
 
 def test_summary_counts_every_planned_profile(tmp_path):
@@ -385,7 +386,7 @@ def test_summary_counts_every_planned_profile(tmp_path):
     (root / "a/report.json").write_text(json.dumps({"task": "t", "started": 1.0, "verdict": {"category": "pass"}}))
     text, counts = campaign.summary([root])
     assert counts == {"pass": 1, "not-run": 1, "config-error": 1}
-    assert "| b | - | gb300-1 | not-run |" in text and "no Task defaults" in text
+    assert "| White | b | - | gb300-1 |" in text and "no Task defaults" in text
 
 
 def test_run_all_exit_code_reports_harness_failures():
@@ -420,13 +421,14 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
                                                               "expected": "C"}]}]}))
     rows, counts, rank = campaign.collect([root])
     page = render(rows, counts, rank, tmp_path / "report.html", context=campaign.run_context([root]),
-                  links=[("Reruns", "reruns/report.html")]).read_text()
+                  links=[("Reruns", "reruns/report.html")], reruns={"bad": "green"}).read_text()
+    assert "rerun on the fixed harness: <span class='signal'><span class='dot green'>" in page
     assert '<a href="reruns/report.html">Reruns</a>' in page
     assert page.index(">bad<") < page.index(">good<") and "answer differs" in page
     assert 'href="gb300-1/bad/report.md"' in page and "trtmc-aiperf-qual run --profile bad" in page
     bad = page[page.index(">bad<"):page.index(">good<")]
-    assert "class='m failed'" in page and "s: fail" in bad and "1/2" in bad  # Acc side by side, its own column
-    assert "gb300-1: host -" in page and "2 models · 1 acc-issue · 1 pass" in page
+    assert "data-result='red' data-k='bad" in page and "s: 1/2 within tolerance" in bad  # Acc values, own column
+    assert "gb300-1: host -" in page and "2 models · 1 pass (Green + Yellow)" in page and "Red 1" in page
 
 
 def test_aggregate_results_report_metrics_not_a_zero_pass_count():

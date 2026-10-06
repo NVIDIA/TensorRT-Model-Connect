@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -74,6 +75,22 @@ def values(item: Mapping[str, Any]) -> str:
     if item.get("passed") is not None and samples:
         return f"{item['passed']}/{samples}"
     return f"{samples} of {expected} answered" if expected else "—"
+
+
+def plain(text: str) -> str:
+    """A reason without a server's JSON error envelope: its message only."""
+    return re.sub(r'\{"error":\{"message":"((?:[^"\\]|\\.)*)".*?\}\}', r"\1", str(text))
+
+
+def acc_value(item: Mapping[str, Any]) -> str:
+    """One benchmark's values only: ``mmlu-0shot (accuracy %): TRTMC 82.84 · native 83.21``; nothing for an error."""
+    metrics = item.get("metrics") or {}
+    if item.get("status") == "error":
+        return f"{item.get('suite')}: —"
+    if "trtmc_score" in metrics:
+        return (f"{item.get('suite')} ({score_name(item)}): TRTMC {_fmt(metrics['trtmc_score'], 2)} · "
+                f"native {_fmt(metrics['native_score'], 2)}")
+    return f"{item.get('suite')}: {values(item)}"
 
 
 def _media_l2(l2: Mapping[str, Any]) -> list[str]:

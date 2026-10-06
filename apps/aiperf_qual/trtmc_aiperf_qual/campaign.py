@@ -29,7 +29,7 @@ from . import bundles, retention
 from .bundles import prefetch
 from .config import Environment
 from .models import checkpoints
-from .report import values
+from .report import acc_value, plain
 from .services import reference_python
 
 KEPT_ASIDE = re.compile(r"\.\d{10}$")  # <profile>.<unix time> of a previous run
@@ -320,22 +320,82 @@ def _row(directory: Path) -> dict[str, Any] | None:
 
 
 def _accuracy_text(items: Sequence[Mapping[str, Any]]) -> str:
-    def one(item: Mapping[str, Any]) -> str:
-        extra = ", informational" if item.get("informational") else ""
-        need = (f"need {item['required_passes']}" if item.get("required_passes") is not None
-                else f"gate {json.dumps(item.get('gate', {}))}")
-        status = f"{item['status']} " if item.get("status") else ""
-        return f"{item['suite']} {status}{values(item)} ({need}{extra})"
-    return "; ".join(one(item) for item in items)
+    return "; ".join(acc_value(item) for item in items if not item.get("informational"))
 
 
-def _perf_text(items: Sequence[Mapping[str, Any]]) -> str:
-    def ms(side: Mapping[str, Any] | None) -> str:
-        value = (side or {}).get("p50_ms")
-        return f"{value:.1f} ms" if isinstance(value, (int, float)) else "—"
+def ms(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{value:.0f} ms" if value >= 100 else f"{value:.1f} ms" if value >= 1 else f"{value:.3f} ms"
 
-    return ", ".join(f"{item.get('request') or item['reference_mode']} {item['light']}: TRTMC {ms(item.get('candidate'))}, "
-                     f"native {ms(item.get('reference'))}" for item in items)
+
+def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
+    return "; ".join(f"{request_label(profile, item)}: TRTMC {ms((item.get('candidate') or {}).get('p50_ms'))} · "
+                     f"native {ms((item.get('reference') or {}).get('p50_ms'))}" for item in items)
+
+
+# The owner's four results, worst first: White, no valid comparison (no verdict: an error or a failed build; or the
+# comparison does not apply: the native model below a benchmark's floor, a Task without an Acc check, timings that
+# cannot be compared); Red, Acc or Perf worse than the native model beyond its margin; Yellow, Perf about equal
+# (counts as a pass) or an Acc difference not shown either way; Green, a pass.
+SIGNALS = ("white", "red", "yellow", "green")
+SIGNAL_NAMES = {"white": "White", "red": "Red", "yellow": "Yellow", "green": "Green"}
+NO_VERDICT = {"error", "config-error", "build-failed", "not-run", "excluded"}
+NOT_COMPARED = {"not-comparable", "not-covered", "perf-inconclusive"}
+
+
+def request_label(profile: str, item: Mapping[str, Any]) -> str:
+    """A timed request named without its model: ``catalog``, ``long prompt`` (the near-capacity request)."""
+    name = str(item.get("request") or item.get("reference_mode") or "")
+    name = name[len(profile) + 1:] if name.startswith(profile + "-") else name
+    return name.replace("catalog-near-capacity", "long prompt")
+
+
+def _judged(row: Mapping[str, Any], status: str) -> list[Mapping[str, Any]]:
+    return [item for item in row.get("accuracy", []) if item.get("status") == status and not item.get("informational")]
+
+
+def signal(row: Mapping[str, Any]) -> str:
+    """The row's result among ``SIGNALS``."""
+    category = row["category"]
+    if category in NO_VERDICT:
+        return "white"
+    lights = [item.get("light") for item in row.get("perf", [])]
+    if category == "acc-issue" or _judged(row, "fail") or "red" in lights:
+        return "red"
+    if category in NOT_COMPARED or "white" in lights:
+        return "white"
+    if category == "acc-inconclusive" or "yellow" in lights:
+        return "yellow"
+    return "green"
+
+
+def signal_reason(profile: str, row: Mapping[str, Any]) -> str:
+    """Why the row is not Green, in one plain sentence per benchmark or request."""
+    result, perf = signal(row), row.get("perf", [])
+    if result == "green":
+        return plain(row.get("notes", ""))[:300]
+    if row["category"] in NO_VERDICT:
+        errors = [str(item.get("error") or "; ".join(item.get("reasons", []))) for item in _judged(row, "error")]
+        return plain(next((text for text in [row.get("notes", ""), *errors] if text), row["category"]))[:300]
+    parts: list[str] = []
+    if result == "red":
+        for item in _judged(row, "fail"):
+            why = ("TRTMC below native beyond the margin" if "trtmc_score" in (item.get("metrics") or {})
+                   else "; ".join(item.get("reasons", [])) or "failed")
+            parts.append(f"{item['suite']}: {why}" + "".join(f" ({plain(note)})" for note in item.get("notes", [])))
+        parts += [f"{request_label(profile, item)}: TRTMC slower than native" for item in perf if item.get("light") == "red"]
+    elif result == "white":
+        parts += [f"{item['suite']}: {plain('; '.join(item.get('reasons', [])))}"
+                  for status in ("not-comparable", "not-covered") for item in _judged(row, status)]
+        parts += [f"{request_label(profile, item)}: timings not comparable ({plain((item.get('reasons') or [''])[0])})"
+                  for item in perf if item.get("light") == "white"]
+    else:
+        parts += [f"{item['suite']}: difference not shown either way" for item in _judged(row, "inconclusive")]
+        parts += [f"{request_label(profile, item)}: TRTMC about equal to native" for item in perf
+                  if item.get("light") == "yellow"]
+    notes = plain(row.get("notes", ""))  # coverage, a regression against a baseline
+    return "; ".join(part for part in [*parts, notes] if part)[:400] or row["category"]
 
 
 def run_context(roots: Sequence[Path]) -> str:
@@ -412,22 +472,27 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
     rows, counts, rank = collect(roots)
     if baseline:
         annotate_regressions(rows, collect(baseline)[0])
-    shown = sorted(counts, key=rank.get)
+    results = collections.Counter(signal(row) for row in rows.values())
     by_task: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for row in rows.values():
-        by_task[row["task"] or "-"][row["category"]] += 1
-    lines = ["# TRTMC vs native qualification", "", f"{len(rows)} models from {', '.join(r.name for r in roots)}.",
-             "", "| category | models |", "|---|---|", *(f"| {c} | {counts[c]} |" for c in shown),
-             "", "## By Task", "", "| Task | " + " | ".join(shown) + " |", "|---|" + "---|" * len(shown),
-             *(f"| {task} | " + " | ".join(str(by_task[task].get(c) or "") for c in shown) + " |"
+        by_task[row["task"] or "-"][signal(row)] += 1
+    names = [SIGNAL_NAMES[result] for result in SIGNALS]
+    lines = ["# TRTMC vs native qualification", "", f"{len(rows)} models from {', '.join(r.name for r in roots)}: "
+             f"{results['green'] + results['yellow']} pass (Green + Yellow).", "",
+             "Green: pass. Yellow: Perf about equal to native (counts as a pass) or an Acc difference not shown either "
+             "way. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
+             "failed build, or the comparison does not apply).", "",
+             "| result | models |", "|---|---|", *(f"| {SIGNAL_NAMES[r]} | {results[r]} |" for r in SIGNALS),
+             "", "## By Task", "", "| Task | " + " | ".join(names) + " |", "|---|" + "---|" * len(names),
+             *(f"| {task} | " + " | ".join(str(by_task[task].get(r) or "") for r in SIGNALS) + " |"
                for task in sorted(by_task)),
-             "", "## Per model", "", "| model | Task | root | category | Acc | Perf L1 (speedup vs native) | "
-             "reference | notes |", "|---|---|---|---|---|---|---|---|"]
-    for profile in sorted(rows, key=lambda p: (rank[rows[p]["category"]], rows[p]["task"] or "", p)):
+             "", "## Per model", "", "| result | model | Task | host | Acc (TRTMC · native) | Perf p50 (TRTMC · native) | "
+             "reason |", "|---|---|---|---|---|---|---|"]
+    for profile in sorted(rows, key=lambda p: (SIGNALS.index(signal(rows[p])), rows[p]["task"] or "", p)):
         row = rows[profile]
-        notes = row["notes"].replace("|", "/").replace("\n", " ")
-        lines.append(f"| {profile} | {row['task'] or '-'} | {row['root']} | {row['category']} | "
-                     f"{_accuracy_text(row['accuracy'])} | {_perf_text(row['perf'])} | {row['backend']} | {notes} |")
+        reason = signal_reason(profile, row).replace("|", "/").replace("\n", " ")
+        lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {row['root']} | "
+                     f"{_accuracy_text(row['accuracy'])} | {_perf_text(profile, row['perf'])} | {reason} |")
     return "\n".join(lines) + "\n", counts
 
 

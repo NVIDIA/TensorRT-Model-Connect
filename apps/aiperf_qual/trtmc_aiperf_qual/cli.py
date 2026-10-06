@@ -273,6 +273,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     merge.add_argument("--title", default="TRTMC vs native qualification", help="the HTML report's title")
     merge.add_argument("--link", action="append", default=[], metavar="LABEL=HREF",
                        help="a related page linked under the HTML report's title (for example an appendix)")
+    merge.add_argument("--appendix", action="append", default=[], type=Path, metavar="ROOT",
+                       help="result roots of reruns (an appendix): each rerun profile's result is shown under its "
+                            "reason in the HTML report; the matrix itself stays as run")
     merge.add_argument("--assignment", type=Path, help="a formal multi-host run: refuse to merge unless the roots "
                                                       "pass merge-check against this assignment")
     merge.add_argument("--smoke", action="store_true", help="with --assignment: the roots hold smoke results")
@@ -366,8 +369,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if any(len(link) != 2 for link in links):
                         print("trtmc-aiperf-qual: --link takes LABEL=HREF", file=sys.stderr)
                         return 2
+                    from .campaign import signal
+
+                    reruns = {profile: signal(row) for profile, row in collect(arguments.appendix)[0].items()
+                              if profile in rows} if arguments.appendix else {}
                     render(rows, counts, rank, arguments.html, title=arguments.title, context=run_context(roots),
-                           links=links)
+                           links=links, reruns=reruns)
             if arguments.output:
                 arguments.output.write_text(text)
                 print(json.dumps(dict(counts)))
