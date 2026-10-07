@@ -839,7 +839,7 @@ class FakeCleanupAPI:
     def __init__(self, brev):
         self.brev = brev
         self.requests = []
-        self.responses = {"GET": [], "DELETE": [], "AUTH": []}
+        self.responses = {"GET": [], "DELETE": [], "AUTH": [], "LIST": []}
         self.body_changes = {}
         self.auth = (200, {"id": "org-test"})
         self.outage_until = 0
@@ -856,7 +856,7 @@ class FakeCleanupAPI:
         }
 
     def __call__(self, method, identity, deadline):
-        assert method in {"GET", "DELETE", "AUTH"}
+        assert method in {"GET", "DELETE", "AUTH", "LIST"}
         assert deadline is None or deadline > brev_provision.time.monotonic()
         self.requests.append((method, identity, deadline, brev_provision.time.monotonic()))
         if brev_provision.time.monotonic() < self.outage_until:
@@ -872,6 +872,8 @@ class FakeCleanupAPI:
             return self.auth
         if method == "GET":
             return (200, self.workspace()) if self.brev.name is not None else (404, None)
+        if method == "LIST":
+            return 200, {"items": [self.workspace()] if self.brev.name is not None else []}
         self.brev.events.append("delete:" + identity)
         if self.brev.delete_failures:
             self.brev.delete_failures -= 1
@@ -1002,7 +1004,9 @@ def test_delete_requires_two_valid_absence_reads_and_persists_confirmation(fake)
     fake.delete_failures = 2
     assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
     assert fake.events.count("delete:allocation-gpu") == 3
-    assert [r[0] for r in fake.api.requests][-4:] == ["GET", "AUTH", "GET", "AUTH"]
+    deletion = next(i for i, request in enumerate(fake.api.requests) if request[0] == "DELETE")
+    assert [r[0] for r in fake.api.requests[deletion + 1 :]].count("AUTH") >= 2
+    assert [r[0] for r in fake.api.requests[deletion + 1 :]].count("LIST") >= 2
     lease = json.loads(fake.lease.read_text())
     assert lease["cleanup_confirmed"] and lease["phase"] == "deleted"
     assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
@@ -1157,13 +1161,163 @@ def test_known_owned_id_is_deleted_even_when_full_inventory_is_unavailable(fake,
     assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
 
 
+@pytest.mark.parametrize("get_status", [500, 503, 401, 403])
+def test_unavailable_id_read_can_use_two_authenticated_post_delete_org_lists(
+    fake, monkeypatch, get_status
+):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(get_status, None)] * 100
+
+    def no_cli(*args, **kwargs):
+        pytest.fail("known-ID deletion must not require CLI inventory or CLI delete")
+
+    monkeypatch.setattr(brev_provision, "_run", no_cli)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    requests = fake.api.requests
+    deletion = next(i for i, request in enumerate(requests) if request[0] == "DELETE")
+    lists = [(i, request) for i, request in enumerate(requests) if request[0] == "LIST"]
+    assert len([r for r in requests if r[0] == "DELETE"]) == 1
+    assert len(lists) == 2 and all(i > deletion for i, _ in lists)
+    assert all(request[1] == "org-test" for _, request in lists)
+    assert lists[1][1][3] - lists[0][1][3] >= 2
+    assert [r[0] for r in requests[deletion + 1 :]].count("AUTH") >= 2
+    lease = json.loads(fake.lease.read_text())
+    assert lease["phase"] == "deleted" and lease["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("listed_status", ["RUNNING", "DELETING", "STOPPED"])
+def test_accepted_delete_waits_for_owned_instance_to_disappear_from_org_list(fake, listed_status):
+    assert fake.provision() == "gpu"
+    body = {**fake.api.workspace(), "status": listed_status}
+    fake.api.responses["GET"] = [(500, None)] * 100
+
+    def still_visible():
+        assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
+        return 200, {"items": [body]}
+
+    fake.api.responses["LIST"] = [
+        still_visible,
+        still_visible,
+        (200, {"items": []}),
+        (200, {"items": []}),
+    ]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert len([r for r in fake.api.requests if r[0] == "DELETE"]) == 1
+    lists = [r for r in fake.api.requests if r[0] == "LIST"]
+    assert len(lists) == 4 and lists[-1][3] - lists[-2][3] >= 2
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        (500, None),
+        (401, None),
+        (403, None),
+        (200, None),
+        (200, {}),
+        (200, {"items": {}}),
+        (200, {"items": [{}]}),
+    ],
+)
+def test_invalid_org_list_resets_consecutive_absence_proof(fake, invalid):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.responses["LIST"] = [
+        (200, {"items": []}),
+        invalid,
+        (200, {"items": []}),
+        (200, {"items": []}),
+    ]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert len([r for r in fake.api.requests if r[0] == "LIST"]) == 4
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("auth", [(401, None), (403, None), (200, {}), (200, {"id": "org-other"})])
+def test_empty_list_does_not_confirm_when_original_org_cannot_be_authenticated(fake, auth):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.auth = auth
+    fake.api.responses["LIST"] = [(200, {"items": []})] * 100
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert any(r[0] == "DELETE" for r in fake.api.requests)
+    assert not any(r[0] == "LIST" for r in fake.api.requests)
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"organizationId": "org-other"},
+        {"id": "other-id"},
+        {"name": "other-name"},
+        {"instanceType": "other-sku"},
+    ],
+)
+def test_org_list_identity_conflict_cannot_be_treated_as_owned_instance_absence(fake, change):
+    assert fake.provision() == "gpu"
+    conflicting = {**fake.api.workspace(), **change}
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.responses["LIST"] = [(200, {"items": [conflicting]})] * 100
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+    assert all(r[1] == "allocation-gpu" for r in fake.api.requests if r[0] == "DELETE")
+
+
+def test_visible_direct_owned_instance_cannot_be_overruled_by_empty_org_list(fake):
+    assert fake.provision() == "gpu"
+    body = fake.api.workspace()
+    fake.api.responses["GET"] = [(200, body)] * 100
+    fake.api.responses["LIST"] = [(200, {"items": []})] * 100
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not any(r[0] == "LIST" for r in fake.api.requests)
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_lost_delete_ack_and_broken_id_route_can_confirm_using_original_org_list(fake):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(500, None)] * 100
+
+    def accepted_but_lost():
+        fake.name = None
+        raise brev_provision.InventoryError("delete acknowledgement lost")
+
+    fake.api.responses["DELETE"] = [accepted_but_lost, (404, None)]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    requests = fake.api.requests
+    deletion = next(i for i, request in enumerate(requests) if request[0] == "DELETE")
+    lists = [(i, r) for i, r in enumerate(requests) if r[0] == "LIST"]
+    assert len(lists) == 2 and all(i > deletion and r[1] == "org-test" for i, r in lists)
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_failed_delete_is_retried_before_org_list_outage_recovers(fake):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.responses["DELETE"] = [(503, None)]
+    fake.api.responses["LIST"] = [(503, None)] * 4
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    requests = fake.api.requests
+    deletes = [r for r in requests if r[0] == "DELETE"]
+    assert len(deletes) == 2 and deletes[1][3] <= 180
+    lists = [r for r in requests if r[0] == "LIST"]
+    assert len(lists) == 6 and deletes[1][3] < lists[4][3]
+    assert fake.name is None and json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
 def test_accepted_delete_is_not_confirmation_while_the_instance_remains_visible(fake):
     assert fake.provision() == "gpu"
     body = fake.api.workspace()
     fake.api.responses["GET"] = [(200, body), (200, body)]
     assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
     assert len([r for r in fake.api.requests if r[0] == "DELETE"]) == 1
-    assert [r[0] for r in fake.api.requests][-4:] == ["GET", "AUTH", "GET", "AUTH"]
+    deletion = next(i for i, request in enumerate(fake.api.requests) if request[0] == "DELETE")
+    assert [r[0] for r in fake.api.requests[deletion + 1 :]].count("AUTH") >= 2
+    assert [r[0] for r in fake.api.requests[deletion + 1 :]].count("LIST") >= 2
 
 
 def test_pre_delete_notfound_read_does_not_replace_two_post_delete_reads(fake):
@@ -1174,7 +1328,7 @@ def test_pre_delete_notfound_read_does_not_replace_two_post_delete_reads(fake):
     methods = [r[0] for r in fake.api.requests]
     deletion = methods.index("DELETE")
     assert methods[:deletion] == ["GET"]
-    assert methods[deletion + 1 :].count("GET") >= 2
+    assert methods[deletion + 1 :].count("LIST") == 2
     assert methods[deletion + 1 :].count("AUTH") >= 2
 
 
@@ -1189,7 +1343,10 @@ def test_until_deleted_outlasts_old_900_second_budget_and_retries_the_same_id(fa
     assert all(
         identity == "allocation-gpu"
         for method, identity, _, _ in fake.api.requests
-        if method != "AUTH"
+        if method in {"GET", "DELETE"}
+    )
+    assert all(
+        identity == "org-test" for method, identity, _, _ in fake.api.requests if method == "LIST"
     )
     assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
 
@@ -1229,6 +1386,21 @@ def test_legacy_lease_without_original_org_cannot_use_wrong_org_notfound_as_abse
         brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
     assert fake.name == "gpu" and clock.now <= 130
     assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_legacy_lease_without_original_org_cannot_bind_scope_from_empty_list(fake):
+    assert fake.provision() == "gpu"
+    lease = json.loads(fake.lease.read_text())
+    lease.pop("organization_id")
+    fake.lease.write_text(json.dumps(lease))
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.responses["DELETE"] = [(404, None)] * 100
+    fake.api.responses["LIST"] = [(200, {"items": []})] * 100
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not any(r[0] == "LIST" for r in fake.api.requests)
+    lease = json.loads(fake.lease.read_text())
+    assert not lease["cleanup_confirmed"] and "organization_id" not in lease
 
 
 def test_legacy_no_org_lease_cannot_confirm_without_positive_owned_response(fake, clock):
@@ -1282,7 +1454,7 @@ def test_lost_delete_ack_can_recover_from_prior_owned_read_and_authenticated_abs
     assert fake.name is None and json.loads(fake.lease.read_text())["cleanup_confirmed"]
     methods = [r[0] for r in fake.api.requests]
     first_delete = methods.index("DELETE")
-    assert methods[first_delete + 1 :].count("GET") >= 2
+    assert methods[first_delete + 1 :].count("LIST") >= 2
     assert methods[first_delete + 1 :].count("AUTH") >= 2
 
 
@@ -1300,7 +1472,7 @@ def test_lost_delete_ack_with_first_get_unavailable_uses_the_trusted_original_le
     assert lease["cleanup_confirmed"] and lease["organization_id"] == "org-test"
     methods = [r[0] for r in fake.api.requests]
     first_delete = methods.index("DELETE")
-    assert methods[first_delete + 1 :].count("GET") >= 2
+    assert methods[first_delete + 1 :].count("LIST") >= 2
     assert methods[first_delete + 1 :].count("AUTH") >= 2
 
 
@@ -1423,6 +1595,104 @@ def test_direct_http_uses_official_origin_bounded_timeout_and_no_credential_redi
     status, body = brev_provision._cleanup_http("DELETE", "allocation-gpu")
     assert status == 202 and body["organizationId"] == "org-test"
     assert "private-response-token" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("credential", [("bak-private", "org-test"), ("oauth-private", "")])
+def test_org_list_http_preserves_full_native_and_legacy_scope_and_filters_secrets(
+    monkeypatch, credential
+):
+    import urllib.request
+
+    monkeypatch.delenv("BREV_API_URL", raising=False)
+    monkeypatch.setattr(brev_provision, "_cleanup_credentials", lambda: credential)
+    records = [
+        {
+            "id": "allocation-gpu",
+            "name": "gpu",
+            "organizationId": "org-test",
+            "instanceType": "g6.4xlarge",
+            "status": "DELETING",
+            "createdByUserId": "current-user",
+            "workspaceClassId": "native",
+            "password": "private-password",
+        },
+        {
+            "id": "another-user-instance",
+            "name": "another-name",
+            "organizationId": "org-test",
+            "instanceType": "g6e.2xlarge",
+            "status": "RUNNING",
+            "createdByUserId": "another-user",
+            "workspaceClassId": "legacy",
+            "startupScript": "private-userdata",
+        },
+    ]
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, bound):
+            assert bound == 1024 * 1024 + 1
+            return json.dumps(records).encode()
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == (
+                "https://brevapi.us-west-2-prod.control-plane.brev.dev"
+                "/api/organizations/org-test/workspaces"
+            )
+            assert request.get_method() == "GET"
+            assert request.get_header("Authorization") == "Bearer " + credential[0]
+            assert timeout == 30
+            return Response()
+
+    def opener(handler):
+        assert (
+            handler.redirect_request(None, None, 302, "redirect", {}, "https://untrusted.example")
+            is None
+        )
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", opener)
+    status, body = brev_provision._cleanup_http("LIST", "org-test")
+    assert status == 200
+    assert [row["id"] for row in body["items"]] == ["allocation-gpu", "another-user-instance"]
+    assert all(set(row) == {"id", "name", "organizationId"} for row in body["items"])
+    assert "private" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("document", [{"workspaces": []}, None, [None]])
+def test_org_list_http_rejects_a_non_array_or_invalid_workspace_element(monkeypatch, document):
+    import urllib.request
+
+    monkeypatch.delenv("BREV_API_URL", raising=False)
+    monkeypatch.setattr(brev_provision, "_cleanup_credentials", lambda: ("bak-private", "org-test"))
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, bound):
+            return json.dumps(document).encode()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *args: SimpleNamespace(open=lambda *args, **kwargs: Response()),
+    )
+    with pytest.raises(brev_provision.InventoryError):
+        brev_provision._cleanup_http("LIST", "org-test")
 
 
 @pytest.mark.parametrize("returned_org", ["org-test", "org-other"])

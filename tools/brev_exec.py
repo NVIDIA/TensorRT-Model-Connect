@@ -856,11 +856,13 @@ def _cleanup_http(method: str, identity: str) -> tuple[int, dict | None]:
         or parsed.fragment
     ):
         raise InventoryError("Brev cleanup requires the official HTTPS control-plane origin")
-    if method == "AUTH":
-        org = identity or credential_org
+    if method in {"AUTH", "LIST"}:
+        org = identity if method == "LIST" else identity or credential_org
         if not org or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", org):
             raise InventoryError("Brev cleanup credential organization is unavailable")
         endpoint = f"api/organizations/{urllib.parse.quote(org, safe='')}"
+        if method == "LIST":
+            endpoint += "/workspaces"
         verb = "GET"
     elif method in {"GET", "DELETE"} and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", identity):
         endpoint = f"api/workspaces/{urllib.parse.quote(identity, safe='')}"
@@ -876,6 +878,14 @@ def _cleanup_http(method: str, identity: str) -> tuple[int, dict | None]:
     try:
         with opener.open(request, timeout=CLI_TIMEOUT) as response:
             status = response.status
+            headers = getattr(response, "headers", {})
+            if method == "LIST" and (
+                re.search(r'rel\s*=\s*["\']?next', headers.get("Link", ""), re.I)
+                or headers.get("X-Next-Page")
+                or headers.get("X-Next-Cursor")
+                or headers.get("Content-Range")
+            ):
+                raise InventoryError("Brev cleanup inventory is incomplete")
             raw = response.read(1024 * 1024 + 1)
     except urllib.error.HTTPError as error:
         return error.code, None
@@ -887,6 +897,15 @@ def _cleanup_http(method: str, identity: str) -> tuple[int, dict | None]:
         body = _json(raw.decode("utf-8"))
     except (UnicodeError, ValueError):
         raise InventoryError("Brev cleanup response is invalid") from None
+    if method == "LIST":
+        if not isinstance(body, list) or any(not isinstance(item, dict) for item in body):
+            raise InventoryError("Brev cleanup inventory is invalid")
+        return status, {
+            "items": [
+                {field: item.get(field) for field in ("id", "name", "organizationId")}
+                for item in body
+            ]
+        }
     if not isinstance(body, dict):
         raise InventoryError("Brev cleanup response is invalid")
     if method == "AUTH" and body.get("id") != org:
@@ -953,6 +972,39 @@ def _cleanup_workspace(body: dict | None, lease: dict) -> None:
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", body["organizationId"]):
         raise InventoryError("Brev cleanup response omitted its organization identity")
     lease["organization_id"] = body["organizationId"]
+
+
+def _cleanup_list_absent(body: dict | None, lease: dict) -> bool:
+    if not isinstance(body, dict) or set(body) != {"items"} or not isinstance(body["items"], list):
+        raise InventoryError("Brev cleanup inventory is invalid or incomplete")
+    items = body["items"]
+    identities = set()
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or any(
+                not isinstance(item.get(field), str) or not item[field]
+                for field in ("id", "name", "organizationId")
+            )
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", item["id"])
+        ):
+            raise InventoryError("Brev cleanup inventory omitted an instance identity")
+        if item["id"] in identities:
+            raise InventoryError("Brev cleanup inventory duplicated an instance identity")
+        identities.add(item["id"])
+        if item["organizationId"] != lease["organization_id"]:
+            raise ProvisionError(
+                "Brev cleanup inventory changed organization; refusing confirmation"
+            )
+        if (item["id"] == lease["instance_id"] and item["name"] != lease["name"]) or (
+            item["name"] == lease["name"] and item["id"] != lease["instance_id"]
+        ):
+            raise ProvisionError(
+                "Brev cleanup inventory changed instance identity; refusing confirmation"
+            )
+    return not any(
+        item["id"] == lease["instance_id"] or item["name"] == lease["name"] for item in items
+    )
 
 
 def _select_instance(instance_type: str, disk_gb: int, provider: str, deadline: float) -> dict:
@@ -1168,10 +1220,10 @@ def _cleanup(
                     lease["owned_instance_observed"] = True
                     lease["ownership_blocked"] = False
                     identity_blocked = False
+                    absent = 0
                     if lease_file is not None:
                         _save_lease(lease_file, lease)
             if status not in (200, 404):
-                absent = 0
                 _log(
                     start, f"{name}: direct instance read unavailable; requesting owned-ID deletion"
                 )
@@ -1191,37 +1243,41 @@ def _cleanup(
                 and lease.get("delete_attempted")
                 and lease.get("delete_outcome_unknown")
             )
-            requested_now = False
             # A valid owned lease is sufficient to request deletion even when fresh reads fail.
-            if not accepted and not (status == 404 and unknown_response):
-                requested_now = True
+            if not accepted and (status == 200 or absent == 0):
                 lease.update(delete_attempted=True, delete_outcome_unknown=True)
                 if lease_file is not None:
                     _save_lease(lease_file, lease)
                 try:
                     deleted_status, deleted_body = _cleanup_request("DELETE", identity, deadline)
                 except InventoryError:
+                    deleted_status, deleted_body = 0, None
                     _log(start, f"{name}: cleanup DELETE HTTP 0")
-                    raise
-                _log(start, f"{name}: cleanup DELETE HTTP {deleted_status}")
+                else:
+                    _log(start, f"{name}: cleanup DELETE HTTP {deleted_status}")
                 lease["delete_outcome_unknown"] = (
-                    deleted_status == 404 or 500 <= deleted_status <= 599
+                    deleted_status in (0, 200, 202, 404) or 500 <= deleted_status <= 599
                 )
                 if deleted_status in (200, 202):
-                    _cleanup_workspace(deleted_body, lease)
-                    accepted = True
-                    lease.update(
-                        delete_accepted=True, delete_outcome_unknown=False, phase="deleting"
-                    )
-                    if lease_file is not None:
-                        _save_lease(lease_file, lease)
-                    _log(start, f"{name}: owned-ID delete accepted; awaiting verified deletion")
-                else:
-                    if lease_file is not None:
-                        _save_lease(lease_file, lease)
-                    absent = 0
-                    raise InventoryError("owned-ID deletion has not been accepted")
-            if status == 404 and not requested_now and (accepted or unknown_response):
+                    try:
+                        _cleanup_workspace(deleted_body, lease)
+                    except InventoryError:
+                        pass
+                    else:
+                        accepted = True
+                        lease.update(
+                            delete_accepted=True, delete_outcome_unknown=False, phase="deleting"
+                        )
+                        _log(start, f"{name}: owned-ID delete accepted; awaiting verified deletion")
+                if lease_file is not None:
+                    _save_lease(lease_file, lease)
+            unknown_response = bool(
+                lease.get("organization_id")
+                and (lease.get("owned_instance_observed") or owned_lease)
+                and lease.get("delete_attempted")
+                and lease.get("delete_outcome_unknown")
+            )
+            if status != 200 and (accepted or unknown_response):
                 org = lease.get("organization_id", "")
                 if not org:
                     raise InventoryError("the original allocation organization remains unknown")
@@ -1240,14 +1296,31 @@ def _cleanup(
                     raise InventoryError("cleanup absence has not been authenticated")
                 if org and auth_body["id"] != org:
                     raise ProvisionError("Brev cleanup organization changed; refusing confirmation")
-                absent += 1
+                try:
+                    list_status, list_body = _cleanup_request("LIST", org, deadline)
+                except InventoryError:
+                    _log(start, f"{name}: cleanup LIST HTTP 0")
+                    raise
+                _log(start, f"{name}: cleanup LIST HTTP {list_status}")
+                if list_status != 200:
+                    raise InventoryError("the original organization inventory is unavailable")
+                is_absent = _cleanup_list_absent(list_body, lease)
+                absent = absent + 1 if is_absent else 0
+                if not is_absent and not accepted:
+                    lease["delete_outcome_unknown"] = False
+                    if lease_file is not None:
+                        _save_lease(lease_file, lease)
                 if absent >= 2:
                     lease.update(phase="deleted", allocation_pending=False, cleanup_confirmed=True)
                     if lease_file is not None:
                         _save_lease(lease_file, lease)
-                    _log(start, f"{name}: deletion confirmed by two authenticated instance reads")
+                    _log(
+                        start,
+                        f"{name}: deletion confirmed by two authenticated organization inventories",
+                    )
                     return
-                delay = 2.0
+                if is_absent:
+                    delay = 2.0
             else:
                 absent = 0
         except (InventoryError, OSError):
