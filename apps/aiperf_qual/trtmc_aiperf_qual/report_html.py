@@ -145,7 +145,9 @@ def _performance_cell(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
     """Each timed request's server model-call time p50 on both sides, coloured by its light."""
     lines = [f"<span class='t-{_e(item.get('light') or 'white')}'>{_e(request_label(profile, item))}: TRTMC "
              f"{_e(ms((item.get('candidate') or {}).get('p50_ms')))} · native "
-             f"{_e(ms((item.get('reference') or {}).get('p50_ms')))}</span>" for item in items]
+             f"{_e(ms((item.get('reference') or {}).get('p50_ms')))}"
+             + (" <small>per audio second</small>" if (item.get("candidate") or {}).get("unit") else "") + "</span>"
+             for item in items]
     return "<br>".join(lines) or '<span class="muted">—</span>'
 
 

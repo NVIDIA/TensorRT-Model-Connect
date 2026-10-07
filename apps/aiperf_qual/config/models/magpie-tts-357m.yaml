@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# MagpieTTS samples (temperature 0.7, top-k 80): Perf compares only the generated duration.
+# MagpieTTS samples (temperature 0.7, top-k 80, fixed in the bundle; the native model varies run to run too): Perf
+# compares model-call time per second of generated audio, and the output check only the generated duration.
 performance:
   l1:
+    measurement: {per_audio_second: true}
     output_grader_params: {min_duration_ratio: 0.5, max_duration_ratio: 2.0, min_rms_ratio: 0.0, max_rms_ratio: 1000000000.0,
       max_log_spectral_distance: 1000000000.0}
 

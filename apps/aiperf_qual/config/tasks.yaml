@@ -21,7 +21,9 @@ defaults:
       suite: catalog
       reference_modes: [eager]
       # settle_s: the request sent back to back first (a fresh server times short requests slower at first).
-      measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5}
+      # min_run_s: a request faster than the settle's pace gets enough requests per run to last this long (12
+      # sub-millisecond requests spread their run's median by more than max_ci_percent).
+      measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5, min_run_s: 1.0}
       aggregation: {candidate: mean, eager: mean, compile: best}
       margin_percent: 5
       # The green / red bounds widen by this (multiplicatively): the largest speedup effect of server instances and
@@ -66,7 +68,10 @@ benchmarks:
   # Raw encoders (BERT, RoBERTa, ...: STS-B is not their task): conversion parity of the encode output (the
   # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance.
   encoder_parity: {suite: encoder-parity, suite_definition: stsbenchmark-sentences-400, metric: vector_parity,
-                   gate: {min_cosine: 0.999, max_relative_l2: 0.02}}
+                   gate: {min_cosine: 0.999, max_relative_l2: 0.02},
+                   # A native model that cannot run the candidate's precision (fp16) runs at fp32: TRTMC's half-
+                   # precision error is then not shared by the reference, so the tolerance doubles.
+                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04}}
   # SciFact reranking of fixed BM25 top-20 candidates (nDCG@10). Each document keeps its head so that the pair, as
   # the bundle's reranker forms it (`pair_format`, the eagle_vlm runtime's), fits the bundle; both sides get it.
   rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-bm25-300, metric: rerank_ndcg, gate: {margin: 1.0},

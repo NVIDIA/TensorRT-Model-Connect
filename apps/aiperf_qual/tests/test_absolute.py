@@ -1592,3 +1592,19 @@ def test_a_harmony_answer_is_graded_on_its_final_channel_only():
     assert final.correct and final.extracted_answer == "C"
     unfinished = asyncio.run(grader.grade("analysisWe should consider B before checking the others", "B"))
     assert not unfinished.correct  # the analysis was cut off: no answer
+
+
+def test_a_native_model_at_another_precision_gets_the_mismatched_precision_tolerance():
+    item = {"suite": "encoder-parity", "metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02},
+            "mismatched_precision_gate": {"min_cosine": 0.998, "max_relative_l2": 0.04}}
+    problems = [{"sample_id": "a"}]
+    native_side = {"observations": {"greedy": {0: {"values": [1.0, 0.0]}}}, "exit": {}}
+    trtmc_side = {"observations": {"greedy": {0: {"values": [1.0, 0.03]}}}, "exit": {}}  # relative L2 0.03
+    model = {"absolute": [item], "candidate": {"precision": "fp16"}}
+    same = absolute.entries(model, {"encoder-parity": problems}, {"encoder-parity": trtmc_side},
+                            {"runs": {"encoder-parity": native_side}, "precision": "fp16"}, None)[0]
+    assert same["status"] == "fail" and same["gate"]["max_relative_l2"] == 0.02
+    fallback = absolute.entries(model, {"encoder-parity": problems}, {"encoder-parity": trtmc_side},
+                                {"runs": {"encoder-parity": native_side}, "precision": "fp32"}, None)[0]
+    assert fallback["status"] == "pass" and fallback["gate"]["max_relative_l2"] == 0.04
+    assert "native fp32 vs TRTMC fp16" in fallback["notes"][-1]

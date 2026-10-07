@@ -758,3 +758,29 @@ def test_smoke_fails_when_the_verdict_reports_an_error():
               "verdict": {"acc": "pass", "perf": "error", "category": "error"}}
     verdict = smoke_verdict(result)
     assert verdict["category"] == "smoke-fail" and verdict["failing"] == ["verdict perf: error"]
+
+
+def test_a_sub_millisecond_request_runs_long_enough_for_a_stable_median():
+    from trtmc_aiperf_qual import runner
+
+    measurement = {"requests": 12, "min_run_s": 1.0}
+    assert runner.requests_per_run(measurement, settled=4000, settle_s=10) == 400  # 2.5 ms a request
+    assert runner.requests_per_run(measurement, settled=200000, settle_s=10) == runner.MAX_RUN_REQUESTS
+    assert runner.requests_per_run(measurement, settled=20, settle_s=10) == 12  # slow requests keep the count
+    assert runner.requests_per_run({"requests": 12}, settled=4000, settle_s=10) == 12
+    assert runner.requests_per_run(measurement, settled=0, settle_s=0) == 12
+    assert runner._audio_seconds({"audio_digest": {"seconds": 13.7}}) == 13.7 and runner._audio_seconds({}) is None
+
+
+def test_sampled_speech_is_valid_by_its_median_duration_not_each_utterance():
+    from trtmc_aiperf_qual.intelligibility import validity
+
+    problems = [{"sample_id": str(index)} for index in range(4)]
+    sound = lambda seconds: {"finite": True, "dbfs": -20.0, "seconds": seconds}  # noqa: E731
+    native = [sound(6.0), sound(14.0), sound(5.0), sound(6.0)]
+    sampled = validity(problems, [sound(13.6), sound(5.3), sound(5.0), sound(6.2)], native)  # two run to the limit
+    assert sampled["status"] == "pass" and "2 of 4 sentences beyond" in sampled["notes"][0]
+    halved = validity(problems, [sound(2.0), sound(4.0), sound(2.0), sound(2.0)], native)
+    assert halved["status"] == "fail" and "median duration ratio 0.33" in halved["reasons"][0]
+    silent = validity(problems, [{"finite": True, "dbfs": -80.0, "seconds": 6.0}, *map(sound, (14, 5, 6))], native)
+    assert silent["status"] == "fail" and silent["passed"] == 3

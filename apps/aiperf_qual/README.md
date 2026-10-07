@@ -42,7 +42,8 @@ tolerance: raw encoders' vectors, MoGe geometry, ACT action chunks, stereo dispa
 Inputs a family prepares itself come from its `reference/inputs.py` (`family_inputs` suites).
 
 Checks for every model of a Task (`supplementary`): text-to-speech round-trip WER (corpus, bootstrap) and
-audio validity; GenEval-style pass rate for text-to-image families that take caller latents (the same
+audio validity (every output finite and not silent; the median per-sentence duration ratio to the native model
+within 0.5-2, as a sampling model's single utterance may run to its length limit on either side); GenEval-style pass rate for text-to-image families that take caller latents (the same
 initial noise on both sides); CLIP-T and video validity for videos; MagicBrush CLIP-I and DINO for edits;
 world-model video parity. The pixel parity under latent replay is reported only (`informational`).
 
@@ -60,6 +61,8 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
   counts as TRTMC's wrong answer: a wrong right/wrong answer, a parity sample outside the tolerance, an empty WER or
   chrF text. A corpus metric without an empty answer (vectors, masks, detections, forecasts) keeps the problem
   missing, an `error`, as does a problem the native model did not answer.
+- A parity benchmark against a native model that ran at another precision than TRTMC (the candidate's failed
+  natively) uses its `mismatched_precision_gate`.
 - Native copies that run out of GPU memory answer again as half as many copies, down to one.
 - Every AIPerf run has a deadline: three times the profile's seconds in the run's ledger (`run-all --ledger`, at
   least ten minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.
@@ -73,7 +76,9 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
 **L1** times each timed request on both servers (warmup, then N requests, R runs): the catalog testcase
 (its greedy variant when it samples text; the first gold problem when the testcase is no workload) and, for
 text generation, a near-capacity request filling the bundle. The statistic is the server-side model-call
-p50 per run; the speedup interval is Welch's t interval of the log ratio. A comparison is white when the
+p50 per run; the speedup interval is Welch's t interval of the log ratio. A request faster than the settle's
+pace gets enough requests per run to last `min_run_s` (1 s); a sampling speech model's timings compare per second of
+generated audio (`per_audio_second`), as its outputs differ in length. A comparison is white when the
 work or outputs differ (checked on every timed response: tokens or text, media geometry, audio length), a
 side's runs spread more than 5%, the native model ran at another precision than the candidate, or the GPU was
 busy. Timing phases hold the host GPU lock

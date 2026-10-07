@@ -173,6 +173,24 @@ def probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any]
         raise RuntimeError(f"probe rejected: {error.read().decode(errors='replace')[-600:]}") from error
 
 
+MAX_RUN_REQUESTS = 2000  # a run of the shortest requests: enough for a stable median, bounded in time
+
+
+def requests_per_run(measurement: Mapping[str, Any], settled: int, settle_s: float) -> int:
+    """The configured requests per run, or as many as the settle's pace (``settled`` requests in ``settle_s``)
+    fits in ``min_run_s``, up to MAX_RUN_REQUESTS."""
+    requests = int(measurement["requests"])
+    if settled and settle_s > 0 and measurement.get("min_run_s"):
+        fitting = math.ceil(float(measurement["min_run_s"]) * settled / settle_s)
+        requests = max(requests, min(MAX_RUN_REQUESTS, fitting))
+    return requests
+
+
+def _audio_seconds(observation: Mapping[str, Any] | None) -> float | None:
+    seconds = ((observation or {}).get("audio_digest") or {}).get("seconds")
+    return float(seconds) if seconds else None
+
+
 def settle(service: Mapping[str, Any], operation: str, request: Mapping[str, Any], seconds: float,
            timeout_s: float) -> int:
     """The timed request sent back to back for ``seconds`` before a side's first timed run (a
@@ -245,16 +263,20 @@ def _responses(run: AiperfRun) -> list[tuple[float | None, dict[str, Any] | None
 def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any], suite: Suite,
               measurement: Mapping[str, Any], out: Path, aggregation: str) -> tuple[AiperfRun, dict[str, Any]]:
     """Repeated timed runs of the suite's request. Each run's statistic is the median server model-call
-    time; every response must carry its time, and every response's work signature is kept."""
-    arguments = [*TASK_ENDPOINT, *_task_url(service, model["operation"]), "--concurrency", "1",
-                 "--input-file", str(suite.write_inputs(out.parent / f"{out.name}.inputs.jsonl")),
-                 "--custom-dataset-type", "single_turn", "--dataset-sampling-strategy", "sequential",
-                 "--request-count", str(measurement["requests"])]
-    if int(measurement.get("warmup", 0)) > 0:
-        arguments += ["--warmup-request-count", str(measurement["warmup"])]
+    time (with ``per_audio_second``, per second of generated audio: a sampling speech model's outputs differ in
+    length); every response must carry its time, and every response's work signature is kept. A request shorter
+    than the settle's pace gets enough requests per run to last ``min_run_s``, so a run's median is not noise."""
     settle_s = float(measurement.get("settle_s", 0))
     settled = (settle(service, model["operation"], suite.samples[0]["request"], settle_s,
                       absolute.run_timeout(environment, model)) if settle_s > 0 else 0)
+    requests = requests_per_run(measurement, settled, settle_s)
+    per_audio_second = bool(measurement.get("per_audio_second"))
+    arguments = [*TASK_ENDPOINT, *_task_url(service, model["operation"]), "--concurrency", "1",
+                 "--input-file", str(suite.write_inputs(out.parent / f"{out.name}.inputs.jsonl")),
+                 "--custom-dataset-type", "single_turn", "--dataset-sampling-strategy", "sequential",
+                 "--request-count", str(requests)]
+    if int(measurement.get("warmup", 0)) > 0:
+        arguments += ["--warmup-request-count", str(measurement["warmup"])]
     # AIPerf 0.13.0's --num-profile-runs breaks endpoints with tokenizes_input: false (trtmc_task);
     # the repetitions run here.
     runs, busy, per_run, work, untimed = [], [], [], [], 0
@@ -263,13 +285,17 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
         runs.append(run_aiperf(environment, out / f"run_{index:02d}", arguments,
                                timeout_s=absolute.run_timeout(environment, model)))
         responses = _responses(runs[-1])
+        if per_audio_second:
+            responses = [(None if ms is None or not _audio_seconds(obs) else ms / _audio_seconds(obs), obs)
+                         for ms, obs in responses]
         times = [ms for ms, _ in responses if ms is not None]
         untimed += len(responses) - len(times)
         if not times:
             per_run.append(None)
             break  # nothing succeeded; further runs cannot either
         per_run.append(statistics.median(times))
-        work += [judge.work_signature(model["operation"], obs) for _, obs in responses]
+        # Per audio second, the work is the request itself (its generated length is normalized out).
+        work += [() if per_audio_second else judge.work_signature(model["operation"], obs) for _, obs in responses]
     stats = judge.across_runs(per_run, aggregation)
     stats["work"] = list(dict.fromkeys(signature for signature in work if signature is not None))  # distinct
     stats["work_missing"] = sum(signature is None for signature in work)
@@ -277,13 +303,16 @@ def _perf_run(environment: Environment, service: Mapping[str, Any], model: Mappi
     stats["aiperf_exit"] = max(run.exit_code for run in runs)
     if settled:
         stats["settle_requests"] = settled
+    stats["requests_per_run"] = requests
+    if per_audio_second:
+        stats["unit"] = "ms per audio second"
     expected_runs, problems = int(measurement.get("runs", 1)), []
     if len(runs) < expected_runs:
         problems.append(f"{len(runs)} of {expected_runs} runs completed")
     if untimed:
         problems.append(f"{untimed} successful responses carry no model-call time")
     for run in runs:
-        problem = run_completeness(run, int(measurement["requests"]))
+        problem = run_completeness(run, requests)
         if problem:
             problems.append(f"{getattr(getattr(run, 'directory', None), 'name', 'run')}: {problem}")
     if problems:

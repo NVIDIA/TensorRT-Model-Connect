@@ -930,11 +930,19 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
                                           + (f"'s {length}-token sequence length" if length else "")),
                             "candidate_replicas": candidate_replicas, "candidate_mps": candidate_mps})
             continue
+        mismatched = (native.get("precision") and model.get("candidate", {}).get("precision")
+                      and native["precision"] != model["candidate"]["precision"])
+        if mismatched and item.get("mismatched_precision_gate"):  # the native model ran at another precision
+            item = {**item, "gate": dict(item["mismatched_precision_gate"]),
+                    "precision_note": f"native {native['precision']} vs TRTMC {model['candidate']['precision']}: "
+                                      "the mismatched-precision tolerance applies"}
         if native_error or item["suite"] not in runs:
             results.append({**error_entry(item, len(problems), f"native side: {native_error or 'not run'}"),
                             "candidate_replicas": candidate_replicas, "candidate_mps": candidate_mps})
         else:
             entry = judge_in_capacity(item, problems, candidate[item["suite"]], runs[item["suite"]])
+            if item.get("precision_note"):
+                entry["notes"] = [*entry.get("notes", []), item["precision_note"]]
             entry["native"] = {"backend": native.get("backend"), "precision": native.get("precision"), "mode": "eager",
                                "replicas": native.get("replicas", 1), "mps": bool(native.get("mps")),
                                **({"fallback_from": native["fallback_from"]} if native.get("fallback_from") else {}),

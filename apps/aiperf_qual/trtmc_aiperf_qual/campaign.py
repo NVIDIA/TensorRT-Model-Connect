@@ -332,7 +332,8 @@ def ms(value: Any) -> str:
 
 def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
     return "; ".join(f"{request_label(profile, item)}: TRTMC {ms((item.get('candidate') or {}).get('p50_ms'))} · "
-                     f"native {ms((item.get('reference') or {}).get('p50_ms'))}" for item in items)
+                     f"native {ms((item.get('reference') or {}).get('p50_ms'))}"
+                     + (" per audio second" if (item.get("candidate") or {}).get("unit") else "") for item in items)
 
 
 # The owner's four results, worst first: White, no valid comparison (no verdict: an error or a failed build; or the
