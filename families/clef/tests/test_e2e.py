@@ -16,6 +16,16 @@ ROOT = Path(__file__).parent
 MANIFEST = json.loads((ROOT / "manifests/clef.json").read_text())
 
 
+def _selection(config):
+    return {
+        name.strip()
+        for option in ("--e2e-model", "--e2e-testcase")
+        for value in (config.getoption(option, default=[]) or [])
+        for name in str(value).split(",")
+        if name.strip()
+    }
+
+
 @pytest.fixture(scope="module")
 def clef_bundle(tmp_path_factory):
     """All cases exercise one freshly built checkpoint/bundle unless explicitly supplied."""
@@ -48,16 +58,13 @@ def clef_bundle(tmp_path_factory):
 @pytest.mark.parametrize("case", MANIFEST["testcases"], ids=lambda case: case["name"])
 def test_e2e(case, request, tmp_path):
     assert MANIFEST["precision"] == "bf16"
-    selected = set(request.config.getoption("--e2e-model", default=[]) or [])
-    selected.update(request.config.getoption("--e2e-testcase", default=[]) or [])
+    selected = _selection(request.config)
     if not selected and os.environ.get("TRTMC_E2E") != "1":
         pytest.skip("real Clef E2E requires explicit selection")
     if selected and not selected.intersection({"clef", case["name"]}):
         pytest.skip("Clef case was not selected")
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
-    build_root = Path(os.environ.get("TRTMC_NATIVE_BUILD_DIR", runtime))
-    binary = build_root / "clef_task_probe"
-    assert binary.is_file()
+    binary = request.getfixturevalue("clef_task_probe")
     checkpoint, bundle = request.getfixturevalue("clef_bundle")
     sys.path.insert(0, str(checkpoint))
     from joint_schema_model import (

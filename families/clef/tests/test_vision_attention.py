@@ -2,15 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Frame isolation and empty-block regression for bounded vision attention."""
 
-import os
-from pathlib import Path
 import subprocess
 
 import numpy as np
 import pytest
 
 
-def test_frames_do_not_share_attention(tmp_path):
+@pytest.mark.trt
+def test_frames_do_not_share_attention(tmp_path, request):
     torch = pytest.importorskip("torch")
     trt = pytest.importorskip("tensorrt")
     if not torch.cuda.is_available():
@@ -18,8 +17,7 @@ def test_frames_do_not_share_attention(tmp_path):
     from families.clef.graph import Graph
     from families.clef.tests.compare_head import dump_inputs
 
-    probe = Path(os.environ.get("TRTMC_RUNTIME_ROOT", "build")) / "clef_engine_probe"
-    assert probe.is_file()
+    probe = request.getfixturevalue("clef_engine_probe")
     lengths, heads, width = (64, 100, 96), 2, 8
     sequence = sum(lengths)
     torch.manual_seed(8127)

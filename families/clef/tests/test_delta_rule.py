@@ -2,22 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Regression for the unstable inverse exposed by the real invoice request."""
 
-import os
-from pathlib import Path
 import subprocess
 
 import numpy as np
 import pytest
 
 
-def test_parallel_keys_do_not_overflow(tmp_path):
+@pytest.mark.trt
+def test_parallel_keys_do_not_overflow(tmp_path, request):
     torch = pytest.importorskip("torch")
     trt = pytest.importorskip("tensorrt")
     if not torch.cuda.is_available():
         pytest.skip("native delta-rule regression requires CUDA")
-    runtime = Path(os.environ.get("TRTMC_RUNTIME_ROOT", "build"))
-    probe = runtime / "clef_engine_probe"
-    assert probe.is_file(), "build clef_engine_probe before running the native regression"
+    probe = request.getfixturevalue("clef_engine_probe")
     from transformers.models.qwen3_5.modeling_qwen3_5 import torch_chunk_gated_delta_rule
     from families.clef.backbone import delta_rule
     from families.clef.graph import Graph

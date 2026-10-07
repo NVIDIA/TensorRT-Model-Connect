@@ -46,3 +46,25 @@ def test_incomplete_decision_head_does_not_match(missing):
 def test_invalid_build_policy_fails_closed(tmp_path, kwargs):
     with pytest.raises(ValueError):
         BuildRequest(tmp_path, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("models", "cases", "expected"),
+    [
+        (
+            [],
+            ["clef-invoice,clef-outage,clef-receipt"],
+            {"clef-invoice", "clef-outage", "clef-receipt"},
+        ),
+        ([], ["clef-invoice", " clef-video, "], {"clef-invoice", "clef-video"}),
+        (["clef"], [], {"clef"}),
+        ([], [], set()),
+    ],
+)
+def test_e2e_selection_accepts_ci_case_lists(models, cases, expected):
+    from types import SimpleNamespace
+    from families.clef.tests.test_e2e import _selection
+
+    options = {"--e2e-model": models, "--e2e-testcase": cases}
+    config = SimpleNamespace(getoption=lambda name, default: options.get(name, default))
+    assert _selection(config) == expected

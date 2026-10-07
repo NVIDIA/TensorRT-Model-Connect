@@ -36,7 +36,8 @@ target_include_directories(clef_media_probe PRIVATE ${PROJECT_SOURCE_DIR} ${PROJ
 target_link_libraries(clef_media_probe PRIVATE nlohmann_json::nlohmann_json)
 set_target_properties(clef_media_probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
-# CI builds the family target before running the family-owned Python tests.
+# Include probes in explicit family test builds. Pytest also builds the probe
+# it needs in TRTMC_NATIVE_BUILD_DIR, separately from the installed runtime.
 # The task probe loads the model dynamically, so this dependency is acyclic.
 add_dependencies(trtmc_model_clef clef_record_probe clef_engine_probe clef_task_probe clef_media_probe)
 endif()
