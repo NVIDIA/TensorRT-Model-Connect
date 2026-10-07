@@ -27,9 +27,29 @@ def main():
     parser.add_argument("--fixtures", type=Path, default=Path(__file__).parent / "fixtures")
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--dynamic", choices=("auto", "static", "dynamic"), default="auto")
+    parser.add_argument(
+        "--aten-masked-scatter",
+        action="store_true",
+        help="Use ATen for masked_scatter if the compiler's scan kernel fails; record this fallback",
+    )
     args = parser.parse_args()
     if args.warmup < 1 or args.iterations < 1:
         parser.error("warmup and iterations must be positive")
+    if args.aten_masked_scatter:
+        # Keep the original operation and inputs. Only its compiler lowering
+        # changes; the rest of the model still uses max-autotune compilation.
+        from torch._inductor.decomposition import decompositions
+        from torch._inductor.lowering import make_fallback
+        import torch._inductor.config as inductor_config
+        import torch._functorch.config as autograd_config
+
+        operation = torch.ops.aten.masked_scatter.default
+        decompositions.pop(operation, None)
+        make_fallback(operation, warn=False)
+        # Graph cache keys do not include this decomposition-table override.
+        # Keep kernel autotune caches, but regenerate the affected graph IR.
+        inductor_config.fx_graph_cache = False
+        autograd_config.enable_autograd_cache = False
     args.output.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(args.checkpoint))
     from joint_schema_model import (
@@ -90,6 +110,7 @@ def main():
                 "mode": "max-autotune",
                 "fullgraph": False,
                 "dynamic": dynamic,
+                "aten_fallbacks": ["masked_scatter"] if args.aten_masked_scatter else [],
                 "scope": "public_task_call_wall",
                 "warmup": args.warmup,
                 "iterations": args.iterations,

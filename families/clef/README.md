@@ -105,8 +105,29 @@ image-file decoding are excluded. `tests/benchmark_compile.py` measures the
 same boundary with `torch.compile(mode="max-autotune")` and checks compiled
 accuracy before timing.
 
-Development qualification is still in progress. The two text E2E cases and
-paired receipt/video output checks pass on GB300 with TensorRT 11.1.0.106.
-A stricter intermediate vision-feature diagnostic still fails, and the final
-native-versus-compiled performance comparison is not complete. This is not a
-release-readiness or general hardware-qualification claim.
+On GB300 with TensorRT 11.1.0.106, all seven E2E cases pass against the pinned
+original implementation. This includes the two model-card text examples,
+alternative answers, multilingual input, a receipt image, and video frames.
+The largest absolute option-probability difference is 0.002188; the BF16 gate
+uses `atol=0.002, rtol=0.01` for probabilities and `atol=0.125, rtol=0.015` for
+logits. A 16,384-token request also passes those gates. Reusing one native Task
+across text, image, video, and maximum-length requests preserves repeatability.
+
+Measured warm median Task latency is 41.5 ms for invoice, 42.3 ms for outage,
+42.7 ms for receipt, and 45.4 ms for video (five warmups and 30 samples each).
+The compiled text reference takes 55.4 ms and 64.4 ms respectively. Both use
+the full request boundary described above. These numbers exclude the native
+bundle's approximately 186-second load time.
+
+The Torch 2.12.0+cu130 media baseline initially fails in an Inductor
+masked-scatter scan kernel on this setup. `benchmark_compile.py` provides the
+explicit `--aten-masked-scatter` option to compile the remaining model while
+retaining the original ATen operation; each receipt records this fallback.
+It also regenerates graph IR because cached graphs do not reflect a changed
+decomposition table. Keep compiler failures separate from completed timing
+samples when comparing the implementations.
+
+Stricter intermediate vision-feature and synthetic layer diagnostics still
+have numerical mismatches. Their thresholds have not been relaxed. These
+component results remain distinct from the passing end-to-end output gates;
+this is not a general hardware or release-readiness claim.
