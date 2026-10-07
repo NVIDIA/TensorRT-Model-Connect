@@ -279,8 +279,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     merge.add_argument("--assignment", type=Path, help="a formal multi-host run: refuse to merge unless the roots "
                                                       "pass merge-check against this assignment")
     merge.add_argument("--smoke", action="store_true", help="with --assignment: the roots hold smoke results")
-    split = commands.add_parser("assign", help="freeze the formal run's profile -> host assignment from a ledger "
-                                               "(DESIGN.md Section 9)")
+    split = commands.add_parser("assign", help="freeze the formal run's profile -> host assignment from a ledger")
     split.add_argument("--environment", type=Path, required=True)
     split.add_argument("--profile", action="append", help="only these profiles")
     split.add_argument("--ledger", type=Path, required=True, help="JSON: profile -> predicted seconds")
@@ -295,13 +294,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                                             "(and its exclusions)")
     plan.add_argument("--environment", type=Path, required=True)
     plan.add_argument("--profile", action="append", help="only these profiles")
-    order = commands.add_parser("order-check", help="time each profile's L1 requests in both orders (DESIGN.md "
-                                                    "4.6): the order effect before a formal run")
+    order = commands.add_parser("order-check", help="time each profile's L1 requests in both orders: the order "
+                                                    "effect before a formal run")
     order.add_argument("--environment", type=Path, required=True)
     order.add_argument("--profile", action="append", required=True)
     order.add_argument("--out-root", type=Path, required=True, help="<out-root>/<profile>/order.json")
-    matrix = commands.add_parser("matrix", help="the execution matrix (DESIGN.md Section 7): one CSV row per ready "
-                                                "profile with its native path, environment, workloads, and checks")
+    matrix = commands.add_parser("matrix", help="the execution matrix: one CSV row per ready profile with its "
+                                                "native path, environment, workloads, and checks")
     matrix.add_argument("--environment", type=Path, required=True)
     matrix.add_argument("--profile", action="append", help="only these profiles")
     matrix.add_argument("--output", type=Path, help="write the CSV here instead of stdout")

@@ -3,7 +3,7 @@
 """World-model video parity (``world_model_parity``): both sides render each input with the same seed; every
 TRTMC video must have the native frame count, move (mean change between frames at least MIN_MOTION_RATIO of
 the native video's), and agree coarsely with the native video (PSNR and SSIM over sampled frames at least the
-check's floors). Action-conditional fidelity is not covered (DESIGN.md Section 6)."""
+check's floors). Action-conditional fidelity is not covered."""
 
 from __future__ import annotations
 

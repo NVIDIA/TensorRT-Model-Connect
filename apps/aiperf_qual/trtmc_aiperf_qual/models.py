@@ -191,7 +191,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         accuracy_source, absolute, supplementary = "none", [], []
     elif absolute or supplementary:
         accuracy_source = "absolute"
-    else:  # reported as an error: the Task's contract is not implemented yet (DESIGN.md Section 6)
+    else:  # reported as an error: the Task's contract is not implemented yet
         accuracy_source = "missing"
 
     l1 = dict(config["performance"]["l1"])

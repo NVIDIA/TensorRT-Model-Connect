@@ -703,7 +703,7 @@ def test_a_new_run_sets_the_previous_directory_aside_so_its_pass_cannot_stand(tm
 
 
 def test_a_phase_past_its_deadline_runs_once_more_and_its_error_is_kept_on_resume(tmp_path):
-    """DESIGN.md Section 9: a run past its deadline fails its phase, which runs once more; failing again, the
+    """A run past its deadline fails its phase, which runs once more; failing again, the
     profile is an error, a result a resumed run-all keeps."""
     from trtmc_aiperf_qual import campaign, runner
 

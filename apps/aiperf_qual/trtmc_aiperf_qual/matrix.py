@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The execution matrix (DESIGN.md Section 7): one row per ready profile, generated from the configuration.
+"""The execution matrix: one row per ready profile, generated from the configuration.
 
 A row is ``executable`` when the profile has a native path (a generic adapter or its family's own) and an
 accuracy scheme (gold benchmarks, whole-output checks, or Perf-only by declaration); the formal run starts

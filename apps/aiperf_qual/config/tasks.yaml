@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Qualification defaults per catalog Task (DESIGN.md). Every catalog model inherits the entry of its Task;
+# Qualification defaults per catalog Task. Every catalog model inherits the entry of its Task;
 # config/models/<profile>.yaml holds only the exceptions (deep-merged over this).
 #
 # Acc: TRTMC and the native model answer the Task's gold-labelled benchmarks (`absolute`, below); each is a
@@ -25,7 +25,7 @@ defaults:
       aggregation: {candidate: mean, eager: mean, compile: best}
       margin_percent: 5
       # The green / red bounds widen by this (multiplicatively): the largest speedup effect of server instances and
-      # timing order that the order check measured on the formal hosts (DESIGN.md 4.6; October 2026: 11.4%).
+      # timing order that the order check measured on the formal hosts (October 2026: 11.4%).
       guard_percent: 12
       max_ci_percent: 5
 
@@ -117,7 +117,7 @@ benchmarks:
   speech_parity: {suite: speech-parity, suite_definition: librispeech-test-clean-speech-20, metric: audio_parity,
                   gate: {min_duration_ratio: 0.8, max_duration_ratio: 1.2, min_rms_ratio: 0.5, max_rms_ratio: 2.0,
                          max_log_spectral_distance: 3.0}}
-  # HumanEval and MBPP completions run against their unit tests (as nobody, CPU/memory/time limits, DESIGN.md 8);
+  # HumanEval and MBPP completions run against their unit tests (as nobody, with CPU, memory, and time limits);
   # prompts that leave fewer than 64 tokens to generate on the bundle are dropped for both sides.
   code: {suite: code, suite_definition: code-humaneval-mbpp-664, metric: code_pass, fit_prompt: true,
          min_new_tokens: 64, min_native: 5.0, gate: {margin: 2.0}}

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Paired non-inferiority of TRTMC against the native model (DESIGN.md, Section 4).
+"""Paired non-inferiority of TRTMC against the native model.
 
 The regression ``R`` is positive when TRTMC is worse, in the metric's points. An entry ``pass``es when
 the one-sided 95% upper bound of ``R`` is below the margin, ``fail``s (a regression established) when
@@ -25,7 +25,7 @@ BOOTSTRAP_SEED = 0
 # Score-test cutoffs searched, from the asymptotic one-sided 95% quantile up.
 CUTOFFS = tuple(1.645 + 0.005 * step for step in range(120))
 # The exact size is evaluated on a discordance grid; between grid points it may rise slightly, so the
-# cutoff keeps the grid maximum at or below this (DESIGN.md 4.2).
+# cutoff keeps the grid maximum at or below this.
 GRID_ALPHA = 0.049
 # Discordance (both kinds of disagreement) covered: from the margin itself up to margin + 0.4.
 DISCORDANCE_SPAN = 0.4

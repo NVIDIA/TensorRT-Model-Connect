@@ -2,8 +2,7 @@
 
 Accuracy and performance qualification of every ready catalog model against its native
 (unconverted) Hugging Face / PyTorch model, driven by [AIPerf](https://github.com/ai-dynamo/aiperf).
-The scheme, its statistics, and its per-Task contracts are in [DESIGN.md](DESIGN.md); it does not use
-`qualification_tests/benchmark_qualification`.
+It does not use `qualification_tests/benchmark_qualification`.
 
 - **Acc**: TRTMC must be as accurate as the native model on the Task's workloads. Both sides answer the
   Task's gold-labelled benchmarks (`absolute`) and each benchmark is a paired non-inferiority decision
@@ -35,8 +34,8 @@ RefCOCO, LibriSpeech WER, STS-B, SciFact retrieval / rerank, HumanEval + MBPP, I
 ADE20K mIoU, mask IoU, ETTh1 MSE, WMT / FLORES chrF++). Selections are seeded and stratified; prompts are
 filtered to the shipped bundle's length (rendered through the chat template on the chat route). A model
 whose catalog request samples answers once per seed on each side and is judged on per-problem seed means.
-Each benchmark's `margin`, `relative_margin`, `min_native` (suitability floor), and sizes are argued in
-DESIGN.md Section 4.
+Each benchmark's `margin`, `relative_margin`, `min_native` (suitability floor), and size are set in
+`config/tasks.yaml`, each with its reason.
 
 Conversion-parity benchmarks (`gold_metrics.PARITY`) compare each output with the native one within a
 tolerance: raw encoders' vectors, MoGe geometry, ACT action chunks, stereo disparities, PersonaPlex speech.
@@ -48,6 +47,25 @@ initial noise on both sides); CLIP-T and video validity for videos; MagicBrush C
 world-model video parity. The pixel parity under latent replay is reported only (`informational`).
 
 A suite with `base: catalog` overrides the profile's catalog request with its dataset fields.
+
+### Verdict rules
+
+- Both sides answer the same problems, selected and fitted to the shipped bundle's sequence length; a suite with no
+  problem that fits is an `error` that says so.
+- An input TRTMC rejects as beyond the bundle's capacity (`backend_rejected_request` exceeding a prefill profile, a
+  KV cache, or an input limit) leaves the comparison on both sides, and the entry reports how many did
+  (`out_of_capacity`); not in a corpus whose rows refer to each other (STS pairs, a retrieval query and its
+  documents).
+- Any other problem the native model answered and TRTMC did not (a failed or rejected request, an unusable output)
+  counts as TRTMC's wrong answer: a wrong right/wrong answer, a parity sample outside the tolerance, an empty WER or
+  chrF text. A problem the native model did not answer is missing evidence: an `error`.
+- Native copies that run out of GPU memory answer again as half as many copies, down to one.
+- Every AIPerf run has a deadline: three times the profile's seconds in the environment's `ledger` (at least ten
+  minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.
+- `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
+  comparison: the native model below a benchmark's floor, a Task without an Acc check, timings that cannot be
+  compared), Red (Acc or Perf worse than native beyond its margin), Yellow (Perf about equal to native, which counts
+  as a pass, or an Acc difference not shown either way), Green (a pass). Perf is reported on the catalog request.
 
 ### Performance
 

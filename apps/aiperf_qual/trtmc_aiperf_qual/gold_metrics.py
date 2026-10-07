@@ -112,7 +112,7 @@ def protect(paths: Sequence[Any]) -> None:
 
 
 def _sandbox_verified(protected: Sequence[str]) -> None:
-    """The DESIGN.md Section 8 boundary holds, checked before every program: programs run as ``nobody``
+    """The code sandbox holds, checked before every program: programs run as ``nobody``
     with no capabilities, and that user can neither write the protected roots nor read root's home.
     Raises otherwise (fail closed)."""
     import subprocess

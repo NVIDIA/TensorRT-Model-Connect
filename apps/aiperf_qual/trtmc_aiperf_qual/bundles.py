@@ -130,7 +130,7 @@ def file_sha256(path: Path) -> str:
 
 def identity(path: Path) -> dict[str, Any]:
     """The bundle that received the verdict: TensorRT builds are not bit-reproducible, so the build inputs alone
-    do not identify it (DESIGN.md Section 12). sha256 of the bundle file and of its trtmc-bench receipt."""
+    do not identify it. sha256 of the bundle file and of its trtmc-bench receipt."""
     receipt = path.with_suffix(path.suffix + ".benchmark.json")
     return {"bundle_bytes": path.stat().st_size, "bundle_sha256": file_sha256(path),
             "receipt_sha256": file_sha256(receipt) if receipt.is_file() else None}

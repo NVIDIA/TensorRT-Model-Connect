@@ -23,7 +23,7 @@ def test_the_score_test_passes_fails_or_stays_inconclusive():
 
 
 def test_cutoffs_are_exact_for_the_count_and_margin():
-    # Values the design states (exact enumeration of both tails at the margin).
+    # Reference values (exact enumeration of both tails at the margin).
     assert noninferiority.critical(100, 0.05) == pytest.approx(1.84)
     assert noninferiority.critical(287, 0.01) == pytest.approx(1.79)
     assert noninferiority.critical(2280, 0.01) == pytest.approx(1.73)
@@ -62,7 +62,7 @@ def test_relative_margins_and_their_zero_native_score():
 
 
 def test_the_harness_does_not_depend_on_benchmark_qualification():
-    """DESIGN.md Section 3: no import of qualification_tests, no read of families/*/tests/benchmark."""
+    """Decoupled from benchmark_qualification: no import of qualification_tests, no read of families/*/tests/benchmark."""
     apps = Path(__file__).resolve().parents[2]
     offenders = []
     for root in (apps / "aiperf_qual", apps / "perf_serving"):

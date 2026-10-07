@@ -4,7 +4,7 @@
 # DETR numbers classes by COCO category id and keeps detections scoring 0.5 or more (its model card).
 # The catalog bundle's 796x1333 engine rejects every COCO image whose DETR resize (shortest edge 800) is
 # taller than 796 rows, i.e. all but very wide images ("resize dimensions exceed the engine input
-# dimensions"): the benchmark runs on a 1333x1333 build of the same checkpoint (DESIGN.md Section 2).
+# dimensions"): the benchmark runs on a 1333x1333 build of the same checkpoint.
 candidate:
   build: {name: detr-resnet-50-coco, image_height: 1333, image_width: 1333}
 absolute: [{name: coco, metric_params: {label_space: coco-category-id}, request: {score_threshold: 0.5}}]

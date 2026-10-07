@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # The native weights (351 GB) exceed the GPU: the native pipeline offloads idle components to host memory,
-# and its Perf is against that offloaded baseline (DESIGN.md Section 9).
+# and its Perf is against that offloaded baseline.
 reference:
   adapter: families/minimax_h3/reference/adapter.py  # Diffusers' ModularPipeline (t2va), as the family's E2E reference
   options: {cpu_offload: true}

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # The family's build reads the upstream checkout (and its serialized checkpoint), not the Hugging Face
-# repository alone: the build takes the directory reference/prepare.py prepares (DESIGN.md Section 2).
+# repository alone: the build takes the directory reference/prepare.py prepares.
 candidate:
   model_directory: trtmc-reference/Fast-FoundationStereo
 

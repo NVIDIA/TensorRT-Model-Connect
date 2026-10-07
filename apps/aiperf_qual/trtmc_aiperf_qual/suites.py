@@ -101,7 +101,7 @@ def select(records: Sequence[dict[str, Any]], selection: Mapping[str, Any]) -> l
         chosen = [group[depth] for depth in range(max(map(len, groups.values()), default=0))
                   for group in groups.values() if depth < len(group)][:count]
         return [record for _, record in sorted(chosen, key=lambda pair: pair[0])]
-    if method == "seeded":  # DESIGN.md 4.4: seeded stratified sampling, records in their sampled order
+    if method == "seeded":  # seeded stratified sampling, records in their sampled order
         count, field = int(require(selection, "count", "selection")), selection.get("field")
         generator = random.Random(int(selection.get("seed", SELECTION_SEED)))
         groups = {}
@@ -441,7 +441,7 @@ def _square_crop(path: Path, cache: Path) -> Path:
     return target
 
 
-SELECTION_SEED = 20261003  # the seeded selections of every suite (DESIGN.md 4.4)
+SELECTION_SEED = 20261003  # the seeded selections of every suite
 ETTH1_TRAIN_ROWS = 8640  # the standard split's training months: the scaler of the scored MSE
 
 
@@ -463,7 +463,7 @@ def _etth1_window_records(source: Mapping[str, Any], environment: Environment) -
     train = [[float(row[column]) for row in rows[:ETTH1_TRAIN_ROWS]] for column in columns]
     scaler = {"mean": [statistics.fmean(values) for values in train], "std": [statistics.pstdev(values) for values in train]}
     # Windows overlap within context + horizon hours: the bootstrap resamples moving blocks of that many
-    # consecutive windows (DESIGN.md 4.3), so each record carries its position in the series.
+    # consecutive windows, so each record carries its position in the series.
     records, block = [], math.ceil((context + prediction) / stride)
     for index, first in enumerate(starts):
         values = [float(row[column]) for row in rows[first:first + context] for column in columns]

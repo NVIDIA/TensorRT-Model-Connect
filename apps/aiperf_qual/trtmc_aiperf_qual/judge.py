@@ -19,11 +19,11 @@ def light_key(item: Mapping[str, Any]) -> str:
     return f"{item['reference_mode']}/{item['request']}" if item.get("request") else item["reference_mode"]
 
 
-QUALIFYING_MODE = "eager"  # torch.compile lights are opt-in reports outside the category (DESIGN.md 4.6)
+QUALIFYING_MODE = "eager"  # torch.compile lights are opt-in reports outside the category
 
 
 def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expected_modes: int) -> dict[str, Any]:
-    """Model-level outcome (DESIGN.md 4.7): Acc (``n/a`` for a Perf-only model), the lights, and a category.
+    """Model-level outcome: Acc (``n/a`` for a Perf-only model), the lights, and a category.
     Only ``pass`` qualifies. ``expected_modes`` eager lights (one per timed request) decide Perf; a missing,
     unavailable (``n/a``), or ``error`` eager light is an error, and other reference modes are reported only.
 
@@ -126,7 +126,7 @@ AUDIO_OPERATIONS = ("generate_audio", "speak")
 
 
 def work_signature(operation: str, observation: Mapping[str, Any] | None) -> tuple | None:
-    """What a response did (DESIGN.md 4.6), as (evidence, value) pairs from fields both backends report:
+    """What a response did, as (evidence, value) pairs from fields both backends report:
     for text (generation, translation, transcription) the generated token count and the generated text,
     two alternatives (equal counts: the same decode steps; equal texts: the same tokens, whichever way a
     backend counts the end-of-sequence token); for generated media ``media_digest`` frames / height / width;
@@ -196,7 +196,7 @@ def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any]
                       max_ci_percent: float, outputs_match: bool, output_reason: str,
                       not_equivalent: str | None = None, candidate_precision: str | None = None,
                       guard_percent: float = 0.0) -> dict[str, Any]:
-    """Light of one reference mode (DESIGN.md 4.6). white: the comparison is invalid (work or outputs
+    """Light of one reference mode. white: the comparison is invalid (work or outputs
     differ, the native model ran at another precision than ``candidate_precision``, a busy GPU) or a
     side's runs spread more than ``max_ci_percent``; otherwise green / red when the speedup interval lies
     beyond the margin widened by the guard (the server-instance effect the order check measured, which the

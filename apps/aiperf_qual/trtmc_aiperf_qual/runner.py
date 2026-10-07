@@ -54,7 +54,7 @@ NEAR_CAPACITY_MAX = 16384
 
 def timed_request(model: Mapping[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
     """The request Perf times: a sampling text request as its greedy variant, so both sides generate the
-    same tokens (DESIGN.md 4.6); every other request as is."""
+    same tokens; every other request as is."""
     if model["operation"] in TEXT_OPERATIONS and sampled_request(request):
         return {**request, **GREEDY}
     return dict(request)
@@ -175,7 +175,7 @@ def probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any]
 
 def settle(service: Mapping[str, Any], operation: str, request: Mapping[str, Any], seconds: float,
            timeout_s: float) -> int:
-    """The timed request sent back to back for ``seconds`` before a side's first timed run (DESIGN.md 4.6: a
+    """The timed request sent back to back for ``seconds`` before a side's first timed run (a
     fresh server times short requests slower for its first seconds), each within the run deadline ``timeout_s``;
     returns how many were sent."""
     deadline, sent = time.monotonic() + seconds, 0
@@ -372,7 +372,7 @@ CONVERSION_PARITY = "conversion-parity"
 
 
 def conversion_parity(performance: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """A Perf-only model's Acc evidence (DESIGN.md 4.7): on every timed request TRTMC's output passes the
+    """A Perf-only model's Acc evidence: on every timed request TRTMC's output passes the
     Task's output check against the native eager output (text: the first 8 greedy token ids, or the whole
     text, are equal); a mismatch is a ``fail``. Empty when no eager comparison ran (``missing_results``
     then reports it)."""
@@ -462,7 +462,7 @@ def unavailable_mode(mode: str, reason: str, request: str | None = None) -> dict
 
 class _Phases:
     """Runs phases, recording failures so one failing phase does not hide the others. A phase with
-    ``retries`` runs again after a failure (DESIGN.md Section 9: one retry of a phase that fails before
+    ``retries`` runs again after a failure (one retry of a phase that fails before
     producing its result); ``reset`` undoes a failed attempt's partial results first."""
 
     def __init__(self, out: Path) -> None:
@@ -587,7 +587,7 @@ def _candidate(environment: Environment, model: Mapping[str, Any], l1: Mapping[s
 
 
 def order_check(environment: Environment, model: Mapping[str, Any], out: Path) -> dict[str, Any]:
-    """DESIGN.md 4.6: the model's L1 requests timed twice in both orders (native then TRTMC, TRTMC then native),
+    """The order check: the model's L1 requests timed twice in both orders (native then TRTMC, TRTMC then native),
     against native eager at its timing precision. Each side's order effect is its p50 when timed second relative
     to its p50 when timed first (native after TRTMC vs native first; TRTMC after native vs TRTMC first); a
     request's speedup effect compounds both sides' ratios, each in its worse direction, and ``largest`` is the
@@ -678,7 +678,7 @@ def _bundle_identity(out: Path) -> dict[str, Any] | None:
 
 
 SMOKE_MEASUREMENT = {"warmup": 0, "requests": 1, "runs": 1}
-PHASE_RETRIES = 1  # a GPU phase that fails before producing its result runs once more (DESIGN.md Section 9)
+PHASE_RETRIES = 1  # a GPU phase that fails before producing its result runs once more
 
 
 def retries(environment: Environment) -> int:

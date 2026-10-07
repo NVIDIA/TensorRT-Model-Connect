@@ -10,7 +10,7 @@ problems, and each side is scored against the gold answers:
 - ``metric`` entries send a suite with gold labels (images, audio, sentence pairs) through AIPerf's
   trtmc_task endpoint and score the outputs here (gold_metrics).
 
-Each entry is a paired non-inferiority decision (``noninferiority``, DESIGN.md Section 4): pass when
+Each entry is a paired non-inferiority decision (``noninferiority``): pass when
 TRTMC's regression against the native model is shown to be below the benchmark's margin, fail when it
 is shown to exceed it, inconclusive otherwise; ``not-comparable`` when the native score is below the
 benchmark's suitability floor ``min_native``. A sampled model answers once per seed on each side and
@@ -39,7 +39,7 @@ from .suites import SELECTION_SEED, build_suite, request_sha
 WORKLOAD_MARGIN_PERCENT = 5.0
 # A request answers within seconds; whole-benchmark runs of large native models take hours.
 RUN_TIMEOUT_S = 12 * 3600
-# DESIGN.md Section 9: a deadline is three times the ledger's time, at least ten minutes.
+# A run's deadline is three times the ledger's time, at least ten minutes.
 DEADLINE_FACTOR, MIN_DEADLINE_S = 3, 600
 
 
@@ -171,7 +171,7 @@ def plan(environment: Environment, model: Mapping[str, Any], item: Mapping[str, 
 
 def _fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], min_new: int) -> list[dict[str, Any]]:
     """Samples whose prompt leaves at least ``min_new`` tokens to generate on the bundle, each generating at
-    most what is left (the same requests on both sides); the others are dropped (DESIGN.md Section 2)."""
+    most what is left (the same requests on both sides); the others are dropped (the shipped length decides)."""
     from transformers import AutoTokenizer
 
     length = int(model["candidate"].get("max_sequence_length") or 0)
@@ -206,8 +206,7 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
                   pair_format: str) -> list[dict[str, Any]]:
     """Reranking samples whose documents keep their head, so that each query-document pair, as the bundle's
     reranker forms it (``pair_format`` with ``{query}`` and ``{document}``), fits the bundle's
-    max_sequence_length (a margin of PAIR_MARGIN_TOKENS); the same documents go to both sides (DESIGN.md Section
-    2)."""
+    max_sequence_length (a margin of PAIR_MARGIN_TOKENS); the same documents go to both sides."""
     length = int(model["candidate"].get("max_sequence_length") or 0)
     if not length:
         return list(samples)
@@ -373,7 +372,7 @@ CAPACITY_LIMIT = re.compile(r"\b(exceed|exhaust)\w*\b.*\b(prefill profile|kv ?ca
 
 def capacity_rejection(record: Mapping[str, Any]) -> str | None:
     """TRTMC's message when it rejected the request (HTTP 422, ``backend_rejected_request``) because the input
-    exceeds the bundle's capacity, else None (DESIGN.md Section 2: such a problem is out of scope)."""
+    exceeds the bundle's capacity, else None (such a problem is out of scope)."""
     error = record.get("error")
     if record.get("status") != 422 or not isinstance(error, Mapping):
         return None
@@ -690,7 +689,7 @@ def judge_in_capacity(item: Mapping[str, Any], problems: Sequence[Mapping[str, A
                       native: Mapping[str, Any]) -> dict[str, Any]:
     """``judge`` over the problems within the bundle's capacity: one TRTMC rejected as exceeding it (prompt or
     cache length, an input limit) leaves the comparison on both sides, and the entry reports how many did
-    (DESIGN.md Section 2). In a corpus whose rows refer to each other it stays a missing answer."""
+    (like an unfitted prompt). In a corpus whose rows refer to each other it stays a missing answer."""
     beyond = rejected(candidate)
     if not beyond:
         return judge(item, problems, candidate, native)

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The formal run on several GPU hosts (DESIGN.md Section 9): a frozen profile -> host assignment from the
+"""The formal run on several GPU hosts: a frozen profile -> host assignment from the
 ledger, each host's run list, and the checks that the hosts' result roots merge into one matrix."""
 
 from __future__ import annotations

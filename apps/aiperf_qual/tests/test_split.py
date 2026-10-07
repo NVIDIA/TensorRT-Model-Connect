@@ -121,7 +121,7 @@ def test_the_roots_merge_only_when_disjoint_complete_formal_and_alike(tmp_path):
 
 
 def test_a_runs_deadline_comes_from_the_ledger(tmp_path):
-    """DESIGN.md Section 9: three times the profile's ledger time, at least ten minutes; an explicit deadline wins;
+    """A run's deadline: three times the profile's ledger time, at least ten minutes; an explicit deadline wins;
     a profile the ledger does not list keeps the default."""
     from trtmc_aiperf_qual import absolute
 
