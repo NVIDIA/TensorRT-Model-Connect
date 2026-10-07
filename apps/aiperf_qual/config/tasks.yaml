@@ -37,6 +37,10 @@ benchmarks:
   # MMLU 0-shot (AIPerf mmlu, pinned): 40 per subject (<= 2,280); margin 1 point.
   mmlu: {plugin: trtmc_mmlu, suite: mmlu-0shot, n_shots: 0, per_task: 40, min_native: 30.0,
          gate: {margin: 1.0}, quantized_gate: {margin: 2.0}, sampled_gate: {margin: 2.0}}
+  # GSM8K (AIPerf gsm8k, pinned; the number after #### or the last number): for math models only, as their
+  # answers (up to 256 tokens) dominate the run time; at most 500 problems; margin 2 points.
+  gsm8k: {plugin: trtmc_gsm8k, suite: gsm8k, limit: 500, min_native: 10.0,
+          gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
   # LAMBADA (OpenAI, all 5,153 passages): base LMs too small for MMLU to discriminate.
   lambada: {plugin: trtmc_lambada, suite: lambada, endpoint: completions, min_native: 10.0,
             gate: {margin: 0.5}, quantized_gate: {margin: 1.0}, sampled_gate: {margin: 1.0}}

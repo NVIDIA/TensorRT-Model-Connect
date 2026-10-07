@@ -12,6 +12,10 @@ environment because AIPerf does not forward benchmark options:
   TRTMC_ACCURACY_PER_TASK         keep the first k problems of each task (MMLU subject)
   TRTMC_ACCURACY_LIMIT            keep the first n problems overall
   TRTMC_ACCURACY_MAX_NEW_TOKENS   cap each problem's generation size
+  TRTMC_ACCURACY_ANSWER_TOKENS    each problem's generation size instead of the benchmark's, with no stop
+                                  sequence (a model that reasons before it answers, over several lines)
+  TRTMC_ACCURACY_PROMPT_FRAME     the plain prompt within this text at ``{prompt}`` (a model whose own request
+                                  format the catalog request writes out, as gpt-oss's harmony conversation)
   TRTMC_ACCURACY_TOKEN_LIMIT      drop problems whose prompt plus generation exceed the bundle's
                                   sequence limit, counted with TRTMC_ACCURACY_TOKENIZER (at
                                   TRTMC_ACCURACY_TOKENIZER_REVISION; TRTMC_ACCURACY_TRUST_REMOTE_CODE=1)
@@ -35,6 +39,7 @@ from typing import Any, Callable, Mapping, Sequence
 from aiperf.accuracy.benchmarks import gsm8k, math_500, mmlu
 from aiperf.accuracy.benchmarks._datasets_compat import load_dataset
 from aiperf.accuracy.graders.base import BaseGrader
+from aiperf.accuracy.graders.multiple_choice import MultipleChoiceGrader
 from aiperf.accuracy.models import BenchmarkProblem, GradingResult
 
 MMLU_REVISION = "31d46ab06e6934bb0d95f6918668716d1db6f921"
@@ -110,6 +115,7 @@ def select(problems: Sequence[BenchmarkProblem], environ: Mapping[str, str] | No
     overall limits, capped generation, and only problems that fit the sequence limit (the same problems
     for every side). ``count_tokens`` (tests) counts a plain prompt; the margin is added to it."""
     environ = os.environ if environ is None else environ
+    frame, answer_tokens = environ.get("TRTMC_ACCURACY_PROMPT_FRAME"), _int(environ, "TRTMC_ACCURACY_ANSWER_TOKENS")
     per_task, limit = _int(environ, "TRTMC_ACCURACY_PER_TASK"), _int(environ, "TRTMC_ACCURACY_LIMIT")
     max_new, token_limit = _int(environ, "TRTMC_ACCURACY_MAX_NEW_TOKENS"), _int(environ, "TRTMC_ACCURACY_TOKEN_LIMIT")
     measure = None
@@ -125,6 +131,11 @@ def select(problems: Sequence[BenchmarkProblem], environ: Mapping[str, str] | No
         if per_task and seen[problem.task] >= per_task:
             continue
         metadata = dict(problem.metadata or {})
+        if answer_tokens:
+            metadata.update(generation_size=answer_tokens, stop_sequence=[])
+        if frame:  # the completions route sends the prompt alone
+            framed = frame.replace("{prompt}", problem.prompt)
+            problem = problem.model_copy(update={"prompt": framed, "raw_messages": None})
         if max_new:
             metadata["generation_size"] = min(int(metadata.get("generation_size", max_new)), max_new)
         if token_limit and measure is not None:
@@ -285,6 +296,28 @@ class SentenceExactGrader(BaseGrader):
         return GradingResult(correct=bool(answer) and answer == gold, unparsed=not answer, confidence=1.0,
                              reasoning="whitespace-normalized sentence", extracted_answer=answer,
                              ground_truth=gold)
+
+
+class FinalChoiceGrader(BaseGrader):
+    """AIPerf's multiple-choice grade of the final answer of a response that reasons first: the text after its last
+    ``assistantfinal`` (a harmony response decoded without its special tokens: ``analysis...assistantfinalB``),
+    else the whole response."""
+
+    MARKER = "assistantfinal"
+
+    def __init__(self, run: Any, **kwargs: Any) -> None:
+        super().__init__(run=run, **kwargs)
+        self._choice = MultipleChoiceGrader(run=run, **kwargs)
+
+    def _final(self, response_text: str) -> str:
+        text = response_text or ""
+        return text.rsplit(self.MARKER, 1)[1] if self.MARKER in text else text
+
+    def extract_answer(self, response_text: str, **kwargs: Any) -> str:
+        return self._choice.extract_answer(self._final(response_text), **kwargs)
+
+    async def grade(self, response_text: str, ground_truth: str, **kwargs: Any) -> GradingResult:
+        return await self._choice.grade(self._final(response_text), ground_truth, **kwargs)
 
 
 class FirstWordGrader(BaseGrader):

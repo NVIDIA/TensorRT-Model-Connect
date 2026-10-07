@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# internlm2-math-plus: GSM8K and MATH-500 are off for now (config/tasks.yaml).
-absolute: [mmlu]
+# The catalog's internlm2 profile is internlm2-math-plus: on MMLU it explains before it names a letter, beyond the
+# 8-token answer budget (native 21.7%, chance level), so it runs GSM8K. Its bundle holds 256 tokens: 160-token
+# answers leave 923 of the 1,319 problems that fit (reference solutions: 95 tokens p50, 165 p90).
+absolute:
+  - {name: gsm8k, max_new_tokens: 160}
 
 reference:
   requirements: families/internlm/requirements.txt  # the family's dependencies, layered on the serving interpreter
