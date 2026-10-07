@@ -16,6 +16,7 @@ def test_primary_task_is_text_to_pooled_features():
 def test_all_semantic_tasks_declared():
     support = describe(ModelMetadata(config={"model_type": "albert"}, model_index={}))
     assert support is not None
+    assert "encoding" in support.tasks
     assert "text_to_pooled_features" in support.tasks
     assert "text_to_token_features" in support.tasks
     assert "text_to_embedding" in support.tasks

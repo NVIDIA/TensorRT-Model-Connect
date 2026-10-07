@@ -294,13 +294,56 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     )
     threshold = max(float(configured), 0.8)
     if manifest.get("task") == "text_to_token_features":
-        actual_vals = np.asarray(actual["values"], dtype=np.float64)
+        reported_shape = actual.get("shape")
+        assert reported_shape is not None and len(reported_shape) == 2, (
+            f"expected 2D shape in CLI token features output, got {reported_shape}"
+        )
         expected_vals = np.asarray(expected["values"], dtype=np.float64)
+        assert expected_vals.ndim == 2, f"reference values must be 2D, got {expected_vals.shape}"
+        assert tuple(reported_shape) == expected_vals.shape, (
+            f"reported shape {reported_shape} != reference shape {expected_vals.shape}"
+        )
+
+        actual_flat = np.asarray(actual["values"], dtype=np.float64)
+        assert actual_flat.size == expected_vals.size, (
+            f"element count mismatch: {actual_flat.size} != {expected_vals.size}"
+        )
+
+        actual_vals = actual_flat.reshape(reported_shape)
         assert actual_vals.shape == expected_vals.shape and actual_vals.ndim == 2
         for actual_row, expected_row in zip(actual_vals, expected_vals):
             assert _cosine(actual_row, expected_row) >= threshold
     else:
         assert _cosine(actual["values"], expected["values"]) >= threshold
+
+
+def _assert_sdk_consumers(
+    runtime_root: Path, bundle: Path, case: dict, tmp_path: Path
+) -> None:
+    del tmp_path
+    native_build_str = os.environ.get("TRTMC_NATIVE_BUILD_DIR")
+    if not native_build_str:
+        return
+    native_build = Path(native_build_str)
+    assert native_build.is_dir(), f"TRTMC_NATIVE_BUILD_DIR not found: {native_build}"
+
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        val for val in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if val
+    )
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_albert_sdk_{language}"
+        assert consumer.is_file(), f"missing family SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [str(consumer), str(bundle), str(runtime_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 600)),
+        )
+        assert "all tasks passed" in completed.stdout
+        record_evidence(f"sdk_{language}", {"stdout": completed.stdout})
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -320,3 +363,5 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("reference", expected)
     with evidence_stage("compare"):
         _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+    with evidence_stage("sdk"):
+        _assert_sdk_consumers(runtime_root, bundle, case, tmp_path)

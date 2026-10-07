@@ -9,6 +9,7 @@ from tensorrt_model_connect.model_support import family_support
 describe = family_support(
     model_types=("albert",),
     tasks=(
+        "encoding",
         "text_to_pooled_features",
         "text_to_token_features",
         "text_to_embedding",
