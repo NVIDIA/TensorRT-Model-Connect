@@ -45,7 +45,10 @@ core, headers, CuTe archive and native dependencies, including 0.11.0's
 chat-template and XGrammar static archives. Consumers requiring CUDA
 device linking enable separable compilation and device-symbol resolution.
 `EdgeLLM::Plugin` identifies the plugin DSO; adapters load it, rather than linking
-it twice. `EdgeLLM_PYTHON_EXECUTABLE` and `EdgeLLM_BUILDER_LAUNCHER` expose the
+it twice. The plugin is installed beside the family DSOs by both the `sdk`
+component (used for Model Connect wheels) and the dependency-only `EdgeLLM`
+component. Reusing an external native SDK must not omit that runtime dependency
+from a clean wheel. `EdgeLLM_PYTHON_EXECUTABLE` and `EdgeLLM_BUILDER_LAUNCHER` expose the
 isolated upstream `experimental.builder.cli.main` API.
 
 `share/trtmc/edge-llm.json` records the pin, native architecture, CUDA/TensorRT

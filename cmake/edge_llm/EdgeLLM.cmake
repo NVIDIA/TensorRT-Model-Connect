@@ -71,10 +71,13 @@ set(CMAKE_IGNORE_PATH "${_edge_saved_ignore_path}")
 function(_edgellm_install_plugin)
   # Preserve the complete SONAME chain when lib and lib64 differ. Install-time
   # expansion also honors cmake --install --prefix and DESTDIR.
-  install(CODE "file(INSTALL
-    DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\"
-    TYPE SHARED_LIBRARY FOLLOW_SYMLINK_CHAIN
-    FILES \"$<TARGET_FILE:EdgeLLM::Plugin>\")" COMPONENT EdgeLLM)
+  # Conan wheels install only sdk. Keep the dependency-only component too.
+  foreach(_component IN ITEMS sdk EdgeLLM)
+    install(CODE "file(INSTALL
+      DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\"
+      TYPE SHARED_LIBRARY FOLLOW_SYMLINK_CHAIN
+      FILES \"$<TARGET_FILE:EdgeLLM::Plugin>\")" COMPONENT "${_component}")
+  endforeach()
 endfunction()
 function(_edgellm_check_external_artifacts)
   foreach(_tool IN ITEMS EdgeLLM_PYTHON_EXECUTABLE EdgeLLM_BUILDER_LAUNCHER)
