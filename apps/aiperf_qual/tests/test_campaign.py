@@ -432,7 +432,8 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
     assert "data-result='red' data-k='bad" in page and "<span>s</span><strong>1/2</strong>" in bad  # values only
     assert "<div class='detail'>Acc outside tolerance</div>" in page  # a short label; the reason is in the evidence
     assert "gb300-1: host -" in page and "Models <strong>2</strong>" in page
-    assert "Pass (Green + Yellow) <strong>1</strong>" in page
+    assert "<span class='signal signal-yellow' title='Yellow'><span class='light'></span></span><strong>1</strong>" in page
+    assert "Pass rate <strong>50.0%</strong>" in page  # Green + Yellow of every model
     legend = page[page.index("<dl class='legend'>"):page.index("</dl>")]
     assert legend.count("<div><dt>") == 4  # one line per result
 

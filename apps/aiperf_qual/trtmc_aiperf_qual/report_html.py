@@ -95,6 +95,11 @@ def _signal(result: str) -> str:
     return f"<span class='signal signal-{result}'><span class='light'></span>{_e(SIGNAL_NAMES[result])}</span>"
 
 
+def _light(result: str) -> str:
+    """A result's light alone, named by its tooltip."""
+    return f"<span class='signal signal-{result}' title='{SIGNAL_NAMES[result]}'><span class='light'></span></span>"
+
+
 def _perf_label(reason: str) -> str:
     """A white Perf light's reason as a short label; the full reason stays in the evidence."""
     spread = TIMING_SPREAD.match(reason)
@@ -297,12 +302,15 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                     f"<td class='timing'>{_latency(profile, perf, 'reference')}</td>"
                     f"<td class='timing'>{_latency(profile, perf, 'candidate')}</td>{rerun}"
                     f"<td>{_evidence(profile, row, base)}</td></tr>")
+    passed = tally["green"] + tally["yellow"]
+    rate = f"{100 * passed / len(rows):.1f}%" if rows else "—"  # of every model the report covers
     cards = ("<section class='strip'><div class='card'><span class='card-label'>Results</span>"
              + "".join(f"<span class='card-item'>{_signal(result)}<strong>{tally[result]}</strong></span>"
                        for result in ("green", "yellow", "red", "white"))
              + "</div><div class='card'><span class='card-label'>Coverage</span>"
              f"<span class='card-item'>Models <strong>{len(rows)}</strong></span>"
-             f"<span class='card-item'>Pass (Green + Yellow) <strong>{tally['green'] + tally['yellow']}</strong></span>"
+             f"<span class='card-item'>Pass {_light('green')}<span class='none'>+</span>{_light('yellow')}"
+             f"<strong>{passed}</strong></span><span class='card-item'>Pass rate <strong>{rate}</strong></span>"
              f"<span class='card-item'>Valid comparisons <strong>{len(rows) - tally['white']} / {len(rows)}"
              "</strong></span></div></section>")
     legend = "<dl class='legend'>" + "".join(f"<div><dt>{_signal(result)}</dt><dd>{_e(text)}</dd></div>"
