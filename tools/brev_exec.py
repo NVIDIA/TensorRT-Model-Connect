@@ -410,8 +410,6 @@ POLL_INTERVAL = 60.0
 CLI_TIMEOUT = 30.0
 PROBE_TIMEOUT = 180.0
 CLEANUP_TIMEOUT = 900.0
-RECOVERY_TIMEOUT = 630.0
-DIAGNOSTIC_INTERVAL = 120.0
 
 _STATE_VALUES = frozenset(
     {
@@ -648,9 +646,11 @@ def _state(row: dict[str, str]) -> str:
 
 
 def _ready(row: dict[str, str]) -> bool:
-    if row["status"] in {"FAILURE", "FAILED", "ERROR", "DELETED", "TERMINATED"}:
+    # These are the pinned CLI's failure enums. Unknown status/build values
+    # remain pending; transient health never starts another allocation.
+    if row["status"] == "FAILURE":
         raise ProvisionError(f"Brev instance entered terminal state {row['status']}")
-    if row["build_status"] in {"CREATE_FAILED", "FAILED", "FAILURE"}:
+    if row["build_status"] == "CREATE_FAILED":
         raise ProvisionError("Brev environment setup failed")
     if row["status"] == "UNHEALTHY" or row["health_status"] in {"UNHEALTHY", "UNAVAILABLE"}:
         return False
@@ -662,8 +662,8 @@ def _ready(row: dict[str, str]) -> bool:
 
 
 def _probe(image: str, marker: str, min_free_disk_gb: float = 200) -> str:
-    # This is repeatable infrastructure validation. Model build/tests never run
-    # here, so a provision retry cannot hide an application failure.
+    # These checks run only after native metadata READY. Repeated checks reuse
+    # this VM; model build/tests never run inside provisioning.
     return "\n".join(
         (
             "set -eu",
@@ -688,40 +688,6 @@ def _probe(image: str, marker: str, min_free_disk_gb: float = 200) -> str:
             f"phase container_gpu sudo -n docker run --rm --gpus all {shlex.quote(image)} "
             "nvidia-smi --query-gpu=uuid --format=csv,noheader",
             f"printf '%s\\n' {shlex.quote(marker)}",
-        )
-    )
-
-
-def _diagnostics() -> str:
-    """Read fixed infrastructure facts without exposing logs, user data or environment."""
-    return "\n".join(
-        (
-            "set -u",
-            "if command -v cloud-init >/dev/null 2>&1; then",
-            "  if output=$(sudo -n cloud-init status 2>/dev/null); then code=0; else code=$?; fi",
-            "  printf 'TRTMC_DIAG_CLOUD_EXIT=%s\\n' \"$code\"",
-            "  printf '%s\\n' \"$output\" | awk '/^status: (not run|disabled|running|done|error)$/ "
-            '{value=substr($0,9); gsub(/ /,"_",value); print "TRTMC_DIAG_CLOUD_STATE=" value}\'',
-            "else printf '%s\\n' 'TRTMC_DIAG_CLOUD_STATE=not_installed'; fi",
-            "for unit in docker cloud-init cloud-final instance-oneshot nvidia-cdi-refresh; do",
-            '  sudo -n systemctl show "$unit.service" --no-pager '
-            "--property=LoadState,ActiveState,SubState,Result,NRestarts 2>/dev/null | "
-            'awk -v unit="$unit" -F= \'{print "TRTMC_DIAG_UNIT_" unit "_" $1 "=" $2}\'',
-            "done",
-            "if sudo -n test -r /var/log/brev-workspace.log 2>/dev/null; then",
-            "  printf '%s\\n' 'TRTMC_DIAG_SETUP_READABLE=1'",
-            '  sudo -n awk \'$0 == "------ Setup Begin ------" {begin++} '
-            '$0 == "------ Setup End ------" {end++} '
-            '$0 == "------ Success ------" {success++} '
-            '$0 == "------ Failure ------" {failure++} '
-            'END {printf "TRTMC_DIAG_SETUP_BEGIN=%d\\nTRTMC_DIAG_SETUP_END=%d\\n'
-            'TRTMC_DIAG_SETUP_SUCCESS=%d\\nTRTMC_DIAG_SETUP_FAILURE=%d\\n", '
-            "begin,end,success,failure}' /var/log/brev-workspace.log 2>/dev/null",
-            "else printf '%s\\n' 'TRTMC_DIAG_SETUP_READABLE=0'; fi",
-            "if nvidia-smi --query-gpu=uuid --format=csv,noheader >/dev/null 2>&1; "
-            "then code=0; else code=$?; fi",
-            "printf 'TRTMC_DIAG_HOST_GPU_EXIT=%s\\n' \"$code\"",
-            "exit 0",
         )
     )
 
@@ -757,17 +723,6 @@ def _safe_lines(output: str) -> list[str]:
         if re.fullmatch(r"TRTMC_DISK_AVAILABLE_BYTES=[0-9]{1,18}", line):
             result.append(line)
     return result
-
-
-def _diagnose(name: str, deadline: float, start: float) -> None:
-    try:
-        result = _run(["brev", "exec", name, _diagnostics()], deadline, CLI_TIMEOUT)
-    except (ProvisionError, OSError):
-        _log(start, f"{name}: bootstrap diagnostic unavailable within its bounded wait")
-        return
-    _log(start, f"{name}: bootstrap diagnostic CLI exit {result.returncode}")
-    for line in _safe_lines(result.stdout):
-        _log(start, f"{name}: {line}")
 
 
 def _save_lease(path: Path, lease: dict) -> None:
@@ -848,115 +803,6 @@ def _select_instance(instance_type: str, disk_gb: int, provider: str, deadline: 
     return {"type": instance_type, "target_disk_gb": disk_gb, "provider": candidate["provider"]}
 
 
-def _recovery_condition() -> str:
-    return r"""sudo -n python3 - <<'CHECK'
-import json, subprocess
-
-def call(args):
-    return subprocess.run(args, capture_output=True, text=True, timeout=10)
-def value(unit, key):
-    result = call(['systemctl', 'show', unit, '--property=' + key, '--value'])
-    return result.stdout.strip() if result.returncode == 0 else ''
-result = call(['cloud-init', 'status', '--format', 'json'])
-try:
-    state = json.loads(result.stdout)
-    cloud_done = result.returncode == 0 and state.get('status') == 'done' and state.get('stage') in (None, 'None')
-except (ValueError, AttributeError):
-    cloud_done = False
-oneshot = call(['systemctl', 'show', 'instance-oneshot.service', '--property=ExecStart', '--value'])
-cdi = call(['systemctl', 'cat', 'nvidia-cdi-refresh.service'])
-conditions = {
- 'cloud_done': cloud_done,
- 'docker_start_limit': value('docker.service', 'Result') == 'start-limit-hit',
- 'docker_clean_exit': value('docker.service', 'ExecMainStatus') == '0',
- 'docker_no_auto_restart': value('docker.service', 'NRestarts') == '0',
- 'docker_limit_three': value('docker.service', 'StartLimitBurst') == '3',
- 'oneshot_failed': value('instance-oneshot.service', 'ActiveState') == 'failed',
- 'known_oneshot': oneshot.returncode == 0 and '/opt/setup.sh' in oneshot.stdout,
- 'known_cdi_restart': cdi.returncode == 0 and 'systemctl restart docker.service' in cdi.stdout,
-}
-for key, okay in conditions.items():
-    print('TRTMC_RECOVERY_CONDITION_' + key + '=' + str(int(okay)))
-print('TRTMC_RECOVERY_CONDITION_COMPLETE')
-CHECK
-exit 0"""
-
-
-def _recovery_script(marker: str) -> str:
-    # This is the qualified Nebius bootstrap recovery, never a general restart.
-    # The EXIT trap removes its runtime-only override even on error or interruption.
-    return "\n".join(
-        (
-            "set -eu",
-            "override=/run/systemd/system/docker.service.d/99-trtmc-boot-recovery.conf",
-            'test ! -e "$override"',
-            "restore() {",
-            '  sudo -n rm -f "$override" && sudo -n systemctl daemon-reload && test ! -e "$override"',
-            "}",
-            "trap restore EXIT",
-            "trap 'exit 129' HUP",
-            "trap 'exit 130' INT",
-            "trap 'exit 143' TERM",
-            "sudo -n mkdir -p /run/systemd/system/docker.service.d",
-            "printf '[Unit]\\nStartLimitIntervalSec=60\\nStartLimitBurst=20\\n' | sudo -n tee \"$override\" >/dev/null",
-            "sudo -n systemctl daemon-reload",
-            "sudo -n systemctl reset-failed docker.service docker.socket instance-oneshot.service",
-            "if sudo -n timeout --kill-after=10s 600s systemctl restart instance-oneshot.service; then code=0; else code=$?; fi",
-            "printf 'TRTMC_RECOVERY_ONESHOT_RC=%s\\n' \"$code\"",
-            "if restore; then restored=0; else restored=$?; fi",
-            "printf 'TRTMC_RECOVERY_RESTORED_RC=%s\\n' \"$restored\"",
-            'test "$code" = 0',
-            'test "$restored" = 0',
-            'test "$(sudo -n systemctl show docker.service --property=StartLimitBurst --value)" = 3',
-            "sudo -n docker info >/dev/null 2>&1",
-            "trap - EXIT HUP INT TERM",
-            f"printf '%s\\n' {shlex.quote(marker)}",
-        )
-    )
-
-
-def _recover_nebius(name: str, deadline: float, start: float, lease: dict, path: Path) -> bool:
-    result = _run(["brev", "exec", name, _recovery_condition()], deadline)
-    expected = {
-        "cloud_done",
-        "docker_start_limit",
-        "docker_clean_exit",
-        "docker_no_auto_restart",
-        "docker_limit_three",
-        "oneshot_failed",
-        "known_oneshot",
-        "known_cdi_restart",
-    }
-    pairs = re.findall(r"^TRTMC_RECOVERY_CONDITION_([a-z_]+)=([01])$", result.stdout, re.M)
-    if (
-        result.returncode
-        or len(pairs) != len(expected)
-        or {key for key, _value in pairs} != expected
-        or any(value != "1" for _key, value in pairs)
-        or result.stdout.splitlines().count("TRTMC_RECOVERY_CONDITION_COMPLETE") != 1
-    ):
-        return False
-    if _remaining(deadline) < RECOVERY_TIMEOUT + CLI_TIMEOUT:
-        raise ProvisionError("insufficient deadline for the bounded Nebius bootstrap recovery")
-    lease.update(phase="recovering", recovery_attempted=True, stock_bootstrap=False)
-    lease["recovery_conditions"] = dict(pairs)
-    _save_lease(path, lease)
-    _log(start, f"{name}: qualified Nebius bootstrap signature; performing one recorded recovery")
-    marker = "TRTMC_RECOVERY_COMPLETE_" + secrets.token_hex(16)
-    result = _run(["brev", "exec", name, _recovery_script(marker)], deadline, RECOVERY_TIMEOUT)
-    lines = result.stdout.splitlines()
-    if (
-        result.returncode
-        or lines.count(marker) != 1
-        or lines.count("TRTMC_RECOVERY_ONESHOT_RC=0") != 1
-        or lines.count("TRTMC_RECOVERY_RESTORED_RC=0") != 1
-    ):
-        raise ProvisionError("Nebius bootstrap recovery or override restoration is unconfirmed")
-    lease.update(phase="provisioning", recovery_completed=True)
-    _save_lease(path, lease)
-    return True
-
-
 def _probe_receipt(output: str, marker: str, min_free_disk_gb: float) -> dict | None:
     pairs = re.findall(r"^TRTMC_PHASE_([a-z_]+)=([0-9]+|not_installed)$", output, re.M)
     if len(pairs) != len({key for key, _value in pairs}):
@@ -985,10 +831,8 @@ def _wait_ready(
     lease: dict,
     lease_file: Path,
     min_free_disk_gb: float,
-    recover_nebius_start_limit: bool,
 ) -> None:
     previous_state = ""
-    next_diagnostic = start
     refreshed = False
     marker = f"TRTMC_GPU_READY_{secrets.token_hex(16)}"
     while True:
@@ -1005,32 +849,18 @@ def _wait_ready(
             _log(start, f"{name}: {state}")
             previous_state = state
         ready = _ready(row)
+        if not ready:
+            _log(start, f"{name}: waiting for Brev metadata READY on the same instance")
         if ready and "metadata_ready_elapsed_seconds" not in lease:
             lease["metadata_ready_elapsed_seconds"] = round(time.monotonic() - start, 1)
             _save_lease(lease_file, lease)
-        may_recover = (
-            recover_nebius_start_limit
-            and lease["provider"] == "nebius"
-            and not lease["recovery_attempted"]
-            and row["status"] == "RUNNING"
-        )
-        if (ready or may_recover) and not refreshed:
+        # Leave platform bootstrap alone until the native inventory says READY.
+        if ready and not refreshed:
             try:
                 result = _run(["brev", "refresh"], deadline)
                 refreshed = result.returncode == 0
             except (ProvisionError, OSError):
                 _log(start, f"{name}: SSH configuration refresh unavailable; retrying the same VM")
-        if may_recover and refreshed:
-            try:
-                recovered = _recover_nebius(name, deadline, start, lease, lease_file)
-            except (ProvisionError, OSError):
-                if lease["recovery_attempted"]:
-                    raise
-                _log(start, f"{name}: recovery signature query unavailable; retrying the same VM")
-            else:
-                if recovered:
-                    _pause(deadline)
-                    continue
         if ready and refreshed:
             try:
                 result = _run(
@@ -1062,9 +892,6 @@ def _wait_ready(
                         )
                         return
                 _log(start, f"{name}: readiness probe has not established the GPU contract")
-        elif row["status"] == "RUNNING" and time.monotonic() >= next_diagnostic:
-            _diagnose(name, deadline, start)
-            next_diagnostic = time.monotonic() + DIAGNOSTIC_INTERVAL
         _pause(deadline)
 
 
@@ -1202,13 +1029,12 @@ def provision(
     instance: str,
     gpu: str = "",
     *,
-    timeout: float = 1200,
+    timeout: float = 2700,
     provider: str = "",
     instance_type: str = "",
     disk_gb: int = 500,
     min_free_disk_gb: float = 200,
     lease_file: Path | None = None,
-    recover_nebius_start_limit: bool = False,
     fallback_provider: str = "aws",
     attempts: int = 1,
     probe_image: str = DEFAULT_PROBE_IMAGE,
@@ -1254,7 +1080,6 @@ def provision(
         "allocation_pending": False,
         "create_started": False,
         "create_accepted": False,
-        "recovery_attempted": False,
         "stock_bootstrap": True,
     }
     with path.open("x", encoding="utf-8") as output:
@@ -1293,7 +1118,6 @@ def provision(
             lease=lease,
             lease_file=path,
             min_free_disk_gb=min_free_disk_gb,
-            recover_nebius_start_limit=recover_nebius_start_limit,
         )
         return instance
     except (ProvisionError, OSError, KeyboardInterrupt) as error:
@@ -1324,9 +1148,8 @@ def provision_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--disk-gb", "--disk", type=int, default=500)
     parser.add_argument("--min-free-disk-gb", type=float, default=200)
     parser.add_argument("--lease-file", type=Path, required=True)
-    parser.add_argument("--timeout", type=float, default=1200)
+    parser.add_argument("--timeout", type=float, default=2700)
     parser.add_argument("--provider", default="")
-    parser.add_argument("--recover-nebius-start-limit", action="store_true")
     parser.add_argument(
         "--gpu", default="", help="Legacy option; exact instance type governs selection"
     )
