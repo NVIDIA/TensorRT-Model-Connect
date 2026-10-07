@@ -582,8 +582,7 @@ def test_raw_records_keep_unicode_line_separators_inside_json_strings(tmp_path):
 
 
 def test_candidate_quality_and_performance_share_one_server_despite_legacy_replica_hint(tmp_path):
-    """With candidate_replicas, the Acc answers come from copies of the TRTMC server (each one request at a time)
-    and performance then times a single server started after the copies stopped; smoke mode keeps one server."""
+    """Legacy replica hints keep candidate quality and performance on one server."""
     from contextlib import contextmanager
     from unittest.mock import patch
 
@@ -591,12 +590,6 @@ def test_candidate_quality_and_performance_share_one_server_despite_legacy_repli
     from trtmc_aiperf_qual.config import Environment
 
     events = []
-
-    @contextmanager
-    def copies(environment, model, backend, out, *, count, **options):
-        events.append(("copies", backend, count))
-        yield {"url": "u", "urls": ["u"] * count, "replicas": count}
-        events.append(("copies stopped",))
 
     @contextmanager
     def single(environment, model, backend, out, **options):
@@ -608,8 +601,7 @@ def test_candidate_quality_and_performance_share_one_server_despite_legacy_repli
         return [{"suite": "s"}]
 
     model, accuracy = {"absolute": [{"suite": "s"}]}, []
-    with patch.object(runner, "serving_replicas", copies), patch.object(runner, "serving", single), \
-            patch.object(absolute, "candidate_entries", answers):
+    with patch.object(runner, "serving", single), patch.object(absolute, "candidate_entries", answers):
         runner._candidate(Environment({"candidate_replicas": 4}), model, {"suite": {}}, [], {}, accuracy, [], tmp_path,
                           absolute_runs={"plans": {}})
         assert events == [("single", "trtmc"), ("answers", 1)]

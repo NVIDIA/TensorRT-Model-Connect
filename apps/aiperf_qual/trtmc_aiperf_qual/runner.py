@@ -26,8 +26,7 @@ from . import absolute, compat, edits, execution, geneval, intelligibility, judg
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
 from .report import write_report
-from .services import (gpu_exclusive, gpu_identity, platform_fingerprint, platform_id, reference_python, serving,
-                       serving_replicas)
+from .services import gpu_exclusive, gpu_identity, platform_fingerprint, platform_id, reference_python, serving
 from .suites import Suite, build_suite, request_sha, single_request_suite, unstated_defaults
 
 from trtmc_aiperf_plugins.accuracy import COMPARATORS
