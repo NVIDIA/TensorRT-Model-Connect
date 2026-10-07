@@ -60,6 +60,18 @@ def _language_controls(tokenizer: Any, request: Mapping[str, Any]) -> tuple[dict
     return ({"forced_bos_token_id": target_id} if target_id is not None else {}), manual
 
 
+def _without_appended_eos(inputs: Any, tokenizer: Any, prompt: str) -> Any:
+    """A causal LM's plain prompt without the end-of-sequence token its tokenizer appends (OLMo, XGLM): the model
+    continues the prompt instead of starting a new document. An encoder's input keeps it."""
+    eos = tokenizer.eos_token_id
+    ids = inputs["input_ids"]
+    if eos is None or ids.shape[1] < 2 or int(ids[0, -1]) != eos or prompt.endswith(str(tokenizer.eos_token)):
+        return inputs
+    for key in list(inputs.keys()):
+        inputs[key] = inputs[key][:, :-1]
+    return inputs
+
+
 def _place_source_language(inputs: Mapping[str, torch.Tensor], token_id: int | None, tokenizer: Any) -> None:
     if token_id is None:
         return
@@ -117,7 +129,8 @@ class TextGeneration:
             return self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt",
                 return_dict=True, enable_thinking=bool(request.get("enable_thinking", False)))
-        return self.tokenizer(prompt, return_tensors="pt")
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        return inputs if self.encoder_decoder else _without_appended_eos(inputs, self.tokenizer, prompt)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         language, manual_source = (_language_controls(self.tokenizer, request) if self.encoder_decoder

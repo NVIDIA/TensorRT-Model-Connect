@@ -7,7 +7,7 @@ torch = pytest.importorskip("torch")
 
 from trtmc_perf_serving.backends.base import BackendError  # noqa: E402
 from trtmc_perf_serving.backends.reference.text import (  # noqa: E402
-    _generation_kwargs, _language_controls, _place_source_language, encoder_input_limit,
+    _generation_kwargs, _language_controls, _place_source_language, _without_appended_eos, encoder_input_limit,
 )
 
 
@@ -63,3 +63,18 @@ def test_encoder_inputs_are_cut_at_the_declared_limit():
     unbounded = SimpleNamespace(model_max_length=int(1e30))  # tokenizers without a declared maximum
     assert encoder_input_limit(unbounded, SimpleNamespace(max_position_embeddings=8192)) == 8192
     assert encoder_input_limit(unbounded, SimpleNamespace()) is None
+
+
+def test_a_causal_lm_prompt_drops_the_eos_its_tokenizer_appends():
+    class Tokenizer:  # OLMo-style: "<|endoftext|>" appended to every encoded text
+        eos_token, eos_token_id = "<|endoftext|>", 9
+
+    def inputs(*ids):
+        return {"input_ids": torch.tensor([list(ids)]), "attention_mask": torch.ones(1, len(ids), dtype=torch.long)}
+
+    trimmed = _without_appended_eos(inputs(5, 6, 9), Tokenizer(), "The capital of France is")
+    assert trimmed["input_ids"].tolist() == [[5, 6]] and trimmed["attention_mask"].shape == (1, 2)
+    kept = _without_appended_eos(inputs(5, 6, 9), Tokenizer(), "text<|endoftext|>")  # the prompt's own EOS stays
+    assert kept["input_ids"].tolist() == [[5, 6, 9]]
+    assert _without_appended_eos(inputs(5, 6), Tokenizer(), "no eos")["input_ids"].tolist() == [[5, 6]]
+    assert _without_appended_eos(inputs(9), Tokenizer(), "")["input_ids"].tolist() == [[9]]  # never an empty prompt
