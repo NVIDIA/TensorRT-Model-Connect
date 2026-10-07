@@ -781,6 +781,73 @@ Json run_rerank(trtmc::ITask& task, const Json& request, const Timing& timing) {
         });
 }
 
+Json run_decide(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& interface = require_interface<trtmc::IStructuredDecision>(task, "IStructuredDecision");
+    auto prepare = [&]() {
+        trtmc::StructuredDecisionRequest value;
+        value.document = request.at("document").get<std::string>();
+        value.max_state_tokens = request.value("max_state_tokens", -1);
+        auto load = [](const std::string& path) {
+            const auto image = read_image(path);
+            trtmc::ImageResult result;
+            result.height = image.height;
+            result.width = image.width;
+            result.pixels.reserve(image.pixels.size());
+            for (float pixel : image.pixels)
+                result.pixels.push_back(std::nearbyint(pixel * 255.0F));
+            return result;
+        };
+        for (const auto& path : request.value("image_paths", std::vector<std::string>{}))
+            value.images.push_back(load(path));
+        for (const auto& paths :
+             request.value("video_frame_paths", std::vector<std::vector<std::string>>{})) {
+            if (paths.empty())
+                throw std::invalid_argument("video frames must not be empty");
+            trtmc::ImageResult video;
+            video.num_frames = 0;
+            for (const auto& path : paths) {
+                const auto frame = load(path);
+                if (video.num_frames &&
+                    (video.height != frame.height || video.width != frame.width))
+                    throw std::invalid_argument("video frame dimensions must match");
+                video.height = frame.height;
+                video.width = frame.width;
+                video.pixels.insert(video.pixels.end(), frame.pixels.begin(), frame.pixels.end());
+                ++video.num_frames;
+            }
+            value.videos.push_back(std::move(video));
+        }
+        return value;
+    };
+    std::optional<trtmc::StructuredDecisionRequest> cached;
+    if (!timing.asset_loading_included)
+        cached = prepare();
+    return measure(
+        timing,
+        [&]() {
+            if (cached)
+                return interface.decide(*cached);
+            const auto value = prepare();
+            return interface.decide(value);
+        },
+        [](const trtmc::StructuredDecisionResult& result) {
+            Json scores = Json::array();
+            std::size_t options = 0;
+            for (const auto& score : result.scores) {
+                options += score.option_ids.size();
+                scores.push_back({{"question_id", score.question_id},
+                                  {"option_ids", score.option_ids},
+                                  {"logits", score.logits},
+                                  {"probabilities", score.probabilities}});
+            }
+            return Json{{"questions", result.scores.size()},
+                        {"options", options},
+                        {"input_tokens", result.input_tokens},
+                        {"scores", scores},
+                        {"response", Json::parse(result.document)}};
+        });
+}
+
 Json run_embedding(trtmc::ITask& task, const Json& request, const Timing& timing, bool pooled) {
     const std::string prompt = request.at("prompt").get<std::string>();
     std::function<trtmc::EmbeddingResult()> invoke;
@@ -3971,6 +4038,7 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             {"geometry", run_geometry},
             {"disparity", run_disparity},
             {"rerank", run_rerank},
+            {"decide", run_decide},
             {"encode", run_encode},
             {"embed", run_embed},
             {"solve", run_solve},

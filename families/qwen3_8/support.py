@@ -18,6 +18,8 @@ _SUPPORT = FamilySupport(
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
+    if "joint_head_config.json" in metadata.files:
+        return None
     if support := _ALIASES(metadata):
         return support
     config = metadata.config.get("text_config", metadata.config)

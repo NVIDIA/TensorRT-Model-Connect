@@ -1,0 +1,12 @@
+{
+  "model": "clef",
+  "state": {
+    "task": "Review the attached receipt."
+  },
+  "questions": {
+    "legible": {
+      "type": "noul",
+      "instructions": "Is the receipt total legible?"
+    }
+  }
+}

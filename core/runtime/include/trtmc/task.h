@@ -517,6 +517,35 @@ class ITextGeneration : public virtual ITask {
                                 const TextGenerationConfig& config = {}) = 0;
 };
 
+struct StructuredDecisionRequest {
+    // The family interprets the JSON record and its schema. Media is contiguous
+    // RGB HWC or THWC with pixel values in [0, 255], using ImageResult dimensions.
+    std::string document;
+    std::vector<ImageResult> images;
+    std::vector<ImageResult> videos;
+    std::int32_t max_state_tokens{-1};
+};
+
+struct DecisionScores {
+    std::string question_id;
+    std::vector<std::string> option_ids;
+    std::vector<float> logits;
+    std::vector<float> probabilities;
+};
+
+struct StructuredDecisionResult {
+    std::string document;
+    std::vector<DecisionScores> scores;
+    std::int32_t input_tokens{0};
+};
+
+class IStructuredDecision : public virtual ITask {
+  public:
+    static constexpr const char* kTask = "structured_decision";
+    const char* task() const noexcept override { return kTask; }
+    virtual StructuredDecisionResult decide(const StructuredDecisionRequest& request) = 0;
+};
+
 class IVisionLanguageGeneration : public virtual ITask {
   public:
     static constexpr const char* kTask = "vision_language_generation";
