@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import cancel
+from . import cancel, execution
 from .config import Environment
 
 READY_MARKER = ".aiperf_results_ready.json"
@@ -84,6 +84,7 @@ def _run(command: Sequence[str], log: Any, env: Mapping[str, str], timeout_s: fl
 
 def run_aiperf(environment: Environment, out: Path, arguments: Sequence[str], *,
                env: Mapping[str, str] | None = None, timeout_s: float = 7200) -> AiperfRun:
+    arguments, evidence = execution.prepare(arguments)
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     command = [str(environment["aiperf"]), "profile", "--model", "trtmc", "--ui-type", "none",
@@ -99,7 +100,9 @@ def run_aiperf(environment: Environment, out: Path, arguments: Sequence[str], *,
     with open(out.parent / f"{out.name}.log", "w") as log:
         code = _run(command, log, client_env, timeout_s)
     _wait_ready(out)
-    return AiperfRun(out, code, command)
+    run = AiperfRun(out, code, command)
+    execution.record(run, evidence)
+    return run
 
 
 def _wait_ready(out: Path, timeout_s: float = 180) -> None:

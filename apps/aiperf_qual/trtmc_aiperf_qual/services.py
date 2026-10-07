@@ -168,7 +168,13 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             raise ServiceError(f"port {port} answered as {info.get('backend')!r}, not this {backend} server")
         if backend == "trtmc":  # which TensorRT and CUDA libraries the loaded bundle actually runs on
             (out / LOADED_LIBRARIES).write_text(json.dumps(loaded_libraries(process.pid), indent=2) + "\n")
-        yield {"url": url, "info": info, "records": out / "records.jsonl"}
+        from .execution import service as execution_service
+
+        identity = {**info, "side": "candidate" if backend == "trtmc" else "reference", "mode": mode,
+                    "precision": model["candidate"]["precision"] if backend == "trtmc" else
+                    info.get("precision", precision or reference.get("precision", "fp32"))}
+        with execution_service(identity):
+            yield {"url": url, "info": info, "records": out / "records.jsonl"}
     finally:
         try:  # the record never keeps a server from stopping
             (out / MEMORY_NODES).write_text(json.dumps(memory_nodes(process.pid), indent=2) + "\n")

@@ -30,6 +30,7 @@ from .bundles import prefetch
 from .config import Environment
 from .judge import QUALIFYING_MODE
 from .models import checkpoints
+from .compat import report as normalized_report
 from .report import acc_value, plain
 from .services import reference_python
 
@@ -301,7 +302,7 @@ def _precision(report: Mapping[str, Any], directory: Path) -> dict[str, str | No
     model = directory / "model.json"
     trtmc = (json.loads(model.read_text()).get("candidate") or {}).get("precision") if model.is_file() else None
     native = next((precision for precision in [*((item.get("reference") or {}).get("precision")
-                                                for item in report.get("performance_l1", [])),
+                                                for item in report.get("performance", [])),
                                                *((item.get("native") or {}).get("precision")
                                                  for item in report.get("accuracy", []))] if precision), None)
     return {"trtmc": trtmc, "native": native}
@@ -314,13 +315,13 @@ def _row(directory: Path) -> dict[str, Any] | None:
         path = directory / name
         if not path.is_file():
             continue
-        value = json.loads(path.read_text())
+        value = normalized_report(json.loads(path.read_text())) if name == "report.json" else json.loads(path.read_text())
         if name == "report.json":
             return {"task": value.get("task"), "category": value["verdict"]["category"],
                     "precision": _precision(value, directory),
-                    "directory": str(directory), "repro": value.get("repro"), "l2": value.get("performance_l2"),
+                    "directory": str(directory), "repro": value.get("repro"), "service_metrics": value.get("service_metrics"),
                     "time": float(value.get("started") or path.stat().st_mtime),
-                    "accuracy": value.get("accuracy", []), "perf": value.get("performance_l1", []),
+                    "accuracy": value.get("accuracy", []), "perf": value.get("performance", []),
                     "backend": (value.get("reference") or {}).get("backend", ""),
                     "notes": "; ".join([*([f"coverage: {value['coverage']}"] if value.get("coverage") else []),
                                         *(f"{key}: {text[:100]}" for key, text in value.get("errors", {}).items())])}
@@ -363,7 +364,7 @@ def reported_perf(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     """The timed requests the results report: the catalog's own against the eager native model (the near-capacity
     request, owner's choice for now, and torch.compile timings, informational, stay in the evidence)."""
     return [item for item in row.get("perf", []) if "near-capacity" not in str(item.get("request") or "")
-            and item.get("reference_mode", QUALIFYING_MODE) == QUALIFYING_MODE]
+            and item.get("reference_mode", QUALIFYING_MODE) == QUALIFYING_MODE and item.get("gate", True)]
 
 
 def request_label(profile: str, item: Mapping[str, Any]) -> str:

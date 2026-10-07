@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Perf L2: AIPerf serving sweeps (informational; they never change the category).
+"""Perf optional service metrics: AIPerf serving sweeps (informational; they never change the category).
 
 Text generation: TRTMC and the native model (eager) each receive synthetic prompts of a fixed
 input/output length over the OpenAI completions route at every concurrency level; the light compares
@@ -30,9 +30,9 @@ METRICS = {"request_throughput": "avg", "request_latency": ("p50", "p99"), "requ
            "output_token_throughput": "avg"}
 
 
-def lengths(l2: Mapping[str, Any], sequence_limit: int | None) -> tuple[int, int]:
+def lengths(service_metrics: Mapping[str, Any], sequence_limit: int | None) -> tuple[int, int]:
     """(input, output) tokens that fit the bundle's sequence limit."""
-    isl, osl = int(l2.get("isl", 96)), int(l2.get("osl", 32))
+    isl, osl = int(service_metrics.get("isl", 96)), int(service_metrics.get("osl", 32))
     if sequence_limit:
         osl = max(4, min(osl, sequence_limit // 4))
         isl = max(8, min(isl, sequence_limit - osl - 16))
@@ -76,18 +76,39 @@ def compare(candidate: list[Mapping[str, Any]], reference: list[Mapping[str, Any
             "throughput_ratio": top_candidate / top_reference, "concurrency": candidate[-1]["concurrency"]}
 
 
-def run(environment: Environment, model: Mapping[str, Any], l2: Mapping[str, Any], services: Mapping[str, Any],
+def run(environment: Environment, model: Mapping[str, Any], service_metrics: Mapping[str, Any], services: Mapping[str, Any],
         out: Path) -> dict[str, Any]:
     """``services``: {"candidate": trtmc service, "reference": native eager service}."""
-    isl, osl = lengths(l2, model["candidate"].get("max_sequence_length"))
-    levels = [int(value) for value in l2.get("concurrency", [1, 4])]
-    requests = int(l2.get("requests", 32))
+    isl, osl = lengths(service_metrics, model["candidate"].get("max_sequence_length"))
+    levels = [int(value) for value in service_metrics.get("concurrency", [1, 4])]
+    requests = int(service_metrics.get("requests", 32))
     sides = {side: [_level(environment, service, model, isl, osl, concurrency, requests,
-                           out / f"l2-{side}-c{concurrency}") for concurrency in levels]
+                           out / f"service_metrics-{side}-c{concurrency}") for concurrency in levels]
              for side, service in services.items()}
     return {"isl": isl, "osl": osl, "requests": requests, **sides,
-            **compare(sides["candidate"], sides["reference"], float(l2.get("margin_percent", 5))),
+            **compare(sides["candidate"], sides["reference"], float(service_metrics.get("margin_percent", 5))),
             "note": "trtmc-perf-serve serializes requests: concurrency measures queueing, not batching"}
+
+
+def run_serial(environment: Environment, model: Mapping[str, Any], config: Mapping[str, Any], out: Path,
+               python: str, precision: str) -> dict[str, Any]:
+    """Optional load metrics use the same recorder, with one backend resident at a time."""
+    from .services import serving
+
+    if config.get("kind") == "media":
+        return run_media(environment, model, config, out, python, precision)
+    isl, osl = lengths(config, model["candidate"].get("max_sequence_length"))
+    levels = [int(value) for value in config.get("concurrency", [1, 4])]
+    requests = int(config.get("requests", 32))
+    sides = {}
+    for side, backend in (("reference", "reference"), ("candidate", "trtmc")):
+        kwargs = {"python": python, "precision": precision, "mode": "eager"} if side == "reference" else {}
+        with serving(environment, dict(model), backend, out / f"service-{side}-server", **kwargs) as server:
+            sides[side] = [_level(environment, server, model, isl, osl, concurrency, requests,
+                                   out / f"service-{side}-c{concurrency}") for concurrency in levels]
+    return {"isl": isl, "osl": osl, "requests": requests, **sides,
+            **compare(sides["candidate"], sides["reference"], float(config.get("margin_percent", 5))),
+            "note": "Single execution lane: concurrency measures queueing. Buffered SSE does not measure token TTFT/ITL."}
 
 
 MEDIA_ROUTES = ("/v1/images/generations", "/v1/videos")
@@ -174,7 +195,7 @@ def compare_media(candidate: Sequence[Mapping[str, Any]], reference: Sequence[Ma
     return result
 
 
-def run_media(environment: Environment, model: Mapping[str, Any], l2: Mapping[str, Any], out: Path,
+def run_media(environment: Environment, model: Mapping[str, Any], service_metrics: Mapping[str, Any], out: Path,
               python: str, precision: str) -> dict[str, Any]:
     """The media sweep; TRTMC first, then the native model (eager), each alone on the GPU."""
     from .generation import is_video
@@ -182,12 +203,12 @@ def run_media(environment: Environment, model: Mapping[str, Any], l2: Mapping[st
     from .services import serving
     from .suites import build_suite
 
-    suite = build_suite(model_suite(l2.get("suite", "partiprompts-30"), model), environment)
-    samples = suite.samples[: int(l2.get("prompts", 3))]
+    suite = build_suite(model_suite(service_metrics.get("suite", "partiprompts-30"), model), environment)
+    samples = suite.samples[: int(service_metrics.get("prompts", 3))]
     video = is_video(samples[0]["request"])
     endpoint = "video_generation" if video else "image_generation"
-    requests = int(l2.get("video_requests" if video else "requests", 2 if video else 3))
-    prompts = out / "l2-media-prompts.jsonl"
+    requests = int(service_metrics.get("video_requests" if video else "requests", 2 if video else 3))
+    prompts = out / "service_metrics-media-prompts.jsonl"
     prompts.parent.mkdir(parents=True, exist_ok=True)
     prompts.write_text("".join(json.dumps({"text": str(sample["request"]["prompt"])}) + "\n" for sample in samples))
     variants = media_variants(samples[0]["request"])
@@ -195,13 +216,13 @@ def run_media(environment: Environment, model: Mapping[str, Any], l2: Mapping[st
     for side, backend, kwargs in (("candidate", "trtmc", {}),
                                   ("reference", "reference", {"mode": "eager", "precision": precision,
                                                               "python": python})):
-        with serving(environment, model, backend, out / f"l2-{side}-server", memory_probe=True, **kwargs) as service:
+        with serving(environment, model, backend, out / f"service_metrics-{side}-server", memory_probe=True, **kwargs) as service:
             sides[side] = [_media_level(environment, service, endpoint, prompts, steps, requests,
-                                        out / f"l2-{side}-steps{steps or 'catalog'}", run_timeout(environment, model))
+                                        out / f"service_metrics-{side}-steps{steps or 'catalog'}", run_timeout(environment, model))
                            for steps in variants]
     return {"kind": "media", "endpoint": endpoint, "prompts": len(samples), "requests": requests,
             "reference_precision": precision, **sides,
             "decomposition": {side: decompose(levels) for side, levels in sides.items()},
-            **compare_media(sides["candidate"], sides["reference"], float(l2.get("margin_percent", 5))),
+            **compare_media(sides["candidate"], sides["reference"], float(service_metrics.get("margin_percent", 5))),
             "note": "model-call time and peak GPU memory from the server records; per-step and fixed times "
                     "assume the call is linear in the denoising steps"}

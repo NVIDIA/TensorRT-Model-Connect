@@ -193,7 +193,7 @@ REPOSITORY = __import__("pathlib").Path(__file__).resolve().parents[3]
 ])
 def test_verdict_categories(accuracy, lights, category):
     result = {"accuracy": [{"suite": "s", **item} for item in accuracy],
-              "performance_l1": [{"reference_mode": mode, "light": light} for mode, light in lights.items()]}
+              "performance": [{"reference_mode": mode, "light": light} for mode, light in lights.items()]}
     assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["category"] == category
 
 
@@ -237,8 +237,8 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
     assert qwen["accuracy_source"] == "absolute"
     assert [(item["suite"], item["endpoint"]) for item in qwen["absolute"]] == [("mmlu-0shot", "chat")]
     assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16/qwen3-0.6b-fp16.bundle" and not qwen["candidate"]["build"]
-    assert qwen["performance"]["l1"]["suite"]["source"] == {"kind": "catalog_testcase", "profile": "qwen3-0.6b-fp16"}
-    assert qwen["performance"]["l1"]["reference_modes"] == ["eager"] and "l2" not in qwen["performance"]
+    assert qwen["performance"]["suite"]["source"] == {"kind": "catalog_testcase", "profile": "qwen3-0.6b-fp16"}
+    assert qwen["performance"]["reference_modes"] == ["eager"] and "service_metrics" not in qwen["performance"]
     small = resolve_model("falcon-rw-1b", environment)  # MMLU is near chance: LAMBADA
     assert [item["suite"] for item in small["absolute"]] == ["lambada"] and small["candidate"]["max_sequence_length"] == 256
     detr = resolve_model("detr-resnet-50", environment)
@@ -263,7 +263,7 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
             resolve_model("mixtral-stories-15m", environment, root=root)
     random = resolve_model("qwen3-moe-tiny-random", environment)  # random weights: Perf only
     assert random["accuracy_source"] == "none" and not random["absolute"] and "random" in random["accuracy_note"]
-    assert random["performance"]["l1"]["suite"]["source"]["kind"] == "catalog_testcase"
+    assert random["performance"]["suite"]["source"]["kind"] == "catalog_testcase"
     world = resolve_model("sana-wm-bidirectional", environment)  # the family's own native adapter
     assert world["reference"]["backend"] == "reference" and world["reference"]["adapter"].startswith("families/sana_wm/")
     with tempfile.TemporaryDirectory() as directory:  # without it no generic adapter serves a world model
@@ -334,13 +334,13 @@ def test_answer_line_accepts_identical_tokens_with_different_rendering():
 def test_perf_output_check_falls_back_to_the_eager_reference():
     from trtmc_aiperf_qual.runner import output_check
 
-    l1 = {"output_grader": "parity_token_exact"}
+    policy = {"output_grader": "parity_token_exact"}
     candidate = {"token_ids": [1, 2, 3]}
     references = {"eager": {"token_ids": [1, 2, 3]}, "compile": {"token_ids": [1, 9, 9]}}
-    match, reason = output_check(l1, candidate, references, "compile")
+    match, reason = output_check(policy, candidate, references, "compile")
     assert match and "eager reference" in reason
-    assert not output_check(l1, candidate, {"eager": {"token_ids": [7]}, "compile": {"token_ids": [8]}}, "compile")[0]
-    assert not output_check(l1, candidate, {"eager": {"token_ids": [7]}}, "eager")[0]
+    assert not output_check(policy, candidate, {"eager": {"token_ids": [7]}, "compile": {"token_ids": [8]}}, "compile")[0]
+    assert not output_check(policy, candidate, {"eager": {"token_ids": [7]}}, "eager")[0]
 
 
 def test_perf_only_models_have_conversion_parity_as_their_accuracy():
@@ -354,7 +354,7 @@ def test_perf_only_models_have_conversion_parity_as_their_accuracy():
             {"reference_mode": "compile", "request": "catalog", "light": "n/a", "output_check": {}}]
     [entry] = conversion_parity(perf)
     assert (entry["status"], entry["samples"], entry["passed"]) == ("fail", 2, 1)
-    result = {"accuracy_source": "none", "accuracy": [entry], "performance_l1": perf}
+    result = {"accuracy_source": "none", "accuracy": [entry], "performance": perf}
     assert judge.verdict(result, expected_suites=[CONVERSION_PARITY], expected_modes=2)["category"] == "acc-issue"
     assert conversion_parity([]) == []  # nothing compared: missing_results reports it
 
@@ -365,25 +365,25 @@ def test_a_task_without_an_accuracy_scheme_stays_an_error():
     model = {"accuracy_source": "missing", "task": "image_features", "absolute": [], "supplementary": []}
     [entry] = missing_results(model, [], {})
     assert entry["suite"] == "accuracy-scheme" and entry["status"] == "error" and "image_features" in entry["error"]
-    result = {"accuracy": [entry], "performance_l1": [{"reference_mode": "eager", "light": "green"}]}
+    result = {"accuracy": [entry], "performance": [{"reference_mode": "eager", "light": "green"}]}
     assert judge.verdict(result, expected_suites=list(expected_suites(model)), expected_modes=1)["category"] == "error"
 
 
 def test_perf_only_models_and_informational_entries():
     perf = [{"reference_mode": "eager", "light": "green"}]
-    perf_only = judge.verdict({"accuracy_source": "none", "accuracy": [], "performance_l1": perf},
+    perf_only = judge.verdict({"accuracy_source": "none", "accuracy": [], "performance": perf},
                               expected_suites=[], expected_modes=1)
     assert (perf_only["acc"], perf_only["category"]) == ("n/a", "pass")
     # Informational entries (pixel parity, a retired check) are reported, never judged.
     informational = judge.verdict({"accuracy": [{"suite": "geneval", "status": "pass"},
                                                 {"suite": "replay-parity", "status": "fail", "informational": True}],
-                                   "performance_l1": perf}, expected_suites=["geneval"], expected_modes=1)
+                                   "performance": perf}, expected_suites=["geneval"], expected_modes=1)
     assert (informational["acc"], informational["category"]) == ("pass", "pass")
 
 
 def test_errors_in_a_suite_make_the_accuracy_an_error():
     verdict = judge.verdict({"accuracy": [{"suite": "a", "status": "pass"}, {"suite": "b", "status": "error"}],
-                             "performance_l1": [{"reference_mode": "eager", "light": "green"}]},
+                             "performance": [{"reference_mode": "eager", "light": "green"}]},
                             expected_suites=["a", "b"], expected_modes=1)
     assert (verdict["acc"], verdict["category"]) == ("error", "error")
 
@@ -398,10 +398,10 @@ def test_sampled_perf_requests_compare_generated_length():
     from trtmc_aiperf_qual.runner import output_check, sampled_request
 
     assert sampled_request({"temperature": 0.7, "top_k": 50}) and not sampled_request({"temperature": 1.0, "top_k": 1})
-    l1 = {"output_grader": "parity_token_exact"}
+    policy = {"output_grader": "parity_token_exact"}
     refs = {"eager": {"token_ids": [5, 6, 7]}}
-    assert output_check(l1, {"token_ids": [1, 2, 3]}, refs, "eager", sampled=True)[0]
-    assert not output_check(l1, {"token_ids": [1, 2]}, refs, "eager", sampled=True)[0]
+    assert output_check(policy, {"token_ids": [1, 2, 3]}, refs, "eager", sampled=True)[0]
+    assert not output_check(policy, {"token_ids": [1, 2]}, refs, "eager", sampled=True)[0]
 
 
 def test_requests_with_top_k_one_are_greedy():
@@ -514,7 +514,7 @@ def test_always_sampling_tts_models_compare_duration_in_perf():
     for profile in ("bark-small", "bark-large", "magpie-tts-357m"):
         model = resolve_model(profile, _environment())
         assert [check["check"] for check in model["supplementary"]] == ["tts_intelligibility"]
-        assert model["performance"]["l1"]["output_grader_params"]["max_log_spectral_distance"] > 100
+        assert model["performance"]["output_grader_params"]["max_log_spectral_distance"] > 100
 
 
 def test_a_missing_mandatory_result_is_an_error_even_when_other_checks_add_rows():
@@ -530,9 +530,9 @@ def test_a_missing_mandatory_result_is_an_error_even_when_other_checks_add_rows(
     assert [(m["suite"], m["status"]) for m in missing] == [("mmlu-0shot", "error")]
     assert "startup failed" in missing[0]["error"]
     lights = [{"reference_mode": "eager", "light": "green"}]
-    assert judge.verdict({"accuracy": produced, "performance_l1": lights}, expected_suites=list(expected_suites(model)),
+    assert judge.verdict({"accuracy": produced, "performance": lights}, expected_suites=list(expected_suites(model)),
                          expected_modes=1)["category"] == "error"
-    assert judge.verdict({"accuracy": produced + missing, "performance_l1": lights},
+    assert judge.verdict({"accuracy": produced + missing, "performance": lights},
                          expected_suites=list(expected_suites(model)), expected_modes=1)["acc"] == "error"
     other = {**model, "family": "minimax"}  # no caller latents (and not a GenEval family): neither expected
     assert set(expected_suites(other)) == {"mmlu-0shot"}
@@ -562,7 +562,7 @@ def test_incomplete_perf_runs_and_missing_exports_are_errors_not_lights():
     late = judge.judge_performance({**fast, "exit_note": "AIPerf exited 1 after all requests succeeded"}, slow, **common)
     assert late["light"] == "green" and "exited 1" in late["notes"][0]
     result = {"accuracy": [{"suite": "s", "status": "pass"}],
-              "performance_l1": [{"reference_mode": "eager", "light": broken["light"]}]}
+              "performance": [{"reference_mode": "eager", "light": broken["light"]}]}
     assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["category"] == "error"
 
 
@@ -607,9 +607,9 @@ def test_a_side_settles_on_its_request_before_the_first_timed_run(tmp_path, monk
     assert events == [("run", "run_01"), ("run", "run_02")] and "settle_requests" not in stats
 
     tasks = yaml.safe_load((Path(__file__).parents[1] / "config" / "tasks.yaml").read_text())
-    assert tasks["defaults"]["performance"]["l1"]["measurement"]["settle_s"] == 10
-    slow = [entry["performance"]["l1"]["measurement"] for entry in tasks["tasks"].values()
-            if "measurement" in ((entry.get("performance") or {}).get("l1") or {})]
+    assert tasks["defaults"]["performance"]["measurement"]["settle_s"] == 10
+    slow = [entry["performance"]["measurement"] for entry in tasks["tasks"].values()
+            if "measurement" in (entry.get("performance") or {})]
     assert slow and all(item["settle_s"] == 0 for item in slow) and LARGE_MODEL_MEASUREMENT["settle_s"] == 0
 
 
@@ -624,11 +624,11 @@ def test_a_large_checkpoint_takes_its_class_and_keeps_the_profile_measurement(tm
     shutil.copytree(Path(__file__).parents[1] / "config", root)
     environment = Environment({"repo": str(REPOSITORY)})
     monkeypatch.setattr(models, "checkpoint_bytes", lambda *args: 17 * 2**30)
-    measurement = lambda: models.resolve_model("albert-base", environment, root)["performance"]["l1"]["measurement"]  # noqa: E731
+    measurement = lambda: models.resolve_model("albert-base", environment, root)["performance"]["measurement"]  # noqa: E731
     assert measurement() == models.LARGE_MODEL_MEASUREMENT
-    (root / "models" / "albert-base.yaml").write_text("performance: {l1: {measurement: {settle_s: 20}}}\n")
+    (root / "models" / "albert-base.yaml").write_text("performance: {measurement: {settle_s: 20}}\n")
     assert measurement() == {**models.LARGE_MODEL_MEASUREMENT, "settle_s": 20}
-    (root / "models" / "albert-base.yaml").write_text("performance: {l1: {measurement: {requests: 3}}}\n")
+    (root / "models" / "albert-base.yaml").write_text("performance: {measurement: {requests: 3}}\n")
     assert measurement() == {**models.LARGE_MODEL_MEASUREMENT, "requests": 3}  # still the class, not the default
     monkeypatch.setattr(models, "checkpoint_bytes", lambda *args: 2**30)
     assert measurement()["settle_s"] == 10 and measurement()["requests"] == 3
@@ -655,7 +655,7 @@ def test_rejudging_reports_results_the_configuration_no_longer_asks_for(tmp_path
 
     model = {"catalog_profile": "demo", "task": "text_generation", "supplementary": [],
              "accuracy_source": "absolute", "absolute": [{"suite": "mmlu-0shot", "gate": {"margin": 1.0}}],
-             "performance": {"l1": {"reference_modes": ["eager"]}}}
+             "performance": {"reference_modes": ["eager"]}}
     perf = {"reference_mode": "eager", **judge.judge_performance(
         {"p50_ms": 1.0, "ci_percent": 0.0, "per_run_p50_ms": [1.0, 1.0], "work": [[]]},
         {"p50_ms": 2.0, "ci_percent": 0.0, "per_run_p50_ms": [2.0, 2.0], "work": [[]]}, margin_percent=5, max_ci_percent=5,
@@ -664,7 +664,7 @@ def test_rejudging_reports_results_the_configuration_no_longer_asks_for(tmp_path
                 {"suite": "clip-alignment", "source": "task", "status": "fail"}]  # a retired check
     (tmp_path / "model.json").write_text(json.dumps(model))
     (tmp_path / "report.json").write_text(json.dumps({"model": "demo", "task": "text_generation", "accuracy": accuracy,
-                                                      "performance_l1": [perf], "provenance": {}}))
+                                                      "performance": [perf], "provenance": {}}))
     monkeypatch.setattr(cli, "recheck_output", lambda *args: None)
     cli.rejudge_reports([tmp_path])
     after = json.loads((tmp_path / "report.json").read_text())
@@ -754,7 +754,7 @@ def test_stated_catalog_controls_reach_every_suite_built_on_the_catalog_request(
 def test_smoke_fails_when_the_verdict_reports_an_error():
     from trtmc_aiperf_qual.runner import smoke_verdict
 
-    result = {"accuracy": [{"suite": "s", "status": "pass"}], "performance_l1": [], "errors": {},
+    result = {"accuracy": [{"suite": "s", "status": "pass"}], "performance": [], "errors": {},
               "verdict": {"acc": "pass", "perf": "error", "category": "error"}}
     verdict = smoke_verdict(result)
     assert verdict["category"] == "smoke-fail" and verdict["failing"] == ["verdict perf: error"]
@@ -796,6 +796,6 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     side = {"p50_ms": 40.0, "ci_percent": 1.0, "unit": "ms per audio second"}
     item = {"reference_mode": "eager", "light": "green", "candidate": side, "reference": {**side, "p50_ms": 90.0},
             "speedup": 2.25}
-    write_report(tmp_path, {"model": "m", "provenance": {}, "performance_l1": [item]})
+    write_report(tmp_path, {"model": "m", "provenance": {}, "performance": [item]})
     assert "| 40.000 per audio second |" in (tmp_path / "report.md").read_text()
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])

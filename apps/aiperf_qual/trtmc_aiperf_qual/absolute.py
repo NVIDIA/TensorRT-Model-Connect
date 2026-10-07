@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from . import cancel, gold_metrics, noninferiority
+from . import cancel, execution, gold_metrics, noninferiority
 from .aiperf_runner import run_aiperf
 from .config import Environment
 from .judge import light
@@ -323,6 +323,14 @@ def _suite_side(environment: Environment, service: Mapping[str, Any], model: Map
 def run_side(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
              item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], out: Path, *,
              capacity: bool = False) -> dict[str, Any]:
+    units = [problem.get("cluster", problem.get("series", index)) for index, problem in enumerate(problems)]
+    with execution.workload(item["suite"], "both", units=units):
+        return _run_side(environment, service, model, item, problems, out, capacity=capacity)
+
+
+def _run_side(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
+             item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]], out: Path, *,
+             capacity: bool = False) -> dict[str, Any]:
     """Graded records per repetition ({seed or "greedy": {problem index: record}}) and the AIPerf exits. With
     ``capacity`` (TRTMC's side), problems the bundle rejects as beyond its capacity are recorded apart."""
     if item.get("metric"):
@@ -412,7 +420,7 @@ def timings(raw_records: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, flo
 
 def workload_perf(candidate: Mapping[int, Mapping[str, Any]], native: Mapping[int, Mapping[str, Any]]) -> dict[str, Any]:
     """Model-call time on the benchmark's own requests, over the problems both sides answered with the
-    same number of tokens (informational: the Perf L1 gate times the catalog request)."""
+    same number of tokens (informational: the Perf performance gate times the catalog request)."""
     pairs = [(candidate[index], native[index]) for index in sorted(set(candidate) & set(native))
              if candidate[index].get("completion_tokens") == native[index].get("completion_tokens")]
     if not pairs:

@@ -230,7 +230,7 @@ def test_summary_merges_result_roots(tmp_path):
     (first / "report.json").write_text(json.dumps({
         "task": "text_generation", "verdict": {"category": "pass"},
         "accuracy": [{"suite": "mmlu", "passed": 10, "samples": 10, "required_passes": 9}],
-        "performance_l1": [{"reference_mode": "eager", "light": "green", "speedup": 2.5,
+        "performance": [{"reference_mode": "eager", "light": "green", "speedup": 2.5,
                             "candidate": {"p50_ms": 4.0}, "reference": {"p50_ms": 10.0}}]}))
     failed = tmp_path / "gb300-2/b"
     failed.mkdir(parents=True)
@@ -358,17 +358,17 @@ def test_rejudge_can_take_todays_judging_settings(monkeypatch):
 
     recorded = {"catalog_profile": "bark-small", "absolute": [{"suite": "s", "gate": {"margin": 1.0}}],
                 "supplementary": [{"check": "replay_parity"}],
-                "performance": {"l1": {"output_grader": "parity_audio", "reference_modes": ["eager"]}}}
+                "performance": {"output_grader": "parity_audio", "reference_modes": ["eager"]}}
     today = {"absolute": [{"suite": "s", "gate": {"margin": 2.0}}], "accuracy_source": "absolute",
              "supplementary": [{"check": "replay_parity", "informational": True}],
-             "performance": {"l1": {"output_grader": "parity_audio", "output_grader_params": {"max_rms_ratio": 9.0},
-                                    "reference_modes": ["eager", "compile"]}}}
+             "performance": {"output_grader": "parity_audio", "output_grader_params": {"max_rms_ratio": 9.0},
+                                    "reference_modes": ["eager", "compile"]}}
     monkeypatch.setattr(models, "resolve_model", lambda profile, environment: today)
     current = cli.current_settings(recorded, Environment({}))
     assert current["absolute"] == [{"suite": "s", "gate": {"margin": 2.0}}]
     assert current["supplementary"][0]["informational"]
-    assert current["performance"]["l1"]["output_grader_params"] == {"max_rms_ratio": 9.0}
-    assert current["performance"]["l1"]["reference_modes"] == ["eager"]  # what was measured stays
+    assert current["performance"]["output_grader_params"] == {"max_rms_ratio": 9.0}
+    assert current["performance"]["reference_modes"] == ["eager"]  # what was measured stays
 
 
 def test_summary_keeps_the_latest_result_of_a_profile_run_on_several_roots(tmp_path):
@@ -403,7 +403,7 @@ def test_summary_notes_trtmc_regressions_against_a_baseline(tmp_path):
         (tmp_path / root / "m").mkdir(parents=True)
         (tmp_path / root / "m/report.json").write_text(json.dumps({
             "task": "t", "started": 1.0, "verdict": {"category": "pass"},
-            "performance_l1": [{"reference_mode": "eager", "light": "green", "candidate": {"p50_ms": p50}}]}))
+            "performance": [{"reference_mode": "eager", "light": "green", "candidate": {"p50_ms": p50}}]}))
     text, _ = campaign.summary([tmp_path / "now"], [tmp_path / "before"])
     assert "regression: TRTMC eager p50 +10.0% vs baseline" in text
 
@@ -669,10 +669,10 @@ def test_media_sweep_steps_decomposition_and_light(tmp_path):
     partial = sweep.compare_media(rejected, reference, 5)
     assert partial["light"] == "green" and partial["notes"] == ["candidate failed at 2 steps"]
     assert sweep.decompose(rejected) == {}
-    l2 = {"kind": "media", "endpoint": "image_generation", "prompts": 3, "requests": 3, "candidate": candidate,
+    service_metrics = {"kind": "media", "endpoint": "image_generation", "prompts": 3, "requests": 3, "candidate": candidate,
           "reference": reference, "decomposition": {"candidate": sweep.decompose(candidate), "reference": {}},
           **compared}
-    write_report(tmp_path, {"model": "m", "provenance": {}, "performance_l2": l2})
+    write_report(tmp_path, {"model": "m", "provenance": {}, "service_metrics": service_metrics})
     text = (tmp_path / "report.md").read_text()
     assert "AIPerf image_generation" in text and "100.0 ms per denoising step + 100.0 ms fixed" in text
     assert "| TRTMC | 4 | 500.000 |" in text

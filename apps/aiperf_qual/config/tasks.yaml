@@ -8,7 +8,7 @@
 # paired non-inferiority decision against its margin (trtmc_aiperf_qual/noninferiority.py). A model with no
 # benchmark sets `accuracy_source: none` (Perf only, for example random-weight test models).
 # Perf: server model-call p50 over repeated identical requests against the native model at the candidate
-# precision, eager. torch.compile (`reference_modes: [eager, compile]`) and the L2 sweep (`performance.l2`)
+# precision, eager. torch.compile (`reference_modes: [eager, compile]`) and optional service metrics (`service_metrics`)
 # are opt-in reports, set per model.
 #
 # Suite "catalog" is the profile's catalog testcase request (model-specific shapes and settings).
@@ -17,19 +17,18 @@ defaults:
   reference:
     backend: auto              # the generic adapter of the operation (unsupported: no native path)
   performance:
-    l1:
-      suite: catalog
-      reference_modes: [eager]
-      # settle_s: the request sent back to back first (a fresh server times short requests slower at first).
-      # min_run_s: a request faster than the settle's pace gets enough requests per run to last this long (12
-      # sub-millisecond requests spread their run's median by more than max_ci_percent).
-      measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5, min_run_s: 1.0}
-      aggregation: {candidate: mean, eager: mean, compile: best}
-      margin_percent: 5
-      # The green / red bounds widen by this (multiplicatively): the largest speedup effect of server instances and
-      # timing order that the order check measured on the formal hosts (October 2026: 11.4%).
-      guard_percent: 12
-      max_ci_percent: 5
+    suite: catalog
+    reference_modes: [eager]
+    # settle_s: the request sent back to back first (a fresh server times short requests slower at first).
+    # min_run_s: a request faster than the settle's pace gets enough requests per run to last this long (12
+    # sub-millisecond requests spread their run's median by more than max_ci_percent).
+    measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5, min_run_s: 1.0}
+    aggregation: {candidate: mean, eager: mean, compile: best}
+    margin_percent: 5
+    # The green / red bounds widen by this (multiplicatively): the largest speedup effect of server instances and
+    # timing order that the order check measured on the formal hosts (October 2026: 11.4%).
+    guard_percent: 12
+    max_ci_percent: 5
 
 # Benchmarks. gate: `margin` (points of the metric) and optionally `relative_margin` (a fraction of the native
 # score, when larger); `quantized_gate` / `sampled_gate` replace it for quantized or sampling candidates.
@@ -130,47 +129,47 @@ benchmarks:
 tasks:
   text_generation:
     absolute: [mmlu]
-    performance: {l1: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}}
+    performance: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}
 
   vision_language_generation:
     # OCRBench alone (the owner's choice, October 2026): it caught both VLM conversion defects MMStar caught
     # (qwen3-vl-2b -26 vs -11 points, phi4-multimodal -19 vs -32) and TRTMC answers MMStar slowly (phi4-multimodal:
     # 29 min against 1 min for OCRBench). MMStar stays for profiles that state it.
     absolute: [ocrbench]
-    performance: {l1: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}}
+    performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
 
   classification: &classify
     absolute: [imagenet]
-    performance: {l1: {output_grader: parity_top1, output_grader_params: {tie_cosine: 0.999}}}
+    performance: {output_grader: parity_top1, output_grader_params: {tie_cosine: 0.999}}
   image_to_class_scores: *classify
 
   encoding:
     absolute: [encoder_parity]
-    performance: {l1: {output_grader: parity_vector}}
+    performance: {output_grader: parity_vector}
   embedding:
     absolute: [sts, retrieval]
-    performance: {l1: {output_grader: parity_vector}}
+    performance: {output_grader: parity_vector}
 
   image_features:
-    performance: {l1: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}}
+    performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}
 
   object_detection:
     absolute: [coco]
-    performance: {l1: {output_grader: parity_boxes}}
+    performance: {output_grader: parity_boxes}
 
   segmentation:
     absolute: [ade20k]
-    performance: {l1: {output_grader: parity_mask}}
+    performance: {output_grader: parity_mask}
   prompted_segmentation:
     absolute: [sam_point]
-    performance: {l1: {output_grader: parity_mask, output_grader_params: {min_mask_iou: 0.7}}}
+    performance: {output_grader: parity_mask, output_grader_params: {min_mask_iou: 0.7}}
   text_prompted_segmentation:
     absolute: [sam3_text]
-    performance: {l1: {output_grader: parity_numeric}}
+    performance: {output_grader: parity_numeric}
 
   transcription: &transcribe
     absolute: [librispeech]
-    performance: {l1: {output_grader: parity_wer}}
+    performance: {output_grader: parity_wer}
   transcription_streaming:
     <<: *transcribe
     absolute: [librispeech_streaming]
@@ -183,10 +182,10 @@ tasks:
     supplementary: [{check: tts_intelligibility, suite: seedtts-en-200, asr_model: openai/whisper-large-v3-turbo,
                      asr_revision: 41f01f3fe87f28c78e2fbf8b568835947dd65ed9,
                      gate: {margin: 2.0, relative_margin: 0.10}}]
-    performance: {l1: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}}
+    performance: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
   speech_to_speech:
     absolute: [speech_parity]
-    performance: {l1: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}}
+    performance: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
 
   # Perf only checks that both sides generate the same geometry (frames, height, width): diffusion
   # content diverges across precisions. Acc is the gold-referenced checks below (GenEval, VBench CLIP-T);
@@ -219,8 +218,7 @@ tasks:
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
                      detector_threshold: 0.2, gate: {margin: 1.0}}]
-    performance:
-      l1: &media_l1 {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
+    performance: &media_policy {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
                      measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
   image_edit:  # edit inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
@@ -238,30 +236,30 @@ tasks:
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
                      dino_model: facebook/dino-vits16, dino_revision: abe3b354cb6a9b6f146096b14a4a9d7eecbcb4bd,
                      gate: {margin: 1.0}}]
-    performance: {l1: *media_l1}
+    performance: *media_policy
   world_model_generation:  # world-model inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
     # 10 COCO images with the catalog's prompt, action, and camera, the same seed on both sides: video
     # validity and coarse agreement (PSNR >= 5 dB, SSIM >= 0.1); action-conditional fidelity is not covered.
     supplementary: [{check: world_model_parity, suite: coco-world-model-10, min_psnr_db: 5.0, min_ssim: 0.1}]
-    performance: {l1: *media_l1}
+    performance: *media_policy
 
   time_series_forecast:
     absolute: [etth1]
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
-    performance: {l1: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}}
+    performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
   reranking:
     absolute: [rerank]
-    performance: {l1: {output_grader: parity_scores}}
+    performance: {output_grader: parity_scores}
 
   robot_control:
     absolute: [action_parity]
     # Perf only checks that both sides computed the same output: counts may differ slightly across
     # precisions (for example valid pixels), which is the Acc checks' concern.
-    performance: {l1: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}}
+    performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
   stereo_disparity:
     absolute: [disparity_parity]
-    performance: {l1: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}}
+    performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
   monocular_geometry:
     absolute: [geometry_parity]
-    performance: {l1: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}}
+    performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}

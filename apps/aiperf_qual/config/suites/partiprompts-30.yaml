@@ -3,7 +3,7 @@
 
 # Thirty PartiPrompts covering all twelve categories (prompts of 6-25 words, evenly spaced within each
 # category), around each model's catalog request (size, frames, steps, guidance, seed). Used by the
-# replay_parity check of image generation (its first prompts) and the media L2 sweep.
+# replay_parity check of image generation (its first prompts) and the media optional service metrics sweep.
 suite: partiprompts-30
 version: 1
 base: catalog

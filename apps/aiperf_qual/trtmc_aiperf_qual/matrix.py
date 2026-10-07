@@ -28,7 +28,7 @@ def row(environment: Environment, profile: str) -> dict[str, Any]:
         model = resolve_model(profile, environment)
     except ConfigError as error:
         return {"profile": profile, "executable": False, "problem": f"configuration: {error}"}
-    reference, l1 = model["reference"], model["performance"]["l1"]
+    reference, policy = model["reference"], model["performance"]
     native = ("unsupported" if reference["backend"] == "unsupported"
               else reference.get("adapter") or f"generic {model['operation']}")
     problems = []
@@ -44,7 +44,7 @@ def row(environment: Environment, profile: str) -> dict[str, Any]:
             "accuracy_source": model["accuracy_source"],
             "benchmarks": " ".join(item["suite"] for item in model["absolute"]),
             "checks": " ".join(check["check"] for check in model["supplementary"]),
-            "timed_request": l1["suite"].get("suite"), "reference_modes": " ".join(l1["reference_modes"]),
+            "timed_request": policy["suite"].get("suite"), "reference_modes": " ".join(policy["reference_modes"]),
             "executable": not problems, "problem": "; ".join(problems)}
 
 

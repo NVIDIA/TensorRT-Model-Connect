@@ -4,13 +4,12 @@
 # The catalog testcase leaves `language` empty, which the Canary bundle rejects as a source language;
 # measure Perf on the same English request the Acc suite uses.
 performance:
-  l1:
-    suite:
-      suite: canary-1b-v2-catalog-en
-      version: 1
-      source: {kind: catalog_testcase, profile: canary-1b-v2}
-      selection: {method: first, count: 1}
-      request: {language: en}
+  suite:
+    suite: canary-1b-v2-catalog-en
+    version: 1
+    source: {kind: catalog_testcase, profile: canary-1b-v2}
+    selection: {method: first, count: 1}
+    request: {language: en}
 
 reference:
   adapter: families/canary/reference/adapter.py  # NeMo's Canary model (no generic adapter loads it)

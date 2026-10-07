@@ -581,9 +581,9 @@ def test_raw_records_keep_unicode_line_separators_inside_json_strings(tmp_path):
 
 
 
-def test_trtmc_answers_come_from_copies_and_l1_times_one_server(tmp_path):
+def test_candidate_quality_and_performance_share_one_server_despite_legacy_replica_hint(tmp_path):
     """With candidate_replicas, the Acc answers come from copies of the TRTMC server (each one request at a time)
-    and L1 then times a single server started after the copies stopped; smoke mode keeps one server."""
+    and performance then times a single server started after the copies stopped; smoke mode keeps one server."""
     from contextlib import contextmanager
     from unittest.mock import patch
 
@@ -612,7 +612,7 @@ def test_trtmc_answers_come_from_copies_and_l1_times_one_server(tmp_path):
             patch.object(absolute, "candidate_entries", answers):
         runner._candidate(Environment({"candidate_replicas": 4}), model, {"suite": {}}, [], {}, accuracy, [], tmp_path,
                           absolute_runs={"plans": {}})
-        assert events == [("copies", "trtmc", 4), ("answers", 4), ("copies stopped",), ("single", "trtmc")]
+        assert events == [("single", "trtmc"), ("answers", 1)]
         events.clear()
         runner._candidate(Environment({"candidate_replicas": 4, "smoke": True}), model, None, [], {}, accuracy, [],
                           tmp_path, absolute_runs={"plans": {}})
@@ -1095,33 +1095,12 @@ def test_both_sides_answer_at_once_trtmc_sized_after_the_native_copies(tmp_path,
     assert "reference did not start" in result["native_error"] and "candidate" in result
 
 
-def test_answers_given_alongside_are_judged_and_only_l1_starts_a_server(tmp_path, monkeypatch):
-    from contextlib import contextmanager
-
+def test_overlapped_answers_cannot_enter_the_isolated_executor(tmp_path):
     from trtmc_aiperf_qual import runner
     from trtmc_aiperf_qual.config import Environment
-
-    started = []
-
-    @contextmanager
-    def single(environment, model, backend, out, **options):
-        started.append(out.name)
-        yield {"url": "u", "info": {}}
-
-    judged = {"suite": "s", "status": "pass", "workload_perf": {"pairs": 3, "light": "green"}}
-    monkeypatch.setattr(runner, "serving", single)
-    monkeypatch.setattr(absolute, "judge", lambda *args: dict(judged))
-    accuracy = []
-    native = {"backend": "reference", "precision": "fp16", "replicas": 8, "mps": True, "runs": {"s": {}}}
-    runner._candidate(Environment({"candidate_replicas": 4}), {"absolute": [{"suite": "s"}]}, {"suite": {}}, [], {},
-                      accuracy, [], tmp_path, absolute_runs={"plans": {"s": [{}]}, "native": native, "native_error": None,
-                                                             "answered": {"candidate": {"s": {}}, "candidate_replicas": 4,
-                                                                          "candidate_mps": True}})
-    assert started == ["candidate"]  # the L1 server only
-    entry = accuracy[0]
-    assert entry["sides_concurrent"] and entry["workload_perf"]["light"] == "white"
-    assert "both sides answered at once" in entry["workload_perf"]["note"]
-
+    with pytest.raises(ValueError, match="overlapped answers"):
+        runner._candidate(Environment({}), {"absolute": []}, {}, [], {}, [], [], tmp_path,
+                          absolute_runs={"answered": {"candidate": {}}})
 
 
 def test_a_side_that_did_not_answer_every_problem_is_incomplete():
@@ -1599,7 +1578,7 @@ def test_a_native_model_at_another_precision_gets_the_mismatched_precision_toler
             "mismatched_precision_gate": {"min_cosine": 0.998, "max_relative_l2": 0.04}}
     problems = [{"sample_id": "a"}]
     native_side = {"observations": {"greedy": {0: {"values": [1.0, 0.0]}}}, "exit": {}}
-    trtmc_side = {"observations": {"greedy": {0: {"values": [1.0, 0.03]}}}, "exit": {}}  # relative L2 0.03
+    trtmc_side = {"observations": {"greedy": {0: {"values": [1.0, 0.03]}}}, "exit": {}}  # relative optional service metrics 0.03
     model = {"absolute": [item], "candidate": {"precision": "fp16"}}
     same = absolute.entries(model, {"encoder-parity": problems}, {"encoder-parity": trtmc_side},
                             {"runs": {"encoder-parity": native_side}, "precision": "fp16"}, None)[0]
@@ -1619,7 +1598,7 @@ def test_rejudge_keeps_the_gate_a_parity_entry_was_judged_against(tmp_path, monk
     item = {"suite": "encoder-parity", "metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02},
             "mismatched_precision_gate": {"min_cosine": 0.998, "max_relative_l2": 0.04}}
     model = {"catalog_profile": "m", "task": "embedding", "candidate": {"precision": "fp16"}, "absolute": [item],
-             "supplementary": [], "accuracy_source": "absolute", "performance": {"l1": {}}}
+             "supplementary": [], "accuracy_source": "absolute", "performance": {}}
     problems = [{"sample_id": "a"}]
     entry, = absolute.entries(model, {"encoder-parity": problems},
                               {"encoder-parity": {"observations": {"greedy": {0: {"values": [1.0, 0.03]}}}, "exit": {}}},
@@ -1627,7 +1606,7 @@ def test_rejudge_keeps_the_gate_a_parity_entry_was_judged_against(tmp_path, monk
                                                            "exit": {}}}, "precision": "fp32"}, None)
     (tmp_path / "model.json").write_text(json.dumps(model))
     (tmp_path / "report.json").write_text(json.dumps({"model": "m", "provenance": {}, "accuracy": [entry],
-                                                      "performance_l1": []}))
+                                                      "performance": []}))
     monkeypatch.setattr(models, "resolve_model", lambda profile, environment: model)
     assert cli.rejudge_reports([tmp_path], Environment({})) == 0
     rejudged, = json.loads((tmp_path / "report.json").read_text())["accuracy"]

@@ -55,7 +55,7 @@ def doctor_environment(environment) -> int:
     return 1 if preflight.problems(checks) else 0
 
 
-def recheck_output(out: Path, l1: dict, item: dict) -> dict | None:
+def recheck_output(out: Path, policy: dict, item: dict) -> dict | None:
     """Re-run the Perf output check on the recorded first observations with the current grader."""
     from . import judge
     from .aiperf_runner import AiperfRun
@@ -78,35 +78,36 @@ def recheck_output(out: Path, l1: dict, item: dict) -> dict | None:
     candidate = judge.first_observation(AiperfRun(candidate_dir, 0, []).raw_records())
     inputs = out / f"perf-candidate{suffix}.inputs.jsonl"
     request = json.loads(json.loads(inputs.read_text().split("\n")[0])["text"])["request"] if inputs.is_file() else {}
-    match, reason = output_check(l1, candidate, references, mode, sampled_request(request))
+    match, reason = output_check(policy, candidate, references, mode, sampled_request(request))
     return {"match": match, "reason": reason}
 
 
 def current_settings(model: dict, environment) -> dict:
     """The recorded model with today's judging settings (benchmark gates, which checks are informational,
     the Perf output check and margins), so a judge-only configuration change needs no rerun."""
-    from . import models
+    from . import compat, models
 
     try:
         current = models.resolve_model(model["catalog_profile"], environment)
     except ConfigError:
         return model
+    model = compat.configuration(model)
     gates = {item["suite"]: {key: item[key] for key in ("gate", "mismatched_precision_gate") if item.get(key)}
              for item in current["absolute"]}
     absolute = [{**item, **gates.get(item["suite"], {})} for item in model.get("absolute", [])]
     judging = ("output_grader", "output_grader_params", "margin_percent", "max_ci_percent", "guard_percent",
                "not_equivalent")
-    l1 = {**model["performance"]["l1"],
-          **{key: value for key, value in current["performance"]["l1"].items() if key in judging}}
+    policy = {**model["performance"],
+          **{key: value for key, value in current["performance"].items() if key in judging}}
     return {**model, "absolute": absolute, "supplementary": current["supplementary"],
-            "accuracy_source": current["accuracy_source"], "performance": {**model["performance"], "l1": l1}}
+            "accuracy_source": current["accuracy_source"], "performance": policy}
 
 
 def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (), regenerate: bool = False) -> int:
     """Run the Task's whole-output checks (``supplementary``) again on finished results and replace
     their report entries, then rejudge; the rest of the result is kept. Generations that sent the
     same requests are reused unless ``regenerate``."""
-    from . import models
+    from . import compat, models
     from .runner import SUPPLEMENTARY_SUITES, applies, supplementary
     from .services import reference_python
 
@@ -114,7 +115,7 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
         path = out / "report.json"
         if not path.is_file():
             continue
-        recorded = json.loads((out / "model.json").read_text())
+        recorded = compat.configuration(json.loads((out / "model.json").read_text()))
         current = models.resolve_model(recorded["catalog_profile"], environment)
         # Today's checks against today's native reference (which backend, which precisions).
         model = {**recorded, "supplementary": current["supplementary"], "reference": current["reference"]}
@@ -132,7 +133,7 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
                 entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
                                 "samples": 0, "passed": None, "required_passes": None,
                                 "error": f"{type(error).__name__}: {str(error)[-800:]}"})
-        result = json.loads(path.read_text())
+        result = compat.report(json.loads(path.read_text()))
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("suite") not in suites] + entries
         preserve_original(out)
         path.write_text(json.dumps(result, indent=2, default=str))
@@ -159,7 +160,7 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
     (``preserve_original``)."""
     import yaml
 
-    from . import absolute, judge
+    from . import absolute, compat, judge
     from .config import CONFIG_ROOT
     from .report import write_report
     from .runner import (CONVERSION_PARITY, conversion_parity, expected_suites, informational_suites, mark_informational,
@@ -170,39 +171,40 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
         path = out / "report.json"
         if not path.is_file():
             continue
-        result = json.loads(path.read_text())
-        model = json.loads((out / "model.json").read_text())
+        result = compat.report(json.loads(path.read_text()))
+        model = compat.configuration(json.loads((out / "model.json").read_text()))
         if environment is not None:
             model = current_settings(model, environment)
-        l1 = dict(model["performance"].get("l1") or {})
+        policy = dict(model.get("performance") or {})
         # Without an environment, output-check parameters follow the current Task defaults.
-        task_l1 = ((tasks["tasks"].get(model.get("task")) or {}).get("performance") or {}).get("l1") or {}
-        if environment is None and task_l1.get("output_grader") == l1.get("output_grader"):
-            l1["output_grader_params"] = {**l1.get("output_grader_params", {}),
-                                          **task_l1.get("output_grader_params", {})}
-        for index, item in enumerate(result.get("performance_l1", [])):
-            if item.get("light") == "n/a":
+        task_policy = (tasks["tasks"].get(model.get("task")) or {}).get("performance") or {}
+        if environment is None and task_policy.get("output_grader") == policy.get("output_grader"):
+            policy["output_grader_params"] = {**policy.get("output_grader_params", {}),
+                                          **task_policy.get("output_grader_params", {})}
+        for index, item in enumerate(result.get("performance", [])):
+            if not item.get("gate", True) or item.get("light") == "n/a":
                 continue
-            check = recheck_output(out, l1, item) or item.get("output_check", {})
+            check = recheck_output(out, policy, item) or item.get("output_check", {})
             verdict = judge.judge_performance(item["candidate"], item["reference"],
-                                              margin_percent=float(l1.get("margin_percent", 5)),
-                                              max_ci_percent=float(l1.get("max_ci_percent", 5)),
-                                              guard_percent=float(l1.get("guard_percent", 0)),
+                                              margin_percent=float(policy.get("margin_percent", 5)),
+                                              max_ci_percent=float(policy.get("max_ci_percent", 5)),
+                                              guard_percent=float(policy.get("guard_percent", 0)),
                                               outputs_match=bool(check.get("match")),
                                               output_reason=str(check.get("reason", "")),
-                                              not_equivalent=l1.get("not_equivalent"),
+                                              not_equivalent=policy.get("not_equivalent"),
                                               candidate_precision=(model.get("reference") or {}).get("perf_precision"))
-            result["performance_l1"][index] = {key: item[key] for key in item
+            result["performance"][index] = {key: item[key] for key in item
                                                if key in ("reference_mode", "request", "candidate_timing_scope",
                                                           "reference_timing_scope", "reference_backend")} | verdict
-        requests = sorted({item.get("request") for item in result.get("performance_l1", [])}, key=str) or [None]
-        if result.get("performance_l1"):
+        requests = sorted({item.get("request") for item in result.get("performance", []) if item.get("gate", True)}, key=str) or [None]
+        if any(item.get("gate", True) for item in result.get("performance", [])):
             from .runner import unavailable_mode
 
-            measured = {(item["reference_mode"], item.get("request")) for item in result["performance_l1"]}
-            result["performance_l1"] += [
+            measured = {(item["reference_mode"], item.get("request")) for item in result["performance"]
+                        if item.get("gate", True)}
+            result["performance"] += [
                 unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"), request)
-                for mode in l1.get("reference_modes", []) for request in requests if (mode, request) not in measured]
+                for mode in policy.get("reference_modes", []) for request in requests if (mode, request) not in measured]
         for item in result["accuracy"]:
             if item.get("source") == "absolute":  # both sides' scores are kept: re-apply today's gate
                 declared = next((entry for entry in model.get("absolute", []) if entry["suite"] == item["suite"]), {})
@@ -220,7 +222,7 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("source") != "missing"]
         if model.get("accuracy_source") == "none":  # re-derived from today's output checks
             result["accuracy"] = [item for item in result["accuracy"] if item.get("suite") != CONVERSION_PARITY]
-            result["accuracy"] += conversion_parity(result.get("performance_l1", []))
+            result["accuracy"] += conversion_parity(result.get("performance", []))
         # Results the configuration no longer asks for (a retired check or suite) stay as evidence only.
         configured = set(expected_suites(model)) | informational_suites(model)
         for item in result["accuracy"]:
@@ -231,7 +233,7 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
         result["accuracy_source"] = model.get("accuracy_source", result.get("accuracy_source"))
         result["accuracy"] += missing_results(model, result["accuracy"], result.get("errors") or {})
         result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)),
-                                          expected_modes=len(requests) if l1 else 0)
+                                          expected_modes=len(requests) if policy else 0)
         if result.get("mode") == "smoke":  # a smoke result stays a smoke result
             result["verdict"] = smoke_verdict(result)
         preserve_original(out)
@@ -244,7 +246,7 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="trtmc-aiperf-qual", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run", help="build (when missing), qualify (Acc + Perf L1), apply bundle retention")
+    run = commands.add_parser("run", help="build (when missing), qualify quality and performance, apply bundle retention")
     run.add_argument("--profile", required=True, help="catalog profile; its configuration is derived")
     run.add_argument("--environment", type=Path, required=True)
     run.add_argument("--out", type=Path, required=True)
@@ -300,7 +302,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                             "(and its exclusions)")
     plan.add_argument("--environment", type=Path, required=True)
     plan.add_argument("--profile", action="append", help="only these profiles")
-    order = commands.add_parser("order-check", help="time each profile's L1 requests in both orders: the order "
+    order = commands.add_parser("order-check", help="time each profile's performance requests in both orders: the order "
                                                     "effect before a formal run")
     order.add_argument("--environment", type=Path, required=True)
     order.add_argument("--profile", action="append", required=True)
@@ -490,9 +492,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                       "accuracy_source": model["accuracy_source"],
                                       "benchmarks": [item["suite"] for item in model["absolute"]],
                                       "supplementary": [item["check"] for item in model["supplementary"]],
-                                      "perf_request": model["performance"]["l1"]["suite"]["source"]["kind"],
+                                      "perf_request": model["performance"]["suite"]["source"]["kind"],
                                       "bundle": model["candidate"]["bundle"],
-                                      "modes": model["performance"]["l1"]["reference_modes"]}))
+                                      "modes": model["performance"]["reference_modes"]}))
                 except ConfigError as error:
                     print(json.dumps({"profile": name, "error": str(error)}))
             return 0

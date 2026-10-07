@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from .compat import report as normalized_report
+
 
 def _fmt(value: Any, digits: int = 3) -> str:
     return "—" if value is None else f"{value:.{digits}f}" if isinstance(value, float) else str(value)
@@ -93,22 +95,22 @@ def acc_value(item: Mapping[str, Any]) -> str:
     return f"{item.get('suite')}: {values(item)}"
 
 
-def _media_l2(l2: Mapping[str, Any]) -> list[str]:
-    speedup = f" · TRTMC {l2['speedup']:.2f}x faster per call" if l2.get("speedup") else ""
-    memory = f", peak memory {l2['memory_ratio']:.2f}x native" if l2.get("memory_ratio") else ""
-    lines = ["", f"## Performance L2 (AIPerf {l2.get('endpoint')}, informational; {l2.get('prompts')} prompts, "
-             f"{l2.get('requests')} requests per level)", "",
-             f"Light {l2.get('light')} {'; '.join(l2.get('reasons', []) + l2.get('notes', []))}{speedup}{memory}. "
-             f"{l2.get('note', '')}", "",
+def _media_service_metrics(service_metrics: Mapping[str, Any]) -> list[str]:
+    speedup = f" · TRTMC {service_metrics['speedup']:.2f}x faster per call" if service_metrics.get("speedup") else ""
+    memory = f", peak memory {service_metrics['memory_ratio']:.2f}x native" if service_metrics.get("memory_ratio") else ""
+    lines = ["", f"## Optional service metrics (AIPerf {service_metrics.get('endpoint')}, informational; {service_metrics.get('prompts')} prompts, "
+             f"{service_metrics.get('requests')} requests per level)", "",
+             f"Light {service_metrics.get('light')} {'; '.join(service_metrics.get('reasons', []) + service_metrics.get('notes', []))}{speedup}{memory}. "
+             f"{service_metrics.get('note', '')}", "",
              "| side | steps | model call p50 ms | request latency p50 ms | peak GPU memory MiB | measured |",
              "|---|---|---|---|---|---|"]
     for side in ("candidate", "reference"):
-        name = "TRTMC" if side == "candidate" else f"native eager {l2.get('reference_precision', '')}".strip()
-        for level in l2.get(side, []):
+        name = "TRTMC" if side == "candidate" else f"native eager {service_metrics.get('reference_precision', '')}".strip()
+        for level in service_metrics.get(side, []):
             lines.append(f"| {name} | {level.get('steps') or 'catalog'} | {_fmt(level.get('model_call_p50_ms'))} | "
                          f"{_fmt(level.get('request_latency_p50'))} | {_fmt(level.get('peak_memory_mb'), 0)} | "
                          f"{level.get('measured')} |")
-    for side, parts in (l2.get("decomposition") or {}).items():
+    for side, parts in (service_metrics.get("decomposition") or {}).items():
         if parts:
             lines.append(f"\n{'TRTMC' if side == 'candidate' else 'native'}: {parts['per_step_ms']:.1f} ms per "
                          f"denoising step + {parts['fixed_ms']:.1f} ms fixed (text encoders, VAE decode).")
@@ -116,6 +118,7 @@ def _media_l2(l2: Mapping[str, Any]) -> list[str]:
 
 
 def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
+    result = normalized_report(result)
     json_path = out / "report.json"
     json_path.write_text(json.dumps(result, indent=2, default=str))
     verdict = result.get("verdict", {})
@@ -131,7 +134,7 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
         lines += [f"Coverage: {result['coverage']}", ""]
     if result.get("accuracy_note"):
         lines += [f"Accuracy not applicable: {result['accuracy_note']}", ""]
-    lines += ["## Accuracy (both sides scored against gold answers)", "",
+    lines += ["## Quality (task scores or explicitly labelled conversion parity)", "",
               "| suite | source | status | passed | gate |",
               "|---|---|---|---|---|"]
     for item in result.get("accuracy", []):
@@ -147,36 +150,38 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
         if item.get("reasons") or item.get("notes"):
             text = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
             lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |")
-    workloads = [item for item in result.get("accuracy", []) if (item.get("workload_perf") or {}).get("pairs")]
-    if workloads:
-        lines += ["", "## Performance on the benchmark requests (informational; server model-call time, p50)", "",
-                  "| benchmark | light | TRTMC ms | native ms | speedup | problems (same output length) | prompt tokens p50 |",
-                  "|---|---|---|---|---|---|---|"]
-        for item in workloads:
-            perf = item["workload_perf"]
-            lines.append(f"| {item['suite']} | {perf['light']} | {perf['trtmc_p50_ms']} | {perf['native_p50_ms']} | "
-                         f"{perf['speedup']}x | {perf['pairs']} | {perf.get('prompt_tokens_p50')} |")
-    lines += ["", "## Performance L1 (server model-call time, p50)", "",
+    lines += ["", "## Performance (server task-call time)", "",
               "| reference mode | light | TRTMC ms | CI % | reference ms (aggregation) | CI % | speedup | notes |",
               "|---|---|---|---|---|---|---|---|"]
-    for item in result.get("performance_l1", []):
+    for item in result.get("performance", []):
         cand, ref = item.get("candidate", {}), item.get("reference", {})
+        if item.get("kind") == "natural_dataset":
+            interval = item.get("speedup_interval90")
+            ratio = _fmt(item.get("speedup"), 2) + "x" if item.get("comparable") else "not comparable"
+            scope = "dataset units 90% CI " + str(interval) if interval else "no dataset-unit interval"
+            notes = "; ".join([*item.get("reasons", []), *item.get("notes", []), scope])
+            lines.append(f"| {item['request']} (shared quality outputs) | {item['light']} | "
+                         f"{_fmt(cand.get('p50_ms'))} | — | {_fmt(ref.get('p50_ms'))} | — | {ratio} | {notes} |")
+            lines += ["", f"Natural task total-time ratio: {_fmt(item.get('natural_task_speedup'), 2)}x; "
+                      f"{item.get('matched_pairs')}/{item.get('pairs')} paired responses have matching work. "
+                      "This describes the collected tasks and is not an equal-work claim when work differs.", ""]
+            continue
         unit = " per audio second" if cand.get("unit") or ref.get("unit") else ""
         lines.append(f"| {item['reference_mode']}{' ' + item['request'] if item.get('request') else ''} | {item['light']} | {_fmt(cand.get('p50_ms'))}{unit} | "
                      f"{_fmt(cand.get('ci_percent'), 2)} | {_fmt(ref.get('p50_ms'))}{unit} ({ref.get('aggregation', 'mean')}) | "
                      f"{_fmt(ref.get('ci_percent'), 2)} | "
                      f"{_fmt(item.get('speedup'), 2)} | {'; '.join(item.get('reasons', []) + item.get('notes', []))} |")
-    l2 = result.get("performance_l2") or {}
-    if l2.get("kind") == "media":
-        lines += _media_l2(l2)
-    elif l2:
-        lines += ["", f"## Performance L2 (serving sweep, informational; ISL {l2.get('isl')}, OSL {l2.get('osl')})", "",
-                  f"Light {l2.get('light')} {'; '.join(l2.get('reasons', []))}"
-                  + (f" · TRTMC/native throughput {l2['throughput_ratio']:.2f}x at concurrency {l2.get('concurrency')}"
-                     if l2.get("throughput_ratio") else "") + f". {l2.get('note', '')}", "",
+    service_metrics = result.get("service_metrics") or {}
+    if service_metrics.get("kind") == "media":
+        lines += _media_service_metrics(service_metrics)
+    elif service_metrics:
+        lines += ["", f"## Optional service metrics (serving sweep, informational; ISL {service_metrics.get('isl')}, OSL {service_metrics.get('osl')})", "",
+                  f"Light {service_metrics.get('light')} {'; '.join(service_metrics.get('reasons', []))}"
+                  + (f" · TRTMC/native throughput {service_metrics['throughput_ratio']:.2f}x at concurrency {service_metrics.get('concurrency')}"
+                     if service_metrics.get("throughput_ratio") else "") + f". {service_metrics.get('note', '')}", "",
                   "| side | concurrency | requests/s | latency p50 ms | latency p99 ms | error % |", "|---|---|---|---|---|---|"]
         for side in ("candidate", "reference"):
-            for level in l2.get(side, []):
+            for level in service_metrics.get(side, []):
                 lines.append(f"| {'TRTMC' if side == 'candidate' else 'native eager'} | {level.get('concurrency')} | "
                              f"{_fmt(level.get('request_throughput_avg'), 2)} | {_fmt(level.get('request_latency_p50'))} | "
                              f"{_fmt(level.get('request_latency_p99'))} | {_fmt(level.get('request_error_rate_avg'), 1)} |")

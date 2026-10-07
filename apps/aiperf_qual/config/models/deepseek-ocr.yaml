@@ -3,8 +3,7 @@
 
 # The family's OCR output contract for the Perf output check.
 performance:
-  l1:
-    output_grader_params: {max_distance: 0.5}
+  output_grader_params: {max_distance: 0.5}
 # An OCR model: OCRBench only.
 absolute: [ocrbench]
 

@@ -175,8 +175,8 @@ def _order_check(tmp_path, monkeypatch, measurements):
     monkeypatch.setattr(runner, "perf_suites", lambda environment, model, perf_suite, service=None: [suite])
     monkeypatch.setattr(runner, "_perf_run", lambda *args: (None, dict(next(measurements))))
     model = {"model": "m", "operation": "generate", "reference": {"perf_precision": "fp16", "precision": "fp32"},
-             "performance": {"l1": {"suite": {}, "max_ci_percent": 5.0, "aggregation": {"eager": "mean"},
-                                    "guard_percent": 4, "measurement": {"warmup": 0, "requests": 1, "runs": 3}}}}
+             "performance": {"suite": {}, "max_ci_percent": 5.0, "aggregation": {"eager": "mean"},
+                                    "guard_percent": 4, "measurement": {"warmup": 0, "requests": 1, "runs": 3}}}
     return runner.order_check(Environment({}), model, tmp_path)
 
 
@@ -239,7 +239,7 @@ def test_an_order_check_that_cannot_start_is_unresolved(tmp_path, monkeypatch):
 
     (tmp_path / "order.json").write_text('{"status": "within-limit"}')
     monkeypatch.setattr(runner, "reference_python", no_environment)
-    result = runner.order_check(Environment({}), {"model": "m", "performance": {"l1": {"max_ci_percent": 5.0}}}, tmp_path)
+    result = runner.order_check(Environment({}), {"model": "m", "performance": {"max_ci_percent": 5.0}}, tmp_path)
     assert result["status"] == "unresolved" and "no env" in result["problems"][0]
     assert '"unresolved"' in (tmp_path / "order.json").read_text()
 

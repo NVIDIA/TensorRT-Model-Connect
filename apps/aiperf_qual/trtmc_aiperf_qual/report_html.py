@@ -21,7 +21,7 @@ from typing import Any, Mapping, Sequence
 from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, ms, reported_perf, request_label, signal, signal_reason
 from .report import _fmt, counted
 
-EVIDENCE = ("report.md", "report.json", "build.json", "build/build.log", "error.json", "phase-errors.log",
+EVIDENCE = ("report.md", "report.json", "execution.jsonl", "build.json", "build/build.log", "error.json", "phase-errors.log",
             "candidate/server.log")
 LIGHT_COLORS = {"green": "#1e8e3e", "yellow": "#b06000", "red": "#c5221f", "white": "#5f6368", "n/a": "#5f6368"}
 LEGEND = (("green", "Accuracy and performance meet their gates."),
@@ -187,6 +187,16 @@ def _latency(profile: str, items: Sequence[Mapping[str, Any]], side: str) -> str
     return "".join(lines) or "<span class='none'>—</span>"
 
 
+def _speedup(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
+    """Only display a headline speedup when the fixed-work comparison is admissible."""
+    lines = []
+    for item in items:
+        ratio = item.get("speedup") if item.get("light") in ("green", "yellow", "red") else None
+        label = f"<span class='detail'>{_e(request_label(profile, item))}</span> " if len(items) > 1 else ""
+        lines.append(f"<div>{label}{f'{ratio:.2f}x' if ratio is not None else '—'}</div>")
+    return "".join(lines) or "<span class='none'>—</span>"
+
+
 def _links(directory: Path | None, base: Path) -> str:
     if directory is None or not directory.is_dir():
         return ""
@@ -229,40 +239,52 @@ def _performance(items: Sequence[Mapping[str, Any]]) -> str:
         color = LIGHT_COLORS.get(light, "#6e7781")
         reasons = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
         unit = " per audio second" if candidate.get("unit") or reference.get("unit") else ""
-        rows.append(f"<tr><td>{_e(item.get('reference_mode'))}</td><td><span class='badge' "
+        ratio = item.get("speedup")
+        interval = item.get("speedup_interval90")
+        measured = f"{ratio:.2f}x" if ratio is not None else "not comparable"
+        if interval:
+            measured += f" [90% CI {interval[0]:.2f}, {interval[1]:.2f}]"
+        if item.get("kind") == "natural_dataset":
+            reasons += " · shared quality outputs; interval across dataset units"
+            natural = item.get("natural_task_speedup")
+            if natural is not None:
+                reasons += f" · natural-task total-time ratio {natural:.2f}x"
+        else:
+            reasons += " · repeated fixed-workload gate"
+        rows.append(f"<tr><td>{_e(item.get('request') or item.get('reference_mode'))}</td><td><span class='badge' "
                     f"style='background:{color}'>{_e(light)}</span></td>"
                     f"<td>{_e(_ms(candidate.get('p50_ms')))}{unit}</td><td>{_e(_ms(reference.get('p50_ms')))}{unit}"
-                    f" {_e(reference.get('precision') or '')}</td><td>{_e(reasons)}</td></tr>")
+                    f" {_e(reference.get('precision') or '')}</td><td>{_e(measured)}</td><td>{_e(reasons)}</td></tr>")
     if not rows:
         return ""
     return ("<table><tr><th>native mode</th><th>light</th><th>TRTMC p50 ms</th><th>native p50 ms</th>"
-            f"<th>reasons / notes</th></tr>{''.join(rows)}</table>")
+            f"<th>speedup</th><th>reasons / notes</th></tr>{''.join(rows)}</table>")
 
 
-def _media_sweep(l2: Mapping[str, Any]) -> str:
+def _media_sweep(service_metrics: Mapping[str, Any]) -> str:
     rows = "".join(f"<tr><td>{'TRTMC' if side == 'candidate' else 'native eager'}</td><td>{_e(level.get('steps') or 'catalog')}"
                    f"</td><td>{_e(_ms(level.get('model_call_p50_ms')))}</td><td>{_e(_ms(level.get('request_latency_p50')))}"
                    f"</td><td>{_e(_ms(level.get('peak_memory_mb')))}</td></tr>"
-                   for side in ("candidate", "reference") for level in l2.get(side, []))
+                   for side in ("candidate", "reference") for level in service_metrics.get(side, []))
     parts = "; ".join(f"{'TRTMC' if side == 'candidate' else 'native'} {value['per_step_ms']:.1f} ms/step + "
-                      f"{value['fixed_ms']:.1f} ms fixed" for side, value in (l2.get("decomposition") or {}).items()
+                      f"{value['fixed_ms']:.1f} ms fixed" for side, value in (service_metrics.get("decomposition") or {}).items()
                       if value)
-    return (f"<p>L2 {_e(l2.get('endpoint'))} (informational): light {_e(l2.get('light'))} "
-            f"{_e('; '.join(l2.get('reasons', [])))} {_e(parts)}</p><table><tr><th>side</th><th>steps</th>"
+    return (f"<p>optional service metrics {_e(service_metrics.get('endpoint'))} (informational): light {_e(service_metrics.get('light'))} "
+            f"{_e('; '.join(service_metrics.get('reasons', [])))} {_e(parts)}</p><table><tr><th>side</th><th>steps</th>"
             f"<th>model call p50 ms</th><th>request latency p50 ms</th><th>peak GPU memory MiB</th></tr>{rows}</table>")
 
 
-def _sweep(l2: Mapping[str, Any]) -> str:
-    if not l2:
+def _sweep(service_metrics: Mapping[str, Any]) -> str:
+    if not service_metrics:
         return ""
-    if l2.get("kind") == "media":
-        return _media_sweep(l2)
+    if service_metrics.get("kind") == "media":
+        return _media_sweep(service_metrics)
     rows = "".join(f"<tr><td>{'TRTMC' if side == 'candidate' else 'native eager'}</td><td>{_e(level.get('concurrency'))}"
                    f"</td><td>{_e(_ms(level.get('request_throughput_avg')))}</td>"
                    f"<td>{_e(_ms(level.get('request_latency_p50')))}</td><td>{_e(_ms(level.get('request_latency_p99')))}</td>"
-                   "</tr>" for side in ("candidate", "reference") for level in l2.get(side, []))
-    return (f"<p>L2 serving sweep (informational, ISL {_e(l2.get('isl'))} / OSL {_e(l2.get('osl'))}): light "
-            f"{_e(l2.get('light'))} {_e('; '.join(l2.get('reasons', [])))} — {_e(l2.get('note'))}</p><table><tr><th>side</th>"
+                   "</tr>" for side in ("candidate", "reference") for level in service_metrics.get(side, []))
+    return (f"<p>optional service metrics serving sweep (informational, ISL {_e(service_metrics.get('isl'))} / OSL {_e(service_metrics.get('osl'))}): light "
+            f"{_e(service_metrics.get('light'))} {_e('; '.join(service_metrics.get('reasons', [])))} — {_e(service_metrics.get('note'))}</p><table><tr><th>side</th>"
             f"<th>concurrency</th><th>requests/s</th><th>latency p50 ms</th><th>latency p99 ms</th></tr>{rows}</table>")
 
 
@@ -275,7 +297,7 @@ def _evidence(profile: str, row: Mapping[str, Any], base: Path) -> str:
     return ("<details><summary>Evidence</summary><div class='evidence-body'>"
             f"<p>{_e(signal_reason(profile, row))}</p><p class='detail'>harness category {_e(row['category'])} · "
             f"host {_e(row.get('root'))}</p>{_accuracy(row.get('accuracy', []))}{_performance(row.get('perf', []))}"
-            f"{_sweep(row.get('l2') or {})}<p>{_links(Path(directory) if directory else None, base)}</p>"
+            f"{_sweep(row.get('service_metrics') or {})}<p>{_links(Path(directory) if directory else None, base)}</p>"
             + (f"<p>reproduce: <code>{_e(row['repro'])}</code></p>" if row.get("repro") else "")
             + "</div></details>")
 
@@ -300,7 +322,8 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                     + f"</td><td><code>{_e(profile)}</code><div class='detail'>{_e(row.get('task') or '—')}</div></td>"
                     f"<td>{_precision(row)}</td><td>{_accuracy_values(row.get('accuracy', []))}</td>"
                     f"<td class='timing'>{_latency(profile, perf, 'reference')}</td>"
-                    f"<td class='timing'>{_latency(profile, perf, 'candidate')}</td>{rerun}"
+                    f"<td class='timing'>{_latency(profile, perf, 'candidate')}</td>"
+                    f"<td class='timing'>{_speedup(profile, perf)}</td>{rerun}"
                     f"<td>{_evidence(profile, row, base)}</td></tr>")
     passed = tally["green"] + tally["yellow"]
     rate = f"{100 * passed / len(rows):.1f}%" if rows else "—"  # of every model the report covers
@@ -321,7 +344,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                + "".join(f"<option value='{result}'>{SIGNAL_NAMES[result]}</option>" for result in SIGNALS)
                + f"</select></label><span class='count'>Showing <span id='n'>{len(rows)}</span> of {len(rows)}"
                "</span></div>")
-    columns = ["Result", "Model / Task", "Precision", "Accuracy (TRTMC / native)", "Native p50", "TRTMC p50",
+    columns = ["Result", "Model / Task", "Precision", "Quality (TRTMC / native)", "Native p50", "TRTMC p50", "Speedup",
                *(["Rerun"] if reruns else []), "Evidence"]
     document = ("<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' "
                 f"content='width=device-width,initial-scale=1'><title>{_e(title)}</title><style>{STYLE}</style>"

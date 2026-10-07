@@ -9,6 +9,7 @@ import math
 import statistics
 from typing import Any, Mapping, Sequence
 
+from .compat import report as normalized_report
 from .noninferiority import t_quantile
 
 METRIC = "trtmc_model_call_time"
@@ -32,7 +33,8 @@ def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expect
     ``informational`` entries are reported, never judged. A model without a native path is
     ``not-covered``.
     """
-    lights = {light_key(item): item["light"] for item in result.get("performance_l1", [])}
+    result = normalized_report(result)
+    lights = {light_key(item): item["light"] for item in result.get("performance", []) if item.get("gate", True)}
     if (result.get("reference") or {}).get("backend") == "unsupported":
         return {"acc": "n/a", "perf": "n/a", "lights": lights, "category": "not-covered"}
     accuracy = [item for item in result.get("accuracy", []) if not item.get("informational")]
@@ -45,8 +47,8 @@ def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expect
         statuses = {item["status"] for item in accuracy}
         acc = ("pass" if statuses == {"pass"} else "error" if "error" in statuses else "fail" if "fail" in statuses else
                "inconclusive" if "inconclusive" in statuses else "not-comparable")
-    qualifying = [item["light"] for item in result.get("performance_l1", [])
-                  if item.get("reference_mode") == QUALIFYING_MODE]
+    qualifying = [item["light"] for item in result.get("performance", [])
+                  if item.get("reference_mode") == QUALIFYING_MODE and item.get("gate", True)]
     perf = "error" if len(qualifying) < max(expected_modes, 1) or {"error", "n/a"} & set(qualifying) else (
         "green" if all(value == "green" for value in qualifying) else
         "red" if "red" in qualifying else "yellow" if "yellow" in qualifying else "white")
