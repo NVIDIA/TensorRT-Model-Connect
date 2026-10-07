@@ -438,6 +438,20 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
     assert legend.count("<div><dt>") == 4  # one line per result
 
 
+def test_html_pass_rate_counts_green_and_yellow_of_every_model(tmp_path):
+    from trtmc_aiperf_qual.report_html import render
+
+    categories = {"g": "pass", "y": "acc-inconclusive", "r": "acc-issue", "w": "error"}
+    rows = {name: {"category": category, "task": "t", "accuracy": [], "perf": [], "root": "h"}
+            for name, category in categories.items()}
+    page = render(rows, {}, {}, tmp_path / "report.html").read_text()
+    green, yellow = (f"<span class='signal signal-{result}' title='{result.title()}'><span class='light'></span></span>"
+                     for result in ("green", "yellow"))
+    assert f"Pass {green}<span class='none'>+</span>{yellow}<strong>2</strong>" in page  # lights, not words
+    assert "Pass rate <strong>50.0%</strong>" in page and "Valid comparisons <strong>3 / 4</strong>" in page
+    assert "Pass rate <strong>—</strong>" in render({}, {}, {}, tmp_path / "empty.html").read_text()
+
+
 def test_html_labels_say_in_a_few_words_why_a_result_is_not_green():
     from trtmc_aiperf_qual.report_html import _issue
 
