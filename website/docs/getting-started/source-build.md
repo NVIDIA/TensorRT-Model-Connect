@@ -80,6 +80,35 @@ existing-interpreter local path.
 The manual commands below remain the direct source-build path and show the
 operations performed by development mode.
 
+## Optional Edge-LLM Python tools
+
+After preparing the source-build prerequisites below, use CPython 3.12 to
+install this checkout with the pinned Edge-LLM builder and Python runtime
+from PyPI through the normal package extra:
+
+```bash
+python -m pip install -e '.[edgellm]'
+python -c 'import tensorrt; from tensorrt_edgellm import runtime; runtime.load()'
+```
+
+This editable source installation still builds Model Connect's native targets;
+the extra does not provide a Python-only build mode.
+
+The Edge wheel does not install the platform CUDA or TensorRT libraries. Its native
+payload must match the executing platform, GPU, and CUDA/TensorRT stack; see
+the [Edge-LLM 0.11.0 installation guide](https://nvidia.github.io/TensorRT-Edge-LLM/0.11.0/user_guide/getting_started/installation.html).
+A successful package installation alone is not a model qualification result.
+
+This extra provides Python tools, not the C++ SDK linked by the existing native
+family adapters. Those adapters still use the separately pinned
+[optional CMake SDK dependency](https://github.com/NVIDIA/TensorRT-Model-Connect/tree/main/cmake/edge_llm).
+Installing this extra does not switch a family's builder or runtime.
+
+The base wheel includes the direct builder. Use a separate environment for
+Edge-LLM's optional `export` or `tools` extras: their Transformers pin differs
+from Model Connect's pin. Do not override either project's requirements to
+force the environments together.
+
 ## 1. Select the GPU and start the container
 
 Change only `GPU`. The commands derive the SM used by CMake and select the
