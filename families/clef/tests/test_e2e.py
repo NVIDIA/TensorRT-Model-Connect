@@ -19,6 +19,8 @@ MANIFEST = json.loads((ROOT / "manifests/clef.json").read_text())
 @pytest.fixture(scope="module")
 def clef_bundle(tmp_path_factory):
     """All cases exercise one freshly built checkpoint/bundle unless explicitly supplied."""
+    # Clef's graph and C++ pipeline execute the complete model on one device.
+    assert MANIFEST["tensor_parallel_size"] == 1
     checkpoint = os.environ.get("TRTMC_CLEF_CHECKPOINT")
     if checkpoint is None:
         from huggingface_hub import snapshot_download
