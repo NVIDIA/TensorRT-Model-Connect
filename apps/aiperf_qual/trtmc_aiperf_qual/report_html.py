@@ -84,6 +84,7 @@ r.style.display=v?'':'none';n+=v}document.getElementById('n').textContent=n}
 NO_VERDICT_LABELS = {"error": "run error", "build-failed": "build failed", "config-error": "configuration error",
                      "not-run": "not run", "excluded": "excluded", "smoke-fail": "smoke failed"}
 TIMING_SPREAD = re.compile(r"^(TRTMC|native) CI (±[\d.]+%)")
+NO_WORK = re.compile(r"^(TRTMC|native): (\d+ responses report no work|no work evidence)")
 
 
 def _e(value: Any) -> str:
@@ -105,6 +106,8 @@ def _perf_label(reason: str) -> str:
         return "outputs differ"
     if reason.startswith("not the same workload"):
         return "different workload"
+    if NO_WORK.match(reason):
+        return "work not reported"
     return reason.split(":")[0].split(" (")[0][:40] or "not comparable"
 
 
@@ -122,9 +125,11 @@ def _issue(profile: str, row: Mapping[str, Any], result: str) -> str:
     perf = reported_perf(row)
     lights = {item.get("light") for item in perf}
     parts = []
-    if result == "red":
-        parts += ["Acc below native"] if row["category"] == "acc-issue" or any(
-            item.get("status") == "fail" for item in accuracy) else []
+    if result == "red":  # a gold-scored benchmark is below native; a parity check (no gold) is out of tolerance
+        failed = [item for item in accuracy if item.get("status") == "fail"]
+        parts += ["Acc below native" if "trtmc_score" in (item.get("metrics") or {}) else "Acc outside tolerance"
+                  for item in failed]
+        parts += ["Acc failed"] if row["category"] == "acc-issue" and not failed else []
         parts += ["Perf slower than native"] if "red" in lights else []
     elif result == "white":
         parts += ["Acc not applicable" for item in accuracy if item.get("status") in ("not-comparable", "not-covered")]

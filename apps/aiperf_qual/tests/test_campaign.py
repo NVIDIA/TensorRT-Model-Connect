@@ -333,9 +333,11 @@ def test_summary_fetches_remote_result_roots_over_ssh(tmp_path):
     remote = tmp_path / "remote/results"
     (remote / "a").mkdir(parents=True)
     (remote / "a/report.json").write_text(json.dumps({"task": "classification", "verdict": {"category": "pass"}}))
+    (remote / "a/model.json").write_text(json.dumps({"candidate": {"precision": "fp16"}}))
     (remote / "a/big.bin").write_bytes(b"x" * 1000)  # only result files are fetched
     roots = campaign.fetch_roots([f"gb300-1=nvidia@host:{remote}"], str(fake_ssh), tmp_path / "fetched")
     assert roots == [tmp_path / "fetched/gb300-1"] and not (roots[0] / "a/big.bin").exists()
+    assert campaign.collect(roots)[0]["a"]["precision"]["trtmc"] == "fp16"  # the model's precision came along
     text, counts = campaign.summary(roots)
     assert counts == {"pass": 1} and "| Green | a | classification | gb300-1 |" in text
     local = tmp_path / "local-root"
@@ -428,7 +430,7 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
     bad = page[page.index(">bad<"):page.index(">good<")]
     assert "<span class='signal signal-green'><span class='light'></span>Green</span>" in bad  # the rerun's result
     assert "data-result='red' data-k='bad" in page and "<span>s</span><strong>1/2</strong>" in bad  # values only
-    assert "<div class='detail'>Acc below native</div>" in page  # a short label; the reason is in the evidence
+    assert "<div class='detail'>Acc outside tolerance</div>" in page  # a short label; the reason is in the evidence
     assert "gb300-1: host -" in page and "Models <strong>2</strong>" in page
     assert "Pass (Green + Yellow) <strong>1</strong>" in page
     legend = page[page.index("<dl class='legend'>"):page.index("</dl>")]
@@ -444,6 +446,12 @@ def test_html_labels_say_in_a_few_words_why_a_result_is_not_green():
     assert _issue("m", timed("TRTMC CI ±5.54% > 5.0%"), "white") == "Perf TRTMC CI ±5.54%"
     assert _issue("m", timed("reference timed at bf16, TRTMC runs fp16"), "white") == "Perf precision differs"
     assert _issue("m", timed("work differs: TRTMC [...] vs native [...]"), "white") == "Perf outputs differ"
+    assert _issue("m", timed("TRTMC: 1 responses report no work"), "white") == "Perf work not reported"
+    assert _issue("m", timed("native: no work evidence"), "white") == "Perf work not reported"
+    scored = {"category": "acc-issue", "perf": [], "accuracy": [{"status": "fail", "metrics": {"trtmc_score": 1.0}}]}
+    assert _issue("m", scored, "red") == "Acc below native"
+    parity = {"category": "acc-issue", "perf": [], "accuracy": [{"status": "fail", "passed": 398, "samples": 400}]}
+    assert _issue("m", parity, "red") == "Acc outside tolerance"
     unfit = {"category": "error", "perf": [], "accuracy": [
         {"status": "error", "error": "no lambada problem fits the bundle's 32-token sequence length"}]}
     assert _issue("m", unfit, "white") == "no problem fits the bundle"
