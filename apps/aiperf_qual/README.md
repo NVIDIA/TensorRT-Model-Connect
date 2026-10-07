@@ -86,12 +86,12 @@ trtmc-aiperf-qual doctor --environment config/environments/<machine>.yaml       
 ## Commands
 
 ```bash
-E=config/environments/gb300-perf-serving.yaml
+E=config/environments/<machine>.yaml
 trtmc-aiperf-qual plan --environment $E
 trtmc-aiperf-qual matrix --environment $E --output matrix.csv                # exit 1 unless every profile is executable
 trtmc-aiperf-qual run --profile qwen3-0.6b-fp16 --environment $E --out out/qwen3-0.6b-fp16
 trtmc-aiperf-qual run-all --environment $E --out-root out/ --shard 0/2      # host 1 of 2
-trtmc-aiperf-qual summary gb300-1=nvidia@host1:/runs/out gb300-2=nvidia@host2:/runs/out \
+trtmc-aiperf-qual summary gb300-1=user@host1:/path/to/out gb300-2=user@host2:/path/to/out \
     --ssh "ssh -J jump" --output qualification.md --html qualification.html   # remote roots over ssh
 trtmc-aiperf-qual rejudge --environment $E out/*/                           # re-apply the judge, no model runs
 python tools/model_benchmark.py aiperf --environment $E --aiperf-python <venv>/bin/python --out-root out/
@@ -166,5 +166,6 @@ it).
   reaches the serving mechanics through `host`), named by `reference.adapter`.
 - Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in
   `config/models/<profile>.yaml`; the report names the bundle it qualified.
-- New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
-  retention); Docker or bare metal only differ in these paths.
+- New machine: a file of its own from `config/environments/example.yaml` (paths, Python interpreters, ports, lock,
+  model list, retention), kept with the machine rather than in the repository; Docker or bare metal only differ in
+  these paths. A run's frozen inputs (its ledger and multi-host assignment) stay with that run's results too.
