@@ -1197,7 +1197,7 @@ python3() {
     assert calls.read_text(encoding="utf-8").splitlines() == [
         "provision -m tools.brev_exec provision --instance trtmc-gpu-ci-123-2 "
         "--instance-type g6.4xlarge --disk-gb 500 --min-free-disk-gb 200 "
-        f"--lease-file {tmp_path}/trtmc-gpu-ci-lease.json --timeout 1200 --attempts 1",
+        f"--lease-file {tmp_path}/trtmc-gpu-ci-lease.json --timeout 2700 --attempts 1",
         f"cleanup -m tools.brev_exec cleanup --instance {instance_name} "
         f"--lease-file {tmp_path}/trtmc-gpu-ci-lease.json --timeout 900",
     ]
@@ -2199,9 +2199,9 @@ python3() {
     assert argv[argv.index("--disk-gb") + 1] == "500"
     assert argv[argv.index("--min-free-disk-gb") + 1] == "200"
     assert argv[argv.index("--lease-file") + 1] == str(tmp_path / "trtmc-gpu-ci-lease.json")
-    assert argv[argv.index("--timeout") + 1] == "1200"
+    assert argv[argv.index("--timeout") + 1] == "2700"
     assert argv[argv.index("--attempts") + 1] == "1"
-    assert ("--recover-nebius-start-limit" in argv) is (provider == "nebius")
+    assert "--recover-nebius-start-limit" not in argv
     assert argv[argv.index("--instance") + 1] == "trtmc-gpu-ci-123-2"
 
 
@@ -2408,7 +2408,7 @@ def test_gpu_lease_survives_reservation_and_cleanup_with_a_trusted_backstop(gpu_
         assert step["with"]["if-no-files-found"] == "error"
     assert steps["Preserve the final GPU instance lease"]["with"]["overwrite"] is True
     cleanup = workflow["jobs"]["cleanup"]
-    assert gpu_job["timeout-minutes"] == 90
+    assert gpu_job["timeout-minutes"] == 120
     assert cleanup["timeout-minutes"] == 20
     assert cleanup["permissions"] == {"contents": "read", "actions": "read"}
     cleanup_steps = {step["name"]: step for step in cleanup["steps"]}

@@ -712,6 +712,7 @@ class FakeBrev:
         self.name = None
         self.sku = brev_provision.DEFAULT_INSTANCE_TYPE
         self.commands = []
+        self.command_times = []
         self.events = []
         self.creates = []
         self.states = []
@@ -720,9 +721,7 @@ class FakeBrev:
         self.delete_succeeds = True
         self.inventory_result = None
         self.create_code = 0
-        self.conditions = {}
-        self.recoveries = 0
-        self.recovery_ok = True
+        self.native_ready = False
         self.catalog = [
             {"type": sku, "provider": provider, "disk_min_gb": 50, "disk_max_gb": 2560}
             for sku, provider in (
@@ -739,6 +738,7 @@ class FakeBrev:
         assert deadline > brev_provision.time.monotonic()
         assert cap > 0
         self.commands.append(command)
+        self.command_times.append((command, brev_provision.time.monotonic()))
         action = command[1]
         code, stdout = 0, ""
         if action == "search":
@@ -766,43 +766,31 @@ class FakeBrev:
                     if len(self.states) > 1:
                         self.states.pop(0)
                     row = {**row, "name": self.name, "instance_type": self.sku}
+                    self.native_ready = (
+                        row["status"] == "RUNNING"
+                        and row["build_status"] == "COMPLETED"
+                        and row["shell_status"] == "READY"
+                        and row["health_status"] not in {"UNHEALTHY", "UNAVAILABLE"}
+                    )
                     rows.append(row)
                     self.events.append("inventory:" + row["build_status"])
                 else:
                     self.events.append("inventory:absent")
                 stdout = json.dumps({"workspaces": rows})
         elif action == "refresh":
+            assert self.native_ready, "SSH configuration changed before native readiness"
             self.events.append("refresh")
         elif action == "exec":
+            assert self.native_ready, "host command executed before native readiness"
             script = command[-1]
             if "TRTMC_DIAG_" in script:
                 self.events.append("diagnostic")
                 stdout = "TRTMC_DIAG_CLOUD_STATE=done\nTRTMC_DIAG_HOST_GPU_EXIT=0\n"
-            elif "TRTMC_RECOVERY_CONDITION_" in script:
-                self.events.append("condition")
-                keys = (
-                    "cloud_done",
-                    "docker_start_limit",
-                    "docker_clean_exit",
-                    "docker_no_auto_restart",
-                    "docker_limit_three",
-                    "oneshot_failed",
-                    "known_oneshot",
-                    "known_cdi_restart",
-                )
-                stdout = "\n".join(
-                    f"TRTMC_RECOVERY_CONDITION_{key}={self.conditions.get(key, 1)}" for key in keys
-                )
-                stdout += "\nTRTMC_RECOVERY_CONDITION_COMPLETE\nprivate-token\n"
-            elif "TRTMC_RECOVERY_ONESHOT_RC" in script:
-                self.events.append("recovery")
-                self.recoveries += 1
-                marker = shlex.split(script.splitlines()[-1])[-1]
-                code_value = 0 if self.recovery_ok else 1
-                stdout = f"TRTMC_RECOVERY_ONESHOT_RC={code_value}\nTRTMC_RECOVERY_RESTORED_RC=0\n{marker}\n"
-                if self.recovery_ok:
-                    self.states = [_row(self.name)]
             else:
+                assert not any(
+                    mutation in script
+                    for mutation in ("reset-failed", "daemon-reload", "systemctl restart")
+                ), "provisioning mutated host services"
                 self.events.append("probe")
                 outcome = self.probe_results.pop(0) if self.probe_results else "ready"
                 marker = shlex.split(script.splitlines()[-1])[-1]
@@ -883,19 +871,28 @@ def test_insufficient_disk_catalog_never_allocates(fake):
     assert not fake.creates
 
 
-def test_create_exit_zero_then_terminal_failure_retains_lease_without_replacement(fake):
-    fake.states = [_row("gpu", status="FAILURE", build_status="CREATE_FAILED")]
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"status": "FAILURE", "build_status": "PENDING"},
+        {"build_status": "CREATE_FAILED"},
+    ],
+)
+def test_create_exit_zero_then_terminal_failure_retains_lease_without_replacement(fake, state):
+    fake.states = [_row("gpu", **state)]
     with pytest.raises(brev_provision.ProvisionError):
         fake.provision()
     assert fake.creates == ["gpu"] and "probe" not in fake.events
     assert fake.name == "gpu" and json.loads(fake.lease.read_text())["phase"] == "provision_failed"
     assert not any(command[1] == "delete" for command in fake.commands)
+    assert not any(command[1] in {"refresh", "exec"} for command in fake.commands)
 
 
 def test_building_is_gated_before_actual_probe(fake, clock):
     fake.states = [_row("gpu", build_status="BUILDING", shell_status="NOT READY"), _row("gpu")]
     assert fake.provision() == "gpu"
-    assert fake.events.index("diagnostic") < fake.events.index("probe")
+    assert "diagnostic" not in fake.events
+    assert fake.events.index("inventory:COMPLETED") < fake.events.index("refresh")
     assert clock.now == brev_provision.POLL_INTERVAL
 
 
@@ -1140,76 +1137,134 @@ def test_interruption_retains_lease_and_never_creates_a_replacement(fake, monkey
     assert json.loads(fake.lease.read_text())["phase"] == "interrupted"
 
 
-def test_only_known_nebius_signature_allows_one_recovery(fake, capsys):
-    fake.states = [_row("gpu", build_status="BUILDING", shell_status="NOT READY")]
-    assert fake.provision(provider="nebius", recover_nebius_start_limit=True) == "gpu"
-    assert fake.recoveries == 1 and fake.creates == ["gpu"]
+@pytest.mark.parametrize("provider", ["aws", "nebius"])
+@pytest.mark.parametrize("ready_after", [720, 1260, 2640])
+def test_slow_native_bootstrap_waits_passively_on_one_allocation(
+    fake, clock, provider, ready_after
+):
+    pending_reads = ready_after // brev_provision.POLL_INTERVAL
+    fake.states = [
+        _row("gpu", build_status="BUILDING", shell_status="NOT READY")
+        for _ in range(int(pending_reads))
+    ] + [_row("gpu")]
+    assert fake.provision(provider=provider) == "gpu"
+    assert clock.now == ready_after and fake.creates == ["gpu"]
+    assert fake.events.count("refresh") == 1 and fake.events.count("probe") == 1
+    assert "diagnostic" not in fake.events
+    assert all(
+        timestamp >= ready_after
+        for command, timestamp in fake.command_times
+        if command[1] in {"refresh", "exec"}
+    )
+    assert all(
+        command[1] in {"ls", "search", "create", "refresh", "exec"} for command in fake.commands
+    )
     lease = json.loads(fake.lease.read_text())
-    assert lease["recovery_completed"] and not lease["stock_bootstrap"]
-    assert "private-token" not in capsys.readouterr().err
+    assert lease["metadata_ready_elapsed_seconds"] == ready_after
+    assert lease["phase"] == "ready" and lease["instance_id"] == "allocation-gpu"
 
 
+@pytest.mark.parametrize("provider", ["aws", "nebius"])
 @pytest.mark.parametrize(
-    "condition",
+    "not_ready",
     [
-        "cloud_done",
-        "docker_start_limit",
-        "docker_clean_exit",
-        "docker_no_auto_restart",
-        "docker_limit_three",
-        "oneshot_failed",
-        "known_oneshot",
-        "known_cdi_restart",
+        {"status": "STARTING"},
+        {"status": "FUTURE_STATE"},
+        {"build_status": "BUILDING"},
+        {"build_status": "PENDING"},
+        {"build_status": "FUTURE_BUILD_STATE"},
+        {"shell_status": "NOT READY"},
+        {"health_status": "UNAVAILABLE"},
+        {"health_status": "UNHEALTHY"},
     ],
 )
-def test_any_missing_recovery_signature_blocks_mutation(fake, condition):
-    fake.conditions[condition] = 0
-    fake.states = [_row("gpu", build_status="BUILDING", shell_status="NOT READY")]
-    with pytest.raises(brev_provision.ProvisionError):
-        fake.provision(provider="nebius", recover_nebius_start_limit=True, timeout=180)
-    assert fake.recoveries == 0 and fake.creates == ["gpu"]
-    assert "state.get('status') == 'done'" in brev_provision._recovery_condition()
-    assert "result.returncode == 0" in brev_provision._recovery_condition()
-
-
-def test_recovery_disabled_or_aws_never_mutates_services(fake):
-    assert fake.provision(recover_nebius_start_limit=True) == "gpu"
-    assert fake.recoveries == 0 and "condition" not in fake.events
-
-
-def test_failed_recovery_is_not_repeated_or_reallocated(fake):
-    fake.states = [_row("gpu", build_status="BUILDING", shell_status="NOT READY")]
-    fake.recovery_ok = False
-    with pytest.raises(brev_provision.ProvisionError, match="recovery"):
-        fake.provision(provider="nebius", recover_nebius_start_limit=True)
-    assert fake.recoveries == 1 and fake.creates == ["gpu"]
-
-
-def test_actual_recovery_restores_override_on_failed_setup(tmp_path):
-    events = tmp_path / "events"
-    stubs = r"""
-sudo() {
- shift
- printf '%s\n' "$*" >> "$EVENTS"
- case "$1" in
-  tee) cat >/dev/null ;;
-  timeout) return 22 ;;
-  systemctl) if [ "$2" = show ]; then printf '3\n'; fi ;;
- esac
- return 0
-}
-"""
-    result = subprocess.run(
-        ["bash", "-c", stubs + brev_provision._recovery_script("ready")],
-        env={**os.environ, "EVENTS": str(events)},
-        capture_output=True,
-        text=True,
-        timeout=5,
+def test_every_native_admission_field_prevents_early_host_commands(
+    fake, clock, provider, not_ready
+):
+    fake.states = [_row("gpu", **not_ready), _row("gpu")]
+    assert fake.provision(provider=provider) == "gpu"
+    assert fake.creates == ["gpu"] and "diagnostic" not in fake.events
+    assert all(
+        timestamp >= brev_provision.POLL_INTERVAL
+        for command, timestamp in fake.command_times
+        if command[1] in {"refresh", "exec"}
     )
-    assert result.returncode != 0 and "ready" not in result.stdout.splitlines()
-    calls = events.read_text().splitlines()
-    assert any(line.startswith("rm -f /run/systemd/system/docker.service.d/") for line in calls)
-    assert calls.count("systemctl daemon-reload") >= 2
+    assert clock.now == brev_provision.POLL_INTERVAL
+
+
+@pytest.mark.parametrize("provider", ["aws", "nebius"])
+def test_passive_bootstrap_timeout_retains_one_vm_for_confirmed_cleanup(fake, clock, provider):
+    fake.states = [_row("gpu", build_status="BUILDING", shell_status="NOT READY")]
+    with pytest.raises(brev_provision.ProvisionError, match="deadline"):
+        fake.provision(provider=provider, timeout=660)
+    assert clock.now == 660 and fake.creates == ["gpu"]
+    assert not any(command[1] in {"refresh", "exec", "delete"} for command in fake.commands)
+    lease = json.loads(fake.lease.read_text())
+    assert lease["phase"] == "provision_failed" and lease["instance_id"] == "allocation-gpu"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert fake.creates == ["gpu"] and fake.name is None
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("bad_json", [False, True])
+def test_api_transient_during_slow_bootstrap_retains_vm_without_early_ssh(
+    fake, clock, monkeypatch, bad_json
+):
+    fake.states = [
+        _row("gpu", build_status="BUILDING", shell_status="NOT READY") for _ in range(12)
+    ] + [_row("gpu")]
+    failed = False
+
+    def read(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        nonlocal failed
+        if command[1] == "ls" and fake.name is not None and clock.now >= 300 and not failed:
+            failed = True
+            return subprocess.CompletedProcess(
+                command, 0 if bad_json else 1, "private-invalid-json", "private-api-token"
+            )
+        return fake(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", read)
+    assert fake.provision() == "gpu" and failed and fake.creates == ["gpu"]
+    assert clock.now >= 720 and "diagnostic" not in fake.events
+    assert all(
+        timestamp >= 720
+        for command, timestamp in fake.command_times
+        if command[1] in {"refresh", "exec"}
+    )
+    assert not any(command[1] == "delete" for command in fake.commands)
+
+
+def test_provision_cli_defaults_to_one_45_minute_allocation(monkeypatch, tmp_path):
+    captured = {}
+
+    def provision(**options):
+        captured.update(options)
+        return "gpu"
+
+    monkeypatch.setattr(brev_provision, "provision", provision)
+    assert (
+        brev_provision.main(
+            ["provision", "--instance", "gpu", "--lease-file", str(tmp_path / "lease.json")]
+        )
+        == 0
+    )
+    assert captured["timeout"] == 2700 and captured["attempts"] == 1
+
+
+def test_removed_recovery_option_cannot_allocate(fake):
+    with pytest.raises(SystemExit) as error:
+        brev_provision.main(
+            [
+                "provision",
+                "--instance",
+                "gpu",
+                "--lease-file",
+                str(fake.lease),
+                "--recover-nebius-start-limit",
+            ]
+        )
+    assert error.value.code == 2 and not fake.creates and not fake.commands
 
 
 @pytest.mark.parametrize("phase", ["sudo", "docker", "host_gpu", "container_gpu", "disk_headroom"])
@@ -1251,15 +1306,15 @@ python3() { printf '500000000000\n'; }
     assert receipt and receipt["phases"]["cloud_init"] == "1"
 
 
-def test_diagnostics_print_only_safe_public_fields(monkeypatch, capsys):
+def test_public_receipt_fields_filter_private_diagnostic_content():
     stdout = "password=private-token\nTRTMC_DIAG_CLOUD_STATE=done\nTRTMC_DIAG_CLOUD_EXIT=1\nTRTMC_DIAG_UNIT_docker_ActiveState=active\nTRTMC_DIAG_UNIT_instance-oneshot_Environment=private-token\n"
-    monkeypatch.setattr(
-        brev_provision,
-        "_run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout, "private-token"),
-    )
-    brev_provision._diagnose("gpu", 10, 0)
-    assert "private-token" not in capsys.readouterr().err
+    lines = list(brev_provision._safe_lines(stdout))
+    assert lines == [
+        "TRTMC_DIAG_CLOUD_STATE=done",
+        "TRTMC_DIAG_CLOUD_EXIT=1",
+        "TRTMC_DIAG_UNIT_docker_ActiveState=active",
+    ]
+    assert "private-token" not in "\n".join(lines)
 
 
 @pytest.mark.parametrize("value", [None, 42, "private\ntoken"])
