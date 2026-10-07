@@ -917,6 +917,17 @@ def run_candidate(environment: Environment, service: Mapping[str, Any], model: M
             for item in model["absolute"]}
 
 
+def precision_gate(item: Mapping[str, Any], native_precision: str | None,
+                   candidate_precision: str | None) -> Mapping[str, Any]:
+    """The item with its mismatched-precision tolerance when the native model ran at another precision."""
+    if (native_precision and candidate_precision and native_precision != candidate_precision
+            and item.get("mismatched_precision_gate")):
+        return {**item, "gate": dict(item["mismatched_precision_gate"]),
+                "precision_note": f"native {native_precision} vs TRTMC {candidate_precision}: "
+                                  "the mismatched-precision tolerance applies"}
+    return item
+
+
 def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: Mapping[str, Any],
             native: Mapping[str, Any], native_error: str | None, candidate_replicas: int = 1,
             candidate_mps: bool = False, concurrent_sides: bool = False) -> list[dict[str, Any]]:
@@ -930,12 +941,7 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
                                           + (f"'s {length}-token sequence length" if length else "")),
                             "candidate_replicas": candidate_replicas, "candidate_mps": candidate_mps})
             continue
-        mismatched = (native.get("precision") and model.get("candidate", {}).get("precision")
-                      and native["precision"] != model["candidate"]["precision"])
-        if mismatched and item.get("mismatched_precision_gate"):  # the native model ran at another precision
-            item = {**item, "gate": dict(item["mismatched_precision_gate"]),
-                    "precision_note": f"native {native['precision']} vs TRTMC {model['candidate']['precision']}: "
-                                      "the mismatched-precision tolerance applies"}
+        item = precision_gate(item, native.get("precision"), model.get("candidate", {}).get("precision"))
         if native_error or item["suite"] not in runs:
             results.append({**error_entry(item, len(problems), f"native side: {native_error or 'not run'}"),
                             "candidate_replicas": candidate_replicas, "candidate_mps": candidate_mps})

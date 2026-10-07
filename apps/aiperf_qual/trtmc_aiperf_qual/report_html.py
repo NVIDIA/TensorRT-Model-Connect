@@ -88,9 +88,10 @@ def _performance(items: Sequence[Mapping[str, Any]]) -> str:
         light = item.get("light", "")
         color = LIGHT_COLORS.get(light, "#6e7781")
         reasons = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
+        unit = " per audio second" if candidate.get("unit") or reference.get("unit") else ""
         rows.append(f"<tr><td>{_e(item.get('reference_mode'))}</td><td><span class='light' "
                     f"style='background:{color}'>{_e(light)}</span></td>"
-                    f"<td>{_e(_ms(candidate.get('p50_ms')))}</td><td>{_e(_ms(reference.get('p50_ms')))}"
+                    f"<td>{_e(_ms(candidate.get('p50_ms')))}{unit}</td><td>{_e(_ms(reference.get('p50_ms')))}{unit}"
                     f" {_e(reference.get('precision') or '')}</td><td>{_e(reasons)}</td></tr>")
     if not rows:
         return ""

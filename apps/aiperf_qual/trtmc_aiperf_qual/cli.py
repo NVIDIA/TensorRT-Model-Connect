@@ -91,8 +91,9 @@ def current_settings(model: dict, environment) -> dict:
         current = models.resolve_model(model["catalog_profile"], environment)
     except ConfigError:
         return model
-    gates = {item["suite"]: item.get("gate") for item in current["absolute"]}
-    absolute = [{**item, "gate": gates.get(item["suite"]) or item.get("gate")} for item in model.get("absolute", [])]
+    gates = {item["suite"]: {key: item[key] for key in ("gate", "mismatched_precision_gate") if item.get(key)}
+             for item in current["absolute"]}
+    absolute = [{**item, **gates.get(item["suite"], {})} for item in model.get("absolute", [])]
     judging = ("output_grader", "output_grader_params", "margin_percent", "max_ci_percent", "guard_percent",
                "not_equivalent")
     l1 = {**model["performance"]["l1"],
@@ -206,7 +207,9 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
             if item.get("source") == "absolute":  # both sides' scores are kept: re-apply today's gate
                 declared = next((entry for entry in model.get("absolute", []) if entry["suite"] == item["suite"]), {})
                 judged = dict(item.get("gate") or {})
-                if environment is not None and declared.get("gate"):
+                # An entry without metrics (a parity check) cannot be re-judged: it keeps the gate it was judged
+                # against, the mismatched-precision one included.
+                if environment is not None and declared.get("gate") and item.get("metrics"):
                     item["gate"] = dict(declared["gate"])
                 if item.get("metrics") and item["status"] != "error":
                     if "counts" in item or "per_problem_regression" in item["metrics"]:  # binary: re-test

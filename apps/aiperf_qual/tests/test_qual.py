@@ -784,3 +784,18 @@ def test_sampled_speech_is_valid_by_its_median_duration_not_each_utterance():
     assert halved["status"] == "fail" and "median duration ratio 0.33" in halved["reasons"][0]
     silent = validity(problems, [{"finite": True, "dbfs": -80.0, "seconds": 6.0}, *map(sound, (14, 5, 6))], native)
     assert silent["status"] == "fail" and silent["passed"] == 3
+    unpaired = validity(problems, [sound(6.0)] * 4, [{"finite": True, "dbfs": -1000.0, "seconds": 0.0}, None, None, None])
+    assert unpaired["status"] == "error" and "no sentence with both" in unpaired["error"]  # no duration evidence
+    assert validity([], [], [])["status"] == "error"
+
+
+def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
+    from trtmc_aiperf_qual import report_html
+    from trtmc_aiperf_qual.report import write_report
+
+    side = {"p50_ms": 40.0, "ci_percent": 1.0, "unit": "ms per audio second"}
+    item = {"reference_mode": "eager", "light": "green", "candidate": side, "reference": {**side, "p50_ms": 90.0},
+            "speedup": 2.25}
+    write_report(tmp_path, {"model": "m", "provenance": {}, "performance_l1": [item]})
+    assert "| 40.000 per audio second |" in (tmp_path / "report.md").read_text()
+    assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])

@@ -161,8 +161,9 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
               "|---|---|---|---|---|---|---|---|"]
     for item in result.get("performance_l1", []):
         cand, ref = item.get("candidate", {}), item.get("reference", {})
-        lines.append(f"| {item['reference_mode']}{' ' + item['request'] if item.get('request') else ''} | {item['light']} | {_fmt(cand.get('p50_ms'))} | "
-                     f"{_fmt(cand.get('ci_percent'), 2)} | {_fmt(ref.get('p50_ms'))} ({ref.get('aggregation', 'mean')}) | "
+        unit = " per audio second" if cand.get("unit") or ref.get("unit") else ""
+        lines.append(f"| {item['reference_mode']}{' ' + item['request'] if item.get('request') else ''} | {item['light']} | {_fmt(cand.get('p50_ms'))}{unit} | "
+                     f"{_fmt(cand.get('ci_percent'), 2)} | {_fmt(ref.get('p50_ms'))}{unit} ({ref.get('aggregation', 'mean')}) | "
                      f"{_fmt(ref.get('ci_percent'), 2)} | "
                      f"{_fmt(item.get('speedup'), 2)} | {'; '.join(item.get('reasons', []) + item.get('notes', []))} |")
     l2 = result.get("performance_l2") or {}

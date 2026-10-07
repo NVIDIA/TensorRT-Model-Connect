@@ -98,7 +98,8 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
 def validity(problems: list[dict[str, Any]], candidate: list[Mapping[str, Any] | None],
              native: list[Mapping[str, Any] | None]) -> dict[str, Any]:
     """Every TRTMC output is finite and not silent; the median of TRTMC's per-sentence duration ratios to the
-    native outputs lies within VALID_DURATION_RATIO (outliers are reported, not failed: sampling)."""
+    native outputs lies within VALID_DURATION_RATIO (outliers are reported, not failed: sampling). Without a
+    sentence both sides voiced, the check has no duration evidence: an error."""
     low, high = VALID_DURATION_RATIO
     failures, ratios = [], []
     for problem, mine, theirs in zip(problems, candidate, native):
@@ -116,8 +117,10 @@ def validity(problems: list[dict[str, Any]], candidate: list[Mapping[str, Any] |
         reasons.append(f"median duration ratio {median:.2f} outside {low}..{high}")
     notes = [f"median duration ratio {median:.2f}; {outside} of {len(ratios)} sentences beyond {low}..{high} "
              "(sampling)"] if median is not None else []
+    error = None if reasons or ratios else "no sentence with both TRTMC and native audio to compare durations"
     return {"suite": "tts-validity", "source": "task", "benchmark": "audio validity (finite, not silent, duration)",
             "samples": count, "expected_samples": count, "passed": count - len(failures), "required_passes": count,
-            "status": "fail" if reasons else "pass", "failures": failures[:10], "reasons": reasons, "notes": notes,
+            "status": "fail" if reasons else "error" if error else "pass", **({"error": error} if error else {}),
+            "failures": failures[:10], "reasons": reasons, "notes": notes,
             "metrics": {"median_duration_ratio": median} if median is not None else {},
             "gate": {"min_dbfs": SILENCE_DBFS, "median_duration_ratio": list(VALID_DURATION_RATIO)}}

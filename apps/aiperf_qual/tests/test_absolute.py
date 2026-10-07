@@ -1608,3 +1608,27 @@ def test_a_native_model_at_another_precision_gets_the_mismatched_precision_toler
                                 {"runs": {"encoder-parity": native_side}, "precision": "fp32"}, None)[0]
     assert fallback["status"] == "pass" and fallback["gate"]["max_relative_l2"] == 0.04
     assert "native fp32 vs TRTMC fp16" in fallback["notes"][-1]
+
+
+def test_rejudge_keeps_the_gate_a_parity_entry_was_judged_against(tmp_path, monkeypatch):
+    import json
+
+    from trtmc_aiperf_qual import cli, models
+    from trtmc_aiperf_qual.config import Environment
+
+    item = {"suite": "encoder-parity", "metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02},
+            "mismatched_precision_gate": {"min_cosine": 0.998, "max_relative_l2": 0.04}}
+    model = {"catalog_profile": "m", "task": "embedding", "candidate": {"precision": "fp16"}, "absolute": [item],
+             "supplementary": [], "accuracy_source": "absolute", "performance": {"l1": {}}}
+    problems = [{"sample_id": "a"}]
+    entry, = absolute.entries(model, {"encoder-parity": problems},
+                              {"encoder-parity": {"observations": {"greedy": {0: {"values": [1.0, 0.03]}}}, "exit": {}}},
+                              {"runs": {"encoder-parity": {"observations": {"greedy": {0: {"values": [1.0, 0.0]}}},
+                                                           "exit": {}}}, "precision": "fp32"}, None)
+    (tmp_path / "model.json").write_text(json.dumps(model))
+    (tmp_path / "report.json").write_text(json.dumps({"model": "m", "provenance": {}, "accuracy": [entry],
+                                                      "performance_l1": []}))
+    monkeypatch.setattr(models, "resolve_model", lambda profile, environment: model)
+    assert cli.rejudge_reports([tmp_path], Environment({})) == 0
+    rejudged, = json.loads((tmp_path / "report.json").read_text())["accuracy"]
+    assert rejudged["status"] == "pass" and rejudged["gate"]["max_relative_l2"] == 0.04
