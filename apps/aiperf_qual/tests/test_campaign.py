@@ -741,6 +741,9 @@ def test_results_follow_the_owners_four_colours_on_the_catalog_request():
     assert campaign.signal_reason("m", row("acc-issue", green, [wer])) == "librispeech: TRTMC worse than native beyond the margin"
     informational = {"suite": "replay", "status": "fail", "informational": True}
     assert campaign.signal(row("pass", green, [informational])) == "green"
+    compiled = row("pass", green)
+    compiled["perf"].append({"request": "m-catalog", "light": "red", "reference_mode": "compile"})
+    assert campaign.signal(compiled) == "green"  # torch.compile timings are informational
     shown = campaign.reported_perf(row("pass", {"catalog": "green", "catalog-near-capacity": "red"}))
     assert [campaign.request_label("m", item) for item in shown] == ["catalog"]
     assert campaign.signal_reason("m", row("perf-issue", {"catalog": "yellow"})) == "catalog: TRTMC about equal to native"

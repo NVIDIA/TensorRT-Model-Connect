@@ -28,6 +28,7 @@ from typing import Any, Mapping, Sequence
 from . import bundles, retention
 from .bundles import prefetch
 from .config import Environment
+from .judge import QUALIFYING_MODE
 from .models import checkpoints
 from .report import acc_value, plain
 from .services import reference_python
@@ -345,9 +346,10 @@ NOT_COMPARED = {"not-comparable", "not-covered"}
 
 
 def reported_perf(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The timed requests the results report: the catalog's own (the near-capacity request stays in the evidence,
-    owner's choice for now)."""
-    return [item for item in row.get("perf", []) if "near-capacity" not in str(item.get("request") or "")]
+    """The timed requests the results report: the catalog's own against the eager native model (the near-capacity
+    request, owner's choice for now, and torch.compile timings, informational, stay in the evidence)."""
+    return [item for item in row.get("perf", []) if "near-capacity" not in str(item.get("request") or "")
+            and item.get("reference_mode", QUALIFYING_MODE) == QUALIFYING_MODE]
 
 
 def request_label(profile: str, item: Mapping[str, Any]) -> str:

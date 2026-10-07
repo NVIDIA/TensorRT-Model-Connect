@@ -1579,3 +1579,16 @@ def test_a_parity_entry_with_a_capacity_rejection_keeps_its_own_sample_ids():
     entry = absolute.judge_in_capacity(item, problems, trtmc, native)  # 1 missing, 1 outside: no renumbering crash
     assert entry["out_of_capacity"] == 1 and entry["passed"] == 0
     assert [failure["sample_id"] for failure in entry["failures"]] == ["2:sentence1", "1:sentence1"]
+
+
+def test_a_harmony_answer_is_graded_on_its_final_channel_only():
+    import asyncio
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_plugins.benchmarks import FinalChoiceGrader
+
+    grader = FinalChoiceGrader(run=SimpleNamespace(cfg=None))
+    final = asyncio.run(grader.grade("analysisCompare A and C.assistantfinalC", "C"))
+    assert final.correct and final.extracted_answer == "C"
+    unfinished = asyncio.run(grader.grade("analysisWe should consider B before checking the others", "B"))
+    assert not unfinished.correct  # the analysis was cut off: no answer

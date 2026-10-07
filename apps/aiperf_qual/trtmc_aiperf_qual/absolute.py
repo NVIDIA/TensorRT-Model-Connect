@@ -569,8 +569,11 @@ def judge_parity(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]],
     mine, theirs = candidate["observations"]["greedy"], native["observations"]["greedy"]
     expected = len(problems)
 
-    def usable(observation: Any) -> bool:  # an output the comparison can read (compared with itself)
-        return isinstance(observation, Mapping) and compare(observation, observation, item["gate"])[0] is not None
+    def usable(observation: Any) -> bool:  # a valid output agrees with itself (unreadable or not finite: it does not)
+        try:
+            return isinstance(observation, Mapping) and compare(observation, observation, item["gate"])[0] is True
+        except Exception:  # noqa: BLE001 - malformed values
+            return False
 
     native_usable = [index for index in range(expected) if usable(theirs.get(index))]
     missed = [index for index in native_usable if not usable(mine.get(index))]  # TRTMC's misses: outside it

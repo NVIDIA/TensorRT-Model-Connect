@@ -300,8 +300,9 @@ class SentenceExactGrader(BaseGrader):
 
 class FinalChoiceGrader(BaseGrader):
     """AIPerf's multiple-choice grade of the final answer of a response that reasons first: the text after its last
-    ``assistantfinal`` (a harmony response decoded without its special tokens: ``analysis...assistantfinalB``),
-    else the whole response."""
+    ``assistantfinal`` (a harmony response decoded without its special tokens: ``analysis...assistantfinalB``). A
+    response without one (its analysis cut off by the answer budget) gave no answer: a letter its analysis weighs
+    is not its answer."""
 
     MARKER = "assistantfinal"
 
@@ -311,7 +312,7 @@ class FinalChoiceGrader(BaseGrader):
 
     def _final(self, response_text: str) -> str:
         text = response_text or ""
-        return text.rsplit(self.MARKER, 1)[1] if self.MARKER in text else text
+        return text.rsplit(self.MARKER, 1)[1] if self.MARKER in text else ""
 
     def extract_answer(self, response_text: str, **kwargs: Any) -> str:
         return self._choice.extract_answer(self._final(response_text), **kwargs)
