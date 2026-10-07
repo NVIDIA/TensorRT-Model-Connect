@@ -57,7 +57,8 @@ env:
 
 concurrency:
   group: community-ci-${{ inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || github.ref_name == 'main' && 'start-main' || 'start-dev' }}-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: true
+  # A newer push must not terminate a run that still owns a cloud instance.
+  cancel-in-progress: false
 
 jobs:
   snapshot:
@@ -865,16 +866,22 @@ jobs:
     environment:
       name: gpu-ci-dispatch
       deployment: false
-    # Upper runtime bound for one externally reserved GPU instance. The
-    # separate cleanup job remains eligible if this job times out.
-    timeout-minutes: 120
+    # Leave the hosted runner's full budget available for blocking final cleanup.
+    # External runner termination remains outside the helper's control.
+    timeout-minutes: 360
     concurrency:
       group: trtmc-community-gpu-${{ inputs.ci_lane }}-${{ needs.gpu-authorize.outputs.pr_number }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     permissions:
       contents: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
+      instance_name: ${{ steps.reserve.outputs.instance_name }}
+      lease_artifact_name: ${{ steps.reserve.outputs.lease_artifact_name }}
+      instance_type: ${{ steps.reserve.outputs.instance_type }}
+      organization_id: ${{ steps.reserve.outputs.organization_id }}
+      allocation_requested: ${{ steps.reserve.outputs.allocation_requested }}
+      cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed }}
 
     steps:
       - name: Check out trusted GPU orchestration
@@ -927,6 +934,9 @@ jobs:
           # Allow bootstrap to finish on this VM without repairs or replacement.
           # The deterministic name also covers cancellation before upload.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
+          echo "lease_artifact_name=gpu-ci-lease-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "instance_type=$instance_type" >> "$GITHUB_OUTPUT"
+          echo "allocation_requested=false" >> "$GITHUB_OUTPUT"
           python3 -m tools.brev_exec provision \
             --instance "$instance_name" \
             --instance-type "$instance_type" \
@@ -940,7 +950,7 @@ jobs:
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: gpu-ci-lease-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.reserve.outputs.lease_artifact_name }}
           path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
           if-no-files-found: error
           retention-days: 7
@@ -1083,26 +1093,8 @@ jobs:
           cleanup_checkpoint_token
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
-      - name: Record the step conclusion
-        if: always()
-        id: result
-        env:
-          JOB_STATUS: ${{ job.status }}
-          TEST_OUTCOME: ${{ steps.test.outcome }}
-          TEST_CONCLUSION: ${{ steps.test.outputs.conclusion }}
-        run: |
-          set -euo pipefail
-          conclusion=failure
-          if [ "$JOB_STATUS" = "cancelled" ]; then
-            conclusion=cancelled
-          elif [ "$JOB_STATUS" = "success" ] \
-            && [ "$TEST_OUTCOME" = "success" ] \
-            && [ "$TEST_CONCLUSION" = "success" ]; then
-            conclusion=success
-          fi
-          echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
-
       - name: Always tear down the GPU instance
+        id: release
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
@@ -1111,13 +1103,35 @@ jobs:
           python3 -m tools.brev_exec cleanup \
             --instance "$INSTANCE_NAME" \
             --lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" \
-            --timeout 900
+            --until-deleted
+          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Record the step conclusion
+        if: always()
+        id: result
+        env:
+          JOB_STATUS: ${{ job.status }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          TEST_CONCLUSION: ${{ steps.test.outputs.conclusion }}
+          CLEANUP_CONFIRMED: ${{ steps.release.outputs.cleanup_confirmed }}
+        run: |
+          set -euo pipefail
+          conclusion=failure
+          if [ "$JOB_STATUS" = "cancelled" ]; then
+            conclusion=cancelled
+          elif [ "$JOB_STATUS" = "success" ] \
+            && [ "$TEST_OUTCOME" = "success" ] \
+            && [ "$TEST_CONCLUSION" = "success" ] \
+            && [ "$CLEANUP_CONFIRMED" = "true" ]; then
+            conclusion=success
+          fi
+          echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
 
       - name: Preserve the final GPU instance lease
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: gpu-ci-lease-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.reserve.outputs.lease_artifact_name }}
           path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
           overwrite: true
           if-no-files-found: error
@@ -1143,7 +1157,7 @@ jobs:
     environment:
       name: gpu-ci-dispatch
       deployment: false
-    timeout-minutes: 20
+    timeout-minutes: 360
     permissions:
       contents: read
       actions: read
@@ -1183,22 +1197,77 @@ jobs:
         timeout-minutes: 1
         env:
           GH_TOKEN: ${{ github.token }}
+          LEASE_ARTIFACT_NAME: ${{ needs.provision-and-test.outputs.lease_artifact_name }}
         run: |
           set -euo pipefail
+          # Producer outputs retain the allocation attempt when this job is rerun.
+          test -n "$LEASE_ARTIFACT_NAME"
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "gpu-ci-lease-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --name "$LEASE_ARTIFACT_NAME" \
             --dir "$RUNNER_TEMP/gpu-ci-lease"
 
       - name: Delete the deterministic GPU instance
         if: ${{ always() && steps.cleanup-checkout.outcome == 'success' && steps.cleanup-login.outcome == 'success' }}
+        env:
+          INSTANCE_NAME: ${{ needs.provision-and-test.outputs.instance_name }}
+          INSTANCE_TYPE: ${{ needs.provision-and-test.outputs.instance_type }}
+          ORGANIZATION_ID: ${{ needs.provision-and-test.outputs.organization_id }}
+          ALLOCATION_REQUESTED: ${{ needs.provision-and-test.outputs.allocation_requested }}
+          OWNER_CLEANUP_CONFIRMED: ${{ needs.provision-and-test.outputs.cleanup_confirmed }}
         run: |
           set -euo pipefail
-          # A missing artifact never suppresses the cancellation backstop.
-          # The trusted helper verifies identity and observes actual absence.
+          # Never reconstruct an allocation identity from this job's rerun attempt.
+          if [ -z "$INSTANCE_NAME" ]; then
+            echo "::error::Original allocation identity is unavailable; cleanup remains unconfirmed."
+            exit 75
+          fi
+          lease_file="$RUNNER_TEMP/gpu-ci-lease/trtmc-gpu-ci-lease.json"
+          if [ ! -f "$lease_file" ]; then
+            if [ "$OWNER_CLEANUP_CONFIRMED" = true ]; then
+              echo "The owning job already confirmed this allocation was released."
+              exit 0
+            fi
+            # Recover intent from the original trusted producer, never from a rerun name.
+            # A true flag is published only immediately before the create request.
+            python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          name = os.environ["INSTANCE_NAME"]
+          sku = os.environ["INSTANCE_TYPE"]
+          requested = os.environ["ALLOCATION_REQUESTED"]
+          organization = os.environ.get("ORGANIZATION_ID", "")
+          run_id = os.environ["GITHUB_RUN_ID"]
+          if not re.fullmatch(r"[0-9]+", run_id) or not re.fullmatch(
+              rf"trtmc-gpu-ci-{re.escape(run_id)}-[1-9][0-9]*", name
+          ):
+              raise SystemExit("Original allocation name does not belong to this workflow run")
+          if requested not in {"true", "false"} or not re.fullmatch(
+              r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", sku
+          ):
+              raise SystemExit("Original allocation intent is unavailable; cleanup is unconfirmed")
+          if organization and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", organization):
+              raise SystemExit("Original allocation organization is invalid")
+          path = Path(os.environ["RUNNER_TEMP"]) / "gpu-ci-lease/trtmc-gpu-ci-lease.json"
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps({
+              "schema_version": 1,
+              "name": name,
+              "sku": sku,
+              "instance_id": None,
+              "organization_id": organization or None,
+              "create_started": requested == "true",
+              "allocation_pending": requested == "true",
+              "phase": "cleanup_unknown" if requested == "true" else "selecting",
+          }) + "\n")
+          PY
+          fi
           python3 -m tools.brev_exec cleanup \
-            --instance "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --lease-file "$RUNNER_TEMP/gpu-ci-lease/trtmc-gpu-ci-lease.json" \
-            --timeout 900
+            --instance "$INSTANCE_NAME" \
+            --lease-file "$lease_file" \
+            --until-deleted
 
   publish:
     name: ${{ github.event_name == 'pull_request' && 'Stable Community CI' || inputs.ci_lane == 'dev' && 'Dev Community CI' || 'Stable Community CI' }} result
