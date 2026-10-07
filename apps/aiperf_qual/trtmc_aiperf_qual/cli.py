@@ -258,6 +258,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                                       "profiles in its order")
     batch.add_argument("--host", help="this host's name in --assignment")
     batch.add_argument("--rerun", action="store_true", help="rerun profiles that already have a result")
+    batch.add_argument("--ledger", type=Path, help="this run's ledger (JSON: profile -> predicted seconds): each AIPerf "
+                                                   "run's deadline is three times its profile's time, at least ten "
+                                                   "minutes (default: 12 hours)")
     batch.add_argument("--smoke", action="store_true", help="smoke mode (results under <out-root>/smoke)")
     batch.add_argument("--no-prefetch", action="store_true",
                        help="do not download the next checkpoint during a run (lower disk peak)")
@@ -381,7 +384,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(text, end="")
             return 0
         environment = load_environment(arguments.environment)
+        if "ledger" in environment.values:  # a machine's file names no run's records
+            print(f"trtmc-aiperf-qual: {arguments.environment} names a ledger; pass a run's ledger with "
+                  "run-all --ledger", file=sys.stderr)
+            return 2
         environment.values["environment_file"] = str(arguments.environment.resolve())  # for reproduction commands
+        if getattr(arguments, "ledger", None):
+            environment.values["run_ledger"] = str(arguments.ledger.resolve())
         if getattr(arguments, "smoke", False):
             environment.values["smoke"] = True
         if environment.values.get("hf_hub_cache"):  # tokenizers loaded here use the managed cache too

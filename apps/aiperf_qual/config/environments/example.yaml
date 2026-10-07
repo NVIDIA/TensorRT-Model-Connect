@@ -20,8 +20,6 @@ ports: {reference: 8900, candidate: 8901}
 # acc_mps: true                          # the copies share the GPU through their own CUDA MPS daemon (default off)
 # acc_overlap: true                     # both sides answer Acc at once under one MPS daemon (default off)
 gpu_lock: /path/to/state/gpu.lock                       # optional: serializes timing with builds on this GPU
-# ledger: /path/to/ledger.json                          # optional: run deadlines, 3x a profile's predicted seconds
-                                                        # (>= 10 min); a run's own ledger, kept with its results
 build_env: {}                                           # optional extra environment of bundle builds
 
 models:                                                 # this machine's model list (run-all, plan)

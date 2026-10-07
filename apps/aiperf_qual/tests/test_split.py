@@ -126,7 +126,7 @@ def test_a_runs_deadline_comes_from_the_ledger(tmp_path):
     from trtmc_aiperf_qual import absolute
 
     (tmp_path / "ledger.json").write_text(json.dumps({"big": 1000, "small": 60}))
-    environment = Environment({"repo": str(tmp_path), "ledger": "ledger.json", "deadlines": {"pinned": 42}})
+    environment = Environment({"run_ledger": str(tmp_path / "ledger.json"), "deadlines": {"pinned": 42}})
     timeout = lambda name: absolute.run_timeout(environment, {"catalog_profile": name})  # noqa: E731
     assert timeout("big") == 3000 and timeout("small") == 600 and timeout("pinned") == 42
     assert timeout("unlisted") == absolute.RUN_TIMEOUT_S
@@ -242,3 +242,24 @@ def test_a_local_install_path_does_not_split_the_dependency_digest(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=next(freezes)))
     first, second, third = (campaign.dependencies_digest.__wrapped__("python") for _ in range(3))
     assert first == second != third
+
+
+def test_a_machines_environment_names_no_run_ledger_and_run_all_takes_one(tmp_path, monkeypatch, capsys):
+    from trtmc_aiperf_qual import cli
+
+    (tmp_path / "env.yaml").write_text(f"repo: {tmp_path}\nledger: ledger.json\n")
+    assert cli.main(["plan", "--environment", str(tmp_path / "env.yaml"), "--profile", "x"]) == 2
+    assert "pass a run's ledger with run-all --ledger" in capsys.readouterr().err
+    seen = {}
+
+    def run_all(environment, models, out_root, **kwargs):
+        seen["ledger"] = environment.values.get("run_ledger")
+        return []
+
+    (tmp_path / "env.yaml").write_text(f"repo: {tmp_path}\n")
+    monkeypatch.setattr("trtmc_aiperf_qual.models.resolve_model", lambda name, environment: {"model": name})
+    monkeypatch.setattr("trtmc_aiperf_qual.campaign.run_all", run_all)
+    monkeypatch.setattr("trtmc_aiperf_qual.campaign.write_plan", lambda *args, **kwargs: None)
+    cli.main(["run-all", "--environment", str(tmp_path / "env.yaml"), "--out-root", str(tmp_path / "out"),
+              "--profile", "x", "--ledger", str(tmp_path / "ledger.json")])
+    assert seen["ledger"] == str((tmp_path / "ledger.json").resolve())

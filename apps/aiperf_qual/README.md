@@ -60,8 +60,8 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
   counts as TRTMC's wrong answer: a wrong right/wrong answer, a parity sample outside the tolerance, an empty WER or
   chrF text. A problem the native model did not answer is missing evidence: an `error`.
 - Native copies that run out of GPU memory answer again as half as many copies, down to one.
-- Every AIPerf run has a deadline: three times the profile's seconds in the environment's `ledger` (at least ten
-  minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.
+- Every AIPerf run has a deadline: three times the profile's seconds in the run's ledger (`run-all --ledger`, at
+  least ten minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.
 - `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
   comparison: the native model below a benchmark's floor, a Task without an Acc check, timings that cannot be
   compared), Red (Acc or Perf worse than native beyond its margin), Yellow (Perf about equal to native, which counts
@@ -104,7 +104,7 @@ trtmc-aiperf-qual doctor --environment config/environments/<machine>.yaml       
 ## Commands
 
 ```bash
-E=config/environments/<machine>.yaml
+E=config/environments/gb300-perf-serving.yaml
 trtmc-aiperf-qual plan --environment $E
 trtmc-aiperf-qual matrix --environment $E --output matrix.csv                # exit 1 unless every profile is executable
 trtmc-aiperf-qual run --profile qwen3-0.6b-fp16 --environment $E --out out/qwen3-0.6b-fp16
@@ -184,6 +184,6 @@ it).
   reaches the serving mechanics through `host`), named by `reference.adapter`.
 - Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in
   `config/models/<profile>.yaml`; the report names the bundle it qualified.
-- New machine: a file of its own from `config/environments/example.yaml` (paths, Python interpreters, ports, lock,
-  model list, retention), kept with the machine rather than in the repository; Docker or bare metal only differ in
-  these paths. A run's frozen inputs (its ledger and multi-host assignment) stay with that run's results too.
+- New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
+  retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
+  assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
