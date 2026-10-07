@@ -132,7 +132,8 @@ def selection_environment(environment: Environment, model: Mapping[str, Any], it
     if item.get("endpoint") == "chat":
         environ["TRTMC_ACCURACY_CHAT"] = "1"
     for key, name in (("per_task", "TRTMC_ACCURACY_PER_TASK"), ("limit", "TRTMC_ACCURACY_LIMIT"),
-                      ("max_new_tokens", "TRTMC_ACCURACY_MAX_NEW_TOKENS")):
+                      ("max_new_tokens", "TRTMC_ACCURACY_MAX_NEW_TOKENS"),
+                      ("answer_tokens", "TRTMC_ACCURACY_ANSWER_TOKENS"), ("prompt_frame", "TRTMC_ACCURACY_PROMPT_FRAME")):
         if item.get(key):
             environ[name] = str(item[key])
     if environment.values.get("smoke"):  # one problem
@@ -269,6 +270,8 @@ def _arguments(model: Mapping[str, Any], item: Mapping[str, Any], service: Mappi
         arguments.append("--tokenizer-trust-remote-code")
     if item.get("tasks"):
         arguments += ["--accuracy-tasks", *item["tasks"]]
+    if item.get("grader"):
+        arguments += ["--accuracy-grader", item["grader"]]
     # The serving base request is the catalog request: greedy as it is unless it samples (top_k 1 or temperature 0;
     # a family may pin its greedy contract, Qwen3-Omni: temperature 1 with top_k 1); a sampling model's runs are
     # repeated with distinct seeds.
@@ -566,15 +569,19 @@ def judge_parity(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]],
     compare = gold_metrics.PARITY[item["metric"]]
     mine, theirs = candidate["observations"]["greedy"], native["observations"]["greedy"]
     expected = len(problems)
-    paired = sorted(set(mine) & set(theirs))
-    missed = sorted(set(theirs) - set(mine))  # TRTMC's misses: samples outside the tolerance
+
+    def usable(observation: Any) -> bool:  # an output the comparison can read (compared with itself)
+        return isinstance(observation, Mapping) and compare(observation, observation, item["gate"])[0] is not None
+
+    native_usable = [index for index in range(expected) if usable(theirs.get(index))]
+    missed = [index for index in native_usable if not usable(mine.get(index))]  # TRTMC's misses: outside it
+    paired = [index for index in native_usable if index not in missed]
     entry: dict[str, Any] = {"suite": item["suite"], "source": "absolute", "benchmark": item["metric"],
-                             "endpoint": "trtmc_task", "expected_samples": expected,
-                             "samples": len(paired) + len(missed),
+                             "endpoint": "trtmc_task", "expected_samples": expected, "samples": len(native_usable),
                              "gate": dict(item["gate"]), "aiperf_exit": {"trtmc": candidate["exit"], "native": native["exit"]}}
-    if len(paired) + len(missed) < expected:
+    if len(native_usable) < expected:
         return {**entry, "passed": None, "status": "error",
-                "reasons": [f"{expected - len(paired) - len(missed)} of {expected} problems lack a native output"]}
+                "reasons": [f"{expected - len(native_usable)} of {expected} problems lack a usable native output"]}
     results = [(index, *compare(mine[index], theirs[index], item["gate"])) for index in paired]
     results += [(index, False, NO_ANSWER) for index in missed]
     unreadable = [reason for _, ok, reason in results if ok is None]
@@ -698,8 +705,12 @@ def judge_in_capacity(item: Mapping[str, Any], problems: Sequence[Mapping[str, A
         return {**error_entry(item, len(problems), f"every problem exceeds the bundle's capacity: {note}"),
                 "out_of_capacity": len(beyond)}
     entry = judge(item, [problems[index] for index in keep], _kept(candidate, keep), _kept(native, keep))
-    failures = [{**failure, "sample_id": f"{task}/{keep[int(index)]}"}  # the request's own index in the raw evidence
-                for failure in entry.get("failures", []) for task, index in [failure["sample_id"].rsplit("/", 1)]]
+
+    def original(sample_id: str) -> str:  # a right/wrong entry's task/index: the request's own index
+        task, _, index = str(sample_id).rpartition("/")
+        return f"{task}/{keep[int(index)]}" if "counts" in entry and task and index.isdigit() else sample_id
+
+    failures = [{**failure, "sample_id": original(failure.get("sample_id", ""))} for failure in entry.get("failures", [])]
     return {**entry, **({"failures": failures} if "failures" in entry else {}), "out_of_capacity": len(beyond),
             "notes": [*entry.get("notes", []), note]}
 
@@ -911,6 +922,12 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
     runs = native.get("runs") or {}
     for item in model["absolute"]:
         problems = plans[item["suite"]]
+        if not problems:  # nothing to compare: not a score of zero on either side
+            length = model.get("candidate", {}).get("max_sequence_length")
+            results.append({**error_entry(item, 0, f"no {item['suite']} problem fits the bundle"
+                                          + (f"'s {length}-token sequence length" if length else "")),
+                            "candidate_replicas": candidate_replicas, "candidate_mps": candidate_mps})
+            continue
         if native_error or item["suite"] not in runs:
             results.append({**error_entry(item, len(problems), f"native side: {native_error or 'not run'}"),
                             "candidate_replicas": candidate_replicas, "candidate_mps": candidate_mps})

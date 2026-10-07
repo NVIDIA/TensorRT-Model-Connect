@@ -36,6 +36,10 @@ def test_parity_entries_pass_only_when_every_output_matches():
     missed = absolute.judge(item, problems, side([{"values": [1.0, 0.0]}]), native)  # TRTMC's miss: outside
     assert missed["status"] == "fail" and missed["passed"] == 1 and missed["failures"][0]["explanation"] == absolute.NO_ANSWER
     assert absolute.judge(item, problems, native, side([{"values": [1.0, 0.0]}]))["status"] == "error"  # native miss
+    unusable = absolute.judge(item, problems, side([{"values": [1.0, 0.0]}, {}]), native)  # TRTMC's unusable output
+    assert unusable["status"] == "fail" and unusable["passed"] == 1
+    assert absolute.judge(item, problems, side([{"values": [1.0, 0.0]}]), side([{"values": [1.0, 0.0]}, {}]))[
+        "status"] == "error"  # an unusable native output is missing evidence, whatever TRTMC answered
 
 
 def test_action_and_disparity_parity(tmp_path):

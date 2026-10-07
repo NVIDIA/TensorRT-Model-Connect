@@ -436,12 +436,15 @@ assignment and ledger and both hosts' gate evidence (Section 12.1).
   corpus metric without an empty answer (vectors, masks, detections, forecasts) keeps it missing. A problem the
   native model did not answer stays missing evidence (an `error`): generated media (GenEval, edits) without an
   image, and for every corpus metric an output without the field it reads, well formed (a forecast of the
-  horizon's length with finite values, a finite vector, a mask of the image's size).
+  horizon's length with finite values, a finite vector, a mask of the image's size). The rule applies when a run
+  judges its answers: `rejudge` re-applies gates to a report's recorded counts and does not replay answers, so a
+  report written before the rule keeps its `error` until the profile reruns.
 - **Smoke coverage**: a sampled model's smoke run keeps every configured seed (one problem), so the seed-mean
-  scorer runs; the combined code suite sends one HumanEval and one MBPP problem. A conversion-parity output that is
-  missing or unreadable on either side (no vector or action chunk, no size, an unreadable artifact, no audio digest,
-  a video without frames) is missing evidence: an `error`, never a `fail`, in smoke and formal runs alike; a smoke
-  verdict whose Acc or Perf is `error` is `smoke-fail`. Each side's depth, mask, or disparity artifact is read at
+  scorer runs; the combined code suite sends one HumanEval and one MBPP problem. A conversion-parity output the
+  comparison cannot read (no vector or action chunk, no size, an unreadable artifact, no audio digest, a video
+  without frames) is TRTMC's miss on TRTMC's side (a sample outside the tolerance) and missing evidence on the
+  native side (an `error`), in smoke and formal runs alike; a smoke verdict whose Acc or Perf is `error` is
+  `smoke-fail`. Each side's depth, mask, or disparity artifact is read at
   that side's own size before the sizes are compared, so a size difference fails only between readable outputs.
 - **Order check** (Section 4.6): `trtmc-aiperf-qual order-check --profile P` times a profile's L1 requests in both
   orders (native then TRTMC, TRTMC then native), each timing by a fresh server, and reports each side's order effect

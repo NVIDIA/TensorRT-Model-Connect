@@ -340,7 +340,7 @@ def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
 # (counts as a pass) or an Acc difference not shown either way; Green, a pass.
 SIGNALS = ("white", "red", "yellow", "green")
 SIGNAL_NAMES = {"white": "White", "red": "Red", "yellow": "Yellow", "green": "Green"}
-NO_VERDICT = {"error", "config-error", "build-failed", "not-run", "excluded"}
+NO_VERDICT = {"error", "config-error", "build-failed", "not-run", "excluded", "smoke-fail"}
 NOT_COMPARED = {"not-comparable", "not-covered"}
 
 
@@ -387,7 +387,7 @@ def signal_reason(profile: str, row: Mapping[str, Any]) -> str:
     parts: list[str] = []
     if result == "red":
         for item in _judged(row, "fail"):
-            why = ("TRTMC below native beyond the margin" if "trtmc_score" in (item.get("metrics") or {})
+            why = ("TRTMC worse than native beyond the margin" if "trtmc_score" in (item.get("metrics") or {})
                    else "; ".join(item.get("reasons", [])) or "failed")
             parts.append(f"{item['suite']}: {why}" + "".join(f" ({plain(note)})" for note in item.get("notes", [])))
         parts += [f"{request_label(profile, item)}: TRTMC slower than native" for item in perf if item.get("light") == "red"]

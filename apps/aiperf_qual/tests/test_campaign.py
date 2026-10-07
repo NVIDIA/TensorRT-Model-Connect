@@ -736,6 +736,9 @@ def test_results_follow_the_owners_four_colours_on_the_catalog_request():
     assert campaign.signal(row("acc-issue", green)) == "red"
     assert campaign.signal(row("not-comparable", green)) == "white"
     assert campaign.signal(row("error", green)) == "white" and campaign.signal(row("build-failed", {})) == "white"
+    assert campaign.signal(row("smoke-fail", green)) == "white"
+    wer = {"suite": "librispeech", "status": "fail", "metrics": {"trtmc_score": 50.0, "native_score": 10.0}}
+    assert campaign.signal_reason("m", row("acc-issue", green, [wer])) == "librispeech: TRTMC worse than native beyond the margin"
     informational = {"suite": "replay", "status": "fail", "informational": True}
     assert campaign.signal(row("pass", green, [informational])) == "green"
     shown = campaign.reported_perf(row("pass", {"catalog": "green", "catalog-near-capacity": "red"}))

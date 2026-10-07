@@ -552,7 +552,7 @@ def test_missing_parity_evidence_is_an_error_not_a_failure(tmp_path):
     observations = {"observations": {"greedy": {0: side}}, "exit": {"greedy": 0}, "timings": {"greedy": {}}}
     entry = absolute.judge_parity({"suite": "stereo", "metric": "disparity_parity", "gate": {"max_mean_epe": 0.1}},
                                   problems, observations, observations)
-    assert entry["status"] == "error" and "readable evidence" in entry["reasons"][0]
+    assert entry["status"] == "error" and "lack a usable native output" in entry["reasons"][0]
 
 
 def test_smoke_covers_one_problem_of_each_code_benchmark(monkeypatch):
@@ -626,13 +626,13 @@ def test_concurrent_trtmc_copies_make_the_workload_times_incomparable():
     judged = {"suite": "s", "status": "pass", "workload_perf": {"pairs": 3, "light": "green"}}
     native = {"backend": "reference", "precision": "fp16", "replicas": 1, "runs": {"s": {}}}
     with patch.object(absolute, "judge", side_effect=lambda *args: {**judged}):
-        alone = absolute.entries({"absolute": [{"suite": "s"}]}, {"s": []}, {"s": {}}, native, None)[0]
-        copies = absolute.entries({"absolute": [{"suite": "s"}]}, {"s": []}, {"s": {}}, native, None,
+        alone = absolute.entries({"absolute": [{"suite": "s"}]}, {"s": [{}]}, {"s": {}}, native, None)[0]
+        copies = absolute.entries({"absolute": [{"suite": "s"}]}, {"s": [{}]}, {"s": {}}, native, None,
                                   candidate_replicas=4)[0]
     assert alone["workload_perf"]["light"] == "green" and alone["candidate_replicas"] == 1
     assert copies["workload_perf"]["light"] == "white" and "TRTMC ran as 4" in copies["workload_perf"]["note"]
     assert copies["candidate_replicas"] == 4
-    failed = absolute.entries({"absolute": [{"suite": "s", "gate": {"margin": 1.0}}]}, {"s": []}, {"s": {}}, native,
+    failed = absolute.entries({"absolute": [{"suite": "s", "gate": {"margin": 1.0}}]}, {"s": [{}]}, {"s": {}}, native,
                               "native exploded",
                               candidate_replicas=4, candidate_mps=True)[0]
     assert failed["status"] == "error" and failed["candidate_replicas"] == 4 and failed["candidate_mps"]
@@ -1114,7 +1114,7 @@ def test_answers_given_alongside_are_judged_and_only_l1_starts_a_server(tmp_path
     accuracy = []
     native = {"backend": "reference", "precision": "fp16", "replicas": 8, "mps": True, "runs": {"s": {}}}
     runner._candidate(Environment({"candidate_replicas": 4}), {"absolute": [{"suite": "s"}]}, {"suite": {}}, [], {},
-                      accuracy, [], tmp_path, absolute_runs={"plans": {"s": []}, "native": native, "native_error": None,
+                      accuracy, [], tmp_path, absolute_runs={"plans": {"s": [{}]}, "native": native, "native_error": None,
                                                              "answered": {"candidate": {"s": {}}, "candidate_replicas": 4,
                                                                           "candidate_mps": True}})
     assert started == ["candidate"]  # the L1 server only
@@ -1560,3 +1560,22 @@ def test_native_copies_out_of_memory_answer_again_as_half_as_many(tmp_path):
     with patch.object(absolute, "run_native", other_failure):
         absolute.run_native_alone(Environment({"native_replicas": 8}), model, "python", plans, tmp_path)
     assert [copies for copies, _ in attempts] == [8]  # only running out of memory makes fewer copies help
+
+
+def test_a_suite_without_a_problem_that_fits_is_an_error_not_a_zero_score():
+    model = {"absolute": [ITEM], "candidate": {"max_sequence_length": 32}}
+    entry = absolute.entries(model, {ITEM["suite"]: []}, {ITEM["suite"]: side({})}, {"runs": {ITEM["suite"]: side({})}},
+                             None)[0]
+    assert entry["status"] == "error" and entry["expected_samples"] == 0
+    assert "no mmlu-0shot problem fits the bundle's 32-token sequence length" in entry["error"]
+
+
+def test_a_parity_entry_with_a_capacity_rejection_keeps_its_own_sample_ids():
+    item = {"suite": "encoder-parity", "metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}
+    problems = [{"sample_id": f"{index}:sentence1"} for index in range(3)]
+    native = {"observations": {"greedy": {i: {"values": [1.0, 0.0]} for i in range(3)}}, "exit": {}}
+    trtmc = {"observations": {"greedy": {2: {"values": [0.0, 1.0]}}}, "exit": {},
+             "rejected": {"greedy": {0: "prompt exceeds the prefill profile"}}}
+    entry = absolute.judge_in_capacity(item, problems, trtmc, native)  # 1 missing, 1 outside: no renumbering crash
+    assert entry["out_of_capacity"] == 1 and entry["passed"] == 0
+    assert [failure["sample_id"] for failure in entry["failures"]] == ["2:sentence1", "1:sentence1"]
