@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -18,7 +19,14 @@ import soundfile
 
 
 SAMPLE_RATE = 16_000
+# The language tags the prompted model emits after each sentence ("dice. <en-US>"); TRTMC's transcript leaves them
+# out, and a transcript is compared as words.
+LANGUAGE_TAG = re.compile(r"\s*<[a-z]{2,3}-[A-Z]{2}>")
 OPTIONAL_CTC_KEYS = frozenset({"ctc_decoder.decoder_layers.0.bias", "ctc_decoder.decoder_layers.0.weight"})
+
+
+def without_language_tags(text: str) -> str:
+    return LANGUAGE_TAG.sub("", text).strip()
 
 
 def _archive(spec: Any) -> Path:
@@ -97,6 +105,7 @@ class Adapter:
         value = values[0] if isinstance(values, tuple) else values
         value = value[0] if isinstance(value, list) and value else value
         text = str(getattr(value, "text", value) if not isinstance(value, Mapping) else value.get("text", ""))
+        text = without_language_tags(text)
         seconds = len(audio) / SAMPLE_RATE
         return self.host.invocation({"text": text, "input_audio_seconds": seconds}, model_ms,
                                     realtime_factor=seconds / (model_ms / 1000.0))
