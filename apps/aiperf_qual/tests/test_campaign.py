@@ -422,13 +422,34 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
     rows, counts, rank = campaign.collect([root])
     page = render(rows, counts, rank, tmp_path / "report.html", context=campaign.run_context([root]),
                   links=[("Reruns", "reruns/report.html")], reruns={"bad": "green"}).read_text()
-    assert "rerun on the fixed harness: <span class='signal'><span class='dot green'>" in page
-    assert '<a href="reruns/report.html">Reruns</a>' in page
+    assert '<a href="reruns/report.html">Reruns</a>' in page and "<th>Rerun</th>" in page
     assert page.index(">bad<") < page.index(">good<") and "answer differs" in page
     assert 'href="gb300-1/bad/report.md"' in page and "trtmc-aiperf-qual run --profile bad" in page
     bad = page[page.index(">bad<"):page.index(">good<")]
-    assert "data-result='red' data-k='bad" in page and "s: 1/2 within tolerance" in bad  # Acc values, own column
-    assert "gb300-1: host -" in page and "2 models · 1 pass (Green + Yellow)" in page and "Red 1" in page
+    assert "<span class='signal signal-green'><span class='light'></span>Green</span>" in bad  # the rerun's result
+    assert "data-result='red' data-k='bad" in page and "<span>s</span><strong>1/2</strong>" in bad  # values only
+    assert "<div class='detail'>Acc below native</div>" in page  # a short label; the reason is in the evidence
+    assert "gb300-1: host -" in page and "Models <strong>2</strong>" in page
+    assert "Pass (Green + Yellow) <strong>1</strong>" in page
+    legend = page[page.index("<dl class='legend'>"):page.index("</dl>")]
+    assert legend.count("<div><dt>") == 4  # one line per result
+
+
+def test_html_labels_say_in_a_few_words_why_a_result_is_not_green():
+    from trtmc_aiperf_qual.report_html import _issue
+
+    def timed(reason):
+        return {"category": "perf-inconclusive", "accuracy": [], "perf": [{"light": "white", "reasons": [reason]}]}
+
+    assert _issue("m", timed("TRTMC CI ±5.54% > 5.0%"), "white") == "Perf TRTMC CI ±5.54%"
+    assert _issue("m", timed("reference timed at bf16, TRTMC runs fp16"), "white") == "Perf precision differs"
+    assert _issue("m", timed("work differs: TRTMC [...] vs native [...]"), "white") == "Perf outputs differ"
+    unfit = {"category": "error", "perf": [], "accuracy": [
+        {"status": "error", "error": "no lambada problem fits the bundle's 32-token sequence length"}]}
+    assert _issue("m", unfit, "white") == "no problem fits the bundle"
+    gated = {"category": "build-failed", "accuracy": [], "perf": [], "notes": "checkpoint: 403 Client Error"}
+    assert _issue("m", gated, "white") == "HTTP 403"
+    assert _issue("m", {"category": "not-covered", "accuracy": [], "perf": []}, "white") == "not covered"
 
 
 def test_aggregate_results_report_metrics_not_a_zero_pass_count():

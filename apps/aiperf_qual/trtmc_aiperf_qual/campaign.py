@@ -295,6 +295,18 @@ def write_exclusions(out_root: Path, excluded: Sequence[Mapping[str, Any]]) -> N
     (out_root / EXCLUSIONS).write_text(json.dumps(list(excluded), indent=2) + "\n")
 
 
+def _precision(report: Mapping[str, Any], directory: Path) -> dict[str, str | None]:
+    """Each side's precision: TRTMC's from the bundle the run built, the native model's as timed (else as it
+    answered the benchmarks)."""
+    model = directory / "model.json"
+    trtmc = (json.loads(model.read_text()).get("candidate") or {}).get("precision") if model.is_file() else None
+    native = next((precision for precision in [*((item.get("reference") or {}).get("precision")
+                                                for item in report.get("performance_l1", [])),
+                                               *((item.get("native") or {}).get("precision")
+                                                 for item in report.get("accuracy", []))] if precision), None)
+    return {"trtmc": trtmc, "native": native}
+
+
 def _row(directory: Path) -> dict[str, Any] | None:
     """The result in a profile directory; ``time`` is when that run started (re-judging rewrites reports,
     so a report's own start time, else the file time)."""
@@ -305,6 +317,7 @@ def _row(directory: Path) -> dict[str, Any] | None:
         value = json.loads(path.read_text())
         if name == "report.json":
             return {"task": value.get("task"), "category": value["verdict"]["category"],
+                    "precision": _precision(value, directory),
                     "directory": str(directory), "repro": value.get("repro"), "l2": value.get("performance_l2"),
                     "time": float(value.get("started") or path.stat().st_mtime),
                     "accuracy": value.get("accuracy", []), "perf": value.get("performance_l1", []),
