@@ -248,8 +248,9 @@ def test_a_machines_environment_names_no_run_ledger_and_run_all_takes_one(tmp_pa
     from trtmc_aiperf_qual import cli
 
     (tmp_path / "env.yaml").write_text(f"repo: {tmp_path}\nledger: ledger.json\n")
-    assert cli.main(["plan", "--environment", str(tmp_path / "env.yaml"), "--profile", "x"]) == 2
-    assert "pass a run's ledger with run-all --ledger" in capsys.readouterr().err
+    for command in (["plan", "--profile", "x"], ["rejudge", str(tmp_path)], ["recheck", str(tmp_path)]):
+        assert cli.main([*command, "--environment", str(tmp_path / "env.yaml")]) == 2, command
+        assert "pass a run's ledger with run-all --ledger" in capsys.readouterr().err
     seen = {}
 
     def run_all(environment, models, out_root, **kwargs):

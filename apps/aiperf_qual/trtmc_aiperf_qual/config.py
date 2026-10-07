@@ -44,7 +44,10 @@ class Environment:
 
 
 def load_environment(path: Path) -> Environment:
-    return Environment(_load(path))
+    values = _load(path)
+    if "ledger" in values:  # a machine's file names no run's records
+        raise ConfigError(f"{path} names a ledger; pass a run's ledger with run-all --ledger")
+    return Environment(values)
 
 
 def load_suite(name: str, root: Path = CONFIG_ROOT) -> dict[str, Any]:

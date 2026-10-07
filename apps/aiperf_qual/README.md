@@ -58,7 +58,8 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
   documents).
 - Any other problem the native model answered and TRTMC did not (a failed or rejected request, an unusable output)
   counts as TRTMC's wrong answer: a wrong right/wrong answer, a parity sample outside the tolerance, an empty WER or
-  chrF text. A problem the native model did not answer is missing evidence: an `error`.
+  chrF text. A corpus metric without an empty answer (vectors, masks, detections, forecasts) keeps the problem
+  missing, an `error`, as does a problem the native model did not answer.
 - Native copies that run out of GPU memory answer again as half as many copies, down to one.
 - Every AIPerf run has a deadline: three times the profile's seconds in the run's ledger (`run-all --ledger`, at
   least ten minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.

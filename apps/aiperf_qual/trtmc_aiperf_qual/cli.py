@@ -384,10 +384,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(text, end="")
             return 0
         environment = load_environment(arguments.environment)
-        if "ledger" in environment.values:  # a machine's file names no run's records
-            print(f"trtmc-aiperf-qual: {arguments.environment} names a ledger; pass a run's ledger with "
-                  "run-all --ledger", file=sys.stderr)
-            return 2
         environment.values["environment_file"] = str(arguments.environment.resolve())  # for reproduction commands
         if getattr(arguments, "ledger", None):
             environment.values["run_ledger"] = str(arguments.ledger.resolve())
