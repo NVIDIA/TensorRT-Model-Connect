@@ -29,9 +29,9 @@ interpreter needs `ensurepip` or an already installed `virtualenv` bootstrapper.
 The native CUDA SDK must include NVCC, NVRTC, cuRAND headers and driver link
 libraries; the TensorRT SDK must contain its matching CPython wheel.
 
-The provider first uses `find_package(EdgeLLM 0.10.1 EXACT CONFIG)`. If absent,
+The provider first uses `find_package(EdgeLLM 0.11.0 EXACT CONFIG)`. If absent,
 CMake `ExternalProject` clones the public NVIDIA TensorRT-Edge-LLM repository at
-`e8b29522938901f6df19ebeedd4b69bc8edbcd97` (v0.10.1), initializes the pinned
+`95515c2f87fba8982db5a519f9022277667b3cc9` (v0.11.0), initializes the pinned
 submodules, builds the native core/plugin and FMHA/GDN CuTe archives, and installs
 an isolated direct-builder Python environment. It does not modify the caller
 Python environment. Downloads happen only during this
@@ -39,9 +39,10 @@ explicit dependency build. `TRTMC_EDGELLM_WHEELHOUSE` selects a complete offline
 Python wheelhouse; `TRTMC_EDGELLM_GIT_MIRROR` optionally supplies a local Git
 mirror, still checked out at the immutable upstream commit.
 
-Upstream 0.10.1 does not export a CMake SDK package, so these compact templates
+Upstream 0.11.0 does not export a CMake SDK package, so these compact templates
 supply that installation boundary. `EdgeLLM::Core` exposes the installed static
-core, headers, CuTe archive and native dependencies. Consumers requiring CUDA
+core, headers, CuTe archive and native dependencies, including 0.11.0's
+chat-template and XGrammar static archives. Consumers requiring CUDA
 device linking enable separable compilation and device-symbol resolution.
 `EdgeLLM::Plugin` identifies the plugin DSO; adapters load it, rather than linking
 it twice. `EdgeLLM_PYTHON_EXECUTABLE` and `EdgeLLM_BUILDER_LAUNCHER` expose the

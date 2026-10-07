@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.20)
-file(INSTALL "@_edge_build@/cpp/libedgellmCore.a" DESTINATION "@_edge_prefix@/lib")
+file(INSTALL "@_edge_build@/cpp/libedgellmCore.a"
+  "@_edge_build@/cpp/libedgellmChatTemplate.a" "@_edge_build@/libxgrammarCore.a"
+  DESTINATION "@_edge_prefix@/lib")
 file(INSTALL "@_edge_build@/libNvInfer_edgellm_plugin.so" DESTINATION "@_edge_prefix@/lib" FOLLOW_SYMLINK_CHAIN)
 file(INSTALL "@_edge_source@/cpp/kernels/cuteDSLArtifact/@CMAKE_SYSTEM_PROCESSOR@/sm_@TRTMC_EDGELLM_CUDA_ARCHITECTURE@/libcutedsl_@CMAKE_SYSTEM_PROCESSOR@.a"
   DESTINATION "@_edge_prefix@/lib" RENAME libcutedsl.a)
