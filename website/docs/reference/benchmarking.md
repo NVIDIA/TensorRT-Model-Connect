@@ -163,7 +163,14 @@ own explicit benchmark inputs; a shared operation name does not imply support.
 | `encode` | `TextToPooledFeatures`, `TextToTokenFeatures` |
 | `embed` | `TextToEmbedding` |
 | `rerank` | `TextQueryDocumentsToRelevance` |
+| `decide` | `IStructuredDecision` |
 | `control` | `ImageStateToActionChunk` |
+
+Structured decisions accept an opaque JSON `document` or `document_path`, with
+optional `image_paths` and `video_frame_paths`. The family interprets the schema.
+Timing covers record encoding, inference, and response construction; media-file
+decoding follows the benchmark's asset-loading policy. The output retains each
+question's option logits and probabilities.
 
 For semantic Task manifests, explicitly specified generation controls retain
 their types; omitted controls use the family defaults. A testcase can supply

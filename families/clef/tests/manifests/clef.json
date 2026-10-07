@@ -6,6 +6,7 @@
   "task": "structured_decision",
   "bundle": "clef.bundle",
   "precision": "bf16",
+  "tensor_parallel_size": 1,
   "max_sequence_length": 512,
   "testcases": [
     {"name": "clef-invoice", "premerge": true,
