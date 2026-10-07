@@ -1,0 +1,48 @@
+{
+  "name": "hy-mt1.5-7b",
+  "hf_id": "tencent/HY-MT1.5-7B",
+  "hf_revision": "397085d46158ad0b437ffd74228499e8c2a35c76",
+  "bundle": "hy-mt1.5-7b.bundle",
+  "family": "hunyuan",
+  "task": "text_generation",
+  "precision": "fp16",
+  "max_sequence_length": 1024,
+  "tensor_parallel_size": 1,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "hy-mt1.5-7b",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "将以下文本翻译成英语,注意只需要输出翻译后的结果,不要额外解释:\n\n今天天气真好。",
+      "max_new_tokens": 128,
+      "temperature": 0,
+      "top_k": 1,
+      "top_p": 1,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "expected_answers": [
+        "The weather is really nice today."
+      ],
+      "repetition_penalty": 1.0
+    },
+    {
+      "name": "hy-mt1.5-7b-idiom",
+      "reference_precision": "fp32",
+      "prompt": "Translate the following segment into Chinese, without additional explanation.\n\nIt’s on the house.",
+      "max_new_tokens": 128,
+      "temperature": 0,
+      "top_k": 1,
+      "top_p": 1,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "expected_answers": [
+        "免费",
+        "请客",
+        "不用付钱",
+        "不要钱"
+      ],
+      "repetition_penalty": 1.0
+    }
+  ]
+}
