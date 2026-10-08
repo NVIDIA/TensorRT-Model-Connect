@@ -179,56 +179,105 @@ RecurrentPipeline::generate_from_ids_speculative(const std::vector<int32_t>& inp
     // first GENERATED token (not a re-prediction of a known prompt token).
     int32_t real_next = argmax(logits);
     int32_t step = static_cast<int32_t>(input_ids.size()) - 1; // last committed index
-    int32_t draft = mtp_scheduler_->draft(real_next, step + 1, hidden.data());
+    // draft_chain() must run BEFORE the companion draft() call below: it
+    // only READS mtp_cache_ (via bind_cache_inputs), expecting it to still
+    // reflect history strictly BEFORE real_next's own position (same
+    // invariant draft() itself asserts: cache position == position - 1).
+    // draft() advances mtp_cache_ past real_next afterward -- the old
+    // single-draft-per-round design got this update "for free" as a side
+    // effect of its own draft() call; draft_chain() deliberately never
+    // touches mtp_cache_ (see mtp_scheduler.h), so it has to be done here
+    // explicitly, with draft()'s own return value discarded.
+    auto draft_result = mtp_scheduler_->draft_chain(real_next, step + 1, hidden.data());
+    mtp_scheduler_->draft(real_next, step + 1, hidden.data());
 
     std::vector<int32_t> output = input_ids;
     int32_t decode_steps = 0;
+    const int32_t hidden_size = mtp_scheduler_->hidden_size();
+    int32_t round_num = 0;
 
     auto t_decode_start = SteadyClock::now();
     while (decode_steps < max_new_tokens) {
-        auto verify = mtp_scheduler_->verify_and_maybe_commit(real_next, draft, step);
+        auto verify = mtp_scheduler_->verify_and_maybe_commit(real_next, draft_result.token_ids, step);
 
-        if (verify.accepted) {
-            output.push_back(real_next);
+        ++round_num;
+        std::cerr << "[trtmc-mtp-round] round=" << round_num << " base_step=" << step
+                  << " real_next=" << real_next << " drafts=[";
+        for (std::size_t i = 0; i < draft_result.token_ids.size(); ++i) {
+            if (i > 0)
+                std::cerr << ",";
+            std::cerr << draft_result.token_ids[i];
+        }
+        std::cerr << "] accepted_length=" << verify.accepted_length
+                  << " full_accept=" << (verify.full_accept ? "true" : "false")
+                  << " accepted_tokens=[";
+        for (std::size_t i = 0; i < verify.accepted_tokens.size(); ++i) {
+            if (i > 0)
+                std::cerr << ",";
+            std::cerr << verify.accepted_tokens[i];
+        }
+        std::cerr << "] next_real_candidate=" << verify.next_real_candidate << "\n";
+
+        bool stop = false;
+        for (int32_t i = 0; i < verify.accepted_length; ++i) {
+            output.push_back(verify.accepted_tokens[static_cast<std::size_t>(i)]);
             ++decode_steps;
             ++prof_steps_;
-            bool stop = is_eos(real_next) || decode_steps >= max_new_tokens;
-            if (!stop) {
-                output.push_back(draft);
-                ++decode_steps;
-                ++prof_steps_;
-                stop = is_eos(draft) || decode_steps >= max_new_tokens;
+            if (is_eos(verify.accepted_tokens[static_cast<std::size_t>(i)]) ||
+                decode_steps >= max_new_tokens) {
+                stop = true;
+                break;
             }
-            if (stop)
-                break;
+        }
+        if (stop)
+            break;
 
-            // Catch-up call: MTP must still process `draft` (now a
-            // confirmed real token) to keep its own cache in sync with the
-            // main token stream -- its own logits are discarded here.
-            mtp_scheduler_->draft(draft, step + 2, verify.hidden_row0.data());
-            const int32_t new_real_next = verify.next_real_candidate;
-            const int32_t new_draft =
-                mtp_scheduler_->draft(new_real_next, step + 3, verify.hidden_row1.data());
-            step += 2;
-            real_next = new_real_next;
-            draft = new_draft;
+        if (verify.full_accept) {
+            // Full accept: commit already happened inside
+            // verify_and_maybe_commit(). Catch up MTP's own cache for
+            // every newly-confirmed draft using the verify engine's REAL
+            // per-row hidden states (rows [0, num_draft_tokens) -- never
+            // draft_chain()'s self-chained approximations, see
+            // mtp_scheduler.h), then seed the next round from the last row.
+            for (int32_t i = 0; i < mtp_scheduler_->num_draft_tokens(); ++i) {
+                mtp_scheduler_->draft(
+                    verify.accepted_tokens[static_cast<std::size_t>(i) + 1], step + 2 + i,
+                    verify.hidden_states.data() + static_cast<std::size_t>(i) * hidden_size);
+            }
+            const int32_t last_row = verify.accepted_length - 1;
+            step += verify.accepted_length;
+            real_next = verify.next_real_candidate;
+            // See the comment at this function's first draft_chain() call:
+            // draft_chain() must run before the companion draft() resync.
+            draft_result = mtp_scheduler_->draft_chain(
+                real_next, step + 1,
+                verify.hidden_states.data() + static_cast<std::size_t>(last_row) * hidden_size);
+            mtp_scheduler_->draft(
+                real_next, step + 1,
+                verify.hidden_states.data() + static_cast<std::size_t>(last_row) * hidden_size);
         } else {
-            // Reject: re-run the plain single-token main engine on the
-            // confirmed-real token from the pre-round committed state --
-            // bit-identical to what the verify call's row 0 already
-            // computed (both are the same greedy argmax), but this is what
-            // actually advances state_ for the real main decoder path.
-            run_step(real_next, logits, &hidden);
-            output.push_back(real_next);
-            ++decode_steps;
-            ++prof_steps_;
-            if (is_eos(real_next) || decode_steps >= max_new_tokens)
-                break;
-            ++step;
-            const int32_t new_draft =
-                mtp_scheduler_->draft(verify.verified_token, step + 1, hidden.data());
-            real_next = verify.verified_token;
-            draft = new_draft;
+            // Partial (including zero drafts accepted): shared state was
+            // left untouched by verify_and_maybe_commit() -- DeltaNet's
+            // recurrent state only ever exposes its FINAL post-all-
+            // substeps value, so there is no safe way to commit a partial
+            // prefix of that call's own state (see mtp_scheduler.h).
+            // Re-run the confirmed prefix as sequential single-token steps
+            // to rebuild state safely, catching up MTP's cache for each
+            // NEWLY-confirmed draft along the way -- real_next itself
+            // already has an MTP cache entry from a prior round, only
+            // accepted_tokens[1..] are new.
+            for (int32_t i = 0; i < verify.accepted_length; ++i) {
+                const int32_t tok = verify.accepted_tokens[static_cast<std::size_t>(i)];
+                run_step(tok, logits, &hidden);
+                if (i >= 1)
+                    mtp_scheduler_->draft(tok, step + 1 + i, hidden.data());
+            }
+            step += verify.accepted_length;
+            real_next = verify.next_real_candidate;
+            // See the comment at this function's first draft_chain() call:
+            // draft_chain() must run before the companion draft() resync.
+            draft_result = mtp_scheduler_->draft_chain(real_next, step + 1, hidden.data());
+            mtp_scheduler_->draft(real_next, step + 1, hidden.data());
         }
     }
     auto t_decode_end = SteadyClock::now();

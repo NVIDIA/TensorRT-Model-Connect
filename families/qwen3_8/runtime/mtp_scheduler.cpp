@@ -26,15 +26,22 @@ int32_t argmax(const float* data, std::size_t n) {
 } // namespace
 
 Qwen38MtpScheduler::Qwen38MtpScheduler(std::unique_ptr<ITrtModule> mtp_module,
+                                       std::unique_ptr<ITrtModule> draft_chain_module,
                                        std::unique_ptr<ITrtModule> multi_token_module,
                                        Qwen38HybridState& state, int32_t hidden_size,
-                                       int32_t vocab_size, cudaStream_t stream)
-    : mtp_module_(std::move(mtp_module)), multi_token_module_(std::move(multi_token_module)),
-      state_(state), stream_(stream), hidden_size_(hidden_size), vocab_size_(vocab_size) {
+                                       int32_t vocab_size, int32_t num_draft_tokens,
+                                       cudaStream_t stream)
+    : mtp_module_(std::move(mtp_module)), draft_chain_module_(std::move(draft_chain_module)),
+      multi_token_module_(std::move(multi_token_module)), state_(state), stream_(stream),
+      hidden_size_(hidden_size), vocab_size_(vocab_size), num_draft_tokens_(num_draft_tokens) {
     if (!mtp_module_ || !mtp_module_->ok())
         throw std::runtime_error("Qwen38MtpScheduler: invalid MTP module");
+    if (!draft_chain_module_ || !draft_chain_module_->ok())
+        throw std::runtime_error("Qwen38MtpScheduler: invalid MTP draft-chain module");
     if (!multi_token_module_ || !multi_token_module_->ok())
         throw std::runtime_error("Qwen38MtpScheduler: invalid multi-token module");
+    if (num_draft_tokens_ < 1)
+        throw std::runtime_error("Qwen38MtpScheduler: num_draft_tokens must be >= 1");
 
     Qwen38KvCache& main_kv = *state_.kv_cache();
 
@@ -48,29 +55,47 @@ Qwen38MtpScheduler::Qwen38MtpScheduler(std::unique_ptr<ITrtModule> mtp_module,
     if (!mtp_cache_->ok())
         throw std::runtime_error("Qwen38MtpScheduler: failed to allocate MTP's own KV cache");
 
+    const int32_t seq_len_val = num_draft_tokens_ + 1;
     multi_present_k_.reserve(static_cast<std::size_t>(main_kv.num_layers()));
     multi_present_v_.reserve(static_cast<std::size_t>(main_kv.num_layers()));
     for (int32_t i = 0; i < main_kv.num_layers(); ++i) {
-        multi_present_k_.emplace_back(std::vector<int64_t>{2, main_kv.kv_dim()}, main_kv.dtype(),
-                                      stream_);
-        multi_present_v_.emplace_back(std::vector<int64_t>{2, main_kv.kv_dim()}, main_kv.dtype(),
-                                      stream_);
+        multi_present_k_.emplace_back(std::vector<int64_t>{seq_len_val, main_kv.kv_dim()},
+                                      main_kv.dtype(), stream_);
+        multi_present_v_.emplace_back(std::vector<int64_t>{seq_len_val, main_kv.kv_dim()},
+                                      main_kv.dtype(), stream_);
         if (!multi_present_k_.back().ok() || !multi_present_v_.back().ok())
             throw std::runtime_error(
                 "Qwen38MtpScheduler: failed to allocate multi-token present K/V scratch");
+    }
+
+    // Single entry each -- draft_chain_module_'s present_k/v are not
+    // per-main-model-layer, they're MTP's own one layer (matching
+    // build_mtp_draft_chain_engine's singular mtp_present_k/v names).
+    draft_chain_present_k_.emplace_back(
+        std::vector<int64_t>{num_draft_tokens_, main_kv.kv_dim()}, main_kv.dtype(), stream_);
+    draft_chain_present_v_.emplace_back(
+        std::vector<int64_t>{num_draft_tokens_, main_kv.kv_dim()}, main_kv.dtype(), stream_);
+    if (!draft_chain_present_k_.back().ok() || !draft_chain_present_v_.back().ok()) {
+        throw std::runtime_error(
+            "Qwen38MtpScheduler: failed to allocate draft-chain present K/V scratch");
     }
 }
 
 void Qwen38MtpScheduler::bind_state() {
     mtp_cache_->bind_to(*mtp_module_);
 
+    // draft_chain_module_ reads MTP's persistent cache (read-only, same
+    // convention as the multi-token engine reading the main model's
+    // cache) but its own present_k/v outputs are never committed back --
+    // bind them to throwaway scratch (TensorRT requires every marked
+    // output bound before execute, even unused ones).
+    mtp_cache_->bind_cache_inputs(*draft_chain_module_);
+    draft_chain_module_->bind_external("mtp_present_k", draft_chain_present_k_[0].data());
+    draft_chain_module_->bind_external("mtp_present_v", draft_chain_present_v_[0].data());
+
     Qwen38KvCache& main_kv = *state_.kv_cache();
     Qwen38RecurrentState& ssm = *state_.recurrent_state();
 
-    // cache_k/v INPUTS: shared, read-only view of the main model's own
-    // cache (the multi-token engine's present_k/v outputs are (2, kv_dim),
-    // too big for Qwen38KvCache::bind_to()'s single-row present buffers,
-    // so that method is deliberately not used here).
     main_kv.bind_cache_inputs(*multi_token_module_);
 
     for (int32_t i = 0; i < main_kv.num_layers(); ++i) {
@@ -81,11 +106,6 @@ void Qwen38MtpScheduler::bind_state() {
                                            multi_present_v_[static_cast<std::size_t>(i)].data());
     }
 
-    // conv_state/ssm_state INPUTS and present_conv/present_ssm OUTPUTS bind
-    // directly to the shared recurrent state's own buffers -- running this
-    // engine overwrites the same present_ buffers the main single-token
-    // engine writes, so a plain Qwen38RecurrentState::advance(2) afterward
-    // picks up this engine's results with no extra copying.
     for (int32_t i = 0; i < ssm.num_layers(); ++i) {
         const auto suffix = "_" + std::to_string(i);
         multi_token_module_->bind_external("conv_state" + suffix, ssm.state_ptr(0, i));
@@ -105,12 +125,12 @@ int32_t Qwen38MtpScheduler::draft(int32_t token, int32_t position, const float* 
     if (!bound_)
         throw std::runtime_error("Qwen38MtpScheduler: bind_state() must be called before draft()");
     // mtp_cache_->position() tracks CALL COUNT (how many rows have been
-    // written to MTP's own cache so far -- used for mask validity and cache
-    // row indexing), not the RoPE position of the token being embedded.
-    // MTP's first-ever call always embeds the token at absolute sequence
-    // position 1 (the main model embeds position 0 by itself, with no MTP
-    // involvement), so the invariant is call_count == position - 1, not
-    // call_count == position.
+    // written to MTP's own cache so far -- used for mask validity and
+    // cache row indexing), not the RoPE position of the token being
+    // embedded. MTP's first-ever call always embeds the token at absolute
+    // sequence position 1 (the main model embeds position 0 by itself,
+    // with no MTP involvement), so the invariant is call_count ==
+    // position - 1, not call_count == position.
     if (mtp_cache_->position() != position - 1) {
         throw std::runtime_error(
             "Qwen38MtpScheduler::draft: MTP cache position out of sync with caller's position "
@@ -163,12 +183,104 @@ int32_t Qwen38MtpScheduler::draft(int32_t token, int32_t position, const float* 
     return argmax(mtp_logits_host_.data(), mtp_logits_host_.size());
 }
 
+Qwen38MtpScheduler::DraftChainResult
+Qwen38MtpScheduler::draft_chain(int32_t token, int32_t position, const float* hidden_state) {
+    if (!bound_) {
+        throw std::runtime_error(
+            "Qwen38MtpScheduler: bind_state() must be called before draft_chain()");
+    }
+
+    TensorMap inputs;
+
+    Tensor token_t;
+    token_t.data = &token;
+    token_t.shape = {1};
+    token_t.dtype = DType::kInt32;
+    inputs["next_token_id"] = token_t;
+
+    Tensor pos_t;
+    pos_t.data = &position;
+    pos_t.shape = {1};
+    pos_t.dtype = DType::kInt32;
+    inputs["position_id"] = pos_t;
+
+    Tensor hidden_t;
+    hidden_t.data = const_cast<float*>(hidden_state);
+    hidden_t.shape = {1, hidden_size_};
+    hidden_t.dtype = DType::kFloat32;
+    inputs["hidden_state"] = hidden_t;
+
+    // Same persistent-prefix mask convention as draft()'s
+    // mtp_cache_->prepare_step() builds (shape (1, max_length+1), valid
+    // prefix + the final "self" column always valid) -- built directly
+    // here since this module takes position_id as a plain input, with no
+    // auto-write to override afterward like draft() needs.
+    const int32_t max_len = mtp_cache_->max_length();
+    mask_scratch_.assign(static_cast<std::size_t>(max_len) + 1, kMaskedScore);
+    const int32_t valid = std::min(mtp_cache_->position(), max_len);
+    std::fill(mask_scratch_.begin(), mask_scratch_.begin() + valid, 0.0F);
+    mask_scratch_[static_cast<std::size_t>(max_len)] = 0.0F;
+    Tensor mask_t;
+    mask_t.data = mask_scratch_.data();
+    mask_t.shape = {1, max_len + 1};
+    mask_t.dtype = DType::kFloat32;
+    inputs["attention_mask"] = mask_t;
+
+    draft_chain_module_->forward_async(inputs);
+    draft_chain_module_->sync();
+
+    if (draft_chain_ids_device_ptr_ == nullptr) {
+        draft_chain_ids_device_ptr_ = draft_chain_module_->device_ptr("mtp_draft_token_ids");
+        if (draft_chain_ids_device_ptr_ == nullptr) {
+            throw std::runtime_error(
+                "Qwen38MtpScheduler: draft-chain module has no 'mtp_draft_token_ids' output");
+        }
+    }
+    if (draft_chain_hidden_device_ptr_ == nullptr) {
+        draft_chain_hidden_device_ptr_ = draft_chain_module_->device_ptr("mtp_draft_hidden_states");
+        if (draft_chain_hidden_device_ptr_ == nullptr) {
+            throw std::runtime_error(
+                "Qwen38MtpScheduler: draft-chain module has no 'mtp_draft_hidden_states' output");
+        }
+    }
+
+    DraftChainResult result;
+    result.token_ids.resize(static_cast<std::size_t>(num_draft_tokens_));
+    cudaError_t copy_status =
+        cudaMemcpy(result.token_ids.data(), draft_chain_ids_device_ptr_,
+                  result.token_ids.size() * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    if (copy_status != cudaSuccess) {
+        throw std::runtime_error(std::string("Qwen38MtpScheduler: failed to copy draft token ids: ") +
+                                 cudaGetErrorString(copy_status));
+    }
+
+    result.hidden_states.resize(static_cast<std::size_t>(num_draft_tokens_) *
+                                static_cast<std::size_t>(hidden_size_));
+    copy_status = cudaMemcpy(result.hidden_states.data(), draft_chain_hidden_device_ptr_,
+                            result.hidden_states.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    if (copy_status != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("Qwen38MtpScheduler: failed to copy draft hidden states: ") +
+            cudaGetErrorString(copy_status));
+    }
+
+    return result;
+}
+
 Qwen38MtpScheduler::VerifyResult
-Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next, int32_t draft, int32_t base_step) {
+Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next,
+                                            const std::vector<int32_t>& draft_tokens,
+                                            int32_t base_step) {
     if (!bound_) {
         throw std::runtime_error(
             "Qwen38MtpScheduler: bind_state() must be called before verify_and_maybe_commit()");
     }
+    if (static_cast<int32_t>(draft_tokens.size()) != num_draft_tokens_) {
+        throw std::runtime_error(
+            "Qwen38MtpScheduler::verify_and_maybe_commit: draft_tokens.size() must equal "
+            "num_draft_tokens()");
+    }
+
     Qwen38KvCache& kv = *state_.kv_cache();
     Qwen38RecurrentState& ssm = *state_.recurrent_state();
 
@@ -178,27 +290,32 @@ Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next, int32_t draft, in
             "with base_step");
     }
 
-    const int32_t p0 = base_step + 1;
-    const int32_t p1 = base_step + 2;
-    int32_t tokens[2] = {real_next, draft};
-    int32_t positions[2] = {p0, p1};
+    const int32_t n = seq_len();
+    std::vector<int32_t> tokens(static_cast<std::size_t>(n));
+    std::vector<int32_t> positions(static_cast<std::size_t>(n));
+    tokens[0] = real_next;
+    positions[0] = base_step + 1;
+    for (int32_t i = 0; i < num_draft_tokens_; ++i) {
+        tokens[static_cast<std::size_t>(i) + 1] = draft_tokens[static_cast<std::size_t>(i)];
+        positions[static_cast<std::size_t>(i) + 1] = base_step + 2 + i;
+    }
 
     TensorMap inputs;
 
     Tensor tok_t;
-    tok_t.data = tokens;
-    tok_t.shape = {2};
+    tok_t.data = tokens.data();
+    tok_t.shape = {n};
     tok_t.dtype = DType::kInt32;
     inputs["token_ids"] = tok_t;
 
     Tensor pos_t;
-    pos_t.data = positions;
-    pos_t.shape = {2};
+    pos_t.data = positions.data();
+    pos_t.shape = {n};
     pos_t.dtype = DType::kInt32;
     inputs["position_ids"] = pos_t;
 
     // mask_persistent_only(valid = kv.position()): only the already-
-    // committed prefix is visible; the 2 new tokens' causal visibility is
+    // committed prefix is visible; the n new tokens' causal visibility is
     // handled internally by the engine's own per-substep mask extension.
     const int32_t max_len = kv.max_length();
     mask_scratch_.assign(static_cast<std::size_t>(max_len), kMaskedScore);
@@ -218,7 +335,7 @@ Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next, int32_t draft, in
         if (multi_logits_device_ptr_ == nullptr)
             throw std::runtime_error("Qwen38MtpScheduler: multi-token module has no 'logits' output");
     }
-    multi_logits_host_.resize(2 * static_cast<std::size_t>(vocab_size_));
+    multi_logits_host_.resize(static_cast<std::size_t>(n) * static_cast<std::size_t>(vocab_size_));
     cudaError_t copy_status =
         cudaMemcpy(multi_logits_host_.data(), multi_logits_device_ptr_,
                   multi_logits_host_.size() * sizeof(float), cudaMemcpyDeviceToHost);
@@ -226,16 +343,39 @@ Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next, int32_t draft, in
         throw std::runtime_error(std::string("Qwen38MtpScheduler: failed to copy logits: ") +
                                  cudaGetErrorString(copy_status));
 
+    // --- longest-prefix-match ---
     VerifyResult result;
-    result.verified_token =
-        argmax(multi_logits_host_.data(), static_cast<std::size_t>(vocab_size_));
-    result.accepted = (result.verified_token == draft);
+    result.accepted_tokens.push_back(real_next);
+    int32_t accepted_drafts = 0;
+    for (int32_t i = 0; i < num_draft_tokens_; ++i) {
+        const int32_t row_argmax = argmax(
+            multi_logits_host_.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(vocab_size_),
+            static_cast<std::size_t>(vocab_size_));
+        if (row_argmax != draft_tokens[static_cast<std::size_t>(i)]) {
+            result.next_real_candidate = row_argmax;
+            break;
+        }
+        result.accepted_tokens.push_back(draft_tokens[static_cast<std::size_t>(i)]);
+        ++accepted_drafts;
+    }
+    result.accepted_length = accepted_drafts + 1;
+    result.full_accept = (accepted_drafts == num_draft_tokens_);
 
-    if (!result.accepted)
-        return result;
+    if (result.full_accept) {
+        // No mismatch broke the loop above -- the "free" next-round
+        // candidate is row (n-1)'s argmax, not yet computed.
+        result.next_real_candidate = argmax(
+            multi_logits_host_.data() +
+                static_cast<std::size_t>(n - 1) * static_cast<std::size_t>(vocab_size_),
+            static_cast<std::size_t>(vocab_size_));
+    }
 
-    // Commit: append_prefill_kv()/advance(2) are already-correct, existing
-    // multi-token-aware methods -- no new cache-indexing math here.
+    if (!result.full_accept)
+        return result; // shared state untouched; caller recovers via run_step()
+
+    // --- full accept: commit directly. append_prefill_kv()/advance() are
+    // already-correct, existing multi-token-aware methods -- no new
+    // cache-indexing math here. ---
     std::vector<const void*> pk;
     std::vector<const void*> pv;
     pk.reserve(static_cast<std::size_t>(kv.num_layers()));
@@ -244,8 +384,8 @@ Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next, int32_t draft, in
         pk.push_back(multi_present_k_[static_cast<std::size_t>(i)].data());
         pv.push_back(multi_present_v_[static_cast<std::size_t>(i)].data());
     }
-    kv.append_prefill_kv(pk, pv, 2);
-    ssm.advance(2);
+    kv.append_prefill_kv(pk, pv, n);
+    ssm.advance(n);
 
     if (multi_hidden_device_ptr_ == nullptr) {
         multi_hidden_device_ptr_ = multi_token_module_->device_ptr("hidden_states");
@@ -254,17 +394,13 @@ Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next, int32_t draft, in
                 "Qwen38MtpScheduler: multi-token module has no 'hidden_states' output");
         }
     }
-    result.hidden_row0.resize(static_cast<std::size_t>(hidden_size_));
-    result.hidden_row1.resize(static_cast<std::size_t>(hidden_size_));
-    const auto row_bytes = static_cast<std::size_t>(hidden_size_) * sizeof(float);
-    cudaMemcpy(result.hidden_row0.data(), multi_hidden_device_ptr_, row_bytes,
-              cudaMemcpyDeviceToHost);
-    cudaMemcpy(result.hidden_row1.data(),
-              static_cast<const uint8_t*>(multi_hidden_device_ptr_) + row_bytes, row_bytes,
-              cudaMemcpyDeviceToHost);
-
-    result.next_real_candidate =
-        argmax(multi_logits_host_.data() + vocab_size_, static_cast<std::size_t>(vocab_size_));
+    result.hidden_states.resize(static_cast<std::size_t>(n) * static_cast<std::size_t>(hidden_size_));
+    copy_status = cudaMemcpy(result.hidden_states.data(), multi_hidden_device_ptr_,
+                            result.hidden_states.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    if (copy_status != cudaSuccess) {
+        throw std::runtime_error(std::string("Qwen38MtpScheduler: failed to copy hidden_states: ") +
+                                 cudaGetErrorString(copy_status));
+    }
 
     return result;
 }
