@@ -1139,9 +1139,11 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
     optional = pyproject.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
     assert set(re.findall(r"^([a-z][a-z0-9_-]*)\s*=", optional, re.MULTILINE)) == {
         "cutedsl",
+        "edgellm",
         "serve",
         "test",
     }
+    assert 'edgellm = ["tensorrt-edgellm==0.11.0"]' in optional
 
     requirements = sorted(FAMILIES.glob("*/requirements.txt"))
     assert requirements
