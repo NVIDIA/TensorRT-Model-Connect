@@ -563,6 +563,17 @@
       "architecture_source": "config.model_name"
     },
     {
+      "hf_id": "convaiinnovations/laya",
+      "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "laya",
+      "architectures": [
+        "LayaTypedDecisions"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "deepseek-ai/DeepSeek-OCR-2",
       "revision": "aaa02f3811945a91062062994c5c4a3f4c0af2b0",
       "revision_source": "resolved",
