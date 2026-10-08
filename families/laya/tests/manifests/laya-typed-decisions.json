@@ -19,35 +19,35 @@
     },
     {
       "name": "laya-typed-decisions-quickstart",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/quickstart.json"
       }
     },
     {
       "name": "laya-typed-decisions-single-option",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/single-option.json"
       }
     },
     {
       "name": "laya-typed-decisions-conversation",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/conversation.json"
       }
     },
     {
       "name": "laya-typed-decisions-empty",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/empty.json"
       }
     },
     {
       "name": "laya-typed-decisions-batched",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/batched.json"
       }

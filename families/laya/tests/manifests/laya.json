@@ -19,35 +19,35 @@
     },
     {
       "name": "laya-quickstart",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/quickstart.json"
       }
     },
     {
       "name": "laya-single-option",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/single-option.json"
       }
     },
     {
       "name": "laya-conversation",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/conversation.json"
       }
     },
     {
       "name": "laya-empty",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/empty.json"
       }
     },
     {
       "name": "laya-batched",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/batched.json"
       }

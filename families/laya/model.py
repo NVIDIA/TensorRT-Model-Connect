@@ -117,9 +117,60 @@ class Graph:
         return layer.get_output(0)
 
     def activation(self, x, kind):
+        if (
+            kind == trt.ActivationType.GELU_ERF
+            and x.dtype == trt.bfloat16
+            and getattr(self, "exact_gelu", False)
+        ):
+            return self.gelu(x)
         return self.cast(
             self.n.add_activation(self.cast(x, trt.float32), kind).get_output(0), x.dtype
         )
+
+    def gelu(self, x):
+        """Preserve the original BF16 GELU, including its small negative tail."""
+        if not hasattr(self, "gelu_table"):
+            import torch
+
+            # All BF16 magnitudes from 2^-10 through 8, in bit-pattern order.
+            # Below this interval GELU rounds to x/2; above it to x or -0.
+            codes = torch.arange(117 * 128, 130 * 128 + 1)
+            values = torch.cat([codes, codes + 32768]).to(torch.int16).view(torch.bfloat16)
+            self.gelu_table = self.const(
+                torch.nn.functional.gelu(values.cuda()).cpu(), trt.bfloat16
+            )
+        f = self.cast(x, trt.float32)
+        magnitude = self.n.add_unary(f, trt.UnaryOperation.ABS).get_output(0)
+        nan = self.n.add_unary(f, trt.UnaryOperation.ISNAN).get_output(0)
+        inf = self.n.add_unary(f, trt.UnaryOperation.ISINF).get_output(0)
+        nonfinite = self.op(nan, inf, trt.ElementWiseOperation.OR)
+        safe = self.n.add_select(nonfinite, self.scalar(2**-10, f), magnitude).get_output(0)
+        safe = self.op(
+            self.op(safe, 2**-10, trt.ElementWiseOperation.MAX), 8.0, trt.ElementWiseOperation.MIN
+        )
+        logarithm = self.n.add_unary(safe, trt.UnaryOperation.LOG).get_output(0)
+        exponent = self.n.add_unary(
+            self.mul(logarithm, 1 / np.log(2)), trt.UnaryOperation.FLOOR
+        ).get_output(0)
+        power = self.op(
+            self.scalar(2.0, exponent), self.mul(exponent, -1), trt.ElementWiseOperation.POW
+        )
+        mantissa = self.n.add_unary(
+            self.mul(self.op(self.mul(safe, power), 1.0, trt.ElementWiseOperation.SUB), 128),
+            trt.UnaryOperation.ROUND,
+        ).get_output(0)
+        index = self.cast(self.add(self.mul(self.add(exponent, 10.0), 128), mantissa), trt.int32)
+        negative = self.op(x, 0, trt.ElementWiseOperation.LESS)
+        index = self.add(index, self.mul(self.cast(negative, trt.int32), 1665))
+        value = self.n.add_gather(self.gelu_table, index, 0).get_output(0)
+        value = self.n.add_select(
+            self.op(magnitude, 2**-10, trt.ElementWiseOperation.LESS), self.mul(x, 0.5), value
+        ).get_output(0)
+        large = self.n.add_select(negative, self.mul(x, 0), x).get_output(0)
+        value = self.n.add_select(
+            self.op(magnitude, 8.0, trt.ElementWiseOperation.GREATER), large, value
+        ).get_output(0)
+        return self.n.add_select(nan, x, value).get_output(0)
 
     def reduce(self, x, kind, axis=-1):
         return self.n.add_reduce(x, kind, 1 << (axis % len(x.shape)), True).get_output(0)
@@ -169,11 +220,14 @@ class Graph:
         return self.n.add_select(valid_queries, result, self.scalar(0, result)).get_output(0)
 
 
-def decision_graph(network, weights, config, max_length, debug=False, precise_attention=False):
+def decision_graph(
+    network, weights, config, max_length, debug=False, precise_attention=False, exact_gelu=False
+):
     import torch
 
     g = Graph(network, weights)
     g.precise_attention = precise_attention
+    g.exact_gelu = exact_gelu
 
     def trace(name, tensor):
         if debug:
@@ -226,8 +280,14 @@ def decision_graph(network, weights, config, max_length, debug=False, precise_at
     for kind in masks:
         theta = config["rope_parameters"][kind]["rope_theta"]
         inverse = 1.0 / (float(theta) ** (torch.arange(0, dim, 2).float() / dim))
-        # Generate constants with the original FP32 CUDA rotary operations.
-        angles = torch.arange(max_length, device="cuda").float()[:, None] * inverse.cuda()[None, :]
+        # The English weights amplify small rotary and GELU discrepancies.
+        # Retain the independently qualified paths for the other checkpoints.
+        if exact_gelu:
+            angles = (
+                torch.arange(max_length, device="cuda").float()[:, None] * inverse.cuda()[None, :]
+            )
+        else:
+            angles = torch.arange(max_length).float()[:, None] * inverse[None, :]
         angles = torch.cat([angles, angles], -1)
         ropes[kind] = tuple(
             g.reshape(
@@ -313,22 +373,7 @@ def decision_graph(network, weights, config, max_length, debug=False, precise_at
     features = g.activation(
         g.linear(g.norm(markers, "scorer.0", 1e-5), "scorer.1"), trt.ActivationType.GELU_ERF
     )
-    # Keep the final scalar accumulation in FP32 while preserving the original
-    # BF16 operands. Calibrated probabilities are sensitive to this projection.
-    score_weight = g.cast(g.const(weights["scorer.3.weight"], trt.bfloat16), trt.float32)
-    score_bias = g.reshape(
-        g.cast(g.const(weights["scorer.3.bias"], trt.bfloat16), trt.float32), (1, 1)
-    )
-    logits = network.add_matrix_multiply(
-        g.reshape(g.cast(features, trt.float32), (-1, hidden)),
-        trt.MatrixOperation.NONE,
-        score_weight,
-        trt.MatrixOperation.TRANSPOSE,
-    ).get_output(0)
-    logits = g.add(logits, score_bias)
-    shape = network.add_shuffle(logits)
-    shape.set_input(1, g.cast(network.add_shape(marker_pos).get_output(0), trt.int32))
-    logits = shape.get_output(0)
+    logits = g.reshape(g.cast(g.linear(features, "scorer.3"), trt.float32), (0, -1))
     mark_valid = g.op(marker_mask, 0, trt.ElementWiseOperation.GREATER)
     logits = network.add_select(mark_valid, logits, g.scalar(-1e4, logits)).get_output(0)
     sm = network.add_softmax(logits)
@@ -387,6 +432,10 @@ def build_plan(root, *, max_sequence_length, max_batch_size=8, max_options=256, 
         max_sequence_length,
         debug,
         precise_attention=agent["encoder"] == "jhu-clsp/mmBERT-base",
+        exact_gelu=(
+            agent["encoder"] == "answerdotai/ModernBERT-large"
+            and agent.get("model_name") == "rl-agent"
+        ),
     )
     profile = builder.create_optimization_profile()
     opt_batch, opt_length, opt_options = (

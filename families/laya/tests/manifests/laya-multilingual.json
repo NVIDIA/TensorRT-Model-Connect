@@ -33,28 +33,28 @@
     },
     {
       "name": "laya-multilingual-single-option",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/single-option.json"
       }
     },
     {
       "name": "laya-multilingual-conversation",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/conversation.json"
       }
     },
     {
       "name": "laya-multilingual-empty",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/empty.json"
       }
     },
     {
       "name": "laya-multilingual-batched",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/batched.json"
       }

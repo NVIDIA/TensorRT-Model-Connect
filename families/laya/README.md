@@ -49,6 +49,12 @@ attention to preserve long-conversation accuracy. The checkpoint's FP16 embeddin
 normalization values are preserved. The family rejects unsupported precision,
 task, and backend choices.
 
+The English checkpoint uses reference-generated rotary constants and a BF16
+GELU lookup expressed entirely with TensorRT operations. The lookup preserves
+the original activation's small negative tail and is checked against every
+BF16 input bit pattern. The other checkpoints retain their independently
+qualified arithmetic paths.
+
 ## Route across all three variants
 
 ```bash

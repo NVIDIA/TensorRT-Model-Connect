@@ -12,22 +12,30 @@
     {
       "name": "laya-router-english",
       "premerge": true,
-      "inputs": {"document_path": "fixtures/email.json"}
+      "inputs": {
+        "document_path": "fixtures/email.json"
+      }
     },
     {
       "name": "laya-router-hindi",
       "premerge": true,
-      "inputs": {"document_path": "fixtures/hindi.json"}
+      "inputs": {
+        "document_path": "fixtures/hindi.json"
+      }
     },
     {
       "name": "laya-router-spanish",
       "premerge": true,
-      "inputs": {"document_path": "fixtures/spanish.json"}
+      "inputs": {
+        "document_path": "fixtures/spanish.json"
+      }
     },
     {
       "name": "laya-router-typed",
       "premerge": true,
-      "inputs": {"document_path": "fixtures/typed-email.json"}
+      "inputs": {
+        "document_path": "fixtures/typed-email.json"
+      }
     }
   ]
 }
