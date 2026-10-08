@@ -58,6 +58,15 @@ std::string normalize_generation_mode(std::string mode) {
     return mode;
 }
 
+// "<count>x[rows,hidden]" of the first window, for the one-time binding log.
+std::string describe_debug_windows(const QwenDebugWindows& windows) {
+    if (windows.empty())
+        return "0";
+    const auto& shape = windows.windows().front().buffer.shape();
+    return std::to_string(windows.windows().size()) + "x[" + std::to_string(shape[0]) + "," +
+           std::to_string(shape[1]) + "]";
+}
+
 } // namespace
 
 QwenTextGenerationPipeline::QwenTextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
@@ -78,6 +87,14 @@ QwenTextGenerationPipeline::QwenTextGenerationPipeline(std::unique_ptr<ITrtModul
         throw std::runtime_error("QwenTextGenerationPipeline: invalid tokenizer");
     if (!state_ || !state_->ok()) {
         throw std::runtime_error("QwenTextGenerationPipeline: invalid inference state");
+    }
+
+    // Bind optional debug outputs once, before any decoder pass captures a CUDA graph.
+    prefill_windows_.bind(*prefill_, config_.prefill_max_length);
+    decoder_windows_.bind(*decoder_, 1);
+    if (!prefill_windows_.empty() || !decoder_windows_.empty()) {
+        std::cerr << "[trtmc.debug_windows] prefill=" << describe_debug_windows(prefill_windows_)
+                  << " decoder=" << describe_debug_windows(decoder_windows_) << '\n';
     }
 
     decoder_->enable_cuda_graph();
@@ -445,6 +462,86 @@ QwenTextGenerationPipeline::trace_logits(const std::string& prompt,
         }
         run_step(result.token_id, logits);
         trace.rows.push_back(logits);
+    }
+    return trace;
+}
+
+namespace {
+
+using DebugWindowValues = QwenTextGenerationPipeline::DebugWindowValues;
+
+std::vector<DebugWindowValues> empty_window_values(const QwenDebugWindows& windows) {
+    std::vector<DebugWindowValues> values;
+    for (const auto& window : windows.windows())
+        values.push_back(DebugWindowValues{window.name, window.layer, {0, window.hidden}, {}});
+    return values;
+}
+
+void append_window_rows(const QwenDebugWindows& windows, int32_t rows,
+                        std::vector<DebugWindowValues>& values) {
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        windows.append_rows(index, rows, values[index].values);
+        values[index].shape[0] += rows;
+    }
+}
+
+} // namespace
+
+void QwenTextGenerationPipeline::trace_debug_prefill(const std::vector<int32_t>& input_ids,
+                                                     std::vector<float>& logits,
+                                                     DebugWindowsTrace& trace) {
+    // Same chunking as run_prefill_batched(); each chunk's rows are copied after it runs.
+    const auto sq = static_cast<int32_t>(input_ids.size());
+    require_batched_prefill_contract(*prefill_, config_, sq, state_.get());
+    auto* kv = static_cast<QwenKvCache*>(state_.get());
+    kv->bind_cache_inputs(*prefill_);
+    std::vector<const void*> pk, pv;
+    require_prefill_kv_pointers(*prefill_, config_, pk, pv);
+
+    const int32_t chunk_limit = resolve_batched_prefill_chunk_limit(*kv, config_, sq);
+    trace.prefill = empty_window_values(prefill_windows_);
+    for (int32_t start = 0; start < sq;) {
+        const int32_t chunk_size = std::min(chunk_limit, sq - start);
+        run_prefill_chunk(input_ids.data() + start, chunk_size, *kv, pk, pv, logits);
+        append_window_rows(prefill_windows_, chunk_size, trace.prefill);
+        start += chunk_size;
+    }
+}
+
+QwenTextGenerationPipeline::DebugWindowsTrace
+QwenTextGenerationPipeline::trace_debug_windows(const std::string& prompt,
+                                                const TextGenerationConfig& cfg) {
+    DebugWindowsTrace trace;
+    trace.prompt_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
+    const auto& input_ids = trace.prompt_ids;
+    if (input_ids.empty())
+        throw std::invalid_argument("Qwen debug-window trace requires a non-empty prompt");
+    if (prefill_windows_.empty() && decoder_windows_.empty())
+        return trace;
+    const int32_t max_new_tokens = std::max(cfg.max_new_tokens, 0);
+    validate_generation_capacity(input_ids, max_new_tokens, state_.get());
+    const auto params = qwen_sampling_params_from_config(cfg, config_.id_eos_ids);
+    auto sampler = create_qwen_sampler(params);
+    sampler->reset();
+    reset_generation_context();
+    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
+
+    std::vector<float> logits;
+    trace_debug_prefill(input_ids, logits, trace);
+    // Prime like generate(), so every traced decoder pass replays the CUDA graph.
+    if (max_new_tokens > 0)
+        prime_decoder_after_batched_prefill(input_ids);
+    state_->mark_prefill_complete();
+
+    for (int32_t step = 0; step < max_new_tokens; ++step) {
+        const auto result =
+            sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params);
+        trace.generated_ids.push_back(result.token_id);
+        if (result.is_eos || qwen_is_eos_token(params, result.token_id))
+            break;
+        run_step(result.token_id, logits);
+        trace.steps.push_back(empty_window_values(decoder_windows_));
+        append_window_rows(decoder_windows_, 1, trace.steps.back());
     }
     return trace;
 }

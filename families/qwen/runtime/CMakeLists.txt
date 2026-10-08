@@ -4,6 +4,7 @@
 add_library(trtmc_model_qwen SHARED
   bpe_tokenizer.cpp
   chat_templates.cpp
+  debug_windows.cpp
   distributed_runtime.cpp
   kv_cache.cpp
   embedding_factory.cpp
@@ -77,6 +78,23 @@ if(TRTMC_BUILD_TESTS)
     ${TRTMC_CUDART_LIBRARY}
   )
   target_compile_options(qwen_logits_trace PRIVATE -Wall -Wextra -Wpedantic)
+
+  add_executable(qwen_debug_windows_trace
+    ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/debug_windows_trace.cpp
+  )
+  target_include_directories(qwen_debug_windows_trace PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(qwen_debug_windows_trace SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(qwen_debug_windows_trace PRIVATE
+    trtmc_runtime
+    trtmc_model_qwen
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(qwen_debug_windows_trace PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 if(TRTMC_BUILD_TESTS)
