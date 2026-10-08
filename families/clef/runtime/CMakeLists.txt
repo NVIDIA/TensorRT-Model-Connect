@@ -1,10 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The original visual position interpolation rounds each FP32 product before
-# its sum. Contracting multiply/add changes BF16 position values at ties.
-set_source_files_properties(media.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
-
 add_library(trtmc_model_clef SHARED plugin.cpp record.cpp bpe_tokenizer.cpp media.cpp)
 target_include_directories(trtmc_model_clef PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
 target_link_libraries(trtmc_model_clef PRIVATE trtmc_core nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})

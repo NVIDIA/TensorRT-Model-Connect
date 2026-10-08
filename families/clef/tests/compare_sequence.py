@@ -70,6 +70,9 @@ def main():
             paths.append(str(path))
     del model, batch, logits
     torch.cuda.empty_cache()
+    (args.output / "reference.json").write_text(
+        json.dumps(expected, default=lambda value: value.tolist(), indent=2)
+    )
     native = json.loads(
         subprocess.check_output(
             [
@@ -83,6 +86,7 @@ def main():
             text=True,
         )
     )
+    (args.output / "native.json").write_text(json.dumps(native, indent=2))
     assert not any(
         any(token in name.lower() for token in ("python", "torch", "c10"))
         for name in native["loaded_libraries"]
@@ -104,8 +108,13 @@ def main():
             assert score["question_id"] == wanted["id"]
             assert score["option_ids"] == wanted["options"]
             probabilities = torch.tensor(wanted["logits"]).softmax(-1).numpy()
-            np.testing.assert_allclose(score["logits"], wanted["logits"], atol=0.125, rtol=0.015)
-            np.testing.assert_allclose(score["probabilities"], probabilities, atol=0.002, rtol=0.01)
+            label = reference["name"] + ":" + wanted["id"]
+            np.testing.assert_allclose(
+                score["logits"], wanted["logits"], atol=0.125, rtol=0.015, err_msg=label
+            )
+            np.testing.assert_allclose(
+                score["probabilities"], probabilities, atol=0.002, rtol=0.01, err_msg=label
+            )
             assert np.argmax(score["probabilities"]) == np.argmax(probabilities)
             assert actual["response"]["answers"][wanted["id"]] == systemone_answer(
                 document["questions"][wanted["id"]],
@@ -119,7 +128,6 @@ def main():
         }
         print(json.dumps(receipt), flush=True)
         receipts.append(receipt)
-    (args.output / "native.json").write_text(json.dumps(native, indent=2))
     (args.output / "comparison.json").write_text(
         json.dumps(
             {

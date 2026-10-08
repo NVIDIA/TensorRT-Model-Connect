@@ -255,8 +255,8 @@ def decoder_block(g, x, config, index, cos=None, sin=None):
     return x
 
 
-def decoder_layer(network, weights, config, index, debug=False):
-    g = Graph(network, weights)
+def decoder_layer(network, weights, config, index, debug=False, fp32_sigmoid=True):
+    g = Graph(network, weights, fp32_sigmoid=fp32_sigmoid)
     if debug:
         g.trace = {}
     x = network.add_input("hidden_states", trt.bfloat16, (-1, config["hidden_size"]))

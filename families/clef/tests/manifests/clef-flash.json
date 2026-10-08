@@ -25,21 +25,21 @@
     },
     {
       "name": "clef-flash-paid-invoice",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/paid-invoice.json"
       }
     },
     {
       "name": "clef-flash-healthy-service",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/healthy-service.json"
       }
     },
     {
       "name": "clef-flash-multilingual",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/multilingual.json"
       }
@@ -56,7 +56,7 @@
     },
     {
       "name": "clef-flash-video",
-      "premerge": false,
+      "premerge": true,
       "inputs": {
         "document_path": "fixtures/video.json",
         "video_frame_paths": [

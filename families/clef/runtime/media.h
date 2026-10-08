@@ -26,5 +26,5 @@ std::vector<std::array<int, 3>> media_positions(const Record& record, const Medi
                                                 int image_token, int video_token);
 void vision_positions(const VisionFrame& frame, const std::vector<char>& embedding, int width,
                       int heads, int side, std::vector<float>& positions, std::vector<float>& cos,
-                      std::vector<float>& sin);
+                      std::vector<float>& sin, bool round_products = false);
 } // namespace trtmc::clef

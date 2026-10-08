@@ -7,10 +7,11 @@ import tensorrt as trt
 
 
 class Graph:
-    def __init__(self, network, weights):
+    def __init__(self, network, weights, *, fp32_sigmoid=True):
         self.n = network
         self.weights = weights
         self.keep = []
+        self.fp32_sigmoid = fp32_sigmoid
 
     def cast(self, x, dtype):
         return x if x.dtype == dtype else self.n.add_cast(x, dtype).get_output(0)
@@ -105,13 +106,7 @@ class Graph:
         return self.n.add_reduce(x, op, 1 << (axis % len(x.shape)), keep).get_output(0)
 
     def mean_pool(self, mask, values):
-        # Torch mean sums the span in FP32, divides once, then rounds to BF16.
-        # Multiplying each value by 1/span before summing changes rounding.
-        present = self.binary(mask, 0.0, trt.ElementWiseOperation.GREATER)
-        binary_mask = self.cast(present, trt.float32)
-        count = self.reduce(binary_mask)
-        total = self.mm(binary_mask, self.cast(values, trt.float32))
-        return self.cast(self.div(total, count), values.dtype)
+        return self.cast(self.mm(mask, self.cast(values, trt.float32)), values.dtype)
 
     def norm(self, x, name, eps=1e-5):
         dtype = x.dtype
@@ -150,6 +145,8 @@ class Graph:
         return self.cast(self.mul(f, self.activation(f, trt.ActivationType.SIGMOID)), x.dtype)
 
     def sigmoid(self, x):
+        if not self.fp32_sigmoid:
+            return self.activation(x, trt.ActivationType.SIGMOID)
         # Torch's BF16 sigmoid evaluates in FP32 and rounds only its result.
         return self.cast(
             self.activation(self.cast(x, trt.float32), trt.ActivationType.SIGMOID), x.dtype

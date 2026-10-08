@@ -284,7 +284,8 @@ class Pipeline final : public IStructuredDecision {
             const auto count = static_cast<std::size_t>(frame.grid_height) * frame.grid_width;
             patches.insert(patches.end(), frame.patches.begin(), frame.patches.end());
             std::vector<float> p, c, s;
-            vision_positions(frame, vision_positions_, width, heads, side, p, c, s);
+            vision_positions(frame, vision_positions_, width, heads, side, p, c, s,
+                             config_.value("round_vision_products", false));
             positions.insert(positions.end(), p.begin(), p.end());
             cos.insert(cos.end(), c.begin(), c.end());
             sin.insert(sin.end(), s.begin(), s.end());

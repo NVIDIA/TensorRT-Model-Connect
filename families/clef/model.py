@@ -11,6 +11,12 @@ import tensorrt as trt
 from .graph import Graph
 
 
+def _fp32_sigmoid(config):
+    # Flash needs FP32 sigmoid opmath to meet its reference contract. Preserve
+    # the independently qualified native BF16 gate path for the 27B backbone.
+    return config["hidden_size"] == 4096
+
+
 def joint_head(network, weights, config, *, dtype=trt.bfloat16):
     """Vectorize ragged questions while retaining every head operation.
 
@@ -170,7 +176,9 @@ def build_decoder_layer(
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    _graph = decoder_layer(network, weights, config, index, debug=debug)
+    _graph = decoder_layer(
+        network, weights, config, index, debug=debug, fp32_sigmoid=_fp32_sigmoid(config)
+    )
     profile = builder.create_optimization_profile()
     for i in range(network.num_inputs):
         tensor = network.get_input(i)
@@ -224,7 +232,7 @@ def build_backbone(checkpoint, config, max_sequence_length):
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    graph = Graph(network, {})
+    graph = Graph(network, {}, fp32_sigmoid=_fp32_sigmoid(config))
     hidden = config["hidden_size"]
     rotary = int(config["head_dim"] * config["rope_parameters"]["partial_rotary_factor"])
     x = network.add_input("hidden_states", trt.bfloat16, (-1, hidden))
@@ -308,6 +316,7 @@ def build(request, writer):
             "max_options": request.max_options,
             "precision": request.precision,
             "backbone_sequence_alignment": 1,
+            "round_vision_products": _fp32_sigmoid(text),
             "vision_config": config["vision_config"],
             "processor_config": json.loads((root / "processor_config.json").read_text()),
         },
