@@ -910,11 +910,19 @@ class Qwen38Model:
 
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "bf16":
+            # Constants are staged as FP16 bytes (TensorRT's Weights constructor
+            # does not accept ml_dtypes.bfloat16 arrays directly) and explicitly
+            # cast to BF16 in-graph by graph_ops._cast_back_to_trt_dtype, which
+            # every constant-building helper already calls to match its
+            # activation's runtime dtype -- mirroring families/qwen's own
+            # "storage np_dtype is fp16, runtime trt_dtype is bfloat16" pattern.
+            work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
         elif precision == "fp32":
             work_np_dtype, work_trt_dtype = np.float32, trt.float32
         else:
             raise ValueError(
-                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32 or fp16")
+                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32, fp16, or bf16")
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -961,8 +969,19 @@ class Qwen38Model:
 
         # --- inputs_embeds = pre_fc_norm_embedding(embed_tokens(next_token_id)) ---
         gather = network.add_gather(embedding_table, next_token_id, 0)
+        gather_out = gather.get_output(0)
+        if work_trt_dtype != trt.float32:
+            # embedding_table is stored at work_np_dtype (fp16 even for bf16
+            # builds -- see the precision dispatch above), so the gather
+            # output is still Half here. Cast up to work_trt_dtype before
+            # apply_norm, matching hidden_state_in's cast above -- apply_norm
+            # preserves its input's actual runtime dtype through to output,
+            # so leaving this uncast made inputs_embeds come out Half while
+            # hs (built from the already-cast hidden_state_in) came out
+            # BFloat16, and the concat below rejected the mixed types.
+            gather_out = network.add_cast(gather_out, work_trt_dtype).get_output(0)
         inputs_embeds = graph_blocks.apply_norm(
-            network, gather.get_output(0), hidden,
+            network, gather_out, hidden,
             weights["mtp_layer.pre_fc_norm_embedding"], None,
             eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
@@ -981,16 +1000,27 @@ class Qwen38Model:
             weights["mtp_layer.fc"], "mtp_layer.fc")
 
         # --- one ordinary decoder layer: real self-attention + its own KV cache ---
+        # Mirrors build_engine's per-layer `layer_cast`: every tensor entering
+        # _add_full_attention_layer must match work_trt_dtype exactly (TensorRT
+        # requires RotaryEmbedding's cosCache/sinCache and IAttention's inputs
+        # to share one runtime dtype), and cos/sin/eps constants are staged at
+        # work_np_dtype (fp16 storage even for bf16 builds) so they still need
+        # an explicit cast for bf16 precision.
+        def _layer_cast(tensor):
+            if tensor.dtype == work_trt_dtype:
+                return tensor
+            return network.add_cast(tensor, work_trt_dtype).get_output(0)
+
         result = _add_full_attention_layer(
             network=network,
-            hidden=fused,
-            cache_k=cache_k,
-            cache_v=cache_v,
-            attention_mask=attention_mask,
+            hidden=_layer_cast(fused),
+            cache_k=_layer_cast(cache_k),
+            cache_v=_layer_cast(cache_v),
+            attention_mask=_layer_cast(attention_mask),
             position_id=position_id,
-            cos_half_tensor=cos_half_tensor,
-            sin_half_tensor=sin_half_tensor,
-            eps_tensor=eps_tensor,
+            cos_half_tensor=_layer_cast(cos_half_tensor),
+            sin_half_tensor=_layer_cast(sin_half_tensor),
+            eps_tensor=_layer_cast(eps_tensor),
             weights=weights,
             prefix="mtp_layer",
             hidden_size=hidden,
@@ -1132,11 +1162,19 @@ class Qwen38Model:
 
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "bf16":
+            # Constants are staged as FP16 bytes (TensorRT's Weights constructor
+            # does not accept ml_dtypes.bfloat16 arrays directly) and explicitly
+            # cast to BF16 in-graph by graph_ops._cast_back_to_trt_dtype, which
+            # every constant-building helper already calls to match its
+            # activation's runtime dtype -- mirroring families/qwen's own
+            # "storage np_dtype is fp16, runtime trt_dtype is bfloat16" pattern.
+            work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
         elif precision == "fp32":
             work_np_dtype, work_trt_dtype = np.float32, trt.float32
         else:
             raise ValueError(
-                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32 or fp16")
+                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32, fp16, or bf16")
 
         num_heads = config.num_attention_heads
         num_kv_heads = config.num_key_value_heads
@@ -1216,9 +1254,20 @@ class Qwen38Model:
         sin_half_tensor = graph_ops.add_constant(
             network, sin_half.shape, sin_half, dtype=work_np_dtype)
 
+        # Constants are staged at work_np_dtype (fp16 storage even for bf16
+        # builds), so for bf16 they still need an explicit cast up to
+        # work_trt_dtype before reaching RotaryEmbedding/IAttention layers,
+        # which require all their input tensors to share one runtime dtype.
+        if work_trt_dtype != trt.float32:
+            eps_tensor = network.add_cast(eps_tensor, work_trt_dtype).get_output(0)
+            cos_half_tensor = network.add_cast(cos_half_tensor, work_trt_dtype).get_output(0)
+            sin_half_tensor = network.add_cast(sin_half_tensor, work_trt_dtype).get_output(0)
+
         # --- Embed all seq_len tokens up front ---
         gather = network.add_gather(embedding_table, token_ids, 0)
         embeds = gather.get_output(0)  # (seq_len, hidden)
+        if work_trt_dtype != trt.float32:
+            embeds = network.add_cast(embeds, work_trt_dtype).get_output(0)
 
         running_conv = list(conv_state_inputs)
         running_ssm = list(ssm_state_inputs)
@@ -1242,6 +1291,8 @@ class Qwen38Model:
             zeros_t = graph_ops.add_constant(
                 network, (1, t + 1),
                 np.zeros((1, t + 1), dtype=work_np_dtype), dtype=work_np_dtype)
+            if zeros_t.dtype != attention_mask.dtype:
+                zeros_t = network.add_cast(zeros_t, attention_mask.dtype).get_output(0)
             mask_concat = network.add_concatenation([attention_mask, zeros_t])
             mask_concat.axis = 1
             mask_t = mask_concat.get_output(0)
