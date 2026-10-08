@@ -11,14 +11,18 @@ import json
 import importlib.util
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from xml.etree import ElementTree
 
 if TYPE_CHECKING:
     from tools.ci.context import CiContext
@@ -30,6 +34,85 @@ class CommunityGpuError(RuntimeError):
 
 FAMILY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 SHARED_SMOKE_FAMILIES = ("bert", "gpt2", "qwen", "timm_vit", "whisper")
+STAGING_TIMEOUT_SECONDS = 900
+FAMILY_TIMEOUT_SECONDS = 2700
+MAX_EXECUTION_SECONDS = 10800
+SUMMARY_PREFIX = "TRTMC_GPU_SUMMARY="
+
+
+def execution_budget_seconds(env: dict[str, str]) -> int:
+    """Budget the selected owners while leaving the job time for final cleanup."""
+    families = selected_families(
+        env.get("TRTMC_GPU_SCOPE", ""),
+        env.get("TRTMC_GPU_FAMILIES", ""),
+        env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
+        env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
+    )
+    return min(
+        MAX_EXECUTION_SECONDS, len(families) * (STAGING_TIMEOUT_SECONDS + FAMILY_TIMEOUT_SECONDS)
+    )
+
+
+def _save_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _phase(report: dict, env: dict[str, str], phase: str, category: str) -> None:
+    report.update(phase=phase, failure_class=category)
+    if destination := env.get("TRTMC_GPU_RESULT_FILE"):
+        _save_json(Path(destination), report)
+
+
+def _case_results(report: dict, env: dict[str, str]) -> None:
+    """Record missing and skipped cases without treating them as passing coverage."""
+    cases = {name: "not_run" for name in report.get("requested_cases", [])}
+    build = Path(env.get("TRTMC_NATIVE_BUILD_DIR", "/tmp/trtmc-community-gpu-build"))
+    path = build / f"trtmc-{report['family']}-e2e-junit.xml"
+    if path.is_file():
+        try:
+            tests = ElementTree.parse(path).getroot().findall(".//testcase")
+            for test in tests:
+                match = re.fullmatch(r"test_.*e2e\[(.+)\]", test.get("name", ""))
+                if match and match[1] in cases:
+                    cases[match[1]] = (
+                        "skipped"
+                        if test.find("skipped") is not None
+                        else "failed"
+                        if test.find("failure") is not None or test.find("error") is not None
+                        else "passed"
+                    )
+        except (OSError, ElementTree.ParseError):
+            report["junit_error"] = "missing or invalid E2E result"
+    report["cases"] = cases
+
+
+@contextmanager
+def _family_result(env: dict[str, str], family: str):
+    started = time.monotonic()
+    report = {
+        "schema_version": 1,
+        "family": family,
+        "status": "running",
+        "phase": "plan",
+        "failure_class": "configuration",
+        "requested_cases": [],
+    }
+    try:
+        yield report
+    except Exception as error:
+        report.update(status="failed", exit_code=1, evidence=str(error)[-4000:])
+        raise
+    else:
+        report.update(status="passed", phase="complete", failure_class=None, exit_code=0)
+    finally:
+        _case_results(report, env)
+        report["duration_seconds"] = round(time.monotonic() - started, 3)
+        if destination := env.get("TRTMC_GPU_RESULT_FILE"):
+            _save_json(Path(destination), report)
+        print("TRTMC_FAMILY_RESULT=" + json.dumps(report, sort_keys=True), flush=True)
 
 
 @dataclass(frozen=True)
@@ -39,6 +122,7 @@ class FamilyPlan:
     family: str
     testcases: tuple[str, ...]
     checkpoints: tuple[tuple[str, str | None], ...]
+    deferred_testcases: tuple[str, ...] = ()
 
 
 def native_cli_library(declaration: Path) -> str | None:
@@ -113,6 +197,7 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
         raise CommunityGpuError(f"{family} GPU plan is missing: " + ", ".join(missing))
 
     cases: list[str] = []
+    deferred: list[str] = []
     checkpoints: set[tuple[str, str | None]] = set()
     manifests = sorted((root / "tests/manifests").glob("*.json"))
     for path in manifests:
@@ -130,8 +215,13 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
                 name = case.get("name")
                 if not isinstance(name, str) or not name:
                     raise ValueError("every testcase requires a non-empty string name")
+                if not isinstance(case.get("community_gpu", True), bool):
+                    raise ValueError("community_gpu must be a boolean when present")
                 if case.get("premerge") is True:
-                    selected_cases.append(name)
+                    if case.get("community_gpu", True):
+                        selected_cases.append(name)
+                    else:
+                        deferred.append(name)
             if selected_cases:
                 if "hf_id" in manifest:
                     checkpoints.add(
@@ -155,8 +245,8 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
     if not manifests:
         raise CommunityGpuError(f"{family} has no E2E manifests")
     if not cases:
-        raise CommunityGpuError(f"{family} has no E2E testcase marked premerge")
-    duplicates = sorted(name for name, count in Counter(cases).items() if count > 1)
+        raise CommunityGpuError(f"{family} has no E2E testcase marked premerge for Community GPU")
+    duplicates = sorted(name for name, count in Counter([*cases, *deferred]).items() if count > 1)
     if duplicates:
         raise CommunityGpuError(
             f"{family} has duplicate premerge E2E cases: " + ", ".join(duplicates)
@@ -165,6 +255,7 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
         family=family,
         testcases=tuple(sorted(cases)),
         checkpoints=tuple(sorted(checkpoints, key=lambda item: (item[0], item[1] or ""))),
+        deferred_testcases=tuple(sorted(deferred)),
     )
 
 
@@ -277,11 +368,18 @@ def _runtime_root(build: Path, plan: FamilyPlan, repository: Path | None = None)
 
 def run(repository: Path, env: dict[str, str], family: str) -> None:
     """Build and validate exactly one family inside its fresh container."""
+    with _family_result(env, family) as report:
+        _run_family(repository, env, family, report)
+
+
+def _run_family(repository: Path, env: dict[str, str], family: str, report: dict) -> None:
     from tools.ci.context import CiContext
     from tools.ci.e2e import E2ERunner
 
     repository = repository.resolve()
     plan = family_plan(repository, family)
+    report["requested_cases"] = list(plan.testcases)
+    report["deferred_cases"] = list(plan.deferred_testcases)
     build_env = {
         **env,
         "CMAKE_CUDA_ARCHITECTURES": env.get("CMAKE_CUDA_ARCHITECTURES", "89"),
@@ -289,11 +387,13 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
     context = CiContext(repository, build_env)
     print(f"Running Community GPU E2E: {family} ({', '.join(plan.testcases)})", flush=True)
     # Install before configuring native targets so they use this family's ABI.
+    _phase(report, env, "dependencies", "dependency")
     _install_family_requirements(context, (plan,))
     targets = [f"trtmc_model_{plan.family}"]
     declaration = repository / "families" / plan.family / "cli.json"
     if declaration.is_file() and native_cli_library(declaration) is not None:
         targets.append(f"trtmc_cli_{plan.family}")
+    _phase(report, env, "gpu", "environment")
     context.run(
         [
             sys.executable,
@@ -308,6 +408,7 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
         raise CommunityGpuError(f"Community GPU build directory must be inside /tmp: {build}")
     if build.exists():
         raise CommunityGpuError(f"Community GPU build directory already exists: {build}")
+    _phase(report, env, "configure", "build")
     context.run(
         [
             "cmake",
@@ -322,6 +423,7 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
             "-DTRTMC_BUILD_EXAMPLES=OFF",
         ]
     )
+    _phase(report, env, "build", "build")
     context.run(
         [
             "cmake",
@@ -354,8 +456,10 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
         ],
         limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
     )
+    _phase(report, env, "runtime", "harness")
     runtime_root = _runtime_root(build, plan, repository)
     if env.get("TRTMC_CHECKPOINTS_PRESTAGED") != "1":
+        _phase(report, env, "checkpoints", "dependency")
         _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
     runtime_env = {
         **checkpoint_env,
@@ -374,6 +478,7 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
         "TRTMC_NATIVE_BUILD_DIR": str(build),
         "TRTMC_E2E_TIMEOUT": env.get("TRTMC_E2E_TIMEOUT", "40m"),
     }
+    _phase(report, env, "validation", "validation")
     E2ERunner(CiContext(repository, runtime_env))._run(
         (plan.family,),
         plan.testcases,
@@ -381,8 +486,141 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
     print(f"Community GPU family passed: {plan.family}", flush=True)
 
 
+def _container_result(
+    path: Path,
+    family: str,
+    exit_code: int,
+    state: dict,
+    expected_cases: tuple[str, ...] | None = None,
+) -> dict:
+    """Treat container evidence as bounded data, never as a command or retry policy."""
+    record = {
+        "family": family,
+        "status": "failed",
+        "phase": "container",
+        "failure_class": "unknown",
+        "exit_code": exit_code,
+        "requested_cases": list(expected_cases or ()),
+        "cases": {name: "not_run" for name in expected_cases or ()},
+    }
+    try:
+        # A timed-out container may still be writing here. Do not follow links,
+        # block on a FIFO/device, or trust a pre-open size check.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+                raise ValueError("invalid family result file")
+            payload = stream.read(1024 * 1024 + 1)
+        if len(payload) > 1024 * 1024:
+            raise ValueError("oversized family result file")
+        value = json.loads(payload)
+        if (
+            not isinstance(value, dict)
+            or value.get("family") != family
+            or value.get("schema_version") != 1
+        ):
+            raise ValueError("invalid family result identity")
+        if value.get("status") not in {"running", "passed", "failed"}:
+            raise ValueError("invalid family result status")
+        cases = value.get("cases", {})
+        requested = value.get("requested_cases", [])
+        if not isinstance(requested, list) or not all(isinstance(name, str) for name in requested):
+            raise ValueError("invalid requested cases")
+        if len(set(requested)) != len(requested) or (
+            expected_cases is not None and sorted(requested) != sorted(expected_cases)
+        ):
+            raise ValueError("family result changed the selected cases")
+        if value.get("phase") not in {
+            "plan",
+            "dependencies",
+            "gpu",
+            "configure",
+            "build",
+            "runtime",
+            "checkpoints",
+            "validation",
+            "complete",
+        }:
+            raise ValueError("invalid result phase")
+        if value.get("failure_class") not in {
+            None,
+            "configuration",
+            "dependency",
+            "environment",
+            "build",
+            "harness",
+            "validation",
+        }:
+            raise ValueError("invalid failure classification")
+        if not isinstance(cases, dict) or any(
+            not isinstance(name, str) or outcome not in {"passed", "failed", "skipped", "not_run"}
+            for name, outcome in cases.items()
+        ):
+            raise ValueError("invalid case results")
+        record.update(
+            {
+                key: value[key]
+                for key in (
+                    "status",
+                    "phase",
+                    "failure_class",
+                    "requested_cases",
+                    "cases",
+                    "duration_seconds",
+                    "evidence",
+                )
+                if key in value
+            }
+        )
+        record["cases"] = {name: cases.get(name, "not_run") for name in requested}
+        if exit_code == 0 and value["status"] == "passed":
+            if (
+                not requested
+                or set(cases) != set(requested)
+                or any(v != "passed" for v in cases.values())
+            ):
+                raise ValueError("family passed without complete selected E2E evidence")
+        else:
+            record["status"] = "failed"
+            if value["status"] == "passed":
+                record["failure_class"] = "unknown"
+    except (OSError, ValueError, TypeError, RecursionError):
+        record.update(
+            status="failed",
+            failure_class="unknown",
+            evidence="missing, incomplete or invalid family result",
+        )
+    if state.get("OOMKilled") is True:
+        record.update(
+            status="failed",
+            failure_class="resource",
+            evidence="Docker confirmed OOMKilled within the container memory limit",
+        )
+    return record
+
+
+def _summary(records: dict[str, dict], env: dict[str, str], started: float) -> dict:
+    value = {
+        "schema_version": 1,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "families": list(records.values()),
+        "complete": all(
+            row.get("status") not in {"not_run", "running"}
+            and bool(row.get("cases"))
+            and all(result in {"passed", "failed"} for result in row["cases"].values())
+            for row in records.values()
+        ),
+        "passed": bool(records) and all(row["status"] == "passed" for row in records.values()),
+    }
+    if destination := env.get("TRTMC_GPU_RESULTS_DIR"):
+        _save_json(Path(destination) / "summary.json", value)
+    print(SUMMARY_PREFIX + json.dumps(value, sort_keys=True), flush=True)
+    return value
+
+
 def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
-    """Run selected families sequentially without importing contributor code on the VM."""
+    """Run selected owners sequentially, preserving partial coverage and cleanup."""
     repository = repository.resolve(strict=True)
     selected = selected_families(
         env.get("TRTMC_GPU_SCOPE", ""),
@@ -390,11 +628,28 @@ def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
         env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
         env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
     )
+    plans = {family: family_plan(repository, family) for family in selected}
+    started = time.monotonic()
+    deadline = started + execution_budget_seconds(env)
+    records = {
+        family: {
+            "family": family,
+            "status": "not_run",
+            "phase": "pending",
+            "failure_class": None,
+            "requested_cases": list(plans[family].testcases),
+            "deferred_cases": list(plans[family].deferred_testcases),
+            "cases": {case: "not_run" for case in plans[family].testcases},
+        }
+        for family in selected
+    }
+    _summary(records, env, started)
     inspected = subprocess.run(
         ["docker", "image", "inspect", "--format", "{{.Id}}", image],
         check=True,
         capture_output=True,
         text=True,
+        timeout=30,
     )
     image_id = inspected.stdout.strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
@@ -402,97 +657,314 @@ def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
     runner = Path(__file__).resolve()
     run_id = uuid.uuid4().hex
     failures = []
-    for family in selected:
-        name = f"trtmc-community-{run_id}-{family}"
-        with tempfile.TemporaryDirectory(prefix=f"{name}-") as cache:
-            stage_command = [
-                sys.executable,
-                str(runner),
-                "--stage-family",
-                family,
-                "--repository",
-                str(repository),
-                "--cache-dir",
-                str(Path(cache) / "hub"),
-            ]
-            stage_env = {
-                key: env[key]
-                for key in (
-                    "HF_TOKEN",
-                    "HF_ENDPOINT",
-                    "HTTP_PROXY",
-                    "HTTPS_PROXY",
-                    "NO_PROXY",
-                    "REQUESTS_CA_BUNDLE",
-                    "SSL_CERT_FILE",
-                )
-                if env.get(key)
-            }
-            print(f"Staging checkpoints on the trusted host for: {family}", flush=True)
-            staged = subprocess.run(stage_command, check=False, env=stage_env)
-            if staged.returncode:
-                failures.append(f"{family}: checkpoint staging exited {staged.returncode}")
-                continue
-
-            command = [
-                "docker",
-                "run",
-                "--rm",
-                "--name",
-                name,
-                "--gpus",
-                "all",
-                "--shm-size",
-                "16g",
-                "--volume",
-                f"{repository}:/src:ro",
-                "--volume",
-                f"{runner}:/opt/community_gpu_ci.py:ro",
-                "--volume",
-                f"{cache}:/tmp/trtmc-community-huggingface",
-                "--workdir",
-                "/src",
-                "--env",
-                "PYTHONPATH=/src",
-                "--env",
-                "PYTHONDONTWRITEBYTECODE=1",
-                "--env",
-                "PYTHONUNBUFFERED=1",
-                "--env",
-                "TRTMC_CHECKPOINTS_PRESTAGED=1",
-                "--env",
-                f"CMAKE_CUDA_ARCHITECTURES={env.get('CMAKE_CUDA_ARCHITECTURES', '89')}",
-                image_id,
-                "python3.12",
-                "/opt/community_gpu_ci.py",
-                "--family",
-                family,
-            ]
-            print(f"Starting isolated Community GPU container: {family}", flush=True)
-            try:
-                result = subprocess.run(command, check=False)
-                if result.returncode:
-                    failures.append(f"{family}: container exited {result.returncode}")
-                print(
-                    f"Community GPU container finished: {family} (exit {result.returncode})",
-                    flush=True,
-                )
-            finally:
-                # Also remove containers left by an interrupted Docker client.
-                cleanup = subprocess.run(
-                    ["docker", "rm", "--force", name],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                # --rm normally removed it already. Other errors may leave a live
-                # workload behind, so do not admit the next family in that case.
-                if cleanup.returncode and f"No such container: {name}" not in cleanup.stderr:
-                    raise CommunityGpuError(
-                        f"Cannot remove Community GPU container {name}: {cleanup.stderr.strip()}"
+    # Reserve a quarter of host RAM and two CPUs for Docker, SSH and the coordinator.
+    memory_limit = int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") * 0.75)
+    cpu_limit = max(1, (os.cpu_count() or 2) - 2)
+    try:
+        for family in selected:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failures.append("coordinator budget exhausted; remaining families were not run")
+                for row in records.values():
+                    if row["status"] == "not_run":
+                        row.update(failure_class="budget", evidence="coordinator deadline reached")
+                break
+            name = f"trtmc-community-{run_id}-{family}"
+            row = records[family]
+            row.update(status="running", phase="checkpoints", failure_class="dependency")
+            _summary(records, env, started)
+            with tempfile.TemporaryDirectory(prefix=f"{name}-") as cache:
+                stage_command = [
+                    sys.executable,
+                    str(runner),
+                    "--stage-family",
+                    family,
+                    "--repository",
+                    str(repository),
+                    "--cache-dir",
+                    str(Path(cache) / "hub"),
+                ]
+                stage_env = {
+                    key: env[key]
+                    for key in (
+                        "HF_TOKEN",
+                        "HF_ENDPOINT",
+                        "HTTP_PROXY",
+                        "HTTPS_PROXY",
+                        "NO_PROXY",
+                        "REQUESTS_CA_BUNDLE",
+                        "SSL_CERT_FILE",
                     )
+                    if env.get(key)
+                }
+                print(f"Staging checkpoints on the trusted host for: {family}", flush=True)
+                try:
+                    staged = subprocess.run(
+                        stage_command,
+                        check=False,
+                        env=stage_env,
+                        timeout=min(STAGING_TIMEOUT_SECONDS, remaining),
+                    )
+                except subprocess.TimeoutExpired:
+                    row.update(
+                        status="failed",
+                        failure_class="budget",
+                        exit_code=124,
+                        evidence="checkpoint staging deadline reached",
+                    )
+                    failures.append(f"{family}: checkpoint staging timed out")
+                    continue
+                if staged.returncode:
+                    row.update(
+                        status="failed",
+                        exit_code=staged.returncode,
+                        evidence="checkpoint staging failed; see the staging error",
+                    )
+                    failures.append(f"{family}: checkpoint staging exited {staged.returncode}")
+                    continue
+                command = [
+                    "docker",
+                    "run",
+                    "--name",
+                    name,
+                    "--gpus",
+                    "all",
+                    "--shm-size",
+                    "16g",
+                    "--memory",
+                    str(memory_limit),
+                    "--memory-swap",
+                    str(memory_limit),
+                    "--cpus",
+                    str(cpu_limit),
+                    "--pids-limit",
+                    "4096",
+                    "--volume",
+                    f"{repository}:/src:ro",
+                    "--volume",
+                    f"{runner}:/opt/community_gpu_ci.py:ro",
+                    "--volume",
+                    f"{cache}:/tmp/trtmc-community-huggingface",
+                    "--workdir",
+                    "/src",
+                    "--env",
+                    "PYTHONPATH=/src",
+                    "--env",
+                    "PYTHONDONTWRITEBYTECODE=1",
+                    "--env",
+                    "PYTHONUNBUFFERED=1",
+                    "--env",
+                    "TRTMC_CHECKPOINTS_PRESTAGED=1",
+                    "--env",
+                    "TRTMC_GPU_RESULT_FILE=/tmp/trtmc-community-huggingface/result.json",
+                    "--env",
+                    f"CMAKE_CUDA_ARCHITECTURES={env.get('CMAKE_CUDA_ARCHITECTURES', '89')}",
+                    image_id,
+                    "python3.12",
+                    "/opt/community_gpu_ci.py",
+                    "--family",
+                    family,
+                ]
+                row.update(phase="container", failure_class="unknown")
+                _summary(records, env, started)
+                print(f"Starting isolated Community GPU container: {family}", flush=True)
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, 0)
+                    result = subprocess.run(
+                        command, check=False, timeout=min(FAMILY_TIMEOUT_SECONDS, remaining)
+                    )
+                    inspected_state = subprocess.run(
+                        ["docker", "inspect", "--format", "{{json .State}}", name],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    try:
+                        state = (
+                            json.loads(inspected_state.stdout)
+                            if inspected_state.returncode == 0
+                            else {}
+                        )
+                    except (ValueError, TypeError):
+                        state = {}
+                    if not isinstance(state, dict):
+                        state = {}
+                    records[family] = _container_result(
+                        Path(cache) / "result.json",
+                        family,
+                        result.returncode,
+                        state,
+                        plans[family].testcases,
+                    )
+                    records[family]["deferred_cases"] = list(plans[family].deferred_testcases)
+                    if records[family]["status"] != "passed":
+                        failures.append(
+                            f"{family}: container exited {result.returncode} "
+                            f"({records[family]['failure_class']})"
+                        )
+                    print(
+                        f"Community GPU container finished: {family} (exit {result.returncode})",
+                        flush=True,
+                    )
+                except subprocess.TimeoutExpired:
+                    row = _container_result(
+                        Path(cache) / "result.json", family, 124, {}, plans[family].testcases
+                    )
+                    row.update(
+                        status="failed",
+                        failure_class="budget",
+                        exit_code=124,
+                        evidence="family or coordinator deadline reached",
+                    )
+                    records[family] = row
+                    records[family]["deferred_cases"] = list(plans[family].deferred_testcases)
+                    failures.append(f"{family}: family execution timed out")
+                finally:
+                    cleanup = subprocess.run(
+                        ["docker", "rm", "--force", name],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    if cleanup.returncode and f"No such container: {name}" not in cleanup.stderr:
+                        records[family].update(
+                            status="failed",
+                            phase="cleanup",
+                            failure_class="infrastructure",
+                            evidence="container removal could not be confirmed",
+                        )
+                        raise CommunityGpuError(
+                            f"Cannot remove Community GPU container {name}: {cleanup.stderr.strip()}"
+                        )
+                _summary(records, env, started)
+    finally:
+        _summary(records, env, started)
     if failures:
         raise CommunityGpuError("Community GPU family failures: " + "; ".join(failures))
+
+
+def _checked_summary(value: object) -> dict | None:
+    """Ignore malformed output and derive coverage from individual verdicts."""
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        return None
+    rows = value.get("families")
+    if not isinstance(rows, list) or not rows:
+        return None
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        family = row.get("family")
+        if not isinstance(family, str) or not FAMILY_PATTERN.fullmatch(family) or family in seen:
+            return None
+        seen.add(family)
+        if not isinstance(row.get("status"), str) or row["status"] not in {
+            "passed",
+            "failed",
+            "running",
+            "not_run",
+        }:
+            return None
+        if not isinstance(row.get("phase"), str) or len(row["phase"]) > 64:
+            return None
+        category = row.get("failure_class")
+        if category is not None and (not isinstance(category, str) or len(category) > 64):
+            return None
+        cases = row.get("cases")
+        if not isinstance(cases, dict) or any(
+            not isinstance(name, str)
+            or not isinstance(outcome, str)
+            or outcome not in {"passed", "failed", "skipped", "not_run"}
+            for name, outcome in cases.items()
+        ):
+            return None
+        deferred = row.get("deferred_cases", [])
+        if not isinstance(deferred, list) or not all(isinstance(name, str) for name in deferred):
+            return None
+    return {
+        **value,
+        "complete": all(
+            row["status"] in {"passed", "failed"}
+            and bool(row["cases"])
+            and all(status in {"passed", "failed"} for status in row["cases"].values())
+            for row in rows
+        ),
+        "passed": all(
+            row["status"] == "passed"
+            and bool(row["cases"])
+            and all(status == "passed" for status in row["cases"].values())
+            for row in rows
+        ),
+    }
+
+
+def summarize_log(path: Path, destination: Path | None = None) -> dict | None:
+    """Render the last complete coordinator record after success or interruption."""
+    summary = None
+    if path.is_file():
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            while line := stream.readline(4 * 1024 * 1024 + 1):
+                if len(line) > 4 * 1024 * 1024:
+                    while line and not line.endswith("\n"):
+                        line = stream.readline(4 * 1024 * 1024 + 1)
+                    continue
+                if line.startswith(SUMMARY_PREFIX):
+                    try:
+                        value = json.loads(line[len(SUMMARY_PREFIX) :])
+                    except (ValueError, RecursionError):
+                        continue
+                    if checked := _checked_summary(value):
+                        summary = checked
+    if destination:
+        with destination.open("a", encoding="utf-8") as stream:
+            stream.write("\nCommunity GPU family outcomes\n\n")
+            if summary is None:
+                stream.write(
+                    "No coordinator result was received. Check provision and setup logs.\n"
+                )
+            else:
+                stream.write(
+                    "| Family | Status | Stage | Classification | E2E cases |\n| --- | --- | --- | --- | --- |\n"
+                )
+                for row in summary["families"]:
+                    if not isinstance(row, dict):
+                        continue
+
+                    def cell(value):
+                        return str(value).replace("|", "\\|").replace("\n", " ")[:500]
+
+                    cases = row.get("cases", {})
+                    counts = dict(Counter(cases.values())) if isinstance(cases, dict) else {}
+                    stream.write(
+                        "| "
+                        + " | ".join(
+                            cell(value)
+                            for value in (
+                                row.get("family"),
+                                row.get("status"),
+                                row.get("phase"),
+                                row.get("failure_class") or "—",
+                                counts,
+                            )
+                        )
+                        + " |\n"
+                    )
+                stream.write(
+                    f"\nAll selected Community E2Es executed: {summary.get('complete') is True}. "
+                    f"All families passed: {summary.get('passed') is True}.\n"
+                )
+                for row in summary["families"]:
+                    if deferred := row.get("deferred_cases"):
+                        stream.write(
+                            f"\n{cell(row['family'])}: deferred from Community, not qualified here: "
+                            + cell(deferred)
+                            + ".\n"
+                        )
+    return summary
 
 
 def main() -> int:
@@ -501,15 +973,23 @@ def main() -> int:
     mode.add_argument("--containers", action="store_true")
     mode.add_argument("--family")
     mode.add_argument("--stage-family")
+    mode.add_argument("--execution-budget", action="store_true")
+    mode.add_argument("--summarize-log", type=Path)
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--image", default="trtmc-quickstart-gpu")
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--checkpoint-token-file", type=Path)
+    parser.add_argument("--summary-file", type=Path)
     args = parser.parse_args()
     try:
         if args.checkpoint_token_file is not None and not args.containers:
             raise CommunityGpuError("--checkpoint-token-file requires --containers")
-        if args.containers:
+        if args.execution_budget:
+            print(execution_budget_seconds(dict(os.environ)))
+        elif args.summarize_log is not None:
+            summary = summarize_log(args.summarize_log, args.summary_file)
+            print(json.dumps(summary, sort_keys=True))
+        elif args.containers:
             env = dict(os.environ)
             if args.checkpoint_token_file is not None:
                 # Only the trusted coordinator reads this private, unmounted

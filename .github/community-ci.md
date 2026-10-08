@@ -83,13 +83,20 @@ test criteria remain owned by the source under test. The GPU runner selects
 timm ViT, Whisper, and directly changed or added families. Docs-only changes
 skip GPU. Missing public assets fail visibly rather than count as coverage.
 
+A testcase may explicitly set `community_gpu: false` to keep a larger workload
+in its existing Internal/Nightly qualification scope. Its `premerge` flag and
+passing criteria remain unchanged. Community reports deferred cases by name and
+does not claim to have qualified them. Each selected family must still declare
+at least one runnable Community premerge case; disabling all cases is an error.
+
 ### Blocking GPU reservation
 
 The workflow calls `python3 -m tools.brev_exec provision` once before admitting any
 project build or model test. The entrypoint reserves a VM through the pinned Brev
 CLI and waits for `RUNNING`, completed environment setup, and shell readiness.
-It then checks SSH, cloud-init completion when installed, the Docker daemon,
-host GPU visibility, and GPU access from a digest-pinned CUDA probe container.
+It then checks SSH, the Docker daemon, host GPU visibility, available disk, and
+GPU access from a digest-pinned CUDA probe container. Cloud-init state is
+diagnostic information, not a requirement to rewrite or restart bootstrap.
 Brev's create exit code alone is not a readiness guarantee.
 
 CI requests Jupyter disabled because the job uses Docker rather than notebooks.
@@ -99,12 +106,20 @@ diagnostics report cloud-init, service states, and fixed setup markers without
 printing credentials, environment values, or complete bootstrap logs. These
 diagnostics do not admit project or model execution.
 
-The reservation has one 20-minute deadline, including CLI waits and failed-attempt
-cleanup. It may try up to three instance names, using the AWS fallback for later
-attempts. Each name is published before creation so teardown can target a partial
-allocation. A replacement is admitted only after the failed allocation's deletion
-has been confirmed in Brev's inventory; uncertain cleanup fails the reservation.
-Failed deletion requests are retried within the cleanup budget.
+The reservation waits up to 45 minutes on one named instance. The default is
+AWS `g6.4xlarge`; explicit Nebius qualification uses
+`gpu-l40s-a.1gpu-16vcpu-64gb`. Both request 500 GiB disk and require 200 GiB free
+at admission. Metadata READY is followed by the same functional probe; neither
+a failed test nor a readiness timeout silently allocates a replacement.
+
+Each failed probe records the CLI return code, whether stdout/stderr were
+received, safe phase markers, and bounded-timeout partial evidence. Unrecognized
+output remains unknown; diagnostic messages never relax the readiness receipt.
+
+Every exit enters blocking deletion of the recorded allocation identity. Cleanup
+is successful only after authenticated inventory confirms absence. A returned
+DELETE response alone is insufficient. The independent cleanup job uses the same
+lease and also waits for confirmed absence.
 
 Once reservation succeeds, dependency setup and model validation use that VM.
 The workflow invokes the family coordinator once and preserves its failure
@@ -118,7 +133,27 @@ One GPU execution reserves one Brev VM and builds one base image. The coordinato
 then starts a fresh container for each selected family, waits for it to finish,
 removes it, and starts the next family. Shared smoke coverage remains BERT, GPT-2,
 Qwen, timm ViT, and Whisper; directly changed or added families remain selected.
-Failures are collected after every selected family has been attempted.
+Failures are collected while the coordinator continues with the remaining
+selected families. Checkpoint staging has a 15-minute per-family limit and the
+family container has a 45-minute limit. The aggregate budget grows with selected
+owners, up to three hours. Any families not admitted before that deadline remain
+explicitly `not_run`, and the workflow fails with incomplete coverage. No testcase
+selection or numerical passing criterion is reduced to fit this budget.
+
+The image/setup/test step is capped at four hours inside the six-hour GPU job,
+leaving at least an hour for release after the 45-minute reservation. Family
+containers are restricted to three quarters of host RAM, no additional swap,
+and all but two host CPUs. Docker OOM state is inspected before each container
+is explicitly removed; it is reported as a resource failure rather than a
+transport failure. Failed removal prevents admission of the next family.
+
+Per-family results retain the failing stage, classification, duration, and every
+selected E2E case's verdict. Missing, skipped, malformed, or incomplete results
+cannot pass even when a container exits zero. The trusted host checks the exact
+case inventory from manifests without importing contributor Python. After VM
+cleanup, the workflow renders these results in the job summary and preserves the
+raw durable-worker log and parsed summary as artifacts. Summary text is
+diagnostic; command success and confirmed VM removal remain mandatory gates.
 
 Each container owns its Python dependencies, native build, runtime directory,
 temporary files, and checkpoint cache. The PR source and selected CI runner are

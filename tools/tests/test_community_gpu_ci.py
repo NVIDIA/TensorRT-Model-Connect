@@ -361,6 +361,41 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     assert runtime["HF_HUB_OFFLINE"] == "1"
 
 
+def _container_receipt(command: list[str], failed: bool = False) -> None:
+    """Emulate a completed container, including its selected E2E evidence."""
+    cache = next(value for value in command if value.endswith(":/tmp/trtmc-community-huggingface"))
+    family = command[-1]
+    (Path(cache.rsplit(":", 1)[0]) / "result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "family": family,
+                "status": "failed" if failed else "passed",
+                "phase": "validation" if failed else "complete",
+                "failure_class": "validation" if failed else None,
+                "requested_cases": [family],
+                "cases": {family: "failed" if failed else "passed"},
+            }
+        )
+    )
+
+
+def _planned_owners(repository: Path, *families: str) -> None:
+    for family in families:
+        _family(
+            repository,
+            family,
+            [
+                {
+                    "family": family,
+                    "testcases": [
+                        {"name": family, "premerge": True},
+                    ],
+                }
+            ],
+        )
+
+
 @pytest.mark.parametrize("failed_family", [None, "alpha"])
 def test_containers_are_sequential_and_failures_do_not_skip_families(
     tmp_path: Path,
@@ -370,6 +405,7 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
     """Each execution is removed before the next family starts, including failures."""
     events = []
     staged = []
+    _planned_owners(tmp_path, "alpha", "beta", "gamma")
     image = "sha256:" + "a" * 64
 
     def docker(command, **kwargs):
@@ -386,7 +422,9 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
             family = command[-1]
             assert command[-2] == "--family"
             assert image in command
-            assert "--rm" in command
+            # Retain exit/OOM state until inspection, then explicitly remove it.
+            assert "--rm" not in command
+            assert "--memory" in command and "--memory-swap" in command
             assert f"{tmp_path}:/src:ro" in command
             assert (
                 f"{Path(community_gpu_ci.__file__).resolve()}:/opt/community_gpu_ci.py:ro"
@@ -396,7 +434,10 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
             assert command[-4:] == ["python3.12", "/opt/community_gpu_ci.py", "--family", family]
             assert not any("HF_TOKEN" in value or "docker.sock" in value for value in command)
             events.append(("start", family, command[command.index("--name") + 1]))
+            _container_receipt(command, family == failed_family)
             return subprocess.CompletedProcess(command, 17 if family == failed_family else 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
         assert command[:3] == ["docker", "rm", "--force"]
         assert command[-1] == events[-1][2]
         events.append(("remove", events[-1][1], command[-1]))
@@ -431,6 +472,7 @@ def test_checkpoint_staging_forwards_only_network_configuration(
     image = "sha256:" + "c" * 64
     runs: list[tuple[list[str], dict]] = []
     token_file = tmp_path / "checkpoint-token"
+    _planned_owners(tmp_path, "alpha")
 
     def docker(command, **kwargs):
         if command[:3] == ["docker", "image", "inspect"]:
@@ -440,7 +482,11 @@ def test_checkpoint_staging_forwards_only_network_configuration(
             if token_from_file:
                 assert "HF_TOKEN" not in os.environ
             runs.append((command, kwargs))
+            if command[:2] == ["docker", "run"]:
+                _container_receipt(command)
             return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
         assert command[:3] == ["docker", "rm", "--force"]
         return subprocess.CompletedProcess(command, 1, stderr=f"No such container: {command[-1]}")
 
@@ -528,6 +574,7 @@ def test_dependency_build_uses_the_family_container_environment(tmp_path: Path) 
 def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch, already_removed):
     """Only confirmed absence may ignore a failed explicit container removal."""
     started = []
+    _planned_owners(tmp_path, "alpha", "beta")
 
     def docker(command, **kwargs):
         if command[:3] == ["docker", "image", "inspect"]:
@@ -536,7 +583,10 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
             return subprocess.CompletedProcess(command, 0)
         if command[:2] == ["docker", "run"]:
             started.append(command[-1])
+            _container_receipt(command)
             return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
         error = f"No such container: {command[-1]}" if already_removed else "daemon unavailable"
         return subprocess.CompletedProcess(command, 1, stderr=error)
 
@@ -573,7 +623,15 @@ def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
     bin_dir.mkdir()
     docker = bin_dir / "docker"
     docker.write_text(
-        '#!/bin/sh\nif [ "$1" = image ]; then printf "sha256:%s\\n" ' + "a" * 64 + "; fi\n"
+        "#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\n"
+        "if sys.argv[1] == 'image': print('sha256:' + 'a' * 64)\n"
+        "elif sys.argv[1] == 'inspect': print('{}')\n"
+        "elif sys.argv[1] == 'run':\n"
+        "    cache = next(v for v in sys.argv if v.endswith(':/tmp/trtmc-community-huggingface'))\n"
+        "    (Path(cache.rsplit(':', 1)[0]) / 'result.json').write_text(json.dumps({\n"
+        "        'schema_version': 1, 'family': 'alpha', 'status': 'passed',\n"
+        "        'phase': 'complete', 'failure_class': None,\n"
+        "        'requested_cases': ['alpha'], 'cases': {'alpha': 'passed'}}))\n"
     )
     docker.chmod(0o755)
     result = subprocess.run(
@@ -2280,3 +2338,308 @@ def test_invalid_existing_exit_status_cannot_pass(local_transport, tmp_path):
     with pytest.raises(RemoteTaskError, match="no trustworthy result.*invalid"):
         brev_provision.execute("gpu", argv, tmp_path / "log", result, 5, 0.02)
     assert counter.read_text() == "run\n"
+
+
+def _gpu_environment(*families: str) -> dict[str, str]:
+    owners = json.dumps(sorted(families))
+    return {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": owners,
+        "TRTMC_GPU_DIRECT_FAMILIES": owners,
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+    }
+
+
+def test_execution_budget_scales_without_consuming_cleanup_budget():
+    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha")) == 3600
+    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha", "beta")) == 7200
+    assert (
+        community_gpu_ci.execution_budget_seconds(
+            _gpu_environment(*(f"family_{chr(97 + i)}" for i in range(20)))
+        )
+        == 10800
+    )
+
+
+def test_family_result_preserves_failed_skipped_and_unrun_cases(tmp_path):
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "trtmc-alpha-e2e-junit.xml").write_text(
+        "<testsuites><testsuite>"
+        '<testcase name="test_official_checkpoint_e2e[one]" />'
+        '<testcase name="test_other_e2e[two]"><failure /></testcase>'
+        '<testcase name="test_other_e2e[three]"><skipped /></testcase>'
+        "</testsuite></testsuites>"
+    )
+    destination = tmp_path / "result.json"
+    env = {"TRTMC_NATIVE_BUILD_DIR": str(build), "TRTMC_GPU_RESULT_FILE": str(destination)}
+    with pytest.raises(RuntimeError, match="original validation error"):
+        with community_gpu_ci._family_result(env, "alpha") as record:
+            record["requested_cases"] = ["one", "two", "three", "four"]
+            community_gpu_ci._phase(record, env, "validation", "validation")
+            raise RuntimeError("original validation error")
+    result = json.loads(destination.read_text())
+    assert result["status"] == "failed" and result["failure_class"] == "validation"
+    assert result["cases"] == {
+        "one": "passed",
+        "two": "failed",
+        "three": "skipped",
+        "four": "not_run",
+    }
+    assert result["evidence"] == "original validation error"
+
+
+@pytest.mark.parametrize("mutation", ["missing", "empty", "skipped", "wrong_owner", "symlink"])
+def test_container_exit_zero_requires_complete_owned_e2e_evidence(tmp_path, mutation):
+    path = tmp_path / "result.json"
+    record = {
+        "schema_version": 1,
+        "family": "alpha",
+        "status": "passed",
+        "phase": "complete",
+        "requested_cases": ["one"],
+        "cases": {"one": "passed"},
+        "failure_class": None,
+    }
+    if mutation == "empty":
+        record["cases"] = {}
+    elif mutation == "skipped":
+        record["cases"] = {"one": "skipped"}
+    elif mutation == "wrong_owner":
+        record["family"] = "beta"
+    if mutation != "missing":
+        path.write_text(json.dumps(record))
+    if mutation == "symlink":
+        outside = tmp_path / "outside.json"
+        path.rename(outside)
+        path.symlink_to(outside)
+    result = community_gpu_ci._container_result(path, "alpha", 0, {})
+    assert result["status"] == "failed"
+    assert result["failure_class"] == "unknown"
+
+
+def test_confirmed_container_oom_is_a_resource_failure(tmp_path):
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "family": "alpha",
+                "status": "running",
+                "phase": "validation",
+                "failure_class": "validation",
+                "requested_cases": ["one"],
+                "cases": {"one": "not_run"},
+            }
+        )
+    )
+    result = community_gpu_ci._container_result(path, "alpha", 137, {"OOMKilled": True})
+    assert result["failure_class"] == "resource" and result["status"] == "failed"
+    assert result["phase"] == "validation" and result["cases"]["one"] == "not_run"
+
+
+def test_exhausted_coordinator_budget_marks_every_unstarted_family(tmp_path, monkeypatch):
+    _planned_owners(tmp_path, "alpha", "beta")
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    calls = []
+
+    def inspect_only(command, **kwargs):
+        calls.append(command)
+        assert command[:3] == ["docker", "image", "inspect"]
+        return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", inspect_only)
+    monkeypatch.setattr(community_gpu_ci, "execution_budget_seconds", lambda _env: 0)
+    with pytest.raises(CiError, match="remaining families were not run"):
+        community_gpu_ci.run_containers(tmp_path, env, "image")
+    report = json.loads((tmp_path / "results/summary.json").read_text())
+    assert not report["passed"] and not report["complete"]
+    assert [row["family"] for row in report["families"]] == ["alpha", "beta"]
+    assert all(
+        row["status"] == "not_run" and row["failure_class"] == "budget"
+        for row in report["families"]
+    )
+    assert len(calls) == 1
+
+
+def test_container_cannot_replace_the_host_selected_case_inventory(tmp_path):
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "family": "alpha",
+                "status": "passed",
+                "phase": "complete",
+                "failure_class": None,
+                "requested_cases": ["easy"],
+                "cases": {"easy": "passed"},
+            }
+        )
+    )
+    result = community_gpu_ci._container_result(path, "alpha", 0, {}, ("required", "other"))
+    assert result["status"] == "failed" and result["failure_class"] == "unknown"
+    assert result["cases"] == {"required": "not_run", "other": "not_run"}
+
+
+def test_fifo_result_cannot_block_host_cleanup(tmp_path):
+    path = tmp_path / "result.json"
+    os.mkfifo(path)
+    start = time.monotonic()
+    result = community_gpu_ci._container_result(path, "alpha", 124, {}, ("required",))
+    assert time.monotonic() - start < 1
+    assert result["status"] == "failed" and result["cases"] == {"required": "not_run"}
+
+
+def test_real_container_client_timeout_cleans_up_before_next_family(tmp_path, monkeypatch):
+    for family in ("alpha", "beta"):
+        _family(
+            tmp_path,
+            family,
+            [{"family": family, "testcases": [{"name": family, "premerge": True}]}],
+        )
+    events = tmp_path / "events"
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    docker = binary / "docker"
+    docker.write_text(
+        f"#!{sys.executable}\nimport json, sys, time\nfrom pathlib import Path\n"
+        f"events = Path({str(events)!r})\n"
+        "if sys.argv[1] == 'image': print('sha256:' + 'a' * 64)\n"
+        "elif sys.argv[1] == 'inspect': print('{}')\n"
+        "elif sys.argv[1] == 'rm':\n"
+        "    with events.open('a') as f: f.write('remove ' + sys.argv[-1].rsplit('-',1)[1] + '\\n')\n"
+        "elif sys.argv[1] == 'run':\n"
+        "    family = sys.argv[-1]\n"
+        "    with events.open('a') as f: f.write('start ' + family + '\\n')\n"
+        "    if family == 'alpha': time.sleep(10)\n"
+        "    cache = next(v for v in sys.argv if v.endswith(':/tmp/trtmc-community-huggingface'))\n"
+        "    (Path(cache.rsplit(':',1)[0]) / 'result.json').write_text(json.dumps({\n"
+        "        'schema_version':1,'family':family,'status':'passed','phase':'complete',\n"
+        "        'failure_class':None,'requested_cases':[family],'cases':{family:'passed'}}))\n"
+    )
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(community_gpu_ci, "FAMILY_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(community_gpu_ci, "STAGING_TIMEOUT_SECONDS", 2)
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="alpha: family execution timed out"):
+        community_gpu_ci.run_containers(tmp_path, env, "image")
+    assert events.read_text().splitlines() == [
+        "start alpha",
+        "remove alpha",
+        "start beta",
+        "remove beta",
+    ]
+    result = json.loads((tmp_path / "results/summary.json").read_text())
+    assert result["families"][0]["failure_class"] == "budget"
+    assert result["families"][1]["status"] == "passed"
+    assert not result["passed"] and not result["complete"]
+
+
+def test_log_summary_preserves_last_complete_record_after_interruption(tmp_path):
+    path = tmp_path / "output.log"
+    expected = {
+        "schema_version": 1,
+        "complete": False,
+        "passed": False,
+        "families": [
+            {
+                "family": "alpha",
+                "status": "running",
+                "phase": "container",
+                "failure_class": "unknown",
+                "cases": {},
+            },
+            {
+                "family": "beta",
+                "status": "not_run",
+                "phase": "pending",
+                "failure_class": None,
+                "cases": {},
+            },
+        ],
+    }
+    path.write_text(
+        "ordinary output\n"
+        + community_gpu_ci.SUMMARY_PREFIX
+        + json.dumps(expected)
+        + "\n"
+        + community_gpu_ci.SUMMARY_PREFIX
+        + '{"schema_'
+    )
+    rendered = tmp_path / "summary.txt"
+    assert community_gpu_ci.summarize_log(path, rendered) == expected
+    assert "| beta | not_run |" in rendered.read_text()
+    assert "All selected Community E2Es executed: False" in rendered.read_text()
+
+
+def test_community_routing_preserves_small_case_and_reports_large_case(tmp_path):
+    _family(
+        tmp_path,
+        "alpha",
+        [
+            {
+                "family": "alpha",
+                "hf_id": "example/small",
+                "testcases": [
+                    {"name": "small", "premerge": True},
+                ],
+            },
+            {
+                "family": "alpha",
+                "hf_id": "example/large",
+                "testcases": [
+                    {"name": "large", "premerge": True, "community_gpu": False},
+                ],
+            },
+        ],
+    )
+    plan = community_gpu_ci.family_plan(tmp_path, "alpha")
+    assert plan.testcases == ("small",)
+    assert plan.checkpoints == (("example/small", None),)
+    assert plan.deferred_testcases == ("large",)
+    manifest = json.loads((tmp_path / "families/alpha/tests/manifests/1.json").read_text())
+    assert manifest["testcases"][0]["premerge"] is True
+
+
+@pytest.mark.parametrize("selection", [False, "false", None])
+def test_community_scope_cannot_silently_remove_all_e2e_coverage(tmp_path, selection):
+    _family(
+        tmp_path,
+        "alpha",
+        [
+            {
+                "family": "alpha",
+                "testcases": [
+                    {"name": "one", "premerge": True, "community_gpu": selection},
+                ],
+            }
+        ],
+    )
+    with pytest.raises(CiError):
+        community_gpu_ci.family_plan(tmp_path, "alpha")
+
+
+def test_summary_rejects_malformed_case_data_and_recomputes_coverage(tmp_path):
+    record = {
+        "schema_version": 1,
+        "complete": True,
+        "passed": True,
+        "families": [
+            {
+                "family": "alpha",
+                "status": "not_run",
+                "phase": "pending",
+                "failure_class": None,
+                "cases": {"one": "not_run"},
+            },
+        ],
+    }
+    checked = community_gpu_ci._checked_summary(record)
+    assert not checked["complete"] and not checked["passed"]
+    record["families"][0]["cases"]["one"] = {}
+    assert community_gpu_ci._checked_summary(record) is None
+    path = tmp_path / "log"
+    path.write_text(community_gpu_ci.SUMMARY_PREFIX + json.dumps(record))
+    assert community_gpu_ci.summarize_log(path, tmp_path / "summary") is None
