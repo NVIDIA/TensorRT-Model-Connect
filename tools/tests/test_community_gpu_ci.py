@@ -533,6 +533,15 @@ def test_family_plan_selects_only_explicit_premerge_cases(tmp_path: Path) -> Non
                 "testcases": [{"name": "invalid-dependency", "premerge": True}],
             }
         ],
+        [
+            {
+                "family": "alpha",
+                "testcases": [
+                    {"name": "valid", "premerge": True},
+                    {"name": "invalid-deferred", "premerge": "true", "community_gpu": False},
+                ],
+            }
+        ],
     ],
 )
 def test_family_plan_rejects_missing_or_duplicate_premerge_cases(
@@ -3046,7 +3055,7 @@ def test_log_summary_preserves_last_complete_record_after_interruption(tmp_path)
     rendered = tmp_path / "summary.txt"
     assert community_gpu_ci.summarize_log(path, rendered) == expected
     assert "| beta | not_run |" in rendered.read_text()
-    assert "All selected Community E2Es executed: False" in rendered.read_text()
+    assert "All runnable Community E2Es executed: False" in rendered.read_text()
 
 
 def test_community_routing_preserves_small_case_and_reports_large_case(tmp_path):
@@ -3078,7 +3087,7 @@ def test_community_routing_preserves_small_case_and_reports_large_case(tmp_path)
     assert manifest["testcases"][0]["premerge"] is True
 
 
-@pytest.mark.parametrize("selection", [False, "false", None])
+@pytest.mark.parametrize("selection", ["false", None])
 def test_community_scope_cannot_silently_remove_all_e2e_coverage(tmp_path, selection):
     _family(
         tmp_path,
@@ -3094,6 +3103,196 @@ def test_community_scope_cannot_silently_remove_all_e2e_coverage(tmp_path, selec
     )
     with pytest.raises(CiError):
         community_gpu_ci.family_plan(tmp_path, "alpha")
+
+
+def _deferred_owner(repository: Path, family: str) -> None:
+    _family(
+        repository,
+        family,
+        [
+            {
+                "family": family,
+                "hf_id": "example/large-checkpoint-must-not-stage",
+                "testcases": [{"name": "large", "premerge": True, "community_gpu": False}],
+            }
+        ],
+    )
+
+
+@pytest.mark.parametrize("failed_baseline", [None, community_gpu_ci.SHARED_SMOKE_FAMILIES[0]])
+def test_fully_deferred_owner_runs_all_real_baselines_with_no_extra_budget(
+    tmp_path, monkeypatch, failed_baseline
+):
+    _deferred_owner(tmp_path, "alpha")
+    _planned_owners(tmp_path, *community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    plan = community_gpu_ci.family_plan(tmp_path, "alpha")
+    assert plan.testcases == () and plan.deferred_testcases == ("large",)
+    assert plan.checkpoints == ()
+    events, staged, timeouts = [], [], []
+
+    def transport(command, **kwargs):
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
+        if "--stage-family" in command:
+            staged.append(command[command.index("--stage-family") + 1])
+            timeouts.append(kwargs["timeout"])
+            return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "run"]:
+            family = command[-1]
+            events.append(("start", family))
+            timeouts.append(kwargs["timeout"])
+            _container_receipt(command, family == failed_baseline)
+            return subprocess.CompletedProcess(command, 17 if family == failed_baseline else 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        assert command[:3] == ["docker", "rm", "--force"]
+        events.append(("remove", events[-1][1]))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    env = {**_gpu_environment("alpha"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    original_budget = community_gpu_ci.execution_budget_seconds(env)
+    if failed_baseline:
+        with pytest.raises(CiError, match="container exited 17"):
+            community_gpu_ci.run_containers(tmp_path, env, "base")
+    else:
+        community_gpu_ci.run_containers(tmp_path, env, "base")
+    assert (
+        original_budget == 3600
+        and community_gpu_ci.execution_budget_seconds(env) == original_budget
+    )
+    assert all(timeout <= original_budget for timeout in timeouts)
+    assert staged == list(community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    assert events == [(kind, family) for family in staged for kind in ("start", "remove")]
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    rows = {row["family"]: row for row in summary["families"]}
+    assert rows["alpha"] == {
+        "family": "alpha",
+        "status": "deferred",
+        "phase": "selection",
+        "failure_class": None,
+        "requested_cases": [],
+        "deferred_cases": ["large"],
+        "cases": {},
+    }
+    assert all(
+        rows[family]["cases"] == {family: "passed" if family != failed_baseline else "failed"}
+        for family in staged
+    )
+    assert summary["passed"] is (failed_baseline is None) and summary["complete"]
+    path = tmp_path / "log"
+    path.write_text(community_gpu_ci.SUMMARY_PREFIX + json.dumps(summary))
+    rendered = tmp_path / "rendered"
+    assert community_gpu_ci.summarize_log(path, rendered)["passed"] is summary["passed"]
+    assert "Runnable Community families passed:" in rendered.read_text()
+    assert "alpha: deferred from Community, not qualified here" in rendered.read_text()
+
+
+def test_mixed_active_and_deferred_owners_do_not_admit_baselines(tmp_path, monkeypatch):
+    _deferred_owner(tmp_path, "alpha")
+    _planned_owners(tmp_path, "beta")
+    staged, started = [], []
+
+    def transport(command, **kwargs):
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
+        if "--stage-family" in command:
+            staged.append(command[command.index("--stage-family") + 1])
+        elif command[:2] == ["docker", "run"]:
+            started.append(command[-1])
+            _container_receipt(command)
+        elif command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        else:
+            assert command[:3] == ["docker", "rm", "--force"]
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    community_gpu_ci.run_containers(tmp_path, _gpu_environment("alpha", "beta"), "image")
+    assert staged == started == ["beta"]
+
+
+def test_deferred_producer_and_direct_family_fail_before_docker_or_install(tmp_path, monkeypatch):
+    _deferred_owner(tmp_path, "alpha")
+    _planned_owners(tmp_path, *community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    calls = []
+    monkeypatch.setattr(
+        community_gpu_ci.subprocess, "run", lambda *args, **kwargs: calls.append(args)
+    )
+    monkeypatch.setattr(
+        community_gpu_ci, "_install_family_requirements", lambda *args: calls.append(args)
+    )
+    with pytest.raises(CiError, match="coverage for every selected owner"):
+        community_gpu_ci.run_containers(
+            tmp_path, _gpu_environment("alpha"), "image", require_family_coverage=True
+        )
+    with pytest.raises(CiError, match="fully deferred"):
+        community_gpu_ci.run(tmp_path, {}, "alpha")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "community_gpu_ci.py",
+            "--containers",
+            "--require-family-coverage",
+            "--repository",
+            str(tmp_path),
+        ],
+    )
+    monkeypatch.setenv("TRTMC_GPU_SCOPE", "families")
+    monkeypatch.setenv("TRTMC_GPU_FAMILIES", '["alpha"]')
+    monkeypatch.setenv("TRTMC_GPU_DIRECT_FAMILIES", '["alpha"]')
+    monkeypatch.setenv("TRTMC_GPU_ADDED_FAMILIES", "[]")
+    assert community_gpu_ci.main() == 1
+    assert calls == []
+
+
+def test_missing_or_deferred_baseline_cannot_create_empty_green(tmp_path, monkeypatch):
+    _deferred_owner(tmp_path, "alpha")
+    calls = []
+    monkeypatch.setattr(
+        community_gpu_ci.subprocess, "run", lambda *args, **kwargs: calls.append(args)
+    )
+    with pytest.raises(CiError, match="GPU plan is missing"):
+        community_gpu_ci.run_containers(tmp_path, _gpu_environment("alpha"), "image")
+    _planned_owners(tmp_path, *community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    path = (
+        tmp_path / "families" / community_gpu_ci.SHARED_SMOKE_FAMILIES[0] / "tests/manifests/0.json"
+    )
+    manifest = json.loads(path.read_text())
+    manifest["testcases"][0]["community_gpu"] = False
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(CiError, match="fallback requires runnable coverage"):
+        community_gpu_ci.run_containers(tmp_path, _gpu_environment("alpha"), "image")
+    assert calls == []
+
+
+@pytest.mark.parametrize("mutation", [None, "empty", "requested", "phase", "duplicates"])
+def test_deferred_only_or_malformed_summary_never_claims_coverage(mutation):
+    row = {
+        "family": "alpha",
+        "status": "deferred",
+        "phase": "selection",
+        "failure_class": None,
+        "requested_cases": [],
+        "deferred_cases": ["large"],
+        "cases": {},
+    }
+    if mutation == "empty":
+        row["deferred_cases"] = []
+    elif mutation == "requested":
+        row["requested_cases"] = ["large"]
+    elif mutation == "phase":
+        row["phase"] = "complete"
+    elif mutation == "duplicates":
+        row["deferred_cases"] = ["large", "large"]
+    checked = community_gpu_ci._checked_summary(
+        {"schema_version": 1, "passed": True, "complete": True, "families": [row]}
+    )
+    if mutation is None:
+        assert checked is not None and not checked["passed"] and not checked["complete"]
+    else:
+        assert checked is None
 
 
 def test_summary_rejects_malformed_case_data_and_recomputes_coverage(tmp_path):

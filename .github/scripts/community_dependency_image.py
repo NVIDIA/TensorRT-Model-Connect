@@ -283,6 +283,7 @@ def qualify(
         "--repository",
         str(repository),
         "--containers",
+        "--require-family-coverage",
         "--image",
         candidate["local_image"],
     ]

@@ -191,6 +191,13 @@ def test_family_e2e_does_not_run_before_native_abi_gate(tmp_path: Path) -> None:
     run.assert_not_called()
 
 
+def test_producer_requires_coverage_of_its_qualified_family(tmp_path: Path) -> None:
+    candidate(tmp_path)
+    with patch.object(MODULE.subprocess, "run") as run:
+        MODULE.qualify(tmp_path, Path("/stage/python"), None, family="nemotron_h")
+    assert "--require-family-coverage" in run.call_args.args[0]
+
+
 @pytest.mark.parametrize(
     "repo,event,ref",
     [

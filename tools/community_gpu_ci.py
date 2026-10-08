@@ -218,6 +218,8 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
                 name = case.get("name")
                 if not isinstance(name, str) or not name:
                     raise ValueError("every testcase requires a non-empty string name")
+                if "premerge" in case and not isinstance(case["premerge"], bool):
+                    raise ValueError("premerge must be a boolean when present")
                 if not isinstance(case.get("community_gpu", True), bool):
                     raise ValueError("community_gpu must be a boolean when present")
                 if case.get("premerge") is True:
@@ -247,7 +249,7 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
 
     if not manifests:
         raise CommunityGpuError(f"{family} has no E2E manifests")
-    if not cases:
+    if not cases and not deferred:
         raise CommunityGpuError(f"{family} has no E2E testcase marked premerge for Community GPU")
     duplicates = sorted(name for name, count in Counter([*cases, *deferred]).items() if count > 1)
     if duplicates:
@@ -381,6 +383,8 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
 
     repository = repository.resolve()
     plan = family_plan(repository, family)
+    if not plan.testcases:
+        raise CommunityGpuError(f"{family} is fully deferred from Community GPU validation")
     report["requested_cases"] = list(plan.testcases)
     report["deferred_cases"] = list(plan.deferred_testcases)
     build_env = {
@@ -598,7 +602,7 @@ def _container_result(
         record.update(
             status="failed",
             failure_class="resource",
-            evidence="Docker confirmed OOMKilled within the container memory limit",
+            evidence="Docker reported OOMKilled for this container",
         )
     return record
 
@@ -608,14 +612,11 @@ def _summary(records: dict[str, dict], env: dict[str, str], started: float) -> d
         "schema_version": 1,
         "duration_seconds": round(time.monotonic() - started, 3),
         "families": list(records.values()),
-        "complete": all(
-            row.get("status") not in {"not_run", "running"}
-            and bool(row.get("cases"))
-            and all(result in {"passed", "failed"} for result in row["cases"].values())
-            for row in records.values()
-        ),
-        "passed": bool(records) and all(row["status"] == "passed" for row in records.values()),
+        "complete": False,
+        "passed": False,
     }
+    if checked := _checked_summary(value):
+        value = checked
     if destination := env.get("TRTMC_GPU_RESULTS_DIR"):
         _save_json(Path(destination) / "summary.json", value)
     print(SUMMARY_PREFIX + json.dumps(value, sort_keys=True), flush=True)
@@ -933,6 +934,7 @@ def run_containers(
     dependency_catalog: Path | None = None,
     registry_token_file: Path | None = None,
     registry_username: str = "github-actions",
+    require_family_coverage: bool = False,
 ) -> None:
     """Run selected owners sequentially, preserving partial coverage and cleanup."""
     repository = repository.resolve(strict=True)
@@ -943,19 +945,35 @@ def run_containers(
         env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
     )
     plans = {family: family_plan(repository, family) for family in selected}
+    deferred_owners = tuple(family for family in selected if not plans[family].testcases)
+    if require_family_coverage and deferred_owners:
+        raise CommunityGpuError(
+            "Dependency qualification requires Community coverage for every selected owner: "
+            + ", ".join(deferred_owners)
+        )
+    active = tuple(family for family in selected if plans[family].testcases)
+    if not active:
+        for family in SHARED_SMOKE_FAMILIES:
+            plan = plans.get(family) or family_plan(repository, family)
+            if not plan.testcases:
+                raise CommunityGpuError(
+                    f"Community fallback requires runnable coverage for {family}"
+                )
+            plans[family] = plan
+        active = SHARED_SMOKE_FAMILIES
     started = time.monotonic()
     deadline = started + execution_budget_seconds(env)
     records = {
         family: {
             "family": family,
-            "status": "not_run",
-            "phase": "pending",
+            "status": "not_run" if plan.testcases else "deferred",
+            "phase": "pending" if plan.testcases else "selection",
             "failure_class": None,
-            "requested_cases": list(plans[family].testcases),
-            "deferred_cases": list(plans[family].deferred_testcases),
-            "cases": {case: "not_run" for case in plans[family].testcases},
+            "requested_cases": list(plan.testcases),
+            "deferred_cases": list(plan.deferred_testcases),
+            "cases": {case: "not_run" for case in plan.testcases},
         }
-        for family in selected
+        for family, plan in plans.items()
     }
     _summary(records, env, started)
     inspected = subprocess.run(
@@ -969,7 +987,7 @@ def run_containers(
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise CommunityGpuError("Docker did not resolve an immutable GPU image ID")
     dependency_images, dependency_errors, dependency_misses = _dependency_image_ids(
-        repository, selected, dependency_catalog, registry_token_file, registry_username, deadline
+        repository, active, dependency_catalog, registry_token_file, registry_username, deadline
     )
     runner = Path(__file__).resolve()
     run_id = uuid.uuid4().hex
@@ -978,7 +996,7 @@ def run_containers(
     memory_limit = int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") * 0.75)
     cpu_limit = max(1, (os.cpu_count() or 2) - 2)
     try:
-        for family in selected:
+        for family in active:
             records[family]["dependency_cache"] = (
                 "input_mismatch"
                 if family in dependency_misses
@@ -1212,6 +1230,7 @@ def _checked_summary(value: object) -> dict | None:
             "failed",
             "running",
             "not_run",
+            "deferred",
         }:
             return None
         if not isinstance(row.get("phase"), str) or len(row["phase"]) > 64:
@@ -1222,27 +1241,52 @@ def _checked_summary(value: object) -> dict | None:
         cases = row.get("cases")
         if not isinstance(cases, dict) or any(
             not isinstance(name, str)
+            or not name
             or not isinstance(outcome, str)
             or outcome not in {"passed", "failed", "skipped", "not_run"}
             for name, outcome in cases.items()
         ):
             return None
         deferred = row.get("deferred_cases", [])
-        if not isinstance(deferred, list) or not all(isinstance(name, str) for name in deferred):
+        if (
+            not isinstance(deferred, list)
+            or not all(isinstance(name, str) and name for name in deferred)
+            or len(set(deferred)) != len(deferred)
+            or set(deferred) & set(cases)
+        ):
             return None
+        requested = row.get("requested_cases", list(cases))
+        if (
+            not isinstance(requested, list)
+            or not all(isinstance(name, str) and name for name in requested)
+            or len(set(requested)) != len(requested)
+            or set(requested) != set(cases)
+        ):
+            return None
+        if row["status"] == "deferred" and (
+            row["phase"] != "selection"
+            or row.get("requested_cases") != []
+            or cases
+            or not deferred
+            or category is not None
+        ):
+            return None
+    active = [row for row in rows if row["status"] != "deferred"]
     return {
         **value,
-        "complete": all(
+        "complete": bool(active)
+        and all(
             row["status"] in {"passed", "failed"}
             and bool(row["cases"])
             and all(status in {"passed", "failed"} for status in row["cases"].values())
-            for row in rows
+            for row in active
         ),
-        "passed": all(
+        "passed": bool(active)
+        and all(
             row["status"] == "passed"
             and bool(row["cases"])
             and all(status == "passed" for status in row["cases"].values())
-            for row in rows
+            for row in active
         ),
     }
 
@@ -1299,8 +1343,8 @@ def summarize_log(path: Path, destination: Path | None = None) -> dict | None:
                         + " |\n"
                     )
                 stream.write(
-                    f"\nAll selected Community E2Es executed: {summary.get('complete') is True}. "
-                    f"All families passed: {summary.get('passed') is True}.\n"
+                    f"\nAll runnable Community E2Es executed: {summary.get('complete') is True}. "
+                    f"Runnable Community families passed: {summary.get('passed') is True}.\n"
                 )
                 for row in summary["families"]:
                     if deferred := row.get("deferred_cases"):
@@ -1331,10 +1375,13 @@ def main() -> int:
     parser.add_argument("--registry-token-file", type=Path)
     parser.add_argument("--registry-username", default="github-actions")
     parser.add_argument("--ci-sha")
+    parser.add_argument("--require-family-coverage", action="store_true")
     args = parser.parse_args()
     try:
         if args.checkpoint_token_file is not None and not args.containers:
             raise CommunityGpuError("--checkpoint-token-file requires --containers")
+        if args.require_family_coverage and not args.containers:
+            raise CommunityGpuError("--require-family-coverage requires --containers")
         if (
             args.dependency_catalog is not None
             and not (args.containers or args.required_host_ram_gib)
@@ -1375,11 +1422,16 @@ def main() -> int:
                 dependency_catalog=args.dependency_catalog,
                 registry_token_file=args.registry_token_file,
                 registry_username=args.registry_username,
+                require_family_coverage=args.require_family_coverage,
             )
         elif args.stage_family:
             if args.cache_dir is None:
                 raise CommunityGpuError("--stage-family requires --cache-dir")
             plan = family_plan(args.repository.resolve(), args.stage_family)
+            if not plan.testcases:
+                raise CommunityGpuError(
+                    "A fully deferred owner has no Community checkpoints to stage"
+                )
             _stage_checkpoints((plan,), args.cache_dir)
         else:
             # Source imports happen only inside the selected family's container.

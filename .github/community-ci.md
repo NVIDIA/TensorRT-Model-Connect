@@ -86,8 +86,12 @@ skip GPU. Missing public assets fail visibly rather than count as coverage.
 A testcase may explicitly set `community_gpu: false` to keep a larger workload
 in its existing Internal/Nightly qualification scope. Its `premerge` flag and
 passing criteria remain unchanged. Community reports deferred cases by name and
-does not claim to have qualified them. Each selected family must still declare
-at least one runnable Community premerge case; disabling all cases is an error.
+does not claim to have qualified them. A fully deferred owner gets no checkpoint
+staging or container. If every requested owner is fully deferred, normal CI runs
+the existing five shared smoke families within the original requested-owner
+budget; mixed selections run only their active owners. Missing premerge cases
+and invalid flags remain errors. Dependency-image producers require actual
+coverage of every selected owner, so shared smoke cannot qualify their images.
 
 ### Blocking GPU reservation
 
