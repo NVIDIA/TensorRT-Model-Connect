@@ -30,6 +30,7 @@ from .weights import (
     _target_np_dtype,
     _transpose_2d,
 )
+from .cli import BuildRequest, coerce_request
 from .config import ModelConfig
 from .parallel import ParallelConfig
 from .parallel import normalize_parallel_config
@@ -69,7 +70,6 @@ def _resolve_vit_config(raw: dict) -> dict:
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -482,26 +482,8 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm ViT bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("timm_vit does not support dynamic_kv_cache")
+    request = coerce_request(request)
 
-    if request.image_height is not None:
-        raise NotImplementedError("timm_vit does not support image_height")
-
-    if request.image_width is not None:
-        raise NotImplementedError("timm_vit does not support image_width")
-
-    if request.video_num_frames is not None:
-        raise NotImplementedError("timm_vit does not support video_num_frames")
-
-    if request.max_batch_size != 1:
-        raise NotImplementedError("timm_vit does not support max_batch_size")
-
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
-
-    if request.task != "image_to_class_scores":
-        raise ValueError("timm_vit supports only task=image_to_class_scores")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if not (
@@ -510,11 +492,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     ):
         raise ValueError(f"timm ViT does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
-    max_sequence_length = _positive_int(request.max_sequence_length or 1, "max_sequence_length")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm ViT does not support quantization")
-    if request.fp32_layers:
-        raise NotImplementedError("timm ViT does not support mixed-precision layers")
+    max_sequence_length = 1
+
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
