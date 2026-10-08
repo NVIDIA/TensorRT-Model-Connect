@@ -40,6 +40,14 @@ install(TARGETS trtmc_model_qwen
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_qwen_chat_templates
+    ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/test_qwen_chat_templates.cpp
+    chat_templates.cpp
+  )
+  target_include_directories(test_qwen_chat_templates PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_qwen_chat_templates PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME test_qwen_chat_templates COMMAND test_qwen_chat_templates)
+
   foreach(test_name IN ITEMS
       test_qwen_embedding_pipeline
       test_qwen_native_kv_cache
