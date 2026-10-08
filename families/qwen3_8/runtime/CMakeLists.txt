@@ -6,6 +6,7 @@ add_library(trtmc_model_qwen3_8 SHARED
   chat_templates.cpp
   hybrid_state.cpp
   kv_cache.cpp
+  mtp_scheduler.cpp
   pipeline.cpp
   plugin.cpp
   plugin_helpers.cpp

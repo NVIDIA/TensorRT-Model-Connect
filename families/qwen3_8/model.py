@@ -157,9 +157,17 @@ def build(request, writer) -> None:
 
     has_mtp = "mtp_layer.fc" in weights
     mtp_plan = None
+    multi_token_plan = None
     if has_mtp:
         mtp_plan = model.build_mtp_engine(
             config, weights, max_sequence_length,
+            precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
+        )
+        # seq_len=2: verifies one MTP draft token per round (1 real + 1
+        # draft token processed per accept/reject round). Matches the only
+        # configuration exercised by the MTP runtime scheduler so far.
+        multi_token_plan = model.build_engine_multi_token(
+            config, weights, max_sequence_length, 2,
             precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
         )
 
@@ -167,6 +175,8 @@ def build(request, writer) -> None:
     writer.add_bytes("engine.plan", plan)
     if mtp_plan is not None:
         writer.add_bytes("mtp_engine.plan", mtp_plan)
+    if multi_token_plan is not None:
+        writer.add_bytes("multi_token_engine.plan", multi_token_plan)
     writer.add_json(
         "runtime.json",
         _runtime_config(

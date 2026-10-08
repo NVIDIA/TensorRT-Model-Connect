@@ -60,6 +60,12 @@ class Qwen38KvCache : public Qwen38InferenceState {
     DeviceTensor& cache_k(int32_t layer) { return cache_k_[static_cast<std::size_t>(layer)]; }
     DeviceTensor& cache_v(int32_t layer) { return cache_v_[static_cast<std::size_t>(layer)]; }
 
+    // Geometry/dtype accessors -- a second ITrtModule that shares this
+    // cache (e.g. a batched multi-token verification engine) needs these to
+    // size and type its own output scratch buffers consistently.
+    int32_t kv_dim() const { return kv_dim_; }
+    DType dtype() const { return cache_dtype_; }
+
     // Write per-layer KV produced by a batched prefill engine into the cache
     // at positions [0, seq_len). Device-to-device copy on this cache's stream;
     // advances position_ to seq_len. Requires seq_len <= max_length.
