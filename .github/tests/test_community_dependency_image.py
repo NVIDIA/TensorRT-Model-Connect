@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import urllib.response
@@ -165,6 +166,125 @@ def test_publication_records_only_immutable_digests(tmp_path: Path) -> None:
     assert len(pushed) == 1 and "/nemotron_h:" in pushed[0]
     assert "sensitive-token" not in json.dumps(receipt)
     assert not token.exists()
+
+
+def test_publication_exports_only_the_nonsecret_receipt_with_private_parent_ownership(
+    tmp_path,
+    monkeypatch,
+):
+    """Separate proof/auth directories exercise the real transfer permission boundary."""
+    proof, auth = tmp_path / "proof", tmp_path / "auth"
+    previous = os.umask(0o077)
+    real_chown = os.chown
+    chowns = []
+
+    def chown(path, uid, gid):
+        chowns.append((Path(path), uid, gid))
+        real_chown(path, uid, gid)
+
+    def run(command, **kwargs):
+        if "inspect" in command:
+            return json.dumps(
+                ["ghcr.io/nvidia/tensorrt-model-connect-community/nemotron_h@sha256:" + "c" * 64]
+            )
+        return ""
+
+    try:
+        candidate(proof)
+        auth.mkdir(mode=0o700)
+        token = auth / "token"
+        token.write_text("sensitive-token")
+        owner = auth.stat()
+        proof_before = proof.stat()
+        monkeypatch.setattr(MODULE.os, "chown", chown)
+        with (
+            patch.object(MODULE, "run", side_effect=run),
+            patch.object(MODULE, "require_private_package"),
+        ):
+            MODULE.publish(
+                proof,
+                "ghcr.io/nvidia/tensorrt-model-connect-community",
+                "actor",
+                token,
+                family="nemotron_h",
+            )
+        private_receipt, export = (
+            proof / "published-candidate.json",
+            auth / "published-candidate.json",
+        )
+        assert json.loads(private_receipt.read_text()) == json.loads(export.read_text())
+        assert stat.S_IMODE(export.stat().st_mode) == 0o600
+        assert (export.stat().st_uid, export.stat().st_gid) == (owner.st_uid, owner.st_gid)
+        assert chowns == [(export, owner.st_uid, owner.st_gid)]
+        assert (proof.stat().st_uid, proof.stat().st_mode) == (
+            proof_before.st_uid,
+            proof_before.st_mode,
+        )
+        assert (auth.stat().st_uid, auth.stat().st_gid, auth.stat().st_mode) == (
+            owner.st_uid,
+            owner.st_gid,
+            owner.st_mode,
+        )
+        assert stat.S_IMODE(private_receipt.stat().st_mode) == 0o600
+        assert "sensitive-token" not in export.read_text() and not token.exists()
+    finally:
+        os.umask(previous)
+
+
+@pytest.mark.parametrize(
+    "failure", ["unqualified", "previsibility", "push", "postvisibility", "digest"]
+)
+def test_failed_publication_never_exports_a_receipt_or_relaxes_private_gates(tmp_path, failure):
+    proof, auth = tmp_path / "proof", tmp_path / "auth"
+    candidate(proof, native=failure != "unqualified")
+    auth.mkdir(mode=0o700)
+    token = auth / "token"
+    token.write_text("sensitive-token")
+    directories = []
+
+    def run(command, **kwargs):
+        directory = Path(command[command.index("--config") + 1])
+        directories.append(directory)
+        if "login" in command:
+            (directory / "config.json").write_text("sensitive-token")
+        if "push" in command and failure == "push":
+            raise subprocess.CalledProcessError(1, command)
+        if "inspect" in command:
+            return json.dumps(["mutable:latest"])
+        return ""
+
+    visibility = (
+        [RuntimeError("visibility unavailable")]
+        if failure == "previsibility"
+        else [None, RuntimeError("visibility unavailable")]
+        if failure == "postvisibility"
+        else [None, None]
+    )
+    with (
+        patch.object(MODULE, "run", side_effect=run),
+        patch.object(MODULE, "require_private_package", side_effect=visibility),
+        patch.object(MODULE.os, "chown") as chown,
+    ):
+        with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
+            MODULE.publish(
+                proof,
+                "ghcr.io/nvidia/tensorrt-model-connect-community",
+                "actor",
+                token,
+                family="nemotron_h",
+            )
+    assert not token.exists() and all(not directory.exists() for directory in directories)
+    assert not (proof / "published-candidate.json").exists()
+    assert not (auth / "published-candidate.json").exists()
+    chown.assert_not_called()
+
+
+def test_publication_download_uses_only_the_ssh_owned_auth_receipt():
+    steps = WORKFLOW["jobs"]["produce"]["steps"]
+    publish = next(step for step in steps if step.get("id") == "publish")
+    assert "$INSTANCE_NAME:$REMOTE_AUTH/published-candidate.json" in publish["run"]
+    assert "$INSTANCE_NAME:$REMOTE_PROOF/published-candidate.json" not in publish["run"]
+    assert publish["timeout-minutes"] == "20"
 
 
 @pytest.mark.parametrize(

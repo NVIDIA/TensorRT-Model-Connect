@@ -209,7 +209,7 @@ jobs:
             "$REMOTE_REPO/.github/scripts/community_dependency_image.py" publish --family nemotron_h \
             --output "$REMOTE_PROOF" --token-file "$REMOTE_AUTH/registry-token" \
             --username "$REGISTRY_USERNAME"
-          timeout --signal=TERM --kill-after=10s 120s brev copy "$INSTANCE_NAME:$REMOTE_PROOF/published-candidate.json" "$RUNNER_TEMP/published-candidate.json"
+          timeout --signal=TERM --kill-after=10s 120s brev copy "$INSTANCE_NAME:$REMOTE_AUTH/published-candidate.json" "$RUNNER_TEMP/published-candidate.json"
       - name: Always remove private host token files
         timeout-minutes: 3
         if: ${{ always() && steps.reserve.outputs.instance_name != '' && env.REMOTE_AUTH != '' }}

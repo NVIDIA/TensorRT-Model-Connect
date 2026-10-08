@@ -372,6 +372,13 @@ def publish(output: Path, registry: str, username: str, token_file: Path, *, fam
                 registry_visibility="private",
             )
             save(output / "published-candidate.json", candidate)
+            # Preserve private root proof while allowing the SSH user to copy
+            # only this nonsecret receipt from its existing private auth directory.
+            receipt = token_file.parent / "published-candidate.json"
+            owner = token_file.parent.stat()
+            save(receipt, candidate)
+            receipt.chmod(0o600)
+            os.chown(receipt, owner.st_uid, owner.st_gid)
     finally:
         token_file.unlink(missing_ok=True)
 
