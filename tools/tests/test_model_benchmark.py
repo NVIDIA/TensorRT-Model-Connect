@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from array import array
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -145,6 +146,37 @@ def test_qualification_summary_is_written_as_report_json(tmp_path: Path) -> None
     html_report = (tmp_path / "report.html").read_text(encoding="utf-8")
     assert 'href="report.json"' in html_report
     assert "summary.json" not in html_report
+
+
+def test_unexpected_case_exception_is_reported_without_stopping_other_models(
+    tmp_path: Path, monkeypatch
+) -> None:
+    broken = _example_case(tmp_path)
+    working = replace(broken, model="working-model")
+    context = SimpleNamespace(
+        artifacts=tmp_path,
+        case_artifacts=lambda case: tmp_path / case.model / case.kind / case.name,
+    )
+    monkeypatch.setattr(model_benchmark, "context_from_args", lambda *_: context)
+
+    def run(case, _context):
+        if case.model == "example-model":
+            raise ValueError("invalid family output")
+        return {
+            "case": case.id, "model": case.model, "kind": case.kind,
+            "benchmark": case.benchmark, "status": "passed",
+        }
+
+    monkeypatch.setattr(model_benchmark, "run_accuracy", run)
+
+    assert model_benchmark._run((broken, working), SimpleNamespace()) == 1
+    report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    assert [case["status"] for case in report["cases"]] == ["error", "passed"]
+    assert "ValueError: invalid family output" in (
+        tmp_path / "example-model/accuracy/parity/execution.stderr.log"
+    ).read_text(encoding="utf-8")
+    html_report = (tmp_path / "report.html").read_text(encoding="utf-8")
+    assert 'href="example-model/accuracy/parity/execution.stderr.log"' in html_report
 
 
 def test_family_configs_auto_discover_without_a_central_model_registry() -> None:
@@ -1675,6 +1707,8 @@ def test_hf_translation_supports_replace_final_unknown_tokenizer(runner) -> None
             {
                 "status": "contract-mismatch",
                 "comparison": {"reason": "generated token ids differ"},
+                "candidate": {"metrics": {"latency_ms": {"p50": 2.0}}, "output_summary": {"token_ids": [1]}},
+                "reference": {"metrics": {"latency_ms": {"p50": 3.0}}, "output_summary": {"token_ids": [2]}},
                 "reference_attempts": [],
             },
             "failed",
@@ -1784,6 +1818,17 @@ def test_performance_distinguishes_model_contract_failures_from_execution_errors
 
     assert result["status"] == expected_status
     assert result.get("error") == expected_error
+    if expected_status == "failed":
+        assert result["comparison_reason"] == "generated token ids differ"
+        assert result["observed_metrics"] == {
+            "candidate_p50_ms": 2.0,
+            "reference_p50_ms": 3.0,
+        }
+        assert result["comparison_evidence"] == {
+            "candidate": {"token_ids": [1]},
+            "reference": {"token_ids": [2]},
+        }
+        assert result["metrics"]["reference_over_candidate_p50"] is None
 
 
 def test_hf_accuracy_reference_normalizes_seq2seq_control_tokens() -> None:

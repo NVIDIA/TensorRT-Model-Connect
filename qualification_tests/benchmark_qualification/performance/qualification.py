@@ -14,6 +14,7 @@ from qualification_tests.benchmark_qualification.performance import matrix as pe
 from qualification_tests.benchmark_qualification.performance.runner import run_case
 
 from ..catalog import QualificationCase, QualificationError, load_benchmark
+from ..reporting import output_preview
 from ..runtime import (
     RuntimeContext,
     reference_environment_options,
@@ -154,6 +155,18 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
     )
     comparison_value = row.get("comparison")
     comparison = comparison_value if isinstance(comparison_value, Mapping) else {}
+    candidate_value = row.get("candidate")
+    reference_value = row.get("reference")
+
+    def observed_p50(value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return None
+        metrics = value.get("metrics")
+        if not isinstance(metrics, Mapping):
+            return None
+        latency = metrics.get("latency_ms")
+        return latency.get("p50") if isinstance(latency, Mapping) else None
+
     result = {
         "schema_version": "trtmc.qualification-result/v1",
         "case": case.id,
@@ -170,6 +183,24 @@ def run_performance(case: QualificationCase, context: RuntimeContext) -> dict[st
         },
         "reference_attempts": row.get("reference_attempts", []) if isinstance(row, Mapping) else [],
     }
+    if status == "failed":
+        reason = comparison.get("reason")
+        if isinstance(reason, str) and reason:
+            result["comparison_reason"] = reason
+        contract = comparison.get("output_contract")
+        if isinstance(contract, Mapping):
+            result["comparison_evidence"] = output_preview(contract)
+        else:
+            outputs = {}
+            for side, value in (("candidate", candidate_value), ("reference", reference_value)):
+                if isinstance(value, Mapping) and value.get("output_summary") is not None:
+                    outputs[side] = output_preview(value["output_summary"])
+            if outputs:
+                result["comparison_evidence"] = outputs
+        result["observed_metrics"] = {
+            "candidate_p50_ms": observed_p50(candidate_value),
+            "reference_p50_ms": observed_p50(reference_value),
+        }
     if error is not None:
         result["error"] = error
     write_result(output, result)
