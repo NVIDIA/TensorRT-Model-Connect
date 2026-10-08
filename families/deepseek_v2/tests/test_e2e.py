@@ -104,6 +104,8 @@ def _checkpoint(manifest: dict) -> Path:
         snapshot_download(
             repo_id=manifest["hf_id"],
             revision=manifest.get("hf_revision"),
+            local_files_only=os.environ.get("HF_HUB_OFFLINE", "").upper()
+            in {"1", "ON", "YES", "TRUE"},
         )
     )
     assert (path / "config.json").is_file(), path
