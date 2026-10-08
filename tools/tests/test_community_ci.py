@@ -228,7 +228,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
     assert jobs["required"]["if"] == (
         "${{ !cancelled() && (github.event_name == 'pull_request' || "
         "(github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' "
-        "&& inputs.source_snapshot != '')) }}"
+        "&& inputs.task != 'dependency-image-audit' && inputs.source_snapshot != '')) }}"
     )
     assert jobs["required"]["needs"] == [
         "authorize",

@@ -178,6 +178,14 @@ starts. No registry token or Docker socket enters those containers. Native
 builds, family installation, and every original E2E assertion still run. No lock
 or image is admitted merely because the producer's local mechanics tests pass.
 
+Maintainers can dispatch `task=dependency-image-audit` on a protected branch with
+`audit_family` and an immutable `audit_digest`. This mode uses only package read
+permission and records the package visibility, identity, linked repository, root
+JSON keys, and matching version metadata. It rechecks the triggering actor before
+the requests and preserves `dependency-image-audit.json` even when visibility is
+not private. It allocates no VM and does not publish or admit an image; the
+producer's private visibility requirement remains unchanged.
+
 The image/setup/test step is capped at four hours inside the six-hour GPU job,
 leaving at least an hour for release after the 45-minute reservation. Family
 containers are restricted to three quarters of host RAM, no additional swap,

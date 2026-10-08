@@ -323,6 +323,91 @@ def require_private_package(reference: str, token: str, *, allow_missing: bool) 
         raise RuntimeError("The dependency producer must not publish into a public package")
 
 
+def audit_package(family: str, digest: str, token: str) -> dict:
+    """Read bounded package evidence without publishing or admitting an image."""
+    if not isinstance(family, str) or not isinstance(digest, str):
+        raise RuntimeError("Package audit requires one valid family and immutable digest")
+    family = validated_family(family)
+    if len(family) > 63 or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise RuntimeError("Package audit requires one valid family and immutable digest")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("Package audit credentials are unavailable")
+    package = f"tensorrt-model-connect-community/{family}"
+    endpoint = "https://api.github.com/orgs/NVIDIA/packages/container/" + urllib.parse.quote(
+        package, safe=""
+    )
+
+    def get(suffix=""):
+        request = urllib.request.Request(
+            endpoint + suffix,
+            method="GET",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+                payload = response.read(1024 * 1024 + 1)
+            if len(payload) > 1024 * 1024:
+                raise ValueError("oversized package response")
+            return json.loads(payload)
+        except (OSError, ValueError):
+            raise RuntimeError("Package audit API evidence is unavailable or invalid") from None
+
+    info = get()
+    if not isinstance(info, dict):
+        raise RuntimeError("Package audit did not receive an object")
+    repository = info.get("repository")
+    visibility = info.get("visibility")
+    if visibility is not None and not isinstance(visibility, (str, bool, int, float)):
+        raise RuntimeError("Package audit visibility is not a scalar")
+
+    def identity(value):
+        return value if type(value) is int and value > 0 else None
+
+    def text(value):
+        return value if isinstance(value, str) and len(value) <= 256 else None
+
+    record = {
+        "package_name": package,
+        "visibility": visibility,
+        "id": identity(info.get("id")),
+        "repository": (
+            {"id": identity(repository.get("id")), "full_name": text(repository.get("full_name"))}
+            if isinstance(repository, dict)
+            else None
+        ),
+        "root_keys": sorted(info),
+        "matching_versions": [],
+    }
+    for page in range(1, 11):
+        versions = get(f"/versions?per_page=100&page={page}")
+        if not isinstance(versions, list) or any(not isinstance(row, dict) for row in versions):
+            raise RuntimeError("Package audit versions are not a complete array")
+        for version in versions:
+            if version.get("name") != digest:
+                continue
+            metadata = version.get("metadata", {})
+            container = metadata.get("container", {}) if isinstance(metadata, dict) else {}
+            tags = container.get("tags", []) if isinstance(container, dict) else []
+            if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+                raise RuntimeError("Package audit version tags are invalid")
+            record["matching_versions"].append(
+                {
+                    "id": identity(version.get("id")),
+                    "name": digest,
+                    "created_at": text(version.get("created_at")),
+                    "updated_at": text(version.get("updated_at")),
+                    "tags": tags,
+                }
+            )
+        if record["matching_versions"] or len(versions) < 100:
+            return record
+    raise RuntimeError("Package audit reached its bounded version inventory limit")
+
+
 def publish(output: Path, registry: str, username: str, token_file: Path, *, family: str) -> None:
     try:
         family = validated_family(family)
@@ -385,7 +470,7 @@ def publish(output: Path, registry: str, username: str, token_file: Path, *, fam
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("build", "qualify", "publish"))
+    parser.add_argument("phase", choices=("build", "qualify", "publish", "audit"))
     parser.add_argument("--family", type=validated_family, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repository", type=Path)
@@ -393,8 +478,17 @@ def main() -> None:
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--registry", default="ghcr.io/nvidia/tensorrt-model-connect-community")
     parser.add_argument("--username")
+    parser.add_argument("--digest")
     args = parser.parse_args()
-    if args.phase == "build":
+    if args.phase == "audit":
+        if args.digest is None:
+            parser.error("Package audit requires an immutable digest")
+        record = audit_package(args.family, args.digest, os.environ.get("GH_TOKEN", ""))
+        save(args.output / "dependency-image-audit.json", record)
+        print(json.dumps(record, sort_keys=True), flush=True)
+        if record["visibility"] != "private":
+            raise RuntimeError("Package audit did not establish private visibility; no admission")
+    elif args.phase == "build":
         if args.repository is None:
             parser.error("Building requires the immutable protected-main repository")
         build(args.output, args.repository, family=args.family)
