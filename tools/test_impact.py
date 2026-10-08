@@ -41,6 +41,7 @@ SHARED_PREFIXES = (
 SHARED_FILES = {
     ".clang-format",
     ".coderabbit.yaml",
+    ".dockerignore",
     ".gitignore",
     ".pre-commit-config.yaml",
     "ASSET_LICENSES.md",
@@ -50,9 +51,9 @@ SHARED_FILES = {
     "Dockerfile.dev.aarch64",
     "Dockerfile.dev.x86",
     "Dockerfile.dev.x86-gpu",
-    ".dockerignore",
     "conanfile.py",
     "conftest.py",
+    "docker-compose.yml",
     "pyproject.toml",
     "ruff.toml",
 }
