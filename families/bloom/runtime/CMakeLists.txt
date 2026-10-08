@@ -52,3 +52,27 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME bloom_tokenizer_contract COMMAND test_bloom_tokenizer_contract)
 endif()
+
+# The owner command adapter loads the model through the existing runtime boundary.
+add_library(trtmc_cli_bloom SHARED cli.cpp)
+target_include_directories(trtmc_cli_bloom PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+target_link_libraries(trtmc_cli_bloom PRIVATE trtmc_runtime trtmc_core nlohmann_json::nlohmann_json)
+target_compile_options(trtmc_cli_bloom PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(trtmc_cli_bloom PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  BUILD_RPATH "\$ORIGIN"
+  INSTALL_RPATH "\$ORIGIN"
+)
+install(TARGETS trtmc_cli_bloom LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_bloom_cli
+    ${PROJECT_SOURCE_DIR}/families/bloom/tests/cpp/test_cli.cpp
+    cli.cpp
+  )
+  target_include_directories(test_bloom_cli PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_link_libraries(test_bloom_cli PRIVATE trtmc_core nlohmann_json::nlohmann_json)
+  target_compile_options(test_bloom_cli PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME bloom_cli COMMAND test_bloom_cli)
+  set_tests_properties(bloom_cli PROPERTIES LABELS cpu)
+endif()

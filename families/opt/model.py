@@ -14,6 +14,8 @@ OPT (Meta) uses:
 
 from __future__ import annotations
 
+from .cli import BuildRequest, coerce_request
+
 import json
 from typing import TYPE_CHECKING
 
@@ -36,7 +38,6 @@ from .default_dual_profile_decoder_tp import build_dual_profile_tp_decoder_engin
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -273,23 +274,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one OPT bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("opt does not support dynamic_kv_cache")
+    request = coerce_request(request)
 
-    if request.image_height is not None:
-        raise NotImplementedError("opt does not support image_height")
-
-    if request.image_width is not None:
-        raise NotImplementedError("opt does not support image_width")
-
-    if request.video_num_frames is not None:
-        raise NotImplementedError("opt does not support video_num_frames")
-
-    if request.max_batch_size != 1:
-        raise NotImplementedError("opt does not support max_batch_size")
-
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
 
     if request.task != "text_generation":
         raise ValueError("opt supports only task=text_generation")
@@ -307,10 +293,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("OPT max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("OPT has no qualified family-owned quantized build")
-    if request.fp32_layers:
-        raise NotImplementedError("OPT does not expose mixed-precision layers")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
