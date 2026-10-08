@@ -18,6 +18,7 @@ const TASKS = {
   monocular_depth: ['Depth estimation', 'Computer Vision', 'depth-estimation', 'depth'],
   monocular_geometry: ['Monocular geometry', 'Computer Vision', 'depth-estimation', 'geometry'],
   object_detection: ['Object detection', 'Computer Vision', 'object-detection', 'detect'],
+  points_to_semantic_segmentation: ['Point-cloud segmentation', 'Computer Vision', 'image-segmentation', null],
   pose_hypothesis_refinement: ['Pose hypothesis refinement', 'Robotics', 'robotics', null],
   prompted_segmentation: ['Prompted segmentation', 'Computer Vision', 'mask-generation', 'segment'],
   reranking: ['Text ranking', 'Natural Language Processing', 'text-ranking', 'rerank'],
