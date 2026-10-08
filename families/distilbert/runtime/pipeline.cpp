@@ -5,9 +5,11 @@
 
 #include "families/distilbert/runtime/pipeline.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <variant>
 
 namespace trtmc {
 
@@ -51,88 +53,101 @@ bool engine_mask_is_int32(const ITrtModule& module) {
     return false;
 }
 
+// Largest sequence the loaded engine accepts for input_ids, taken from its
+// active optimization profile (dynamic input) or its fixed shape.
+std::size_t input_capacity(const ITrtModule& module) {
+    const std::string name = "input_ids";
+    const auto shape =
+        module.input_is_dynamic(name)
+            ? module.input_profile_shape(name, module.profile_idx(), ProfileShapeSelector::kMax)
+            : module.tensor_shape(name);
+    if (shape.empty() || shape.back() <= 0)
+        throw std::runtime_error("EncoderPipeline: engine reports no usable input_ids capacity");
+    return static_cast<std::size_t>(shape.back());
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
 
 EncoderPipeline::EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string mode,
-                                 std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+                                 std::shared_ptr<ITokenizer> tokenizer, std::int64_t vocab_size)
     : encoder_(std::move(encoder)), mode_(std::move(mode)), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)) {
+      vocab_size_(vocab_size) {
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("EncoderPipeline: invalid encoder module");
-}
-
-EmbeddingResult EncoderPipeline::embed(const std::string& text) {
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
-    auto ids = tokenizer_->encode(text);
-    auto raw = encode_ids(ids);
-
-    // For embedding models: the TRT engine returns [max_seq, hidden] hidden
-    // states. Mean-pool over actual input positions and L2-normalize.
-    if (mode_ != "embedding" || raw.data.empty())
-        return raw;
-
-    const auto actual_len = static_cast<int32_t>(ids.size());
-    const int32_t hidden = infer_output_hidden_dim(*encoder_);
-    if (hidden <= 0 || actual_len <= 0 || raw.dim < actual_len * hidden)
-        return raw;
-
-    auto pooled = mean_pool_and_normalize(raw.data.data(), actual_len, hidden);
-    raw.data = std::move(pooled);
-    raw.dim = hidden;
-    return raw;
+    if (vocab_size_ <= 0)
+        throw std::runtime_error("EncoderPipeline: vocabulary size must be positive");
 }
 
-EmbeddingResult EncoderPipeline::encode(const std::string& text) {
-    if (!tokenizer_)
-        throw std::runtime_error("EncoderPipeline: no tokenizer configured");
-    auto ids = tokenizer_->encode(text);
-    auto raw = encode_ids(ids);
+void EncoderPipeline::require_mode(std::string_view expected) const {
+    if (mode_ != expected)
+        throw internal::UnsupportedTask("EncoderPipeline: this bundle was built for " + mode_ +
+                                        ", not " + std::string(expected));
+}
 
-    // Extract CLS token (first hidden_dim values) from the full hidden state
-    // matrix [max_seq, hidden]. This matches HF model.encode() behavior for
-    // encoder-only models (BERT, RoBERTa, etc.).
-    const int32_t hidden = infer_output_hidden_dim(*encoder_);
-    if (hidden > 0 && raw.dim > hidden) {
-        raw.data.resize(static_cast<std::size_t>(hidden));
-        raw.dim = hidden;
+std::vector<internal::TaskInstance> EncoderPipeline::task_bindings() {
+    if (mode_ == internal::ITextToEmbedding::kTask)
+        return {internal::bind<internal::ITextToEmbedding>(*this)};
+    if (mode_ == internal::ITextPairToRelevance::kTask) {
+        return {internal::bind<internal::ITextPairToRelevance>(*this),
+                internal::bind<internal::ITextQueryDocumentsToRelevance>(*this)};
     }
-    return raw;
+    return {internal::bind<internal::ITextToPooledFeatures>(*this)};
 }
 
-float EncoderPipeline::rerank(const std::string& query, const std::string& document) {
-    if (!tokenizer_)
-        throw std::runtime_error("EncoderPipeline: no tokenizer configured");
-    // Match the text-only reranking template documented by the supported
-    // Nemotron rerank cross-encoder model card.
-    std::string combined = "question:" + query + "   passage:" + document;
-    auto ids = tokenizer_->encode(combined);
-    auto result = encode_ids(ids);
-    return result.data.empty() ? 0.0f : result.data[0];
+std::vector<std::int32_t> EncoderPipeline::resolve_ids(const internal::TextSource& text) const {
+    if (const auto* view = std::get_if<std::string_view>(&text))
+        return tokenizer_->encode(std::string(*view));
+    const auto ids = std::get<Span<const std::int32_t>>(text);
+    // Caller-supplied ids feed the embedding gather directly; an out-of-range id
+    // would silently produce wrong features, so reject it before inference.
+    for (const auto id : ids) {
+        if (id < 0 || id >= vocab_size_)
+            throw std::invalid_argument("EncoderPipeline: token id outside the model vocabulary");
+    }
+    return {ids.begin(), ids.end()};
 }
 
-EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
+std::pair<std::vector<float>, std::int32_t>
+EncoderPipeline::run_encoder(const std::vector<std::int32_t>& input_ids) const {
     const auto n = input_ids.size();
-    std::vector<int32_t> mask_i32(n, 1);
-    std::vector<float> mask_f32(n, 1.0f);
+    if (n == 0)
+        throw std::invalid_argument("EncoderPipeline: text produced no tokens");
+    const auto capacity = input_capacity(*encoder_);
+    if (n > capacity)
+        throw std::invalid_argument("EncoderPipeline: input exceeds engine capacity");
 
-    auto ids_copy = input_ids;
+    // The engine is built with a fixed padded input length, and the runtime
+    // copies only the bytes it is given into a persistent device buffer of that
+    // length. Sending just the n real tokens would leave the previous call's
+    // tokens and attention mask in the tail, so a shorter input after a longer
+    // one would attend to stale tokens. Always send the full padded length:
+    // ids padded with 0 and the attention mask 0 beyond the real tokens.
+    const std::size_t length = encoder_->input_is_dynamic("input_ids") ? n : capacity;
+    std::vector<int32_t> ids_padded(length, 0);
+    std::copy(input_ids.begin(), input_ids.end(), ids_padded.begin());
+    std::vector<int32_t> mask_i32(length, 0);
+    std::vector<float> mask_f32(length, 0.0f);
+    std::fill(mask_i32.begin(), mask_i32.begin() + static_cast<std::ptrdiff_t>(n), 1);
+    std::fill(mask_f32.begin(), mask_f32.begin() + static_cast<std::ptrdiff_t>(n), 1.0f);
+
     Tensor ids_t;
-    ids_t.data = ids_copy.data();
-    ids_t.shape = {static_cast<int64_t>(n)};
+    ids_t.data = ids_padded.data();
+    ids_t.shape = {static_cast<int64_t>(length)};
     ids_t.dtype = DType::kInt32;
 
     // Match the engine's expected dtype for the attention mask.
     Tensor mask_t;
     if (engine_mask_is_int32(*encoder_)) {
         mask_t.data = mask_i32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.shape = {static_cast<int64_t>(length)};
         mask_t.dtype = DType::kInt32;
     } else {
         mask_t.data = mask_f32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.shape = {static_cast<int64_t>(length)};
         mask_t.dtype = DType::kFloat32;
     }
 
@@ -142,19 +157,100 @@ EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_id
 
     auto outputs = encoder_->forward(inputs);
 
-    EmbeddingResult result;
     for (auto& [name, tensor] : outputs) {
         if (name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
             name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
             name.find("score") != std::string::npos) {
-            auto n = tensor.numel();
-            result.data.resize(static_cast<std::size_t>(n));
-            std::memcpy(result.data.data(), tensor.data, n * sizeof(float));
-            result.dim = static_cast<int32_t>(n);
-            break;
+            const auto count = tensor.numel();
+            std::vector<float> data(static_cast<std::size_t>(count));
+            std::memcpy(data.data(), tensor.data, static_cast<std::size_t>(count) * sizeof(float));
+            return {std::move(data), static_cast<int32_t>(count)};
         }
     }
+    throw std::runtime_error("EncoderPipeline: engine returned no recognizable output tensor");
+}
 
+internal::SemanticEmbeddingResult
+EncoderPipeline::run(const internal::TextToEmbeddingRequest& request, internal::ConfigView config) {
+    require_mode(internal::ITextToEmbedding::kTask);
+    if (!config.empty())
+        throw internal::ConfigError(
+            "EncoderPipeline: text_to_embedding has no runtime configuration");
+    auto ids = tokenizer_->encode(std::string(request.text));
+    auto [data, dim] = run_encoder(ids);
+
+    // For embedding models: the TRT engine returns [max_seq, hidden] hidden
+    // states. Mean-pool over actual input positions and L2-normalize.
+    internal::SemanticEmbeddingResult result;
+    const auto actual_len = static_cast<int32_t>(ids.size());
+    const int32_t hidden = infer_output_hidden_dim(*encoder_);
+    if (hidden > 0 && actual_len > 0 && dim >= actual_len * hidden) {
+        result.values = mean_pool_and_normalize(data.data(), actual_len, hidden);
+        result.pooling = "mean";
+        result.normalization = "l2";
+    } else {
+        result.values = std::move(data);
+    }
+    return result;
+}
+
+internal::PooledFeaturesResult
+EncoderPipeline::run(const internal::TextToPooledFeaturesRequest& request,
+                     internal::ConfigView config) {
+    require_mode(internal::ITextToPooledFeatures::kTask);
+    if (!config.empty()) {
+        throw internal::ConfigError(
+            "EncoderPipeline: text_to_pooled_features has no runtime configuration");
+    }
+    auto ids = resolve_ids(request.text);
+    auto [data, dim] = run_encoder(ids);
+
+    // Extract the CLS token (first hidden_dim values) from the full hidden
+    // state matrix [max_seq, hidden]. Matches HF model(**inputs)
+    // .last_hidden_state[0, 0] for encoder-only models (BERT, RoBERTa, etc.).
+    const int32_t hidden = infer_output_hidden_dim(*encoder_);
+    if (hidden > 0 && dim > hidden)
+        data.resize(static_cast<std::size_t>(hidden));
+
+    internal::PooledFeaturesResult result;
+    result.values = std::move(data);
+    result.pooling = "cls";
+    result.normalization = "none";
+    return result;
+}
+
+internal::RelevanceResult EncoderPipeline::run(const internal::TextPairToRelevanceRequest& request,
+                                               internal::ConfigView config) {
+    require_mode(internal::ITextPairToRelevance::kTask);
+    if (!config.empty()) {
+        throw internal::ConfigError(
+            "EncoderPipeline: text_pair_to_relevance has no runtime configuration");
+    }
+    // Match the text-only reranking template documented by the supported
+    // Nemotron rerank cross-encoder model card.
+    const std::string combined =
+        "question:" + std::string(request.query) + "   passage:" + std::string(request.document);
+    auto ids = tokenizer_->encode(combined);
+    auto [data, dim] = run_encoder(ids);
+    (void)dim;
+
+    internal::RelevanceResult result;
+    result.score = data.empty() ? 0.0f : data[0];
+    result.kind = internal::ScoreKind::Unbounded;
+    return result;
+}
+
+internal::DocumentRelevanceResult
+EncoderPipeline::run(const internal::TextQueryDocumentsToRelevanceRequest& request,
+                     internal::ConfigView config) {
+    require_mode(internal::ITextPairToRelevance::kTask);
+    internal::DocumentRelevanceResult result;
+    result.scores.reserve(request.documents.size());
+    for (const auto& document : request.documents) {
+        result.scores.push_back(
+            run(internal::TextPairToRelevanceRequest{request.query, document}, config).score);
+    }
+    result.kind = internal::ScoreKind::Unbounded;
     return result;
 }
 
