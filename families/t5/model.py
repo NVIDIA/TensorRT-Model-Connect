@@ -755,6 +755,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("T5 does not support quantized builds")
     if request.fp32_layers:
         raise NotImplementedError("T5 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("T5 does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )

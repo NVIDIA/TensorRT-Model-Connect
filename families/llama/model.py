@@ -158,6 +158,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one dense Llama bundle through family-owned code only."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Llama does not support MTP speculative decoding")
     if request.image_height is not None:
         raise NotImplementedError("llama does not support image_height")
 

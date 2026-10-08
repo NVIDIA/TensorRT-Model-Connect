@@ -618,6 +618,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("qwen3_omni does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("qwen3_omni does not expose fp32 layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("qwen3_omni does not support MTP speculative decoding")
     precision = str(request.precision).lower()
     if precision != "bf16":
         raise ValueError("qwen3_omni supports only the qualified bf16 build")

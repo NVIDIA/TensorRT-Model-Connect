@@ -556,6 +556,8 @@ def _build_timesfm_network(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one TimesFM bundle without shared model orchestration."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("TimesFM does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("timesfm does not support dynamic_kv_cache")
 

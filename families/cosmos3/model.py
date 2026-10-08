@@ -83,6 +83,8 @@ def _build_vae(weights: dict[str, Any], *, first_frame_only: bool, verbose: bool
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one fixed-profile Cosmos3-Nano bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Cosmos3-Nano does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("cosmos3 does not support dynamic_kv_cache")
 

@@ -109,6 +109,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Wan2.2 TI2V requires max_batch_size=1")
     if request.fp32_layers:
         raise NotImplementedError("Wan2.2 TI2V does not support fp32_layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Wan2.2 TI2V does not support MTP speculative decoding")
     if request.precision not in {"bf16", "bfloat16"}:
         raise ValueError("Wan2.2 TI2V requires precision=bf16")
 

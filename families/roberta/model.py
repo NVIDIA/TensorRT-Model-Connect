@@ -342,6 +342,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("RoBERTa has no family-owned quantized build")
     if request.fp32_layers:
         raise NotImplementedError("RoBERTa does not expose mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("RoBERTa does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )

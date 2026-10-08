@@ -307,6 +307,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Nemotron has no qualified family-owned quantized build")
     if request.fp32_layers:
         raise NotImplementedError("Nemotron does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Nemotron does not support MTP speculative decoding")
 
     model = _NemotronModel()
     config.raw["_model_dir"] = str(model_dir)

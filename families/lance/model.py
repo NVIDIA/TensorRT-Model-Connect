@@ -230,6 +230,8 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Lance vision-language bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Lance does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("lance does not support dynamic_kv_cache")
 

@@ -396,6 +396,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_resnet does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("timm_resnet does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("timm_resnet does not support MTP speculative decoding")
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)

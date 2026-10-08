@@ -525,6 +525,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Qwen-Image does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("Qwen-Image does not support fp32_layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Qwen-Image does not support MTP speculative decoding")
 
     model_dir = Path(request.model_dir)
     if request.task == "image_edit":

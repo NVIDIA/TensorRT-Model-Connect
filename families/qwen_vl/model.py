@@ -1068,6 +1068,8 @@ def _generation_token_contract(model_dir: Path, vocab_size: int) -> dict[str, ob
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen-VL vision-language bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Qwen-VL does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen_vl does not support dynamic_kv_cache")
 

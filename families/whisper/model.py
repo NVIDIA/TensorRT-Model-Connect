@@ -952,6 +952,8 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Whisper transcription bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Whisper does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("whisper does not support dynamic_kv_cache")
 

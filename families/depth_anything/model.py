@@ -366,6 +366,8 @@ def build(request, writer) -> None:
         raise NotImplementedError("depth_anything does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("depth_anything does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("depth_anything does not support MTP speculative decoding")
 
     model_dir = Path(request.model_dir)
     model_config = config_module.ModelConfig.from_dir(model_dir)

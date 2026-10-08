@@ -281,6 +281,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("GPT-NeoX has no qualified family-owned quantized build")
     if request.fp32_layers:
         raise NotImplementedError("GPT-NeoX does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("GPT-NeoX does not support MTP speculative decoding")
 
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")

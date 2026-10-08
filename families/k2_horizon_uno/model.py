@@ -672,6 +672,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("K2-Horizon-Uno does not support quantized builds")
     if request.fp32_layers:
         raise NotImplementedError("K2-Horizon-Uno does not support mixed-FP32 layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("K2-Horizon-Uno does not support MTP speculative decoding")
 
     adapter_dir = Path(request.model_dir)
     load_and_validate_adapter_config(adapter_dir / "adapter_config.json")

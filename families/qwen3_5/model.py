@@ -1362,6 +1362,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _Qwen35Model, *
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen3.5 hybrid bundle through family-owned code only."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Qwen3.5 does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen3_5 does not support dynamic_kv_cache")
 

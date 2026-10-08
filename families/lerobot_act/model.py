@@ -105,6 +105,8 @@ def _validate_initial_policy(raw: dict[str, Any]) -> None:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build the one qualified LeRobot ACT policy contract."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("LeRobot ACT does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("lerobot_act does not support dynamic_kv_cache")
 

@@ -57,6 +57,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("foundationpose does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("foundationpose does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("foundationpose does not support MTP speculative decoding")
 
     refiner, scorer = _model_files(Path(request.model_dir))
     refiner_plan = build_foundationpose_engine(

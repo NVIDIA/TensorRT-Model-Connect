@@ -916,6 +916,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("M2M-100 does not support quantized builds")
     if request.fp32_layers:
         raise NotImplementedError("M2M-100 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("M2M-100 does not support MTP speculative decoding")
 
     model = _M2M100Model()
     config.raw["_model_dir"] = str(model_dir)

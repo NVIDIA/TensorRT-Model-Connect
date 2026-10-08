@@ -128,6 +128,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Mistral has no qualified family-owned quantized build")
     if request.fp32_layers:
         raise NotImplementedError("Mistral does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Mistral does not support MTP speculative decoding")
 
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_resolved_build_precision"] = precision

@@ -206,6 +206,8 @@ class _Sam2Model:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one SAM2 video-segmentation bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("SAM2 does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("sam2 does not support dynamic_kv_cache")
 
