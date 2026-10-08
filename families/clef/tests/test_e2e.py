@@ -4,6 +4,7 @@
 
 import json
 import os
+from functools import cache
 from pathlib import Path
 import subprocess
 import sys
@@ -13,7 +14,11 @@ import pytest
 
 
 ROOT = Path(__file__).parent
-MANIFEST = json.loads((ROOT / "manifests/clef.json").read_text())
+MANIFESTS = {
+    manifest["name"]: manifest
+    for path in sorted((ROOT / "manifests").glob("*.json"))
+    for manifest in [json.loads(path.read_text())]
+}
 
 
 def _selection(config):
@@ -28,44 +33,57 @@ def _selection(config):
 
 @pytest.fixture(scope="module")
 def clef_bundle(tmp_path_factory):
-    """All cases exercise one freshly built checkpoint/bundle unless explicitly supplied."""
-    # Clef's graph and C++ pipeline execute the complete model on one device.
-    assert MANIFEST["tensor_parallel_size"] == 1
-    checkpoint = os.environ.get("TRTMC_CLEF_CHECKPOINT")
-    if checkpoint is None:
-        from huggingface_hub import snapshot_download
+    """Build only selected checkpoints, once each, in separate model-owned bundles."""
 
-        checkpoint = snapshot_download(MANIFEST["hf_id"], revision=MANIFEST["hf_revision"])
-    checkpoint = Path(checkpoint)
-    bundle_value = os.environ.get("TRTMC_CLEF_BUNDLE")
-    bundle = (
-        Path(bundle_value)
-        if bundle_value
-        else tmp_path_factory.mktemp("clef-bundle") / MANIFEST["bundle"]
-    )
-    if bundle_value is None:
-        from families.clef.cli import build
+    @cache
+    def resolve(name):
+        manifest = MANIFESTS[name]
+        assert manifest["tensor_parallel_size"] == 1
+        prefix = "TRTMC_" + name.upper().replace("-", "_")
+        checkpoint = os.environ.get(prefix + "_CHECKPOINT")
+        if checkpoint is None:
+            from huggingface_hub import snapshot_download
 
-        build(
-            model=str(checkpoint),
-            output=bundle,
-            max_sequence_length=MANIFEST["max_sequence_length"],
+            checkpoint = snapshot_download(manifest["hf_id"], revision=manifest["hf_revision"])
+        checkpoint = Path(checkpoint)
+        bundle_value = os.environ.get(prefix + "_BUNDLE")
+        bundle = (
+            Path(bundle_value)
+            if bundle_value
+            else tmp_path_factory.mktemp(name + "-bundle") / manifest["bundle"]
         )
-    assert bundle.is_file()
-    return checkpoint, bundle
+        if bundle_value is None:
+            from families.clef.cli import build
+
+            build(
+                model=str(checkpoint),
+                output=bundle,
+                max_sequence_length=manifest["max_sequence_length"],
+            )
+        assert bundle.is_file()
+        return checkpoint, bundle
+
+    return resolve
 
 
-@pytest.mark.parametrize("case", MANIFEST["testcases"], ids=lambda case: case["name"])
-def test_e2e(case, request, tmp_path):
-    assert MANIFEST["precision"] == "bf16"
+@pytest.mark.parametrize(
+    ("manifest", "case"),
+    [
+        pytest.param(manifest, case, id=case["name"])
+        for manifest in MANIFESTS.values()
+        for case in manifest["testcases"]
+    ],
+)
+def test_e2e(manifest, case, request, tmp_path):
+    assert manifest["precision"] == "bf16"
     selected = _selection(request.config)
     if not selected and os.environ.get("TRTMC_E2E") != "1":
         pytest.skip("real Clef E2E requires explicit selection")
-    if selected and not selected.intersection({"clef", case["name"]}):
+    if selected and not selected.intersection({"clef", manifest["name"], case["name"]}):
         pytest.skip("Clef case was not selected")
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     binary = request.getfixturevalue("clef_task_probe")
-    checkpoint, bundle = request.getfixturevalue("clef_bundle")
+    checkpoint, bundle = request.getfixturevalue("clef_bundle")(manifest["name"])
     sys.path.insert(0, str(checkpoint))
     from joint_schema_model import (
         collate_records,

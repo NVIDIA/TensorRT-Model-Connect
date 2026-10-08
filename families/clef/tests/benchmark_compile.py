@@ -19,12 +19,19 @@ import torch
 
 
 def main():
+    root = Path(__file__).resolve().parent
+    manifests = {
+        value["name"]: value
+        for path in (root / "manifests").glob("*.json")
+        for value in [json.loads(path.read_text())]
+    }
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=30)
-    parser.add_argument("--fixtures", type=Path, default=Path(__file__).parent / "fixtures")
+    parser.add_argument("--model", choices=sorted(manifests), default="clef")
+    parser.add_argument("--fixtures", type=Path)
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--dynamic", choices=("auto", "static", "dynamic"), default="auto")
     parser.add_argument(
@@ -51,6 +58,12 @@ def main():
         inductor_config.fx_graph_cache = False
         autograd_config.enable_autograd_cache = False
     args.output.mkdir(parents=True, exist_ok=True)
+    manifest = manifests[args.model]
+    fixtures = (
+        sorted(args.fixtures.glob("*.json"))
+        if args.fixtures
+        else [root / case["inputs"]["document_path"] for case in manifest["testcases"]]
+    )
     sys.path.insert(0, str(args.checkpoint))
     from joint_schema_model import (
         encode_record,
@@ -84,7 +97,7 @@ def main():
 
     receipts = []
     with torch.inference_mode():
-        for fixture in sorted(args.fixtures.glob("*.json")):
+        for fixture in fixtures:
             if args.case and fixture.stem not in args.case:
                 continue
             from families.clef.tests.media_fixtures import fixture_record
@@ -127,7 +140,11 @@ def main():
                     {
                         "torch": torch.__version__,
                         "device": torch.cuda.get_device_name(),
-                        "checkpoint_revision": "2f3de3dd85f379784083b0814d997ab627200f0c",
+                        "checkpoint": manifest["hf_id"],
+                        "checkpoint_revision": manifest["hf_revision"],
+                        "emulate_precision_casts": bool(
+                            torch._inductor.config.emulate_precision_casts
+                        ),
                         "results": receipts,
                     },
                     indent=2,

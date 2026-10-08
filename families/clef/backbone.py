@@ -169,7 +169,7 @@ def deltanet(g, x, p, config):
     indices = g.const(np.repeat(np.arange(key_heads), heads // key_heads), trt.int32)
     q = g.n.add_gather(q, indices, 1).get_output(0)
     k = g.n.add_gather(k, indices, 1).get_output(0)
-    beta = g.activation(g.linear(x, p + ".in_proj_b"), trt.ActivationType.SIGMOID)
+    beta = g.sigmoid(g.linear(x, p + ".in_proj_b"))
     a = g.cast(g.linear(x, p + ".in_proj_a"), trt.float32)
     dt = g.const(g.weights[p + ".dt_bias"].float().reshape(1, heads))
     decay = g.mul(
@@ -228,7 +228,7 @@ def full_attention(g, x, p, config, cos, sin):
     out = g.reshape(g.permute(layer.get_output(0), (0, 2, 1, 3)), (-1, heads * dim))
     # Transformers 5.10.2 uses sigmoid here, including when the release config
     # contains output_gate_type. Follow executed reference math, not that label.
-    out = g.mul(out, g.activation(gate, trt.ActivationType.SIGMOID))
+    out = g.mul(out, g.sigmoid(gate))
     return g.linear(out, p + ".o_proj")
 
 
