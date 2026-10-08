@@ -35,7 +35,7 @@ class AiperfRun:
     def summary(self) -> dict[str, Any]:
         return self.json("profile_export_aiperf.json")
 
-    def raw_records(self, phase: str = "profiling") -> list[dict[str, Any]]:
+    def raw_records(self, phase: str | None = "profiling") -> list[dict[str, Any]]:
         """The per-request records: the merged export, else the per-processor files AIPerf leaves
         unmerged (for example when every request failed)."""
         records = []
@@ -47,8 +47,18 @@ class AiperfRun:
                 if not line.strip():
                     continue
                 item = json.loads(line)
-                if item["metadata"].get("benchmark_phase") == phase:
+                if phase is None or item["metadata"].get("benchmark_phase") == phase:
                     records.append(item)
+        return records
+
+    def metric_records(self, phase: str | None = "profiling") -> list[dict[str, Any]]:
+        records = []
+        for path in sorted(self.directory.glob("**/profile_export.jsonl")):
+            for line in path.read_text().split("\n"):
+                if line.strip():
+                    item = json.loads(line)
+                    if phase is None or item["metadata"].get("benchmark_phase") == phase:
+                        records.append(item)
         return records
 
     def accuracy_records(self) -> list[dict[str, Any]]:
@@ -59,11 +69,11 @@ class AiperfRun:
                 if item.get("benchmark_phase") == "profiling"]
 
 
-def _run(command: Sequence[str], log: Any, env: Mapping[str, str], timeout_s: float) -> int:
+def _run(command: Sequence[str], log: Any, env: Mapping[str, str], timeout_s: float, *, cwd: Path | None = None) -> int:
     """AIPerf in a process group of its own, stopped (the whole group) at its deadline (TimeoutExpired), when the
     run is cancelled (``cancel.Cancelled``), or on any interrupt of this thread."""
     process = subprocess.Popen(list(command), stdout=log, stderr=subprocess.STDOUT, env=dict(env),
-                               start_new_session=True)
+                               start_new_session=True, cwd=cwd)
     deadline = time.time() + timeout_s
     try:
         while True:
@@ -83,11 +93,12 @@ def _run(command: Sequence[str], log: Any, env: Mapping[str, str], timeout_s: fl
 
 
 def run_aiperf(environment: Environment, out: Path, arguments: Sequence[str], *,
-               env: Mapping[str, str] | None = None, timeout_s: float = 7200) -> AiperfRun:
+               env: Mapping[str, str] | None = None, timeout_s: float = 7200,
+               model_name: str = "trtmc", command_prefix: Sequence[str] | None = None) -> AiperfRun:
     arguments, evidence = execution.prepare(arguments)
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
-    command = [str(environment["aiperf"]), "profile", "--model", "trtmc", "--ui-type", "none",
+    command = [*(command_prefix or [str(environment["aiperf"])]), "profile", "--model", model_name, "--ui-type", "none",
                "--export-level", "raw", "--artifact-dir", str(out), "--random-seed", "0",
                "--request-timeout-seconds", "1800", *arguments]
     # Tokenizers and public datasets load online (AIPerf's offline path rejects local tokenizer
@@ -115,7 +126,8 @@ def _wait_ready(out: Path, timeout_s: float = 180) -> None:
     previous = None
     while time.time() < deadline:
         cancel.check()
-        sizes = tuple(path.stat().st_size for path in sorted(out.glob(f"**/{RAW_EXPORT}")))
+        raw = sorted(out.glob(f"**/{RAW_EXPORT}")) or sorted(out.glob("**/raw_records/*.jsonl"))
+        sizes = tuple(path.stat().st_size for path in [*raw, *sorted(out.glob("**/profile_export.jsonl"))])
         if sizes and sizes == previous:
             return
         previous = sizes

@@ -327,8 +327,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                                                "this machine's environment file")
     check.add_argument("--fix", action="store_true")
     check.add_argument("--environment", type=Path, help="also check paths, interpreters, GPU, and model list")
+    text = commands.add_parser("text-profile", help="profile text through trtmc-server without qualification verdicts")
+    text.add_argument("--environment", type=Path, required=True)
+    text.add_argument("--config", type=Path, required=True)
+    text.add_argument("--out", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
+        if arguments.command == "text-profile":
+            from .text_profile import profile
+
+            result = profile(load_environment(arguments.environment), arguments.config, arguments.out)
+            print(json.dumps({"out": str(arguments.out), "runs": len(result["runs"])}))
+            return int(any(run["exit_code"] for run in [*result["runs"], *result.get("reference_runs", [])]))
         if arguments.command == "doctor":
             code = doctor(arguments.fix)
             if arguments.environment:

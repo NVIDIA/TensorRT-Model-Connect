@@ -27,6 +27,7 @@ target_link_libraries(trtmc_model_qwen PRIVATE
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
   ${CMAKE_DL_LIBS}
+  Threads::Threads
 )
 target_compile_options(trtmc_model_qwen PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(trtmc_model_qwen PROPERTIES
@@ -44,6 +45,7 @@ if(TRTMC_BUILD_TESTS)
       test_qwen_native_kv_cache
       test_qwen_sampler
       test_qwen_tensor_names
+      test_qwen_text_stream
   )
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/${test_name}.cpp
@@ -59,6 +61,7 @@ if(TRTMC_BUILD_TESTS)
     )
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+  target_link_libraries(test_qwen_text_stream PRIVATE Threads::Threads)
   set_tests_properties(test_qwen_native_kv_cache PROPERTIES SKIP_RETURN_CODE 77)
 
   add_executable(qwen_logits_trace
@@ -83,4 +86,11 @@ if(TRTMC_BUILD_TESTS)
   add_executable(qwen_embedding_consumer
     ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/qwen_embedding_consumer.cpp)
   target_link_libraries(qwen_embedding_consumer PRIVATE trtmc_c)
+endif()
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(qwen_text_stream_consumer
+    ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/qwen_text_stream_consumer.cpp)
+  target_link_libraries(qwen_text_stream_consumer PRIVATE trtmc_c)
+  target_compile_options(qwen_text_stream_consumer PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()

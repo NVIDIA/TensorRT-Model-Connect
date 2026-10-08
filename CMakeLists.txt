@@ -673,7 +673,7 @@ if(TRTMC_BUILD_TESTS)
       trtmc_server trtmc_c nlohmann_json::nlohmann_json)
     target_compile_options(test_server_sdk_worker PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_dependencies(test_server_sdk_worker trtmc-server trtmc_api_test_backend
-      trtmc_api_test_family trtmc_api_test_text_family)
+      trtmc_api_test_family trtmc_api_test_text_family trtmc_api_test_stream_family)
     add_test(NAME server_sdk_worker
       COMMAND test_server_sdk_worker "${_trtmc_api_test_runtime_root}")
     add_test(NAME server_sdk_worker_process

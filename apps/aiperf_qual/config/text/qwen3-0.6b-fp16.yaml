@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Replace /path values with paths on the validation host. Validation must use
+# this bundle and the same family DSO that the server will load.
+aiperf:
+  version: 0.13.0
+checkpoint:
+  name: Qwen/Qwen3-0.6B
+  revision: c1899de289a04d12100db370d81485cdf75e47ca
+  precision: fp16
+tokenizer:
+  name: Qwen/Qwen3-0.6B
+  revision: c1899de289a04d12100db370d81485cdf75e47ca
+server:
+  bundle: /path/bundles/qwen3-0.6b-fp16.bundle
+  model_name: Qwen/Qwen3-0.6B
+  binary: /path/build/trtmc-server
+  runtime_root: /path/build
+  replicas: 1
+  port: 8000
+  startup_timeout: 120
+  request_timeout: 120
+validation_profile: qwen3-0.6b-fp16
+validation_commands:
+  - [/path/trtmc-python, -m, pytest, families/qwen/tests/test_e2e.py, --e2e-model, qwen3-0.6b-fp16, -q]
+  - [/path/build/families/qwen/qwen_text_stream_consumer, /path/bundles/qwen3-0.6b-fp16.bundle, /path/build]
+workload:
+  endpoints: [completions, chat]
+  input_tokens: [32]
+  output_tokens: [16]
+  concurrency: [1]
+  request_rate: [null]
+  streaming: [false]
+  requests: 20
+  warmup_requests: 3
+# Enable after the baseline passes. Reference runs follow all candidate runs,
+# using the same GPU lock; only nonstreaming concurrency-1 cases are compared.
+# reference:
+#   profile: qwen3-0.6b-fp16
+#   python: /path/reference-python
+#   mode: eager

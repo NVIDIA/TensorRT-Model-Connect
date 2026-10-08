@@ -247,3 +247,85 @@ it).
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
   retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
+
+
+## Text profiling with the persistent server
+
+`text-profile` reuses `trtmc-server` with AIPerf's built-in `completions` and
+`chat` endpoints. It adds server readiness/model checks, AIPerf release
+version checks and installed-package provenance, family validation commands,
+length/load sweeps, request-ID timing joins and an optional sequential
+native-reference comparison. It produces
+benchmark evidence independently of the qualification verdicts above.
+
+```bash
+PYTHONPATH=apps/aiperf_qual python3 -m trtmc_aiperf_qual text-profile \
+  --environment /path/text-environment.yaml \
+  --config /path/qwen-text-profile.yaml --out /path/results/qwen-baseline
+```
+
+For a short guide using an already-built Qwen bundle and the pip-installed
+AIPerf client directly, see
+[Profile Text with AIPerf](../../website/docs/user-guides/profile-text-with-aiperf.md).
+The automated runner also uses `pip install aiperf==0.13.0`; no AIPerf source
+checkout is required. Keep the client in a separate Python environment.
+
+For automatic validation and timing joins, generate the configuration from
+the checked-in Qwen example, then run `text-profile`. Replace the three paths
+below with your native build, already-built FP16 bundle, and client interpreter.
+The Qwen example expects checkpoint revision
+`c1899de289a04d12100db370d81485cdf75e47ca` and a context limit of at least 256.
+Use your CUDA-enabled TRTMC Python interpreter for both commands; the runtime
+build must also include `qwen_text_stream_consumer` for the family stream check.
+
+```bash
+python apps/aiperf_qual/examples/prepare_text_profile.py \
+  --build-dir /absolute/path/build \
+  --bundle /absolute/path/qwen3-0.6b.bundle \
+  --aiperf-python /absolute/path/client-venv/bin/python \
+  --out artifacts/qwen-config
+
+PYTHONPATH=apps/aiperf_qual python -m trtmc_aiperf_qual text-profile \
+  --environment artifacts/qwen-config/environment.yaml \
+  --config artifacts/qwen-config/model.yaml --out artifacts/qwen-profile
+```
+
+Run in the same GPU environment as the build, with the reference checkpoint
+available in its Hugging Face cache. The runner validates the exact served
+bundle before timing. `report.json` contains success counts, p50/p95 latency,
+throughput and native Task wall time; `run-NNN/joined.jsonl` joins client
+measurements to server records. Use new configuration and result directories
+for subsequent runs. Add `--include-streaming` to generate Qwen's raw/chat
+streaming cases. Larger bundles can need a higher `server.startup_timeout`.
+
+To profile another built model with this runner, supply a model template with
+its checkpoint/tokenizer revisions, server settings and family-owned
+`validation_commands`. These checks must validate the exact served bundle.
+Do not reuse Qwen's correctness commands for another family. Optional legacy
+`aiperf.source` and `aiperf.commit` fields retain exact clean-checkout checks
+for source installations, but the shipped templates use `aiperf.version` only.
+
+In Docker, make the checkout, build, bundle, client environment and cache
+available inside the GPU container. For a Git worktree, mount the original
+checkout's entire `.git` directory at the same absolute path too:
+`git rev-parse --path-format=absolute --git-common-dir` identifies it. The
+automated runner reads Git metadata to record provenance.
+
+Client token counts are tokenizer estimates; do not enable
+`--use-server-token-count`, because the server does not expose measured prompt
+token counts. Nonstreaming native `model_call_ms` measures the public Task
+call; streaming measures the Task stream including relay/backpressure.
+AIPerf `client_request_latency_ms` ends at the last content chunk;
+`client_request_lifecycle_ms` also includes terminal delivery and cleanup.
+These serving measurements exclude model loading, validation and warmup and
+do not represent GPU kernel time or release qualification verdicts.
+
+An optional `reference` block (`profile`, GPU `python`, `mode: eager`) runs
+the existing native reference sequentially under the same GPU lock. Only
+nonstreaming, closed-loop, concurrency-one cases with matching inputs, text,
+actual output counts and Task timing scopes receive a descriptive native Task
+wall ratio. Mismatched work is reported as noncomparable.
+
+The normal qualification commands keep the existing perf-serving service and
+its raw Task/observation protocol. `services.serving(service="trtmc-server")`
+is an explicit text candidate option; callers must use the public text endpoints.

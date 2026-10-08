@@ -55,6 +55,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--max-body-bytes", type=positive, default=1024 * 1024)
     result.add_argument("--max-prompt-bytes", type=positive, default=256 * 1024)
     result.add_argument("--max-new-tokens", type=positive, default=4096)
+    result.add_argument("--records", type=Path, help="append terminal request timing JSONL (no text)")
     result.add_argument("--access-log", action="store_true")
     result.add_argument("--worker-binary", type=Path, help=argparse.SUPPRESS)
     return result
@@ -136,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_body_bytes=args.max_body_bytes,
                 max_prompt_bytes=args.max_prompt_bytes,
                 max_generation_tokens=args.max_new_tokens,
+                records=args.records,
             ),
         )
         uvicorn_config = uvicorn.Config(

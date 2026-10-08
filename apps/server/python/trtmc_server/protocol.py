@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -47,9 +48,11 @@ def extract_result(result: Any) -> tuple[str, int, dict[str, float]]:
     if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
         raise WorkerProtocolError("worker generate result has invalid completion_tokens")
     timings: dict[str, float] = {}
-    for name in ("setup_ms", "prefill_ms", "decode_ms"):
+    for name in ("setup_ms", "prefill_ms", "decode_ms", "model_call_ms"):
+        if name == "model_call_ms" and name not in result:
+            continue
         value = result.get(name, 0.0)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
             raise WorkerProtocolError(f"worker generate result has invalid {name}")
         timings[name] = float(value)
     return str(result["text"]), tokens, timings

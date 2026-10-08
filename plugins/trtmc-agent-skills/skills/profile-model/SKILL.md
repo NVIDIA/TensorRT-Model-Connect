@@ -48,3 +48,25 @@ python3 -m qualification_tests.benchmark_qualification.performance run <suite> \
 Lead the report with correctness and evidence level. Include exact commands,
 p50 and other suite-owned statistics, measurement scope, limitations, and any
 target not run.
+
+
+## HTTP text load evidence
+
+For text serving measurements, reuse the persistent `trtmc-server` through
+`python3 -m trtmc_aiperf_qual text-profile --environment <environment> --config
+<text-config> --out <result-dir>` with `PYTHONPATH=apps/aiperf_qual`. Consult
+`website/docs/user-guides/profile-text-with-aiperf.md` and the checked-in
+`apps/aiperf_qual/config/text/` examples. Keep the owning family's exact-bundle
+correctness checks before timing; HTTP success does not replace them.
+
+Require incremental capability before interpreting TTFT or inter-token
+latency. Nonstreaming native records use `public_task_call_wall`; streaming
+records include relay/backpressure and have a different scope. Preserve warmup
+and failures when joining AIPerf exports to server records with `X-Request-ID`.
+Native prompt counts are unavailable; client tokenizer counts are estimates.
+AIPerf request latency ends at the last content response. Inspect the client
+request lifecycle and server handler timing as well: terminal delivery or
+cleanup can delay the next request without appearing in content latency.
+The optional sequential reference comparison requires matching payloads,
+outputs, token counts, precision and Task boundaries. It does not change the
+qualification criteria or establish speedup from HTTP latency alone.
