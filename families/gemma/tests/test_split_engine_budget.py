@@ -20,7 +20,8 @@ from families.gemma.model import (
 
 
 def _weights(parameters: int) -> dict:
-    return {"w": np.zeros(parameters, dtype=np.float32)}
+    # The estimator reads size only; preserve the shape without a huge backing array.
+    return {"w": np.broadcast_to(np.zeros(1, dtype=np.float32), (parameters,))}
 
 
 def test_bytes_follow_the_build_precision():
