@@ -11,6 +11,7 @@
 // plugin. Architecture-specific behavior remains in this model directory and
 // in the TRT engine emitted by the matching family builder.
 
+#include "families/qwen/runtime/debug_windows.h"
 #include "families/qwen/runtime/inference_state.h"
 #include "families/qwen/runtime/sampler.h"
 #include "families/qwen/runtime/tokenizer.h"
@@ -81,9 +82,31 @@ class QwenTextGenerationPipeline final : public ITextGeneration,
     // Family-local E2E seam; the public Task API remains TextResult-only.
     LogitsTrace trace_logits(const std::string& prompt, const TextGenerationConfig& cfg);
 
+    struct DebugWindowValues {
+        std::string name;
+        int32_t layer{0};
+        std::vector<int64_t> shape; // {rows, hidden}
+        std::vector<float> values;  // row-major float32
+    };
+    struct DebugWindowsTrace {
+        std::vector<int32_t> prompt_ids;
+        std::vector<int32_t> generated_ids;
+        std::vector<DebugWindowValues> prefill; // one row per prompt token
+        // steps[k]: the decoder pass that consumes generated_ids[k], one row. Unlike
+        // generate(), the last sampled token also gets a pass; a sampled EOS does not.
+        std::vector<std::vector<DebugWindowValues>> steps;
+    };
+    // Family-local debug seam: the only place debug_hidden_<i> outputs are copied
+    // to host. Returns no windows when the engines have no debug outputs.
+    DebugWindowsTrace trace_debug_windows(const std::string& prompt,
+                                          const TextGenerationConfig& cfg);
+
   private:
     // Kept before TRT modules so TP communicators outlive contexts/engines.
     std::shared_ptr<void> distributed_owner_;
+    // Bound as engine outputs; kept before TRT modules so buffers outlive them.
+    QwenDebugWindows prefill_windows_;
+    QwenDebugWindows decoder_windows_;
     std::unique_ptr<ITrtModule> decoder_;
     std::unique_ptr<ITrtModule> prefill_;
     std::unique_ptr<QwenInferenceState> state_;
@@ -130,6 +153,8 @@ class QwenTextGenerationPipeline final : public ITextGeneration,
                            const std::vector<const void*>& present_k,
                            const std::vector<const void*>& present_v, std::vector<float>& logits);
     void prime_decoder_after_batched_prefill(const std::vector<int32_t>& input_ids);
+    void trace_debug_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
+                             DebugWindowsTrace& trace);
     bool should_stop_on_answer(const std::vector<int32_t>& output, int32_t prompt_token_count,
                                const TextGenerationConfig& cfg, int32_t steps,
                                int32_t stop_interval, bool is_eos) const;
