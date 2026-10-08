@@ -160,7 +160,7 @@ def build(request, writer) -> None:
     if has_mtp:
         mtp_plan = model.build_mtp_engine(
             config, weights, max_sequence_length,
-            precision=precision, verbose=bool(request.verbose),
+            precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
         )
 
     writer.set_header(family="qwen3_8", task=request.task, backend=request.backend)

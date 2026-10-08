@@ -856,7 +856,7 @@ class Qwen38Model:
     def build_mtp_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
-        verbose: bool = False,
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         """Build the MTP (multi-token-prediction) draft-head TRT engine.
 
@@ -868,10 +868,18 @@ class Qwen38Model:
                      self-attention with its OWN KV cache, not stateless
             logits = lm_head(norm(fused))                # draft token n+2
 
-        Always builds with quant_ctx=None: MTP weights are unquantized in
-        every published checkpoint seen so far (see `_load_mtp_weights`),
-        so this engine's GEMMs are plain matmuls regardless of whether the
-        main engine used NVFP4.
+        `quant_ctx` should be the SAME context passed to the main engine's
+        `build_engine()` (or None for an unquantized build). MTP's own
+        `mtp_layer.*` weights are never registered in it (see
+        `_load_mtp_weights` -- unquantized in every checkpoint seen so far,
+        `quant_ctx.maybe_quantized_matmul` falls back to a plain constant
+        matmul for any unregistered name), so passing it through is a no-op
+        for the decoder layer. It matters for `lm_head`: when the main
+        model is NVFP4-quantized, `w_lm_head` is *shared* with the main
+        engine and is NVFP4-owned too -- `load_weights()` never
+        materializes a plain copy for it (`_owned(quant_ctx, "w_lm_head")`),
+        so building this engine with `quant_ctx=None` regardless of the
+        main build's quantization would read an empty weight for `lm_head`.
 
         Caller contract: `next_token_id` is the token the main engine just
         produced at position n (i.e. token n+1); `position_id` must be the
@@ -967,7 +975,7 @@ class Qwen38Model:
         # --- fused = fc(cat([inputs_embeds, hidden_states])) ---
         fused_cat = network.add_concatenation([inputs_embeds, hs])
         fused_cat.axis = 1
-        matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, None)
+        matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
         fused = matmul(
             fused_cat.get_output(0), 2 * hidden, hidden,
             weights["mtp_layer.fc"], "mtp_layer.fc")
@@ -995,7 +1003,7 @@ class Qwen38Model:
             max_cache_length=max_cache_length,
             mlp_size=mlp_size,
             dtype=work_np_dtype,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
         )
         mtp_hidden = result["hidden"]
         present_k = result["present_k"]
@@ -1008,7 +1016,7 @@ class Qwen38Model:
             network, mtp_hidden, hidden, weights["mtp_final_norm"], eps_tensor,
             dtype=work_np_dtype)
 
-        lm_head_matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, None)
+        lm_head_matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
         mtp_logits = lm_head_matmul(
             mtp_hidden, hidden, vocab, weights.get("w_lm_head"), "w_lm_head")
         if mtp_logits.dtype != trt.float32:
