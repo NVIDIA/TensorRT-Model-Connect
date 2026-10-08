@@ -273,8 +273,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {"encoding", "embedding", "reranking"}:
-        raise ValueError("electra task must be encoding, embedding, or reranking")
+    if request.task not in {
+        "text_to_pooled_features",
+        "text_to_embedding",
+        "text_pair_to_relevance",
+    }:
+        raise ValueError(
+            "electra task must be text_to_pooled_features, text_to_embedding, "
+            "or text_pair_to_relevance"
+        )
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "electra":
@@ -329,6 +336,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         {
             **_tokenizer_runtime_contract(model_dir),
             "tensor_parallel_size": parallel.tp_size,
+            "vocab_size": _positive_int(config.vocab_size, "vocab_size"),
         },
     )
     for filename in _BUNDLE_FILES:

@@ -3,7 +3,7 @@
   "hf_id": "xlnet/xlnet-base-cased",
   "bundle": "xlnet-base.bundle",
   "family": "xlnet",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "precision": "fp16",
   "testcases": [
     {
