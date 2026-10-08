@@ -2080,9 +2080,13 @@ def test_manifests_contain_only_family_test_inputs_not_central_orchestration() -
             for field in sorted(manifest.keys() - consumed):
                 violations.append(f"{path.relative_to(REPO)}:unused:{field}")
             for index, case in enumerate(manifest.get("testcases", [])):
+                if "community_gpu" in case and not isinstance(case["community_gpu"], bool):
+                    violations.append(
+                        f"{path.relative_to(REPO)}:testcases[{index}]:community_gpu"
+                    )
                 for field in sorted(forbidden & case.keys()):
                     violations.append(f"{path.relative_to(REPO)}:testcases[{index}]:{field}")
-                for field in sorted(case.keys() - consumed - {"premerge"}):
+                for field in sorted(case.keys() - consumed - {"premerge", "community_gpu"}):
                     violations.append(f"{path.relative_to(REPO)}:testcases[{index}]:unused:{field}")
     assert violations == []
 

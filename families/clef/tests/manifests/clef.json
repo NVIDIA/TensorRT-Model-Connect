@@ -9,9 +9,9 @@
   "tensor_parallel_size": 1,
   "max_sequence_length": 512,
   "testcases": [
-    {"name": "clef-invoice", "premerge": true,
+    {"name": "clef-invoice", "premerge": true, "community_gpu": false,
      "inputs": {"document_path": "fixtures/invoice.json"}},
-    {"name": "clef-outage", "premerge": true,
+    {"name": "clef-outage", "premerge": true, "community_gpu": false,
      "inputs": {"document_path": "fixtures/outage.json"}},
     {"name": "clef-paid-invoice", "premerge": false,
      "inputs": {"document_path": "fixtures/paid-invoice.json"}},
@@ -19,7 +19,7 @@
      "inputs": {"document_path": "fixtures/healthy-service.json"}},
     {"name": "clef-multilingual", "premerge": false,
      "inputs": {"document_path": "fixtures/multilingual.json"}},
-    {"name": "clef-receipt", "premerge": true,
+    {"name": "clef-receipt", "premerge": true, "community_gpu": false,
      "inputs": {"document_path": "fixtures/receipt.json", "image_paths": ["fixtures/media/receipt.png"]}},
     {"name": "clef-video", "premerge": false,
      "inputs": {"document_path": "fixtures/video.json", "video_frame_paths": [
