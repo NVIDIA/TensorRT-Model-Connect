@@ -10,6 +10,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import urllib.response
 from email.message import Message
 from pathlib import Path
@@ -430,3 +431,33 @@ def test_registry_api_non_object_json_fails_safely(value: object) -> None:
                 "sensitive-token",
                 allow_missing=True,
             )
+
+
+def test_failed_native_probe_preserves_bounded_real_subprocess_diagnostics(capsys) -> None:
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('probe-start'); "
+        "sys.stderr.write('x' * 20000 + '\\nNative ABI: missing_symbol\\n'); sys.exit(17)",
+    ]
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        MODULE.run(command, capture=True)
+    assert error.value.returncode == 17
+    output = capsys.readouterr()
+    assert "probe-start" in output.err and "Native ABI: missing_symbol" in output.err
+    assert output.out == "" and len(output.err) < 16500
+
+
+@pytest.mark.parametrize("capture", [True, False])
+def test_failed_real_credential_command_never_echoes_response_body(capsys, capture: bool) -> None:
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; token = sys.stdin.read(); print('rejected:' + token); "
+        "sys.stderr.write('response:' + token); sys.exit(9)",
+    ]
+    with pytest.raises(RuntimeError, match="Credential command failed") as error:
+        MODULE.run(command, capture=capture, stdin="sensitive-token")
+    output = capsys.readouterr()
+    assert output.out == output.err == ""
+    assert "sensitive-token" not in str(error.value)

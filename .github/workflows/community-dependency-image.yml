@@ -127,7 +127,7 @@ jobs:
           artifact="community-image-lease-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "lease_artifact_name=$artifact" >> "$GITHUB_OUTPUT"
           python3 -m tools.brev_exec provision --instance "$name" --provider aws \
-            --instance-type g6.4xlarge --disk-gb 500 --min-free-disk-gb 200 \
+            --instance-type g6.8xlarge --disk-gb 500 --min-free-disk-gb 200 \
             --timeout 2700 --attempts 1 --lease-file "$RUNNER_TEMP/community-image-lease.json"
       - name: Preserve the original allocation lease
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}

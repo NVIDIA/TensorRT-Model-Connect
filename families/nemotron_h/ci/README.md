@@ -22,8 +22,11 @@ dependency versions or validation policy.
 
 ## Qualification and publication
 
-One AWS `g6.4xlarge` VM with 500 GiB disk performs the expensive x86 build and L4
-qualification. The small GitHub-hosted job only controls it. The producer:
+One AWS `g6.8xlarge` VM with 128 GiB host RAM, one L4, and 500 GiB disk performs
+the expensive x86 build and qualification. The original 64 GiB builder passed
+dependency and native ABI checks but Docker reported OOM during model validation.
+The larger builder retains the container's 75 percent memory limit and all
+original tests. The small GitHub-hosted job only controls it. The producer:
 
 1. Builds the exact protected-main GPU base and the unchanged family requirements
    with the full dependency resolver and `pip check`.
@@ -73,9 +76,11 @@ paths, completes successfully. The eventual family-owned lock entry must carry:
 
 The generic consumer must read the entry from trusted CI code, compare it with
 actual PR input hashes, and pull by digest. It must not trust a PR-selected image
-or a mutable tag. A missing/mismatched/failed entry is an explicit dependency
-qualification failure, never a skipped-green result. No digest is checked in
-until a real x86/L4 producer run has established these facts.
+or a mutable tag. A missing entry or changed dependency inputs use the normal
+base image and full family installation; tests and budgets remain unchanged.
+Corrupt qualification records or failed authenticated pulls are explicit family
+dependency failures. No digest is checked in until a real x86/L4 producer run
+has established these facts.
 
 ## Dev invocation
 
