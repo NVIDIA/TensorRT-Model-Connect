@@ -71,10 +71,10 @@ Qwen38MtpScheduler::Qwen38MtpScheduler(std::unique_ptr<ITrtModule> mtp_module,
     // Single entry each -- draft_chain_module_'s present_k/v are not
     // per-main-model-layer, they're MTP's own one layer (matching
     // build_mtp_draft_chain_engine's singular mtp_present_k/v names).
-    draft_chain_present_k_.emplace_back(
-        std::vector<int64_t>{num_draft_tokens_, main_kv.kv_dim()}, main_kv.dtype(), stream_);
-    draft_chain_present_v_.emplace_back(
-        std::vector<int64_t>{num_draft_tokens_, main_kv.kv_dim()}, main_kv.dtype(), stream_);
+    draft_chain_present_k_.emplace_back(std::vector<int64_t>{num_draft_tokens_, main_kv.kv_dim()},
+                                        main_kv.dtype(), stream_);
+    draft_chain_present_v_.emplace_back(std::vector<int64_t>{num_draft_tokens_, main_kv.kv_dim()},
+                                        main_kv.dtype(), stream_);
     if (!draft_chain_present_k_.back().ok() || !draft_chain_present_v_.back().ok()) {
         throw std::runtime_error(
             "Qwen38MtpScheduler: failed to allocate draft-chain present K/V scratch");
@@ -173,7 +173,7 @@ int32_t Qwen38MtpScheduler::draft(int32_t token, int32_t position, const float* 
     mtp_logits_host_.resize(static_cast<std::size_t>(vocab_size_));
     const cudaError_t copy_status =
         cudaMemcpy(mtp_logits_host_.data(), mtp_logits_device_ptr_,
-                  mtp_logits_host_.size() * sizeof(float), cudaMemcpyDeviceToHost);
+                   mtp_logits_host_.size() * sizeof(float), cudaMemcpyDeviceToHost);
     if (copy_status != cudaSuccess)
         throw std::runtime_error(std::string("Qwen38MtpScheduler: failed to copy mtp_logits: ") +
                                  cudaGetErrorString(copy_status));
@@ -248,16 +248,17 @@ Qwen38MtpScheduler::draft_chain(int32_t token, int32_t position, const float* hi
     result.token_ids.resize(static_cast<std::size_t>(num_draft_tokens_));
     cudaError_t copy_status =
         cudaMemcpy(result.token_ids.data(), draft_chain_ids_device_ptr_,
-                  result.token_ids.size() * sizeof(int32_t), cudaMemcpyDeviceToHost);
+                   result.token_ids.size() * sizeof(int32_t), cudaMemcpyDeviceToHost);
     if (copy_status != cudaSuccess) {
-        throw std::runtime_error(std::string("Qwen38MtpScheduler: failed to copy draft token ids: ") +
-                                 cudaGetErrorString(copy_status));
+        throw std::runtime_error(
+            std::string("Qwen38MtpScheduler: failed to copy draft token ids: ") +
+            cudaGetErrorString(copy_status));
     }
 
     result.hidden_states.resize(static_cast<std::size_t>(num_draft_tokens_) *
                                 static_cast<std::size_t>(hidden_size_));
     copy_status = cudaMemcpy(result.hidden_states.data(), draft_chain_hidden_device_ptr_,
-                            result.hidden_states.size() * sizeof(float), cudaMemcpyDeviceToHost);
+                             result.hidden_states.size() * sizeof(float), cudaMemcpyDeviceToHost);
     if (copy_status != cudaSuccess) {
         throw std::runtime_error(
             std::string("Qwen38MtpScheduler: failed to copy draft hidden states: ") +
@@ -267,10 +268,8 @@ Qwen38MtpScheduler::draft_chain(int32_t token, int32_t position, const float* hi
     return result;
 }
 
-Qwen38MtpScheduler::VerifyResult
-Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next,
-                                            const std::vector<int32_t>& draft_tokens,
-                                            int32_t base_step) {
+Qwen38MtpScheduler::VerifyResult Qwen38MtpScheduler::verify_and_maybe_commit(
+    int32_t real_next, const std::vector<int32_t>& draft_tokens, int32_t base_step) {
     if (!bound_) {
         throw std::runtime_error(
             "Qwen38MtpScheduler: bind_state() must be called before verify_and_maybe_commit()");
@@ -333,12 +332,13 @@ Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next,
     if (multi_logits_device_ptr_ == nullptr) {
         multi_logits_device_ptr_ = multi_token_module_->device_ptr("logits");
         if (multi_logits_device_ptr_ == nullptr)
-            throw std::runtime_error("Qwen38MtpScheduler: multi-token module has no 'logits' output");
+            throw std::runtime_error(
+                "Qwen38MtpScheduler: multi-token module has no 'logits' output");
     }
     multi_logits_host_.resize(static_cast<std::size_t>(n) * static_cast<std::size_t>(vocab_size_));
     cudaError_t copy_status =
         cudaMemcpy(multi_logits_host_.data(), multi_logits_device_ptr_,
-                  multi_logits_host_.size() * sizeof(float), cudaMemcpyDeviceToHost);
+                   multi_logits_host_.size() * sizeof(float), cudaMemcpyDeviceToHost);
     if (copy_status != cudaSuccess)
         throw std::runtime_error(std::string("Qwen38MtpScheduler: failed to copy logits: ") +
                                  cudaGetErrorString(copy_status));
@@ -348,9 +348,10 @@ Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next,
     result.accepted_tokens.push_back(real_next);
     int32_t accepted_drafts = 0;
     for (int32_t i = 0; i < num_draft_tokens_; ++i) {
-        const int32_t row_argmax = argmax(
-            multi_logits_host_.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(vocab_size_),
-            static_cast<std::size_t>(vocab_size_));
+        const int32_t row_argmax =
+            argmax(multi_logits_host_.data() +
+                       static_cast<std::size_t>(i) * static_cast<std::size_t>(vocab_size_),
+                   static_cast<std::size_t>(vocab_size_));
         if (row_argmax != draft_tokens[static_cast<std::size_t>(i)]) {
             result.next_real_candidate = row_argmax;
             break;
@@ -364,10 +365,10 @@ Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next,
     if (result.full_accept) {
         // No mismatch broke the loop above -- the "free" next-round
         // candidate is row (n-1)'s argmax, not yet computed.
-        result.next_real_candidate = argmax(
-            multi_logits_host_.data() +
-                static_cast<std::size_t>(n - 1) * static_cast<std::size_t>(vocab_size_),
-            static_cast<std::size_t>(vocab_size_));
+        result.next_real_candidate =
+            argmax(multi_logits_host_.data() +
+                       static_cast<std::size_t>(n - 1) * static_cast<std::size_t>(vocab_size_),
+                   static_cast<std::size_t>(vocab_size_));
     }
 
     if (!result.full_accept)
@@ -394,9 +395,10 @@ Qwen38MtpScheduler::verify_and_maybe_commit(int32_t real_next,
                 "Qwen38MtpScheduler: multi-token module has no 'hidden_states' output");
         }
     }
-    result.hidden_states.resize(static_cast<std::size_t>(n) * static_cast<std::size_t>(hidden_size_));
+    result.hidden_states.resize(static_cast<std::size_t>(n) *
+                                static_cast<std::size_t>(hidden_size_));
     copy_status = cudaMemcpy(result.hidden_states.data(), multi_hidden_device_ptr_,
-                            result.hidden_states.size() * sizeof(float), cudaMemcpyDeviceToHost);
+                             result.hidden_states.size() * sizeof(float), cudaMemcpyDeviceToHost);
     if (copy_status != cudaSuccess) {
         throw std::runtime_error(std::string("Qwen38MtpScheduler: failed to copy hidden_states: ") +
                                  cudaGetErrorString(copy_status));

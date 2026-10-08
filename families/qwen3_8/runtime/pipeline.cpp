@@ -198,7 +198,8 @@ RecurrentPipeline::generate_from_ids_speculative(const std::vector<int32_t>& inp
 
     auto t_decode_start = SteadyClock::now();
     while (decode_steps < max_new_tokens) {
-        auto verify = mtp_scheduler_->verify_and_maybe_commit(real_next, draft_result.token_ids, step);
+        auto verify =
+            mtp_scheduler_->verify_and_maybe_commit(real_next, draft_result.token_ids, step);
 
         ++round_num;
         std::cerr << "[trtmc-mtp-round] round=" << round_num << " base_step=" << step
@@ -252,9 +253,9 @@ RecurrentPipeline::generate_from_ids_speculative(const std::vector<int32_t>& inp
             draft_result = mtp_scheduler_->draft_chain(
                 real_next, step + 1,
                 verify.hidden_states.data() + static_cast<std::size_t>(last_row) * hidden_size);
-            mtp_scheduler_->draft(
-                real_next, step + 1,
-                verify.hidden_states.data() + static_cast<std::size_t>(last_row) * hidden_size);
+            mtp_scheduler_->draft(real_next, step + 1,
+                                  verify.hidden_states.data() +
+                                      static_cast<std::size_t>(last_row) * hidden_size);
         } else {
             // Partial (including zero drafts accepted): shared state was
             // left untouched by verify_and_maybe_commit() -- DeltaNet's
@@ -310,8 +311,8 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
                   << " tok/s, " << std::setprecision(2) << (decode_ms / decode_steps) << " ms/tok)";
     std::cerr << "\n";
 
-    std::cerr << "[trtmc-perf] Total generation: " << total_ms << " ms"
-              << " (" << (prefill_tokens + decode_steps) << " tokens)\n";
+    std::cerr << "[trtmc-perf] Total generation: " << total_ms << " ms" << " ("
+              << (prefill_tokens + decode_steps) << " tokens)\n";
 
     if (prof_steps_ > 0) {
         std::cerr << std::setprecision(2);
@@ -408,15 +409,17 @@ void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits,
                 }
             }
             if (hidden_state_numel_ == 0)
-                throw std::runtime_error(std::string(name_) + ": hidden_state tensor has zero size");
+                throw std::runtime_error(std::string(name_) +
+                                         ": hidden_state tensor has zero size");
         }
         hidden_state_out->resize(hidden_state_numel_);
         const cudaError_t hidden_copy =
             cudaMemcpy(hidden_state_out->data(), hidden_state_device_ptr_,
-                      hidden_state_numel_ * sizeof(float), cudaMemcpyDeviceToHost);
+                       hidden_state_numel_ * sizeof(float), cudaMemcpyDeviceToHost);
         if (hidden_copy != cudaSuccess) {
-            throw std::runtime_error(std::string(name_) + ": failed to copy hidden_state to host: " +
-                                     cudaGetErrorString(hidden_copy));
+            throw std::runtime_error(
+                std::string(name_) +
+                ": failed to copy hidden_state to host: " + cudaGetErrorString(hidden_copy));
         }
     }
 

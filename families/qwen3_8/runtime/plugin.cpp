@@ -110,7 +110,8 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     if (config.precision != "fp16" && config.precision != "fp32" && config.precision != "bf16")
         throw std::runtime_error("qwen3_8 runtime.json contains invalid precision");
     if (config.has_mtp && config.mtp_num_draft_tokens < 1)
-        throw std::runtime_error("qwen3_8 runtime.json has has_mtp set but mtp_num_draft_tokens < 1");
+        throw std::runtime_error(
+            "qwen3_8 runtime.json has has_mtp set but mtp_num_draft_tokens < 1");
     return config;
 }
 
@@ -176,7 +177,7 @@ ITask* create(const FamilyContext& context) {
             "qwen3_8 MTP draft chain");
         auto multi_token_module =
             load_engine(context.backend, require_section(context.reader, "multi_token_engine.plan"),
-                       "qwen3_8 multi-token verification");
+                        "qwen3_8 multi-token verification");
         mtp_scheduler = std::make_unique<Qwen38MtpScheduler>(
             std::move(mtp_module), std::move(draft_chain_module), std::move(multi_token_module),
             *state, config.hidden_size, config.vocab_size, config.mtp_num_draft_tokens, stream);
@@ -191,8 +192,8 @@ ITask* create(const FamilyContext& context) {
         qwen3_8_detect_chat_template_format(chat_template(context.reader));
 
     return new RecurrentPipeline(std::move(decoder), std::move(state), std::move(generation),
-                                 stream, "Qwen3.8", create_tokenizer(context.reader),
-                                 std::string{}, nullptr, std::move(mtp_scheduler));
+                                 stream, "Qwen3.8", create_tokenizer(context.reader), std::string{},
+                                 nullptr, std::move(mtp_scheduler));
 }
 
 } // namespace trtmc::qwen3_8

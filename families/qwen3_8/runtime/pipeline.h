@@ -76,7 +76,7 @@ class RecurrentPipeline final : public ITextGeneration {
                                            const Qwen38SamplingParams& params);
 
     std::vector<int32_t> generate_from_ids_speculative(const std::vector<int32_t>& input_ids,
-                                                        int32_t max_new_tokens);
+                                                       int32_t max_new_tokens);
 
     bool is_eos(int32_t token) const;
 
@@ -85,7 +85,7 @@ class RecurrentPipeline final : public ITextGeneration {
     // to feed Qwen38MtpScheduler::draft(). Skipped (no extra D2H copy) for
     // the plain decode loop.
     void run_step(int32_t token_id, std::vector<float>& logits,
-                 std::vector<float>* hidden_state_out = nullptr);
+                  std::vector<float>* hidden_state_out = nullptr);
 
     using SteadyClock = std::chrono::steady_clock;
     void report_timing(SteadyClock::time_point t_prefill_start,
