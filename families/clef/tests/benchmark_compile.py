@@ -14,8 +14,26 @@ import statistics
 import sys
 import time
 
-import numpy as np
-import torch
+
+def select_fixtures(root, manifest, fixture_dir, requested):
+    candidates = (
+        [(path.stem, path) for path in sorted(fixture_dir.glob("*.json"))]
+        if fixture_dir is not None
+        else [
+            (case["name"], root / case["inputs"]["document_path"]) for case in manifest["testcases"]
+        ]
+    )
+    unmatched = set(requested) - {name for case, path in candidates for name in (case, path.stem)}
+    if unmatched:
+        raise ValueError("unknown benchmark cases: " + ", ".join(sorted(unmatched)))
+    selected = [
+        (case, path)
+        for case, path in candidates
+        if not requested or case in requested or path.stem in requested
+    ]
+    if not selected:
+        raise ValueError("no benchmark fixtures selected")
+    return selected
 
 
 def main():
@@ -52,6 +70,14 @@ def main():
     args = parser.parse_args()
     if args.warmup < 1 or args.iterations < 1:
         parser.error("warmup and iterations must be positive")
+    manifest = manifests[args.model]
+    try:
+        fixtures = select_fixtures(root, manifest, args.fixtures, args.case)
+    except ValueError as error:
+        parser.error(str(error))
+    import numpy as np
+    import torch
+
     if args.emulate_precision_casts:
         import torch._inductor.config as inductor_config
 
@@ -78,12 +104,6 @@ def main():
         inductor_config.fx_graph_cache = False
         autograd_config.enable_autograd_cache = False
     args.output.mkdir(parents=True, exist_ok=True)
-    manifest = manifests[args.model]
-    fixtures = (
-        sorted(args.fixtures.glob("*.json"))
-        if args.fixtures
-        else [root / case["inputs"]["document_path"] for case in manifest["testcases"]]
-    )
     sys.path.insert(0, str(args.checkpoint))
     from joint_schema_model import (
         encode_record,
@@ -117,9 +137,7 @@ def main():
 
     receipts = []
     with torch.inference_mode():
-        for fixture in fixtures:
-            if args.case and fixture.stem not in args.case:
-                continue
+        for case, fixture in fixtures:
             from families.clef.tests.media_fixtures import fixture_record
 
             record = fixture_record(fixture)
@@ -139,6 +157,7 @@ def main():
                 torch.cuda.synchronize()
                 samples.append((time.perf_counter() - started) * 1000)
             receipt = {
+                "case": case,
                 "fixture": fixture.stem,
                 "mode": "max-autotune",
                 "fullgraph": False,
