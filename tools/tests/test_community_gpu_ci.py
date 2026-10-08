@@ -139,6 +139,121 @@ def test_real_dependency_update_is_a_cache_miss(tmp_path, changed):
     assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry) is None
 
 
+def _host_profile_catalog(repository, family="alpha", *, ram=128, proof=True):
+    entry = _dependency_entry(repository, family)
+    entry["lock"]["resources"] = {"host_ram_gib": ram}
+    if proof:
+        entry["lock"]["qualification_host"] = {
+            "ram_gib": 128,
+            "gpu_count": 1,
+            "arch": "x86_64",
+            "run_id": "12345",
+        }
+    path = repository / "host-catalog.json"
+    path.write_text(
+        json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": {family: entry}})
+    )
+    return path, entry
+
+
+def test_host_profile_without_a_catalog_keeps_the_64_gib_default(tmp_path):
+    catalog = tmp_path / "empty-catalog.json"
+    catalog.write_text(json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": {}}))
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+        == 64
+    )
+
+
+def test_host_profile_uses_maximum_selected_owner_and_keeps_it_on_cache_miss(tmp_path):
+    catalog, entry = _host_profile_catalog(tmp_path)
+    value = json.loads(catalog.read_text())
+    value["families"]["beta"] = _dependency_entry(tmp_path, "beta")
+    catalog.write_text(json.dumps(value))
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha", "beta"), catalog, "3" * 40
+        )
+        == 128
+    )
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("beta"), catalog, "3" * 40
+        )
+        == 64
+    )
+    (tmp_path / "families/alpha/requirements.txt").write_text("new dependency input\n")
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry) is None
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+        == 128
+    )
+
+
+@pytest.mark.parametrize("ram", [True, "128", 0, 96, 256, 128.0])
+def test_host_profile_rejects_invalid_ram_before_allocation(tmp_path, ram):
+    catalog, _ = _host_profile_catalog(tmp_path, ram=ram)
+    with pytest.raises(CiError):
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid", ["missing", "ram", "gpus", "arch", "run", "unqualified", "mutable"]
+)
+def test_128_gib_profile_requires_real_complete_single_gpu_qualification(tmp_path, invalid):
+    catalog, _ = _host_profile_catalog(tmp_path)
+    value = json.loads(catalog.read_text())
+    lock = value["families"]["alpha"]["lock"]
+    if invalid == "missing":
+        lock.pop("qualification_host")
+    elif invalid == "ram":
+        lock["qualification_host"]["ram_gib"] = 64
+    elif invalid == "gpus":
+        lock["qualification_host"]["gpu_count"] = 2
+    elif invalid == "arch":
+        lock["qualification_host"]["arch"] = "aarch64"
+    elif invalid == "run":
+        lock["qualification_host"]["run_id"] = "0"
+    elif invalid == "unqualified":
+        lock["family_e2e_passed"] = False
+    else:
+        lock["image"] = f"{community_gpu_ci.DEPENDENCY_REGISTRY}/alpha:latest"
+    catalog.write_text(json.dumps(value))
+    with pytest.raises(CiError):
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+
+
+def test_host_profile_rejects_catalog_from_another_ci_snapshot(tmp_path):
+    catalog, _ = _host_profile_catalog(tmp_path)
+    with pytest.raises(CiError):
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "4" * 40
+        )
+
+
+def test_legacy_64_gib_lock_error_remains_isolated_to_its_owner(tmp_path):
+    catalog, _ = _host_profile_catalog(tmp_path, ram=64, proof=False)
+    value = json.loads(catalog.read_text())
+    value["families"]["alpha"]["lock"]["image"] += ":latest"
+    catalog.write_text(json.dumps(value))
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+        == 64
+    )
+    with pytest.raises(CiError):
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", value["families"]["alpha"])
+
+
 @pytest.mark.parametrize("kind", ["duplicate", "oversize", "fifo", "symlink"])
 def test_dependency_catalog_reads_are_bounded_and_regular(tmp_path, kind):
     path = tmp_path / "catalog"
@@ -1255,6 +1370,70 @@ def test_exact_catalog_json_disk_and_default_vm_are_used(fake):
     assert lease["disk_available_bytes"] >= 200 * 1024**3
     assert lease["phases"]["cloud_init"] == "1"
     assert not any(command[1] == "delete" for command in fake.commands)
+
+
+@pytest.mark.parametrize(
+    "provider,ram,sku",
+    [
+        ("aws", 64, "g6.4xlarge"),
+        ("aws", 128, "g6.8xlarge"),
+        ("nebius", 64, "gpu-l40s-a.1gpu-16vcpu-64gb"),
+        ("nebius", 128, "gpu-l40s-a.1gpu-32vcpu-128gb"),
+    ],
+)
+def test_host_profile_reserves_the_exact_qualified_single_gpu_sku(fake, provider, ram, sku):
+    fake.catalog = [
+        {
+            "type": sku,
+            "provider": provider,
+            "disk_min_gb": 50,
+            "disk_max_gb": 2560,
+            "ram_gb": ram,
+            "arch": "x86_64",
+            "gpu_count": 1,
+        }
+    ]
+    assert fake.provision(provider=provider, host_ram_gib=ram) == "gpu"
+    assert fake.creates == ["gpu"] and fake.sku == sku
+    lease = json.loads(fake.lease.read_text())
+    assert lease["host_ram_gib"] == ram and lease["sku"] == sku
+
+
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        {"ram_gb": 64},
+        {"arch": "aarch64"},
+        {"gpu_count": 2},
+        {"gpu_count": 1.0},
+    ],
+)
+def test_128_gib_profile_never_falls_back_to_a_smaller_or_different_catalog_host(fake, wrong):
+    fake.catalog = [
+        {
+            "type": "g6.8xlarge",
+            "provider": "aws",
+            "disk_min_gb": 50,
+            "disk_max_gb": 2560,
+            "ram_gb": 128,
+            "arch": "x86_64",
+            "gpu_count": 1,
+            **wrong,
+        }
+    ]
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision(host_ram_gib=128)
+    assert not fake.creates
+
+
+@pytest.mark.parametrize("ram", [True, "128", 96, 128.0])
+def test_invalid_or_conflicting_host_profile_never_creates(fake, ram):
+    with pytest.raises(ValueError):
+        fake.provision(host_ram_gib=ram)
+    assert not fake.creates
+    with pytest.raises(ValueError):
+        fake.provision(host_ram_gib=128, instance_type="g6.4xlarge")
+    assert not fake.creates
 
 
 @pytest.mark.parametrize(

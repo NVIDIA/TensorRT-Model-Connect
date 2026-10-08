@@ -691,6 +691,77 @@ def export_dependency_catalog(repository: Path, ci_sha: str, destination: Path) 
     _save_json(destination, catalog)
 
 
+def _dependency_host_ram_gib(lock: dict) -> int:
+    resources = lock.get("resources", {})
+    if not isinstance(resources, dict):
+        raise CommunityGpuError("Invalid qualified host resources")
+    ram = resources.get("host_ram_gib", 64)
+    if type(ram) is not int or ram not in {64, 128}:
+        raise CommunityGpuError("Qualified host RAM must be 64 or 128 GiB")
+    host = lock.get("qualification_host")
+    if ram == 128 or "qualification_host" in lock:
+        if (
+            not isinstance(host, dict)
+            or type(host.get("ram_gib")) is not int
+            or host["ram_gib"] != ram
+            or type(host.get("gpu_count")) is not int
+            or host["gpu_count"] != 1
+            or host.get("arch") != "x86_64"
+            or not isinstance(host.get("run_id"), str)
+            or not re.fullmatch(r"[1-9][0-9]*", host["run_id"])
+        ):
+            raise CommunityGpuError("Host RAM has no matching single-GPU x86 qualification")
+    return ram
+
+
+def _dependency_catalog(path: Path) -> dict:
+    catalog = _dependency_json(_dependency_bytes(path))
+    families = catalog.get("families")
+    if (
+        type(catalog.get("schema_version")) is not int
+        or catalog.get("schema_version") != 1
+        or not isinstance(families, dict)
+    ):
+        raise CommunityGpuError("Invalid dependency catalog schema")
+    if not isinstance(catalog.get("ci_sha"), str) or not re.fullmatch(
+        r"[0-9a-f]{40}", catalog["ci_sha"]
+    ):
+        raise CommunityGpuError("Dependency catalog has no immutable CI source")
+    if not all(isinstance(name, str) and FAMILY_PATTERN.fullmatch(name) for name in families):
+        raise CommunityGpuError("Invalid dependency catalog family")
+    return catalog
+
+
+def required_host_ram_gib(
+    repository: Path, env: dict[str, str], catalog_path: Path, ci_sha: str
+) -> int:
+    """Select the largest admitted owner profile before any cloud allocation."""
+    catalog = _dependency_catalog(catalog_path)
+    if catalog["ci_sha"] != ci_sha:
+        raise CommunityGpuError("Host resources do not belong to the trusted CI commit")
+    selected = selected_families(
+        env.get("TRTMC_GPU_SCOPE", ""),
+        env.get("TRTMC_GPU_FAMILIES", ""),
+        env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
+        env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
+    )
+    ram = 64
+    for family in selected:
+        if family in catalog["families"]:
+            entry = catalog["families"][family]
+            if not isinstance(entry, dict) or not isinstance(entry.get("lock"), dict):
+                # Keep legacy image errors isolated to their owner; they cannot
+                # authorize a larger host without a resource declaration.
+                continue
+            owner_ram = _dependency_host_ram_gib(entry["lock"])
+            # Dependency input changes can require a cold install; they cannot
+            # reduce the host memory used for this owner's admitted qualification.
+            if owner_ram == 128:
+                _dependency_reference(repository, family, entry)
+            ram = max(ram, owner_ram)
+    return ram
+
+
 def _dependency_reference(repository: Path, family: str, entry: object) -> str | None:
     """Require an admitted digest and the exact dependency inputs for this owner."""
     if not isinstance(entry, dict) or not isinstance(entry.get("lock"), dict):
@@ -754,6 +825,7 @@ def _dependency_reference(repository: Path, family: str, entry: object) -> str |
         raise CommunityGpuError("Dependency image has an incomplete qualified ABI")
     if abi["platform"] != lock["platform"]:
         raise CommunityGpuError("Qualified ABI platform disagrees with the image")
+    _dependency_host_ram_gib(lock)
     return None if changed else reference
 
 
@@ -770,20 +842,8 @@ def _dependency_image_ids(
     try:
         if catalog_path is None:
             return images, errors, misses
-        catalog = _dependency_json(_dependency_bytes(catalog_path))
+        catalog = _dependency_catalog(catalog_path)
         families = catalog.get("families")
-        if (
-            type(catalog.get("schema_version")) is not int
-            or catalog.get("schema_version") != 1
-            or not isinstance(families, dict)
-        ):
-            raise CommunityGpuError("Invalid dependency catalog schema")
-        if not isinstance(catalog.get("ci_sha"), str) or not re.fullmatch(
-            r"[0-9a-f]{40}", catalog["ci_sha"]
-        ):
-            raise CommunityGpuError("Dependency catalog has no immutable CI source")
-        if not all(isinstance(name, str) and FAMILY_PATTERN.fullmatch(name) for name in families):
-            raise CommunityGpuError("Invalid dependency catalog family")
         for family in selected:
             if family not in families:
                 continue
@@ -1261,6 +1321,7 @@ def main() -> int:
     mode.add_argument("--execution-budget", action="store_true")
     mode.add_argument("--summarize-log", type=Path)
     mode.add_argument("--export-dependency-catalog", type=Path)
+    mode.add_argument("--required-host-ram-gib", action="store_true")
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--image", default="trtmc-quickstart-gpu")
     parser.add_argument("--cache-dir", type=Path)
@@ -1275,12 +1336,21 @@ def main() -> int:
         if args.checkpoint_token_file is not None and not args.containers:
             raise CommunityGpuError("--checkpoint-token-file requires --containers")
         if (
-            args.dependency_catalog is not None or args.registry_token_file is not None
-        ) and not args.containers:
+            args.dependency_catalog is not None
+            and not (args.containers or args.required_host_ram_gib)
+        ) or (args.registry_token_file is not None and not args.containers):
             raise CommunityGpuError("Dependency image inputs require --containers")
         if args.export_dependency_catalog is not None:
             export_dependency_catalog(
                 args.repository, args.ci_sha or "", args.export_dependency_catalog
+            )
+        elif args.required_host_ram_gib:
+            if args.dependency_catalog is None:
+                raise CommunityGpuError("Host selection requires the trusted dependency catalog")
+            print(
+                required_host_ram_gib(
+                    args.repository, dict(os.environ), args.dependency_catalog, args.ci_sha or ""
+                )
             )
         elif args.execution_budget:
             print(execution_budget_seconds(dict(os.environ)))

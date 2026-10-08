@@ -107,8 +107,10 @@ printing credentials, environment values, or complete bootstrap logs. These
 diagnostics do not admit project or model execution.
 
 The reservation waits up to 45 minutes on one named instance. The default is
-AWS `g6.4xlarge`; explicit Nebius qualification uses
-`gpu-l40s-a.1gpu-16vcpu-64gb`. Both request 500 GiB disk and require 200 GiB free
+64 GiB RAM on AWS `g6.4xlarge` or Nebius
+`gpu-l40s-a.1gpu-16vcpu-64gb`. A qualified 128 GiB owner profile selects only
+AWS `g6.8xlarge` or Nebius `gpu-l40s-a.1gpu-32vcpu-128gb`. All four types have
+one GPU, request 500 GiB disk, and require 200 GiB free
 at admission. Metadata READY is followed by the same functional probe; neither
 a failed test nor a readiness timeout silently allocates a replacement.
 
@@ -149,6 +151,20 @@ base requirements, and family requirements with the actual PR source. A changed
 input uses the normal base image and ordinary family installation, so dependency
 update PRs can still be tested before a new image is published. Invalid lock
 metadata fails that owner explicitly while other owners continue.
+
+Before reserving a VM, the trusted CI commit's selected owner locks determine
+the host RAM profile. An omitted `resources.host_ram_gib` uses 64 GiB. The only
+other supported value is 128, which requires the lock's existing qualification
+proof and a matching `qualification_host` record: `ram_gib`, `gpu_count: 1`,
+`arch: "x86_64"`, and the successful producer's decimal `run_id`. Admission of
+that record waits for real workload qualification and confirmed cleanup. The
+maximum profile among selected owners determines the one VM. Invalid resource
+claims fail before allocation. A changed dependency input or image cache miss
+retains the owner's host RAM profile; it never silently downgrades the host or
+allocates a replacement. PR-owned locks and instance types do not select capacity.
+This preallocation selector uses authorized requested owners before the PR's
+execution plans are materialized. If a later plan defers an owner, its admitted
+host profile may be retained conservatively.
 
 Matching locks select private GHCR images by immutable digest. A read credential
 is copied to the trusted VM only after its PR base image build; the coordinator
