@@ -6,7 +6,7 @@ name: Community CI
 # Community CI GPU promotion v1
 
 run-name: >-
-  ${{ inputs.task == 'dependency-image-audit' && 'Community dependency image metadata audit' || inputs.task == 'dependency-image' && 'Community GPU dependency image qualification' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
+  ${{ inputs.task == 'dependency-image-withdraw' && 'Community dependency image withdrawal' || inputs.task == 'dependency-image-audit' && 'Community dependency image metadata audit' || inputs.task == 'dependency-image' && 'Community GPU dependency image qualification' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
 
 # Stable keeps the existing pull_request pipeline. Trusted metadata jobs pair
 # its immutable snapshot with the optional Dev execution of this same workflow.
@@ -24,7 +24,7 @@ on:
         required: false
         type: choice
         default: test
-        options: [test, dependency-image, dependency-image-audit]
+        options: [test, dependency-image, dependency-image-audit, dependency-image-withdraw]
       audit_family:
         description: Project family package to inspect in audit mode
         required: false
@@ -76,6 +76,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  withdraw-dependency-image:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image-withdraw' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Authorize withdrawal of the reviewed publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = NVIDIA/TensorRT-Model-Connect
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          case "$GITHUB_REF" in refs/heads/main|refs/heads/ci/developer) ;; *) exit 1 ;; esac
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUEST_ACTOR/permission" --jq '.role_name // .permission')
+          case "$role" in admin|maintain) ;; *) exit 1 ;; esac
+      - name: Check out only the protected withdrawal implementation
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Withdraw only the reviewed OCI index and child versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/withdraw_community_image.py
+      - name: Preserve confirmed withdrawal evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-image-withdrawal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/community-image-withdrawal.json
+          if-no-files-found: error
+          retention-days: 7
+
   audit-dependency-image:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image-audit' }}
     runs-on: ubuntu-24.04
@@ -163,7 +199,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request_target' ||
-       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.source_snapshot == ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.source_snapshot == ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -478,7 +514,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request' ||
-       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.source_snapshot != ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.source_snapshot != ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -710,7 +746,7 @@ jobs:
 
   required:
     name: Community CPU / Required
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.source_snapshot != '')) }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.source_snapshot != '')) }}
     needs:
       - authorize
       - source-quality

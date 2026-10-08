@@ -39,7 +39,12 @@ def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
     )
     inputs = caller["on"]["workflow_dispatch"]["inputs"]
     assert inputs["task"]["default"] == "test"
-    assert inputs["task"]["options"] == ["test", "dependency-image", "dependency-image-audit"]
+    assert inputs["task"]["options"] == [
+        "test",
+        "dependency-image",
+        "dependency-image-audit",
+        "dependency-image-withdraw",
+    ]
     jobs = caller["jobs"]
     producer = jobs["produce-dependency-image"]
     assert producer["if"] == (
@@ -51,8 +56,15 @@ def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
     for name in ("snapshot", "authorize", "required"):
         assert "inputs.task != 'dependency-image'" in jobs[name]["if"]
     for name, job in jobs.items():
-        if name != "produce-dependency-image":
+        if name not in {"produce-dependency-image", "withdraw-dependency-image"}:
             assert job.get("permissions", {}).get("packages") != "write"
+    withdrawal = jobs["withdraw-dependency-image"]
+    assert withdrawal["permissions"] == {"contents": "read", "packages": "write"}
+    assert "uses" not in withdrawal and "secrets" not in withdrawal
+    authorization = withdrawal["steps"][0]["run"]
+    assert 'test "$GITHUB_EVENT_NAME" = workflow_dispatch' in authorization
+    assert "refs/heads/main|refs/heads/ci/developer" in authorization
+    assert "admin|maintain" in authorization
     assert caller["concurrency"]["cancel-in-progress"] == "false"
 
 
@@ -90,7 +102,10 @@ def test_registered_audit_cannot_enter_test_or_producer_jobs() -> None:
     assert audit["runs-on"] == "ubuntu-24.04"
     assert audit["permissions"] == {"contents": "read", "packages": "read"}
     assert not audit.get("secrets")
-    for task in ("test", "dependency-image", "dependency-image-audit"):
+    for task in ("test", "dependency-image", "dependency-image-audit", "dependency-image-withdraw"):
+        assert workflow_condition(jobs["withdraw-dependency-image"]["if"], task=task) == (
+            task == "dependency-image-withdraw"
+        )
         assert workflow_condition(audit["if"], task=task) == (task == "dependency-image-audit")
         assert workflow_condition(jobs["produce-dependency-image"]["if"], task=task) == (
             task == "dependency-image"
@@ -697,7 +712,6 @@ def test_registry_api_redirect_never_forwards_authorization() -> None:
             MODULE.require_private_package(
                 "ghcr.io/nvidia/tensorrt-model-connect-community/nemotron_h",
                 "sensitive-token",
-                allow_missing=True,
             )
     assert len(requests) == 1 and requests[0].startswith("https://api.github.com/")
     assert "sensitive-token" not in str(error.value)
@@ -706,13 +720,123 @@ def test_registry_api_redirect_never_forwards_authorization() -> None:
 @pytest.mark.parametrize("value", [None, [], "private"])
 def test_registry_api_non_object_json_fails_safely(value: object) -> None:
     response = io.BytesIO(json.dumps(value).encode())
+    response.status = 200
     with patch.object(MODULE.urllib.request.OpenerDirector, "open", return_value=response):
         with pytest.raises(RuntimeError, match="visibility"):
             MODULE.require_private_package(
                 "ghcr.io/nvidia/tensorrt-model-connect-community/nemotron_h",
                 "sensitive-token",
-                allow_missing=True,
             )
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        404,
+        403,
+        401,
+        500,
+        "public",
+        "internal",
+        "missing",
+        "invalid",
+        "network",
+        "non200",
+        "private",
+    ],
+)
+def test_full_image_push_requires_authenticated_200_private_before_any_docker_command(
+    tmp_path,
+    lookup,
+    capsys,
+):
+    """Run the real publication gate; first-push absence is never private evidence."""
+    proof, auth = tmp_path / "proof", tmp_path / "auth"
+    candidate(proof)
+    auth.mkdir(mode=0o700)
+    token = auth / "token"
+    token.write_text("sensitive-token")
+    events = []
+    requests = []
+
+    def api(request, **kwargs):
+        requests.append(request)
+        events.append("package-get")
+        assert request.get_method() == "GET"
+        assert request.get_header("Authorization") == "Bearer sensitive-token"
+        assert kwargs["timeout"] == 30
+        if isinstance(lookup, int):
+            raise MODULE.urllib.error.HTTPError(
+                request.full_url, lookup, "private body", {}, io.BytesIO(b"sensitive-token")
+            )
+        if lookup == "network":
+            raise OSError("sensitive-token network failure")
+        payload = (
+            b"not JSON"
+            if lookup == "invalid"
+            else json.dumps(
+                {
+                    "visibility": None
+                    if lookup == "missing"
+                    else "private"
+                    if lookup == "non200"
+                    else lookup
+                }
+            ).encode()
+        )
+        response = io.BytesIO(payload)
+        response.status = 202 if lookup == "non200" else 200
+        return response
+
+    def docker(command, **kwargs):
+        assert "sensitive-token" not in str(command)
+        for action in ("login", "tag", "push", "inspect"):
+            if action in command:
+                events.append(action)
+        if "inspect" in command:
+            return json.dumps(
+                ["ghcr.io/nvidia/tensorrt-model-connect-community/nemotron_h@sha256:" + "c" * 64]
+            )
+        return ""
+
+    with (
+        patch.object(MODULE.urllib.request.OpenerDirector, "open", side_effect=api),
+        patch.object(MODULE, "run", side_effect=docker) as run,
+    ):
+        if lookup == "private":
+            MODULE.publish(
+                proof,
+                "ghcr.io/nvidia/tensorrt-model-connect-community",
+                "actor",
+                token,
+                family="nemotron_h",
+            )
+            assert events == ["package-get", "login", "tag", "push", "package-get", "inspect"]
+            assert (
+                json.loads((auth / "published-candidate.json").read_text())["registry_visibility"]
+                == "private"
+            )
+        else:
+            with pytest.raises(RuntimeError) as failure:
+                MODULE.publish(
+                    proof,
+                    "ghcr.io/nvidia/tensorrt-model-connect-community",
+                    "actor",
+                    token,
+                    family="nemotron_h",
+                )
+            run.assert_not_called()
+            assert events == ["package-get"]
+            assert (
+                not (proof / "published-candidate.json").exists()
+                and not (auth / "published-candidate.json").exists()
+            )
+            if lookup in (404, 403, 401, 500, "network", "invalid", "non200"):
+                assert "Bootstrap a known-private package" in str(failure.value)
+            assert "sensitive-token" not in str(failure.value)
+    assert not token.exists()
+    output = capsys.readouterr()
+    assert "sensitive-token" not in output.out + output.err
 
 
 def test_failed_native_probe_preserves_bounded_real_subprocess_diagnostics(capsys) -> None:

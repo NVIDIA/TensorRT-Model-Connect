@@ -38,7 +38,8 @@ original tests. The small GitHub-hosted job only controls it. The producer:
    coordinator. Dependencies are already installed; no criteria are changed.
 5. Only after qualification, copies a short-lived `GITHUB_TOKEN` to a private
    host file, logs in through stdin with a private temporary Docker config,
-   verifies existing GHCR packages are private before pushing, verifies private
+   requires an authenticated HTTP 200 proving the existing target package is
+   private before any full image push, verifies private
    visibility again after each push, and removes both credential locations.
 6. Blocks until the owned VM is confirmed deleted, then uploads the candidate
    receipt. An independent job recovers the original lease and confirms
@@ -51,6 +52,21 @@ host before family containers. Registry credentials are introduced after those
 containers finish. Later PR consumption must use a separate short-lived
 `packages:read` credential on the trusted host and remove its Docker config
 before launching contributor containers.
+
+## Private package prerequisite
+
+An administrator must establish the target package with private visibility and
+grant the workflow repository package access before this producer can upload a
+full dependency image. Bootstrap only with a harmless, non-sensitive artifact,
+then verify that the authenticated package lookup returns HTTP 200 and actual
+`private` visibility. An absent package, denied authentication, unavailable API,
+or non-private response blocks publication; the producer does not assume a
+first push will create a private package.
+
+A public package cannot be converted back to private. Do not upload the full
+image to discover its visibility or attempt to repair visibility after that
+push. Follow GitHub's [package visibility and access guidance](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)
+before rerunning the producer. The post-push private check remains required.
 
 The current Mamba pin requires `apache-tvm-ffi<=0.1.9`, whereas the base includes
 `0.1.12`. The producer records the final closure and tests the default native
