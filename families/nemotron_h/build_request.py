@@ -38,6 +38,7 @@ class BuildRequest:
     quantization: ClassVar[str | None] = None
     fp32_layers: ClassVar[tuple[int, ...]] = ()
     dynamic_kv_cache: ClassVar[bool] = False
+    mtp_seq_len: ClassVar[int | None] = None
     verbose: bool = False
     graph_transform: GraphTransform | None = None
 
@@ -75,6 +76,7 @@ def coerce_request(request: object) -> BuildRequest:
     if isinstance(request, BuildRequest):
         return request
     unsupported = {
+        "mtp_seq_len": None,
         "image_height": None,
         "image_width": None,
         "video_num_frames": None,

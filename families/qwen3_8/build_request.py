@@ -37,6 +37,7 @@ class BuildRequest:
     context_parallel_size: ClassVar[int] = 1
     quantization: str | None = None
     fp32_layers: tuple[int, ...] = ()
+    mtp_seq_len: int | None = None
     dynamic_kv_cache: ClassVar[bool] = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
@@ -64,6 +65,8 @@ class BuildRequest:
             raise ValueError("quantization must be non-empty when provided")
         if any(layer < 0 for layer in self.fp32_layers):
             raise ValueError("fp32_layers must contain non-negative indices")
+        if self.mtp_seq_len is not None and self.mtp_seq_len < 2:
+            raise ValueError("mtp_seq_len must be >= 2 when provided")
         if not isinstance(self.dynamic_kv_cache, bool):
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
