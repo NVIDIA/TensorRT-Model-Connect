@@ -1095,8 +1095,16 @@ class Qwen38Model:
 
         Outputs:
           - `logits`: shape `(seq_len, vocab)`, one row per sub-step.
+          - `hidden_states`: shape `(seq_len, hidden_size)`, the final-normed
+            hidden state behind each `logits` row -- reusable to derive the
+            next MTP draft without another main-engine call.
           - `present_conv_{i}`/`present_ssm_{i}`: FINAL state after all
-            `seq_len` sub-steps (DeltaNet layers).
+            `seq_len` sub-steps (DeltaNet layers). CAUTION: only valid to
+            commit as the new persistent state if every sub-step's token was
+            real/accepted -- if a later sub-step's token turns out to be a
+            rejected draft, this reflects the wrong recurrence and must be
+            discarded (re-run the single-token engine on the accepted
+            prefix instead).
           - `present_k_{i}`/`present_v_{i}`: shape `(seq_len, kv_attention_size)`
             -- one new K/V row per sub-step, for the caller to write back
             into the persistent cache at consecutive positions.
@@ -1217,6 +1225,7 @@ class Qwen38Model:
         running_cache_k = list(cache_k_inputs)
         running_cache_v = list(cache_v_inputs)
         per_step_logits = []
+        per_step_hidden = []
         per_layer_new_k = [[] for _ in range(num_attn)]
         per_layer_new_v = [[] for _ in range(num_attn)]
 
@@ -1318,6 +1327,11 @@ class Qwen38Model:
                 hs = graph_ops.add_rms_norm(
                     network, hs, hidden, final_norm, eps_tensor,
                     dtype=work_np_dtype)
+            hs_out = hs
+            if hs_out.dtype != trt.float32:
+                hs_out = network.add_cast(hs_out, trt.float32).get_output(0)
+            per_step_hidden.append(hs_out)
+
             lm_head_matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
             logits_t = lm_head_matmul(
                 hs, hidden, vocab, weights.get("w_lm_head"), "w_lm_head")
@@ -1334,6 +1348,18 @@ class Qwen38Model:
         logits_out = logits_cat.get_output(0)
         logits_out.name = "logits"
         network.mark_output(logits_out)
+
+        # hidden_states[t] = final-normed hidden state used to produce
+        # logits[t] -- lets a caller re-derive the NEXT MTP draft from any
+        # sub-step's result without an extra main-engine call (e.g. after
+        # accept, bootstrap the following round from hidden_states[-1]; on
+        # reject, hidden_states[0] is still valid since sub-step 0's token
+        # was real regardless of what happened at later sub-steps).
+        hidden_states_cat = network.add_concatenation(per_step_hidden)
+        hidden_states_cat.axis = 0
+        hidden_states_out = hidden_states_cat.get_output(0)
+        hidden_states_out.name = "hidden_states"
+        network.mark_output(hidden_states_out)
 
         for mi in range(num_mamba):
             pc = running_conv[mi]
