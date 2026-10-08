@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """All released Laya variants through the C++ Task, compared with the original SDK."""
 
+from copy import deepcopy
 from functools import cache
 import json
 import os
@@ -83,6 +84,52 @@ def compare_response(actual, expected):
         assert actual == expected
 
 
+def compare_native_response(result, reference, internal):
+    """Check SDK formatting after the independent reference probability gates.
+
+    Entropy and expected scores propagate probability error differently from
+    individual probabilities. Evaluate their SDK formulas on the already
+    validated native probabilities, and require exact four-decimal formatting.
+    Selected choices, action probabilities, usage, and routing still compare
+    directly with the original inference result.
+    """
+    from laya.common import answer_confidence, confidence_from_probs
+
+    expected = deepcopy(reference)
+    assert [score["question_id"] for score in result["scores"]] == list(internal)
+    for score in result["scores"]:
+        qid = score["question_id"]
+        question = internal[qid]
+        p = np.asarray(score["probabilities"], dtype=np.float32)
+        count = len(p)
+        options = (
+            list(question["crit"]) if question["t"] == "choice" else [str(i) for i in range(count)]
+        )
+        if question["t"] == "noul":
+            options = ["false", "true"]
+        assert score["option_ids"] == options
+        actual = result["response"]["answers"][qid]
+        answer = expected["answers"][qid]
+        compare_response(actual["action"], answer["action"])
+        action = actual["action"]["act_probability"]
+        assert 0 <= action <= 1 and action == round(action, 4)
+        answer["action"] = actual["action"]
+        answer["answer_confidence"] = round(answer_confidence(p, count), 4)
+        if question["t"] == "noul":
+            answer["noul"] = round(float(p[1]), 4)
+            answer["confidence"] = round(max(float(p[1]), 1.0 - float(p[1])), 4)
+        else:
+            answer["probabilities"] = {
+                option: round(float(value), 4) for option, value in zip(options, p, strict=True)
+            }
+            answer["confidence"] = round(confidence_from_probs(p, count), 4)
+            if question["t"] == "choice":
+                assert options[int(p.argmax())] == answer["choice"]
+            else:
+                answer["score"] = round(float((np.arange(count) * p).sum()), 4)
+    assert result["response"] == expected
+
+
 @pytest.mark.parametrize(
     ("manifest", "case"),
     [
@@ -135,6 +182,7 @@ def test_e2e(manifest, case, request, tmp_path):
     if routing is not None:
         assert result["response"]["routing"] == routing
     assert result["scores"] == native["results"][1]["scores"]
+    assert result["response"] == native["results"][1]["response"]
     assert result["response"]["usage"] == reference["usage"]
     assert len(result["scores"]) == len(ids)
     for qid, item, raw, actual in zip(ids, items, logits, result["scores"], strict=True):
@@ -149,5 +197,5 @@ def test_e2e(manifest, case, request, tmp_path):
         np.testing.assert_allclose(actual["logits"], expected, atol=0.125, rtol=0.015)
         np.testing.assert_allclose(actual["probabilities"], probabilities, atol=0.002, rtol=0.01)
         assert np.argmax(actual["probabilities"]) == np.argmax(probabilities)
-    compare_response(result["response"], reference)
+    compare_native_response(result, reference, internal)
     (tmp_path / "native.json").write_text(json.dumps(native, indent=2))

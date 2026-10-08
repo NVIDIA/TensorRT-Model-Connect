@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from families.laya.cli import VARIANTS
-from families.laya.tests.test_e2e import MANIFESTS, ROOT, compare_response
+from families.laya.tests.test_e2e import MANIFESTS, ROOT, compare_native_response
 
 
 def main():
@@ -88,6 +88,7 @@ def main():
                 )
                 result = native["results"][0]
                 assert result["scores"] == native["results"][1]["scores"]
+                assert result["response"] == native["results"][1]["response"]
                 assert result["response"]["routing"] == decision
                 reference["routing"] = decision
                 assert result["response"]["usage"] == reference["usage"]
@@ -114,7 +115,7 @@ def main():
                     mode,
                     flush=True,
                 )
-                compare_response(result["response"], reference)
+                compare_native_response(result, reference, internal)
                 receipt = {"case": case["name"], "mode": mode, "response": result["response"]}
                 print(json.dumps(receipt, ensure_ascii=False), flush=True)
                 receipts.append(receipt)

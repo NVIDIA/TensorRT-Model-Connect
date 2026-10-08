@@ -96,6 +96,11 @@ python -m pytest families/laya/tests/test_e2e.py --e2e-model laya -q
 The tests compare the native public Task against the original CUDA SDK with
 `fast=False, compile=False`, including every option's logit/probability,
 selected answers, action/confidence fields, repeated calls, and usage.
+Logits and per-option probabilities retain their original-reference tolerances;
+selected choices, usage, and routing must match. Derived fields use the original
+SDK formulas on the validated native probabilities and must match their exact
+four-decimal formatting. Entropy confidence and expected scores can therefore
+differ from the original inference result as those probability errors propagate.
 The native process's loaded libraries are checked for Python/Torch dependencies.
 The fixtures include the card's English email, Hindi, Spanish, and quickstart
 inputs, plus empty, single-option, and long-conversation records.
