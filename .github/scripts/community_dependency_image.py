@@ -13,6 +13,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.parse
@@ -50,7 +51,18 @@ def digest(path: Path) -> str:
 
 
 def run(command: list[str], *, capture: bool = False, stdin: str | None = None) -> str:
-    result = subprocess.run(command, check=True, text=True, capture_output=capture, input=stdin)
+    try:
+        result = subprocess.run(
+            command, check=True, text=True, capture_output=capture or stdin is not None, input=stdin
+        )
+    except subprocess.CalledProcessError as error:
+        if stdin is not None:
+            raise RuntimeError("Credential command failed; captured output is suppressed") from None
+        if capture:
+            for label, stream in (("stdout", error.stdout), ("stderr", error.stderr)):
+                if stream:
+                    print(f"Captured {label} tail:\n{stream[-16384:]}", file=sys.stderr, flush=True)
+        raise
     return result.stdout if capture else ""
 
 
