@@ -109,10 +109,12 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
 }
 
 namespace {
-void validate_generation_capacity(const std::vector<int32_t>&, int32_t, QwenInferenceState*);
-}
+class QwenGenerationCapacityError final : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
 
-namespace {
+void validate_generation_capacity(const std::vector<int32_t>&, int32_t, QwenInferenceState*);
 class QwenGenerationLease {
   public:
     explicit QwenGenerationLease(std::atomic<bool>& active, bool acquire = true) : active_(active) {
@@ -187,13 +189,19 @@ std::vector<internal::TaskInstance> QwenTextGenerationPipeline::task_bindings() 
 TextResult QwenTextGenerationPipeline::run(const internal::TextContinuationRequest& request,
                                            internal::ConfigView config) {
     const auto cfg = qwen_text_config(config);
-    if (const auto* text = std::get_if<std::string_view>(&request.prefix))
-        return generate(std::string(*text), cfg);
-    if (cfg.use_chat_template)
-        throw std::invalid_argument("Qwen token-ID input cannot apply a chat template");
-    QwenGenerationLease lease(generation_active_);
-    const auto tokens = std::get<Span<const std::int32_t>>(request.prefix);
-    return generate_from_tokens(std::vector<std::int32_t>(tokens.begin(), tokens.end()), cfg, {});
+    try {
+        if (const auto* text = std::get_if<std::string_view>(&request.prefix))
+            return generate(std::string(*text), cfg);
+        if (cfg.use_chat_template)
+            throw std::invalid_argument("Qwen token-ID input cannot apply a chat template");
+        QwenGenerationLease lease(generation_active_);
+        const auto tokens = std::get<Span<const std::int32_t>>(request.prefix);
+        return generate_from_tokens(std::vector<std::int32_t>(tokens.begin(), tokens.end()), cfg,
+                                    {});
+    } catch (const QwenGenerationCapacityError& error) {
+        // Preserve legacy runtime errors; the Task SDK classifies invalid requests separately.
+        throw std::invalid_argument(error.what());
+    }
 }
 
 std::unique_ptr<internal::ITextStream>
@@ -255,6 +263,9 @@ QwenTextGenerationPipeline::start(const internal::TextContinuationRequest& reque
                           {}});
                 return result;
             });
+    } catch (const QwenGenerationCapacityError& error) {
+        generation_active_.store(false);
+        throw std::invalid_argument(error.what());
     } catch (...) {
         generation_active_.store(false);
         throw;
@@ -346,7 +357,7 @@ void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t
     if (input_ids.size() > capacity ||
         (max_new_tokens > 0 &&
          static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size())) {
-        throw std::invalid_argument(
+        throw QwenGenerationCapacityError(
             "Qwen requested prompt and generation exceed the model's fixed KV cache capacity");
     }
 }
