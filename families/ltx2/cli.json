@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one LTX-2.5 text-to-audio-video TensorRT bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "Hugging Face model ID or local snapshot"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "precision", "flags": ["--precision"], "type": "string", "choices": ["bf16"], "default": "bf16"},
+        {"name": "backend", "flags": ["--backend"], "type": "string", "choices": ["trt", "trt_rtx"], "default": "trt"},
+        {"name": "image_height", "flags": ["--image-height"], "type": "int"},
+        {"name": "image_width", "flags": ["--image-width"], "type": "int"},
+        {"name": "video_num_frames", "flags": ["--video-num-frames"], "type": "int"},
+        {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int"},
+        {"name": "context_parallel_size", "flags": ["--context-parallel-size"], "type": "int", "choices": [1, 2], "default": 1},
+        {"name": "vae_tile_pixels", "flags": ["--vae-tile-pixels"], "type": "int", "default": 512, "help": "Video VAE tile size in pixels (0: untiled spatial axes)"},
+        {"name": "vae_tile_overlap_pixels", "flags": ["--vae-tile-overlap-pixels"], "type": "int", "default": 64, "help": "Minimum spatial tile overlap in pixels"},
+        {"name": "vae_tile_frames", "flags": ["--vae-tile-frames"], "type": "int", "default": 256, "help": "Video VAE tile length in frames (0: untiled time axis)"},
+        {"name": "vae_tile_overlap_frames", "flags": ["--vae-tile-overlap-frames"], "type": "int", "default": 24, "help": "Minimum temporal tile overlap in frames"},
+        {"name": "two_stage", "flags": ["--two-stage"], "type": "bool", "action": "store_true", "default": false, "help": "Also build the two-stage pipeline (half-resolution stage 1, latent upsampler, full-resolution refinement); run it with --set two_stage=true"},
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+      ]
+    }
+  ]
+}

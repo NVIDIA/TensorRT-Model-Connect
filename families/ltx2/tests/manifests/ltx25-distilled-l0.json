@@ -1,0 +1,23 @@
+{
+  "name": "ltx25-distilled-l0",
+  "hf_id": "Lightricks/LTX-2.5-Diffusers",
+  "hf_revision": "426936f8b22dc28e4def61e515478b0b7e4a53cc",
+  "bundle": "ltx25-distilled-l0.bundle",
+  "family": "ltx2",
+  "task": "text_to_audio_video",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "ltx25-distilled-l0",
+      "premerge": true,
+      "test_prompt": "A cinematic shot of a red fox walking through a snowy forest at dawn, the camera tracking alongside, snow crunching underfoot.",
+      "seed": 42,
+      "runtime_timeout_s": 3600
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "context_parallel_size": 1,
+  "image_height": 384,
+  "image_width": 640,
+  "video_num_frames": 49
+}
