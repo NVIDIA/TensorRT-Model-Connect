@@ -26,7 +26,7 @@ def _cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted(MANIFEST_ROOT.glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == FAMILY
-        assert manifest["task"] == "object_detection"
+        assert manifest["task"] == "image_to_boxes"
         for case in manifest["testcases"]:
             name = str(case["name"])
             assert name not in result
@@ -100,6 +100,57 @@ def _asset(case: dict) -> Path:
     path = TEST_ROOT / str(case["test_image"])
     assert path.is_file(), f"selected YOLO11 E2E image is missing: {path}"
     return path
+
+
+def _assert_sdk_consumers(
+    runtime_root: Path, bundle: Path, case: dict, expected_actual: dict, tmp_path: Path
+) -> None:
+    from PIL import Image
+
+    native_build = _required_path(
+        os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR"
+    )
+    image = np.asarray(Image.open(_asset(case)).convert("RGB"), dtype=np.float32)
+    image /= np.float32(255.0)
+    raw_image = tmp_path / "sdk-input.rgb.f32"
+    image.tofile(raw_image)
+    outputs = []
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_yolo11_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [
+                str(consumer),
+                str(bundle),
+                str(runtime_root),
+                str(raw_image),
+                str(image.shape[0]),
+                str(image.shape[1]),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=600,
+        )
+        payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"SDK {language} consumer must return one result"
+        actual = json.loads(payloads[0])
+        assert actual["task"] == "image_to_boxes"
+        assert actual["image_height"] == image.shape[0]
+        assert actual["image_width"] == image.shape[1]
+        assert actual["count"] == len(actual["boxes"]) == len(expected_actual["scores"])
+        for idx, box_item in enumerate(actual["boxes"]):
+            assert box_item["class_id"] == expected_actual["classes"][idx]
+            assert abs(box_item["score"] - expected_actual["scores"][idx]) < 1e-5
+            for a_idx, want_coord in enumerate(expected_actual["boxes"][idx * 4 : (idx + 1) * 4]):
+                assert abs(box_item["box"][a_idx] - want_coord) < 1e-4
+        outputs.append(actual)
+    assert outputs[0] == outputs[1]
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -184,3 +235,5 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         for axis, want in enumerate(expected):
             # The CLI writes the boxes as one flat array, four per detection.
             assert abs(float(actual["boxes"][index * 4 + axis]) - want) < 1.0
+
+    _assert_sdk_consumers(runtime_root, bundle, case, actual, tmp_path)
