@@ -73,6 +73,7 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: Qwen38Model, **
         "precision",
         "layer_types",
         "decoder_engine_layout",
+        "has_mtp",
     }
     missing = fields - runtime.keys()
     if missing:
@@ -154,8 +155,18 @@ def build(request, writer) -> None:
         debug_layer_outputs=False,
     )
 
+    has_mtp = "mtp_layer.fc" in weights
+    mtp_plan = None
+    if has_mtp:
+        mtp_plan = model.build_mtp_engine(
+            config, weights, max_sequence_length,
+            precision=precision, verbose=bool(request.verbose),
+        )
+
     writer.set_header(family="qwen3_8", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
+    if mtp_plan is not None:
+        writer.add_bytes("mtp_engine.plan", mtp_plan)
     writer.add_json(
         "runtime.json",
         _runtime_config(
@@ -165,6 +176,7 @@ def build(request, writer) -> None:
             precision=precision,
             max_cache_length=max_sequence_length,
             decoder_engine_layout="single",
+            has_mtp=has_mtp,
         ),
     )
     for filename in _BUNDLE_FILES:
