@@ -170,7 +170,7 @@ class Router final : public IStructuredDecision {
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
-        throw std::invalid_argument("Laya does not use a KV cache");
+        throw std::invalid_argument("laya does not support --kv-cache-size");
     if (context.reader.find_section("router.json"))
         return new trtmc::laya::Router(context);
     return new trtmc::laya::Pipeline(context);

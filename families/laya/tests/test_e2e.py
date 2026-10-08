@@ -32,7 +32,7 @@ def _selection(config):
 @pytest.fixture(scope="module")
 def laya_models(tmp_path_factory):
     @cache
-    def reference(checkpoint, variant):
+    def reference(checkpoint, variant, maximum):
         from laya import Agent
         from families.laya.cli import VARIANTS
 
@@ -40,6 +40,8 @@ def laya_models(tmp_path_factory):
             str(Path(checkpoint) / VARIANTS[variant]), device="cuda", fast=False, compile=False
         )
         assert agent.device.type == "cuda"
+        if maximum is not None:
+            agent.cfg["max_len"] = maximum
         return agent
 
     @cache
@@ -47,6 +49,9 @@ def laya_models(tmp_path_factory):
         from families.laya.cli import build
 
         manifest = MANIFESTS[name]
+        assert manifest["precision"] == "bf16"
+        assert manifest["tensor_parallel_size"] == 1
+        maximum = manifest.get("max_sequence_length")
         checkpoint = os.environ.get("TRTMC_LAYA_CHECKPOINT")
         if checkpoint is None:
             from huggingface_hub import snapshot_download
@@ -56,8 +61,13 @@ def laya_models(tmp_path_factory):
         value = os.environ.get(prefix + "_BUNDLE")
         bundle = Path(value) if value else tmp_path_factory.mktemp(name) / manifest["bundle"]
         if value is None:
-            build(model=checkpoint, output=bundle, variant=manifest["variant"])
-        return bundle, lambda variant: reference(str(checkpoint), variant)
+            build(
+                model=checkpoint,
+                output=bundle,
+                variant=manifest["variant"],
+                max_sequence_length=maximum,
+            )
+        return bundle, lambda variant: reference(str(checkpoint), variant, maximum)
 
     return resolve
 
@@ -126,7 +136,6 @@ def test_e2e(manifest, case, request, tmp_path):
         assert result["response"]["routing"] == routing
     assert result["scores"] == native["results"][1]["scores"]
     assert result["response"]["usage"] == reference["usage"]
-    compare_response(result["response"], reference)
     assert len(result["scores"]) == len(ids)
     for qid, item, raw, actual in zip(ids, items, logits, result["scores"], strict=True):
         assert actual["question_id"] == qid
@@ -140,4 +149,5 @@ def test_e2e(manifest, case, request, tmp_path):
         np.testing.assert_allclose(actual["logits"], expected, atol=0.125, rtol=0.015)
         np.testing.assert_allclose(actual["probabilities"], probabilities, atol=0.002, rtol=0.01)
         assert np.argmax(actual["probabilities"]) == np.argmax(probabilities)
+    compare_response(result["response"], reference)
     (tmp_path / "native.json").write_text(json.dumps(native, indent=2))
