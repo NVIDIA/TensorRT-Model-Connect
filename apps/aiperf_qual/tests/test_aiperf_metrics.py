@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from html.parser import HTMLParser
 
 import pytest
 
@@ -34,7 +35,12 @@ def test_native_exports_reach_json_markdown_and_campaign_html_without_changing_g
     record(session, "reference", summary)
     record(session, "candidate", {**summary, "request_error_rate": {"unit": "%", "avg": 0.0}})
     result = {"model": "model", "provenance": {}, "accuracy_source": "none", "accuracy": [],
-              "performance": [{"reference_mode": "eager", "light": "green", "request": "catalog"}]}
+              "performance": [{"reference_mode": "eager", "light": "green", "request": "catalog",
+                               "speedup": 2.5, "speedup_interval90": [2.4, 2.6]},
+                              {"reference_mode": "eager", "light": "white", "request": "dataset",
+                               "kind": "natural_dataset", "gate": False, "comparable": True,
+                               "pairs": 1, "matched_pairs": 1, "speedup": 2.5,
+                               "natural_task_speedup": 2.5, "speedup_interval90": [2.4, 2.6]}]}
     result["verdict"] = judge.verdict(result, expected_suites=[], expected_modes=1)
     result["aiperf_metrics"] = aiperf_metrics.entries(session.batches)
     assert judge.verdict(result, expected_suites=[], expected_modes=1) == result["verdict"]
@@ -45,15 +51,42 @@ def test_native_exports_reach_json_markdown_and_campaign_html_without_changing_g
     report.write_report(out, result)
     saved = json.loads((out / "report.json").read_text())
     assert saved["aiperf_metrics"] == result["aiperf_metrics"] and saved["verdict"] == result["verdict"]
+    assert saved["performance"] == result["performance"]
     markdown = (out / "report.md").read_text()
     assert "informational; no gate" in markdown and "12.500 ms" in markdown
     assert "task <example>\\|dataset" in markdown and "0.000 %" in markdown and "999.000" not in markdown
+    assert "speedup" not in markdown.lower() and "2.50x" not in markdown and "total-time ratio" not in markdown
     rows, counts, rank = campaign.collect([tmp_path])
     summary_text, _ = campaign.summary([tmp_path])
     assert "AIPerf native client metrics (informational; no gate)" in summary_text and "25.000 requests/sec" in summary_text
     page = report_html.render(rows, counts, rank, tmp_path / "report.html").read_text()
     assert "task &lt;example&gt;|dataset" in page and "25.000 requests/sec" in page
     assert "Native eager fp16" in page and "TRTMC fp16" in page and "informational; no gate" in page
+    assert "speedup" not in page.lower() and "2.50x" not in page and "total-time ratio" not in page
+
+    class VisibleText(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.details = 0
+            self.text = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "details":
+                self.details += 1
+
+        def handle_endtag(self, tag):
+            if tag == "details":
+                self.details -= 1
+
+        def handle_data(self, data):
+            if not self.details:
+                self.text.append(data)
+
+    visible = VisibleText()
+    visible.feed(page)
+    text = " ".join(visible.text)
+    assert all(value in text for value in ("12.500 ms", "30.000 ms", "25.000 requests/sec", "100.000 tokens/sec",
+                                          "100.000 %", "0.000 %", "Native eager fp16", "TRTMC fp16"))
 
 
 def test_run_percentiles_and_precisions_are_kept_separate_and_failed_attempts_are_excluded(tmp_path):

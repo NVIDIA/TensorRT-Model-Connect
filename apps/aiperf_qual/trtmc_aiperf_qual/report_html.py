@@ -7,6 +7,7 @@ for a result that is not Green, both sides' precision, each benchmark's values, 
 request, a rerun's result when an appendix is linked, and the evidence to expand (the full reason, Acc gates and
 failing samples with both outputs, the Perf comparison per reference mode, links to the evidence files, and a
 reproduction command). Rows are ordered White, Red, Yellow, Green.
+Per-run AIPerf client metrics follow the model table, visible without expanding evidence.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ border:1px solid var(--line-strong);border-radius:10px;background:var(--panel)}
 .filters input,.filters select{min-height:32px;padding:5px 9px;border:1px solid var(--line-strong);border-radius:6px;
 background:#fff;font:inherit}.filters input{min-width:260px}.count{margin-left:auto;color:var(--muted);font-size:12px}
 .wrap{overflow:auto;border:1px solid var(--line-strong);border-radius:10px;background:var(--panel)}
+.client-metrics{margin-top:20px}.client-metrics h3{margin:0 0 8px}.client-metrics table{min-width:1240px}
 table{width:100%;border-collapse:separate;border-spacing:0}.register{min-width:1240px}
 th,td{padding:8px 10px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);text-align:left;
 vertical-align:top}th:last-child,td:last-child{border-right:0}
@@ -79,8 +81,9 @@ overflow-wrap:anywhere}
 """
 SCRIPT = """
 function f(){const q=document.getElementById('q').value.toLowerCase(),s=document.getElementById('s').value;
-let n=0;for(const r of document.querySelectorAll('tr.m')){const v=r.dataset.k.includes(q)&&(!s||r.dataset.result===s);
-r.style.display=v?'':'none';n+=v}document.getElementById('n').textContent=n}
+let n=0;for(const r of document.querySelectorAll('tr.m, section.client-metrics')){
+const v=r.dataset.k.includes(q)&&(!s||r.dataset.result===s);
+r.style.display=v?'':'none';if(r.classList.contains('m'))n+=v}document.getElementById('n').textContent=n}
 """
 NO_VERDICT_LABELS = {"error": "run error", "build-failed": "build failed", "config-error": "configuration error",
                      "not-run": "not run", "excluded": "excluded", "smoke-fail": "smoke failed"}
@@ -188,16 +191,6 @@ def _latency(profile: str, items: Sequence[Mapping[str, Any]], side: str) -> str
     return "".join(lines) or "<span class='none'>—</span>"
 
 
-def _speedup(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
-    """Only display a headline speedup when the fixed-work comparison is admissible."""
-    lines = []
-    for item in items:
-        ratio = item.get("speedup") if item.get("light") in ("green", "yellow", "red") else None
-        label = f"<span class='detail'>{_e(request_label(profile, item))}</span> " if len(items) > 1 else ""
-        lines.append(f"<div>{label}{f'{ratio:.2f}x' if ratio is not None else '—'}</div>")
-    return "".join(lines) or "<span class='none'>—</span>"
-
-
 def _links(directory: Path | None, base: Path) -> str:
     if directory is None or not directory.is_dir():
         return ""
@@ -240,26 +233,19 @@ def _performance(items: Sequence[Mapping[str, Any]]) -> str:
         color = LIGHT_COLORS.get(light, "#6e7781")
         reasons = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
         unit = " per audio second" if candidate.get("unit") or reference.get("unit") else ""
-        ratio = item.get("speedup")
-        interval = item.get("speedup_interval90")
-        measured = f"{ratio:.2f}x" if ratio is not None else "not comparable"
-        if interval:
-            measured += f" [90% CI {interval[0]:.2f}, {interval[1]:.2f}]"
         if item.get("kind") == "natural_dataset":
-            reasons += " · shared quality outputs; interval across dataset units"
-            natural = item.get("natural_task_speedup")
-            if natural is not None:
-                reasons += f" · natural-task total-time ratio {natural:.2f}x"
+            reasons += (f" · shared quality outputs; {item.get('matched_pairs')}/{item.get('pairs')} "
+                        "paired responses have matching work; informational, no gate")
         else:
             reasons += " · repeated fixed-workload gate"
         rows.append(f"<tr><td>{_e(item.get('request') or item.get('reference_mode'))}</td><td><span class='badge' "
                     f"style='background:{color}'>{_e(light)}</span></td>"
                     f"<td>{_e(_ms(candidate.get('p50_ms')))}{unit}</td><td>{_e(_ms(reference.get('p50_ms')))}{unit}"
-                    f" {_e(reference.get('precision') or '')}</td><td>{_e(measured)}</td><td>{_e(reasons)}</td></tr>")
+                    f" {_e(reference.get('precision') or '')}</td><td>{_e(reasons)}</td></tr>")
     if not rows:
         return ""
     return ("<table><tr><th>native mode</th><th>light</th><th>TRTMC p50 ms</th><th>native p50 ms</th>"
-            f"<th>speedup</th><th>reasons / notes</th></tr>{''.join(rows)}</table>")
+            f"<th>reasons / notes</th></tr>{''.join(rows)}</table>")
 
 
 def _media_sweep(service_metrics: Mapping[str, Any]) -> str:
@@ -299,7 +285,7 @@ def _native_metrics(items: Sequence[Mapping[str, Any]]) -> str:
     header = "".join(f"<th>{_e(label)}</th>" for label in aiperf_metrics.HEADERS)
     rows = "".join("<tr>" + "".join(f"<td>{_e(cell)}</td>" for cell in aiperf_metrics.cells(item)) + "</tr>"
                    for item in items)
-    return f"<p>{_e(aiperf_metrics.NOTE)}</p><table><tr>{header}</tr>{rows}</table>"
+    return f"<div class='wrap'><table><thead><tr>{header}</tr></thead><tbody>{rows}</tbody></table></div>"
 
 
 def _evidence(profile: str, row: Mapping[str, Any], base: Path) -> str:
@@ -307,7 +293,6 @@ def _evidence(profile: str, row: Mapping[str, Any], base: Path) -> str:
     return ("<details><summary>Evidence</summary><div class='evidence-body'>"
             f"<p>{_e(signal_reason(profile, row))}</p><p class='detail'>harness category {_e(row['category'])} · "
             f"host {_e(row.get('root'))}</p>{_accuracy(row.get('accuracy', []))}{_performance(row.get('perf', []))}"
-            f"{_native_metrics(row.get('aiperf_metrics', []))}"
             f"{_sweep(row.get('service_metrics') or {})}<p>{_links(Path(directory) if directory else None, base)}</p>"
             + (f"<p>reproduce: <code>{_e(row['repro'])}</code></p>" if row.get("repro") else "")
             + "</div></details>")
@@ -321,20 +306,26 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
     results = {profile: signal(row) for profile, row in rows.items()}
     order = sorted(rows, key=lambda p: (SIGNALS.index(results[p]), rows[p].get("task") or "", p))
     tally = {result: sum(1 for value in results.values() if value == result) for result in SIGNALS}
-    body = []
-    for profile in order:
+    body, client_metrics = [], []
+    for index, profile in enumerate(order):
         row, result = rows[profile], results[profile]
         perf = reported_perf(row)
         issue = _issue(profile, row, result)
         key = f"{profile} {row.get('task') or ''} {result} {row.get('root')}".lower()
+        metrics = row.get("aiperf_metrics", [])
+        metrics_link = f"<div class='detail'><a href='#aiperf-{index}'>AIPerf client metrics</a></div>" if metrics else ""
+        if metrics:
+            client_metrics.append(f"<section class='client-metrics' id='aiperf-{index}' data-result='{result}' "
+                                  f"data-k='{_e(key)}'><h3>{_e(profile)}</h3>{_native_metrics(metrics)}</section>")
         rerun = f"<td>{_signal(reruns[profile]) if profile in reruns else ''}</td>" if reruns else ""
         body.append(f"<tr class='m' data-result='{result}' data-k='{_e(key)}'><td>{_signal(result)}"
                     + (f"<div class='detail'>{_e(issue)}</div>" if issue else "")
-                    + f"</td><td><code>{_e(profile)}</code><div class='detail'>{_e(row.get('task') or '—')}</div></td>"
+                    + f"</td><td><code>{_e(profile)}</code><div class='detail'>{_e(row.get('task') or '—')}</div>"
+                    f"{metrics_link}</td>"
                     f"<td>{_precision(row)}</td><td>{_accuracy_values(row.get('accuracy', []))}</td>"
                     f"<td class='timing'>{_latency(profile, perf, 'reference')}</td>"
                     f"<td class='timing'>{_latency(profile, perf, 'candidate')}</td>"
-                    f"<td class='timing'>{_speedup(profile, perf)}</td>{rerun}"
+                    f"{rerun}"
                     f"<td>{_evidence(profile, row, base)}</td></tr>")
     passed = tally["green"] + tally["yellow"]
     rate = f"{100 * passed / len(rows):.1f}%" if rows else "—"  # of every model the report covers
@@ -355,17 +346,20 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                + "".join(f"<option value='{result}'>{SIGNAL_NAMES[result]}</option>" for result in SIGNALS)
                + f"</select></label><span class='count'>Showing <span id='n'>{len(rows)}</span> of {len(rows)}"
                "</span></div>")
-    columns = ["Result", "Model / Task", "Precision", "Quality (TRTMC / native)", "Native p50", "TRTMC p50", "Speedup",
+    native_section = ("<h2>AIPerf native client metrics (informational; no gate)</h2>"
+                      f"<p class='purpose'>{_e(aiperf_metrics.NOTE)}</p>{''.join(client_metrics)}"
+                      if client_metrics else "")
+    columns = ["Result", "Model / Task", "Precision", "Quality (TRTMC / native)", "Native task p50", "TRTMC task p50",
                *(["Rerun"] if reruns else []), "Evidence"]
     document = ("<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' "
                 f"content='width=device-width,initial-scale=1'><title>{_e(title)}</title><style>{STYLE}</style>"
                 f"<script>{SCRIPT}</script><header><p class='eyebrow'>Qualification report</p><h1>{_e(title)}</h1>"
                 "<p class='purpose'>TRTMC against the native model: benchmark accuracy, and the server model-call time "
-                "p50 of the catalog request.</p>"
+                "p50 of the catalog request. Per-run AIPerf client metrics appear below.</p>"
                 + (f"<p class='meta'>{_e(context)}</p>" if context else "")
                 + (f"<p class='meta'>{related}</p>" if related else "")
                 + f"</header>{cards}{legend}{filters}<div class='wrap'><table class='register'><thead><tr>"
                 + "".join(f"<th>{column}</th>" for column in columns)
-                + f"</tr></thead><tbody>{''.join(body)}</tbody></table></div></html>")
+                + f"</tr></thead><tbody>{''.join(body)}</tbody></table></div>{native_section}</html>")
     output.write_text(document)
     return output

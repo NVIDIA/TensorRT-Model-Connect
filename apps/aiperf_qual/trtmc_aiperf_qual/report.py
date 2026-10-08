@@ -97,11 +97,10 @@ def acc_value(item: Mapping[str, Any]) -> str:
 
 
 def _media_service_metrics(service_metrics: Mapping[str, Any]) -> list[str]:
-    speedup = f" · TRTMC {service_metrics['speedup']:.2f}x faster per call" if service_metrics.get("speedup") else ""
     memory = f", peak memory {service_metrics['memory_ratio']:.2f}x native" if service_metrics.get("memory_ratio") else ""
     lines = ["", f"## Optional service metrics (AIPerf {service_metrics.get('endpoint')}, informational; {service_metrics.get('prompts')} prompts, "
              f"{service_metrics.get('requests')} requests per level)", "",
-             f"Light {service_metrics.get('light')} {'; '.join(service_metrics.get('reasons', []) + service_metrics.get('notes', []))}{speedup}{memory}. "
+             f"Light {service_metrics.get('light')} {'; '.join(service_metrics.get('reasons', []) + service_metrics.get('notes', []))}{memory}. "
              f"{service_metrics.get('note', '')}", "",
              "| side | steps | model call p50 ms | request latency p50 ms | peak GPU memory MiB | measured |",
              "|---|---|---|---|---|---|"]
@@ -152,26 +151,21 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
             text = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
             lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |")
     lines += ["", "## Performance (server task-call time)", "",
-              "| reference mode | light | TRTMC ms | CI % | reference ms (aggregation) | CI % | speedup | notes |",
-              "|---|---|---|---|---|---|---|---|"]
+              "| reference mode | light | TRTMC ms | CI % | reference ms (aggregation) | CI % | notes |",
+              "|---|---|---|---|---|---|---|"]
     for item in result.get("performance", []):
         cand, ref = item.get("candidate", {}), item.get("reference", {})
         if item.get("kind") == "natural_dataset":
-            interval = item.get("speedup_interval90")
-            ratio = _fmt(item.get("speedup"), 2) + "x" if item.get("comparable") else "not comparable"
-            scope = "dataset units 90% CI " + str(interval) if interval else "no dataset-unit interval"
-            notes = "; ".join([*item.get("reasons", []), *item.get("notes", []), scope])
+            notes = "; ".join([*item.get("reasons", []), *item.get("notes", []), "informational; no gate"])
             lines.append(f"| {item['request']} (shared quality outputs) | {item['light']} | "
-                         f"{_fmt(cand.get('p50_ms'))} | — | {_fmt(ref.get('p50_ms'))} | — | {ratio} | {notes} |")
-            lines += ["", f"Natural task total-time ratio: {_fmt(item.get('natural_task_speedup'), 2)}x; "
-                      f"{item.get('matched_pairs')}/{item.get('pairs')} paired responses have matching work. "
-                      "This describes the collected tasks and is not an equal-work claim when work differs.", ""]
+                         f"{_fmt(cand.get('p50_ms'))} | — | {_fmt(ref.get('p50_ms'))} | — | {notes} |")
+            lines += ["", f"{item.get('matched_pairs')}/{item.get('pairs')} paired responses have matching work. "
+                      "Task-call timings reuse the quality outputs; differing work prevents an equal-work comparison.", ""]
             continue
         unit = " per audio second" if cand.get("unit") or ref.get("unit") else ""
         lines.append(f"| {item['reference_mode']}{' ' + item['request'] if item.get('request') else ''} | {item['light']} | {_fmt(cand.get('p50_ms'))}{unit} | "
                      f"{_fmt(cand.get('ci_percent'), 2)} | {_fmt(ref.get('p50_ms'))}{unit} ({ref.get('aggregation', 'mean')}) | "
-                     f"{_fmt(ref.get('ci_percent'), 2)} | "
-                     f"{_fmt(item.get('speedup'), 2)} | {'; '.join(item.get('reasons', []) + item.get('notes', []))} |")
+                     f"{_fmt(ref.get('ci_percent'), 2)} | {'; '.join(item.get('reasons', []) + item.get('notes', []))} |")
     if result.get("aiperf_metrics"):
         lines += ["", "## AIPerf native client metrics (informational; no gate)", "", aiperf_metrics.NOTE, "",
                   *aiperf_metrics.markdown(result["aiperf_metrics"])]
@@ -180,9 +174,8 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
         lines += _media_service_metrics(service_metrics)
     elif service_metrics:
         lines += ["", f"## Optional service metrics (serving sweep, informational; ISL {service_metrics.get('isl')}, OSL {service_metrics.get('osl')})", "",
-                  f"Light {service_metrics.get('light')} {'; '.join(service_metrics.get('reasons', []))}"
-                  + (f" · TRTMC/native throughput {service_metrics['throughput_ratio']:.2f}x at concurrency {service_metrics.get('concurrency')}"
-                     if service_metrics.get("throughput_ratio") else "") + f". {service_metrics.get('note', '')}", "",
+                  f"Light {service_metrics.get('light')} {'; '.join(service_metrics.get('reasons', []))}. "
+                  f"{service_metrics.get('note', '')}", "",
                   "| side | concurrency | requests/s | latency p50 ms | latency p99 ms | error % |", "|---|---|---|---|---|---|"]
         for side in ("candidate", "reference"):
             for level in service_metrics.get(side, []):

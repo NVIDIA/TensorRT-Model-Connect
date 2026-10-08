@@ -83,7 +83,8 @@ and GPU scorers run after their generation servers stop. This costs more wall ti
 multi-replica, overlapping Acc schedule.
 
 The report answers two independent questions: the task quality scores on each side and their difference;
-and the native/TRTMC task-call times, speedup, interval, precision, and work comparability. Quality uses
+and the native/TRTMC task-call times, precision, and work comparability. Markdown and HTML omit speedup
+ratios; JSON retains them and their intervals for qualification and diagnostics. Quality uses
 its existing task metric and non-inferiority gate. Parity is labelled parity, random-weight models have
 absolute quality N/A, and an unavailable native reference cannot provide a speedup. CLIP-T and video
 validity do not establish temporal, motion, or action correctness; world-model checks establish coarse
@@ -116,8 +117,10 @@ verdict; the prototype's single execution lane and buffered SSE do not measure t
 Every recorded workload also includes AIPerf's native client statistics in `aiperf_metrics`: request
 latency p50/p99, request throughput, output-token throughput when available, and request error rate.
 JSON retains the exported statistics and units; Markdown and HTML show each side's values per workload,
-precision, and profiling run. These metrics reuse the existing exports without extra inference or a
-load sweep. Missing values stay unavailable, percentiles are not merged across runs, and these
+precision, and profiling run. HTML shows these tables directly below the model summary, with links from
+each model and the same search/result filters; expanding Evidence is unnecessary. These metrics reuse
+the existing exports without extra inference or a load sweep. Missing values stay unavailable,
+percentiles are not merged across runs, and these
 informational measurements never affect acceptance gates or the model verdict.
 
 ```yaml
