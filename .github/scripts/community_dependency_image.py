@@ -177,6 +177,7 @@ def build(output: Path, repository: Path, *, family: str) -> None:
     if len(profiles) != 1:
         raise RuntimeError("The native import probe did not produce exactly one ABI profile")
     observed = json.loads(profiles[0])
+    print("TRTMC_DEPENDENCY_PROFILE=" + json.dumps(observed, sort_keys=True), flush=True)
     closure = hashlib.sha256(
         json.dumps(observed["resolved_dependencies"], separators=(",", ":")).encode()
     ).hexdigest()
