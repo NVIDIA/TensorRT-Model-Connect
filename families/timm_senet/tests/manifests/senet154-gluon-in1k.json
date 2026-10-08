@@ -4,7 +4,7 @@
   "hf_revision": "86f6d239ed30acbe3aca0cbb5769da2621a4e02c",
   "bundle": "senet154-gluon-in1k.bundle",
   "family": "timm_senet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

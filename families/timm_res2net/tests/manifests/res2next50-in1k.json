@@ -4,7 +4,7 @@
   "hf_revision": "a8fe0f89e842b6dfa74b96deed2254d4fb7bf625",
   "bundle": "res2next50-in1k.bundle",
   "family": "timm_res2net",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {
