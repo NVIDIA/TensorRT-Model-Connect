@@ -70,6 +70,8 @@ BarkConfig parse_config(const nlohmann::json& json) {
 } // namespace
 } // namespace trtmc::bark_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("bark")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("bark does not support --kv-cache-size");

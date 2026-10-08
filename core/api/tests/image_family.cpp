@@ -173,6 +173,8 @@ class ImageFixture final : public IModel,
 };
 } // namespace
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("image_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "image_fixture")
         throw std::runtime_error("wrong fixture family");

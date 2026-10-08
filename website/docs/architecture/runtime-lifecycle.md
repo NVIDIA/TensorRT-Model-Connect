@@ -14,12 +14,16 @@ auto task = trtmc::load_task("model.bundle", "/opt/trtmc/lib");
 2. The loader validates the `family` and `backend` names as safe DSO tokens.
 3. It loads `libtrtmc_backend_<backend>.so` from the explicit runtime root.
 4. It loads `libtrtmc_model_<family>.so` from that same root.
-5. It resolves the single `trtmc_create_family` factory and passes a
+5. It requires both plugin descriptors to declare the active product build,
+   expected kind, and identity.
+6. It resolves the single `trtmc_create_family` factory and passes a
    `FamilyContext` containing the read-only bundle reader and abstract backend.
-6. It verifies that the returned `ITask::task()` matches the bundle header.
+7. It verifies that the backend name and returned `ITask::task()` match the
+   bundle header.
 
-There is no current-directory search, environment fallback, registry lookup,
-strategy switch, sibling-family probe, or load retry.
+The Runtime Loader performs no current-directory search, environment fallback,
+registry lookup, strategy switch, sibling-family probe, or load retry. The CLI
+may select one explicit root before entering this sequence.
 
 ## Ownership after transfer
 

@@ -41,29 +41,40 @@ selecting another task supported by the same family. The build then imports
 only the selected `families.gpt2.model` and calls `build(request, writer)` once.
 A prepared local snapshot can be passed in place of the model ID.
 
-For a wheel install, resolve its native runtime directory directly from the
-installed package:
+Run the bundle directly:
 
 ```bash
-TRTMC_RUNTIME_ROOT="$(python -c 'import pathlib, tensorrt_model_connect as m; print(pathlib.Path(m.__file__).parent / "bin")')"
 trtmc run gpt2.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --prompt "Hello" \
   --max-new-tokens 32
 ```
 
-For a native CMake install, point the loader at the directory containing the matching
-`libtrtmc_core.so`, `libtrtmc_runtime.so`, `libtrtmc_backend_trt.so`, and
-`libtrtmc_model_gpt2.so`. The loader reads the bundle header, loads exactly
-those DSOs, and returns the abstract task interface declared by the bundle.
+The CLI reads the bundle family and backend, then selects the first complete,
+single-directory plugin root in this order:
 
-```bash
-trtmc run gpt2.bundle \
-  --runtime-root /opt/trtmc/lib \
-  --prompt "Hello" \
-  --max-new-tokens 32
-```
+1. the directory containing the active `libtrtmc_runtime.so`;
+2. colon-separated directories in `TRTMC_RUNTIME_PATH`.
 
-The shell variable above is only a convenient explicit argument. The CLI never
-searches environment variables, the current directory, or an installed
-fallback runtime.
+The wheel console command replaces itself with the native CLI stored beside
+Core, Runtime, backend, and family DSOs. Native installs resolve their already
+loaded Runtime directory in the same way, so discovery does not inspect Python
+installation layouts or scan `PATH` directories.
+
+A complete GPT-2 TensorRT plugin root contains root-local
+`libtrtmc_backend_trt.so` and `libtrtmc_model_gpt2.so` files. Candidates are
+never combined across directories, and discovery never loads a candidate just
+to inspect it. After selection, the Runtime Loader loads those exact paths and
+requires their descriptors to match the active product build, plugin kinds,
+and bundle IDs before it calls either factory. A mismatched selected root fails
+immediately without falling back to another installation.
+
+Before bundle inspection crosses a C++ interface, the CLI verifies that its
+own product-build identity matches the already loaded Runtime and Core. The
+Runtime Loader repeats the Core check and validates selected plugins at load.
+
+The CLI prints the automatically selected directory. Use `--runtime-root DIR`
+to override it with one exact root. An explicit root bypasses discovery but not
+build and identity validation. The current directory is not searched
+implicitly; use `TRTMC_RUNTIME_PATH=.` when that behavior is intended.
+`LD_LIBRARY_PATH` remains a platform-loader setting evaluated before the CLI
+starts.

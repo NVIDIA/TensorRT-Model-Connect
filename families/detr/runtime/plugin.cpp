@@ -49,6 +49,8 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
 } // namespace
 } // namespace trtmc::detr
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("detr")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("detr does not support --kv-cache-size");

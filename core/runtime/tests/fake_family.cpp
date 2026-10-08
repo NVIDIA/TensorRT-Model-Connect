@@ -185,6 +185,8 @@ trtmc::ITask* create_fake_task(const trtmc::FamilyContext& context) {
 
 } // namespace
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("fake")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "fake")
         throw std::runtime_error("unexpected family");

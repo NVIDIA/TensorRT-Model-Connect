@@ -5,6 +5,7 @@
 
 #include "server/native_worker.h"
 #include "trtmc/core.hpp"
+#include "trtmc/runtime/runtime_root.h"
 
 #include <array>
 #include <cerrno>
@@ -77,6 +78,8 @@ int worker_main(int argc, char** argv) {
         else
             throw std::invalid_argument("unknown _serve-worker option: " + option);
     }
+    if (runtime_root.empty())
+        runtime_root = trtmc::loaded_runtime_root();
     const trtmc::LoadOptions options{runtime_root, kv_cache_size, runtime_cache, cuda_graphs};
     return trtmc::server::run_bundle_worker(bundle, options, std::cin, std::cout);
 }

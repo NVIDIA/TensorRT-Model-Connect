@@ -27,6 +27,8 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
 } // namespace
 } // namespace trtmc::magpie_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("magpie_tts")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("magpie_tts does not support --kv-cache-size");

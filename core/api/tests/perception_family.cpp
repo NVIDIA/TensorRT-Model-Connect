@@ -490,6 +490,8 @@ extern "C" int trtmc_test_boxes_single_calls() {
 extern "C" int trtmc_test_boxes_batch_items() {
     return boxes_batch_items.load();
 }
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("perception_fixture")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().task == trtmc::IPoseHypothesisRefinement::kTask)
         return new ExistingPreprocessed;

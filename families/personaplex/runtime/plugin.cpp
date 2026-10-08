@@ -85,6 +85,8 @@ SpeechConfig parse_config(const BundleReader& bundle, const nlohmann::json& json
 } // namespace
 } // namespace trtmc::personaplex_factory
 
+TRTMC_DEFINE_FAMILY_PLUGIN_V1("personaplex")
+
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("personaplex does not support --kv-cache-size");
