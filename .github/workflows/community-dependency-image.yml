@@ -1,0 +1,338 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Community Nemotron-H dependency image
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      BREV_API_KEY:
+        required: false
+      HF_TOKEN:
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: community-nemotron-h-image
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      allowed: ${{ steps.authorize.outputs.allowed }}
+      model_sha: ${{ steps.authorize.outputs.model_sha }}
+    steps:
+      - name: Authorize a protected manual producer
+        id: authorize
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          if repo != "NVIDIA/TensorRT-Model-Connect":
+              raise SystemExit("The dependency producer belongs to the upstream repository")
+          if os.environ["GITHUB_EVENT_NAME"] != "workflow_dispatch":
+              raise SystemExit("Dependency production requires a manual dispatch")
+          if os.environ["GITHUB_REF"] not in {"refs/heads/main", "refs/heads/ci/developer"}:
+              raise SystemExit("Dependency production requires a protected source branch")
+          if not re.fullmatch(r"[0-9a-f]{40}", os.environ["GITHUB_SHA"]):
+              raise SystemExit("Dependency production requires an immutable source commit")
+          permission = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/{repo}/collaborators/{os.environ['REQUEST_ACTOR']}/permission"
+          ], text=True))
+          role = permission.get("role_name", permission.get("permission"))
+          if role not in {"admin", "maintain"}:
+              raise SystemExit("Dependency production requires maintain or admin permission")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              main = json.loads(subprocess.check_output([
+                  "gh", "api", f"repos/{repo}/git/ref/heads/main"
+              ], text=True))["object"]["sha"]
+              if not re.fullmatch(r"[0-9a-f]{40}", main):
+                  raise SystemExit("The protected main snapshot is unavailable")
+              output.write("allowed=true\nmodel_sha=" + main + "\n")
+          PY
+
+  produce:
+    needs: authorize
+    if: ${{ needs.authorize.outputs.allowed == 'true' }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: gpu-ci-dispatch
+      deployment: false
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    outputs:
+      instance_name: ${{ steps.reserve.outputs.instance_name }}
+      instance_type: ${{ steps.reserve.outputs.instance_type }}
+      organization_id: ${{ steps.reserve.outputs.organization_id }}
+      allocation_requested: ${{ steps.reserve.outputs.allocation_requested }}
+      lease_artifact_name: ${{ steps.reserve.outputs.lease_artifact_name }}
+      cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed }}
+    steps:
+      - name: Reauthorize the current triggering actor before allocating
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUEST_ACTOR/permission" --jq '.role_name // .permission')
+          case "$role" in admin|maintain) ;; *) echo "::error::The triggering actor requires maintain or admin permission."; exit 1 ;; esac
+      - name: Check out only the protected producer commit
+        timeout-minutes: 5
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install the pinned Brev CLI
+        timeout-minutes: 5
+        env:
+          BREV_VERSION: 0.6.335
+          BREV_ARCHIVE_SHA256: 89d778e6f1e5e52495f3e0f10393f1666a1b16d180001b13faec6f906955e6f8
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/brev.tar.gz"
+          curl -fsSL "https://github.com/brevdev/brev-cli/releases/download/v${BREV_VERSION}/brev-cli_${BREV_VERSION}_linux_amd64.tar.gz" -o "$archive"
+          echo "$BREV_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP" brev
+          install -m 0755 "$RUNNER_TEMP/brev" "$HOME/.local/bin/brev"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Log in to Brev
+        timeout-minutes: 5
+        env:
+          BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$BREV_API_KEY"
+          brev login --api-key "$BREV_API_KEY"
+      - name: Reserve one AWS L4 builder
+        timeout-minutes: 45
+        id: reserve
+        run: |
+          set -euo pipefail
+          name="trtmc-img-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact="community-image-lease-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "lease_artifact_name=$artifact" >> "$GITHUB_OUTPUT"
+          python3 -m tools.brev_exec provision --instance "$name" --provider aws \
+            --instance-type g6.4xlarge --disk-gb 500 --min-free-disk-gb 200 \
+            --timeout 2700 --attempts 1 --lease-file "$RUNNER_TEMP/community-image-lease.json"
+      - name: Preserve the original allocation lease
+        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.reserve.outputs.lease_artifact_name }}
+          path: ${{ runner.temp }}/community-image-lease.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Prepare only protected source on the builder
+        timeout-minutes: 20
+        env:
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+          MODEL_SHA: ${{ needs.authorize.outputs.model_sha }}
+        run: |
+          set -euo pipefail
+          repo="/tmp/trtmc-image-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          model="/tmp/trtmc-image-model-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          proof="/tmp/trtmc-image-proof-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          auth="/tmp/trtmc-image-auth-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "REMOTE_REPO=$repo" >> "$GITHUB_ENV"
+          echo "REMOTE_MODEL=$model" >> "$GITHUB_ENV"
+          echo "REMOTE_PROOF=$proof" >> "$GITHUB_ENV"
+          echo "REMOTE_AUTH=$auth" >> "$GITHUB_ENV"
+          python3 -m tools.brev_exec --instance "$INSTANCE_NAME" \
+            --log "$RUNNER_TEMP/image-setup.log" \
+            --result-file "/tmp/trtmc-image-setup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --timeout 900 -- bash -c \
+            "set -eu; git init '$repo'; cd '$repo'; git config remote.origin.url 'https://github.com/$GITHUB_REPOSITORY.git'; git fetch --depth 1 origin '$GITHUB_SHA'; test \"\$(git rev-parse FETCH_HEAD)\" = '$GITHUB_SHA'; git checkout --detach '$GITHUB_SHA'; git init '$model'; cd '$model'; git config remote.origin.url 'https://github.com/$GITHUB_REPOSITORY.git'; git fetch --depth 1 origin '$MODEL_SHA'; test \"\$(git rev-parse FETCH_HEAD)\" = '$MODEL_SHA'; git checkout --detach '$MODEL_SHA'; sudo apt-get update -qq; sudo apt-get install -y --no-install-recommends python3-venv; python3 -m venv /tmp/trtmc-image-stage; /tmp/trtmc-image-stage/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0; install -d -m 0700 '$auth'"
+      - name: Build full dependencies and validate native ABI
+        timeout-minutes: 125
+        env:
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.brev_exec --instance "$INSTANCE_NAME" \
+            --log "$RUNNER_TEMP/dependency-build.log" \
+            --result-file "/tmp/trtmc-image-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --timeout 7200 -- sudo python3 \
+            "$REMOTE_REPO/.github/scripts/community_dependency_image.py" build --family nemotron_h --repository "$REMOTE_MODEL" --output "$REMOTE_PROOF"
+      - name: Qualify the unchanged Nemotron-H workloads on L4
+        timeout-minutes: 66
+        env:
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          token="$RUNNER_TEMP/community-image-hf-token"
+          umask 077
+          printf '%s' "$HF_TOKEN" > "$token"
+          trap 'rm -f "$token"' EXIT
+          timeout --signal=TERM --kill-after=10s 120s brev copy "$token" "$INSTANCE_NAME:$REMOTE_AUTH/hf-token"
+          python3 -m tools.brev_exec --instance "$INSTANCE_NAME" \
+            --log "$RUNNER_TEMP/dependency-qualification.log" \
+            --result-file "/tmp/trtmc-image-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --timeout 3720 -- sudo python3 \
+            "$REMOTE_REPO/.github/scripts/community_dependency_image.py" qualify --family nemotron_h \
+            --output "$REMOTE_PROOF" --repository "$REMOTE_MODEL" --stage-python /tmp/trtmc-image-stage/bin/python \
+            --token-file "$REMOTE_AUTH/hf-token"
+      - name: Publish qualified candidates with short-lived host credentials
+        timeout-minutes: 20
+        id: publish
+        env:
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+          REGISTRY_TOKEN: ${{ github.token }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          token="$RUNNER_TEMP/community-image-registry-token"
+          umask 077
+          printf '%s' "$REGISTRY_TOKEN" > "$token"
+          trap 'rm -f "$token"' EXIT
+          timeout --signal=TERM --kill-after=10s 120s brev copy "$token" "$INSTANCE_NAME:$REMOTE_AUTH/registry-token"
+          python3 -m tools.brev_exec --instance "$INSTANCE_NAME" \
+            --log "$RUNNER_TEMP/dependency-publication.log" \
+            --result-file "/tmp/trtmc-image-publication-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --timeout 900 -- sudo python3 \
+            "$REMOTE_REPO/.github/scripts/community_dependency_image.py" publish --family nemotron_h \
+            --output "$REMOTE_PROOF" --token-file "$REMOTE_AUTH/registry-token" \
+            --username "$REGISTRY_USERNAME"
+          timeout --signal=TERM --kill-after=10s 120s brev copy "$INSTANCE_NAME:$REMOTE_PROOF/published-candidate.json" "$RUNNER_TEMP/published-candidate.json"
+      - name: Always remove private host token files
+        timeout-minutes: 3
+        if: ${{ always() && steps.reserve.outputs.instance_name != '' && env.REMOTE_AUTH != '' }}
+        env:
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+        run: |
+          python3 -m tools.brev_exec --instance "$INSTANCE_NAME" \
+            --log "$RUNNER_TEMP/image-auth-cleanup.log" \
+            --result-file "/tmp/trtmc-image-auth-cleanup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --timeout 120 -- sudo rm -rf "$REMOTE_AUTH"
+      - name: Always block until the owned builder is deleted
+        id: release
+        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
+        env:
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.brev_exec cleanup --instance "$INSTANCE_NAME" \
+            --lease-file "$RUNNER_TEMP/community-image-lease.json" --until-deleted
+          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+      - name: Preserve the final allocation lease
+        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.reserve.outputs.lease_artifact_name }}
+          path: ${{ runner.temp }}/community-image-lease.json
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve a catalog candidate only after successful cleanup
+        if: ${{ success() && steps.publish.outcome == 'success' && steps.release.outputs.cleanup_confirmed == 'true' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-nemotron-h-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/published-candidate.json
+          if-no-files-found: error
+          retention-days: 30
+
+  cleanup:
+    needs: [authorize, produce]
+    if: ${{ always() && needs.authorize.result == 'success' && needs.produce.outputs.instance_name != '' }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: gpu-ci-dispatch
+      deployment: false
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - timeout-minutes: 5
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install the pinned Brev CLI
+        timeout-minutes: 5
+        env:
+          BREV_VERSION: 0.6.335
+          BREV_ARCHIVE_SHA256: 89d778e6f1e5e52495f3e0f10393f1666a1b16d180001b13faec6f906955e6f8
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/brev.tar.gz"
+          curl -fsSL "https://github.com/brevdev/brev-cli/releases/download/v${BREV_VERSION}/brev-cli_${BREV_VERSION}_linux_amd64.tar.gz" -o "$archive"
+          echo "$BREV_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP" brev
+          install -m 0755 "$RUNNER_TEMP/brev" "$HOME/.local/bin/brev"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Log in to the original Brev organization
+        timeout-minutes: 5
+        id: login
+        env:
+          BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
+        run: brev login --api-key "$BREV_API_KEY"
+      - name: Recover the original producer lease
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LEASE_ARTIFACT_NAME: ${{ needs.produce.outputs.lease_artifact_name }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "$LEASE_ARTIFACT_NAME" --dir "$RUNNER_TEMP/image-lease"
+      - name: Independently confirm deletion of the original builder
+        if: ${{ always() && steps.login.outcome == 'success' }}
+        env:
+          INSTANCE_NAME: ${{ needs.produce.outputs.instance_name }}
+          INSTANCE_TYPE: ${{ needs.produce.outputs.instance_type }}
+          ORGANIZATION_ID: ${{ needs.produce.outputs.organization_id }}
+          ALLOCATION_REQUESTED: ${{ needs.produce.outputs.allocation_requested }}
+          OWNER_CLEANUP_CONFIRMED: ${{ needs.produce.outputs.cleanup_confirmed }}
+        run: |
+          set -euo pipefail
+          lease="$RUNNER_TEMP/image-lease/community-image-lease.json"
+          if [ ! -f "$lease" ]; then
+            if [ "$OWNER_CLEANUP_CONFIRMED" = true ]; then exit 0; fi
+            python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          name = os.environ["INSTANCE_NAME"]
+          run = os.environ["GITHUB_RUN_ID"]
+          sku = os.environ["INSTANCE_TYPE"]
+          org = os.environ["ORGANIZATION_ID"]
+          requested = os.environ["ALLOCATION_REQUESTED"]
+          if not re.fullmatch(rf"trtmc-img-ci-{re.escape(run)}-[1-9][0-9]*", name):
+              raise SystemExit("The original producer allocation name is unavailable")
+          if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", sku) or requested not in {"true", "false"}:
+              raise SystemExit("The original allocation intent is unavailable")
+          if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", org):
+              raise SystemExit("The original allocation organization is unavailable")
+          path = Path(os.environ["RUNNER_TEMP"]) / "image-lease/community-image-lease.json"
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps({"schema_version": 1, "name": name, "sku": sku,
+              "instance_id": None, "organization_id": org,
+              "create_started": requested == "true", "allocation_pending": requested == "true",
+              "phase": "cleanup_unknown" if requested == "true" else "selecting"}) + "\n")
+          PY
+          fi
+          python3 -m tools.brev_exec cleanup --instance "$INSTANCE_NAME" \
+            --lease-file "$lease" --until-deleted

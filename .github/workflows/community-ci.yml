@@ -6,7 +6,7 @@ name: Community CI
 # Community CI GPU promotion v1
 
 run-name: >-
-  ${{ (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
+  ${{ inputs.task == 'dependency-image' && 'Community GPU dependency image qualification' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
 
 # Stable keeps the existing pull_request pipeline. Trusted metadata jobs pair
 # its immutable snapshot with the optional Dev execution of this same workflow.
@@ -19,9 +19,15 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
+      task:
+        description: Test a PR or qualify the protected dependency image
+        required: false
+        type: choice
+        default: test
+        options: [test, dependency-image]
       pr_number:
         description: Open pull request number to test
-        required: true
+        required: false
         type: string
       run_gpu_smoke:
         description: Manually enable the experimental GPU smoke test
@@ -56,17 +62,28 @@ env:
   COMMUNITY_GPU_EXECUTION_ENABLED: "true"
 
 concurrency:
-  group: community-ci-${{ inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || github.ref_name == 'main' && 'start-main' || 'start-dev' }}-${{ github.event.pull_request.number || inputs.pr_number }}
+  group: community-ci-${{ inputs.task == 'dependency-image' && 'dependency-image' || inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || github.ref_name == 'main' && 'start-main' || 'start-dev' }}-${{ github.event.pull_request.number || inputs.pr_number }}
   # A newer push must not terminate a run that still owns a cloud instance.
   cancel-in-progress: false
 
 jobs:
+  produce-dependency-image:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image' }}
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    uses: ./.github/workflows/community-dependency-image.yml
+    secrets:
+      BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   snapshot:
     name: Capture the Community CI snapshot
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request_target' ||
-       (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.source_snapshot == ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -381,7 +398,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request' ||
-       (github.event_name == 'workflow_dispatch' && inputs.source_snapshot != ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.source_snapshot != ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -613,7 +630,7 @@ jobs:
 
   required:
     name: Community CPU / Required
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot != '')) }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.source_snapshot != '')) }}
     needs:
       - authorize
       - source-quality
