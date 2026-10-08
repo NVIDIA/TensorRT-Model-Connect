@@ -12,7 +12,7 @@ from trtmc_server.app import ServerConfig, create_app
 from trtmc_server.registry import ModelRegistry, ModelSpec
 from trtmc_server.worker import WorkerLoadOptions
 from apps.server.python.tests.test_app import FakeRegistry
-from apps.server.python.tests.test_stream_transport import SCRIPT
+from apps.server.python.tests.test_stream_transport import SCRIPT, wait_for_replacement
 
 
 def test_ids_terminal_records_and_text_privacy(tmp_path):
@@ -88,7 +88,7 @@ def test_first_sse_delta_is_sent_before_worker_completion(tmp_path):
 
 
 @pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
-def test_http_disconnect_closes_stream_and_retires_lane(tmp_path, spec_version):
+def test_http_disconnect_closes_stream_and_restores_replica(tmp_path, spec_version):
     release = tmp_path / "release"
     binary = tmp_path / "worker"
     binary.write_text(SCRIPT.replace('release=r.get("release")', f'release={str(release)!r}'))
@@ -126,15 +126,20 @@ def test_http_disconnect_closes_stream_and_retires_lane(tmp_path, spec_version):
                     raise OSError("client disconnected during send")
 
         async with app.router.lifespan_context(app):
+            group = registry._groups["test"]
+            retired_worker = group._workers[0]
             try:
                 await asyncio.wait_for(app(scope, receive, send), timeout=5)
             except ClientDisconnect:
                 assert spec_version == "2.4"
             assert disconnected.is_set()
+            assert retired_worker._process.poll() is not None
+            await asyncio.to_thread(wait_for_replacement, group)
+            assert group._workers[0].pid != retired_worker.pid
             model = registry.status()["models"]["test"]
-            assert model["idle_replicas"] == 0 and model["ready_replicas"] == 0
-            worker = registry._groups["test"]._workers[0]
-            assert worker._process.poll() is not None
+            assert model["idle_replicas"] == 1 and model["ready_replicas"] == 1
+            with group.acquire_session() as session:
+                assert session.request("generate", {"prompt": "next"})["text"] == "ok"
     asyncio.run(run())
     saved = [json.loads(line) for line in records.read_text().split("\n") if line]
     assert len(saved) == 1 and saved[0]["status"] == 499

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real subprocess tests for bounded streaming, admission and cancellation."""
 import threading
+import time
 
 import pytest
 
@@ -101,7 +102,7 @@ def test_completion_wakes_consumer_without_polling(tmp_path, monkeypatch):
         native.close()
 
 
-def test_disconnect_retires_worker_and_releases_only_after_exit(tmp_path):
+def test_disconnect_replaces_worker_only_after_exit(tmp_path):
     native = worker(tmp_path)
     group = WorkerGroup("test", [native])
     session = group.acquire_session()
@@ -113,8 +114,11 @@ def test_disconnect_retires_worker_and_releases_only_after_exit(tmp_path):
         assert not native.ready
         assert native._process.poll() is not None
         session.close()
-        with pytest.raises(WorkerCrashedError):
-            group.acquire_session()
+        wait_for_replacement(group)
+        with group.acquire_session() as replacement:
+            assert replacement._worker.pid != native.pid
+            assert replacement.request("generate", {"prompt": "next"})["text"] == "ok"
+        assert group.status()["idle_replicas"] == 1
     finally:
         group.close()
 
@@ -153,3 +157,69 @@ def test_protocol_versions_and_false_capability_are_rejected():
         with pytest.raises(WorkerProtocolError):
             ModelRegistry._validate_ready({"event": "ready", "protocol_version": version,
                                           "capabilities": ["text_generation"]})
+
+
+def wait_for_replacement(group, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if group.status()["idle_replicas"] == group.replicas:
+            return
+        time.sleep(.01)
+    raise AssertionError("cancelled replica was not replaced")
+
+
+def test_replacement_failure_does_not_loop_or_leak_processes(tmp_path):
+    native = worker(tmp_path)
+    group = WorkerGroup("test", [native])
+    try:
+        session = group.acquire_session()
+        stream = session.stream({"prompt": "hello", "release": str(tmp_path / "never")})
+        assert stream.next()["text_delta"] == "中"
+        native.trtmc_binary.write_text("#!/bin/sh\nexit 1\n")
+        stream.cancel()
+        session.close()
+        group._recovery.submit(lambda: None).result(timeout=5)
+        assert not group.ready
+        with pytest.raises(WorkerCrashedError):
+            group.acquire_session()
+        assert native._process.poll() is not None
+        assert group._workers[0]._process.poll() is not None
+    finally:
+        group.close()
+
+
+def test_shutdown_joins_a_replacement_without_leaking_workers(tmp_path, monkeypatch):
+    native = worker(tmp_path)
+    group = WorkerGroup("test", [native])
+    started, release = threading.Event(), threading.Event()
+    replacing = []
+    original = native.replacement
+
+    def delayed_replacement():
+        replacement = original()
+        replacing.append(replacement)
+        started.set()
+        assert release.wait(5)
+        return replacement
+
+    monkeypatch.setattr(native, "replacement", delayed_replacement)
+    closer = None
+    try:
+        session = group.acquire_session()
+        stream = session.stream({"prompt": "hello", "release": str(tmp_path / "never")})
+        assert stream.next()["text_delta"] == "中"
+        stream.cancel()
+        session.close()
+        assert started.wait(5)
+        closer = threading.Thread(target=group.close)
+        closer.start()
+        release.set()
+        closer.join(5)
+        assert not closer.is_alive() and not group.ready
+        assert native._process.poll() is not None
+        assert replacing[0]._process.poll() is not None
+    finally:
+        release.set()
+        if closer is not None:
+            closer.join(5)
+        group.close()

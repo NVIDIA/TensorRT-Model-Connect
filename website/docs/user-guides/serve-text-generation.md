@@ -197,7 +197,11 @@ distinguish stop causes.
 The MVP uses zero queued requests. Saturated replicas return `429` with a
 `Retry-After` header. Worker request timeouts terminate that worker rather
 than risking protocol desynchronization. A failed lane makes its model
-degraded or unavailable; the MVP does not automatically restart workers.
+degraded or unavailable. When a client disconnects from an incremental stream,
+the server confirms that the cancelled worker has exited and automatically loads
+a replacement with the same settings. That replica remains unavailable during
+model loading; other healthy replicas can continue serving. A failed replacement
+load leaves the replica unavailable without repeatedly retrying startup.
 
 Uvicorn stops new HTTP admission during shutdown and lets active requests
 finish before application lifespan cleanup closes each worker. The worker first

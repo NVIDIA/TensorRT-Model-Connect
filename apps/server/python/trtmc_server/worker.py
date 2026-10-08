@@ -180,7 +180,7 @@ class WorkerSession:
 
 
 class WorkerStream:
-    """Bounded delta relay. A cancelled HTTP request retires its native lane."""
+    """Bounded delta relay. A cancelled HTTP request replaces its native lane."""
     def __init__(self, worker: "WorkerProcess", payload: Mapping[str, Any]) -> None:
         self.worker = worker
         self.events: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=8)
@@ -227,6 +227,7 @@ class WorkerStream:
 
     def abort(self) -> None:
         self.cancelled.set()
+        self.worker._replace_on_release = True  # noqa: SLF001
         self.worker._mark_failed(WorkerCrashedError("stream consumer disconnected"))  # noqa: SLF001
 
     def cancel(self) -> None:
@@ -291,6 +292,16 @@ class WorkerProcess:
         self._ready_payload: dict[str, Any] = {}
         self._last_error: WorkerError | None = None
         self._stderr_tail: deque[str] = deque(maxlen=stderr_lines)
+        self._replace_on_release = False
+
+    def replacement(self) -> "WorkerProcess":
+        """Create an unloaded lane with the same transport and load settings."""
+        return WorkerProcess(
+            name=self.name, bundle=self.bundle, trtmc_binary=self.trtmc_binary,
+            startup_timeout=self.startup_timeout, request_timeout=self.request_timeout,
+            stderr_lines=self._stderr_tail.maxlen or 100,
+            max_request_line_bytes=self.max_request_line_bytes, load_options=self.load_options,
+        )
 
     @property
     def state(self) -> str:
@@ -792,7 +803,7 @@ class WorkerGroup:
 
     def __init__(self, name: str, workers: Iterable[WorkerProcess]) -> None:
         self.name = name
-        self._workers = tuple(workers)
+        self._workers = list(workers)
         if not self._workers:
             raise ValueError("worker group must contain at least one replica")
         self._idle: queue.Queue[WorkerProcess] = queue.Queue(maxsize=len(self._workers))
@@ -802,6 +813,9 @@ class WorkerGroup:
             self._idle.put_nowait(worker)
         self._closed = False
         self._lock = threading.Lock()
+        self._recovery = ThreadPoolExecutor(
+            max_workers=len(self._workers), thread_name_prefix=f"trtmc-{name}-recovery"
+        )
 
     @property
     def replicas(self) -> int:
@@ -843,14 +857,18 @@ class WorkerGroup:
             if self._closed:
                 return
             self._closed = True
+        # A replacement may be loading. Join it before closing the final set,
+        # so server shutdown cannot leave a newly started worker behind.
+        self._recovery.shutdown(wait=True, cancel_futures=True)
         for worker in reversed(self._workers):
             worker.close()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             closed = self._closed
-        ready_replicas = sum(worker.ready for worker in self._workers)
-        idle_replicas = sum(worker.ready and not worker.busy for worker in self._workers)
+            workers = tuple(self._workers)
+        ready_replicas = sum(worker.ready for worker in workers)
+        idle_replicas = sum(worker.ready and not worker.busy for worker in workers)
         ready = not closed and ready_replicas > 0
         return {
             "state": "closed" if closed else "ready" if ready else "failed",
@@ -864,6 +882,31 @@ class WorkerGroup:
 
     def _release(self, worker: WorkerProcess) -> None:
         with self._lock:
-            if self._closed or not worker.ready:
+            if self._closed:
                 return
-            self._idle.put_nowait(worker)
+            if worker.ready:
+                self._idle.put_nowait(worker)
+            elif worker._replace_on_release:  # noqa: SLF001
+                self._recovery.submit(self._replace, worker)
+
+    def _replace(self, worker: WorkerProcess) -> None:
+        # Closing joins the old operation executor and confirms process exit
+        # before loading another model into this replica's GPU lane.
+        worker.close(grace_period=0)
+        with self._lock:
+            if self._closed:
+                return
+        replacement = worker.replacement()
+        try:
+            replacement.start()
+            if replacement.ready_payload != worker.ready_payload:
+                raise WorkerProtocolError("replacement worker changed model metadata")
+        except WorkerError:
+            replacement.close(grace_period=0)
+        with self._lock:
+            self._workers[self._workers.index(worker)] = replacement
+            closed = self._closed
+            if not closed and replacement.ready:
+                self._idle.put_nowait(replacement)
+        if closed:
+            replacement.close(grace_period=0)

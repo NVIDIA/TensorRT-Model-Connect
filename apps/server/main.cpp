@@ -54,7 +54,7 @@ int worker_main(int argc, char** argv) {
     if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0)
         throw std::system_error(errno, std::generic_category(),
                                 "cannot set worker parent-death signal");
-    if (parent == 1 || getppid() != parent)
+    if (getppid() != parent)
         return 1;
 #endif
     if (argc < 3)
