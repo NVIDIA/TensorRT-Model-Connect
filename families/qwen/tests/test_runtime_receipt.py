@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from families.qwen.tests.runtime_receipt import assert_native_kv_receipt
+from families.qwen.tests.runtime_receipt import assert_native_kv_receipt, assert_prompt_token_count
 
 
 def _case() -> dict:
@@ -60,3 +60,34 @@ def test_long_regression_keeps_exact_prompt_and_observed_token_gates() -> None:
         assert_native_kv_receipt(_payload(stderr), case, 65)
     with pytest.raises(AssertionError):
         assert_native_kv_receipt(_payload(stderr), case, 64)
+
+
+@pytest.mark.parametrize("tokens", [20, 24, 144])
+def test_prompt_count_matches_without_kv_expectations(tokens: int) -> None:
+    assert_prompt_token_count(
+        _payload(f"[trtmc.prefill] tokens={tokens} launches=1 max_chunk={tokens}"), tokens
+    )
+
+
+def test_prompt_count_rejects_extra_thinking_prefix() -> None:
+    with pytest.raises(AssertionError, match="native prompt has 24 tokens; reference has 20"):
+        assert_prompt_token_count(
+            _payload("[trtmc.prefill] tokens=24 launches=1 max_chunk=24"), 20
+        )
+
+
+def test_prompt_count_requires_native_receipt() -> None:
+    with pytest.raises(AssertionError, match="did not report"):
+        assert_prompt_token_count(_payload(""), 20)
+
+
+@pytest.mark.parametrize("tagged", [False, True])
+def test_prompt_count_checks_each_tensor_parallel_rank(tagged: bool) -> None:
+    receipt = "[trtmc.prefill] tokens=20 launches=1 max_chunk=20"
+    rank0 = "[1,0]<stderr>:" if tagged else ""
+    rank1 = "[1,1]<stderr>:" if tagged else ""
+    assert_prompt_token_count(_payload(f"{rank0}{receipt}\n{rank1}{receipt}"), 20)
+    with pytest.raises(AssertionError, match="native prompt has 24 tokens"):
+        assert_prompt_token_count(
+            _payload(f"{rank0}{receipt}\n{rank1}[trtmc.prefill] tokens=24 launches=1 max_chunk=24"), 20
+        )

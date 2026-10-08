@@ -278,7 +278,7 @@ def _run_native(
     return payload
 
 
-def _raw_prompt_token_count(model_dir: Path, manifest: dict, prompt: str) -> int:
+def _prompt_token_count(model_dir: Path, manifest: dict, case: dict, prompt: str) -> int:
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -286,7 +286,7 @@ def _raw_prompt_token_count(model_dir: Path, manifest: dict, prompt: str) -> int
         local_files_only=True,
         trust_remote_code=bool(manifest.get("trust_remote_code", False)),
     )
-    return len(tokenizer.encode(prompt, add_special_tokens=False))
+    return int(_render_prompt(tokenizer, prompt, case)["input_ids"].shape[-1])
 
 
 @cache
@@ -765,7 +765,10 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     )
     if manifest["task"] == "embedding":
         return _embedding_e2e(manifest, case, model_dir, runtime_root, torch, tmp_path)
+    from families.qwen.tests.runtime_receipt import assert_prompt_token_count
+
     prompt = _prompt(case)
+    prompt_tokens = _prompt_token_count(model_dir, manifest, case, prompt)
     record_evidence("inputs", {"prompt": prompt})
     bundle = tmp_path / manifest["bundle"]
 
@@ -784,6 +787,8 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             tmp_path,
         )
     record_evidence("native", payload)
+    with evidence_stage("compare"):
+        assert_prompt_token_count(payload, prompt_tokens)
     if case_name in _LOGIT_ORACLES:
         with evidence_stage("native"):
             payload["logits_trace"] = _native_logits_trace(bundle, prompt, case, tp_size, tmp_path)
@@ -802,6 +807,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             )
         record_evidence("native", repeated)
         with evidence_stage("compare"):
+            assert_prompt_token_count(repeated, prompt_tokens)
             assert repeated["token_ids"] == payload["token_ids"]
         with evidence_stage("compare"):
             assert repeated["text"] == payload["text"]
@@ -817,7 +823,6 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         from families.qwen.tests.runtime_receipt import assert_native_kv_receipt
 
         assert "expected_prompt_tokens" in case
-        prompt_tokens = _raw_prompt_token_count(model_dir, manifest, prompt)
         with evidence_stage("compare"):
             assert_native_kv_receipt(payload, case, prompt_tokens)
         record_evidence("reference", {"mode": "contract_only", "oracle": "family runtime contract"})

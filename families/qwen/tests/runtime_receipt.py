@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Qwen native-KV runtime receipt checks used by family E2E."""
+"""Qwen prompt and native-KV runtime receipt checks used by family E2E."""
 
 from __future__ import annotations
 
 import re
 
-_PREFILL = re.compile(r"^\[trtmc\.prefill\] tokens=(\d+) launches=(\d+) max_chunk=(\d+)$")
+_PREFILL = re.compile(
+    r"^(?:\[[^,\]]+,\d+\]<stderr>:)?\s*"
+    r"\[trtmc\.prefill\] tokens=(\d+) launches=(\d+) max_chunk=(\d+)$"
+)
 _RUNTIME_ERROR = re.compile(
     r"\[trt\]\s+ERROR:|IExecutionContext::enqueueV3:\s+Error Code|"
     r"Internal Error:|Cuda Runtime|illegal memory access",
@@ -22,6 +25,16 @@ def prefill_observations(stderr: str) -> tuple[tuple[int, int, int], ...]:
         if match:
             values.append(tuple(int(value) for value in match.groups()))
     return tuple(values)
+
+
+def assert_prompt_token_count(payload: dict, prompt_tokens: int) -> None:
+    observations = prefill_observations(str(payload["runtime_stderr"]))
+    assert observations, "native execution did not report its prompt token count"
+    # Tensor-parallel ranks each report the complete prompt, not disjoint pieces.
+    for tokens, _, _ in observations:
+        assert tokens == prompt_tokens, (
+            f"native prompt has {tokens} tokens; reference has {prompt_tokens}"
+        )
 
 
 def assert_native_kv_receipt(payload: dict, case: dict, prompt_tokens: int) -> None:
