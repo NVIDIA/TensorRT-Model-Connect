@@ -341,10 +341,10 @@ std::unique_ptr<ITask> load_task(const BundleReader& reader, const std::string& 
     require_safe_id("family", info.family);
     require_safe_id("task", info.task);
     require_safe_id("backend", info.backend);
-    if ((!runtime_cache_path.empty() || cuda_graphs) && info.backend != "trt_rtx") {
-        throw std::invalid_argument(
-            "runtime cache and whole-graph capture require a TensorRT-RTX bundle");
-    }
+    if (!runtime_cache_path.empty() && info.backend != "trt_rtx")
+        throw std::invalid_argument("runtime cache requires a TensorRT-RTX bundle");
+    if (cuda_graphs && info.backend != "trt" && info.backend != "trt_rtx")
+        throw std::invalid_argument("CUDA graphs require a TensorRT or TensorRT-RTX bundle");
 
     const fs::path root = resolve_runtime_root(runtime_root);
     IBackend& backend = cached_backend(root, info.backend);

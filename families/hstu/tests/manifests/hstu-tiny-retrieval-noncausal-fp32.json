@@ -1,0 +1,19 @@
+{
+  "name": "hstu-tiny-retrieval-noncausal-fp32",
+  "family": "hstu",
+  "task": "recommendation",
+  "bundle": "hstu-tiny-retrieval-noncausal-fp32.bundle",
+  "precision": "fp32",
+  "max_batch_size": 2,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "hstu-tiny-retrieval-noncausal-fp32",
+      "premerge": true,
+      "config_overrides": {
+        "mode": "retrieval",
+        "is_causal": false
+      }
+    }
+  ]
+}

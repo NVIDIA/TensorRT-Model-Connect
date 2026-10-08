@@ -13,7 +13,9 @@
 
 #include <NvInfer.h>
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -28,11 +30,20 @@ class TrtModuleImpl final : public ITrtModule {
   public:
     // Backend creates engine + context, passes them in.
     // The engine must outlive this module (caller manages lifetime via keep_alive).
+    TrtModuleImpl(nvinfer1::ICudaEngine* engine, TrtUniquePtr<nvinfer1::IExecutionContext> ctx,
+                  cudaStream_t stream, int32_t profile_idx = 0,
+                  void* distributed_communicator = nullptr,
+                  const std::vector<ModuleExternalBinding>& external_bindings = {},
+                  bool backend_managed_cuda_graph = false, bool drain_before_destroy = false,
+                  bool collect_timing = true);
+    // Existing direct callers transfer a raw context. Backend creation uses the
+    // owning overload so allocation failures cannot lose the context.
     TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
                   cudaStream_t stream, int32_t profile_idx = 0,
                   void* distributed_communicator = nullptr,
                   const std::vector<ModuleExternalBinding>& external_bindings = {},
-                  bool backend_managed_cuda_graph = false);
+                  bool backend_managed_cuda_graph = false, bool drain_before_destroy = false,
+                  bool collect_timing = true);
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -46,6 +57,10 @@ class TrtModuleImpl final : public ITrtModule {
     void sync() override;
     cudaStream_t stream() const override { return stream_; }
     void enable_cuda_graph() override;
+    // Standard-backend opt-in policy. Manual enable_cuda_graph() retains its
+    // immediate first-call capture behavior.
+    void enable_automatic_cuda_graph();
+    static void validate_automatic_cuda_graph_engine(nvinfer1::ICudaEngine* engine);
     bool cuda_graph_active() const override { return use_cuda_graph_; }
     bool cuda_graph_captured() const override;
     int32_t profile_idx() const override { return profile_idx_; }
@@ -87,13 +102,17 @@ class TrtModuleImpl final : public ITrtModule {
     };
 
     nvinfer1::ICudaEngine* engine_{nullptr};
-    nvinfer1::IExecutionContext* ctx_{nullptr};
+    TrtUniquePtr<nvinfer1::IExecutionContext> ctx_;
     cudaStream_t stream_{nullptr};
     int32_t profile_idx_{0};
     void* distributed_communicator_{nullptr};
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
+    bool automatic_cuda_graph_{false};
+    bool cuda_graph_prepared_{false};
     bool backend_managed_cuda_graph_{false};
+    const bool collect_timing_{true};
+    bool drain_before_destroy_{false};
     bool alias_groups_ready_{true};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
@@ -104,7 +123,10 @@ class TrtModuleImpl final : public ITrtModule {
     std::unordered_map<std::string, std::vector<uint8_t>> host_output_staging_;
     std::unordered_map<std::string, DeviceTensor> output_device_tensors_;
     std::string timing_label_{"engine"};
-    std::vector<TimingEvent> timing_events_;
+    std::deque<TimingEvent> timing_events_;
+    std::vector<TimingEvent> free_timing_events_;
+    double timing_total_ms_{0.0};
+    std::uint64_t timing_launches_{0};
 
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
     void discover_tensor_aliases(nvinfer1::ICudaEngine* engine);
@@ -116,6 +138,12 @@ class TrtModuleImpl final : public ITrtModule {
     void validate_alias_outputs_exist(const std::vector<std::string>& output_names) const;
     void bind_alias_outputs_or_invalidate(const std::vector<std::string>& output_names, void* ptr);
     void reset_cuda_graph_if_rebound(void* previous_ptr, void* ptr);
+    bool alias_group_matches(const BufferEntry& input, const std::vector<std::string>& outputs,
+                             void* ptr) const;
+    void invalidate_cuda_graph();
+    void validate_automatic_cuda_graph() const;
+    void validate_graph_input_shape(const std::string& name,
+                                    const std::vector<int64_t>& shape) const;
     void validate_alias_groups_bound() const;
     void free_buffers();
     void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);
@@ -131,12 +159,17 @@ class TrtModuleImpl final : public ITrtModule {
                               const std::vector<int64_t>& new_shape);
     void execute_enqueue();
     void flush_timing_events();
+    void reclaim_timing_events();
+    bool accumulate_timing_event(const TimingEvent& event);
+    static bool create_timing_event(TimingEvent& event);
+    static void destroy_timing_event(TimingEvent event);
     bool begin_timing_event(TimingEvent& event);
     void finish_timing_event(TimingEvent event);
     void launch_ready_cuda_graph();
     void capture_and_launch_cuda_graph();
     void enqueue_without_cuda_graph();
     void record_timed_enqueue();
+    void enqueue_with_graph_policy();
     bool bind_tensor_address(const std::string& name, const BufferEntry& entry);
     bool attach_distributed_communicator();
     static bool dims_are_dynamic(const nvinfer1::Dims& dims);

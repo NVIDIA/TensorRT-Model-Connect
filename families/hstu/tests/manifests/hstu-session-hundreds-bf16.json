@@ -1,0 +1,42 @@
+{
+  "name": "hstu-session-hundreds-bf16",
+  "family": "hstu",
+  "task": "recommendation",
+  "bundle": "hstu-session-hundreds-bf16.bundle",
+  "precision": "bf16",
+  "max_batch_size": 1,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "hstu-session-hundreds-bf16",
+      "premerge": true,
+      "session_scenario": "hundreds",
+      "decode_steps": 20,
+      "config_overrides": {
+        "enable_history_cache": true,
+        "disable_contextual_mask": true,
+        "hidden_size": 128,
+        "num_heads": 4,
+        "head_dim": 32,
+        "num_layers": 2,
+        "max_sequence_length": 1024,
+        "position_buckets": 1024,
+        "scaling_seqlen": 1024
+      },
+      "fixture": {
+        "history_lengths": [
+          200,
+          137
+        ],
+        "candidate_lengths": [
+          256,
+          256
+        ],
+        "context_counts": [
+          2,
+          1
+        ]
+      }
+    }
+  ]
+}
