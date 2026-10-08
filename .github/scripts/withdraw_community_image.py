@@ -29,6 +29,18 @@ DIGESTS = frozenset(
 ENDPOINT = "https://api.github.com/orgs/NVIDIA/packages/container/" + urllib.parse.quote(
     PACKAGE, safe=""
 )
+LAST_TAGGED_MESSAGE = (
+    "You cannot delete the last tagged version of a package. You must delete the package instead."
+)
+
+
+class PackageAPIError(RuntimeError):
+    def __init__(self, method, status, message="", *, policy_message=None):
+        self.status = status
+        policy = message if policy_message is None else policy_message
+        self.api_message = policy if policy == LAST_TAGGED_MESSAGE else ""
+        detail = f": {message}" if message else ""
+        super().__init__(f"Package API {method} failed with HTTP {status}{detail}")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -36,9 +48,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def api(token: str, suffix: str = "", *, method: str = "GET"):
+def api(token: str, suffix: str = "", *, method: str = "GET", control: bool = False):
+    if control and (suffix or method != "GET"):
+        raise RuntimeError("Organization control is read-only")
+    endpoint = (
+        "https://api.github.com/orgs/NVIDIA/packages?package_type=container&per_page=1"
+        if control
+        else ENDPOINT + suffix
+    )
     request = urllib.request.Request(
-        ENDPOINT + suffix,
+        endpoint,
         method=method,
         headers={
             "Authorization": f"Bearer {token}",
@@ -62,10 +81,12 @@ def api(token: str, suffix: str = "", *, method: str = "GET"):
         # GitHub can reject a deletion for a policy reason even after reads
         # succeed. Retain only its bounded message, never headers or raw bodies.
         message = ""
+        policy_message = ""
         try:
             body = json.loads(error.read(4096))
             value = body.get("message") if isinstance(body, dict) else None
             if isinstance(value, str):
+                policy_message = value if value == LAST_TAGGED_MESSAGE else ""
                 message = value.replace(token, "[redacted]") if token else value
                 message = re.sub(
                     r"gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+", "[redacted]", message
@@ -73,8 +94,7 @@ def api(token: str, suffix: str = "", *, method: str = "GET"):
                 message = " ".join(message.split())[:500]
         except (OSError, ValueError):
             pass
-        detail = f": {message}" if message else ""
-        raise RuntimeError(f"Package API {method} failed with HTTP {error.code}{detail}") from None
+        raise PackageAPIError(method, error.code, message, policy_message=policy_message) from None
     except (OSError, ValueError):
         raise RuntimeError("Package API evidence is unavailable or invalid") from None
 
@@ -91,17 +111,66 @@ def inventory(token: str) -> list[dict]:
     raise RuntimeError("Package version inventory exceeds the page limit")
 
 
-def withdraw(token: str) -> dict:
-    if not token:
-        raise RuntimeError("Package administration credentials are unavailable")
+def validated_package(token: str) -> None:
     package = api(token)
     if (
         not isinstance(package, dict)
         or package.get("id") != PACKAGE_ID
         or package.get("name") != PACKAGE
-        or package.get("repository", {}).get("id") != REPOSITORY_ID
+        or not isinstance(package.get("repository"), dict)
+        or package["repository"].get("id") != REPOSITORY_ID
     ):
         raise RuntimeError("Package identity does not match the reviewed publication")
+
+
+def withdraw_whole_package(token: str) -> dict:
+    validated_package(token)
+    rows = inventory(token)
+    ids = [row.get("id") for row in rows]
+    if (
+        not rows
+        or any(not isinstance(row.get("name"), str) or row["name"] not in DIGESTS for row in rows)
+        or any(type(identity) is not int or identity <= 0 for identity in ids)
+        or len(set(ids)) != len(ids)
+        or any(row["name"] == ROOT_DIGEST and row["id"] != ROOT_VERSION_ID for row in rows)
+    ):
+        raise RuntimeError("Whole-package withdrawal would include unreviewed versions")
+    api(token, method="DELETE")
+    print(
+        json.dumps({"package_id": PACKAGE_ID, "whole_package": True, "http_status": 204}),
+        flush=True,
+    )
+    for _ in range(2):
+        try:
+            api(token)
+        except PackageAPIError as error:
+            if error.status != 404:
+                raise
+        else:
+            raise RuntimeError("Withdrawn package remains visible")
+        control = api(token, control=True)
+        if not isinstance(control, list) or any(not isinstance(row, dict) for row in control):
+            raise RuntimeError("Authenticated organization control is unavailable")
+        if any(row.get("id") == PACKAGE_ID or row.get("name") == PACKAGE for row in control):
+            raise RuntimeError("Withdrawn package remains in organization control")
+        time.sleep(2)
+    return {
+        "package": PACKAGE,
+        "reviewed_digests": sorted(DIGESTS),
+        "whole_package_deleted": True,
+        "package_delete_http_status": 204,
+        "deleted": [
+            {"id": row["id"], "digest": row["name"], "scope": "whole_package"} for row in rows
+        ],
+        "remaining_other_versions": 0,
+        "authenticated_absence_confirmations": 2,
+    }
+
+
+def withdraw(token: str) -> dict:
+    if not token:
+        raise RuntimeError("Package administration credentials are unavailable")
+    validated_package(token)
     before = inventory(token)
     targets = [row for row in before if row.get("name") in DIGESTS]
     ids = [row.get("id") for row in targets]
@@ -116,7 +185,12 @@ def withdraw(token: str) -> dict:
         current = api(token, f"/versions/{row['id']}")
         if current.get("id") != row["id"] or current.get("name") != row["name"]:
             raise RuntimeError("Package version identity changed before deletion")
-        api(token, f"/versions/{row['id']}", method="DELETE")
+        try:
+            api(token, f"/versions/{row['id']}", method="DELETE")
+        except PackageAPIError as error:
+            if error.status != 400 or error.api_message != LAST_TAGGED_MESSAGE:
+                raise
+            return withdraw_whole_package(token)
         deleted.append({"id": row["id"], "digest": row["name"], "http_status": 204})
         print(json.dumps(deleted[-1]), flush=True)
     for _ in range(2):
@@ -136,4 +210,7 @@ if __name__ == "__main__":
     receipt = withdraw(os.environ.get("GH_TOKEN", ""))
     output = Path(os.environ["RUNNER_TEMP"]) / "community-image-withdrawal.json"
     output.write_text(json.dumps(receipt, indent=2) + "\n")
-    print("Reviewed image versions are absent from two authenticated active inventories.")
+    if receipt.get("whole_package_deleted"):
+        print("Reviewed package deletion confirmed by two authenticated absence checks.")
+    else:
+        print("Reviewed image versions are absent from two authenticated active inventories.")
