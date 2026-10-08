@@ -1044,6 +1044,336 @@ class Qwen38Model:
 
         return bytes(plan)
 
+    def build_engine_multi_token(
+        self, config: ModelConfig, weights: WeightDict,
+        max_cache_length: int, seq_len: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
+    ) -> bytes:
+        """Build a TRT engine that processes `seq_len` NEW tokens in one call,
+        emitting `seq_len` rows of logits -- one prediction per position.
+
+        Exists to let MTP's draft token(s) be verified against what the main
+        model actually predicts, in one engine call instead of `seq_len`
+        separate ones (the real speculative-decoding throughput win; see
+        `build_mtp_engine`'s docstring and the PR discussion for why a
+        single-token-only main engine can't do this).
+
+        Implementation: NOT a rewrite of the per-layer graph code. This
+        chains `seq_len` ordinary single-token sub-steps together inside one
+        TensorRT network, reusing `_add_deltanet_layer`/
+        `_add_full_attention_layer` verbatim per sub-step -- the same
+        composition every existing multi-step *driver loop* in this family
+        already does across separate engine calls, just fused into one
+        `build_serialized_network()` call so it runs as a single kernel
+        launch sequence with no host round-trip between sub-steps.
+
+        DeltaNet layers need no change at all: their recurrence
+        (`conv_state`/`ssm_state`) is already expressed as "one call = one
+        step", so chaining `result["present_conv"/"present_ssm"]` from
+        sub-step t into sub-step t+1's `conv_state_in`/`ssm_state_in` is
+        exactly what the existing function already supports.
+
+        Full-attention layers also need no change to `_add_full_attention_layer`
+        itself: sub-step t is called with `max_cache_length=max_cache_length+t`
+        (so its internal `attention_window = max_cache_length+t+1` grows by
+        one each sub-step) and a `cache_k`/`cache_v` tensor of matching
+        width, built by concatenating the previous sub-step's cache with
+        this sub-step's own new K/V row. Since every value here (`seq_len`,
+        `t`, `max_cache_length`) is a Python-level constant at graph-build
+        time, these growing shapes are ordinary static TRT shapes, not
+        dynamic ones.
+
+        Attention-mask contract: `attention_mask` input covers only the
+        *persistent* cache (`max_cache_length` columns, same convention as
+        `build_engine`'s single-token mask). No external input is needed for
+        the `seq_len` new tokens' mutual causal visibility -- sub-step t's
+        attention only ever reads a cache tensor of width
+        `max_cache_length+t+1` (this sub-step's own row plus everything
+        already grown), so any "future" new-token column is structurally
+        unreachable, not merely masked. Each sub-step appends `t+1` zero
+        (unmasked) columns onto the external mask itself for this reason.
+
+        Outputs:
+          - `logits`: shape `(seq_len, vocab)`, one row per sub-step.
+          - `present_conv_{i}`/`present_ssm_{i}`: FINAL state after all
+            `seq_len` sub-steps (DeltaNet layers).
+          - `present_k_{i}`/`present_v_{i}`: shape `(seq_len, kv_attention_size)`
+            -- one new K/V row per sub-step, for the caller to write back
+            into the persistent cache at consecutive positions.
+        """
+        if seq_len < 1:
+            raise ValueError(f"seq_len must be >= 1, got {seq_len}")
+
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        num_layers = config.num_hidden_layers
+
+        layer_types: list[str] = weights["_layer_types"]
+        d_inner: int = weights["_d_inner"]
+        d_conv: int = weights["_d_conv"]
+        conv_dim: int = weights["_conv_dim"]
+        deltanet_num_heads: int = weights["_deltanet_num_heads"]
+        deltanet_num_kv_heads: int = weights["_deltanet_num_kv_heads"]
+        deltanet_head_dim: int = weights["_deltanet_head_dim"]
+        num_mamba: int = weights["_num_mamba_layers"]
+        num_attn: int = weights["_num_attention_layers"]
+        attn_size: int = weights["_attn_size"]
+        mlp_size: int = weights["_mlp_size"]
+        partial_rotary_factor: float = weights["_partial_rotary_factor"]
+        rope_theta: float = weights["_rope_theta"]
+
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32 or fp16")
+
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+        head_dim = attn_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim,
+            quant_ctx=quant_ctx)
+        rotary_embedding_dim = int(head_dim * partial_rotary_factor)
+
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+
+        # --- Inputs ---
+        token_ids = network.add_input("token_ids", trt.int32, (seq_len,))
+        position_ids = network.add_input("position_ids", trt.int32, (seq_len,))
+        attention_mask = network.add_input(
+            "attention_mask", trt.float32, (1, max_cache_length))
+
+        conv_state_inputs = []
+        ssm_state_inputs = []
+        for mi in range(num_mamba):
+            cs = network.add_input(
+                graph_ops.layer_tensor_name("conv_state", mi),
+                trt.float32, (conv_dim, d_conv))
+            ss = network.add_input(
+                graph_ops.layer_tensor_name("ssm_state", mi),
+                trt.float32, (deltanet_num_heads, deltanet_head_dim, deltanet_head_dim))
+            conv_state_inputs.append(cs)
+            ssm_state_inputs.append(ss)
+
+        cache_k_inputs = []
+        cache_v_inputs = []
+        for ai in range(num_attn):
+            ck = network.add_input(
+                graph_ops.layer_tensor_name("cache_k", ai),
+                work_trt_dtype, (max_cache_length, kv_attention_size))
+            cv = network.add_input(
+                graph_ops.layer_tensor_name("cache_v", ai),
+                work_trt_dtype, (max_cache_length, kv_attention_size))
+            cache_k_inputs.append(ck)
+            cache_v_inputs.append(cv)
+
+        (
+            attention_mask,
+            conv_state_inputs,
+            ssm_state_inputs,
+            cache_k_inputs,
+            cache_v_inputs,
+        ) = _prepare_runtime_inputs(
+            network, work_trt_dtype, attention_mask,
+            conv_state_inputs, ssm_state_inputs,
+            cache_k_inputs, cache_v_inputs,
+        )
+
+        # --- Shared constants ---
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
+        eps_tensor = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+
+        # Sized for the worst case: the last sub-step's furthest position.
+        table_len = max_cache_length + seq_len
+        cos_half = graph_ops.make_rope_table_half_dim(
+            table_len, head_dim, rope_theta,
+            cosine=True, partial_rotary_factor=partial_rotary_factor)
+        sin_half = graph_ops.make_rope_table_half_dim(
+            table_len, head_dim, rope_theta,
+            cosine=False, partial_rotary_factor=partial_rotary_factor)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half.shape, cos_half, dtype=work_np_dtype)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half.shape, sin_half, dtype=work_np_dtype)
+
+        # --- Embed all seq_len tokens up front ---
+        gather = network.add_gather(embedding_table, token_ids, 0)
+        embeds = gather.get_output(0)  # (seq_len, hidden)
+
+        running_conv = list(conv_state_inputs)
+        running_ssm = list(ssm_state_inputs)
+        running_cache_k = list(cache_k_inputs)
+        running_cache_v = list(cache_v_inputs)
+        per_step_logits = []
+        per_layer_new_k = [[] for _ in range(num_attn)]
+        per_layer_new_v = [[] for _ in range(num_attn)]
+
+        for t in range(seq_len):
+            hidden_slice = network.add_slice(
+                embeds, start=(t, 0), shape=(1, hidden), stride=(1, 1))
+            hidden_state = hidden_slice.get_output(0)
+            pos_slice = network.add_slice(
+                position_ids, start=(t,), shape=(1,), stride=(1,))
+            position_id_t = pos_slice.get_output(0)
+
+            # This sub-step's own t+1 new-token columns are always causally
+            # valid (unmasked) -- see docstring above.
+            zeros_t = graph_ops.add_constant(
+                network, (1, t + 1),
+                np.zeros((1, t + 1), dtype=work_np_dtype), dtype=work_np_dtype)
+            mask_concat = network.add_concatenation([attention_mask, zeros_t])
+            mask_concat.axis = 1
+            mask_t = mask_concat.get_output(0)
+
+            mamba_counter = 0
+            attn_counter = 0
+            for layer_idx in range(num_layers):
+                prefix = f"layer.{layer_idx}"
+                lt = layer_types[layer_idx]
+
+                if lt == "deltanet":
+                    result = _add_deltanet_layer(
+                        network=network,
+                        hidden=hidden_state,
+                        conv_state_in=running_conv[mamba_counter],
+                        ssm_state_in=running_ssm[mamba_counter],
+                        eps_tensor=eps_tensor,
+                        weights=weights,
+                        prefix=prefix,
+                        hidden_size=hidden,
+                        d_inner=d_inner,
+                        d_conv=d_conv,
+                        conv_dim=conv_dim,
+                        num_heads=deltanet_num_heads,
+                        num_kv_heads=deltanet_num_kv_heads,
+                        head_dim=deltanet_head_dim,
+                        mlp_size=mlp_size,
+                        dtype=work_np_dtype,
+                        quant_ctx=quant_ctx,
+                    )
+                    hidden_state = result["hidden"]
+                    running_conv[mamba_counter] = result["present_conv"]
+                    running_ssm[mamba_counter] = result["present_ssm"]
+                    mamba_counter += 1
+
+                elif lt == "attention":
+                    result = _add_full_attention_layer(
+                        network=network,
+                        hidden=hidden_state,
+                        cache_k=running_cache_k[attn_counter],
+                        cache_v=running_cache_v[attn_counter],
+                        attention_mask=mask_t,
+                        position_id=position_id_t,
+                        cos_half_tensor=cos_half_tensor,
+                        sin_half_tensor=sin_half_tensor,
+                        eps_tensor=eps_tensor,
+                        weights=weights,
+                        prefix=prefix,
+                        hidden_size=hidden,
+                        attn_size=attn_size,
+                        kv_attention_size=kv_attention_size,
+                        num_heads=num_heads,
+                        num_kv_heads=num_kv_heads,
+                        head_dim=head_dim,
+                        rotary_embedding_dim=rotary_embedding_dim,
+                        max_cache_length=max_cache_length + t,
+                        mlp_size=mlp_size,
+                        dtype=work_np_dtype,
+                        quant_ctx=quant_ctx,
+                    )
+                    hidden_state = result["hidden"]
+                    new_k = result["present_k"]
+                    new_v = result["present_v"]
+                    per_layer_new_k[attn_counter].append(new_k)
+                    per_layer_new_v[attn_counter].append(new_v)
+
+                    grow_k = network.add_concatenation(
+                        [running_cache_k[attn_counter], new_k])
+                    grow_k.axis = 0
+                    grow_v = network.add_concatenation(
+                        [running_cache_v[attn_counter], new_v])
+                    grow_v.axis = 0
+                    running_cache_k[attn_counter] = grow_k.get_output(0)
+                    running_cache_v[attn_counter] = grow_v.get_output(0)
+                    attn_counter += 1
+
+            # --- Final norm + lm_head for this sub-step ---
+            hs = hidden_state
+            if hs.dtype != work_trt_dtype:
+                hs = network.add_cast(hs, work_trt_dtype).get_output(0)
+            final_norm = weights.get("final_norm")
+            if final_norm is not None and len(final_norm) > 0:
+                hs = graph_ops.add_rms_norm(
+                    network, hs, hidden, final_norm, eps_tensor,
+                    dtype=work_np_dtype)
+            lm_head_matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
+            logits_t = lm_head_matmul(
+                hs, hidden, vocab, weights.get("w_lm_head"), "w_lm_head")
+            b_out = np.zeros(vocab, dtype=work_np_dtype)
+            logits_t = graph_ops.add_bias_sum(
+                network, logits_t, vocab, b_out, dtype=work_np_dtype)
+            if logits_t.dtype != trt.float32:
+                logits_t = network.add_cast(logits_t, trt.float32).get_output(0)
+            per_step_logits.append(logits_t)
+
+        # --- Outputs ---
+        logits_cat = network.add_concatenation(per_step_logits)
+        logits_cat.axis = 0
+        logits_out = logits_cat.get_output(0)
+        logits_out.name = "logits"
+        network.mark_output(logits_out)
+
+        for mi in range(num_mamba):
+            pc = running_conv[mi]
+            ps = running_ssm[mi]
+            if pc.dtype != trt.float32:
+                pc = network.add_cast(pc, trt.float32).get_output(0)
+            if ps.dtype != trt.float32:
+                ps = network.add_cast(ps, trt.float32).get_output(0)
+            pc.name = graph_ops.layer_tensor_name("present_conv", mi)
+            ps.name = graph_ops.layer_tensor_name("present_ssm", mi)
+            network.mark_output(pc)
+            network.mark_output(ps)
+
+        for ai in range(num_attn):
+            stacked_k = network.add_concatenation(per_layer_new_k[ai])
+            stacked_k.axis = 0
+            stacked_v = network.add_concatenation(per_layer_new_v[ai])
+            stacked_v.axis = 0
+            pk = stacked_k.get_output(0)
+            pv = stacked_v.get_output(0)
+            if pk.dtype != work_trt_dtype:
+                pk = network.add_cast(pk, work_trt_dtype).get_output(0)
+            if pv.dtype != work_trt_dtype:
+                pv = network.add_cast(pv, work_trt_dtype).get_output(0)
+            pk.name = graph_ops.layer_tensor_name("present_k", ai)
+            pv.name = graph_ops.layer_tensor_name("present_v", ai)
+            network.mark_output(pk)
+            network.mark_output(pv)
+
+        if verbose:
+            print(f"[trtmc build] Building Qwen3.8 multi-token ({seq_len}-token) "
+                  f"TRT engine (hidden={hidden}, cache={max_cache_length}) ...",
+                  file=sys.stderr)
+
+        plan = builder.build_serialized_network(network, trt_config)
+        if plan is None:
+            raise RuntimeError("TensorRT multi-token engine build failed")
+
+        return bytes(plan)
+
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         """Inject hybrid-specific config fields into the bundle."""
         raw = config.raw
