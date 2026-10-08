@@ -35,7 +35,12 @@ def clef_bundle(tmp_path_factory):
     if checkpoint is None:
         from huggingface_hub import snapshot_download
 
-        checkpoint = snapshot_download(MANIFEST["hf_id"], revision=MANIFEST["hf_revision"])
+        checkpoint = snapshot_download(
+            MANIFEST["hf_id"],
+            revision=MANIFEST["hf_revision"],
+            local_files_only=os.environ.get("HF_HUB_OFFLINE", "").upper()
+            in {"1", "ON", "YES", "TRUE"},
+        )
     checkpoint = Path(checkpoint)
     bundle_value = os.environ.get("TRTMC_CLEF_BUNDLE")
     bundle = (
