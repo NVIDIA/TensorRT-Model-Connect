@@ -4,7 +4,7 @@
   "hf_revision": "2c62d71504c6fbba9bb322f728586c4a235e5fa4",
   "bundle": "mobilevit-xxs-cvnets-in1k.bundle",
   "family": "timm_mobilevit",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

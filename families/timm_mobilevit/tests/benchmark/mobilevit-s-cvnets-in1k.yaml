@@ -7,7 +7,7 @@ candidate:
   family: timm_mobilevit
   checkpoint: timm/mobilevit_s.cvnets_in1k
   revision: b531fe564ef88515b1aa1743ad4c40452b9f80ee
-  task: classification
+  task: image_to_class_scores
   precision: fp16
   bundle: mobilevit-s-cvnets-in1k.bundle
   build:

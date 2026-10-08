@@ -35,6 +35,7 @@ dependencies = [
 trtmc = "tensorrt_model_connect.__main__:main"
 trtmc-bench = "trtmc_benchmark.cli:main"
 trtmc-server = "trtmc_server.cli:main"
+trtmc-perf-serve = "trtmc_perf_serving.cli:main"
 
 [project.optional-dependencies]
 serve = [
@@ -58,6 +59,7 @@ packages = [
     "core/builder/tensorrt_model_connect",
     "apps/benchmark/trtmc_benchmark",
     "apps/server/python/trtmc_server",
+    "apps/perf_serving/trtmc_perf_serving",
     "families",
 ]
 
@@ -91,6 +93,7 @@ testpaths = [
     "families",
     "core/builder/tests",
     "apps/benchmark/trtmc_benchmark/tests",
+    "apps/perf_serving/tests",
     "examples/audio_streaming/test_audio_streaming.py",
     "examples/models/cosmos3/dual_spark/test_cosmos3_dual_spark_source.py",
     "examples/models/nemotron_voicechat/full_duplex/test_voicechat_full_duplex_source.py",

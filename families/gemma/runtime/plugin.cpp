@@ -10,6 +10,9 @@
 #include "families/gemma/runtime/plugin_helpers.h"
 #include "families/gemma/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
+#ifdef TRTMC_HAS_EDGE_LLM
+#include "families/gemma/runtime/edge_llm/adapter.h"
+#endif
 
 #include <cstdint>
 #include <memory>
@@ -207,6 +210,13 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
 } // namespace
 
 ITask* create(const FamilyContext& context) {
+    if (context.reader.find_section("edge_llm.json")) {
+#ifdef TRTMC_HAS_EDGE_LLM
+        return edge_llm::create(context.reader);
+#else
+        throw std::runtime_error("Gemma4 Edge bundle requires TRTMC_ENABLE_EDGELLM=ON");
+#endif
+    }
     const RuntimeConfig config = parse_runtime_config(context.reader);
     DecoderModules modules = load_modules(context, config);
     const cudaStream_t stream = modules.decode->stream();

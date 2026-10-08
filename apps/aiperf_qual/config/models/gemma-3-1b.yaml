@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The gemma family builds full attention for every layer, so its bundles stop at the checkpoint's
+# 512-token sliding window: MMLU 5-shot does not fit; LAMBADA (at most 222 prompt tokens) does.
+absolute: [lambada]

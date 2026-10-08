@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one internvl TensorRT bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "task",
+          "flags": [
+            "--task"
+          ],
+          "type": "string",
+          "choices": [
+            "vision_language_generation"
+          ],
+          "default": "vision_language_generation"
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "fp32",
+            "fp16",
+            "bf16"
+          ],
+          "default": "fp32"
+        },
+        {
+          "name": "backend",
+          "flags": [
+            "--backend"
+          ],
+          "type": "string",
+          "choices": [
+            "trt",
+            "trt_rtx"
+          ],
+          "default": "trt"
+        },
+        {
+          "name": "max_sequence_length",
+          "flags": [
+            "--max-sequence-length"
+          ],
+          "type": "int"
+        },
+        {
+          "name": "tensor_parallel_size",
+          "flags": [
+            "--tensor-parallel-size"
+          ],
+          "type": "int",
+          "choices": [
+            1,
+            2,
+            4,
+            8
+          ],
+          "default": 1
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        }
+      ]
+    }
+  ]
+}

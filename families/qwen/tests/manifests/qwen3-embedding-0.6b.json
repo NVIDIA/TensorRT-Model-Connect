@@ -1,0 +1,20 @@
+{
+  "name": "qwen3-embedding-0.6b",
+  "hf_id": "Qwen/Qwen3-Embedding-0.6B",
+  "hf_revision": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+  "bundle": "qwen3-embedding-0.6b.bundle",
+  "family": "qwen",
+  "task": "embedding",
+  "precision": "bf16",
+  "trust_remote_code": false,
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "qwen3-embedding-0.6b",
+      "prompt": "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:What is the capital of China?",
+      "reference_precision": "bf16",
+      "premerge": true
+    }
+  ]
+}

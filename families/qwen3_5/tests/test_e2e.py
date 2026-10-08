@@ -227,7 +227,7 @@ def _run_native(
 
     completed = subprocess.run(
         command,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         timeout=600,
@@ -235,6 +235,9 @@ def _run_native(
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
     record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    (tmp_path / "native.stdout.log").write_text(completed.stdout, encoding="utf-8")
+    (tmp_path / "native.stderr.log").write_text(completed.stderr, encoding="utf-8")
+    completed.check_returncode()
     if tp_size == 1:
         return json.loads(completed.stdout)
 

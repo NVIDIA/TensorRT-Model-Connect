@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
-from pathlib import Path
+import subprocess
+import tempfile
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 
@@ -13,18 +16,76 @@ _BUNDLE_MAGIC = b"BUNDLE\x01\x00"
 VISION_FEATURE_COSINE = 0.5
 
 
-def _bundle_section(bundle: Path, name: str) -> bytes:
+def _bundle_section(bundle: Path, name: str, *, output: Path | None = None) -> bytes:
+    """Read metadata or stream a weight section without allocating the whole checkpoint."""
     with bundle.open("rb") as stream:
         assert stream.read(8) == _BUNDLE_MAGIC
         encoded_length = stream.read(8)
         assert len(encoded_length) == 8
         header_length = struct.unpack("<Q", encoded_length)[0]
+        assert 0 < header_length <= min(100 * 1024 * 1024, bundle.stat().st_size - 16)
         header = json.loads(stream.read(header_length))
         section = header["sections"][name]
-        stream.seek(16 + header_length + int(section["offset"]))
-        data = stream.read(int(section["length"]))
-    assert data
-    return data
+        offset, length = section["offset"], section["length"]
+        assert type(offset) is int and type(length) is int
+        assert offset >= 0 and length > 0
+        assert 16 + header_length + offset + length <= bundle.stat().st_size
+        stream.seek(16 + header_length + offset)
+        if output is None:
+            data = stream.read(length)
+            assert len(data) == length
+            return data
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("wb") as destination:
+            while length:
+                chunk = stream.read(min(length, 64 * 1024))
+                assert chunk
+                destination.write(chunk)
+                length -= len(chunk)
+    return b""
+
+
+def _edge_vision_features(bundle: Path, image_path: Path, marker: dict) -> np.ndarray:
+    """Keep the existing health test on actual features, not generated text."""
+    from PIL import Image
+
+    runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
+    with tempfile.TemporaryDirectory(prefix="internvl-vision-") as temporary:
+        root = Path(temporary)
+        for name in marker["artifacts"]:
+            path = PurePosixPath(name)
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or str(path) != name
+                or "\\" in name
+                or "\0" in name
+                or not name.startswith(("edge_llm/engine/", "edge_llm/checkpoint/"))
+            ):
+                raise ValueError(f"Unsafe Edge artifact: {name}")
+            if name.startswith(("edge_llm/engine/visual/", "edge_llm/checkpoint/")):
+                _bundle_section(bundle, name, output=root / name)
+        with Image.open(image_path) as source:
+            image = np.asarray(source.convert("RGB"), dtype=np.uint8)
+        rgb = root / "image.rgb"
+        rgb.write_bytes(image.tobytes())
+        features = root / "features.fp16"
+        subprocess.run(
+            [
+                str(runtime / "families/internvl/internvl_edge_vision_features"),
+                str(root / "edge_llm/engine"),
+                str(root / "edge_llm/checkpoint"),
+                str(runtime / "libNvInfer_edgellm_plugin.so"),
+                str(rgb),
+                str(image.shape[0]),
+                str(image.shape[1]),
+                str(marker["max_sequence_length"]),
+                str(features),
+            ],
+            check=True,
+            timeout=1800,
+        )
+        return np.fromfile(features, dtype=np.float16).astype(np.float32)
 
 
 def _native_pixels(image_path: Path, config: dict) -> np.ndarray:
@@ -89,6 +150,12 @@ def _execute_vision_plan(plan: bytes, inputs: dict[str, np.ndarray]) -> np.ndarr
 
 
 def native_vision_features(bundle: Path, image_path: Path) -> np.ndarray:
+    try:
+        marker = json.loads(_bundle_section(bundle, "edge_llm.json"))
+    except KeyError:
+        marker = None
+    if marker is not None:
+        return _edge_vision_features(bundle, image_path, marker)
     config = json.loads(_bundle_section(bundle, "runtime.json"))
     pixels = _native_pixels(image_path, config)
     return _execute_vision_plan(_bundle_section(bundle, "vision.plan"), {"pixel_values": pixels})

@@ -10,10 +10,16 @@
 namespace trtmc {
 namespace {
 
-std::string apply_chatml(const std::string& prompt, bool enable_thinking) {
+std::string apply_chatml(const std::string& prompt, bool enable_thinking,
+                         bool nemotron_format = false) {
     std::string r = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
-    if (!enable_thinking)
+    if (nemotron_format) {
+        // Modern Nemotron ChatML includes an empty system and a compact think suffix.
+        r = "<|im_start|>system\n<|im_end|>\n" + r;
+        r += enable_thinking ? "<think>\n" : "<think></think>";
+    } else if (!enable_thinking) {
         r += "<think>\n\n</think>\n\n";
+    }
     return r;
 }
 
@@ -29,8 +35,12 @@ std::string apply_nemotron_h(const std::string& prompt, bool enable_thinking) {
 std::string nemotron_h_detect_chat_template_format(const std::string& jinja_template) {
     if (jinja_template.empty())
         return {};
-    if (jinja_template.find("<|im_start|>") != std::string::npos)
+    if (jinja_template.find("<|im_start|>") != std::string::npos) {
+        if (jinja_template.find("<|im_start|>system") != std::string::npos &&
+            jinja_template.find("<think></think>") != std::string::npos)
+            return "nemotron_chatml";
         return "chatml";
+    }
     if (jinja_template.find("<SPECIAL_10>") != std::string::npos)
         return "nemotron_h";
     return {};
@@ -40,6 +50,8 @@ std::string nemotron_h_apply_chat_template(const std::string& format, const std:
                                            bool enable_thinking) {
     if (format.empty())
         return prompt;
+    if (format == "nemotron_chatml")
+        return apply_chatml(prompt, enable_thinking, true);
     if (format == "chatml")
         return apply_chatml(prompt, enable_thinking);
     if (format == "nemotron_h")

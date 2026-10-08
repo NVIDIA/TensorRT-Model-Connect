@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# MMStar (val, 1,500 multiple-choice questions with an image); the gold answer is the option letter.
+suite: mmstar-val-1500
+version: 1
+source:
+  kind: aiperf_public
+  dataset: mmstar
+  label_column: answer
+selection: {method: first, count: 1500}
+fields: {prompt: prompt, image: image_path}
+prompt_suffix: "\nAnswer with the option's letter from the given choices directly."
+request:
+  max_new_tokens: 16
+  temperature: 0.0
+  top_k: 1
+  top_p: 1.0
+  use_chat_template: true
+  enable_thinking: false

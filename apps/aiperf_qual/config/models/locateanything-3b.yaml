@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A grounding model: RefCOCO boxes against the gold boxes (Acc@IoU 0.5).
+absolute: [refcoco]
+
+reference:
+  adapter: families/locateanything/reference/adapter.py  # the family's official loading and prompt contract
+  # The official reference runs at fp32 only (the candidate is fp16): Perf against it is perf-inconclusive.
+  timing_precision: fp32
+  requirements: families/locateanything/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  trust_remote_code: true  # the checkpoint's own modeling code

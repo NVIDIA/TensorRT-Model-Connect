@@ -34,6 +34,7 @@ inline bool uses_existing_task_runtime(std::string_view primary_task) noexcept {
         IEmbedding::kTask,
         IEncoding::kTask,
         IReranking::kTask,
+        IStructuredDecision::kTask,
         ISegmentation::kTask,
         IPointPromptedSegmentation::kTask,
         ITextPromptedSegmentation::kTask,

@@ -28,7 +28,7 @@ target_link_libraries(trtmc_model_qwen3_5 PRIVATE
 )
 target_compile_options(trtmc_model_qwen3_5 PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
-  "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>"
 )
 set_target_properties(trtmc_model_qwen3_5 PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -55,3 +55,5 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME ${test_name} COMMAND ${test_name})
 endif()
+
+include(edge_llm/Adapter.cmake)

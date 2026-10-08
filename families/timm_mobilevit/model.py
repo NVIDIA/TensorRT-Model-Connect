@@ -545,8 +545,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_mobilevit does not support tensor parallelism")
     if request.context_parallel_size != 1:
         raise NotImplementedError("timm_mobilevit does not support context parallelism")
-    if request.task != "classification":
-        raise ValueError("timm_mobilevit supports only task=classification")
+    if request.task != "image_to_class_scores":
+        raise ValueError("timm_mobilevit supports only task=image_to_class_scores")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("timm_mobilevit does not support quantization")
     if request.fp32_layers:
@@ -560,6 +560,20 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     plan, runtime = _build_engine(
         raw, Checkpoint.open(model_dir), str(request.precision).lower(), bool(request.verbose)
     )
+    # Only publish checkpoint-supplied identity; absent metadata means
+    # model-local class ordinals, not an inferred cross-model vocabulary.
+    vocabulary_id = raw.get("vocabulary_id", "")
+    labels = raw.get("label_names", [])
+    if not isinstance(vocabulary_id, str):
+        raise ValueError("timm MobileViT vocabulary_id must be a string")
+    if not isinstance(labels, list) or (
+        labels
+        and (
+            len(labels) != runtime["num_classes"]
+            or any(not isinstance(label, str) or not label for label in labels)
+        )
+    ):
+        raise ValueError("timm MobileViT label_names must name every class in order")
     writer.set_header(family="timm_mobilevit", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json(
@@ -571,5 +585,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "interpolation": runtime["interpolation"],
             "image_mean": runtime["mean"],
             "image_std": runtime["std"],
+            "num_classes": runtime["num_classes"],
+            "vocabulary_id": vocabulary_id,
+            "labels": labels,
         },
     )

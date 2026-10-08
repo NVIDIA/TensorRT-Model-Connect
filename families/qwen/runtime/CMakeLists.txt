@@ -6,6 +6,8 @@ add_library(trtmc_model_qwen SHARED
   chat_templates.cpp
   distributed_runtime.cpp
   kv_cache.cpp
+  embedding_factory.cpp
+  embedding_pipeline.cpp
   pipeline.cpp
   plugin.cpp
   plugin_helpers.cpp
@@ -38,6 +40,7 @@ install(TARGETS trtmc_model_qwen
 
 if(TRTMC_BUILD_TESTS)
   foreach(test_name IN ITEMS
+      test_qwen_embedding_pipeline
       test_qwen_native_kv_cache
       test_qwen_sampler
       test_qwen_tensor_names
@@ -74,4 +77,10 @@ if(TRTMC_BUILD_TESTS)
     ${TRTMC_CUDART_LIBRARY}
   )
   target_compile_options(qwen_logits_trace PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(qwen_embedding_consumer
+    ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/qwen_embedding_consumer.cpp)
+  target_link_libraries(qwen_embedding_consumer PRIVATE trtmc_c)
 endif()

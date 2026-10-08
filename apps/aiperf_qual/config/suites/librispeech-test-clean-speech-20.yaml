@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# LibriSpeech test-clean (AIPerf `librispeech`, pinned): 20 utterances in seeded order, one per speaker, as the user
+# turn of a speech-to-speech model; no gold: the spoken answer is compared with the native model's.
+suite: librispeech-test-clean-speech-20
+version: 1
+source:
+  kind: aiperf_public
+  dataset: librispeech
+  label_column: text
+  cluster_column: speaker_id
+  one_per_cluster: true
+selection: {method: seeded, count: 20}
+fields: {audio: audio_path}
+request:
+  max_new_tokens: 300

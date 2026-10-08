@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/moge/reference/adapter.py  # the pinned official MoGe source (no generic adapter)
+  prepare: families/moge/reference/prepare.py
+  requirements: families/moge/requirements.txt  # the family's dependencies, layered on the serving interpreter

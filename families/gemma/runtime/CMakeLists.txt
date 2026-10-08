@@ -26,7 +26,10 @@ target_link_libraries(trtmc_model_gemma PRIVATE
   ${TRTMC_CUDART_LIBRARY}
   ${CMAKE_DL_LIBS}
 )
-target_compile_options(trtmc_model_gemma PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(trtmc_model_gemma PRIVATE
+  "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>"
+)
 set_target_properties(trtmc_model_gemma PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
   BUILD_RPATH "\$ORIGIN"
@@ -54,3 +57,5 @@ if(TRTMC_BUILD_TESTS)
   endforeach()
   set_tests_properties(test_gemma_pipeline PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/edge_llm/Adapter.cmake")

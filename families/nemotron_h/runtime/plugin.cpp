@@ -4,6 +4,9 @@
  */
 
 #include "families/nemotron_h/runtime/chat_templates.h"
+#ifdef TRTMC_HAS_EDGE_LLM
+#include "families/nemotron_h/runtime/edge_llm/adapter.h"
+#endif
 #include "families/nemotron_h/runtime/distributed_runtime.h"
 #include "families/nemotron_h/runtime/hybrid_state.h"
 #include "families/nemotron_h/runtime/pipeline.h"
@@ -215,5 +218,12 @@ ITask* create(const FamilyContext& context) {
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("nemotron_h does not support --kv-cache-size");
+    if (context.reader.find_section("edge_llm.json")) {
+#ifdef TRTMC_HAS_EDGE_LLM
+        return trtmc::nemotron_h::edge_llm::create(context.reader);
+#else
+        throw std::runtime_error("Nemotron-H Edge bundle requires TRTMC_ENABLE_EDGELLM=ON");
+#endif
+    }
     return trtmc::nemotron_h::create(context);
 }

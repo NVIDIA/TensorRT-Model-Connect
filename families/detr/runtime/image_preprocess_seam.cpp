@@ -107,6 +107,17 @@ std::vector<float> preprocess_detr_image(const float* image_pixels, int32_t imag
     const auto resize_shape = compute_detr_resize_shape(image_height, image_width, config);
     const int32_t resized_h = resize_shape.height;
     const int32_t resized_w = resize_shape.width;
+    const int32_t out_h = config.input_image_h;
+    const int32_t out_w = config.input_image_w;
+
+    if (resized_h > out_h || resized_w > out_w) {
+        throw std::invalid_argument(
+            "detr input resize dimensions exceed the engine input dimensions");
+    }
+    if (resized_h != out_h || resized_w != out_w) {
+        throw std::invalid_argument(
+            "detr input resize dimensions require padding, but the engine has no pixel_mask input");
+    }
 
     std::vector<float> resized(static_cast<std::size_t>(resized_h) * resized_w * 3U);
     if (stbir_resize(image_pixels, image_width, image_height,
@@ -117,19 +128,11 @@ std::vector<float> preprocess_detr_image(const float* image_pixels, int32_t imag
         throw std::runtime_error("Failed to resize detr input image");
     }
 
-    const int32_t out_h = config.input_image_h;
-    const int32_t out_w = config.input_image_w;
-    if (resized_h > out_h || resized_w > out_w) {
-        throw std::invalid_argument(
-            "detr input resize dimensions exceed the engine input dimensions");
-    }
     const auto output_plane = static_cast<std::size_t>(out_h) * out_w;
-    std::vector<float> pixel_values(3U * output_plane, 0.0F);
+    std::vector<float> pixel_values(3U * output_plane);
 
-    for (int32_t y = 0; y < out_h; ++y) {
-        for (int32_t x = 0; x < out_w; ++x) {
-            if (y >= resized_h || x >= resized_w)
-                continue;
+    for (int32_t y = 0; y < resized_h; ++y) {
+        for (int32_t x = 0; x < resized_w; ++x) {
             const auto src_idx = static_cast<std::size_t>(((y * resized_w) + x) * 3);
             const float r = (resized[src_idx] - config.image_mean[0]) / config.image_std[0];
             const float g = (resized[src_idx + 1] - config.image_mean[1]) / config.image_std[1];

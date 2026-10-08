@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# VBench's object dimensions (object class, multiple objects, color, spatial relationship), 5 prompts each,
+# at the catalog request; the prompt's GenEval-style requirements are checked on the middle frame.
+suite: vbench-objects-20
+version: 1
+base: catalog
+source:
+  kind: url_jsonl
+  url: https://raw.githubusercontent.com/Vchitect/VBench/master/vbench/VBench_full_info.json
+  sha256: 5dd2de80ee43cda750b2b72ea7023657c0b90d3702041c7e4608c65dbe50dccd
+  transform: vbench_objects
+selection: {method: first, count: 5, per_task: true}
+fields: {prompt: prompt}

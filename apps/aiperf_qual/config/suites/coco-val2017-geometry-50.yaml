@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# COCO val2017 (detection-datasets/coco, pinned): 50 images in seeded order as monocular-geometry inputs (MoGe-2's
+# 1,800-token budget); no gold: the geometry is compared with the native model's (conversion parity).
+suite: coco-val2017-geometry-50
+version: 1
+source:
+  kind: hf_dataset
+  dataset: detection-datasets/coco
+  split: val
+  revision: cf0b22332314a937e9dc8a1957b21725430bb41d
+  data_files: {val: data/val-*.parquet}
+  image_column: image
+selection: {method: seeded, count: 50}
+fields: {image: image_path}
+request:
+  num_tokens: 1800

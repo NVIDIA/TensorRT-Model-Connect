@@ -7,7 +7,7 @@ candidate:
   family: timm_crossvit
   checkpoint: timm/crossvit_9_240.in1k
   revision: df3051d20d8addd16d03c4230046128c17e32826
-  task: classification
+  task: image_to_class_scores
   precision: fp16
   bundle: crossvit-9-240-in1k.bundle
   build:

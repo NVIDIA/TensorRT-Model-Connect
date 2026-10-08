@@ -13,10 +13,13 @@ _ALIASES = family_support(
     default_precision="bf16",
 )
 _SUPPORT = FamilySupport(
-    tasks=("text_generation",), default_task="text_generation", default_precision="bf16")
+    tasks=("text_generation",), default_task="text_generation", default_precision="bf16",
+)
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
+    if "joint_head_config.json" in metadata.files:
+        return None
     if support := _ALIASES(metadata):
         return support
     config = metadata.config.get("text_config", metadata.config)

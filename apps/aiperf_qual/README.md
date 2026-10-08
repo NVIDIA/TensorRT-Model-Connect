@@ -1,0 +1,249 @@
+# trtmc-aiperf-qual
+
+Accuracy and performance qualification of every ready catalog model against its native
+(unconverted) Hugging Face / PyTorch model, driven by [AIPerf](https://github.com/ai-dynamo/aiperf).
+It does not use `qualification_tests/benchmark_qualification`.
+
+- **Acc**: TRTMC must be as accurate as the native model on the Task's workloads. Both sides answer the
+  Task's gold-labelled benchmarks (`absolute`) and each benchmark is a paired non-inferiority decision
+  (`noninferiority.py`): `pass` when TRTMC's regression is shown to be below the benchmark's margin, `fail`
+  when it is shown to exceed it, `inconclusive` otherwise. Tasks without a gold set compare outputs with
+  the native model (conversion parity). Random-weight test models are Perf only (`accuracy_source: none`).
+- **Perf**: TRTMC must be faster than the native model (eager) at the candidate's precision: the speedup's
+  90% interval lies above 1.05 x (1 + guard) (the 5% margin widened by the largest server-instance and order effect
+  the order check measured, `guard_percent`), on every timed request, with the same work on both sides.
+
+## Design
+
+| Layer | What | Model-specific? |
+|---|---|---|
+| Execution | One workload recorder, with native and TRTMC servers running separately and speaking the same `/v1/tasks/{operation}` protocol: TRTMC (`trtmc-perf-serve --backend trtmc`, later `trtmc-server`) and the native reference (`--backend reference`: the generic adapter of the operation, or a family's own pipeline, `families/<family>/reference/adapter.py`). AIPerf sends every request. | No (adapters: per family) |
+| Task | `config/tasks.yaml`: per catalog Task, its benchmarks (`absolute`) and checks (`supplementary`), and Perf settings. | No |
+| Model | Derived from the catalog entry and its Task. `config/models/<profile>.yaml` holds only exceptions. | Only exceptions |
+
+`trtmc-aiperf-qual plan` prints the derived configuration of every model; `trtmc-aiperf-qual matrix`
+writes the execution matrix (native path, environment, workloads, checks, and whether each profile is
+executable).
+
+### Accuracy
+
+Benchmarks (`benchmarks` in `config/tasks.yaml`) are AIPerf accuracy benchmarks at pinned revisions
+(MMLU 0-shot, LAMBADA, TinyStories, BART denoising: `plugins/trtmc_aiperf_plugins/benchmarks.py`) or gold
+suites sent through AIPerf's `trtmc_task` endpoint and scored by `gold_metrics.py` (MMStar, OCRBench,
+RefCOCO, LibriSpeech WER, STS-B, SciFact retrieval / rerank, HumanEval + MBPP, ImageNetV2, COCO mAP,
+ADE20K mIoU, mask IoU, ETTh1 MSE, WMT / FLORES chrF++). Selections are seeded and stratified; prompts are
+filtered to the shipped bundle's length (rendered through the chat template on the chat route). A model
+whose catalog request samples answers once per seed on each side and is judged on per-problem seed means.
+Each benchmark's `margin`, `relative_margin`, `min_native` (suitability floor), and size are set in
+`config/tasks.yaml`, each with its reason.
+
+Conversion-parity benchmarks (`gold_metrics.PARITY`) compare each output with the native one within a
+tolerance: raw encoders' vectors, MoGe geometry, ACT action chunks, stereo disparities, PersonaPlex speech.
+Inputs a family prepares itself come from its `reference/inputs.py` (`family_inputs` suites).
+
+Checks for every model of a Task (`supplementary`): text-to-speech round-trip WER (corpus, bootstrap) and
+audio validity (every output finite and not silent; the median per-sentence duration ratio to the native model
+within 0.5-2, as a sampling model's single utterance may run to its length limit on either side; an error
+when no sentence has audio on both sides); GenEval-style pass rate for text-to-image families that take caller latents (the same
+initial noise on both sides); CLIP-T and video validity for videos; MagicBrush CLIP-I and DINO for edits;
+world-model video parity. The pixel parity under latent replay is reported only (`informational`).
+
+A suite with `base: catalog` overrides the profile's catalog request with its dataset fields.
+
+### Verdict rules
+
+- Both sides answer the same problems, selected and fitted to the shipped bundle's sequence length; a suite with no
+  problem that fits is an `error` that says so.
+- An input TRTMC rejects as beyond the bundle's capacity (`backend_rejected_request` exceeding a prefill profile, a
+  KV cache, or an input limit) leaves the comparison on both sides, and the entry reports how many did
+  (`out_of_capacity`); not in a corpus whose rows refer to each other (STS pairs, a retrieval query and its
+  documents).
+- Any other problem the native model answered and TRTMC did not (a failed or rejected request, an unusable output)
+  counts as TRTMC's wrong answer: a wrong right/wrong answer, a parity sample outside the tolerance, an empty WER or
+  chrF text. A corpus metric without an empty answer (vectors, masks, detections, forecasts) keeps the problem
+  missing, an `error`, as does a problem the native model did not answer.
+- A parity benchmark against a native model that ran at another precision than TRTMC (the candidate's failed
+  natively) uses its `mismatched_precision_gate`.
+- Both sides run separately with one server and concurrency 1. Legacy Acc replica, MPS, and overlap settings
+  are ignored by qualification; their contended timings cannot serve as speed evidence.
+- Every AIPerf run has a deadline: three times the profile's seconds in the run's ledger (`run-all --ledger`, at
+  least ten minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.
+- `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
+  comparison: the native model below a benchmark's floor, a Task without an Acc check, timings that cannot be
+  compared), Red (Acc or Perf worse than native beyond its margin), Yellow (Perf about equal to native, which counts
+  as a pass, or an Acc difference not shown either way), Green (quality passes with valid comparable timings). Perf is reported on the quality dataset.
+
+### Performance
+
+One executor sends every workload through AIPerf and writes one `execution.jsonl` evidence stream.
+Workloads have a role: `quality`, `performance`, `both`, or optional `service`. Both consumers reuse
+profiling responses and artifact references; image and video quality scoring does not regenerate outputs
+just to obtain their task-call timings. Warmup is excluded, both backends run separately at concurrency 1,
+and GPU scorers run after their generation servers stop. This costs more wall time than the former
+multi-replica, overlapping Acc schedule.
+
+The report answers two independent questions: the task quality scores on each side and their difference;
+and the native/TRTMC task-call times, precision, and work comparability. Markdown and HTML omit speedup
+ratios; JSON retains them and their intervals for qualification and diagnostics. Quality uses
+its existing task metric and non-inferiority gate. Parity is labelled parity, random-weight models have
+absolute quality N/A, and an unavailable native reference cannot provide a speedup. CLIP-T and video
+validity do not establish temporal, motion, or action correctness; world-model checks establish coarse
+conversion parity only. The family's checks keep their documented coverage and thresholds.
+
+Natural evaluation workloads (`both`) provide timings from the **same outputs used for quality**. Their
+paired geometric speedup and total-time ratio are descriptive; the 90% interval is across dataset units,
+with seeds clustered by problem, not a repeated-run stability interval. Every requested response must be
+present, valid, paired, warmed, and at matching effective precision and declared task-call boundaries.
+Actual work is compared per sample, so different samples may have different lengths. An unmatched
+workload reports its natural-task time ratio and the reason equal-work acceleration is unavailable;
+matched subsets never hide failures or shorter outputs. `max_tokens` alone is not work evidence. No
+mandatory second, forced-length suite is added for variable-output families.
+
+Models with quality benchmarks run **only their required quality workloads**. For example, Qwen uses
+`mmlu-0shot`, and image/video models use their configured quality datasets. Catalog, near-capacity,
+and informational replay checks are not extra default workloads. Each side answers each selected
+problem once, with excluded warmup. The same profiling responses supply Acc, Native/TRTMC task-call
+p50, and AIPerf client metrics. Multiple required benchmarks remain separate, labelled datasets.
+Dataset timing completeness and work comparability are checked; timing results are measurements,
+not repeated-run performance acceptance gates. Quality thresholds remain unchanged. Failed or
+unpaired responses remain visible in each side's timing coverage rather than disappearing into a
+matched subset. Models explicitly lacking a quality benchmark retain one configured performance
+workload and conversion-parity evidence. The explicit `order-check` diagnostic and historical
+fixed-workload reports keep their original statistics. Timing and generation phases hold `gpu_lock`.
+
+Configuration now uses a flat `performance` policy and opt-in `service_metrics`; reports use `performance`
+and `service_metrics` under schema `trtmc.qualification/v2`. Earlier tiered configurations and reports
+are normalized on read, including rejudge, without maintaining another execution path. Rejudge never
+promotes descriptive dataset results to an acceptance gate. `torch.compile` remains an optional labelled
+reference. Service metrics (client latency, throughput, load sweeps) are opt-in and do not affect the
+verdict; the prototype's single execution lane and buffered SSE do not measure token TTFT/ITL.
+
+Every recorded workload also includes AIPerf's native client statistics in `aiperf_metrics`: request
+latency p50/p99, request throughput, output-token throughput when available, and request error rate.
+JSON retains every run's exported statistics and units. Markdown and HTML show one Native/TRTMC table
+per workload, with separate precision, run-count, and total-request columns. Repeated runs use the median
+of each exported statistic; displayed latency p50/p99 are medians of run percentiles, not pooled request
+percentiles. Hovering a metric in HTML shows the range across runs. Different workloads, modes, precisions,
+and concurrency levels are never averaged together. The main Native row uses the declared timing precision
+when available; additional native settings (such as fp32 quality references or compiled modes) appear in
+a separate collapsed section. Precision mismatches remain explicit. Output-token throughput appears only
+where exported; missing metrics stay unavailable and partial statistics show available/total runs.
+HTML shows these tables directly below the model summary, with links from each model and the same
+search/result filters. Summaries reuse existing exports without extra inference or load sweeps and never
+affect acceptance gates or the model verdict.
+
+```yaml
+performance:
+  measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5, min_run_s: 1.0}
+# Optional for a service workload, e.g. LLM/VLM:
+service_metrics: {isl: 96, osl: 32, concurrency: [1, 4], requests: 32}
+```
+
+### Reference environments
+
+A model whose native reference needs more than the serving interpreter declares
+`reference.requirements` (normally `families/<family>/requirements.txt`, and `reference.prepare` for an
+upstream checkout) in `config/models`; `trtmc-perf-serve reference-env` creates the environment layered on
+the serving interpreter once, caches it by digest, and creates a fresh one next to it when its recorded
+`pip freeze` changed. Bundles build in the same environment, as CI installs a family's requirements before a
+build; trtmc-bench reuses a bundle only when its build receipt matches.
+
+The Diffusers adapter ties a T5-style text encoder's `encoder.embed_tokens` back to `shared` when loading
+left it zero (Transformers 5.2 does not tie it for `UMT5EncoderModel`, Wan). A timed request that leaves
+`num_steps`, guidance, CFG, or frames at -1 is an error until `config/models` states them, since TRTMC and
+Diffusers apply different defaults.
+
+## Setup
+
+```bash
+apps/aiperf_qual/setup.sh /path/to/aiperf-venv /path/to/trtmc-venv/bin/python   # orchestrator + serving packages
+cp config/environments/example.yaml config/environments/<machine>.yaml         # fill in this machine's paths
+trtmc-aiperf-qual doctor --environment config/environments/<machine>.yaml       # paths, packages, GPU, model list
+```
+
+## Commands
+
+```bash
+E=config/environments/gb300-perf-serving.yaml
+trtmc-aiperf-qual plan --environment $E
+trtmc-aiperf-qual matrix --environment $E --output matrix.csv                # exit 1 unless every profile is executable
+trtmc-aiperf-qual run --profile qwen3-0.6b-fp16 --environment $E --out out/qwen3-0.6b-fp16
+trtmc-aiperf-qual run-all --environment $E --out-root out/ --shard 0/2      # host 1 of 2
+trtmc-aiperf-qual summary gb300-1=user@host1:/path/to/out gb300-2=user@host2:/path/to/out \
+    --ssh "ssh -J jump" --output qualification.md --html qualification.html   # remote roots over ssh
+trtmc-aiperf-qual rejudge --environment $E out/*/                           # re-apply the judge, no model runs
+python tools/model_benchmark.py aiperf --environment $E --aiperf-python <venv>/bin/python --out-root out/
+```
+
+`run` builds the candidate bundle when `bundle_root` does not hold it yet (trtmc-bench, in the
+reference environment, under the GPU lock), qualifies, and applies the bundle retention policy.
+`report.md` / `report.json` in the output directory hold the verdict: `pass`, `acc-issue`,
+`not-covered` (no native path), `acc-inconclusive`, `not-comparable`, `perf-issue` (red/yellow),
+`perf-inconclusive` (white), or `error` (a phase failed; see "Phase errors" and `phase-errors.log`);
+`build.json` records the build (`build-failed` when it failed); `report.json` carries a reproduction
+command. `--smoke` runs one problem per benchmark and one timed request (`smoke-pass` / `smoke-fail`,
+never a verdict; results go under `<out-root>/smoke`, or `<dir>/smoke/<profile>` for `run --out <dir>/<profile>`).
+`rejudge` and `recheck` keep the run's own report as `report.original.json`.
+
+`run-all` runs profiles one after another (profiles sharing a checkpoint back to back), appends one
+line per profile to `<out-root>/campaign.jsonl`, and skips profiles whose finished result has the same
+run key (configuration, harness, mode, and dependencies; `--rerun` keeps the old directory as
+`<profile>.<timestamp>`). `--shard INDEX/COUNT` splits the
+catalog across hosts. `run-all` writes `plan.json` (every profile it must report, and configuration
+errors) and exits 2 on configuration errors, 1 when a profile ended in `error` or `build-failed`,
+else 0 (qualification outcomes such as `acc-issue` are results, not failures).
+
+`summary` merges result roots: the latest run of each profile wins; planned profiles without a
+result are `not-run`, configuration errors `config-error`. A remote root `[NAME=][USER@]HOST:/PATH`
+is fetched over `--ssh`; local paths are read in place. `--html report.html` also writes a
+self-contained, failure-first report (per model: Acc suites with failing samples, TRTMC and native
+outputs side by side, Perf lights with labelled p50 values and reasons, L2, evidence links, and the
+reproduction command), fetching logs next to it. `--baseline ROOT` notes TRTMC
+p50 regressions (> 5%) against a previous run.
+
+### Per-machine model list
+
+GPU memory decides which models a machine can run. `models` in its environment file selects them
+for `run-all` and `plan` (an explicit `--profile` overrides it):
+
+```yaml
+models:
+  include: all                    # all ready catalog profiles (default), or names / glob patterns
+  exclude:                        # a reason is required
+    - {profile: "flux-2-dev*", reason: "does not fit in 80 GB"}
+  max_checkpoint_gib: 30          # optional: also exclude larger checkpoints (unknown sizes are kept)
+```
+
+Excluded profiles are written to `<out-root>/excluded.json` and appear in `summary` as `excluded`
+with their reason, unless another result root holds a result for them.
+
+### Disk retention
+
+Checkpoints and bundles dominate disk use. `retention` in the environment file frees them as the
+batch advances (both default to `retain`):
+
+| key | values | effect |
+|---|---|---|
+| `bundle` | `retain`, `delete_on_pass`, `delete_unless_error`, `delete_built_unless_error` | delete `bundle_root/<name>/` after the model's run (`delete_built_unless_error`: only a bundle the run built itself); an `error` verdict always keeps it for the rerun |
+| `hf_cache` | `retain`, `delete_unused` | `run-all` deletes a checkpoint repository from `hf_hub_cache` once no remaining profile of the batch uses it |
+
+Deletion never leaves those roots. Reference environments and reports are kept (`rejudge`
+needs only the reports). The peak is the largest single model (checkpoint plus bundle) plus the
+next profile's checkpoint, which `run-all` downloads during the current run (`--no-prefetch` avoids
+it).
+
+## Extending
+
+- New model of a known Task: nothing to add.
+- New Task: one entry in `config/tasks.yaml`: its gold-labelled benchmarks (`absolute`, defined under
+  `benchmarks`, scored by `gold_metrics.py` or an AIPerf grader) and the Perf output check
+  (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
+- Model needing a different input or reference option: `config/models/<profile>.yaml`.
+- Model whose native pipeline the generic adapters cannot run: `families/<family>/reference/adapter.py`
+  (an `Adapter(spec, host)` with `invoke(request, artifact_base)`; it imports nothing from the applications and
+  reaches the serving mechanics through `host`), named by `reference.adapter`.
+- Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in
+  `config/models/<profile>.yaml`; the report names the bundle it qualified.
+- New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
+  retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
+  assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).

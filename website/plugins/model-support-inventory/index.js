@@ -27,6 +27,7 @@ const TASKS = {
   speech_to_speech: ['Speech to speech', 'Audio', 'audio-to-audio', 'speak'],
   stereo_disparity: ['Depth estimation', 'Computer Vision', 'depth-estimation', 'disparity'],
   structure_prediction: ['Structure prediction', 'Biology', 'protein-folding', null],
+  structured_decision: ['Structured decisions', 'Multimodal', null, 'decide'],
   text_generation: ['Text generation', 'Natural Language Processing', 'text-generation', 'run'],
   text_prompted_segmentation: ['Text-prompted segmentation', 'Computer Vision', 'mask-generation', 'segment'],
   time_series_forecast: ['Time-series forecasting', 'Time Series', 'time-series-forecasting', 'forecast'],
