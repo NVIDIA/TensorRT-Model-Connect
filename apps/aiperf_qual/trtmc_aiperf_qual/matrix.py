@@ -28,7 +28,11 @@ def row(environment: Environment, profile: str) -> dict[str, Any]:
         model = resolve_model(profile, environment)
     except ConfigError as error:
         return {"profile": profile, "executable": False, "problem": f"configuration: {error}"}
+    from .runner import applies, quality_only
+
     reference, policy = model["reference"], model["performance"]
+    checks = [check for check in model["supplementary"] if not check.get("informational") and applies(check, model)]
+    datasets = [item["suite"] for item in model["absolute"]] + [check.get("entry", check["check"]) for check in checks]
     native = ("unsupported" if reference["backend"] == "unsupported"
               else reference.get("adapter") or f"generic {model['operation']}")
     problems = []
@@ -43,8 +47,9 @@ def row(environment: Environment, profile: str) -> dict[str, Any]:
             "prepare": reference.get("prepare") or "", "trust_remote_code": reference["trust_remote_code"],
             "accuracy_source": model["accuracy_source"],
             "benchmarks": " ".join(item["suite"] for item in model["absolute"]),
-            "checks": " ".join(check["check"] for check in model["supplementary"]),
-            "timed_request": policy["suite"].get("suite"), "reference_modes": " ".join(policy["reference_modes"]),
+            "checks": " ".join(check["check"] for check in checks),
+            "timed_request": " ".join(datasets) if quality_only(model) else policy["suite"].get("suite"),
+            "reference_modes": "eager" if quality_only(model) else " ".join(policy["reference_modes"]),
             "executable": not problems, "problem": "; ".join(problems)}
 
 

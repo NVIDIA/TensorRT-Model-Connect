@@ -263,7 +263,7 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
 
 
 CATEGORIES = ("error", "config-error", "build-failed", "not-run", "acc-issue", "not-covered", "acc-inconclusive",
-              "not-comparable", "perf-issue", "perf-inconclusive", "pass", "excluded", "smoke-fail", "smoke-pass")
+              "not-comparable", "perf-issue", "perf-inconclusive", "measured", "pass", "excluded", "smoke-fail", "smoke-pass")
 EXCLUSIONS = "excluded.json"
 PLAN = "plan.json"
 HARNESS_FAILURES = ("error", "build-failed")
@@ -321,6 +321,7 @@ def _row(directory: Path) -> dict[str, Any] | None:
                     "precision": _precision(value, directory),
                     "directory": str(directory), "repro": value.get("repro"), "service_metrics": value.get("service_metrics"),
                     "aiperf_metrics": value.get("aiperf_metrics", []),
+                    "performance_source": value.get("performance_source"),
                     "time": float(value.get("started") or path.stat().st_mtime),
                     "accuracy": value.get("accuracy", []), "perf": value.get("performance", []),
                     "backend": (value.get("reference") or {}).get("backend", ""),
@@ -362,8 +363,10 @@ NOT_COMPARED = {"not-comparable", "not-covered"}
 
 
 def reported_perf(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The timed requests the results report: the catalog's own against the eager native model (the near-capacity
-    request, owner's choice for now, and torch.compile timings, informational, stay in the evidence)."""
+    """Quality-dataset timings for new runs; original fixed gates for historical reports."""
+    datasets = [item for item in row.get("perf", []) if item.get("kind") == "natural_dataset"]
+    if row.get("performance_source") == "quality":
+        return datasets
     return [item for item in row.get("perf", []) if "near-capacity" not in str(item.get("request") or "")
             and item.get("reference_mode", QUALIFYING_MODE) == QUALIFYING_MODE and item.get("gate", True)]
 

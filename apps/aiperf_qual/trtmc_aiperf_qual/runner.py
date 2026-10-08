@@ -2,13 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Qualify one model against its native reference.
 
-Phases (each failure is recorded and the report is still written):
-
-1. Accuracy plan: the gold-labelled benchmark problems both sides answer (``absolute``); the Task's
-   whole-output checks (``supplementary``) run as they come.
-2. Probe: TRTMC serves one request before the native model spends time on the benchmarks.
-3. Reference perf: the native model at the candidate precision, eager (and torch.compile where listed).
-4. Native answers to the benchmarks, then the candidate: TRTMC's answers, then performance perf.
+The required quality datasets run once per side. Their responses feed both
+quality scorers and task-call timings. Perf-only models retain their configured
+request. Failures remain explicit results rather than additional fallback work.
 """
 
 from __future__ import annotations
@@ -736,8 +732,15 @@ def smoke_verdict(result: Mapping[str, Any]) -> dict[str, Any]:
     return {**result.get("verdict", {}), "category": "smoke-fail" if failing else "smoke-pass", "failing": failing}
 
 
+def quality_only(model: Mapping[str, Any]) -> bool:
+    """Required quality workloads supply both scores and timings; no extra performance requests."""
+    return bool(model.get("absolute") or any(
+        not check.get("informational") and check.get("check") in SUPPLEMENTARY_CHECKS and applies(check, model)
+        for check in model.get("supplementary", [])))
+
+
 def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[str, Any]:
-    """One isolated executor; quality outputs also provide natural-workload timings."""
+    """Run quality workloads once per side and reuse their outputs for performance."""
     model = compat.configuration(model)
     environment = Environment({**environment.values, "native_replicas": 1, "candidate_replicas": 1,
                                "acc_mps": False, "acc_overlap": False})
@@ -754,6 +757,12 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
         result = _qualify(model, environment, out)
     result["schema_version"] = execution.SCHEMA
     result["performance"].extend(evidence.natural_performance())
+    if quality_only(model):
+        result["performance_source"] = "quality"
+        result["performance_expected"] = [item["suite"] for item in model.get("absolute", [])]
+        result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)), expected_modes=0)
+        if environment.values.get("smoke"):
+            result["verdict"] = smoke_verdict(result)
     result["aiperf_metrics"] = aiperf_metrics.entries(evidence.batches)
     for item in result["accuracy"]:
         item.pop("workload_perf", None)
@@ -772,7 +781,8 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
     smoke = bool(environment.values.get("smoke"))
     if smoke:
         model = smoke_model(model)
-    policy = model.get("performance")
+    dataset_only = quality_only(model)
+    policy = None if dataset_only else model.get("performance")
     perf_suite = build_suite(policy["suite"], environment) if policy else None
     (out / "suites").mkdir(exist_ok=True)
     if perf_suite:
@@ -813,20 +823,13 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
         accuracy.extend(absolute.error_entry(item, 0, f"problem selection: {phases.errors.get('absolute_plan')}")
                         for item in model["absolute"])
     for check in model.get("supplementary", []):
-        if check.get("check") in SUPPLEMENTARY_CHECKS and applies(check, model):
+        if not check.get("informational") and check.get("check") in SUPPLEMENTARY_CHECKS and applies(check, model):
             def run_check(check: Mapping[str, Any] = check) -> None:
                 with gpu_exclusive(environment):
                     accuracy.extend(supplementary(environment, model, check, python, out))
             phases.run(check["check"], run_check)
-    probe_server = bool(plans) or bool(policy and perf_suite and near_capacity_applies(
-        model, timed_request(model, perf_suite.samples[0]["request"])))
-    if probe_server:
-        timed_suites = phases.run("candidate_probe", lambda: candidate_probe(
-            environment, model, perf_suite, out, phases, serviceability=bool(plans), policy=bool(policy))) or []
-        if "candidate_probe" in phases.errors and plans:  # the server did not start: TRTMC cannot serve
-            phases.errors.setdefault("absolute_probe", phases.errors["candidate_probe"])
-    else:
-        timed_suites = (phases.run("perf_requests", lambda: perf_suites(environment, model, perf_suite)) or []) if policy else []
+    timed_suites = (phases.run("perf_requests", lambda: [single_request_suite(
+        perf_suite.name, timed_request(model, perf_suite.samples[0]["request"]), perf_suite.manifest)]) or []) if policy else []
     if policy and not timed_suites:
         policy = None  # the timed requests could not be built: the phase error says why
     with gpu_exclusive(environment):
@@ -850,14 +853,15 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
         def undo() -> None:  # a failed attempt's partial entries
             del accuracy[marks[0]:], performance[marks[1]:]
 
-        if phases.run("candidate", lambda: _candidate(environment, model, policy, timed_suites, reference_perf, accuracy,
-                                                      performance, out, absolute_runs) or True,
+        if (not dataset_only or absolute_runs) and phases.run("candidate", lambda: _candidate(
+                environment, model, policy, timed_suites, reference_perf, accuracy, performance, out, absolute_runs) or True,
                       retries=retries(environment), reset=undo):
             phases.errors.pop("candidate", None)
         service_config = model.get("service_metrics")
         service_metrics: dict[str, Any] = {}
         # The opt-in sweeps start the native adapter: only where performance could time it.
-        generic = any(item.get("reference_backend") == "reference" for item in performance)
+        generic = reference.get("backend") == "reference" if dataset_only else any(
+            item.get("reference_backend") == "reference" for item in performance)
         if service_config and generic:
             with execution.workload("service-metrics", "service"):
                 phases.run("service_metrics", lambda: service_metrics.update(sweep.run_serial(
@@ -879,6 +883,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
               "host": {**gpu_identity(environment), "trtmc_libraries": _loaded(out)},
               "bundle": _bundle_identity(out),
               "accuracy_source": model.get("accuracy_source"),
+              "performance_source": "quality" if dataset_only else "fixed",
               **({"accuracy_note": model["accuracy_note"]} if model.get("accuracy_note") else {}),
               **({"coverage": model["coverage"]} if model.get("coverage") else {}),
               "reference": {key: reference.get(key) for key in ("backend", "precision", "perf_precision",

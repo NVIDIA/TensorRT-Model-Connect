@@ -71,7 +71,7 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
 - `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
   comparison: the native model below a benchmark's floor, a Task without an Acc check, timings that cannot be
   compared), Red (Acc or Perf worse than native beyond its margin), Yellow (Perf about equal to native, which counts
-  as a pass, or an Acc difference not shown either way), Green (a pass). Perf is reported on the catalog request.
+  as a pass, or an Acc difference not shown either way), Green (quality passes with valid comparable timings). Perf is reported on the quality dataset.
 
 ### Performance
 
@@ -99,13 +99,17 @@ workload reports its natural-task time ratio and the reason equal-work accelerat
 matched subsets never hide failures or shorter outputs. `max_tokens` alone is not work evidence. No
 mandatory second, forced-length suite is added for variable-output families.
 
-Existing fixed-workload acceptance coverage remains: the catalog testcase (its greedy variant when it
-samples text, or the first gold problem when the testcase is no workload), plus the text-generation
-near-capacity request. These are workloads of the same executor. They retain warmup, N requests and R
-runs, per-run server task-call p50, the Welch log-ratio 90% interval, 5% margin, instance/order guard,
-precision/work checks, GPU interference checks, and the 5% stability limit. Fast requests still meet
-`min_run_s`; speech may retain its declared per-audio-second normalization. These gates are not replaced
-by the descriptive natural-workload statistic. Timing and generation phases hold `gpu_lock`.
+Models with quality benchmarks run **only their required quality workloads**. For example, Qwen uses
+`mmlu-0shot`, and image/video models use their configured quality datasets. Catalog, near-capacity,
+and informational replay checks are not extra default workloads. Each side answers each selected
+problem once, with excluded warmup. The same profiling responses supply Acc, Native/TRTMC task-call
+p50, and AIPerf client metrics. Multiple required benchmarks remain separate, labelled datasets.
+Dataset timing completeness and work comparability are checked; timing results are measurements,
+not repeated-run performance acceptance gates. Quality thresholds remain unchanged. Failed or
+unpaired responses remain visible in each side's timing coverage rather than disappearing into a
+matched subset. Models explicitly lacking a quality benchmark retain one configured performance
+workload and conversion-parity evidence. The explicit `order-check` diagnostic and historical
+fixed-workload reports keep their original statistics. Timing and generation phases hold `gpu_lock`.
 
 Configuration now uses a flat `performance` policy and opt-in `service_metrics`; reports use `performance`
 and `service_metrics` under schema `trtmc.qualification/v2`. Earlier tiered configurations and reports

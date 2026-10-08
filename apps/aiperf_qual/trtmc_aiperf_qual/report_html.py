@@ -3,8 +3,8 @@
 """Self-contained, failure-first HTML report over result roots (``summary --html``).
 
 One row per model with data only: its result (White, Red, Yellow, Green: ``campaign.signal``) and a short label
-for a result that is not Green, both sides' precision, each benchmark's values, both sides' p50 of the catalog
-request, a rerun's result when an appendix is linked, and the evidence to expand (the full reason, Acc gates and
+for a result that is not Green, both sides' precision, each benchmark's values, both sides' p50 of the quality
+workload, a rerun's result when an appendix is linked, and the evidence to expand (the full reason, Acc gates and
 failing samples with both outputs, the Perf comparison per reference mode, links to the evidence files, and a
 reproduction command). Rows are ordered White, Red, Yellow, Green.
 AIPerf client summaries follow the model table, with Native/TRTMC rows per workload.
@@ -26,7 +26,7 @@ from .report import _fmt, counted
 EVIDENCE = ("report.md", "report.json", "execution.jsonl", "build.json", "build/build.log", "error.json", "phase-errors.log",
             "candidate/server.log")
 LIGHT_COLORS = {"green": "#1e8e3e", "yellow": "#b06000", "red": "#c5221f", "white": "#5f6368", "n/a": "#5f6368"}
-LEGEND = (("green", "Accuracy and performance meet their gates."),
+LEGEND = (("green", "Quality meets its criteria and task timings are available; dataset timings have no performance gate."),
           ("yellow", "Pass: performance within the margin of native, or an accuracy difference not shown either way."),
           ("red", "Accuracy or performance worse than native beyond the margin."),
           ("white", "No valid comparison: a build, run, or environment error, or results that cannot be compared."))
@@ -373,7 +373,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                 f"content='width=device-width,initial-scale=1'><title>{_e(title)}</title><style>{STYLE}</style>"
                 f"<script>{SCRIPT}</script><header><p class='eyebrow'>Qualification report</p><h1>{_e(title)}</h1>"
                 "<p class='purpose'>TRTMC against the native model: benchmark accuracy, and the server model-call time "
-                "p50 of the catalog request. AIPerf client summaries appear below.</p>"
+                "p50 on the quality evaluation workload. AIPerf client summaries appear below.</p>"
                 + (f"<p class='meta'>{_e(context)}</p>" if context else "")
                 + (f"<p class='meta'>{related}</p>" if related else "")
                 + f"</header>{cards}{legend}{filters}<div class='wrap'><table class='register'><thead><tr>"

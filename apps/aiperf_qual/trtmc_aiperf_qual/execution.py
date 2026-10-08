@@ -213,8 +213,11 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
     complete = all(rows) and all(len(index) == len(values) for index, values in zip(indexed, rows))
     complete = complete and indexed[0].keys() == indexed[1].keys() and all(
         row["valid"] for values in rows for row in values)
+    complete = complete and all(batch.get("aiperf_exit", 0) == 0 for batches in sides for batch in batches)
     if not complete:
         reasons.append("natural workload has missing, failed, duplicate, or unpaired responses")
+    exported = all(batch.get("expected_requests") is None or len(batch["records"]) == batch["expected_requests"]
+                   for batches in sides for batch in batches)
     if any(batch.get("expected_requests") is not None and len(batch["records"]) != batch["expected_requests"]
            for batches in sides for batch in batches):
         reasons.append("natural workload did not export every configured request")
@@ -242,17 +245,23 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
         reasons.append(f"actual work differs or is unknown on {len(pairs) - matched} paired responses")
     result: dict[str, Any] = {"request": name, "reference_mode": "eager", "kind": "natural_dataset", "gate": False,
                               "timing_contract": TIMING_CONTRACT, "pairs": len(pairs), "matched_pairs": matched,
+                              "complete": bool(complete and exported),
                               "comparable": bool(pairs and not reasons), "light": "white" if reasons else "informational",
                               "reasons": list(dict.fromkeys(reasons)), "notes": [
                                   "Shared quality outputs; not an additional performance gate.",
                                   "Interval across evaluation units, not repeated-run timing stability."],
                               "candidate": {}, "reference": {}}
+    # Report each side's entire valid workload, including unpaired responses.
+    # Pair filtering is only for comparability, never for the displayed timings.
+    for side, values, precision in zip(("candidate", "reference"), rows, precisions):
+        times = [row["model_call_ms"] for row in values if row["valid"]]
+        result[side] = {"p50_ms": statistics.median(times) if times else None,
+                        "total_ms": sum(times), "requests": len(values), "valid_requests": len(times),
+                        "precision": next(iter(precision)) if len(precision) == 1 else None}
     if not pairs:
         return result
     mine = [row["model_call_ms"] for row, _ in pairs]
     theirs = [row["model_call_ms"] for _, row in pairs]
-    for side, values, precision in zip(("candidate", "reference"), (mine, theirs), precisions):
-        result[side] = {"p50_ms": statistics.median(values), "precision": next(iter(precision)) if len(precision) == 1 else None}
     result["natural_task_speedup"] = sum(theirs) / sum(mine)
     if result["comparable"]:
         # Multiple seeds belong to one evaluation unit; they are not independent samples.

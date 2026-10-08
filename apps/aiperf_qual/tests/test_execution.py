@@ -194,3 +194,91 @@ def test_qualification_ignores_legacy_overlap_and_replica_settings(tmp_path, mon
         "native_replicas": 8, "candidate_replicas": 8, "acc_overlap": True, "acc_mps": True}), tmp_path)
     assert seen[0]["native_replicas"] == seen[0]["candidate_replicas"] == 1
     assert not seen[0]["acc_overlap"] and not seen[0]["acc_mps"]
+
+
+@pytest.mark.parametrize("supplementary", [False, True])
+def test_qualification_runs_only_quality_workloads_for_absolute_and_media_models(tmp_path, monkeypatch, supplementary):
+    from contextlib import nullcontext
+
+    name = "geneval-prompts-200" if supplementary else "mmlu-0shot"
+    model = {"model": "demo", "catalog_profile": "demo", "operation": "generate", "task": "text_generation",
+             "reference": {"backend": "reference", "precision": "fp16", "perf_precision": "fp16"},
+             "absolute": [] if supplementary else [{"suite": name}],
+             "supplementary": [{"check": "geneval"}, {"check": "replay_parity", "informational": True}]
+                              if supplementary else [],
+             "accuracy_source": "absolute", "performance": {"suite": "forbidden-catalog", "measurement": {"warmup": 1}}}
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("additional catalog/performance/probe workload executed")
+
+    def answer(side):
+        calls.append((name, side))
+        run = SimpleNamespace(directory=tmp_path / side, exit_code=0, raw_records=lambda: [raw(0, 10)])
+        execution.record(run, {"name": name, "role": "both", "identity": identity(side),
+                               "gpu_busy_percent": 0, "warmup": 1, "expected_requests": 1})
+
+    def native(*args, **kwargs):
+        assert args[-1] is None  # no catalog request as a native serviceability probe
+        answer("reference")
+        return {"runs": {}}
+
+    def candidate(*args):
+        assert args[2] is None and not args[3]  # no separate performance policy or suites
+        answer("candidate")
+        args[5].append({"suite": name, "source": "absolute", "status": "pass"})
+
+    def media(*args):
+        assert args[2]["check"] == "geneval"  # informational replay never runs
+        answer("reference")
+        answer("candidate")
+        return [{"suite": "geneval", "source": "absolute", "status": "pass"}]
+
+    for key in ("build_suite", "candidate_probe", "_reference_perf", "perf_suites"):
+        monkeypatch.setattr(runner, key, forbidden)
+    monkeypatch.setattr(runner, "reference_python", lambda *args: "python")
+    monkeypatch.setattr(runner, "platform_fingerprint", lambda *args: {"fingerprint": {}})
+    monkeypatch.setattr(runner, "platform_id", lambda *args: "test")
+    monkeypatch.setattr(runner, "gpu_identity", lambda *args: {})
+    monkeypatch.setattr(runner, "_loaded", lambda *args: {})
+    monkeypatch.setattr(runner, "_bundle_identity", lambda *args: {})
+    monkeypatch.setattr(runner, "gpu_exclusive", lambda *args: nullcontext())
+    monkeypatch.setattr(runner.importlib.metadata, "version", lambda *args: "test")
+    monkeypatch.setattr(runner.absolute, "plan", lambda *args: [1])
+    monkeypatch.setattr(runner.absolute, "run_native_alone", native)
+    monkeypatch.setattr(runner, "_candidate", candidate)
+    monkeypatch.setattr(runner, "supplementary", media)
+    result = runner.qualify(model, Environment({}), tmp_path)
+    assert calls == [(name, "reference"), (name, "candidate")]
+    assert [item["request"] for item in result["performance"]] == [name]
+    assert result["performance"][0]["candidate"]["p50_ms"] == 10
+    assert result["performance"][0]["reference"]["p50_ms"] == 10
+    assert result["verdict"]["acc"] == "pass" and result["verdict"]["perf"] != "error"
+    assert result["performance_source"] == "quality" and not result["performance"][0]["gate"]
+    assert result["provenance"]["timed_requests"] == []
+
+
+def test_quality_measurement_verdict_does_not_claim_repeated_performance_gate(tmp_path):
+    evidence = new_session(tmp_path)
+    collect(evidence, "candidate", [raw(0, 10)])
+    collect(evidence, "reference", [raw(0, 20)])
+    item, = evidence.natural_performance()
+    base = {"performance_source": "quality", "accuracy": [{"suite": "evaluation", "source": "absolute", "status": "pass"}],
+            "performance": [item]}
+    result = judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)
+    assert result == {"acc": "pass", "perf": "measured", "lights": {}, "category": "measured"}
+    item["complete"] = False
+    assert judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)["category"] == "error"
+    item["complete"] = True
+    base["accuracy"].append({"suite": "another-required-dataset", "source": "absolute", "status": "pass"})
+    assert judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)["perf"] == "error"
+
+
+def test_unpaired_valid_outputs_still_contribute_to_each_sides_displayed_timings(tmp_path):
+    evidence = new_session(tmp_path)
+    collect(evidence, "candidate", [raw(0, 10)])
+    collect(evidence, "reference", [raw(0, 20), raw(1, 100)])
+    result, = evidence.natural_performance()
+    assert not result["complete"] and not result["comparable"]
+    assert result["pairs"] == 1 and result["reference"]["p50_ms"] == 60
+    assert result["reference"]["valid_requests"] == 2 and result["reference"]["total_ms"] == 120

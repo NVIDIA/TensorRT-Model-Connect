@@ -7,9 +7,10 @@
 # Acc: TRTMC and the native model answer the Task's gold-labelled benchmarks (`absolute`, below); each is a
 # paired non-inferiority decision against its margin (trtmc_aiperf_qual/noninferiority.py). A model with no
 # benchmark sets `accuracy_source: none` (Perf only, for example random-weight test models).
-# Perf: server model-call p50 over repeated identical requests against the native model at the candidate
-# precision, eager. torch.compile (`reference_modes: [eager, compile]`) and optional service metrics (`service_metrics`)
-# are opt-in reports, set per model.
+# Perf: server task-call p50 from the same benchmark responses, with excluded warmup.
+# Quality workloads do not send separate catalog/near-capacity performance requests or apply repeated-run gates.
+# The repeated measurement settings below apply only to explicit Perf-only models and order-check diagnostics.
+# Optional service metrics (`service_metrics`) are opt-in reports, set per model.
 #
 # Suite "catalog" is the profile's catalog testcase request (model-specific shapes and settings).
 

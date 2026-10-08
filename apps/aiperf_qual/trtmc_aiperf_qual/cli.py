@@ -481,6 +481,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             names, _ = machine_list()
             return write_matrix(environment, names, arguments.output)
         if arguments.command == "plan":
+            from .runner import applies, quality_only
+
             names, excluded = machine_list()
             for item in excluded:
                 print(json.dumps({"profile": item["profile"], "task": item["task"], "excluded": item["reason"]}))
@@ -491,10 +493,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                                       "backend": model["reference"]["backend"],
                                       "accuracy_source": model["accuracy_source"],
                                       "benchmarks": [item["suite"] for item in model["absolute"]],
-                                      "supplementary": [item["check"] for item in model["supplementary"]],
-                                      "perf_request": model["performance"]["suite"]["source"]["kind"],
+                                      "supplementary": [item["check"] for item in model["supplementary"]
+                                                        if not item.get("informational") and applies(item, model)],
+                                      "perf_request": "quality" if quality_only(model) else
+                                                      model["performance"]["suite"]["source"]["kind"],
                                       "bundle": model["candidate"]["bundle"],
-                                      "modes": model["performance"]["reference_modes"]}))
+                                      "modes": ["eager"] if quality_only(model) else model["performance"]["reference_modes"]}))
                 except ConfigError as error:
                     print(json.dumps({"profile": name, "error": str(error)}))
             return 0

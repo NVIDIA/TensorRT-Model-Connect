@@ -47,6 +47,18 @@ def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expect
         statuses = {item["status"] for item in accuracy}
         acc = ("pass" if statuses == {"pass"} else "error" if "error" in statuses else "fail" if "fail" in statuses else
                "inconclusive" if "inconclusive" in statuses else "not-comparable")
+    if result.get("performance_source") == "quality":
+        datasets = [item for item in result.get("performance", []) if item.get("kind") == "natural_dataset"]
+        names = {item.get("request") for item in datasets}
+        required = set(result.get("performance_expected", [item.get("suite") for item in accuracy
+                                                           if item.get("source") == "absolute"]))
+        perf = ("error" if not datasets or not required <= names or any(not item.get("complete") for item in datasets)
+                else "measured" if all(item.get("comparable") for item in datasets) else "not-comparable")
+        # A dataset measurement is not a repeated-run performance acceptance test.
+        category = ("error" if "error" in (acc, perf) else "acc-issue" if acc == "fail" else
+                    "acc-inconclusive" if acc == "inconclusive" else "not-comparable" if acc == "not-comparable" else
+                    "perf-inconclusive" if perf == "not-comparable" else "measured")
+        return {"acc": acc, "perf": perf, "lights": {}, "category": category}
     qualifying = [item["light"] for item in result.get("performance", [])
                   if item.get("reference_mode") == QUALIFYING_MODE and item.get("gate", True)]
     perf = "error" if len(qualifying) < max(expected_modes, 1) or {"error", "n/a"} & set(qualifying) else (

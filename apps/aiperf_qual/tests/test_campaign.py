@@ -791,3 +791,28 @@ def test_results_follow_the_owners_four_colours_on_the_catalog_request():
     shown = campaign.reported_perf(row("pass", {"catalog": "green", "catalog-near-capacity": "red"}))
     assert [campaign.request_label("m", item) for item in shown] == ["catalog"]
     assert campaign.signal_reason("m", row("perf-issue", {"catalog": "yellow"})) == "catalog: TRTMC about equal to native"
+
+
+def test_quality_dataset_timings_are_the_main_report_and_keep_their_benchmark_label(tmp_path):
+    from trtmc_aiperf_qual import cli, report, report_html
+
+    out = tmp_path / "qwen"
+    out.mkdir()
+    item = {"request": "mmlu-0shot", "reference_mode": "eager", "kind": "natural_dataset", "gate": False,
+            "complete": True, "comparable": True, "light": "informational", "pairs": 2, "matched_pairs": 2,
+            "reference": {"p50_ms": 123.0, "precision": "fp16"},
+            "candidate": {"p50_ms": 45.0, "precision": "fp16"}}
+    result = {"model": "qwen", "task": "text_generation", "performance_source": "quality", "provenance": {},
+              "accuracy_source": "absolute", "accuracy": [{"suite": "mmlu-0shot", "source": "absolute", "status": "pass"}],
+              "performance": [item], "verdict": {"acc": "pass", "perf": "measured", "category": "measured"}}
+    model = {"absolute": [{"suite": "mmlu-0shot"}], "accuracy_source": "absolute", "performance": {}}
+    (out / "model.json").write_text(json.dumps(model))
+    report.write_report(out, result)
+    rows, counts, rank = campaign.collect([tmp_path])
+    assert campaign.reported_perf(rows["qwen"]) == [item]
+    page = report_html.render(rows, counts, rank, tmp_path / "summary.html").read_text()
+    assert "mmlu-0shot" in page and "123 ms" in page and "45.0 ms" in page
+    assert "p50 of the catalog" not in page and "Speedup" not in page
+    cli.rejudge_reports([out])
+    saved = json.loads((out / "report.json").read_text())
+    assert saved["verdict"]["perf"] == "measured" and saved["performance"] == [item]

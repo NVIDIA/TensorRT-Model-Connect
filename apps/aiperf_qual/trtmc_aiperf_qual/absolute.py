@@ -766,6 +766,7 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
 
     errors = []
     for precision in precisions or timing_precisions(model["reference"]):
+        evidence_start = execution.checkpoint()
         try:
             count = copies or native_copies(environment)
             with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{precision}",
@@ -790,6 +791,7 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
                     "mps": bool(service.get("mps")),
                     **({"fallback_from": "; ".join(errors)[:600]} if errors else {})}
         except Exception as error:  # noqa: BLE001 - the next precision
+            execution.supersede(evidence_start)
             errors.append(f"{precision}: {type(error).__name__}: {str(error)[-300:]}")
     raise RuntimeError("; ".join(errors)[:1500])
 
