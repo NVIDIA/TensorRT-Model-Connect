@@ -322,6 +322,14 @@ class VideoFixture final : public IModel,
     }
     AudioVideoResult run(const TextToAudioVideoRequest& input, ConfigView config) override {
         ++single_calls;
+        if (mode_ == "worker") {
+            (void)gain(config);
+            AudioVideoResult result;
+            result.video.frames.num_frames = 0;
+            result.audio.sample_rate = 48000;
+            result.audio.channels = 2;
+            return result;
+        }
         auto result = audio_video(16, float(input.prompt.size()) / 100, gain(config));
         if (mode_ == "bad_av")
             result.audio_start_seconds.reset();
