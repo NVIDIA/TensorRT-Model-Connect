@@ -799,6 +799,8 @@ def _encoder_embedding_parity(
         mode, operation = {
             "encoding": ("cls", "encode"),
             "embedding": ("embedding", "embed"),
+            "text_to_pooled_features": ("cls", "encode"),
+            "text_to_embedding": ("embedding", "embed"),
         }[task]
     except KeyError as error:
         raise QualificationError(
