@@ -35,14 +35,29 @@ def main():
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--dynamic", choices=("auto", "static", "dynamic"), default="auto")
     parser.add_argument(
+        "--emulate-precision-casts",
+        action="store_true",
+        help="Preserve the original BF16 rounding boundaries when validating compiled accuracy",
+    )
+    parser.add_argument(
         "--aten-masked-scatter",
         action="store_true",
         help="Use ATen for masked_scatter if the compiler's scan kernel fails; record this fallback",
     )
+    parser.add_argument(
+        "--aten-layer-norm",
+        action="store_true",
+        help="Retain the original ATen LayerNorm when compiler lowering fails accuracy",
+    )
     args = parser.parse_args()
     if args.warmup < 1 or args.iterations < 1:
         parser.error("warmup and iterations must be positive")
-    if args.aten_masked_scatter:
+    if args.emulate_precision_casts:
+        import torch._inductor.config as inductor_config
+
+        inductor_config.emulate_precision_casts = True
+    aten_fallbacks = []
+    if args.aten_masked_scatter or args.aten_layer_norm:
         # Keep the original operation and inputs. Only its compiler lowering
         # changes; the rest of the model still uses max-autotune compilation.
         from torch._inductor.decomposition import decompositions
@@ -50,9 +65,14 @@ def main():
         import torch._inductor.config as inductor_config
         import torch._functorch.config as autograd_config
 
-        operation = torch.ops.aten.masked_scatter.default
-        decompositions.pop(operation, None)
-        make_fallback(operation, warn=False)
+        for enabled, name, operation in (
+            (args.aten_masked_scatter, "masked_scatter", torch.ops.aten.masked_scatter.default),
+            (args.aten_layer_norm, "native_layer_norm", torch.ops.aten.native_layer_norm.default),
+        ):
+            if enabled:
+                decompositions.pop(operation, None)
+                make_fallback(operation, warn=False)
+                aten_fallbacks.append(name)
         # Graph cache keys do not include this decomposition-table override.
         # Keep kernel autotune caches, but regenerate the affected graph IR.
         inductor_config.fx_graph_cache = False
@@ -123,7 +143,7 @@ def main():
                 "mode": "max-autotune",
                 "fullgraph": False,
                 "dynamic": dynamic,
-                "aten_fallbacks": ["masked_scatter"] if args.aten_masked_scatter else [],
+                "aten_fallbacks": aten_fallbacks,
                 "scope": "public_task_call_wall",
                 "warmup": args.warmup,
                 "iterations": args.iterations,

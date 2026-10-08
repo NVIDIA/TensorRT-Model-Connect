@@ -122,8 +122,28 @@ image-file decoding are excluded. `tests/benchmark_compile.py` measures the
 same boundary with `torch.compile(mode="max-autotune")` and checks compiled
 accuracy before timing.
 Pass `--model clef-flash` to select Flash's pinned checkpoint metadata and fixtures.
+For fixed-workload comparisons, `--dynamic static` avoids recompiling symbolic
+sequence shapes. `--emulate-precision-casts` preserves the original BF16
+rounding boundaries. If compiler lowering fails accuracy, `--aten-layer-norm`
+retains the original normalization kernel. Each receipt records these settings
+and any ATen fallbacks; failed accuracy runs do not produce timing results.
 
-On GB300 with TensorRT 11.1.0.106, all seven E2E cases pass against the pinned
+To check changing text and media requests through one loaded Task, run:
+
+```bash
+PYTHONPATH=core/builder:apps/benchmark:. \
+python -m families.clef.tests.compare_sequence \
+  --checkpoint /path/to/pinned/checkpoint --model clef-flash \
+  --bundle clef-flash.bundle --runtime-root build \
+  --probe build/clef_task_probe --output clef-flash-sequence
+```
+
+This checks every manifest case twice, with the same per-option accuracy gates
+as E2E, and requires exact repeatability after the intervening requests.
+
+The following historical measurements describe the 27B qualification in
+[PR #1598](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1598).
+On GB300 with TensorRT 11.1.0.106, all seven E2E cases passed against the pinned
 original implementation. This includes the two model-card text examples,
 alternative answers, multilingual input, a receipt image, and video frames.
 The largest absolute option-probability difference is 0.002188; the BF16 gate
