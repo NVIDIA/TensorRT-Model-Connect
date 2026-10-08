@@ -1,0 +1,12 @@
+{
+  "state": "A resolved billing ticket.",
+  "questions": {
+    "status": {
+      "type": "choice",
+      "instructions": "Choose the only available status.",
+      "criteria": [
+        "closed"
+      ]
+    }
+  }
+}

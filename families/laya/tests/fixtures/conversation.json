@@ -1,0 +1,41 @@
+{
+  "state": [
+    {
+      "role": "user",
+      "content": "Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. Previous message. "
+    },
+    {
+      "role": "user",
+      "content": "The duplicate invoice charge is still unresolved. Refund it today or I will cancel."
+    }
+  ],
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which department should handle this request?",
+      "criteria": {
+        "billing": "invoices, payments, refunds",
+        "technical": "bugs, outages, system errors",
+        "sales": "pricing, new contracts",
+        "other": "everything else"
+      }
+    },
+    "urgency": {
+      "type": "score",
+      "instructions": "How urgent is this request?",
+      "criteria": [
+        "not urgent",
+        "soon",
+        "critical deadline or blocking issue"
+      ]
+    },
+    "churn_risk": {
+      "type": "noul",
+      "instructions": "Does the user threaten to cancel or leave?"
+    },
+    "refund_requested": {
+      "type": "noul",
+      "instructions": "Does the user explicitly request a refund?"
+    }
+  }
+}

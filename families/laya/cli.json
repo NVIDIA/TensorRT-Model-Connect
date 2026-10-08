@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build", "help": "Build a Laya decision checkpoint", "executor": "python", "handler": "cli:build",
+      "arguments": [
+        {"name": "model", "type": "string"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "variant", "flags": ["--variant"], "type": "string", "default": "english"},
+        {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int"},
+        {"name": "max_batch_size", "flags": ["--max-batch-size"], "type": "int", "default": 8},
+        {"name": "max_options", "flags": ["--max-options"], "type": "int", "default": 256}
+      ]
+    },
+    {
+      "name": "decide", "help": "Answer a JSON record using Laya", "executor": "native", "handler": "decide",
+      "arguments": [
+        {"name": "bundle", "type": "path"},
+        {"name": "record", "flags": ["--record"], "type": "path", "required": true},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path"}
+      ]
+    }
+  ]
+}

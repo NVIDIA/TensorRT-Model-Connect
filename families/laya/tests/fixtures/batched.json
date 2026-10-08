@@ -1,0 +1,90 @@
+{
+  "state": {
+    "from": "user@acme.com",
+    "subject": "Duplicate charge on invoice #4411",
+    "body": "Hi, we were billed twice for March. Please refund the duplicate today or we will cancel our plan."
+  },
+  "questions": {
+    "department_0": {
+      "type": "choice",
+      "instructions": "Which department should handle this request?",
+      "criteria": {
+        "billing": "invoices, payments, refunds",
+        "technical": "bugs, outages, system errors",
+        "sales": "pricing, new contracts",
+        "other": "everything else"
+      }
+    },
+    "urgency_0": {
+      "type": "score",
+      "instructions": "How urgent is this request?",
+      "criteria": [
+        "not urgent",
+        "soon",
+        "critical deadline or blocking issue"
+      ]
+    },
+    "churn_risk_0": {
+      "type": "noul",
+      "instructions": "Does the user threaten to cancel or leave?"
+    },
+    "refund_requested_0": {
+      "type": "noul",
+      "instructions": "Does the user explicitly request a refund?"
+    },
+    "department_1": {
+      "type": "choice",
+      "instructions": "Which department should handle this request?",
+      "criteria": {
+        "billing": "invoices, payments, refunds",
+        "technical": "bugs, outages, system errors",
+        "sales": "pricing, new contracts",
+        "other": "everything else"
+      }
+    },
+    "urgency_1": {
+      "type": "score",
+      "instructions": "How urgent is this request?",
+      "criteria": [
+        "not urgent",
+        "soon",
+        "critical deadline or blocking issue"
+      ]
+    },
+    "churn_risk_1": {
+      "type": "noul",
+      "instructions": "Does the user threaten to cancel or leave?"
+    },
+    "refund_requested_1": {
+      "type": "noul",
+      "instructions": "Does the user explicitly request a refund?"
+    },
+    "department_2": {
+      "type": "choice",
+      "instructions": "Which department should handle this request?",
+      "criteria": {
+        "billing": "invoices, payments, refunds",
+        "technical": "bugs, outages, system errors",
+        "sales": "pricing, new contracts",
+        "other": "everything else"
+      }
+    },
+    "urgency_2": {
+      "type": "score",
+      "instructions": "How urgent is this request?",
+      "criteria": [
+        "not urgent",
+        "soon",
+        "critical deadline or blocking issue"
+      ]
+    },
+    "churn_risk_2": {
+      "type": "noul",
+      "instructions": "Does the user threaten to cancel or leave?"
+    },
+    "refund_requested_2": {
+      "type": "noul",
+      "instructions": "Does the user explicitly request a refund?"
+    }
+  }
+}

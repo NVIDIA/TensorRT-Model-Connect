@@ -1,0 +1,63 @@
+{
+  "name": "laya-multilingual",
+  "hf_id": "convaiinnovations/laya",
+  "hf_revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+  "family": "laya",
+  "task": "structured_decision",
+  "bundle": "laya-multilingual.bundle",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1024,
+  "variant": "multilingual",
+  "testcases": [
+    {
+      "name": "laya-multilingual-hindi",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/hindi.json"
+      }
+    },
+    {
+      "name": "laya-multilingual-spanish",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/spanish.json"
+      }
+    },
+    {
+      "name": "laya-multilingual-email",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/email.json"
+      }
+    },
+    {
+      "name": "laya-multilingual-single-option",
+      "premerge": false,
+      "inputs": {
+        "document_path": "fixtures/single-option.json"
+      }
+    },
+    {
+      "name": "laya-multilingual-conversation",
+      "premerge": false,
+      "inputs": {
+        "document_path": "fixtures/conversation.json"
+      }
+    },
+    {
+      "name": "laya-multilingual-empty",
+      "premerge": false,
+      "inputs": {
+        "document_path": "fixtures/empty.json"
+      }
+    },
+    {
+      "name": "laya-multilingual-batched",
+      "premerge": false,
+      "inputs": {
+        "document_path": "fixtures/batched.json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""All released Laya variants through the C++ Task, compared with the original SDK."""
+
+from functools import cache
+import json
+import os
+from pathlib import Path
+import subprocess
+
+import numpy as np
+import pytest
+
+ROOT = Path(__file__).parent
+MANIFESTS = {
+    item["name"]: item
+    for path in sorted((ROOT / "manifests").glob("*.json"))
+    for item in [json.loads(path.read_text())]
+}
+
+
+def _selection(config):
+    return {
+        name.strip()
+        for option in ("--e2e-model", "--e2e-testcase")
+        for value in (config.getoption(option, default=[]) or [])
+        for name in str(value).split(",")
+        if name.strip()
+    }
+
+
+@pytest.fixture(scope="module")
+def laya_models(tmp_path_factory):
+    @cache
+    def reference(checkpoint, variant):
+        from laya import Agent
+        from families.laya.cli import VARIANTS
+
+        agent = Agent(
+            str(Path(checkpoint) / VARIANTS[variant]), device="cuda", fast=False, compile=False
+        )
+        assert agent.device.type == "cuda"
+        return agent
+
+    @cache
+    def resolve(name):
+        from families.laya.cli import build
+
+        manifest = MANIFESTS[name]
+        checkpoint = os.environ.get("TRTMC_LAYA_CHECKPOINT")
+        if checkpoint is None:
+            from huggingface_hub import snapshot_download
+
+            checkpoint = snapshot_download(manifest["hf_id"], revision=manifest["hf_revision"])
+        prefix = "TRTMC_" + name.upper().replace("-", "_")
+        value = os.environ.get(prefix + "_BUNDLE")
+        bundle = Path(value) if value else tmp_path_factory.mktemp(name) / manifest["bundle"]
+        if value is None:
+            build(model=checkpoint, output=bundle, variant=manifest["variant"])
+        return bundle, lambda variant: reference(str(checkpoint), variant)
+
+    return resolve
+
+
+def compare_response(actual, expected):
+    if isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            compare_response(actual[key], expected[key])
+    elif isinstance(expected, (float, int)):
+        np.testing.assert_allclose(actual, expected, atol=0.002, rtol=0.01)
+    else:
+        assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("manifest", "case"),
+    [
+        pytest.param(manifest, case, id=case["name"])
+        for manifest in MANIFESTS.values()
+        for case in manifest["testcases"]
+    ],
+)
+def test_e2e(manifest, case, request, tmp_path):
+    selected = _selection(request.config)
+    if not selected and os.environ.get("TRTMC_E2E") != "1":
+        pytest.skip("real Laya E2E requires explicit selection")
+    if selected and not selected.intersection({"laya", manifest["name"], case["name"]}):
+        pytest.skip("Laya case was not selected")
+    import torch
+    from laya.common import collate_items, temp_bucket
+
+    probe = request.getfixturevalue("laya_task_probe")
+    bundle, reference_agent = request.getfixturevalue("laya_models")(manifest["name"])
+    fixture = ROOT / case["inputs"]["document_path"]
+    record = json.loads(fixture.read_text())
+    routing = None
+    variant = manifest["variant"]
+    if variant == "router":
+        from laya import Router
+
+        routing = Router().route(record["state"], record["questions"], model=record.get("model"))
+        variant = routing.model
+    agent = reference_agent(variant)
+    ids = list(record["questions"])
+    internal = {qid: agent._to_internal(record["questions"][qid]) for qid in ids}
+    items = agent._encode_state(record["state"], ids, internal) if ids else []
+    with torch.inference_mode():
+        reference = agent.predict(record["state"], record["questions"])
+        logits = agent._forward(collate_items([items], agent.tok.pad_token_id))[0] if items else []
+    assert agent.device.type == "cuda", "the reference must not silently fall back to CPU"
+    if routing is not None:
+        reference["routing"] = routing
+    native = json.loads(
+        subprocess.check_output(
+            [str(probe), str(bundle), os.environ["TRTMC_RUNTIME_ROOT"], str(fixture), "2"],
+            text=True,
+        )
+    )
+    assert not any(
+        any(token in name.lower() for token in ("python", "torch", "c10"))
+        for name in native["loaded_libraries"]
+    )
+    result = native["results"][0]
+    if routing is not None:
+        assert result["response"]["routing"] == routing
+    assert result["scores"] == native["results"][1]["scores"]
+    assert result["response"]["usage"] == reference["usage"]
+    compare_response(result["response"], reference)
+    assert len(result["scores"]) == len(ids)
+    for qid, item, raw, actual in zip(ids, items, logits, result["scores"], strict=True):
+        assert actual["question_id"] == qid
+        count = len(item["markers"])
+        scale = agent.temperature_by_options.get(
+            temp_bucket(item["qtype"], count), agent.temperature[item["qtype"]]
+        )
+        expected = raw[:count] / scale
+        probabilities = np.exp(expected - expected.max())
+        probabilities /= probabilities.sum()
+        np.testing.assert_allclose(actual["logits"], expected, atol=0.125, rtol=0.015)
+        np.testing.assert_allclose(actual["probabilities"], probabilities, atol=0.002, rtol=0.01)
+        assert np.argmax(actual["probabilities"]) == np.argmax(probabilities)
+    (tmp_path / "native.json").write_text(json.dumps(native, indent=2))
