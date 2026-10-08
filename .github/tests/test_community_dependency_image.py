@@ -39,7 +39,12 @@ def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
     )
     inputs = caller["on"]["workflow_dispatch"]["inputs"]
     assert inputs["task"]["default"] == "test"
-    assert inputs["task"]["options"] == ["test", "dependency-image", "dependency-image-audit"]
+    assert inputs["task"]["options"] == [
+        "test",
+        "dependency-image",
+        "dependency-image-audit",
+        "dependency-image-withdraw",
+    ]
     jobs = caller["jobs"]
     producer = jobs["produce-dependency-image"]
     assert producer["if"] == (
@@ -51,8 +56,15 @@ def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
     for name in ("snapshot", "authorize", "required"):
         assert "inputs.task != 'dependency-image'" in jobs[name]["if"]
     for name, job in jobs.items():
-        if name != "produce-dependency-image":
+        if name not in {"produce-dependency-image", "withdraw-dependency-image"}:
             assert job.get("permissions", {}).get("packages") != "write"
+    withdrawal = jobs["withdraw-dependency-image"]
+    assert withdrawal["permissions"] == {"contents": "read", "packages": "write"}
+    assert "uses" not in withdrawal and "secrets" not in withdrawal
+    authorization = withdrawal["steps"][0]["run"]
+    assert 'test "$GITHUB_EVENT_NAME" = workflow_dispatch' in authorization
+    assert "refs/heads/main|refs/heads/ci/developer" in authorization
+    assert "admin|maintain" in authorization
     assert caller["concurrency"]["cancel-in-progress"] == "false"
 
 
@@ -90,7 +102,10 @@ def test_registered_audit_cannot_enter_test_or_producer_jobs() -> None:
     assert audit["runs-on"] == "ubuntu-24.04"
     assert audit["permissions"] == {"contents": "read", "packages": "read"}
     assert not audit.get("secrets")
-    for task in ("test", "dependency-image", "dependency-image-audit"):
+    for task in ("test", "dependency-image", "dependency-image-audit", "dependency-image-withdraw"):
+        assert workflow_condition(jobs["withdraw-dependency-image"]["if"], task=task) == (
+            task == "dependency-image-withdraw"
+        )
         assert workflow_condition(audit["if"], task=task) == (task == "dependency-image-audit")
         assert workflow_condition(jobs["produce-dependency-image"]["if"], task=task) == (
             task == "dependency-image"

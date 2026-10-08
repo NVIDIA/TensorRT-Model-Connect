@@ -199,7 +199,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request_target' ||
-       (github.event_name == 'workflow_dispatch' && !startsWith(inputs.task, 'dependency-image') && inputs.source_snapshot == ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.source_snapshot == ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -514,7 +514,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request' ||
-       (github.event_name == 'workflow_dispatch' && !startsWith(inputs.task, 'dependency-image') && inputs.source_snapshot != ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.source_snapshot != ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -746,7 +746,7 @@ jobs:
 
   required:
     name: Community CPU / Required
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && !startsWith(inputs.task, 'dependency-image') && inputs.source_snapshot != '')) }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.source_snapshot != '')) }}
     needs:
       - authorize
       - source-quality

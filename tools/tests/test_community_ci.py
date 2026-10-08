@@ -227,7 +227,8 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
     # executor must still run it so skipped CPU stages produce failure.
     assert jobs["required"]["if"] == (
         "${{ !cancelled() && (github.event_name == 'pull_request' || "
-        "(github.event_name == 'workflow_dispatch' && !startsWith(inputs.task, 'dependency-image') "
+        "(github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' "
+        "&& inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' "
         "&& inputs.source_snapshot != '')) }}"
     )
     assert jobs["required"]["needs"] == [
