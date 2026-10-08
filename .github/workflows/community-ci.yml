@@ -957,6 +957,9 @@ jobs:
 
       - name: Build the GPU image and validate the exact PR merge
         id: test
+        # Bound setup + validation separately from the 360-minute job so the
+        # blocking release step retains at least an hour after provisioning.
+        timeout-minutes: 240
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
           MERGE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
@@ -1078,16 +1081,24 @@ jobs:
           # tools.brev_exec preserves the remote application's real result.
           # The workflow does not retry or replace the VM for that result.
           echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
+          execution_budget="$(env \
+            "TRTMC_GPU_SCOPE=$SCOPE" \
+            "TRTMC_GPU_FAMILIES=$FAMILIES" \
+            "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
+            "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            python3 -m tools.community_gpu_ci --execution-budget)"
+          echo "Selected-family execution budget: ${execution_budget}s"
           python3 -m tools.brev_exec \
             --instance "$INSTANCE_NAME" \
             --log /tmp/gpu-ci-output.log \
             --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --timeout 2700 \
+            --timeout "$((execution_budget + 120))" \
             -- sudo env \
             "TRTMC_GPU_SCOPE=$SCOPE" \
             "TRTMC_GPU_FAMILIES=$FAMILIES" \
             "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
             "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            "TRTMC_GPU_RESULTS_DIR=/tmp/trtmc-community-results-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
             /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect --checkpoint-token-file "$remote_auth/token"
           cleanup_checkpoint_token
@@ -1105,6 +1116,14 @@ jobs:
             --lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" \
             --until-deleted
           echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize every selected GPU family
+        if: always()
+        run: |
+          python3 -m tools.community_gpu_ci \
+            --summarize-log /tmp/gpu-ci-output.log \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            > "$RUNNER_TEMP/trtmc-community-gpu-summary.json"
 
       - name: Record the step conclusion
         if: always()
@@ -1143,7 +1162,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gpu-ci-output-${{ needs.gpu-authorize.outputs.pr_number }}
-          path: /tmp/gpu-ci-output.log
+          path: |
+            /tmp/gpu-ci-output.log
+            ${{ runner.temp }}/trtmc-community-gpu-summary.json
           if-no-files-found: ignore
           retention-days: 7
 

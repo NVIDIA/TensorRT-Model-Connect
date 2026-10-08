@@ -936,8 +936,8 @@ python3() {
             "GPU_TYPE": "test",
             "CI_SHA": "a" * 40,
             "MERGE_SHA": "b" * 40,
-            "FAMILIES": "[]",
-            "DIRECT_FAMILIES": "[]",
+            "FAMILIES": '["bert"]',
+            "DIRECT_FAMILIES": '["bert"]',
             "ADDED_FAMILIES": "[]",
             "SCOPE": "families",
             "CUDA_ARCHITECTURES": "89",
@@ -964,7 +964,9 @@ python3() {
     )
     assert ("VM teardown is still required" in auth_result.stderr) is cleanup_fails
     assert 'timeout 30s brev exec "$checkpoint_instance"' in test_step["run"]
-    assert "--timeout 2700" in test_step["run"]
+    assert '--timeout "$((execution_budget + 120))"' in test_step["run"]
+    assert test_step["timeout-minutes"] == 240
+    assert "--execution-budget" in test_step["run"]
     publish = workflow["jobs"]["publish"]["steps"][0]
     assert publish["env"]["CPU_RESULT"] == "${{ needs.required.result }}"
     assert publish["env"]["GPU_RESULT"] == "${{ needs.provision-and-test.result }}"
@@ -2238,7 +2240,7 @@ def test_gpu_coordinator_runs_once_on_the_ready_instance(tmp_path, gpu_job, coor
     coordinated = harness.events("coordinate")
     assert len(coordinated) == 1
     assert f"--instance {instance}" in coordinated[0]
-    assert "--timeout 2700" in coordinated[0]
+    assert "--timeout 3720" in coordinated[0]
     remote = harness.events("brev")
     assert not any(call.startswith(("create ", "delete ")) for call in remote)
     assert not any(call == f"exec {instance} true" for call in remote)

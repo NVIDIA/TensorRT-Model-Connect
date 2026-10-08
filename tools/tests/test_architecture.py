@@ -384,8 +384,18 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     # Each reviewed contract group remains a closed set: this convention does
     # not admit arbitrary new shared files or model-specific implementations.
     for group in (
-        "audio", "features", "numeric", "stream", "video", "perception",
-        "language", "tracking", "speech", "action", "recurrent", "structure",
+        "audio",
+        "features",
+        "numeric",
+        "stream",
+        "video",
+        "perception",
+        "language",
+        "tracking",
+        "speech",
+        "action",
+        "recurrent",
+        "structure",
     ):
         expected_api.update(
             {
@@ -1545,7 +1555,7 @@ def _implemented_task_ids(source: str, interfaces: dict[str, str]) -> set[str]:
 
 def test_task_contract_inventory_recognizes_implemented_interfaces_not_mentions() -> None:
     declarations = _declared_task_interfaces(
-        '''
+        """
         class IModel { public: virtual void describe() = 0; };
         class ITextContinuation {
             public: static constexpr std::string_view kTask = "text_continuation";
@@ -1561,7 +1571,7 @@ def test_task_contract_inventory_recognizes_implemented_interfaces_not_mentions(
                                        "batch_recurrent_tokens_to_logits", step, Request, Result)
         // TRTMC_TRACK_FACTORY(PhantomTracks, "phantom_tracks", create, Input)
         // class IPhantom { static constexpr auto kTask = "phantom"; };
-        '''
+        """
     )
     assert declarations == {
         "ITextContinuation": "text_continuation",
@@ -1572,22 +1582,22 @@ def test_task_contract_inventory_recognizes_implemented_interfaces_not_mentions(
         "IBatchRecurrentTokensToLogits": "batch_recurrent_tokens_to_logits",
     }
     assert _implemented_task_ids(
-        '''
+        """
         class Family : public trtmc::internal::ITextContinuation,
                        public internal::ILatentReplayToText {};
         // public ITextGeneration is not an implementation.
         /* public ITextGeneration */
         ITextGeneration* pointer_only;
-        ''',
+        """,
         declarations,
     ) == {"text_continuation", "latent_replay_to_text"}
     assert _implemented_task_ids("class Family : public INotDefined {};", declarations) == set()
     assert _implemented_task_ids(
-        '''
+        """
         class Tracker : public trtmc::internal::IFramesBoxToMaskTracks {};
         class Recurrent : public internal::IRecurrentTokensToLogits,
                           public internal::IBatchRecurrentTokensToLogits {};
-        ''',
+        """,
         declarations,
     ) == {
         "frames_box_to_mask_tracks",
@@ -1692,7 +1702,7 @@ def test_manifests_contain_only_family_test_inputs_not_central_orchestration() -
             for index, case in enumerate(manifest.get("testcases", [])):
                 for field in sorted(forbidden & case.keys()):
                     violations.append(f"{path.relative_to(REPO)}:testcases[{index}]:{field}")
-                for field in sorted(case.keys() - consumed - {"premerge"}):
+                for field in sorted(case.keys() - consumed - {"premerge", "community_gpu"}):
                     violations.append(f"{path.relative_to(REPO)}:testcases[{index}]:unused:{field}")
     assert violations == []
 
