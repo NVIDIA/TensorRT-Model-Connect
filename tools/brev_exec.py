@@ -489,6 +489,19 @@ class InventoryError(ProvisionError):
     """Inventory visibility is unknown; retry without replacing the allocation."""
 
 
+class CommandTimeout(ProvisionError):
+    """The CLI exceeded its bound; captured streams may contain partial evidence."""
+
+    def __init__(self, message: str, stdout: str = "", stderr: str = "") -> None:
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _captured_text(value: str | bytes | None) -> str:
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+
+
 def _remaining(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -522,6 +535,8 @@ def _run(
     try:
         stdout, stderr = process.communicate(input_text, timeout=timeout)
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+        stdout = _captured_text(getattr(error, "stdout", None))
+        stderr = _captured_text(getattr(error, "stderr", None))
         # Brev's internal retries can leave ssh children running after the CLI
         # is killed. Terminate the complete process group, including those children.
         try:
@@ -531,8 +546,16 @@ def _run(
         # An escaped daemon may retain the pipes after the CLI group is gone.
         # Drain only within the remaining deadline; do not wait for that daemon.
         try:
-            process.communicate(timeout=max(0.0, min(1.0, deadline - time.monotonic())))
-        except subprocess.TimeoutExpired:
+            drained_stdout, drained_stderr = process.communicate(
+                timeout=max(0.0, min(1.0, deadline - time.monotonic()))
+            )
+            stdout = _captured_text(drained_stdout)
+            stderr = _captured_text(drained_stderr)
+        except subprocess.TimeoutExpired as drain_error:
+            if drain_error.stdout is not None:
+                stdout = _captured_text(drain_error.stdout)
+            if drain_error.stderr is not None:
+                stderr = _captured_text(drain_error.stderr)
             for stream in (process.stdout, process.stderr):
                 if stream is not None:
                     stream.close()
@@ -542,7 +565,9 @@ def _run(
                 pass
         if isinstance(error, KeyboardInterrupt):
             raise
-        raise ProvisionError(f"brev {command[1]} exceeded its bounded wait") from None
+        raise CommandTimeout(
+            f"brev {command[1]} exceeded its bounded wait", stdout, stderr
+        ) from None
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
@@ -723,6 +748,38 @@ def _safe_lines(output: str) -> list[str]:
         if re.fullmatch(r"TRTMC_DISK_AVAILABLE_BYTES=[0-9]{1,18}", line):
             result.append(line)
     return result
+
+
+def _probe_evidence(
+    stdout: str, stderr: str, marker: str, returncode: int | None, outcome: str
+) -> dict:
+    # Retain fixed diagnostic categories, never arbitrary CLI messages, identities or URLs.
+    stderr_text = stderr.casefold()
+    signals = [
+        label
+        for phrase, label in (
+            ("permission denied (publickey", "ssh_authentication_failed"),
+            ("host key verification failed", "ssh_host_key_verification_failed"),
+            ("connection closed", "connection_closed"),
+            ("connection reset", "connection_reset"),
+            ("connection timed out", "connection_timed_out"),
+            ("operation timed out", "operation_timed_out"),
+            ("broken pipe", "broken_pipe"),
+            ("could not resolve hostname", "hostname_resolution_failed"),
+            ("sudo: a password is required", "sudo_password_required"),
+        )
+        if phrase in stderr_text
+    ]
+    return {
+        "outcome": outcome,
+        "returncode": returncode,
+        "stdout_present": bool(stdout),
+        "stderr_present": bool(stderr),
+        "stdout_ready_marker": marker in stdout.splitlines(),
+        "stdout_safe_lines": _safe_lines(stdout),
+        "stderr_safe_lines": _safe_lines(stderr),
+        "stderr_signals": signals,
+    }
 
 
 def _save_lease(path: Path, lease: dict) -> None:
@@ -1106,11 +1163,24 @@ def _wait_ready(
                     deadline,
                     PROBE_TIMEOUT,
                 )
+            except CommandTimeout as error:
+                evidence = _probe_evidence(error.stdout, error.stderr, marker, None, "timeout")
+                _log(start, f"{name}: readiness probe unavailable within its bounded wait")
             except (ProvisionError, OSError):
+                evidence = _probe_evidence("", "", marker, None, "unavailable")
                 _log(start, f"{name}: readiness probe unavailable within its bounded wait")
             else:
-                for line in _safe_lines(result.stdout):
-                    _log(start, f"{name}: {line}")
+                evidence = _probe_evidence(
+                    result.stdout, result.stderr, marker, result.returncode, "completed"
+                )
+            lease["last_probe_evidence"] = evidence
+            _save_lease(lease_file, lease)
+            _log(start, f"{name}: readiness probe evidence {json.dumps(evidence, sort_keys=True)}")
+            for line in evidence["stdout_safe_lines"]:
+                _log(start, f"{name}: {line}")
+            for line in evidence["stderr_safe_lines"]:
+                _log(start, f"{name}: stderr {line}")
+            if evidence["outcome"] == "completed":
                 receipt = _probe_receipt(result.stdout, marker, min_free_disk_gb)
                 if result.returncode == 0 and receipt is not None:
                     current = _inventory(name, deadline, start, lease["instance_id"], lease["sku"])

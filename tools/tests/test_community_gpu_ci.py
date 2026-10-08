@@ -2164,8 +2164,14 @@ def test_hung_cli_and_ssh_child_are_killed_at_subprocess_deadline(tmp_path: Path
 
     assert time.monotonic() - start < 2
     child_stat = Path(f"/proc/{child_pid.read_text(encoding='utf-8')}/stat")
+    # SIGKILL delivery is asynchronous; retain the original total termination bound.
+    while child_stat.exists() and time.monotonic() < start + 2:
+        if child_stat.read_text(encoding="utf-8").split()[2] == "Z":
+            break
+        time.sleep(0.005)
     if child_stat.exists():
         assert child_stat.read_text(encoding="utf-8").split()[2] == "Z"
+    assert time.monotonic() - start < 2
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process sessions required")
@@ -2643,3 +2649,167 @@ def test_summary_rejects_malformed_case_data_and_recomputes_coverage(tmp_path):
     path = tmp_path / "log"
     path.write_text(community_gpu_ci.SUMMARY_PREFIX + json.dumps(record))
     assert community_gpu_ci.summarize_log(path, tmp_path / "summary") is None
+
+
+@pytest.mark.parametrize(
+    "failure,expected_code,expected_signal",
+    [
+        ("ssh", 255, "connection_closed"),
+        ("stderr-receipt", 0, None),
+        ("nonzero-receipt", 17, None),
+        ("failed-phase", 0, None),
+        ("unknown-stderr", 1, None),
+    ],
+)
+def test_probe_failure_evidence_preserves_safe_distinctions_without_accepting(
+    fake, monkeypatch, capsys, failure, expected_code, expected_signal
+):
+    snapshots = []
+    save = brev_provision._save_lease
+
+    def record(path, lease):
+        if "last_probe_evidence" in lease:
+            snapshots.append(json.loads(json.dumps(lease["last_probe_evidence"])))
+        save(path, lease)
+
+    attempts = 0
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        nonlocal attempts
+        result = fake(command, deadline, cap, **kwargs)
+        if command[1] != "exec":
+            return result
+        attempts += 1
+        if attempts > 1:
+            return result
+        if failure == "ssh":
+            return subprocess.CompletedProcess(
+                command, 255, "", "Connection closed by 192.0.2.4 private-probe-token\n"
+            )
+        if failure == "stderr-receipt":
+            return subprocess.CompletedProcess(
+                command, 0, "", result.stdout + "private-probe-token"
+            )
+        if failure == "nonzero-receipt":
+            return subprocess.CompletedProcess(command, 17, result.stdout, "private-probe-token")
+        if failure == "failed-phase":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                result.stdout.replace("TRTMC_PHASE_docker=0", "TRTMC_PHASE_docker=1"),
+                "",
+            )
+        return subprocess.CompletedProcess(
+            command, 1, "", "private-probe-token unknown upstream error"
+        )
+
+    monkeypatch.setattr(brev_provision, "_save_lease", record)
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert fake.provision() == "gpu"
+    assert fake.creates == ["gpu"] and attempts == 2
+    first = snapshots[0]
+    assert first["outcome"] == "completed" and first["returncode"] == expected_code
+    assert first["stderr_signals"] == ([expected_signal] if expected_signal else [])
+    if failure == "stderr-receipt":
+        assert not first["stdout_ready_marker"] and not first["stdout_safe_lines"]
+        assert "TRTMC_PHASE_container_gpu=0" in first["stderr_safe_lines"]
+    if failure == "failed-phase":
+        assert "TRTMC_PHASE_docker=1" in first["stdout_safe_lines"]
+    if failure == "unknown-stderr":
+        assert first["stderr_present"] and not first["stderr_safe_lines"]
+    output = capsys.readouterr().err
+    assert '"returncode": ' + str(expected_code) in output
+    assert "private-probe-token" not in output and "192.0.2.4" not in output
+    assert "private-probe-token" not in fake.lease.read_text()
+
+
+@pytest.mark.parametrize("eventually_ready", [False, True])
+def test_partial_timeout_receipt_is_recorded_but_never_establishes_readiness(
+    fake, clock, monkeypatch, capsys, eventually_ready
+):
+    snapshots = []
+    save = brev_provision._save_lease
+    attempts = 0
+
+    def record(path, lease):
+        if "last_probe_evidence" in lease:
+            snapshots.append(json.loads(json.dumps(lease["last_probe_evidence"])))
+        save(path, lease)
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        nonlocal attempts
+        result = fake(command, deadline, cap, **kwargs)
+        if command[1] == "exec":
+            attempts += 1
+            if attempts == 1 or not eventually_ready:
+                clock.now += min(cap, deadline - clock.now)
+                raise brev_provision.CommandTimeout(
+                    "bounded wait", result.stdout, "Connection reset private-probe-token"
+                )
+        return result
+
+    monkeypatch.setattr(brev_provision, "_save_lease", record)
+    monkeypatch.setattr(brev_provision, "_run", run)
+    if eventually_ready:
+        assert fake.provision(timeout=400) == "gpu"
+        assert attempts == 2
+    else:
+        with pytest.raises(brev_provision.ProvisionError, match="deadline"):
+            fake.provision(timeout=180)
+        assert attempts == 1
+        assert json.loads(fake.lease.read_text())["phase"] == "provision_failed"
+    first = snapshots[0]
+    assert first["outcome"] == "timeout" and first["returncode"] is None
+    assert (
+        first["stdout_ready_marker"] and "TRTMC_PHASE_container_gpu=0" in first["stdout_safe_lines"]
+    )
+    assert first["stderr_signals"] == ["connection_reset"]
+    assert fake.creates == ["gpu"]
+    assert "private-probe-token" not in capsys.readouterr().err + fake.lease.read_text()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process sessions required")
+@pytest.mark.parametrize("escaped_pipe", [False, True])
+def test_real_probe_timeout_retains_partial_stdout_and_stderr_with_bounded_drain(
+    tmp_path, escaped_pipe
+):
+    child_pid = tmp_path / "escaped-pid"
+    cli = tmp_path / "partial_cli.py"
+    cli.write_text(
+        "import subprocess,sys,time\nfrom pathlib import Path\n"
+        "print('TRTMC_PHASE_docker=0', flush=True)\n"
+        "print('TRTMC_PHASE_host_gpu=1', file=sys.stderr, flush=True)\n"
+        "print('Connection closed by 192.0.2.4 private-probe-token', file=sys.stderr, flush=True)\n"
+        + (
+            "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'], "
+            "start_new_session=True)\n"
+            f"Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+            if escaped_pipe
+            else ""
+        )
+        + "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(brev_provision.CommandTimeout) as failure:
+            brev_provision._run([sys.executable, str(cli)], started + 0.3)
+        assert time.monotonic() - started < 2
+        error = failure.value
+        assert error.stdout == "TRTMC_PHASE_docker=0\n"
+        assert "TRTMC_PHASE_host_gpu=1\n" in error.stderr
+        evidence = brev_provision._probe_evidence(
+            error.stdout, error.stderr, "absent", None, "timeout"
+        )
+        assert evidence["stdout_safe_lines"] == ["TRTMC_PHASE_docker=0"]
+        assert evidence["stderr_safe_lines"] == ["TRTMC_PHASE_host_gpu=1"]
+        assert evidence["stderr_signals"] == ["connection_closed"]
+        assert "private-probe-token" not in json.dumps(evidence) and "192.0.2.4" not in json.dumps(
+            evidence
+        )
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
