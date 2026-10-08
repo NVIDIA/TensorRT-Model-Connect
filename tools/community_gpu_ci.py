@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import importlib.util
 import os
@@ -38,6 +39,8 @@ STAGING_TIMEOUT_SECONDS = 900
 FAMILY_TIMEOUT_SECONDS = 2700
 MAX_EXECUTION_SECONDS = 10800
 SUMMARY_PREFIX = "TRTMC_GPU_SUMMARY="
+MAX_DEPENDENCY_CATALOG_BYTES = 1024 * 1024
+DEPENDENCY_REGISTRY = "ghcr.io/nvidia/tensorrt-model-connect-community"
 
 
 def execution_budget_seconds(env: dict[str, str]) -> int:
@@ -619,7 +622,258 @@ def _summary(records: dict[str, dict], env: dict[str, str], started: float) -> d
     return value
 
 
-def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
+def _dependency_bytes(path: Path, *, root: Path | None = None) -> bytes:
+    """Read bounded regular input without following contributor-controlled links."""
+    if root is not None and not path.parent.resolve().is_relative_to(root.resolve()):
+        raise CommunityGpuError("Dependency input escapes its checkout")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise CommunityGpuError("Dependency input is not a regular file")
+        content = stream.read(MAX_DEPENDENCY_CATALOG_BYTES + 1)
+    if len(content) > MAX_DEPENDENCY_CATALOG_BYTES:
+        raise CommunityGpuError("Dependency input exceeds the size limit")
+    return content
+
+
+def _dependency_json(content: bytes) -> dict:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise CommunityGpuError("Duplicate dependency catalog key")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(content, object_pairs_hook=unique)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise CommunityGpuError("Invalid dependency catalog JSON") from error
+    if not isinstance(value, dict):
+        raise CommunityGpuError("Dependency catalog must be an object")
+    return value
+
+
+def export_dependency_catalog(repository: Path, ci_sha: str, destination: Path) -> None:
+    """Export owner locks and recipe hashes from one trusted CI Git object."""
+    if not re.fullmatch(r"[0-9a-f]{40}", ci_sha):
+        raise CommunityGpuError("Dependency catalog requires an immutable CI commit")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repository), *args],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        ).stdout
+
+    def blob(path):
+        object_name = f"{ci_sha}:{path}"
+        size = int(git("cat-file", "-s", object_name))
+        if size > MAX_DEPENDENCY_CATALOG_BYTES:
+            raise CommunityGpuError("Trusted dependency blob exceeds the size limit")
+        return git("show", object_name)
+
+    entries = {}
+    for path in git("ls-tree", "-r", "--name-only", ci_sha, "--", "families").decode().splitlines():
+        match = re.fullmatch(r"families/([a-z][a-z0-9_]*)/ci/dependency-image.json", path)
+        if match:
+            family = match[1]
+            entries[family] = {
+                "lock": _dependency_json(blob(path)),
+                "trusted_recipe_sha256": hashlib.sha256(
+                    blob(f"families/{family}/ci/Dockerfile.dependencies")
+                ).hexdigest(),
+            }
+    catalog = {"schema_version": 1, "ci_sha": ci_sha, "families": entries}
+    if len(json.dumps(catalog).encode()) > MAX_DEPENDENCY_CATALOG_BYTES:
+        raise CommunityGpuError("Dependency catalog exceeds the size limit")
+    _save_json(destination, catalog)
+
+
+def _dependency_reference(repository: Path, family: str, entry: object) -> str | None:
+    """Require an admitted digest and the exact dependency inputs for this owner."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("lock"), dict):
+        raise CommunityGpuError("Invalid family dependency lock")
+    lock = entry["lock"]
+    reference = lock.get("image")
+    if (
+        type(lock.get("schema_version")) is not int
+        or lock.get("schema_version") != 1
+        or lock.get("family") != family
+        or lock.get("platform") != "linux/amd64"
+        or lock.get("registry_visibility") != "private"
+        or lock.get("native_byok_passed") is not True
+        or lock.get("family_e2e_passed") is not True
+        or not isinstance(reference, str)
+        or not re.fullmatch(
+            re.escape(f"{DEPENDENCY_REGISTRY}/{family}") + r"@sha256:[0-9a-f]{64}", reference
+        )
+    ):
+        raise CommunityGpuError("Family dependency image is not an immutable qualified image")
+    for field in ("source_sha", "producer_source_sha"):
+        if not isinstance(lock.get(field), str) or not re.fullmatch(r"[0-9a-f]{40}", lock[field]):
+            raise CommunityGpuError("Dependency qualification has no immutable source")
+    changed = False
+    for field, path in (
+        ("base_dockerfile_sha256", "Dockerfile.dev.x86-gpu"),
+        ("base_requirements_sha256", "requirements/community-ci.txt"),
+        ("family_requirements_sha256", f"families/{family}/requirements.txt"),
+    ):
+        expected = lock.get(field)
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise CommunityGpuError("Dependency lock has an invalid input hash")
+        try:
+            observed = hashlib.sha256(
+                _dependency_bytes(repository / path, root=repository)
+            ).hexdigest()
+        except FileNotFoundError:
+            observed = None
+        changed |= expected != observed
+    recipe = entry.get("trusted_recipe_sha256")
+    if not isinstance(recipe, str) or not re.fullmatch(r"[0-9a-f]{64}", recipe):
+        raise CommunityGpuError("Trusted family dependency recipe is invalid")
+    expected_recipe = lock.get("dependency_recipe_sha256")
+    if not isinstance(expected_recipe, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_recipe):
+        raise CommunityGpuError("Dependency lock has an invalid recipe hash")
+    changed |= recipe != expected_recipe
+    abi = lock.get("abi")
+    if not isinstance(abi, dict) or not isinstance(abi.get("resolved_dependencies"), list):
+        raise CommunityGpuError("Dependency image has no qualified dependency profile")
+    if not all(isinstance(item, str) for item in abi["resolved_dependencies"]):
+        raise CommunityGpuError("Invalid qualified dependency profile")
+    closure = hashlib.sha256(
+        json.dumps(abi["resolved_dependencies"], separators=(",", ":")).encode()
+    ).hexdigest()
+    if lock.get("resolved_dependencies_sha256") != closure:
+        raise CommunityGpuError("Qualified dependency profile hash changed")
+    if any(
+        not isinstance(abi.get(field), str) or not abi[field]
+        for field in ("platform", "python_abi", "torch", "cuda", "tensorrt", "apache_tvm_ffi")
+    ) or not isinstance(abi.get("cxx11abi"), bool):
+        raise CommunityGpuError("Dependency image has an incomplete qualified ABI")
+    if abi["platform"] != lock["platform"]:
+        raise CommunityGpuError("Qualified ABI platform disagrees with the image")
+    return None if changed else reference
+
+
+def _dependency_image_ids(
+    repository: Path,
+    selected: tuple[str, ...],
+    catalog_path: Path | None,
+    token_path: Path | None,
+    username: str,
+    deadline: float,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Pull trusted images on the host and erase auth before contributor execution."""
+    images, errors, references, misses = {}, {}, {}, {}
+    try:
+        if catalog_path is None:
+            return images, errors, misses
+        catalog = _dependency_json(_dependency_bytes(catalog_path))
+        families = catalog.get("families")
+        if (
+            type(catalog.get("schema_version")) is not int
+            or catalog.get("schema_version") != 1
+            or not isinstance(families, dict)
+        ):
+            raise CommunityGpuError("Invalid dependency catalog schema")
+        if not isinstance(catalog.get("ci_sha"), str) or not re.fullmatch(
+            r"[0-9a-f]{40}", catalog["ci_sha"]
+        ):
+            raise CommunityGpuError("Dependency catalog has no immutable CI source")
+        if not all(isinstance(name, str) and FAMILY_PATTERN.fullmatch(name) for name in families):
+            raise CommunityGpuError("Invalid dependency catalog family")
+        for family in selected:
+            if family not in families:
+                continue
+            try:
+                reference = _dependency_reference(repository, family, families[family])
+                if reference is None:
+                    misses[family] = "Qualified image inputs mismatch; cold install"
+                else:
+                    references[family] = reference
+            except (CommunityGpuError, OSError) as error:
+                errors[family] = str(error)
+        if not references:
+            return images, errors, misses
+        if token_path is None:
+            errors.update(
+                {family: "Dependency registry read credential is missing" for family in references}
+            )
+            return images, errors, misses
+        try:
+            token = _dependency_bytes(token_path).decode().strip()
+        except (OSError, UnicodeError, CommunityGpuError):
+            errors.update(
+                {
+                    family: "Dependency registry read credential is unreadable"
+                    for family in references
+                }
+            )
+            return images, errors, misses
+        token_path.unlink(missing_ok=True)
+        if not token:
+            errors.update(
+                {family: "Dependency registry read credential is empty" for family in references}
+            )
+            return images, errors, misses
+        with tempfile.TemporaryDirectory(prefix="trtmc-dependency-auth-") as auth:
+
+            def docker(*args, stdin=None, limit=900):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CommunityGpuError("Dependency image preparation budget exhausted")
+                result = subprocess.run(
+                    ["docker", "--config", auth, *args],
+                    input=stdin,
+                    text=True,
+                    capture_output=True,
+                    timeout=min(limit, remaining),
+                )
+                if result.returncode:
+                    raise CommunityGpuError("Dependency registry command failed")
+                return result.stdout.strip()
+
+            try:
+                docker(
+                    "login",
+                    "ghcr.io",
+                    "--username",
+                    username,
+                    "--password-stdin",
+                    stdin=token,
+                    limit=30,
+                )
+            except (CommunityGpuError, subprocess.TimeoutExpired):
+                errors.update({family: "Dependency registry login failed" for family in references})
+                return images, errors, misses
+            for family, reference in references.items():
+                try:
+                    docker("pull", "--platform", "linux/amd64", reference)
+                    identity = docker(
+                        "image", "inspect", "--format", "{{.Id}}", reference, limit=30
+                    )
+                    if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity):
+                        raise CommunityGpuError("Dependency image has no immutable local ID")
+                    images[family] = identity
+                except (CommunityGpuError, subprocess.TimeoutExpired):
+                    errors[family] = "Qualified dependency image could not be pulled or inspected"
+        return images, errors, misses
+    finally:
+        if token_path is not None:
+            token_path.unlink(missing_ok=True)
+
+
+def run_containers(
+    repository: Path,
+    env: dict[str, str],
+    image: str,
+    *,
+    dependency_catalog: Path | None = None,
+    registry_token_file: Path | None = None,
+    registry_username: str = "github-actions",
+) -> None:
     """Run selected owners sequentially, preserving partial coverage and cleanup."""
     repository = repository.resolve(strict=True)
     selected = selected_families(
@@ -654,6 +908,9 @@ def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
     image_id = inspected.stdout.strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise CommunityGpuError("Docker did not resolve an immutable GPU image ID")
+    dependency_images, dependency_errors, dependency_misses = _dependency_image_ids(
+        repository, selected, dependency_catalog, registry_token_file, registry_username, deadline
+    )
     runner = Path(__file__).resolve()
     run_id = uuid.uuid4().hex
     failures = []
@@ -662,6 +919,26 @@ def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
     cpu_limit = max(1, (os.cpu_count() or 2) - 2)
     try:
         for family in selected:
+            records[family]["dependency_cache"] = (
+                "input_mismatch"
+                if family in dependency_misses
+                else "qualified"
+                if family in dependency_images
+                else "unlisted"
+            )
+            if family in dependency_misses:
+                print(f"{family}: {dependency_misses[family]}", flush=True)
+            if family in dependency_errors:
+                records[family].update(
+                    status="failed",
+                    phase="dependencies",
+                    failure_class="dependency",
+                    exit_code=1,
+                    evidence=dependency_errors[family],
+                )
+                failures.append(f"{family}: {dependency_errors[family]}")
+                _summary(records, env, started)
+                continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 failures.append("coordinator budget exhausted; remaining families were not run")
@@ -759,7 +1036,7 @@ def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
                     "TRTMC_GPU_RESULT_FILE=/tmp/trtmc-community-huggingface/result.json",
                     "--env",
                     f"CMAKE_CUDA_ARCHITECTURES={env.get('CMAKE_CUDA_ARCHITECTURES', '89')}",
-                    image_id,
+                    dependency_images.get(family, image_id),
                     "python3.12",
                     "/opt/community_gpu_ci.py",
                     "--family",
@@ -840,6 +1117,14 @@ def run_containers(repository: Path, env: dict[str, str], image: str) -> None:
                         raise CommunityGpuError(
                             f"Cannot remove Community GPU container {name}: {cleanup.stderr.strip()}"
                         )
+                    records[family]["dependency_image_id"] = dependency_images.get(family, image_id)
+                    records[family]["dependency_cache"] = (
+                        "input_mismatch"
+                        if family in dependency_misses
+                        else "qualified"
+                        if family in dependency_images
+                        else "unlisted"
+                    )
                 _summary(records, env, started)
     finally:
         _summary(records, env, started)
@@ -975,16 +1260,29 @@ def main() -> int:
     mode.add_argument("--stage-family")
     mode.add_argument("--execution-budget", action="store_true")
     mode.add_argument("--summarize-log", type=Path)
+    mode.add_argument("--export-dependency-catalog", type=Path)
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--image", default="trtmc-quickstart-gpu")
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--checkpoint-token-file", type=Path)
     parser.add_argument("--summary-file", type=Path)
+    parser.add_argument("--dependency-catalog", type=Path)
+    parser.add_argument("--registry-token-file", type=Path)
+    parser.add_argument("--registry-username", default="github-actions")
+    parser.add_argument("--ci-sha")
     args = parser.parse_args()
     try:
         if args.checkpoint_token_file is not None and not args.containers:
             raise CommunityGpuError("--checkpoint-token-file requires --containers")
-        if args.execution_budget:
+        if (
+            args.dependency_catalog is not None or args.registry_token_file is not None
+        ) and not args.containers:
+            raise CommunityGpuError("Dependency image inputs require --containers")
+        if args.export_dependency_catalog is not None:
+            export_dependency_catalog(
+                args.repository, args.ci_sha or "", args.export_dependency_catalog
+            )
+        elif args.execution_budget:
             print(execution_budget_seconds(dict(os.environ)))
         elif args.summarize_log is not None:
             summary = summarize_log(args.summarize_log, args.summary_file)
@@ -1000,7 +1298,14 @@ def main() -> int:
                     args.checkpoint_token_file.unlink(missing_ok=True)
                 if token:
                     env["HF_TOKEN"] = token
-            run_containers(args.repository, env, args.image)
+            run_containers(
+                args.repository,
+                env,
+                args.image,
+                dependency_catalog=args.dependency_catalog,
+                registry_token_file=args.registry_token_file,
+                registry_username=args.registry_username,
+            )
         elif args.stage_family:
             if args.cache_dir is None:
                 raise CommunityGpuError("--stage-family requires --cache-dir")

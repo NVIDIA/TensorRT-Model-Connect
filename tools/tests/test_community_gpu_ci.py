@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import shlex
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import time
 from tools import brev_exec as brev_provision
@@ -24,6 +25,295 @@ from tools import community_gpu_ci
 from tools.ci.process import CiError as RemoteTaskError
 from tools.community_gpu_ci import CommunityGpuError as CiError
 from tools.ci import context as ci_context, e2e as ci_e2e
+
+
+def _dependency_entry(repository: Path, family: str, digest: str = "a") -> dict:
+    """A fake provider receipt with real physical dependency inputs."""
+    paths = {
+        "base_dockerfile_sha256": "Dockerfile.dev.x86-gpu",
+        "base_requirements_sha256": "requirements/community-ci.txt",
+        "family_requirements_sha256": f"families/{family}/requirements.txt",
+    }
+    inputs = {}
+    for field, relative in paths.items():
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(f"# {relative}\n")
+        inputs[field] = hashlib.sha256(path.read_bytes()).hexdigest()
+    recipe = repository / f"families/{family}/ci/Dockerfile.dependencies"
+    recipe.parent.mkdir(parents=True, exist_ok=True)
+    recipe.write_text("FROM ${BASE_IMAGE}\n")
+    recipe_hash = hashlib.sha256(recipe.read_bytes()).hexdigest()
+    dependencies = ["torch==2.12.0+cu130", "tensorrt==11.1.0.106"]
+    return {
+        "trusted_recipe_sha256": recipe_hash,
+        "lock": {
+            "schema_version": 1,
+            "family": family,
+            "image": f"{community_gpu_ci.DEPENDENCY_REGISTRY}/{family}@sha256:{digest * 64}",
+            "platform": "linux/amd64",
+            "registry_visibility": "private",
+            "source_sha": "1" * 40,
+            "producer_source_sha": "2" * 40,
+            "native_byok_passed": True,
+            "family_e2e_passed": True,
+            "dependency_recipe_sha256": recipe_hash,
+            **inputs,
+            "resolved_dependencies_sha256": hashlib.sha256(
+                json.dumps(dependencies, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "abi": {
+                "resolved_dependencies": dependencies,
+                "platform": "linux/amd64",
+                "python_abi": "cp312",
+                "torch": "2.12.0+cu130",
+                "cuda": "13.0",
+                "tensorrt": "11.1.0.106",
+                "apache_tvm_ffi": "0.1.12",
+                "cxx11abi": True,
+            },
+        },
+    }
+
+
+def test_dependency_export_ignores_the_pr_lock_and_recipe(tmp_path):
+    """Changing working-tree image selectors cannot replace the trusted Git blobs."""
+    entry = _dependency_entry(tmp_path, "alpha")
+    lock = tmp_path / "families/alpha/ci/dependency-image.json"
+    lock.write_text(json.dumps(entry["lock"]))
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
+
+    git("init", "-q")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.test", "add", ".")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "-qm",
+        "trusted inputs",
+    )
+    trusted = git("rev-parse", "HEAD")
+    lock.write_text('{"image":"attacker.example/alpha:latest"}')
+    (tmp_path / "families/alpha/ci/Dockerfile.dependencies").write_text("PR-owned replacement\n")
+    catalog = tmp_path / "catalog.json"
+    community_gpu_ci.export_dependency_catalog(tmp_path, trusted, catalog)
+    value = json.loads(catalog.read_text())
+    assert value["ci_sha"] == trusted and value["families"]["alpha"] == entry
+    assert (
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", value["families"]["alpha"])
+        == entry["lock"]["image"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["mutable", "other_family", "other_registry", "profile", "unqualified"]
+)
+def test_corrupt_dependency_receipt_cannot_select_an_image(tmp_path, mutation):
+    entry = _dependency_entry(tmp_path, "alpha")
+    if mutation == "mutable":
+        entry["lock"]["image"] = f"{community_gpu_ci.DEPENDENCY_REGISTRY}/alpha:latest"
+    elif mutation == "other_family":
+        entry["lock"]["family"] = "beta"
+    elif mutation == "other_registry":
+        entry["lock"]["image"] = entry["lock"]["image"].replace("ghcr.io", "ghcrXio")
+    elif mutation == "profile":
+        entry["lock"]["abi"]["resolved_dependencies"].append("unexpected==9")
+    else:
+        entry["lock"]["family_e2e_passed"] = False
+    with pytest.raises(CiError):
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    ["Dockerfile.dev.x86-gpu", "requirements/community-ci.txt", "families/alpha/requirements.txt"],
+)
+def test_real_dependency_update_is_a_cache_miss(tmp_path, changed):
+    entry = _dependency_entry(tmp_path, "alpha")
+    (tmp_path / changed).write_text("updated dependency input\n")
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry) is None
+
+
+@pytest.mark.parametrize("kind", ["duplicate", "oversize", "fifo", "symlink"])
+def test_dependency_catalog_reads_are_bounded_and_regular(tmp_path, kind):
+    path = tmp_path / "catalog"
+    if kind == "duplicate":
+        path.write_text('{"families":{},"families":{}}')
+    elif kind == "oversize":
+        with path.open("wb") as stream:
+            stream.truncate(community_gpu_ci.MAX_DEPENDENCY_CATALOG_BYTES + 1)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        target = tmp_path / "target"
+        target.write_text("{}")
+        path.symlink_to(target)
+    start = time.monotonic()
+    with pytest.raises((CiError, OSError)):
+        community_gpu_ci._dependency_json(community_gpu_ci._dependency_bytes(path))
+    assert time.monotonic() - start < 1
+
+
+@pytest.mark.parametrize("alpha_state", ["qualified", "changed", "corrupt"])
+def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
+    tmp_path,
+    monkeypatch,
+    alpha_state,
+):
+    """Actual orchestration uses immutable IDs, retains cold installs, and runs other owners."""
+    _planned_owners(tmp_path, "alpha", "beta", "gamma")
+    entries = {
+        family: _dependency_entry(tmp_path, family, digest)
+        for family, digest in (("alpha", "a"), ("gamma", "c"))
+    }
+    if alpha_state == "changed":
+        (tmp_path / "families/alpha/requirements.txt").write_text("new-package==2\n")
+    elif alpha_state == "corrupt":
+        entries["alpha"]["lock"]["image"] += ":latest"
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": entries}))
+    token = tmp_path / "read-token"
+    token.write_text("private-registry-secret")
+    base = "sha256:" + "b" * 64
+    ids = {family: "sha256:" + digest * 64 for family, digest in (("alpha", "1"), ("gamma", "3"))}
+    config_paths, pulls, runs = [], [], []
+
+    def docker(command, **kwargs):
+        assert "private-registry-secret" not in " ".join(map(str, command))
+        if "--config" in command:
+            config = Path(command[command.index("--config") + 1])
+            if "login" in command:
+                assert kwargs["input"] == "private-registry-secret" and not token.exists()
+                (config / "config.json").write_text("private-registry-secret")
+                config_paths.append(config)
+            if "pull" in command:
+                pulls.append(command[-1])
+            identity = ids[command[-1].split("/")[-1].split("@")[0]] if "inspect" in command else ""
+            return subprocess.CompletedProcess(command, 0, stdout=identity)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout=base)
+        if "--stage-family" in command or command[:2] == ["docker", "run"]:
+            assert not token.exists() and config_paths and all(not p.exists() for p in config_paths)
+            assert "docker.sock" not in " ".join(map(str, command))
+            assert "REGISTRY_TOKEN" not in str(kwargs.get("env", {}))
+            if command[:2] == ["docker", "run"]:
+                family = command[-1]
+                runs.append((family, next(v for v in command if str(v).startswith("sha256:"))))
+                _container_receipt(command)
+            return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        assert command[:3] == ["docker", "rm", "--force"]
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {
+        **_gpu_environment("alpha", "beta", "gamma"),
+        "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results"),
+    }
+    if alpha_state == "corrupt":
+        with pytest.raises(CiError, match="alpha"):
+            community_gpu_ci.run_containers(
+                tmp_path, env, "base", dependency_catalog=catalog, registry_token_file=token
+            )
+    else:
+        community_gpu_ci.run_containers(
+            tmp_path, env, "base", dependency_catalog=catalog, registry_token_file=token
+        )
+    assert runs == (
+        [("alpha", ids["alpha"] if alpha_state == "qualified" else base)]
+        if alpha_state != "corrupt"
+        else []
+    ) + [("beta", base), ("gamma", ids["gamma"])]
+    assert pulls == ([entries["alpha"]["lock"]["image"]] if alpha_state == "qualified" else []) + [
+        entries["gamma"]["lock"]["image"]
+    ]
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    outcomes = {row["family"]: row for row in summary["families"]}
+    assert outcomes["beta"]["cases"] == {"beta": "passed"} and outcomes["gamma"]["cases"] == {
+        "gamma": "passed"
+    }
+    if alpha_state == "changed":
+        assert outcomes["alpha"]["dependency_cache"] == "input_mismatch" and outcomes["alpha"][
+            "cases"
+        ] == {"alpha": "passed"}
+    elif alpha_state == "corrupt":
+        assert outcomes["alpha"]["failure_class"] == "dependency" and outcomes["alpha"][
+            "cases"
+        ] == {"alpha": "not_run"}
+    assert community_gpu_ci._checked_summary(summary)["families"] == summary["families"]
+
+
+def test_registry_failure_cleans_auth_and_never_reports_its_secret(tmp_path, monkeypatch, capsys):
+    entry = _dependency_entry(tmp_path, "alpha")
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(
+        json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": {"alpha": entry}})
+    )
+    token = tmp_path / "read-token"
+    token.write_text("registry-secret")
+    configs = []
+
+    def docker(command, **kwargs):
+        assert "login" in command and kwargs["input"] == "registry-secret"
+        assert not token.exists() and "registry-secret" not in str(command)
+        config = Path(command[command.index("--config") + 1])
+        configs.append(config)
+        (config / "config.json").write_text("registry-secret")
+        return subprocess.CompletedProcess(
+            command, 1, stdout="registry-secret", stderr="registry-secret"
+        )
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    images, errors, misses = community_gpu_ci._dependency_image_ids(
+        tmp_path, ("alpha",), catalog, token, "test-user", time.monotonic() + 30
+    )
+    assert not images and not misses and errors == {"alpha": "Dependency registry login failed"}
+    assert not token.exists() and all(not p.exists() for p in configs)
+    captured = capsys.readouterr()
+    assert "registry-secret" not in captured.out + captured.err + json.dumps(errors)
+
+
+def test_missing_registry_token_fails_cached_owner_but_runs_unlisted_owner(tmp_path, monkeypatch):
+    _planned_owners(tmp_path, "alpha", "beta")
+    entry = _dependency_entry(tmp_path, "alpha")
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(
+        json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": {"alpha": entry}})
+    )
+    started = []
+
+    def docker(command, **kwargs):
+        assert "--config" not in command
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
+        if "--stage-family" in command:
+            assert command[command.index("--stage-family") + 1] == "beta"
+        elif command[:2] == ["docker", "run"]:
+            started.append(command[-1])
+            _container_receipt(command)
+        elif command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        else:
+            assert command[:3] == ["docker", "rm", "--force"]
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="read credential is missing"):
+        community_gpu_ci.run_containers(tmp_path, env, "base", dependency_catalog=catalog)
+    assert started == ["beta"]
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    results = {r["family"]: r for r in summary["families"]}
+    assert results["alpha"]["failure_class"] == "dependency" and results["alpha"]["cases"] == {
+        "alpha": "not_run"
+    }
+    assert results["beta"]["cases"] == {"beta": "passed"} and not summary["passed"]
 
 
 def _family(repository: Path, name: str, manifests: list[dict[str, object]]) -> Path:

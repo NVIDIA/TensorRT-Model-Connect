@@ -891,6 +891,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      packages: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
       instance_name: ${{ steps.reserve.outputs.instance_name }}
@@ -988,6 +989,8 @@ jobs:
           CUDA_ARCHITECTURES: ${{ vars.TRTMC_COMMUNITY_CUDA_ARCHITECTURES || '89' }}
           CI_SHA: ${{ github.sha }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          REGISTRY_TOKEN: ${{ github.token }}
+          REGISTRY_USERNAME: ${{ github.actor }}
         run: |
           set -euo pipefail
           # Never place the token in remote command arguments or build context.
@@ -999,7 +1002,7 @@ jobs:
               # Keep cleanup bounded if SSH fails. VM teardown remains the
               # fallback, including when a partial copy preceded a failure.
               if timeout 30s brev exec "$checkpoint_instance" \
-                "rm -f -- '$remote_auth/token' && rmdir -- '$remote_auth'"; then
+                "rm -f -- '$remote_auth/token' '$remote_auth/registry-token' && rmdir -- '$remote_auth'"; then
                 checkpoint_instance=""
               else
                 echo "::warning::Could not remove the checkpoint token from $checkpoint_instance; VM teardown is still required." >&2
@@ -1007,7 +1010,8 @@ jobs:
             fi
           }
           checkpoint_token=$(mktemp "$RUNNER_TEMP/trtmc-checkpoint-token.XXXXXX")
-          trap 'rm -f "$checkpoint_token"; cleanup_checkpoint_token' EXIT
+          registry_token=$(mktemp "$RUNNER_TEMP/trtmc-registry-token.XXXXXX")
+          trap 'rm -f "$checkpoint_token" "$registry_token"; cleanup_checkpoint_token' EXIT
           printf '%s' "$HF_TOKEN" > "$checkpoint_token"
           unset HF_TOKEN
           # Provisioning has already verified this VM. Retry setup transfers
@@ -1090,6 +1094,17 @@ jobs:
           retry brev exec "$INSTANCE_NAME" "install -d -m 0700 $remote_auth" || exit 1
           checkpoint_instance="$INSTANCE_NAME"
           retry brev copy "$checkpoint_token" "$INSTANCE_NAME:$remote_auth/token" || exit 1
+          # Owner locks and recipes come from the protected CI commit, while
+          # dependency input hashes are checked against the PR source.
+          dependency_catalog="/tmp/trtmc-community-dependency-catalog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          retry brev exec "$INSTANCE_NAME" "/tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --export-dependency-catalog '$dependency_catalog' --repository /tmp/model_connect --ci-sha '$CI_SHA'" || exit 1
+          if compgen -G 'families/*/ci/dependency-image.json' > /dev/null; then
+            # Introduce the read credential only after the PR base image was
+            # built. The trusted host deletes it before any model container.
+            printf '%s' "$REGISTRY_TOKEN" > "$registry_token"
+            retry brev copy "$registry_token" "$INSTANCE_NAME:$remote_auth/registry-token" || exit 1
+          fi
+          unset REGISTRY_TOKEN
 
           # Each selected family gets a fresh container on this one VM. The
           # coordinator waits for its removal before starting the next family,
@@ -1117,7 +1132,8 @@ jobs:
             "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
             "TRTMC_GPU_RESULTS_DIR=/tmp/trtmc-community-results-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
-            /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect --checkpoint-token-file "$remote_auth/token"
+            /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect --checkpoint-token-file "$remote_auth/token" \
+            --dependency-catalog "$dependency_catalog" --registry-token-file "$remote_auth/registry-token" --registry-username "${REGISTRY_USERNAME:-github-actions}"
           cleanup_checkpoint_token
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 

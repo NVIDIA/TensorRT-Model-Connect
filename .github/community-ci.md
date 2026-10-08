@@ -140,6 +140,24 @@ owners, up to three hours. Any families not admitted before that deadline remain
 explicitly `not_run`, and the workflow fails with incomplete coverage. No testcase
 selection or numerical passing criterion is reduced to fit this budget.
 
+Dependency images are optional caches, admitted through family-owned
+`families/<family>/ci/dependency-image.json` locks only after real qualification
+and cleanup have passed. Promotion of a published candidate into a lock remains
+manual. The trusted coordinator exports locks and recipe hashes from the chosen
+CI commit's Git objects, never from the PR tree. It compares the base Dockerfile,
+base requirements, and family requirements with the actual PR source. A changed
+input uses the normal base image and ordinary family installation, so dependency
+update PRs can still be tested before a new image is published. Invalid lock
+metadata fails that owner explicitly while other owners continue.
+
+Matching locks select private GHCR images by immutable digest. A read credential
+is copied to the trusted VM only after its PR base image build; the coordinator
+pulls all selected cached images using a temporary Docker configuration and
+deletes both credential and configuration before any contributor container
+starts. No registry token or Docker socket enters those containers. Native
+builds, family installation, and every original E2E assertion still run. No lock
+or image is admitted merely because the producer's local mechanics tests pass.
+
 The image/setup/test step is capped at four hours inside the six-hour GPU job,
 leaving at least an hour for release after the 45-minute reservation. Family
 containers are restricted to three quarters of host RAM, no additional swap,

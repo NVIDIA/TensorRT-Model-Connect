@@ -806,8 +806,9 @@ def test_complete_pipeline_requires_every_cpu_and_gpu_stage(failed, bad_result):
 
 @pytest.mark.parametrize("failure", ["", "copy", "coordinate", "exit"])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
+@pytest.mark.parametrize("registry_cache", [False, True])
 def test_gpu_status_and_cleanup_fail_closed(
-    tmp_path: Path, failure: str, cleanup_fails: bool
+    tmp_path: Path, failure: str, cleanup_fails: bool, registry_cache: bool
 ) -> None:
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github/workflows/community-ci.yml").read_text(encoding="utf-8")
@@ -885,6 +886,10 @@ def test_gpu_status_and_cleanup_fail_closed(
     # can leave a partial token even when it reports failure. The ready VM must
     # receive token cleanup on every exit; test failures must not replace it.
     trace = tmp_path / "auth-trace"
+    if registry_cache:
+        lock = tmp_path / "families/alpha/ci/dependency-image.json"
+        lock.parent.mkdir(parents=True)
+        lock.write_text("{}")  # Only catalog presence is relevant to this workflow harness.
     stubs = r"""
 sleep() { :; }
 timeout() { shift; "$@"; }
@@ -894,9 +899,17 @@ brev() {
   case "$1" in
     copy)
       printf 'copy %s\n' "${3%%:*}" >> "$AUTH_TRACE"
+      if [[ "$3" == */registry-token ]]; then
+        test "${CI_TEST_BASE_IMAGE_BUILT:-0}" = 1 || return 96
+        test "$(cat "$2")" = test-registry-secret || return 97
+        printf 'registry-copy %s\n' "${3%%:*}" >> "$AUTH_TRACE"
+      fi
       test "$AUTH_FAILURE" != copy || return 1
       ;;
     exec)
+      if [[ "$3" == *'sudo docker build'* ]]; then
+        CI_TEST_BASE_IMAGE_BUILT=1
+      fi
       if [[ "$3" == "rm -f -- "* ]]; then
         printf 'cleanup %s\n' "$2" >> "$AUTH_TRACE"
         test "$AUTH_CLEANUP_FAILS" != true || return 1
@@ -916,6 +929,7 @@ python3() {
   test "$1" = -m && test "$2" = tools.brev_exec || exit 98
   test "$3" != provision || exit 98
   test -z "${HF_TOKEN+x}" || exit 99
+  test -z "${REGISTRY_TOKEN+x}" || exit 97
   printf 'coordinate %s\n' "$INSTANCE_NAME" >> "$AUTH_TRACE"
   test "$AUTH_FAILURE" != exit || exit 17
   test "$AUTH_FAILURE" != coordinate
@@ -923,11 +937,13 @@ python3() {
 """
     auth_result = subprocess.run(
         ["bash", "-c", stubs + test_step["run"]],
+        cwd=tmp_path,
         env={
             **os.environ,
             "AUTH_TRACE": str(trace),
             "AUTH_FAILURE": failure,
             "AUTH_CLEANUP_FAILS": str(cleanup_fails).lower(),
+            "PYTHONPATH": str(REPO_ROOT),
             "RUNNER_TEMP": str(tmp_path),
             "GITHUB_OUTPUT": str(tmp_path / "outputs"),
             "GITHUB_RUN_ID": "123",
@@ -943,6 +959,7 @@ python3() {
             "SCOPE": "families",
             "CUDA_ARCHITECTURES": "89",
             "HF_TOKEN": "test-checkpoint-secret",
+            "REGISTRY_TOKEN": "test-registry-secret",
         },
         capture_output=True,
         text=True,
@@ -960,7 +977,14 @@ python3() {
         cleanup_index = events.index(f"cleanup {instance}")
         assert cleanup_index > events.index(f"copy {instance}")
     assert not list(tmp_path.glob("trtmc-checkpoint-token.*"))
+    assert not list(tmp_path.glob("trtmc-registry-token.*"))
+    assert any(event.startswith("registry-copy ") for event in events) is (
+        registry_cache and failure != "copy"
+    )
     assert "test-checkpoint-secret" not in (
+        auth_result.stdout + auth_result.stderr + trace.read_text(encoding="utf-8")
+    )
+    assert "test-registry-secret" not in (
         auth_result.stdout + auth_result.stderr + trace.read_text(encoding="utf-8")
     )
     assert ("VM teardown is still required" in auth_result.stderr) is cleanup_fails
@@ -1255,10 +1279,20 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert "sleep" not in step["run"]
     gpu = executor["jobs"]["provision-and-test"]
     test = next(step for step in gpu["steps"] if step.get("id") == "test")
+    assert gpu["permissions"] == {"contents": "read", "packages": "read"}
+    assert test["env"]["REGISTRY_TOKEN"] == "${{ github.token }}"
     assert test["env"]["HF_TOKEN"] == "${{ secrets.HF_TOKEN }}"
     assert """printf '%s' "$HF_TOKEN" > "$checkpoint_token" """.strip() in test["run"]
     assert "unset HF_TOKEN" in test["run"]
-    assert """trap 'rm -f "$checkpoint_token"; cleanup_checkpoint_token' EXIT""" in test["run"]
+    assert "unset REGISTRY_TOKEN" in test["run"]
+    assert "--ci-sha '$CI_SHA'" in test["run"]
+    assert test["run"].index("sudo docker build") < test["run"].index(
+        "printf '%s' \"$REGISTRY_TOKEN\""
+    )
+    assert (
+        """trap 'rm -f "$checkpoint_token" "$registry_token"; cleanup_checkpoint_token' EXIT"""
+        in test["run"]
+    )
     assert "install -d -m 0700 $remote_auth" in test["run"]
     assert 'retry brev copy "$checkpoint_token" "$INSTANCE_NAME:$remote_auth/token"' in test["run"]
     assert '--checkpoint-token-file "$remote_auth/token"' in test["run"]
