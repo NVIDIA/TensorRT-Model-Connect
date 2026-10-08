@@ -258,6 +258,12 @@ length/load sweeps, request-ID timing joins and an optional sequential
 native-reference comparison. It produces
 benchmark evidence independently of the qualification verdicts above.
 
+Qwen and GPT-2 prebuilt validation checks the builder-recorded immutable Hugging Face
+checkpoint identity and build settings against the selected pinned snapshot and family manifest.
+Bundles created before this metadata was added must be rebuilt for automated
+exact-bundle validation. Declaring a profile or revision in YAML is insufficient.
+
+
 ```bash
 PYTHONPATH=apps/aiperf_qual python3 -m trtmc_aiperf_qual text-profile \
   --environment /path/text-environment.yaml \
@@ -274,7 +280,7 @@ For automatic validation and timing joins, generate the configuration from
 the checked-in Qwen example, then run `text-profile`. Replace the three paths
 below with your native build, already-built FP16 bundle, and client interpreter.
 The Qwen example expects checkpoint revision
-`c1899de289a04d12100db370d81485cdf75e47ca` and a context limit of at least 256.
+`c1899de289a04d12100db370d81485cdf75e47ca` and a context limit of 256.
 Use your CUDA-enabled TRTMC Python interpreter for both commands; the runtime
 build must also include `qwen_text_stream_consumer` for the family stream check.
 

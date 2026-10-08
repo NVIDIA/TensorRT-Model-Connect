@@ -104,7 +104,7 @@ def _required_environment(tp_size: int):
 
 
 def _validation_revision(manifest: dict) -> str | None:
-    if not os.environ.get("TRTMC_E2E_BUNDLE"):
+    if manifest.get("task") == "embedding" or not os.environ.get("TRTMC_E2E_BUNDLE"):
         return manifest.get("hf_revision")
     assert os.environ.get("TRTMC_E2E_PROFILE") == manifest["name"], (
         "prebuilt validation must select the matching manifest profile"
@@ -126,7 +126,11 @@ def _validation_bundle(manifest: dict, model_dir: Path, default: Path) -> Path:
     assert manifest["task"] == "text_generation", "prebuilt validation supports text generation only"
     bundle = Path(value)
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
-    record_evidence("inputs", {"prebuilt_bundle": str(bundle.resolve())})
+    from ..bundle_provenance import validate_prebuilt_bundle
+
+    provenance = validate_prebuilt_bundle(bundle, model_dir, manifest, _validation_revision(manifest))
+    record_evidence("inputs", {"prebuilt_bundle": str(bundle.resolve()),
+                               "bundle_build_provenance": provenance})
     return bundle
 
 

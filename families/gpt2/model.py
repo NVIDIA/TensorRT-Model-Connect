@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
+from .bundle_provenance import checkpoint_identity
 from .config import ModelConfig
 from .default_decoder import build_standard_decoder_engine
 from .default_dual_profile_decoder_tp import build_dual_profile_tp_decoder_engine
@@ -302,6 +303,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
     )
     writer.add_json("runtime.json", runtime)
+    writer.add_json("checkpoint_provenance.json", {
+        "version": 1, "checkpoint": checkpoint_identity(model_dir),
+        "build": {"precision": precision, "max_sequence_length": max_sequence_length,
+                  "tensor_parallel_size": parallel.tp_size,
+                  "quantization": request.quantization or "none",
+                  "fp32_layers": list(request.fp32_layers)},
+    })
     for filename in _BUNDLE_FILES:
         path = model_dir / filename
         if path.is_file():

@@ -71,3 +71,25 @@ def test_checkpoint_uses_only_the_staged_revision(tmp_path, monkeypatch, cached)
     else:
         with pytest.raises(LocalEntryNotFoundError):
             test_e2e._checkpoint(manifest)
+
+
+def test_embedding_ignores_prebuilt_text_profile(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    (tmp_path / "config.json").write_text("{}")
+    observed = {}
+
+    def snapshot_download(**kwargs):
+        observed.update(kwargs)
+        return str(tmp_path)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    monkeypatch.setenv("TRTMC_E2E_BUNDLE", str(tmp_path / "unrelated-text.bundle"))
+    monkeypatch.setenv("TRTMC_E2E_PROFILE", "qwen3-0.6b-fp16")
+    monkeypatch.setenv("TRTMC_E2E_CHECKPOINT_REVISION", "b" * 40)
+    manifest = {"name": "qwen3-embedding-0.6b", "task": "embedding",
+                "hf_id": "Qwen/Qwen3-Embedding-0.6B", "hf_revision": "a" * 40}
+    assert test_e2e._checkpoint(manifest) == tmp_path
+    assert observed == {"repo_id": manifest["hf_id"], "revision": "a" * 40,
+                        "local_files_only": True}
+    assert test_e2e._validation_revision(manifest) == "a" * 40
