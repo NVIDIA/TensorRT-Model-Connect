@@ -122,8 +122,15 @@ def main():
             (args.output / "torch-compile.json").write_text(
                 json.dumps(
                     {
-                        "checkpoint": manifest["hf_id"],
-                        "checkpoint_revision": manifest["hf_revision"],
+                        "selected_manifest": {
+                            "name": manifest["name"],
+                            "hf_id": manifest["hf_id"],
+                            "hf_revision": manifest["hf_revision"],
+                        },
+                        "supplied_artifacts": {
+                            "checkpoint_path": str(args.checkpoint.resolve()),
+                            "identity_verified": False,
+                        },
                         "variant": variant,
                         "torch": torch.__version__,
                         "device": torch.cuda.get_device_name(),
