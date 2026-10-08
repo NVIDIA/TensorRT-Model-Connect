@@ -48,6 +48,7 @@ if(TRTMC_BUILD_TESTS)
     set_target_properties(test_albert_sdk_${_language} PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
     )
+    add_dependencies(trtmc_model_albert test_albert_sdk_${_language})
   endforeach()
 endif()
 

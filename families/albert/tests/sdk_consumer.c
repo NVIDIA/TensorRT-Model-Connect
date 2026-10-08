@@ -72,6 +72,7 @@ int main(int argc, char** argv) {
     /* ── load model ───────────────────────────────────────────────────────── */
     trtmc_load_options_v1 opts;
     memset(&opts, 0, sizeof(opts));
+    opts.struct_size = sizeof(opts);
     opts.runtime_root = sv(runtime_root);
 
     trtmc_model* model = NULL;
