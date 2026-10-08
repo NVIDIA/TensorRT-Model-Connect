@@ -117,6 +117,29 @@ def _checkpoint(manifest: dict) -> Path:
     return path
 
 
+def test_checkpoint_uses_the_staged_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    options: dict[str, object] = {}
+
+    def download(**kwargs) -> str:
+        options.update(kwargs)
+        return str(snapshot)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", download)
+
+    manifest = {"hf_id": "Qwen/Qwen3-0.6B", "hf_revision": "revision"}
+    assert _checkpoint(manifest) == snapshot
+    assert options == {
+        "repo_id": "Qwen/Qwen3-0.6B",
+        "revision": "revision",
+        "local_files_only": True,
+    }
+
+
 def _prompt(case: dict) -> str:
     if "prompt" in case:
         prompt = case["prompt"]

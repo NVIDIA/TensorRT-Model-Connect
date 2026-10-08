@@ -7,6 +7,7 @@ import base64
 import copy
 import unittest
 import json
+import shlex
 import struct
 import zlib
 from html.parser import HTMLParser
@@ -16,7 +17,7 @@ import numpy as np
 import pytest
 
 from tools import e2e_evidence
-from tools.e2e_evidence import Evidence, evidence_stage, record_evidence
+from tools.e2e_evidence import Evidence, evidence_stage, record_evidence, render_command
 from tools.e2e_report import (
     NPY_MAX_BYTES,
     _assessment as assessment,
@@ -29,6 +30,23 @@ from tools.e2e_report import (
 )
 
 pytest_plugins = ("pytester",)
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "value with spaces",
+        "",
+        "single'quote",
+        "$HOME",
+        r"path\with\backslashes",
+        "first line\nsecond line",
+    ],
+)
+def test_render_command_round_trips_raw_argv(argument: str) -> None:
+    arguments = ["trtmc", "run", "--input", argument]
+
+    assert shlex.split(render_command(arguments)) == arguments
 
 
 def _recorder(tmp_path: Path) -> Evidence:
