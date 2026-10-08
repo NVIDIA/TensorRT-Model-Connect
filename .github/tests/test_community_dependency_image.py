@@ -30,6 +30,29 @@ WORKFLOW = yaml.load(
 )
 
 
+def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
+    caller = yaml.load(
+        (ROOT / ".github/workflows/community-ci.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    inputs = caller["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["task"]["default"] == "test"
+    assert inputs["task"]["options"] == ["test", "dependency-image"]
+    jobs = caller["jobs"]
+    producer = jobs["produce-dependency-image"]
+    assert producer["if"] == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image' }}"
+    )
+    assert producer["uses"] == "./.github/workflows/community-dependency-image.yml"
+    assert set(producer["secrets"]) == set(WORKFLOW["on"]["workflow_call"]["secrets"])
+    assert set(producer["secrets"]) == {"BREV_API_KEY", "HF_TOKEN"}
+    for name in ("snapshot", "authorize", "required"):
+        assert "inputs.task != 'dependency-image'" in jobs[name]["if"]
+    for name, job in jobs.items():
+        if name != "produce-dependency-image":
+            assert job.get("permissions", {}).get("packages") != "write"
+    assert caller["concurrency"]["cancel-in-progress"] == "false"
+
+
 def candidate(directory: Path, native: object = True, family: object = True) -> Path:
     directory.mkdir(exist_ok=True)
     path = directory / "candidate.json"
@@ -241,7 +264,7 @@ def test_workflow_keeps_credentials_late_and_both_cleanup_paths() -> None:
         if "upload-artifact@" in step.get("uses", "")
     )
     before_cleanup = steps[: steps.index(release)]
-    assert sum(int(step["timeout-minutes"]) for step in before_cleanup) <= 299
+    assert sum(int(step["timeout-minutes"]) for step in before_cleanup) <= 300
     assert (
         int(produce["timeout-minutes"])
         - sum(int(step["timeout-minutes"]) for step in before_cleanup)

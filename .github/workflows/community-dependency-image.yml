@@ -5,6 +5,11 @@ name: Community Nemotron-H dependency image
 on:
   workflow_dispatch:
   workflow_call:
+    secrets:
+      BREV_API_KEY:
+        required: false
+      HF_TOKEN:
+        required: false
 permissions:
   contents: read
 concurrency:
@@ -109,7 +114,10 @@ jobs:
         timeout-minutes: 5
         env:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
-        run: brev login --api-key "$BREV_API_KEY"
+        run: |
+          set -euo pipefail
+          test -n "$BREV_API_KEY"
+          brev login --api-key "$BREV_API_KEY"
       - name: Reserve one AWS L4 builder
         timeout-minutes: 45
         id: reserve
@@ -162,7 +170,7 @@ jobs:
             --timeout 7200 -- sudo python3 \
             "$REMOTE_REPO/.github/scripts/community_dependency_image.py" build --family nemotron_h --repository "$REMOTE_MODEL" --output "$REMOTE_PROOF"
       - name: Qualify the unchanged Nemotron-H workloads on L4
-        timeout-minutes: 65
+        timeout-minutes: 66
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -176,7 +184,7 @@ jobs:
           python3 -m tools.brev_exec --instance "$INSTANCE_NAME" \
             --log "$RUNNER_TEMP/dependency-qualification.log" \
             --result-file "/tmp/trtmc-image-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --timeout 3600 -- sudo python3 \
+            --timeout 3720 -- sudo python3 \
             "$REMOTE_REPO/.github/scripts/community_dependency_image.py" qualify --family nemotron_h \
             --output "$REMOTE_PROOF" --repository "$REMOTE_MODEL" --stage-python /tmp/trtmc-image-stage/bin/python \
             --token-file "$REMOTE_AUTH/hf-token"

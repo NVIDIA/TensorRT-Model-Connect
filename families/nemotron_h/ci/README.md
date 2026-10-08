@@ -82,23 +82,19 @@ until a real x86/L4 producer run has established these facts.
 A new `workflow_dispatch` filename may need default-branch registration before
 GitHub accepts direct dispatches. The file also supports `workflow_call`, so the
 already registered Community CI entry can call it on Dev without changing main.
-The caller integration is owned by the Community CI workflow maintainer:
+The registered Community CI workflow routes this explicit manual mode separately
+from PR snapshots, tests, and commit statuses:
 
-```yaml
-produce-dependency-image:
-  if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image' }}
-  permissions:
-    contents: read
-    actions: read
-    packages: write
-  uses: ./.github/workflows/community-dependency-image.yml
+```bash
+gh workflow run community-ci.yml --repo NVIDIA/TensorRT-Model-Connect \
+  --ref ci/developer -f task=dependency-image
 ```
 
-The registered caller must route this explicit manual mode separately from PR
-execution and retain `cancel-in-progress: false`. The callee uses its protected
-job environment for Brev/Hugging Face secrets and does not require a PAT.
+The caller retains `cancel-in-progress: false` and passes only the named Brev and
+Hugging Face secrets. The callee uses its protected job environment and a
+short-lived `GITHUB_TOKEN`; it does not require a PAT.
 
-The steps before owner cleanup total at most 299 minutes, leaving at least one
+The steps before owner cleanup total at most 300 minutes, leaving at least one
 hour of the hosted job's 360 minute limit for cleanup. The producer never replaces a VM for a
 package or model failure. Platform force-kill still bounds any hosted job;
 the independent cleanup job is the backstop. No cron or shared family image is
