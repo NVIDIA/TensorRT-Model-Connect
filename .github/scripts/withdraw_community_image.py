@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -58,7 +59,22 @@ def api(token: str, suffix: str = "", *, method: str = "GET"):
                 raise RuntimeError("Package inventory exceeds the response limit")
             return json.loads(payload)
     except urllib.error.HTTPError as error:
-        raise RuntimeError(f"Package API {method} failed with HTTP {error.code}") from None
+        # GitHub can reject a deletion for a policy reason even after reads
+        # succeed. Retain only its bounded message, never headers or raw bodies.
+        message = ""
+        try:
+            body = json.loads(error.read(4096))
+            value = body.get("message") if isinstance(body, dict) else None
+            if isinstance(value, str):
+                message = value.replace(token, "[redacted]") if token else value
+                message = re.sub(
+                    r"gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+", "[redacted]", message
+                )
+                message = " ".join(message.split())[:500]
+        except (OSError, ValueError):
+            pass
+        detail = f": {message}" if message else ""
+        raise RuntimeError(f"Package API {method} failed with HTTP {error.code}{detail}") from None
     except (OSError, ValueError):
         raise RuntimeError("Package API evidence is unavailable or invalid") from None
 

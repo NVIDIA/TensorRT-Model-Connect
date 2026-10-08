@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import io
+import json
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -71,3 +74,30 @@ def test_api_failure_does_not_count_as_confirmed_deletion(monkeypatch):
     monkeypatch.setattr(MODULE, "api", failing_api)
     with pytest.raises(RuntimeError, match="403"):
         MODULE.withdraw("test-token")
+
+
+def test_delete_diagnostic_retains_only_bounded_redacted_message(monkeypatch):
+    class Opener:
+        def open(self, request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "Bad Request",
+                {},
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "message": "Policy rejection test-token\n" + "x" * 900,
+                            "secret": "DO NOT PRINT",
+                        }
+                    ).encode()
+                ),
+            )
+
+    monkeypatch.setattr(MODULE.urllib.request, "build_opener", lambda *_: Opener())
+    with pytest.raises(RuntimeError) as failure:
+        MODULE.api("test-token", "/versions/1356372450", method="DELETE")
+    message = str(failure.value)
+    assert "HTTP 400: Policy rejection [redacted]" in message
+    assert "test-token" not in message and "DO NOT PRINT" not in message
+    assert "\n" not in message and len(message) < 600
