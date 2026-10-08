@@ -301,7 +301,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def require_private_package(reference: str, token: str, *, allow_missing: bool) -> None:
+def require_private_package(reference: str, token: str) -> None:
     package = reference.removeprefix("ghcr.io/nvidia/").split(":", 1)[0]
     request = urllib.request.Request(
         "https://api.github.com/orgs/NVIDIA/packages/container/"
@@ -310,13 +310,14 @@ def require_private_package(reference: str, token: str, *, allow_missing: bool) 
     )
     try:
         with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+            if getattr(response, "status", None) != 200:
+                raise ValueError("package lookup must return HTTP 200")
             package_info = json.load(response)
-    except urllib.error.HTTPError as error:
-        if error.code == 404 and allow_missing:
-            return
-        raise RuntimeError("Private package visibility could not be verified") from None
     except (OSError, ValueError):
-        raise RuntimeError("Private package visibility could not be verified") from None
+        raise RuntimeError(
+            "Private package visibility could not be verified. Bootstrap a known-private "
+            "package and grant this workflow authenticated access before publishing full images."
+        ) from None
     if not isinstance(package_info, dict):
         raise RuntimeError("Private package visibility could not be verified")
     if package_info.get("visibility") != "private":
@@ -428,7 +429,7 @@ def publish(output: Path, registry: str, username: str, token_file: Path, *, fam
             token = token_file.read_text(encoding="utf-8").strip()
             if not token:
                 raise RuntimeError("The short-lived registry credential is empty")
-            require_private_package(f"{registry}/{family}", token, allow_missing=True)
+            require_private_package(f"{registry}/{family}", token)
             run(
                 [*config, "login", "ghcr.io", "--username", username, "--password-stdin"],
                 capture=True,
@@ -439,7 +440,7 @@ def publish(output: Path, registry: str, username: str, token_file: Path, *, fam
             tag = f"{registry}/{family}:{candidate['source_sha'][:16]}-{key}"
             run([*config, "tag", candidate["local_image"], tag])
             run([*config, "push", tag])
-            require_private_package(tag, token, allow_missing=False)
+            require_private_package(tag, token)
             values = json.loads(
                 run(
                     [*config, "image", "inspect", "--format", "{{json .RepoDigests}}", tag],
