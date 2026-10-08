@@ -218,6 +218,8 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
                 name = case.get("name")
                 if not isinstance(name, str) or not name:
                     raise ValueError("every testcase requires a non-empty string name")
+                if "premerge" in case and not isinstance(case["premerge"], bool):
+                    raise ValueError("premerge must be a boolean when present")
                 if not isinstance(case.get("community_gpu", True), bool):
                     raise ValueError("community_gpu must be a boolean when present")
                 if case.get("premerge") is True:
@@ -247,7 +249,7 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
 
     if not manifests:
         raise CommunityGpuError(f"{family} has no E2E manifests")
-    if not cases:
+    if not cases and not deferred:
         raise CommunityGpuError(f"{family} has no E2E testcase marked premerge for Community GPU")
     duplicates = sorted(name for name, count in Counter([*cases, *deferred]).items() if count > 1)
     if duplicates:
@@ -381,6 +383,8 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
 
     repository = repository.resolve()
     plan = family_plan(repository, family)
+    if not plan.testcases:
+        raise CommunityGpuError(f"{family} is fully deferred from Community GPU validation")
     report["requested_cases"] = list(plan.testcases)
     report["deferred_cases"] = list(plan.deferred_testcases)
     build_env = {
@@ -598,7 +602,7 @@ def _container_result(
         record.update(
             status="failed",
             failure_class="resource",
-            evidence="Docker confirmed OOMKilled within the container memory limit",
+            evidence="Docker reported OOMKilled for this container",
         )
     return record
 
@@ -608,14 +612,11 @@ def _summary(records: dict[str, dict], env: dict[str, str], started: float) -> d
         "schema_version": 1,
         "duration_seconds": round(time.monotonic() - started, 3),
         "families": list(records.values()),
-        "complete": all(
-            row.get("status") not in {"not_run", "running"}
-            and bool(row.get("cases"))
-            and all(result in {"passed", "failed"} for result in row["cases"].values())
-            for row in records.values()
-        ),
-        "passed": bool(records) and all(row["status"] == "passed" for row in records.values()),
+        "complete": False,
+        "passed": False,
     }
+    if checked := _checked_summary(value):
+        value = checked
     if destination := env.get("TRTMC_GPU_RESULTS_DIR"):
         _save_json(Path(destination) / "summary.json", value)
     print(SUMMARY_PREFIX + json.dumps(value, sort_keys=True), flush=True)
@@ -691,6 +692,77 @@ def export_dependency_catalog(repository: Path, ci_sha: str, destination: Path) 
     _save_json(destination, catalog)
 
 
+def _dependency_host_ram_gib(lock: dict) -> int:
+    resources = lock.get("resources", {})
+    if not isinstance(resources, dict):
+        raise CommunityGpuError("Invalid qualified host resources")
+    ram = resources.get("host_ram_gib", 64)
+    if type(ram) is not int or ram not in {64, 128}:
+        raise CommunityGpuError("Qualified host RAM must be 64 or 128 GiB")
+    host = lock.get("qualification_host")
+    if ram == 128 or "qualification_host" in lock:
+        if (
+            not isinstance(host, dict)
+            or type(host.get("ram_gib")) is not int
+            or host["ram_gib"] != ram
+            or type(host.get("gpu_count")) is not int
+            or host["gpu_count"] != 1
+            or host.get("arch") != "x86_64"
+            or not isinstance(host.get("run_id"), str)
+            or not re.fullmatch(r"[1-9][0-9]*", host["run_id"])
+        ):
+            raise CommunityGpuError("Host RAM has no matching single-GPU x86 qualification")
+    return ram
+
+
+def _dependency_catalog(path: Path) -> dict:
+    catalog = _dependency_json(_dependency_bytes(path))
+    families = catalog.get("families")
+    if (
+        type(catalog.get("schema_version")) is not int
+        or catalog.get("schema_version") != 1
+        or not isinstance(families, dict)
+    ):
+        raise CommunityGpuError("Invalid dependency catalog schema")
+    if not isinstance(catalog.get("ci_sha"), str) or not re.fullmatch(
+        r"[0-9a-f]{40}", catalog["ci_sha"]
+    ):
+        raise CommunityGpuError("Dependency catalog has no immutable CI source")
+    if not all(isinstance(name, str) and FAMILY_PATTERN.fullmatch(name) for name in families):
+        raise CommunityGpuError("Invalid dependency catalog family")
+    return catalog
+
+
+def required_host_ram_gib(
+    repository: Path, env: dict[str, str], catalog_path: Path, ci_sha: str
+) -> int:
+    """Select the largest admitted owner profile before any cloud allocation."""
+    catalog = _dependency_catalog(catalog_path)
+    if catalog["ci_sha"] != ci_sha:
+        raise CommunityGpuError("Host resources do not belong to the trusted CI commit")
+    selected = selected_families(
+        env.get("TRTMC_GPU_SCOPE", ""),
+        env.get("TRTMC_GPU_FAMILIES", ""),
+        env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
+        env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
+    )
+    ram = 64
+    for family in selected:
+        if family in catalog["families"]:
+            entry = catalog["families"][family]
+            if not isinstance(entry, dict) or not isinstance(entry.get("lock"), dict):
+                # Keep legacy image errors isolated to their owner; they cannot
+                # authorize a larger host without a resource declaration.
+                continue
+            owner_ram = _dependency_host_ram_gib(entry["lock"])
+            # Dependency input changes can require a cold install; they cannot
+            # reduce the host memory used for this owner's admitted qualification.
+            if owner_ram == 128:
+                _dependency_reference(repository, family, entry)
+            ram = max(ram, owner_ram)
+    return ram
+
+
 def _dependency_reference(repository: Path, family: str, entry: object) -> str | None:
     """Require an admitted digest and the exact dependency inputs for this owner."""
     if not isinstance(entry, dict) or not isinstance(entry.get("lock"), dict):
@@ -754,6 +826,7 @@ def _dependency_reference(repository: Path, family: str, entry: object) -> str |
         raise CommunityGpuError("Dependency image has an incomplete qualified ABI")
     if abi["platform"] != lock["platform"]:
         raise CommunityGpuError("Qualified ABI platform disagrees with the image")
+    _dependency_host_ram_gib(lock)
     return None if changed else reference
 
 
@@ -770,20 +843,8 @@ def _dependency_image_ids(
     try:
         if catalog_path is None:
             return images, errors, misses
-        catalog = _dependency_json(_dependency_bytes(catalog_path))
+        catalog = _dependency_catalog(catalog_path)
         families = catalog.get("families")
-        if (
-            type(catalog.get("schema_version")) is not int
-            or catalog.get("schema_version") != 1
-            or not isinstance(families, dict)
-        ):
-            raise CommunityGpuError("Invalid dependency catalog schema")
-        if not isinstance(catalog.get("ci_sha"), str) or not re.fullmatch(
-            r"[0-9a-f]{40}", catalog["ci_sha"]
-        ):
-            raise CommunityGpuError("Dependency catalog has no immutable CI source")
-        if not all(isinstance(name, str) and FAMILY_PATTERN.fullmatch(name) for name in families):
-            raise CommunityGpuError("Invalid dependency catalog family")
         for family in selected:
             if family not in families:
                 continue
@@ -873,6 +934,7 @@ def run_containers(
     dependency_catalog: Path | None = None,
     registry_token_file: Path | None = None,
     registry_username: str = "github-actions",
+    require_family_coverage: bool = False,
 ) -> None:
     """Run selected owners sequentially, preserving partial coverage and cleanup."""
     repository = repository.resolve(strict=True)
@@ -883,19 +945,35 @@ def run_containers(
         env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
     )
     plans = {family: family_plan(repository, family) for family in selected}
+    deferred_owners = tuple(family for family in selected if not plans[family].testcases)
+    if require_family_coverage and deferred_owners:
+        raise CommunityGpuError(
+            "Dependency qualification requires Community coverage for every selected owner: "
+            + ", ".join(deferred_owners)
+        )
+    active = tuple(family for family in selected if plans[family].testcases)
+    if not active:
+        for family in SHARED_SMOKE_FAMILIES:
+            plan = plans.get(family) or family_plan(repository, family)
+            if not plan.testcases:
+                raise CommunityGpuError(
+                    f"Community fallback requires runnable coverage for {family}"
+                )
+            plans[family] = plan
+        active = SHARED_SMOKE_FAMILIES
     started = time.monotonic()
     deadline = started + execution_budget_seconds(env)
     records = {
         family: {
             "family": family,
-            "status": "not_run",
-            "phase": "pending",
+            "status": "not_run" if plan.testcases else "deferred",
+            "phase": "pending" if plan.testcases else "selection",
             "failure_class": None,
-            "requested_cases": list(plans[family].testcases),
-            "deferred_cases": list(plans[family].deferred_testcases),
-            "cases": {case: "not_run" for case in plans[family].testcases},
+            "requested_cases": list(plan.testcases),
+            "deferred_cases": list(plan.deferred_testcases),
+            "cases": {case: "not_run" for case in plan.testcases},
         }
-        for family in selected
+        for family, plan in plans.items()
     }
     _summary(records, env, started)
     inspected = subprocess.run(
@@ -909,7 +987,7 @@ def run_containers(
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise CommunityGpuError("Docker did not resolve an immutable GPU image ID")
     dependency_images, dependency_errors, dependency_misses = _dependency_image_ids(
-        repository, selected, dependency_catalog, registry_token_file, registry_username, deadline
+        repository, active, dependency_catalog, registry_token_file, registry_username, deadline
     )
     runner = Path(__file__).resolve()
     run_id = uuid.uuid4().hex
@@ -918,7 +996,7 @@ def run_containers(
     memory_limit = int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") * 0.75)
     cpu_limit = max(1, (os.cpu_count() or 2) - 2)
     try:
-        for family in selected:
+        for family in active:
             records[family]["dependency_cache"] = (
                 "input_mismatch"
                 if family in dependency_misses
@@ -1152,6 +1230,7 @@ def _checked_summary(value: object) -> dict | None:
             "failed",
             "running",
             "not_run",
+            "deferred",
         }:
             return None
         if not isinstance(row.get("phase"), str) or len(row["phase"]) > 64:
@@ -1162,27 +1241,52 @@ def _checked_summary(value: object) -> dict | None:
         cases = row.get("cases")
         if not isinstance(cases, dict) or any(
             not isinstance(name, str)
+            or not name
             or not isinstance(outcome, str)
             or outcome not in {"passed", "failed", "skipped", "not_run"}
             for name, outcome in cases.items()
         ):
             return None
         deferred = row.get("deferred_cases", [])
-        if not isinstance(deferred, list) or not all(isinstance(name, str) for name in deferred):
+        if (
+            not isinstance(deferred, list)
+            or not all(isinstance(name, str) and name for name in deferred)
+            or len(set(deferred)) != len(deferred)
+            or set(deferred) & set(cases)
+        ):
             return None
+        requested = row.get("requested_cases", list(cases))
+        if (
+            not isinstance(requested, list)
+            or not all(isinstance(name, str) and name for name in requested)
+            or len(set(requested)) != len(requested)
+            or set(requested) != set(cases)
+        ):
+            return None
+        if row["status"] == "deferred" and (
+            row["phase"] != "selection"
+            or row.get("requested_cases") != []
+            or cases
+            or not deferred
+            or category is not None
+        ):
+            return None
+    active = [row for row in rows if row["status"] != "deferred"]
     return {
         **value,
-        "complete": all(
+        "complete": bool(active)
+        and all(
             row["status"] in {"passed", "failed"}
             and bool(row["cases"])
             and all(status in {"passed", "failed"} for status in row["cases"].values())
-            for row in rows
+            for row in active
         ),
-        "passed": all(
+        "passed": bool(active)
+        and all(
             row["status"] == "passed"
             and bool(row["cases"])
             and all(status == "passed" for status in row["cases"].values())
-            for row in rows
+            for row in active
         ),
     }
 
@@ -1239,8 +1343,8 @@ def summarize_log(path: Path, destination: Path | None = None) -> dict | None:
                         + " |\n"
                     )
                 stream.write(
-                    f"\nAll selected Community E2Es executed: {summary.get('complete') is True}. "
-                    f"All families passed: {summary.get('passed') is True}.\n"
+                    f"\nAll runnable Community E2Es executed: {summary.get('complete') is True}. "
+                    f"Runnable Community families passed: {summary.get('passed') is True}.\n"
                 )
                 for row in summary["families"]:
                     if deferred := row.get("deferred_cases"):
@@ -1261,6 +1365,7 @@ def main() -> int:
     mode.add_argument("--execution-budget", action="store_true")
     mode.add_argument("--summarize-log", type=Path)
     mode.add_argument("--export-dependency-catalog", type=Path)
+    mode.add_argument("--required-host-ram-gib", action="store_true")
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--image", default="trtmc-quickstart-gpu")
     parser.add_argument("--cache-dir", type=Path)
@@ -1270,17 +1375,29 @@ def main() -> int:
     parser.add_argument("--registry-token-file", type=Path)
     parser.add_argument("--registry-username", default="github-actions")
     parser.add_argument("--ci-sha")
+    parser.add_argument("--require-family-coverage", action="store_true")
     args = parser.parse_args()
     try:
         if args.checkpoint_token_file is not None and not args.containers:
             raise CommunityGpuError("--checkpoint-token-file requires --containers")
+        if args.require_family_coverage and not args.containers:
+            raise CommunityGpuError("--require-family-coverage requires --containers")
         if (
-            args.dependency_catalog is not None or args.registry_token_file is not None
-        ) and not args.containers:
+            args.dependency_catalog is not None
+            and not (args.containers or args.required_host_ram_gib)
+        ) or (args.registry_token_file is not None and not args.containers):
             raise CommunityGpuError("Dependency image inputs require --containers")
         if args.export_dependency_catalog is not None:
             export_dependency_catalog(
                 args.repository, args.ci_sha or "", args.export_dependency_catalog
+            )
+        elif args.required_host_ram_gib:
+            if args.dependency_catalog is None:
+                raise CommunityGpuError("Host selection requires the trusted dependency catalog")
+            print(
+                required_host_ram_gib(
+                    args.repository, dict(os.environ), args.dependency_catalog, args.ci_sha or ""
+                )
             )
         elif args.execution_budget:
             print(execution_budget_seconds(dict(os.environ)))
@@ -1305,11 +1422,16 @@ def main() -> int:
                 dependency_catalog=args.dependency_catalog,
                 registry_token_file=args.registry_token_file,
                 registry_username=args.registry_username,
+                require_family_coverage=args.require_family_coverage,
             )
         elif args.stage_family:
             if args.cache_dir is None:
                 raise CommunityGpuError("--stage-family requires --cache-dir")
             plan = family_plan(args.repository.resolve(), args.stage_family)
+            if not plan.testcases:
+                raise CommunityGpuError(
+                    "A fully deferred owner has no Community checkpoints to stage"
+                )
             _stage_checkpoints((plan,), args.cache_dir)
         else:
             # Source imports happen only inside the selected family's container.

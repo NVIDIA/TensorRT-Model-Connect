@@ -86,8 +86,12 @@ skip GPU. Missing public assets fail visibly rather than count as coverage.
 A testcase may explicitly set `community_gpu: false` to keep a larger workload
 in its existing Internal/Nightly qualification scope. Its `premerge` flag and
 passing criteria remain unchanged. Community reports deferred cases by name and
-does not claim to have qualified them. Each selected family must still declare
-at least one runnable Community premerge case; disabling all cases is an error.
+does not claim to have qualified them. A fully deferred owner gets no checkpoint
+staging or container. If every requested owner is fully deferred, normal CI runs
+the existing five shared smoke families within the original requested-owner
+budget; mixed selections run only their active owners. Missing premerge cases
+and invalid flags remain errors. Dependency-image producers require actual
+coverage of every selected owner, so shared smoke cannot qualify their images.
 
 ### Blocking GPU reservation
 
@@ -107,8 +111,10 @@ printing credentials, environment values, or complete bootstrap logs. These
 diagnostics do not admit project or model execution.
 
 The reservation waits up to 45 minutes on one named instance. The default is
-AWS `g6.4xlarge`; explicit Nebius qualification uses
-`gpu-l40s-a.1gpu-16vcpu-64gb`. Both request 500 GiB disk and require 200 GiB free
+64 GiB RAM on AWS `g6.4xlarge` or Nebius
+`gpu-l40s-a.1gpu-16vcpu-64gb`. A qualified 128 GiB owner profile selects only
+AWS `g6.8xlarge` or Nebius `gpu-l40s-a.1gpu-32vcpu-128gb`. All four types have
+one GPU, request 500 GiB disk, and require 200 GiB free
 at admission. Metadata READY is followed by the same functional probe; neither
 a failed test nor a readiness timeout silently allocates a replacement.
 
@@ -150,6 +156,20 @@ input uses the normal base image and ordinary family installation, so dependency
 update PRs can still be tested before a new image is published. Invalid lock
 metadata fails that owner explicitly while other owners continue.
 
+Before reserving a VM, the trusted CI commit's selected owner locks determine
+the host RAM profile. An omitted `resources.host_ram_gib` uses 64 GiB. The only
+other supported value is 128, which requires the lock's existing qualification
+proof and a matching `qualification_host` record: `ram_gib`, `gpu_count: 1`,
+`arch: "x86_64"`, and the successful producer's decimal `run_id`. Admission of
+that record waits for real workload qualification and confirmed cleanup. The
+maximum profile among selected owners determines the one VM. Invalid resource
+claims fail before allocation. A changed dependency input or image cache miss
+retains the owner's host RAM profile; it never silently downgrades the host or
+allocates a replacement. PR-owned locks and instance types do not select capacity.
+This preallocation selector uses authorized requested owners before the PR's
+execution plans are materialized. If a later plan defers an owner, its admitted
+host profile may be retained conservatively.
+
 Matching locks select private GHCR images by immutable digest. A read credential
 is copied to the trusted VM only after its PR base image build; the coordinator
 pulls all selected cached images using a temporary Docker configuration and
@@ -157,6 +177,14 @@ deletes both credential and configuration before any contributor container
 starts. No registry token or Docker socket enters those containers. Native
 builds, family installation, and every original E2E assertion still run. No lock
 or image is admitted merely because the producer's local mechanics tests pass.
+
+Maintainers can dispatch `task=dependency-image-audit` on a protected branch with
+`audit_family` and an immutable `audit_digest`. This mode uses only package read
+permission and records the package visibility, identity, linked repository, root
+JSON keys, and matching version metadata. It rechecks the triggering actor before
+the requests and preserves `dependency-image-audit.json` even when visibility is
+not private. It allocates no VM and does not publish or admit an image; the
+producer's private visibility requirement remains unchanged.
 
 The image/setup/test step is capped at four hours inside the six-hour GPU job,
 leaving at least an hour for release after the 45-minute reservation. Family

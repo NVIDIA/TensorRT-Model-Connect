@@ -228,7 +228,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
     assert jobs["required"]["if"] == (
         "${{ !cancelled() && (github.event_name == 'pull_request' || "
         "(github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' "
-        "&& inputs.source_snapshot != '')) }}"
+        "&& inputs.task != 'dependency-image-audit' && inputs.source_snapshot != '')) }}"
     )
     assert jobs["required"]["needs"] == [
         "authorize",
@@ -1177,6 +1177,7 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
         "PROVISION_EXITCODE": str(provision_exitcode),
         "GPU_TYPE": "L40",
         "GPU_PROVIDER": "auto",
+        "HOST_RAM_GIB": "64",
         "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "2",
         "GITHUB_OUTPUT": str(output),
@@ -1214,7 +1215,6 @@ python3() {
     assert outputs == [
         "instance_name=trtmc-gpu-ci-123-2",
         "lease_artifact_name=gpu-ci-lease-123-2",
-        "instance_type=g6.4xlarge",
         "allocation_requested=false",
         f"instance_name={instance_name}",
     ]
@@ -1244,7 +1244,7 @@ python3() {
     assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
     assert calls.read_text(encoding="utf-8").splitlines() == [
         "provision -m tools.brev_exec provision --instance trtmc-gpu-ci-123-2 "
-        "--instance-type g6.4xlarge --disk-gb 500 --min-free-disk-gb 200 "
+        "--provider aws --host-ram-gib 64 --disk-gb 500 --min-free-disk-gb 200 "
         f"--lease-file {tmp_path}/trtmc-gpu-ci-lease.json --timeout 2700 --attempts 1",
         f"cleanup -m tools.brev_exec cleanup --instance {instance_name} "
         f"--lease-file {tmp_path}/trtmc-gpu-ci-lease.json --until-deleted",
@@ -2121,6 +2121,7 @@ class JobHarness:
             "GITHUB_REPOSITORY": "example/repository",
             "GPU_TYPE": "L40S",
             "GPU_PROVIDER": "auto",
+            "HOST_RAM_GIB": "64",
             "RESERVED_INSTANCE": "trtmc-gpu-ci-123-2",
             "PROVISION_EXIT": "0",
             "COORDINATOR_EXIT": "0",
@@ -2169,6 +2170,82 @@ class JobHarness:
         return values["instance_name"]
 
 
+@pytest.mark.parametrize("profile", [64, 128, "invalid"])
+def test_trusted_host_selection_step_runs_before_any_allocation(tmp_path, gpu_job, profile):
+    """Execute the actual exporter/selector CLI against Git blobs, not the PR working lock."""
+    from tools.tests.test_community_gpu_ci import _dependency_entry
+
+    repository = tmp_path / "source"
+    repository.mkdir()
+    entry = _dependency_entry(repository, "alpha")
+    entry["lock"]["resources"] = {"host_ram_gib": 64 if profile == 64 else 128}
+    if profile != 64:
+        entry["lock"]["qualification_host"] = {
+            "ram_gib": 64 if profile == "invalid" else 128,
+            "gpu_count": 1,
+            "arch": "x86_64",
+            "run_id": "12345",
+        }
+    lock = repository / "families/alpha/ci/dependency-image.json"
+    lock.write_text(json.dumps(entry["lock"]))
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args], text=True).strip()
+
+    git("init", "-q")
+    git("add", ".")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "-qm",
+        "trusted host inputs",
+    )
+    ci_sha = git("rev-parse", "HEAD")
+    lock.write_text('{"resources":{"host_ram_gib":256},"image":"attacker:latest"}')
+    step = next(step for step in gpu_job["steps"] if step.get("id") == "host_profile")
+    assert step.get("continue-on-error", False) is False
+    assert [s.get("id") for s in gpu_job["steps"]].index("host_profile") < [
+        s.get("id") for s in gpu_job["steps"]
+    ].index("reserve")
+    output = tmp_path / "host-output"
+    result = subprocess.run(
+        ["bash", "-c", step["run"]],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(REPO_ROOT),
+            "GITHUB_WORKSPACE": str(repository),
+            "GITHUB_SHA": ci_sha,
+            "GITHUB_OUTPUT": str(output),
+            "RUNNER_TEMP": str(tmp_path),
+            "TRTMC_GPU_SCOPE": "families",
+            "TRTMC_GPU_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    harness = JobHarness(tmp_path, gpu_job)
+    if result.returncode == 0:
+        assert output.read_text().strip() == f"host_ram_gib={profile}"
+        reserved = harness.run("reserve", HOST_RAM_GIB=str(profile))
+        assert (
+            reserved.returncode == 0
+            and f"--host-ram-gib {profile}" in harness.events("provision")[0]
+        )
+    if profile == "invalid":
+        assert result.returncode != 0 and not output.exists() and not harness.events("provision")
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_failed_blocking_reservation_stops_normal_test_admission(tmp_path, gpu_job):
     harness = JobHarness(tmp_path, gpu_job)
     reserve, test_step = harness.steps["reserve"], harness.steps["test"]
@@ -2185,7 +2262,7 @@ def test_failed_blocking_reservation_stops_normal_test_admission(tmp_path, gpu_j
     provisioned = harness.events("provision")
     assert len(provisioned) == 1
     assert "--instance trtmc-gpu-ci-123-2" in provisioned[0]
-    assert "--instance-type g6.4xlarge" in provisioned[0]
+    assert "--provider aws --host-ram-gib 64" in provisioned[0]
     assert "--attempts 1" in provisioned[0]
     assert not harness.events("coordinate")
     assert not harness.events("brev")
@@ -2202,23 +2279,28 @@ def test_failed_blocking_reservation_stops_normal_test_admission(tmp_path, gpu_j
 
 
 @pytest.mark.parametrize(
-    "provider,expected",
+    "provider,ram,expected",
     [
-        ("auto", "g6.4xlarge"),
-        ("aws", "g6.4xlarge"),
-        ("nebius", "gpu-l40s-a.1gpu-16vcpu-64gb"),
-        ("AWS", False),
-        ("aws;$(printf unexpected-provider-command)", False),
+        ("auto", "64", "aws"),
+        ("auto", "128", "aws"),
+        ("aws", "64", "aws"),
+        ("aws", "128", "aws"),
+        ("nebius", "64", "nebius"),
+        ("nebius", "128", "nebius"),
+        ("AWS", "64", False),
+        ("aws", "96", False),
+        ("aws", "", False),
+        ("aws;$(printf unexpected-provider-command)", "128", False),
     ],
 )
-def test_gpu_provider_selects_one_qualified_exact_type(tmp_path, gpu_job, provider, expected):
+def test_gpu_provider_selects_one_qualified_exact_type(tmp_path, gpu_job, provider, ram, expected):
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     choice = workflow[True]["workflow_dispatch"]["inputs"]["gpu_provider"]
     assert choice["type"] == "choice"
     assert choice["default"] == "auto"
     assert choice["options"] == ["auto", "aws", "nebius"]
     reserve = next(step for step in gpu_job["steps"] if step.get("id") == "reserve")
-    assert reserve["env"]["INSTANCE_TYPE"] == "g6.4xlarge"
+    assert reserve["env"]["HOST_RAM_GIB"] == "${{ steps.host_profile.outputs.host_ram_gib }}"
     assert reserve["env"]["GPU_PROVIDER"] == "${{ inputs.gpu_provider || 'auto' }}"
     arguments = tmp_path / "helper-arguments"
     script = r"""
@@ -2237,6 +2319,7 @@ python3() {
             "RUNNER_TEMP": str(tmp_path),
             "GPU_TYPE": "L40S",
             "GPU_PROVIDER": provider,
+            "HOST_RAM_GIB": ram,
         },
         capture_output=True,
         text=True,
@@ -2250,10 +2333,11 @@ python3() {
     assert result.returncode == 0, result.stdout + result.stderr
     argv = arguments.read_bytes().decode().split("\0")[:-1]
     assert argv[:3] == ["-m", "tools.brev_exec", "provision"]
-    assert "--provider" not in argv and "--gpu" not in argv
+    assert "--gpu" not in argv and "--instance-type" not in argv
     assert "--fallback-provider" not in argv
-    assert argv.count("--instance-type") == 1
-    assert argv[argv.index("--instance-type") + 1] == expected
+    assert argv.count("--provider") == 1
+    assert argv[argv.index("--provider") + 1] == expected
+    assert argv[argv.index("--host-ram-gib") + 1] == ram
     assert argv[argv.index("--disk-gb") + 1] == "500"
     assert argv[argv.index("--min-free-disk-gb") + 1] == "200"
     assert argv[argv.index("--lease-file") + 1] == str(tmp_path / "trtmc-gpu-ci-lease.json")

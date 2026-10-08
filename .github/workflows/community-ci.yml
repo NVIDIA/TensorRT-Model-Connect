@@ -6,7 +6,7 @@ name: Community CI
 # Community CI GPU promotion v1
 
 run-name: >-
-  ${{ inputs.task == 'dependency-image' && 'Community GPU dependency image qualification' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
+  ${{ inputs.task == 'dependency-image-audit' && 'Community dependency image metadata audit' || inputs.task == 'dependency-image' && 'Community GPU dependency image qualification' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
 
 # Stable keeps the existing pull_request pipeline. Trusted metadata jobs pair
 # its immutable snapshot with the optional Dev execution of this same workflow.
@@ -24,7 +24,16 @@ on:
         required: false
         type: choice
         default: test
-        options: [test, dependency-image]
+        options: [test, dependency-image, dependency-image-audit]
+      audit_family:
+        description: Project family package to inspect in audit mode
+        required: false
+        default: nemotron_h
+        type: string
+      audit_digest:
+        description: Immutable sha256 digest to match in audit mode
+        required: false
+        type: string
       pr_number:
         description: Open pull request number to test
         required: false
@@ -62,11 +71,82 @@ env:
   COMMUNITY_GPU_EXECUTION_ENABLED: "true"
 
 concurrency:
-  group: community-ci-${{ inputs.task == 'dependency-image' && 'dependency-image' || inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || github.ref_name == 'main' && 'start-main' || 'start-dev' }}-${{ github.event.pull_request.number || inputs.pr_number }}
+  group: community-ci-${{ startsWith(inputs.task, 'dependency-image') && inputs.task || inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || github.ref_name == 'main' && 'start-main' || 'start-dev' }}-${{ github.event.pull_request.number || inputs.pr_number }}
   # A newer push must not terminate a run that still owns a cloud instance.
   cancel-in-progress: false
 
 jobs:
+  audit-dependency-image:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image-audit' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Authorize a protected metadata audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          if repo != "NVIDIA/TensorRT-Model-Connect":
+              raise SystemExit("The dependency audit belongs to the upstream repository")
+          if os.environ["GITHUB_EVENT_NAME"] != "workflow_dispatch":
+              raise SystemExit("Package auditing requires a manual dispatch")
+          if os.environ["GITHUB_REF"] not in {"refs/heads/main", "refs/heads/ci/developer"}:
+              raise SystemExit("Package auditing requires a protected source branch")
+          if not re.fullmatch(r"[0-9a-f]{40}", os.environ["GITHUB_SHA"]):
+              raise SystemExit("Package auditing requires an immutable source commit")
+          permission = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/{repo}/collaborators/{os.environ['REQUEST_ACTOR']}/permission"
+          ], text=True))
+          role = permission.get("role_name", permission.get("permission"))
+          if role not in {"admin", "maintain"}:
+              raise SystemExit("Package auditing requires maintain or admin permission")
+          PY
+      - name: Check out only the protected audit commit
+        timeout-minutes: 5
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reauthorize the current triggering actor before auditing
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUEST_ACTOR/permission" --jq '.role_name // .permission')
+          case "$role" in admin|maintain) ;; *) echo "::error::The triggering actor requires maintain or admin permission."; exit 1 ;; esac
+      - name: Inspect only the requested package metadata
+        timeout-minutes: 6
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUDIT_FAMILY: ${{ inputs.audit_family }}
+          AUDIT_DIGEST: ${{ inputs.audit_digest }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/community_dependency_image.py audit \
+            --family "$AUDIT_FAMILY" --digest "$AUDIT_DIGEST" \
+            --output "$RUNNER_TEMP/dependency-image-audit"
+      - name: Preserve the package audit evidence
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-dependency-image-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dependency-image-audit/dependency-image-audit.json
+          if-no-files-found: ignore
+          retention-days: 7
+
   produce-dependency-image:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image' }}
     permissions:
@@ -83,7 +163,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request_target' ||
-       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.source_snapshot == ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.source_snapshot == ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -398,7 +478,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request' ||
-       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.source_snapshot != ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.source_snapshot != ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -630,7 +710,7 @@ jobs:
 
   required:
     name: Community CPU / Required
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.source_snapshot != '')) }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.source_snapshot != '')) }}
     needs:
       - authorize
       - source-quality
@@ -929,23 +1009,44 @@ jobs:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
         run: brev login --api-key "$BREV_API_KEY"
 
+      - name: Select the qualified host RAM profile
+        id: host_profile
+        timeout-minutes: 2
+        env:
+          TRTMC_GPU_SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
+          TRTMC_GPU_FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
+          TRTMC_GPU_DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
+          TRTMC_GPU_ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
+        run: |
+          set -euo pipefail
+          catalog="$RUNNER_TEMP/trtmc-gpu-host-profiles.json"
+          python3 -m tools.community_gpu_ci \
+            --export-dependency-catalog "$catalog" \
+            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA"
+          ram="$(python3 -m tools.community_gpu_ci \
+            --required-host-ram-gib --dependency-catalog "$catalog" \
+            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
+          echo "host_ram_gib=$ram" >> "$GITHUB_OUTPUT"
+
       - name: Reserve a GPU instance
         id: reserve
         env:
-          INSTANCE_TYPE: g6.4xlarge
           GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
+          HOST_RAM_GIB: ${{ steps.host_profile.outputs.host_ram_gib }}
         run: |
           set -euo pipefail
           instance_name="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           lease_file="$RUNNER_TEMP/trtmc-gpu-ci-lease.json"
           gpu_provider="${GPU_PROVIDER:-auto}"
-          instance_type="${INSTANCE_TYPE:-g6.4xlarge}"
           case "$gpu_provider" in
-            auto|aws) ;;
-            nebius)
-              instance_type=gpu-l40s-a.1gpu-16vcpu-64gb
-              ;;
+            auto) gpu_provider=aws ;;
+            aws|nebius) ;;
             *) echo "::error::Unknown GPU provider for qualification."; exit 1 ;;
+          esac
+          host_ram_gib="${HOST_RAM_GIB:?The trusted host RAM profile is unavailable}"
+          case "$host_ram_gib" in
+            64|128) ;;
+            *) echo "::error::Unknown qualified host RAM profile."; exit 1 ;;
           esac
           # The helper persists its lease before creating one exact catalog
           # type, then passively polls Brev metadata before probing readiness.
@@ -953,11 +1054,10 @@ jobs:
           # The deterministic name also covers cancellation before upload.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
           echo "lease_artifact_name=gpu-ci-lease-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
-          echo "instance_type=$instance_type" >> "$GITHUB_OUTPUT"
           echo "allocation_requested=false" >> "$GITHUB_OUTPUT"
           python3 -m tools.brev_exec provision \
             --instance "$instance_name" \
-            --instance-type "$instance_type" \
+            --provider "$gpu_provider" --host-ram-gib "$host_ram_gib" \
             --disk-gb 500 \
             --min-free-disk-gb 200 \
             --lease-file "$lease_file" \

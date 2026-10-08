@@ -406,6 +406,10 @@ DEFAULT_PROBE_IMAGE = (
 )
 DEFAULT_INSTANCE_TYPE = "g6.4xlarge"
 NEBIUS_INSTANCE_TYPE = "gpu-l40s-a.1gpu-16vcpu-64gb"
+HOST_INSTANCE_TYPES = {
+    "aws": {64: DEFAULT_INSTANCE_TYPE, 128: "g6.8xlarge"},
+    "nebius": {64: NEBIUS_INSTANCE_TYPE, 128: "gpu-l40s-a.1gpu-32vcpu-128gb"},
+}
 POLL_INTERVAL = 60.0
 CLI_TIMEOUT = 30.0
 PROBE_TIMEOUT = 180.0
@@ -1064,7 +1068,13 @@ def _cleanup_list_absent(body: dict | None, lease: dict) -> bool:
     )
 
 
-def _select_instance(instance_type: str, disk_gb: int, provider: str, deadline: float) -> dict:
+def _select_instance(
+    instance_type: str,
+    disk_gb: int,
+    provider: str,
+    deadline: float,
+    host_ram_gib: int | None = None,
+) -> dict:
     result = _run(["brev", "search", "--min-disk", str(disk_gb), "--json"], deadline)
     if result.returncode:
         raise ProvisionError(f"Brev catalog search failed (exit {result.returncode})")
@@ -1095,6 +1105,14 @@ def _select_instance(instance_type: str, disk_gb: int, provider: str, deadline: 
         raise ProvisionError(
             "the requested type and provider do not match the qualification profile"
         )
+    if host_ram_gib is not None and (
+        type(candidate.get("gpu_count")) is not int
+        or candidate["gpu_count"] != 1
+        or candidate.get("arch") != "x86_64"
+        or type(candidate.get("ram_gb")) not in (int, float)
+        or candidate["ram_gb"] != host_ram_gib
+    ):
+        raise ProvisionError("the catalog does not match the single-GPU x86 host RAM profile")
     return {"type": instance_type, "target_disk_gb": disk_gb, "provider": candidate["provider"]}
 
 
@@ -1482,6 +1500,7 @@ def provision(
     timeout: float = 2700,
     provider: str = "",
     instance_type: str = "",
+    host_ram_gib: int | None = None,
     disk_gb: int = 500,
     min_free_disk_gb: float = 200,
     lease_file: Path | None = None,
@@ -1506,6 +1525,11 @@ def provision(
         )
     if provider not in {"", "aws", "nebius"} or not probe_image or lease_file is None:
         raise ValueError("a supported provider, probe image and persistent lease file are required")
+    if host_ram_gib is not None:
+        if type(host_ram_gib) is not int or host_ram_gib not in {64, 128} or instance_type:
+            raise ValueError("host RAM must be 64 or 128 GiB without an explicit instance type")
+        provider = provider or "aws"
+        instance_type = HOST_INSTANCE_TYPES[provider][host_ram_gib]
     instance_type = instance_type or (
         NEBIUS_INSTANCE_TYPE if provider == "nebius" else DEFAULT_INSTANCE_TYPE
     )
@@ -1525,6 +1549,7 @@ def provision(
         "sku": instance_type,
         "provider": provider,
         "requested_disk_gb": disk_gb,
+        "host_ram_gib": host_ram_gib,
         "instance_id": None,
         "phase": "selecting",
         "allocation_pending": False,
@@ -1540,7 +1565,7 @@ def provision(
         _save_lease(path, lease)
         if _inventory(instance, deadline, start) is not None:
             raise ProvisionError("instance name already exists; refusing to reuse or delete it")
-        candidate = _select_instance(instance_type, disk_gb, provider, deadline)
+        candidate = _select_instance(instance_type, disk_gb, provider, deadline, host_ram_gib)
         lease.update(
             provider=candidate["provider"],
             phase="creating",
@@ -1597,6 +1622,7 @@ def provision_main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--instance", required=True)
     parser.add_argument("--instance-type", "--type", default="")
+    parser.add_argument("--host-ram-gib", type=int)
     parser.add_argument("--disk-gb", "--disk", type=int, default=500)
     parser.add_argument("--min-free-disk-gb", type=float, default=200)
     parser.add_argument("--lease-file", type=Path, required=True)
