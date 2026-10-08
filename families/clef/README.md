@@ -127,6 +127,10 @@ sequence shapes. `--emulate-precision-casts` preserves the original BF16
 rounding boundaries. If compiler lowering fails accuracy, `--aten-layer-norm`
 retains the original normalization kernel. Each receipt records these settings
 and any ATen fallbacks; failed accuracy runs do not produce timing results.
+The comparison tools report the selected manifest separately from supplied
+local artifact paths. They do not authenticate local checkpoint or bundle
+contents against the Hub revision; a passing comparison alone is not proof
+of that identity.
 
 To check changing text and media requests through one loaded Task, run:
 

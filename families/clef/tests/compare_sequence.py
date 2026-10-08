@@ -131,8 +131,16 @@ def main():
     (args.output / "comparison.json").write_text(
         json.dumps(
             {
-                "checkpoint": manifest["hf_id"],
-                "revision": manifest["hf_revision"],
+                "selected_manifest": {
+                    "name": manifest["name"],
+                    "hf_id": manifest["hf_id"],
+                    "hf_revision": manifest["hf_revision"],
+                },
+                "supplied_artifacts": {
+                    "checkpoint_path": str(args.checkpoint.resolve()),
+                    "bundle_path": str(args.bundle.resolve()),
+                    "identity_verified": False,
+                },
                 "results": receipts,
             },
             indent=2,
