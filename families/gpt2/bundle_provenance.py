@@ -20,6 +20,15 @@ def checkpoint_identity(model_dir: Path) -> dict[str, str] | None:
             "revision": path.name}
 
 
+def _json_object(payload: bytes, description: str) -> dict:
+    try:
+        value = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise AssertionError(f"invalid prebuilt {description} JSON") from error
+    assert isinstance(value, dict), f"invalid prebuilt {description} object"
+    return value
+
+
 def _read_provenance(bundle: Path) -> dict:
     with bundle.open("rb") as source:
         assert source.read(8) == b"BUNDLE\x01\x00", "invalid prebuilt bundle signature"
@@ -27,20 +36,24 @@ def _read_provenance(bundle: Path) -> dict:
         assert len(size_bytes) == 8, "truncated prebuilt bundle header"
         size = struct.unpack("<Q", size_bytes)[0]
         assert 0 < size <= 100 * 1024 * 1024, "invalid prebuilt bundle header size"
-        header = json.loads(source.read(size))
-        assert header["family"] == "gpt2" and header["task"] == "text_generation", (
+        header_bytes = source.read(size)
+        assert len(header_bytes) == size, "truncated prebuilt bundle header"
+        header = _json_object(header_bytes, "header")
+        assert header.get("family") == "gpt2" and header.get("task") == "text_generation", (
             "prebuilt bundle has the wrong family or task"
         )
-        section = header["sections"].get("checkpoint_provenance.json")
+        sections = header.get("sections")
+        assert isinstance(sections, dict), "invalid prebuilt bundle sections object"
+        section = sections.get("checkpoint_provenance.json")
         assert section is not None, "prebuilt bundle lacks build provenance; rebuild it with TRTMC"
-        offset, length = section["offset"], section["length"]
-        start = 16 + size + offset
+        assert isinstance(section, dict), "invalid prebuilt provenance section object"
+        offset, length = section.get("offset"), section.get("length")
         assert (type(offset) is int and type(length) is int and offset >= 0
-                and 0 < length <= 1024 * 1024 and start + length <= bundle.stat().st_size), (
-            "invalid prebuilt provenance section"
-        )
+                and 0 < length <= 1024 * 1024), "invalid prebuilt provenance section range"
+        start = 16 + size + offset
+        assert start + length <= bundle.stat().st_size, "prebuilt provenance section exceeds bundle"
         source.seek(start)
-        return json.loads(source.read(length))
+        return _json_object(source.read(length), "provenance")
 
 
 def validate_prebuilt_bundle(
