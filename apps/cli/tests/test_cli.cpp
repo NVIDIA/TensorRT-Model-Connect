@@ -4,10 +4,12 @@
  */
 
 #include "cli/cli.h"
+#include "cli/family_cli.h"
 #include "cli/io.h"
 #include "cli/sdk_dispatch.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -19,6 +21,15 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+// shellapi.h depends on windows.h.
+#include <shellapi.h>
+#endif
 
 namespace {
 
@@ -37,6 +48,50 @@ trtmc::cli::Command parse(std::vector<std::string> arguments) {
     for (auto& argument : arguments)
         argv.push_back(argument.data());
     return trtmc::cli::parse_args(static_cast<int>(argv.size()), argv.data());
+}
+
+// An empty value counts as unset for the runtime-cache {rank} expansion.
+void set_env(const char* name, const std::string& value) {
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+// Family Python commands reach the interpreter through a Windows command line.
+void check_windows_argument_quoting() {
+    using trtmc::cli::quote_windows_argument;
+    const std::vector<std::pair<std::string, std::string>> cases{
+        {"plain", "plain"},
+        {"C:\\models\\ltx2", "C:\\models\\ltx2"},
+        {"", "\"\""},
+        {"a red fox", "\"a red fox\""},
+        {"tab\there", "\"tab\there\""},
+        {"C:\\Program Files\\model\\", "\"C:\\Program Files\\model\\\\\""},
+        {"say \"hi\"", "\"say \\\"hi\\\"\""},
+        {"a\\\"b", "\"a\\\\\\\"b\""},
+        {"\"", "\"\\\"\""},
+    };
+    for (const auto& [argument, expected] : cases)
+        check(quote_windows_argument(argument) == expected,
+              "Windows argument quoting follows the CommandLineToArgvW rules");
+#ifdef _WIN32
+    std::wstring line = L"python";
+    for (const auto& entry : cases) {
+        const auto quoted = quote_windows_argument(entry.first);
+        line += L' ';
+        line += std::wstring(quoted.begin(), quoted.end());
+    }
+    int count = 0;
+    LPWSTR* parsed = CommandLineToArgvW(line.c_str(), &count);
+    bool round_trip = parsed != nullptr && count == static_cast<int>(cases.size()) + 1;
+    for (std::size_t i = 0; round_trip && i < cases.size(); ++i)
+        round_trip = std::wstring(parsed[i + 1]) ==
+                     std::wstring(cases[i].first.begin(), cases[i].first.end());
+    LocalFree(parsed);
+    check(round_trip, "CommandLineToArgvW parses quoted arguments back unchanged");
+#endif
 }
 
 bool parse_throws(std::vector<std::string> arguments) {
@@ -322,6 +377,7 @@ bool dispatch_throws(const trtmc::cli::Command& command, trtmc::ITask& task) {
 } // namespace
 
 int main() {
+    check_windows_argument_quoting();
     const std::vector<std::string> execution_commands{
         "run",
         "encode",
@@ -394,6 +450,21 @@ int main() {
                             "--runtime-cache", "kernels.cache", "--cuda-graphs"});
     check(rtx.runtime_cache_path == "kernels.cache" && rtx.cuda_graphs,
           "TensorRT-RTX runtime options are retained directly");
+    {
+        const char* saved = std::getenv("OMPI_COMM_WORLD_RANK");
+        const std::string previous = saved != nullptr ? saved : "";
+        set_env("OMPI_COMM_WORLD_RANK", "");
+        check(parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--runtime-cache",
+                     "k.rank{rank}.cache"})
+                      .runtime_cache_path == "k.rank0.cache",
+              "runtime cache {rank} defaults to rank 0 outside a distributed launch");
+        set_env("OMPI_COMM_WORLD_RANK", "3");
+        check(parse({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--runtime-cache",
+                     "{rank}/k.{rank}.cache"})
+                      .runtime_cache_path == "3/k.3.cache",
+              "runtime cache {rank} expands to the OpenMPI world rank");
+        set_env("OMPI_COMM_WORLD_RANK", previous);
+    }
     check(parse_throws({"trtmc", "run", "model.bundle", "--runtime-root", "lib", "--cuda-graphs",
                         "--cuda-graphs"}),
           "duplicate TensorRT-RTX graph option is rejected");

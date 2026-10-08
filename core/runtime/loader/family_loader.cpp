@@ -6,10 +6,10 @@
 #include "trtmc/runtime/family_loader.h"
 
 #include "runtime/bundle/bundle_format.h"
+#include "trtmc/runtime/dynamic_library.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
-#include <dlfcn.h>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -62,13 +62,14 @@ fs::path resolve_runtime_root(const std::string& runtime_root) {
         return absolute_path(runtime_root, "runtime_root");
 
     static const char runtime_library_anchor = 0;
-    Dl_info info{};
-    if (dladdr(&runtime_library_anchor, &info) == 0 || info.dli_fname == nullptr ||
-        info.dli_fname[0] == '\0') {
-        throw std::runtime_error("Unable to locate the loaded libtrtmc_runtime shared library; "
-                                 "specify runtime_root explicitly");
+    fs::path library;
+    try {
+        library = platform::module_path_containing(&runtime_library_anchor);
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string("Unable to locate the loaded trtmc_runtime shared "
+                                             "library; specify runtime_root explicitly: ") +
+                                 error.what());
     }
-    const fs::path library = absolute_path(info.dli_fname, "loaded runtime library");
     if (library.parent_path().empty())
         throw std::runtime_error("Loaded runtime library has no parent directory: '" +
                                  library.string() + "'");
@@ -77,44 +78,29 @@ fs::path resolve_runtime_root(const std::string& runtime_root) {
 
 class SharedLibrary {
   public:
-    explicit SharedLibrary(const fs::path& path) : path_(path.string()) {
-        dlerror();
-        handle_ = dlopen(path_.c_str(), RTLD_NOW | RTLD_LOCAL);
-        if (handle_ == nullptr) {
-            const char* error = dlerror();
-            throw std::runtime_error("Unable to load '" + path_ +
-                                     "': " + (error != nullptr ? error : "unknown dlopen error"));
-        }
-    }
+    explicit SharedLibrary(const fs::path& path) : library_(path.string(), "trtmc runtime") {}
 
     SharedLibrary(const SharedLibrary&) = delete;
     SharedLibrary& operator=(const SharedLibrary&) = delete;
 
-    ~SharedLibrary() {
-        if (handle_ != nullptr)
-            dlclose(handle_);
-    }
-
-    void* require_symbol(const char* name) const {
-        dlerror();
-        void* symbol = dlsym(handle_, name);
-        const char* error = dlerror();
-        if (error != nullptr || symbol == nullptr) {
-            throw std::runtime_error("Library '" + path_ + "' is missing required symbol '" + name +
-                                     "'");
-        }
-        return symbol;
-    }
+    void* require_symbol(const char* name) const { return library_.require_symbol(name); }
 
   private:
-    std::string path_;
-    void* handle_{nullptr};
+    platform::DynamicLibrary library_;
 };
+
+fs::path backend_library_path(const fs::path& runtime_root, const std::string& backend_id) {
+    return runtime_root / platform::shared_library_filename("trtmc_backend_" + backend_id);
+}
+
+fs::path family_library_path(const fs::path& runtime_root, const std::string& family_id) {
+    return runtime_root / platform::shared_library_filename("trtmc_model_" + family_id);
+}
 
 class BackendLibrary {
   public:
     BackendLibrary(const fs::path& runtime_root, const std::string& backend_id)
-        : library_(runtime_root / ("libtrtmc_backend_" + backend_id + ".so")) {
+        : library_(backend_library_path(runtime_root, backend_id)) {
         const auto create =
             reinterpret_cast<CreateBackendFn>(library_.require_symbol("trtmc_create_backend"));
         destroy_ =
@@ -152,7 +138,7 @@ class BackendLibrary {
 class FamilyLibrary {
   public:
     FamilyLibrary(const fs::path& runtime_root, const std::string& family_id)
-        : library_(runtime_root / ("libtrtmc_model_" + family_id + ".so")),
+        : library_(family_library_path(runtime_root, family_id)),
           create_(reinterpret_cast<CreateFamilyFn>(library_.require_symbol(kCreateFamilySymbol))) {}
 
     FamilyLibrary(const FamilyLibrary&) = delete;
@@ -245,7 +231,7 @@ RuntimeLibraryCache& runtime_library_cache() {
 }
 
 IBackend& cached_backend(const fs::path& runtime_root, const std::string& backend_id) {
-    const std::string path = (runtime_root / ("libtrtmc_backend_" + backend_id + ".so")).string();
+    const std::string path = backend_library_path(runtime_root, backend_id).string();
     auto& cache = runtime_library_cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
     const auto found = cache.backends.find(path);
@@ -275,7 +261,7 @@ IBackend& cached_configured_backend(IBackend& backend, const std::string& runtim
 }
 
 FamilyLibrary& cached_family(const fs::path& runtime_root, const std::string& family_id) {
-    const std::string path = (runtime_root / ("libtrtmc_model_" + family_id + ".so")).string();
+    const std::string path = family_library_path(runtime_root, family_id).string();
     auto& cache = runtime_library_cache();
     std::lock_guard<std::mutex> lock(cache.mutex);
     const auto found = cache.families.find(path);
@@ -305,7 +291,8 @@ void preload_byok_kernel(const std::string& runtime_root, const std::string& lib
     if (library.empty() || function.empty() || kernel_name.empty())
         throw std::invalid_argument("BYOK library, function, and kernel name must be non-empty");
     using LoadKernel = const char* (*)(const char*, const char*, const char*) noexcept;
-    const auto path = resolve_runtime_root(runtime_root) / "libtrtmc_byok_tvm_ffi.so";
+    const auto path = resolve_runtime_root(runtime_root) /
+                      platform::shared_library_filename("trtmc_byok_tvm_ffi");
     LoadKernel load;
     {
         auto& cache = runtime_library_cache();
