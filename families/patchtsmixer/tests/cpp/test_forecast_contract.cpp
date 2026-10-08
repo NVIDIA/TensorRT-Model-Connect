@@ -77,8 +77,9 @@ void require(bool condition, const char* message) {
         throw std::runtime_error(message);
 }
 
-trtmc::ForecastRequest request(const std::vector<float>& values, const std::vector<float>& mask) {
-    return {{values.data(), values.size()}, {mask.data(), mask.size()}, 0};
+trtmc::internal::SeriesToPointForecastRequest request(const std::vector<float>& values,
+                                                      const std::vector<std::uint8_t>& mask) {
+    return {{{{values.data(), values.size()}, 0, 0}, {mask.data(), mask.size()}}};
 }
 
 trtmc::patchtsmixer::RuntimeConfig config() {
@@ -136,9 +137,12 @@ void test_short_multichannel_series_is_left_padded() {
     auto* recording = module.get();
     trtmc::patchtsmixer::Pipeline pipeline(std::move(module), config());
     const std::vector<float> values{11.0F, 21.0F, 12.0F, 22.0F};
-    const std::vector<float> mask;
+    const std::vector<std::uint8_t> mask;
 
-    pipeline.forecast(request(values, mask));
+    const auto result = pipeline.run(request(values, mask), {});
+    require(result.values.rows == 2 && result.values.columns == 2 &&
+                result.axes.horizon_steps == std::vector<std::int64_t>({1, 2}),
+            "forecast must retain its horizon and channel axes");
 
     require(recording->shape == std::vector<std::int64_t>({1, 4, 2}),
             "PatchTSMixer must preserve its configured channel count");
@@ -153,10 +157,11 @@ void test_frequency_is_rejected() {
     auto module = std::make_unique<RecordingModule>();
     trtmc::patchtsmixer::Pipeline pipeline(std::move(module), config());
     const std::vector<float> values{1.0F, 2.0F};
-    const std::vector<float> mask(values.size(), 1.0F);
+    const std::vector<std::uint8_t> mask(values.size(), 1);
     bool rejected = false;
     try {
-        pipeline.forecast({{values.data(), values.size()}, {mask.data(), mask.size()}, 1});
+        const trtmc::internal::ConfigEntry fields[] = {{"frequency", std::int64_t{1}}};
+        pipeline.run(request(values, mask), fields);
     } catch (const std::invalid_argument&) {
         rejected = true;
     }
@@ -169,9 +174,9 @@ void test_overlong_multichannel_series_is_left_truncated() {
     trtmc::patchtsmixer::Pipeline pipeline(std::move(module), config());
     const std::vector<float> values{1.0F, 11.0F, 2.0F, 12.0F, 3.0F, 13.0F,
                                     4.0F, 14.0F, 5.0F, 15.0F, 6.0F, 16.0F};
-    const std::vector<float> mask(values.size(), 1.0F);
+    const std::vector<std::uint8_t> mask(values.size(), 1);
 
-    pipeline.forecast(request(values, mask));
+    pipeline.run(request(values, mask), {});
 
     require(recording->values ==
                 std::vector<float>({3.0F, 13.0F, 4.0F, 14.0F, 5.0F, 15.0F, 6.0F, 16.0F}),
@@ -182,14 +187,106 @@ void test_partial_multichannel_timestep_is_rejected() {
     auto module = std::make_unique<RecordingModule>();
     trtmc::patchtsmixer::Pipeline pipeline(std::move(module), config());
     const std::vector<float> values{1.0F, 2.0F, 3.0F};
-    const std::vector<float> mask(values.size(), 1.0F);
+    const std::vector<std::uint8_t> mask(values.size(), 1);
     bool rejected = false;
     try {
-        pipeline.forecast(request(values, mask));
+        pipeline.run(request(values, mask), {});
     } catch (const std::invalid_argument&) {
         rejected = true;
     }
     require(rejected, "PatchTSMixer must reject a partial channel timestep");
+}
+
+void test_task_binding_declares_family_config() {
+    auto module = std::make_unique<RecordingModule>();
+    trtmc::patchtsmixer::Pipeline pipeline(std::move(module), config());
+    const auto bindings = pipeline.task_bindings();
+    require(bindings.size() == 1 && bindings[0].key.id == "series_to_point_forecast" &&
+                bindings[0].key.major == 1 && bindings[0].key.minor == 0,
+            "PatchTSMixer must bind only its supported point forecast Task");
+    require(bindings[0].implementation ==
+                static_cast<trtmc::internal::ISeriesToPointForecast*>(&pipeline),
+            "Task binding must point to the adjusted interface subobject");
+    require(std::string(pipeline.task()) == bindings[0].key.id,
+            "bundle primary Task must match the family binding");
+    const auto fields = bindings[0].fields;
+    require(fields.size() == 1 && fields[0].name == "frequency" &&
+                fields[0].kind == trtmc::internal::ConfigKind::I64 &&
+                trtmc::internal::config_get<std::int64_t>({}, fields, "frequency") == 0,
+            "frequency must be family-declared with its unchanged zero default");
+    const std::vector<float> values{1.0F, 2.0F};
+    const std::vector<std::uint8_t> mask;
+    const trtmc::internal::ConfigEntry explicit_zero[] = {{"frequency", std::int64_t{0}}};
+    auto* task = static_cast<trtmc::internal::ISeriesToPointForecast*>(bindings[0].implementation);
+    require(task->run(request(values, mask), explicit_zero).values.values.size() == 4,
+            "bound Task must accept the declared zero frequency");
+}
+
+void test_explicit_history_shape_matches_bundle_channels() {
+    auto module = std::make_unique<RecordingModule>();
+    trtmc::patchtsmixer::Pipeline pipeline(std::move(module), config());
+    const std::vector<float> values{1.0F, 2.0F, 3.0F, 4.0F};
+    const std::vector<std::uint8_t> mask;
+    auto input = request(values, mask);
+    input.history.past_values.rows = 2;
+    input.history.past_values.columns = 2;
+    pipeline.run(input, {});
+    for (const auto& shape :
+         {std::pair{0U, 2U}, std::pair{2U, 0U}, std::pair{1U, 4U}, std::pair{3U, 2U}}) {
+        input.history.past_values.rows = shape.first;
+        input.history.past_values.columns = shape.second;
+        bool rejected = false;
+        try {
+            pipeline.run(input, {});
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "history shape must be complete and match the bundle channels");
+    }
+}
+
+void test_observed_mask_survives_padding_and_truncation() {
+    auto module = std::make_unique<RecordingModule>();
+    auto* recording = module.get();
+    trtmc::patchtsmixer::Pipeline pipeline(std::move(module), config());
+    const std::vector<float> short_values{1.0F, 2.0F, 3.0F, 4.0F};
+    const std::vector<std::uint8_t> short_mask{1, 0, 0, 1};
+    pipeline.run(request(short_values, short_mask), {});
+    require(recording->mask == std::vector<float>({0, 0, 0, 0, 1, 0, 0, 1}),
+            "padding must preserve caller-provided missing observations");
+    const std::vector<float> long_values(12, 1.0F);
+    const std::vector<std::uint8_t> long_mask{1, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1};
+    pipeline.run(request(long_values, long_mask), {});
+    require(recording->mask == std::vector<float>({1, 0, 0, 1, 1, 1, 0, 1}),
+            "truncation must crop the mask at exactly the same timestep as the values");
+    bool rejected = false;
+    try {
+        pipeline.run(request(long_values, short_mask), {});
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    require(rejected, "observed mask must contain one entry per input value");
+}
+
+void test_result_owns_every_value_after_next_call_and_pipeline_destruction() {
+    trtmc::internal::PointForecastResult first;
+    {
+        auto module = std::make_unique<RecordingModule>();
+        auto* recording = module.get();
+        recording->output = {1.25F, -2.5F, 3.75F, 4.5F};
+        trtmc::patchtsmixer::Pipeline pipeline(std::move(module), config());
+        const std::vector<float> values{1.0F, 2.0F};
+        const std::vector<std::uint8_t> mask;
+        first = pipeline.run(request(values, mask), {});
+        recording->output.assign(4, 99.0F);
+        const auto next = pipeline.run(request(values, mask), {});
+        require(next.values.values == std::vector<float>(4, 99.0F),
+                "each call must return its own engine output");
+    }
+    require(first.values.values == std::vector<float>({1.25F, -2.5F, 3.75F, 4.5F}) &&
+                first.values.rows == 2 && first.values.columns == 2 &&
+                first.axes.horizon_steps == std::vector<std::int64_t>({1, 2}),
+            "result must own all values and axes beyond the engine lifetime");
 }
 
 } // namespace
@@ -201,6 +298,10 @@ int main() {
     test_overlong_multichannel_series_is_left_truncated();
     test_partial_multichannel_timestep_is_rejected();
     test_frequency_is_rejected();
+    test_task_binding_declares_family_config();
+    test_explicit_history_shape_matches_bundle_channels();
+    test_observed_mask_survives_padding_and_truncation();
+    test_result_owns_every_value_after_next_call_and_pipeline_destruction();
     std::cerr << "ALL PASSED\n";
     return 0;
 }

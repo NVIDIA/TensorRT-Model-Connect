@@ -3,7 +3,7 @@
   "hf_id": "ibm-granite/granite-timeseries-patchtsmixer",
   "bundle": "patchtsmixer-granite-official.bundle",
   "family": "patchtsmixer",
-  "task": "time_series_forecast",
+  "task": "series_to_point_forecast",
   "precision": "fp16",
   "fp32_layers": [
     0,
