@@ -165,12 +165,15 @@ void conditioned_video(const std::filesystem::path& root, const std::filesystem:
 void exercise(const std::filesystem::path& root) {
     const auto all = root / "video_cli.bundle", untimed = root / "video_cli_untimed.bundle",
                worker = root / "video_cli_worker.bundle", disabled = root / "video_cli_none.bundle",
+               audio_video = root / "video_cli_audio_video.bundle",
                output = root / "video_cli_frames", worker_output = root / "video_cli_worker_frames",
+               audio_video_output = root / "video_cli_audio_video_frames",
                initial = root / "video_cli_initial.f32";
     bundle(all, "text_to_video");
     bundle(untimed, "unknown_time");
     bundle(worker, "worker");
     bundle(disabled, "none");
+    bundle(audio_video, "text_to_audio_video");
     const std::vector<std::string> base{
         "trtmc", "generate-video", all.string(),   "--runtime-root", root.string(), "--prompt",
         "p",     "--output",       output.string()};
@@ -221,9 +224,29 @@ void exercise(const std::filesystem::path& root) {
     const auto wrong_task = invoke({"--task", "text_to_image"});
     check(wrong_task.status != 0 && wrong_task.output.empty(),
           "video command does not reinterpret an image Task");
+    const auto av =
+        run({"trtmc", "generate-video", audio_video.string(), "--runtime-root", root.string(),
+             "--prompt", "sound", "--output", audio_video_output.string()});
+    check(av.status == 0, "audio/video primary uses generate-video without another selector");
+    if (av.status == 0) {
+        const auto metadata = json::parse(av.output);
+        const auto wav = trtmc::cli::io::read_wav_interleaved(metadata.at("audio"));
+        check(metadata.at("audio_sample_rate") == 10 && metadata.at("audio_channels") == 2 &&
+                  metadata.at("audio_num_samples") == 8 && metadata.at("audio_num_frames") == 4 &&
+                  metadata.at("audio_start_seconds") == -0.05 && wav.sample_rate == 10 &&
+                  wav.channels == 2 && wav.samples.size() == 8,
+              "audio/video output writes actual synchronized stereo WAV metadata");
+    }
+    const auto av_replay = run({"trtmc", "generate-video", audio_video.string(), "--runtime-root",
+                                root.string(), "--prompt", "sound", "--initial-latents-raw",
+                                initial.string(), "--output", audio_video_output.string()});
+    check(av_replay.status != 0 && av_replay.output.empty(),
+          "audio/video Task rejects unsupported latent replay");
     conditioned_video(root, all, output, initial);
     remove_frames(output);
-    for (const auto& path : {all, untimed, worker, disabled, initial})
+    std::filesystem::remove(audio_video_output / "audio.wav");
+    remove_frames(audio_video_output);
+    for (const auto& path : {all, untimed, worker, disabled, audio_video, initial})
         std::filesystem::remove(path);
 }
 } // namespace

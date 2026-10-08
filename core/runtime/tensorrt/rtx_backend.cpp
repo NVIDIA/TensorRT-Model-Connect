@@ -14,6 +14,7 @@
 #include <NvInfer.h>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -46,6 +47,19 @@ std::shared_ptr<nvinfer1::ICudaEngine> deserialize_engine(nvinfer1::IRuntime& ru
     if (!engine)
         throw std::runtime_error("[trtmc] Failed to deserialize engine (RTX)");
     return {engine, [](nvinfer1::ICudaEngine* value) { delete value; }};
+}
+
+void configure_weight_streaming(nvinfer1::ICudaEngine& engine, const ModuleCreateOptions& options) {
+    if (!options.weight_streaming_budget_bytes)
+        return;
+    const auto requested = *options.weight_streaming_budget_bytes;
+    if (requested > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+        throw std::invalid_argument("[trtmc] Weight streaming budget exceeds int64 range");
+    if (engine.getStreamableWeightsSize() <= 0)
+        throw std::runtime_error(
+            "[trtmc] Weight streaming was requested for an engine built without it");
+    if (!engine.setWeightStreamingBudgetV2(static_cast<std::int64_t>(requested)))
+        throw std::runtime_error("[trtmc] TensorRT-RTX rejected the weight streaming budget");
 }
 
 class RuntimeCacheState {
@@ -135,6 +149,7 @@ class RtxBackend final : public IBackend {
     create_dual_profile_modules(const void* plan_data, size_t plan_size,
                                 const ModuleCreateOptions& options) override {
         auto engine = deserialize_engine(*runtime_, plan_data, plan_size);
+        configure_weight_streaming(*engine, options);
         const auto stream_setup = resolve_stream(options.stream);
         if (engine->getNbOptimizationProfiles() < 2)
             throw std::runtime_error("[trtmc] Dual-profile engine requires two profiles");
@@ -152,6 +167,7 @@ class RtxBackend final : public IBackend {
     create_module_impl(const void* plan_data, size_t plan_size, const ModuleCreateOptions& options,
                        const std::vector<ModuleExternalBinding>& external_bindings) {
         auto engine = deserialize_engine(*runtime_, plan_data, plan_size);
+        configure_weight_streaming(*engine, options);
         return create_context_module(engine, resolve_stream(options.stream), options, 0,
                                      external_bindings);
     }

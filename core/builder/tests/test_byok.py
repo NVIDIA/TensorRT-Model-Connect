@@ -12,7 +12,7 @@ import pytest
 from tensorrt_model_connect import byok
 
 
-def test_add_kernel_uses_one_explicit_plugin_library(
+def test_add_kernel_uses_explicit_or_standard_plugin_library(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     library = tmp_path / "libtrtmc_backend_trt.so"
@@ -78,6 +78,27 @@ def test_add_kernel_uses_one_explicit_plugin_library(
         "outputs": [{"dims": "same_as_input_0", "dtype": "float32"}],
         "workspace_bytes": 0,
     }
+
+    monkeypatch.setattr(byok, "_PACKAGED_PLUGIN_LIBRARY", library)
+    loaded.clear()
+    assert byok.add_kernel(
+        Network(),
+        kernel_name="example.identity",
+        inputs=["input"],
+        output_specs=[{"dims": "same_as_input_0", "dtype": "float32"}],
+    ) == ["output"]
+    assert loaded == [(str(library), byok.ctypes.RTLD_GLOBAL)]
+
+    missing_packaged_library = tmp_path / "package" / "libtrtmc_byok_tvm_ffi.so"
+    monkeypatch.setattr(byok, "_PACKAGED_PLUGIN_LIBRARY", missing_packaged_library)
+    loaded.clear()
+    assert byok.add_kernel(
+        Network(),
+        kernel_name="example.identity",
+        inputs=["input"],
+        output_specs=[{"dims": "same_as_input_0", "dtype": "float32"}],
+    ) == ["output"]
+    assert loaded == [("libtrtmc_byok_tvm_ffi.so", byok.ctypes.RTLD_GLOBAL)]
 
 
 def test_add_kernel_rejects_implicit_or_invalid_inputs(tmp_path) -> None:

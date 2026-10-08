@@ -815,6 +815,7 @@ def test_gpu_status_and_cleanup_fail_closed() -> None:
         (REPO_ROOT / ".github/workflows/community-ci.yml").read_text(encoding="utf-8")
     )
     job = workflow["jobs"]["provision-and-test"]
+    assert job["timeout-minutes"] == 120
     steps = {step["name"]: step for step in job["steps"]}
     assert steps["Reserve a GPU instance"]["id"] == "reserve"
     test_step = steps["Build the GPU image, check out the exact PR merge, and run the smoke test"]

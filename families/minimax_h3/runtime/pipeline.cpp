@@ -34,6 +34,9 @@ constexpr int32_t kTextDim = 5120;
 constexpr int32_t kAudioLatents = 207;
 constexpr int32_t kAudioRows = 414;
 constexpr int32_t kAudioChannels = 32;
+constexpr int32_t kOutputAudioChannels = 2;
+constexpr int32_t kAudioSampleRate = 32000;
+constexpr int32_t kAudioSamplesPerChannel = 165600;
 constexpr int32_t kLatentFrames = 37;
 constexpr int32_t kLatentHeight = 48;
 constexpr int32_t kLatentWidth = 84;
@@ -49,7 +52,6 @@ constexpr int32_t kHidden = 5376;
 constexpr int32_t kTimestepSlots = 4;
 constexpr int32_t kModalityCount = 3;
 constexpr int32_t kAdalnRows = kTimestepSlots * kModalityCount;
-constexpr int32_t kSteps = 50;
 constexpr int32_t kOutputFrames = 124;
 constexpr int32_t kOutputHeight = 768;
 constexpr int32_t kOutputWidth = 1344;
@@ -571,12 +573,30 @@ std::vector<float> to_frame_major_rgb(const std::vector<float>& video) {
     return pixels;
 }
 
-void validate_generate_config(const ImageGenerationConfig& cfg) {
-    if ((cfg.height > 0 && cfg.height != kOutputHeight) ||
-        (cfg.width > 0 && cfg.width != kOutputWidth) ||
-        (cfg.num_steps > 0 && cfg.num_steps != kSteps))
+struct ResolvedGenerationConfig {
+    int64_t seed{0};
+};
+
+ResolvedGenerationConfig resolve_generation_config(internal::ConfigView supplied,
+                                                   const MiniMaxH3GenerationConfig& generation,
+                                                   Span<const internal::ConfigField> fields) {
+    internal::validate_config(fields, supplied);
+    const auto height = internal::config_get<int64_t>(supplied, fields, "height");
+    const auto width = internal::config_get<int64_t>(supplied, fields, "width");
+    const auto steps = internal::config_get<int64_t>(supplied, fields, "num_steps");
+    const auto seed = internal::config_get<int64_t>(supplied, fields, "seed").value_or(0);
+    const auto guidance = internal::config_get<double>(supplied, fields, "guidance_scale");
+    const auto cfg = internal::config_get<double>(supplied, fields, "cfg_scale");
+    if ((height && *height != kOutputHeight) || (width && *width != kOutputWidth) ||
+        (steps && *steps != generation.num_inference_steps))
         throw std::invalid_argument(
-            "MiniMax-H3 native profile is fixed at 124 frames, 768x1344, 50 grid points");
+            "MiniMax-H3 native profile is fixed at 124 frames, 768x1344, and the "
+            "checkpoint-declared sigma-grid size");
+    if (seed < 0)
+        throw std::invalid_argument("MiniMax-H3 seed must be non-negative");
+    if ((guidance && *guidance != 1.0) || (cfg && *cfg != 1.0))
+        throw std::invalid_argument("MiniMax-H3 native profile requires guidance scales of 1.0");
+    return {seed};
 }
 
 struct DenoiserStats {
@@ -618,6 +638,7 @@ struct MiniMaxH3Pipeline::ResidentState {
     std::unique_ptr<ITrtModule> denoiser_tail;
     std::unique_ptr<ITrtModule> denoiser_finish;
     std::unique_ptr<ITrtModule> vae;
+    std::unique_ptr<ITrtModule> audio_vae;
 
     void load_text_embeddings(const std::string& requested_prompt, ITokenizer& tokenizer,
                               const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
@@ -632,10 +653,16 @@ struct MiniMaxH3Pipeline::ResidentState {
                                std::vector<float>& video_rows_host,
                                std::vector<float>& audio_rows_host, float cache_threshold,
                                cudaStream_t stream);
+    void release_denoiser();
     bool prepare_vae(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream,
                      bool first_block_cache);
     std::vector<float> decode_vae(bool first_block_cache, const std::vector<float>& latent,
                                   std::size_t expected_pixels, cudaStream_t stream);
+    bool prepare_audio_vae(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
+    std::vector<float> decode_audio(const std::vector<float>& audio_rows_host);
+    void download_audio_rows(std::vector<float>& audio_rows_host);
+    void release_audio_vae();
+    void release_vae();
 
     bool denoiser_is_resident(bool first_block_cache) const;
     void load_first_block_cache_denoiser(const MiniMaxH3ModuleLoader& loader, cudaStream_t stream);
@@ -678,6 +705,7 @@ void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& r
     video_velocity.reset();
     audio_velocity.reset();
     vae.reset();
+    audio_vae.reset();
     vae_latent_tiles.reset();
     vae_decoded_tiles.reset();
     vae_overlap.reset();
@@ -952,6 +980,20 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_denoiser(
                                    audio_rows_host);
 }
 
+void MiniMaxH3Pipeline::ResidentState::release_denoiser() {
+    denoiser.reset();
+    denoiser_head.reset();
+    denoiser_tail.reset();
+    denoiser_finish.reset();
+    head_hidden.reset();
+    head_residual.reset();
+    previous_head_residual.reset();
+    tail_residual.reset();
+    audio_rows.reset();
+    video_velocity.reset();
+    audio_velocity.reset();
+}
+
 bool MiniMaxH3Pipeline::ResidentState::vae_is_resident(bool first_block_cache) const {
     if (!first_block_cache)
         return vae != nullptr;
@@ -1068,6 +1110,76 @@ MiniMaxH3Pipeline::ResidentState::decode_monolithic_vae(const std::vector<float>
     return to_frame_major_rgb(video);
 }
 
+bool MiniMaxH3Pipeline::ResidentState::prepare_audio_vae(const MiniMaxH3ModuleLoader& loader,
+                                                         cudaStream_t stream) {
+    const bool resident_hit = audio_vae != nullptr;
+    if (!resident_hit) {
+        audio_vae = loader("audio_vae.plan", stream);
+        audio_vae->set_timing_label("audio_vae.plan");
+    }
+    return resident_hit;
+}
+
+void MiniMaxH3Pipeline::ResidentState::download_audio_rows(std::vector<float>& audio_rows_host) {
+    if (!audio_rows || audio_rows_host.size() != kAudioCount ||
+        !audio_rows->copy_to_host(audio_rows_host.data()))
+        throw std::runtime_error("MiniMax-H3 failed to download audio latents");
+}
+
+void MiniMaxH3Pipeline::ResidentState::release_audio_vae() {
+    audio_vae.reset();
+}
+
+void MiniMaxH3Pipeline::ResidentState::release_vae() {
+    vae.reset();
+    video_rows.reset();
+    vae_latent_tiles.reset();
+    vae_decoded_tiles.reset();
+    vae_overlap.reset();
+    frame_major_rgb.reset();
+}
+
+std::vector<float>
+MiniMaxH3Pipeline::ResidentState::decode_audio(const std::vector<float>& audio_rows_host) {
+    if (audio_rows_host.size() != kAudioCount)
+        throw std::runtime_error("MiniMax-H3 audio latent row count is invalid");
+    std::vector<float> latents(kAudioCount);
+    for (int32_t output_channel = 0; output_channel < kOutputAudioChannels; ++output_channel) {
+        for (int32_t latent_channel = 0; latent_channel < kAudioChannels; ++latent_channel) {
+            for (int32_t frame = 0; frame < kAudioLatents; ++frame) {
+                const auto source =
+                    static_cast<std::size_t>(output_channel * kAudioLatents + frame) *
+                        kAudioChannels +
+                    latent_channel;
+                const auto target =
+                    (static_cast<std::size_t>(output_channel) * kAudioChannels + latent_channel) *
+                        kAudioLatents +
+                    frame;
+                latents[target] = audio_rows_host[source];
+            }
+        }
+    }
+    TensorMap inputs;
+    inputs.emplace("normalized_audio_latents",
+                   Tensor{latents.data(),
+                          {kOutputAudioChannels, kAudioChannels, kAudioLatents},
+                          DType::kFloat32});
+    const auto outputs = audio_vae->forward(inputs);
+    const auto channels =
+        copy_float(require_output(outputs, "waveform"),
+                   static_cast<std::size_t>(kOutputAudioChannels) * kAudioSamplesPerChannel,
+                   "audio VAE waveform");
+    audio_vae->sync();
+    std::vector<float> interleaved(channels.size());
+    for (int32_t frame = 0; frame < kAudioSamplesPerChannel; ++frame) {
+        for (int32_t channel = 0; channel < kOutputAudioChannels; ++channel) {
+            interleaved[static_cast<std::size_t>(frame) * kOutputAudioChannels + channel] =
+                channels[static_cast<std::size_t>(channel) * kAudioSamplesPerChannel + frame];
+        }
+    }
+    return interleaved;
+}
+
 std::vector<float> MiniMaxH3Pipeline::ResidentState::decode_vae(bool first_block_cache,
                                                                 const std::vector<float>& latent,
                                                                 std::size_t expected_pixels,
@@ -1096,6 +1208,28 @@ MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift) {
     return result;
 }
 
+MiniMaxH3Schedule make_minimax_h3_dmd_schedule(const std::vector<int32_t>& denoising_steps,
+                                               float shift) {
+    if (denoising_steps.empty() || !std::isfinite(shift) || shift <= 0.0F)
+        throw std::invalid_argument("MiniMax-H3 DMD schedule arguments are invalid");
+    MiniMaxH3Schedule result;
+    result.sigmas.reserve(denoising_steps.size() + 1);
+    int32_t previous = 1000;
+    for (const int32_t step : denoising_steps) {
+        if (step < 1 || step > 999 || step >= previous)
+            throw std::invalid_argument(
+                "MiniMax-H3 DMD denoising steps must be strictly decreasing integers in [1, 999]");
+        const float base = static_cast<float>(step) / 1000.0F;
+        result.sigmas.push_back(shift * base / (1.0F + (shift - 1.0F) * base));
+        previous = step;
+    }
+    result.sigmas.push_back(0.0F);
+    result.timesteps.reserve(denoising_steps.size());
+    for (std::size_t index = 0; index < denoising_steps.size(); ++index)
+        result.timesteps.push_back(1.0F - result.sigmas[index]);
+    return result;
+}
+
 void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t count,
                                float timestep, float sigma, float sigma_next) {
     if (sample == nullptr || velocity == nullptr || !(sigma > 0.0F))
@@ -1110,12 +1244,22 @@ void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t
 
 MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
                                      std::unique_ptr<ITokenizer> tokenizer, std::string model_id,
-                                     bool first_block_cache, float cache_threshold)
+                                     MiniMaxH3GenerationConfig generation, bool first_block_cache,
+                                     float cache_threshold)
     : loader_(std::move(loader)), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id)),
-      resident_(std::make_unique<ResidentState>()), first_block_cache_(first_block_cache),
-      cache_threshold_(cache_threshold) {
+      generation_(std::move(generation)), resident_(std::make_unique<ResidentState>()),
+      first_block_cache_(first_block_cache), cache_threshold_(cache_threshold) {
     if (!loader_ || !tokenizer_)
         throw std::invalid_argument("MiniMax-H3 pipeline requires a loader and tokenizer");
+    if (generation_.num_inference_steps < 2 || !std::isfinite(generation_.video_scheduler_shift) ||
+        generation_.video_scheduler_shift <= 0.0F ||
+        !std::isfinite(generation_.audio_scheduler_shift) ||
+        generation_.audio_scheduler_shift <= 0.0F)
+        throw std::invalid_argument("MiniMax-H3 generation profile is invalid");
+    if (!generation_.dmd_denoising_steps.empty() &&
+        generation_.dmd_denoising_steps.size() + 1 !=
+            static_cast<std::size_t>(generation_.num_inference_steps))
+        throw std::invalid_argument("MiniMax-H3 DMD rung count does not match sigma-grid size");
     if (!std::isfinite(cache_threshold_) || cache_threshold_ <= 0.0F)
         throw std::invalid_argument("MiniMax-H3 cache threshold must be finite and positive");
     if (cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking) != cudaSuccess)
@@ -1128,11 +1272,29 @@ MiniMaxH3Pipeline::~MiniMaxH3Pipeline() {
         cudaStreamDestroy(stream_);
 }
 
-ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
-                                              const ImageGenerationConfig& cfg) {
+std::vector<internal::TaskInstance> MiniMaxH3Pipeline::task_bindings() {
+    static const std::array<internal::ConfigField, 6> fields = {{
+        {"height", internal::ConfigKind::I64, std::nullopt, "Output height; fixed at 768."},
+        {"width", internal::ConfigKind::I64, std::nullopt, "Output width; fixed at 1344."},
+        {"num_steps", internal::ConfigKind::I64, std::nullopt,
+         "Checkpoint-declared sigma-grid size."},
+        {"seed", internal::ConfigKind::I64, internal::ConfigValue{int64_t{0}},
+         "Joint video/audio noise seed."},
+        {"guidance_scale", internal::ConfigKind::F64, internal::ConfigValue{1.0},
+         "Guidance scale; fixed at 1.0."},
+        {"cfg_scale", internal::ConfigKind::F64, internal::ConfigValue{1.0},
+         "Classifier-free guidance scale; fixed at 1.0."},
+    }};
+    return {internal::bind<internal::ITextToAudioVideo>(*this, {fields.data(), fields.size()})};
+}
+
+internal::AudioVideoResult MiniMaxH3Pipeline::run(const internal::TextToAudioVideoRequest& request,
+                                                  internal::ConfigView config) {
     std::lock_guard<std::mutex> lock(generation_mutex_);
-    validate_generate_config(cfg);
-    const int64_t seed = cfg.seed >= 0 ? cfg.seed : 0;
+    const auto bindings = task_bindings();
+    const auto resolved = resolve_generation_config(config, generation_, bindings[0].fields);
+    const int64_t seed = resolved.seed;
+    const std::string prompt(request.prompt);
     const auto total_begin = Clock::now();
 
     const bool text_cache_hit = resident_->prompt == prompt && !resident_->text_embeddings.empty();
@@ -1141,8 +1303,18 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
         resident_->load_text_embeddings(prompt, *tokenizer_, loader_, stream_);
     const auto text_end = Clock::now();
 
-    const auto video_schedule = make_minimax_h3_schedule(kSteps, 12.0F);
-    const auto audio_schedule = make_minimax_h3_schedule(kSteps, 3.0F);
+    const auto video_schedule =
+        generation_.dmd_denoising_steps.empty()
+            ? make_minimax_h3_schedule(generation_.num_inference_steps,
+                                       generation_.video_scheduler_shift)
+            : make_minimax_h3_dmd_schedule(generation_.dmd_denoising_steps,
+                                           generation_.video_scheduler_shift);
+    const auto audio_schedule =
+        generation_.dmd_denoising_steps.empty()
+            ? make_minimax_h3_schedule(generation_.num_inference_steps,
+                                       generation_.audio_scheduler_shift)
+            : make_minimax_h3_dmd_schedule(generation_.dmd_denoising_steps,
+                                           generation_.audio_scheduler_shift);
     const bool adaln_cache_hit = !resident_->modulations.empty();
     const auto adaln_begin = Clock::now();
     if (!adaln_cache_hit)
@@ -1166,6 +1338,15 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
         resident_->run_denoiser(first_block_cache_, metadata, video_schedule, audio_schedule,
                                 video_rows, audio_rows, cache_threshold_, stream_);
     const auto denoiser_end = Clock::now();
+    if (first_block_cache_)
+        resident_->download_audio_rows(audio_rows);
+    resident_->release_denoiser();
+
+    const auto audio_vae_begin = Clock::now();
+    const bool audio_vae_resident_hit = resident_->prepare_audio_vae(loader_, stream_);
+    auto audio_samples = resident_->decode_audio(audio_rows);
+    resident_->release_audio_vae();
+    const auto audio_vae_end = Clock::now();
     audio_rows.clear();
     audio_rows.shrink_to_fit();
 
@@ -1181,6 +1362,7 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
     const auto vae_begin = Clock::now();
     const bool vae_resident_hit = resident_->prepare_vae(loader_, stream_, first_block_cache_);
     auto pixels = resident_->decode_vae(first_block_cache_, latent, expected_pixels, stream_);
+    resident_->release_vae();
     const auto vae_end = Clock::now();
     latent.clear();
     latent.shrink_to_fit();
@@ -1191,21 +1373,39 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
               << " adaln_ms=" << milliseconds(adaln_begin, adaln_end)
               << " denoiser_ms=" << milliseconds(denoiser_begin, denoiser_end)
               << " vae_decoder_ms=" << milliseconds(vae_begin, vae_end)
+              << " audio_vae_decoder_ms=" << milliseconds(audio_vae_begin, audio_vae_end)
               << " total_ms=" << milliseconds(total_begin, total_end)
               << " text_cache_hit=" << static_cast<int>(text_cache_hit)
               << " adaln_cache_hit=" << static_cast<int>(adaln_cache_hit)
               << " denoiser_resident_hit=" << static_cast<int>(denoiser_resident_hit)
               << " vae_resident_hit=" << static_cast<int>(vae_resident_hit)
+              << " audio_vae_resident_hit=" << static_cast<int>(audio_vae_resident_hit)
               << " first_block_cache=" << static_cast<int>(first_block_cache_)
               << " cache_threshold=" << cache_threshold_
+              << " generation_profile=" << generation_.profile
+              << " sigma_grid_points=" << generation_.num_inference_steps
               << " full_denoiser_steps=" << denoiser_stats.full_steps
               << " skipped_denoiser_steps=" << denoiser_stats.skipped_steps << '\n';
-    ImageResult result;
-    result.height = kOutputHeight;
-    result.width = kOutputWidth;
-    result.channels = 3;
-    result.num_frames = kOutputFrames;
-    result.pixels = std::move(pixels);
+    internal::AudioVideoResult result;
+    result.video.frames.height = kOutputHeight;
+    result.video.frames.width = kOutputWidth;
+    result.video.frames.channels = 3;
+    result.video.frames.num_frames = kOutputFrames;
+    result.video.frames.pixels = std::move(pixels);
+    result.video.timestamps_seconds.reserve(kOutputFrames);
+    for (int32_t frame = 0; frame < kOutputFrames; ++frame)
+        result.video.timestamps_seconds.push_back(static_cast<double>(frame) / 24.0);
+    result.video.setup_ms =
+        milliseconds(text_begin, text_end) + milliseconds(adaln_begin, adaln_end);
+    result.video.inference_ms =
+        milliseconds(denoiser_begin, denoiser_end) + milliseconds(vae_begin, vae_end);
+    result.audio.samples = std::move(audio_samples);
+    result.audio.sample_rate = kAudioSampleRate;
+    result.audio.channels = kOutputAudioChannels;
+    result.audio.setup_ms = result.video.setup_ms;
+    result.audio.inference_ms =
+        milliseconds(denoiser_begin, denoiser_end) + milliseconds(audio_vae_begin, audio_vae_end);
+    result.audio_start_seconds = 0.0;
     return result;
 }
 

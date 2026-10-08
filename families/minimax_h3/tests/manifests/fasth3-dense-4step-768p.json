@@ -1,21 +1,23 @@
 {
-  "name": "minimax-h3-768p",
-  "hf_id": "MiniMaxAI/MiniMax-H3",
-  "hf_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
-  "bundle": "minimax-h3-768p.bundle",
+  "name": "fasth3-dense-4step-768p",
+  "hf_id": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree",
+  "hf_revision": "f58c2eb023afcad8379de99bebe14c43b23b49b8",
+  "bundle": "fasth3-dense-4step-768p.bundle",
   "family": "minimax_h3",
+  "generation_profile": "fasth3-dense-4step",
   "task": "text_to_audio_video",
   "precision": "bf16",
   "reference_precision": "bf16",
   "testcases": [
     {
-      "name": "minimax-h3-768p",
-      "premerge": true,
+      "name": "fasth3-dense-4step-768p",
+      "premerge": false,
       "semantic_assessment": true,
-      "runtime_timeout_s": 7200,
+      "runtime_timeout_s": 3600,
       "test_type": "diffusion",
       "prompt_file": "prompts/t2va-example-1.json",
-      "num_inference_steps": 50,
+      "num_inference_steps": 5,
+      "guidance_scale": 1.0,
       "seed": 0,
       "reference_precision": "bf16"
     }
