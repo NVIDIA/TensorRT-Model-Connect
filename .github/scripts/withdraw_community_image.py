@@ -99,10 +99,12 @@ def api(token: str, suffix: str = "", *, method: str = "GET", control: bool = Fa
         raise RuntimeError("Package API evidence is unavailable or invalid") from None
 
 
-def inventory(token: str) -> list[dict]:
+def inventory(token: str, *, state: str = "active") -> list[dict]:
+    if state not in {"active", "deleted"}:
+        raise RuntimeError("Unknown package version state")
     rows = []
     for page in range(1, 11):
-        batch = api(token, f"/versions?state=active&per_page=100&page={page}")
+        batch = api(token, f"/versions?state={state}&per_page=100&page={page}")
         if not isinstance(batch, list) or any(not isinstance(row, dict) for row in batch):
             raise RuntimeError("Package version inventory is not an array of objects")
         rows.extend(batch)
@@ -125,10 +127,12 @@ def validated_package(token: str) -> None:
 
 def withdraw_whole_package(token: str) -> dict:
     validated_package(token)
-    rows = inventory(token)
+    active_rows = inventory(token)
+    # Whole-package deletion also covers recoverable version history.
+    rows = active_rows + inventory(token, state="deleted")
     ids = [row.get("id") for row in rows]
     if (
-        not rows
+        not active_rows
         or any(not isinstance(row.get("name"), str) or row["name"] not in DIGESTS for row in rows)
         or any(type(identity) is not int or identity <= 0 for identity in ids)
         or len(set(ids)) != len(ids)

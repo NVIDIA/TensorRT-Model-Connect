@@ -112,6 +112,7 @@ def whole_api(
     error_message=None,
     remains=False,
     control_error=False,
+    other_deleted=False,
 ):
     rows = [{"id": MODULE.ROOT_VERSION_ID, "name": MODULE.ROOT_DIGEST}]
     rows += [
@@ -145,6 +146,8 @@ def whole_api(
                 "name": MODULE.PACKAGE,
                 "repository": {"id": MODULE.REPOSITORY_ID},
             }
+        if suffix.startswith("/versions?state=deleted"):
+            return [{"id": 998, "name": "sha256:" + "b" * 64}] if other_deleted else []
         if suffix.startswith("/versions?"):
             return [row.copy() for row in rows]
         row = next(row for row in rows if suffix == f"/versions/{row['id']}")
@@ -174,7 +177,7 @@ def test_last_tagged_version_with_children_withdraws_whole_package_once(monkeypa
     assert calls[position + 1 :] == [("GET", "", False), ("GET", "", True)] * 2
 
 
-@pytest.mark.parametrize("fault", ["other", "changed"])
+@pytest.mark.parametrize("fault", ["other", "changed", "other_deleted"])
 def test_whole_package_fallback_revalidates_scope_before_delete(monkeypatch, fault):
     _, calls = whole_api(monkeypatch, **{fault: True})
     with pytest.raises(RuntimeError):
@@ -210,7 +213,7 @@ def test_whole_delete_requires_two_absences_and_valid_control(monkeypatch, fault
 )
 def test_invalid_whole_inventory_never_deletes_package(monkeypatch, rows):
     _, calls = whole_api(monkeypatch)
-    monkeypatch.setattr(MODULE, "inventory", lambda _: rows)
+    monkeypatch.setattr(MODULE, "inventory", lambda _, **kwargs: rows)
     with pytest.raises(RuntimeError):
         MODULE.withdraw_whole_package("test-token")
     assert ("DELETE", "", False) not in calls
