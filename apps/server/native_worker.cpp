@@ -9,16 +9,16 @@
 #include "task_runtime.h"
 #include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
+#include "trtmc/stream.hpp"
 #include "trtmc/task.h"
 #include "trtmc/text.hpp"
-#include "trtmc/stream.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <chrono>
-#include <functional>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -177,7 +177,8 @@ std::int64_t default_token_limit(const std::vector<ConfigField>& fields) {
     return 128;
 }
 
-using StreamGenerate = std::function<Json(const std::string&, const Json&, const Json&, std::ostream&)>;
+using StreamGenerate =
+    std::function<Json(const std::string&, const Json&, const Json&, std::ostream&)>;
 
 template <class Generate>
 int run_protocol(std::int64_t default_tokens, Generate&& generate, std::istream& input,
@@ -234,7 +235,9 @@ int run_protocol(std::int64_t default_tokens, Generate&& generate, std::istream&
                 if (!stream_generate)
                     throw ProtocolError("incremental streaming is unsupported by this model");
                 const auto prompt = string_field(request, "prompt", true);
-                response = {{"id", id}, {"ok", true}, {"event", "complete"},
+                response = {{"id", id},
+                            {"ok", true},
+                            {"event", "complete"},
                             {"result", stream_generate(prompt, request, id, output)}};
             } else {
                 throw ProtocolError("unknown operation: " + operation);
@@ -277,23 +280,30 @@ int run_sdk_worker(const Task& task, Request&& make_request, std::istream& input
                 auto stream = stream_task.start(input, config);
                 while (auto event = stream.next()) {
                     if (event->kind() == StreamEventKind::Delta) {
-                        if (!write_json(out, {{"id", id}, {"ok", true}, {"event", "delta"},
-                            {"result", {{"text_delta", std::string(event->text_delta())},
-                                        {"token_count", event->token_ids().size()}}}})) {
+                        if (!write_json(out, {{"id", id},
+                                              {"ok", true},
+                                              {"event", "delta"},
+                                              {"result",
+                                               {{"text_delta", std::string(event->text_delta())},
+                                                {"token_count", event->token_ids().size()}}}})) {
                             stream.cancel();
                             throw std::runtime_error("stream output pipe closed");
                         }
                     } else if (event->kind() == StreamEventKind::Complete) {
                         const auto wall_ms = std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - started).count();
+                                                 std::chrono::steady_clock::now() - started)
+                                                 .count();
                         const auto final = event->final_result();
                         if (!final)
                             throw std::runtime_error("stream completion has no result");
                         const auto result = *final;
-                        return Json{{"text", std::string(result.text)},
+                        return Json{
+                            {"text", std::string(result.text)},
                             {"completion_tokens", result.token_ids.size()},
-                            {"setup_ms", result.setup_ms}, {"prefill_ms", result.prefill_ms},
-                            {"decode_ms", result.decode_ms}, {"model_call_ms", wall_ms},
+                            {"setup_ms", result.setup_ms},
+                            {"prefill_ms", result.prefill_ms},
+                            {"decode_ms", result.decode_ms},
+                            {"model_call_ms", wall_ms},
                             {"timing_scope", "public_task_stream_wall_including_backpressure"}};
                     } else {
                         throw std::runtime_error("native stream was cancelled");
@@ -316,12 +326,14 @@ int run_sdk_worker(const Task& task, Request&& make_request, std::istream& input
                 const auto started = std::chrono::steady_clock::now();
                 const auto result = task.run(input, config);
                 const auto wall_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - started).count();
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
                 return Json{{"text", std::string(result.text())},
                             {"completion_tokens", result.token_ids().size()},
                             {"setup_ms", result.setup_ms()},
                             {"prefill_ms", result.prefill_ms()},
-                            {"decode_ms", result.decode_ms()}, {"model_call_ms", wall_ms},
+                            {"decode_ms", result.decode_ms()},
+                            {"model_call_ms", wall_ms},
                             {"timing_scope", "public_task_call_wall"}};
             } catch (const Error& error) {
                 if (error.code() == TRTMC_INVALID_ARGUMENT ||
@@ -349,12 +361,14 @@ int run_text_worker(ITask& task, std::istream& input, std::ostream& output) {
             const auto started = std::chrono::steady_clock::now();
             const auto result = text->generate(prompt, config);
             const auto wall_ms = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - started).count();
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
             return Json{{"text", result.text},
                         {"completion_tokens", result.token_ids.size()},
                         {"setup_ms", result.setup_ms},
                         {"prefill_ms", result.prefill_ms},
-                        {"decode_ms", result.decode_ms}, {"model_call_ms", wall_ms},
+                        {"decode_ms", result.decode_ms},
+                        {"model_call_ms", wall_ms},
                         {"timing_scope", "public_task_call_wall"}};
         },
         input, output);
@@ -374,7 +388,8 @@ int run_text_worker(const Model& model, std::istream& input, std::ostream& outpu
             output);
     return run_sdk_worker(
         model.task<TextContinuation>(),
-        [](const std::string& prompt) { return TextContinuationRequest{prompt}; }, input, output, &model);
+        [](const std::string& prompt) { return TextContinuationRequest{prompt}; }, input, output,
+        &model);
 }
 
 int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std::istream& input,
@@ -388,7 +403,9 @@ int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std
             // Only pre-SDK families may take this compatibility path. Never
             // retry a malformed SDK binding or a failed Task operation.
             if (error.code() != TRTMC_UNSUPPORTED ||
-                std::string(error.what()).find("family has not implemented the Task SDK model interface") == std::string::npos)
+                std::string(error.what())
+                        .find("family has not implemented the Task SDK model interface") ==
+                    std::string::npos)
                 throw;
         }
         auto task = load_task(bundle, options.runtime_root, options.kv_cache_size_bytes,

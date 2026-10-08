@@ -14,10 +14,10 @@
 #include "families/qwen/runtime/inference_state.h"
 #include "families/qwen/runtime/sampler.h"
 #include "families/qwen/runtime/tokenizer.h"
-#include "trtmc/runtime/trt_module.h"
-#include "trtmc/task.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/internal/stream.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/task.h"
 
 #include <atomic>
 #include <cstdint>
@@ -61,8 +61,8 @@ class QwenTextGenerationPipeline final : public ITextGeneration,
     int32_t default_max_new_tokens() const override { return 128; }
     std::vector<internal::TaskInstance> task_bindings() override;
     TextResult run(const internal::TextContinuationRequest&, internal::ConfigView) override;
-    std::unique_ptr<internal::ITextStream>
-    start(const internal::TextContinuationRequest&, internal::ConfigView) override;
+    std::unique_ptr<internal::ITextStream> start(const internal::TextContinuationRequest&,
+                                                 internal::ConfigView) override;
 
     // Token-ID-based generation (for unit tests and internal callers).
     struct GenerationResult {
@@ -91,7 +91,7 @@ class QwenTextGenerationPipeline final : public ITextGeneration,
     std::atomic<bool> generation_active_{false};
     using TokenCallback = std::function<bool(const std::vector<int32_t>&)>;
     TextResult generate_incremental(const std::string&, const TextGenerationConfig&,
-                                   const TokenCallback&);
+                                    const TokenCallback&);
 
     TextResult generate_from_tokens(const std::vector<int32_t>&, const TextGenerationConfig&,
                                     const TokenCallback&);

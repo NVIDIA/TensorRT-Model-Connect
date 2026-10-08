@@ -104,7 +104,8 @@ os._exit(0)
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         assert select.select([parent.stdout], [], [], 5)[0], "frontend did not report worker readiness"
         pid = int(parent.stdout.readline())
-        parent.stdin.write("exit\n"); parent.stdin.flush()
+        parent.stdin.write("exit\n")
+        parent.stdin.flush()
         assert parent.wait(timeout=5) == 0
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -118,7 +119,8 @@ os._exit(0)
     finally:
         if parent is not None:
             if parent.poll() is None:
-                parent.kill(); parent.wait(timeout=5)
+                parent.kill()
+                parent.wait(timeout=5)
             for stream in (parent.stdin, parent.stdout, parent.stderr):
                 if stream is not None:
                     stream.close()

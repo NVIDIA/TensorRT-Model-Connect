@@ -10,7 +10,8 @@
 namespace trtmc {
 namespace {
 
-std::string apply_chatml(const std::string& prompt, bool enable_thinking, const std::string& system_prompt) {
+std::string apply_chatml(const std::string& prompt, bool enable_thinking,
+                         const std::string& system_prompt) {
     std::string r;
     if (!system_prompt.empty())
         r = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n";

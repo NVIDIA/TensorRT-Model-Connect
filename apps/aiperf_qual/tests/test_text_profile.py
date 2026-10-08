@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-from pathlib import Path
 import json
 
 import pytest
@@ -84,8 +83,9 @@ def test_sweeps_are_explicit_and_validate_inputs():
 
 
 def test_join_retains_warmup_errors_and_missing_server_records(tmp_path):
-    metadata = lambda key, phase: {"x_request_id": key, "benchmark_phase": phase,
-                                  "request_start_ns": 1000000000, "request_end_ns": 2000000000}
+    def metadata(key, phase):
+        return {"x_request_id": key, "benchmark_phase": phase,
+                "request_start_ns": 1000000000, "request_end_ns": 2000000000}
     raw = [{"metadata": metadata("warm", "warmup"), "metrics": {}},
            {"metadata": metadata("ok", "profiling"), "status": 200, "metrics": {"request_latency": {"value": 30, "unit": "ms"}}},
            {"metadata": metadata("busy", "profiling"), "error": {"message": "429"}},
@@ -112,13 +112,15 @@ def test_join_retains_warmup_errors_and_missing_server_records(tmp_path):
 def test_matched_reference_ratio_requires_inputs_outputs_work_and_scope(tmp_path):
     from trtmc_aiperf_qual.text_profile import compare_runs
     candidate_dir, reference_dir = tmp_path / "candidate", tmp_path / "reference"
-    candidate_dir.mkdir(); reference_dir.mkdir()
+    candidate_dir.mkdir()
+    reference_dir.mkdir()
     def export(directory, key, text="answer", prompt="question"):
         record = {"metadata": {"session_num": 0, "x_request_id": key, "benchmark_phase": "profiling"},
                   "payload": {"model": key, "prompt": prompt, "max_tokens": 8}, "status": 200,
                   "responses": [{"text": json.dumps({"choices": [{"text": text}]})}]}
         (directory / "profile_export_raw.jsonl").write_text(json.dumps(record) + "\n")
-    export(candidate_dir, "c"); export(reference_dir, "r")
+    export(candidate_dir, "c")
+    export(reference_dir, "r")
     candidate, reference = AiperfRun(candidate_dir, 0, []), AiperfRun(reference_dir, 0, [])
     c = [{"request_id": "c", "status": 200, "completion_tokens": 3, "model_call_ms": 10, "timing_scope": "public_task_call_wall"}]
     r = [{"request_id": "r", "status": 200, "completion_tokens": 3, "model_call_ms": 20, "timing_scope": "public_task_call_wall"}]

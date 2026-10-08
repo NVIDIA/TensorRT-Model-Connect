@@ -8,8 +8,8 @@
 
 #include <array>
 #include <cerrno>
-#include <cstdint>
 #include <csignal>
+#include <cstdint>
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -52,7 +52,8 @@ int worker_main(int argc, char** argv) {
     // shutdown also ends native generation instead of leaving an orphan lane.
     const auto parent = getppid();
     if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0)
-        throw std::system_error(errno, std::generic_category(), "cannot set worker parent-death signal");
+        throw std::system_error(errno, std::generic_category(),
+                                "cannot set worker parent-death signal");
     if (parent == 1 || getppid() != parent)
         return 1;
 #endif

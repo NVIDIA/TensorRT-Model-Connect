@@ -9,8 +9,6 @@
 #include "families/qwen/runtime/kv_cache.h"
 #include "families/qwen/runtime/tensor_names.h"
 #include "families/qwen/runtime/text_stream.h"
-#include <cuda_runtime_api.h>
-#include <limits>
 
 #include <algorithm>
 #include <cctype>
@@ -18,7 +16,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <cuda_runtime_api.h>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -96,9 +96,8 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
     std::string effective = prompt;
     bool templated = false;
     if (cfg.use_chat_template && !config.chat_template_format.empty()) {
-        effective =
-            qwen_apply_chat_template(config.chat_template_format, prompt, cfg.enable_thinking,
-                                     cfg.system_prompt);
+        effective = qwen_apply_chat_template(config.chat_template_format, prompt,
+                                             cfg.enable_thinking, cfg.system_prompt);
         templated = true;
     }
     auto ids = tokenizer.encode(effective);
@@ -121,6 +120,7 @@ class QwenGenerationLease {
             throw std::invalid_argument("Qwen model already has an active generation");
     }
     ~QwenGenerationLease() { active_.store(false); }
+
   private:
     std::atomic<bool>& active_;
 };
@@ -159,9 +159,12 @@ TextGenerationConfig qwen_text_config(internal::ConfigView supplied) {
     result.temperature = number("temperature");
     result.top_p = number("top_p");
     result.min_p = number("min_p");
-    result.use_chat_template = *internal::config_get<bool>(supplied, qwen_text_fields, "use_chat_template");
-    result.enable_thinking = *internal::config_get<bool>(supplied, qwen_text_fields, "enable_thinking");
-    result.system_prompt = std::string(*internal::config_get<std::string_view>(supplied, qwen_text_fields, "system_prompt"));
+    result.use_chat_template =
+        *internal::config_get<bool>(supplied, qwen_text_fields, "use_chat_template");
+    result.enable_thinking =
+        *internal::config_get<bool>(supplied, qwen_text_fields, "enable_thinking");
+    result.system_prompt = std::string(
+        *internal::config_get<std::string_view>(supplied, qwen_text_fields, "system_prompt"));
     if (result.max_new_tokens <= 0 || result.top_k < 0 || result.top_p > 1 || result.min_p > 1)
         throw internal::ConfigError("Qwen generation config is out of range");
     if (!result.use_chat_template && !result.system_prompt.empty())
@@ -176,7 +179,8 @@ std::vector<internal::TaskInstance> QwenTextGenerationPipeline::task_bindings() 
     std::vector<internal::TaskInstance> result{
         internal::bind<internal::ITextContinuation>(*this, qwen_text_fields)};
     if (!distributed_owner_)
-        result.push_back(internal::bind<internal::IStreamingTextContinuation>(*this, qwen_text_fields));
+        result.push_back(
+            internal::bind<internal::IStreamingTextContinuation>(*this, qwen_text_fields));
     return result;
 }
 
@@ -192,8 +196,9 @@ TextResult QwenTextGenerationPipeline::run(const internal::TextContinuationReque
     return generate_from_tokens(std::vector<std::int32_t>(tokens.begin(), tokens.end()), cfg, {});
 }
 
-std::unique_ptr<internal::ITextStream> QwenTextGenerationPipeline::start(
-    const internal::TextContinuationRequest& request, internal::ConfigView config) {
+std::unique_ptr<internal::ITextStream>
+QwenTextGenerationPipeline::start(const internal::TextContinuationRequest& request,
+                                  internal::ConfigView config) {
     if (distributed_owner_)
         throw internal::UnsupportedTask("Qwen streaming requires a single-process model");
     const auto cfg = qwen_text_config(config);
@@ -215,7 +220,7 @@ std::unique_ptr<internal::ITextStream> QwenTextGenerationPipeline::start(
             throw std::runtime_error("Qwen cannot read the current CUDA device");
         return std::make_unique<QwenTextStream>(
             [this, input = std::move(input), cfg, device](const QwenTextStream::Emit& emit,
-                                                         const std::atomic<bool>& cancelled) {
+                                                          const std::atomic<bool>& cancelled) {
                 QwenGenerationLease lease(generation_active_, false);
                 if (cudaSetDevice(device) != cudaSuccess)
                     throw std::runtime_error("Qwen cannot select the generation CUDA device");
@@ -229,9 +234,11 @@ std::unique_ptr<internal::ITextStream> QwenTextGenerationPipeline::start(
                         throw std::runtime_error("Qwen tokenizer rewrote an emitted prefix");
                     if (decoded.size() == sent.size())
                         return true;
-                    internal::TextStreamEvent delta{internal::StreamEventKind::Delta,
+                    internal::TextStreamEvent delta{
+                        internal::StreamEventKind::Delta,
                         decoded.substr(sent.size()),
-                        std::vector<int32_t>(tokens.begin() + sent_tokens, tokens.end()), {}};
+                        std::vector<int32_t>(tokens.begin() + sent_tokens, tokens.end()),
+                        {}};
                     sent = decoded;
                     sent_tokens = tokens.size();
                     return emit(std::move(delta));
@@ -239,9 +246,13 @@ std::unique_ptr<internal::ITextStream> QwenTextGenerationPipeline::start(
                 if (cancelled)
                     return TextResult{};
                 auto result = generate_from_tokens(input, cfg, on_tokens);
-                if (!cancelled && (sent.size() < result.text.size() || sent_tokens < result.token_ids.size()))
-                    emit({internal::StreamEventKind::Delta, result.text.substr(sent.size()),
-                        std::vector<int32_t>(result.token_ids.begin() + sent_tokens, result.token_ids.end()), {}});
+                if (!cancelled &&
+                    (sent.size() < result.text.size() || sent_tokens < result.token_ids.size()))
+                    emit({internal::StreamEventKind::Delta,
+                          result.text.substr(sent.size()),
+                          std::vector<int32_t>(result.token_ids.begin() + sent_tokens,
+                                               result.token_ids.end()),
+                          {}});
                 return result;
             });
     } catch (...) {
@@ -256,16 +267,17 @@ TextResult QwenTextGenerationPipeline::generate(const std::string& prompt,
     return generate_incremental(prompt, cfg, {});
 }
 
-TextResult QwenTextGenerationPipeline::generate_incremental(
-    const std::string& prompt, const TextGenerationConfig& cfg, const TokenCallback& on_tokens) {
+TextResult QwenTextGenerationPipeline::generate_incremental(const std::string& prompt,
+                                                            const TextGenerationConfig& cfg,
+                                                            const TokenCallback& on_tokens) {
     QwenGenerationLease lease(generation_active_);
     auto input_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
     return generate_from_tokens(input_ids, cfg, on_tokens);
 }
 
-TextResult QwenTextGenerationPipeline::generate_from_tokens(
-    const std::vector<int32_t>& input_ids, const TextGenerationConfig& cfg,
-    const TokenCallback& on_tokens) {
+TextResult QwenTextGenerationPipeline::generate_from_tokens(const std::vector<int32_t>& input_ids,
+                                                            const TextGenerationConfig& cfg,
+                                                            const TokenCallback& on_tokens) {
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
 
     auto sp = qwen_sampling_params_from_config(cfg, config_.id_eos_ids);
@@ -525,8 +537,8 @@ int32_t QwenTextGenerationPipeline::run_decode_loop(
         const bool is_eos = result.is_eos || qwen_is_eos_token(params, result.token_id);
         output.push_back(result.token_id);
         ++steps;
-        if (on_tokens && !on_tokens(std::vector<int32_t>(output.begin() + prompt_token_count,
-                                                       output.end())))
+        if (on_tokens &&
+            !on_tokens(std::vector<int32_t>(output.begin() + prompt_token_count, output.end())))
             break;
         if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval, is_eos))
             break;

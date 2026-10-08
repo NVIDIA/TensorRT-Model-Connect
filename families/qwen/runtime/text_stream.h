@@ -5,6 +5,7 @@
 #pragma once
 
 #include "trtmc/internal/stream.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -24,8 +25,11 @@ inline std::string qwen_utf8_text(std::string_view bytes, bool final) {
     std::string result;
     for (std::size_t i = 0; i < bytes.size();) {
         const auto lead = static_cast<unsigned char>(bytes[i]);
-        const std::size_t length = lead < 0x80 ? 1 : lead >= 0xc2 && lead <= 0xdf ? 2
-            : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
+        const std::size_t length = lead < 0x80                    ? 1
+                                   : lead >= 0xc2 && lead <= 0xdf ? 2
+                                   : lead >= 0xe0 && lead <= 0xef ? 3
+                                   : lead >= 0xf0 && lead <= 0xf4 ? 4
+                                                                  : 0;
         bool valid = length != 0;
         const auto available = std::min(length, bytes.size() - i);
         for (std::size_t j = 1; j < available; ++j) {
@@ -33,8 +37,8 @@ inline std::string qwen_utf8_text(std::string_view bytes, bool final) {
             valid = valid && byte >= 0x80 && byte <= 0xbf;
             if (j == 1)
                 valid = valid && !(lead == 0xe0 && byte < 0xa0) &&
-                    !(lead == 0xed && byte >= 0xa0) && !(lead == 0xf0 && byte < 0x90) &&
-                    !(lead == 0xf4 && byte >= 0x90);
+                        !(lead == 0xed && byte >= 0xa0) && !(lead == 0xf0 && byte < 0x90) &&
+                        !(lead == 0xf4 && byte >= 0x90);
         }
         if (valid && available < length && !final)
             break;
@@ -58,9 +62,9 @@ class QwenTextStream final : public internal::ITextStream {
     explicit QwenTextStream(Produce produce) {
         producer_ = std::thread([this, produce = std::move(produce)] {
             try {
-                auto result = produce([this](internal::TextStreamEvent event) {
-                    return push(std::move(event));
-                }, cancelled_);
+                auto result = produce(
+                    [this](internal::TextStreamEvent event) { return push(std::move(event)); },
+                    cancelled_);
                 if (!cancelled_)
                     push({internal::StreamEventKind::Complete, {}, {}, std::move(result)});
             } catch (...) {
@@ -107,6 +111,7 @@ class QwenTextStream final : public internal::ITextStream {
         events_.clear();
         cv_.notify_all();
     }
+
   private:
     bool push(internal::TextStreamEvent event) {
         std::unique_lock<std::mutex> lock(mutex_);

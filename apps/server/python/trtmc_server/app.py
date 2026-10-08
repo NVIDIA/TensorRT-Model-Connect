@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from pathlib import Path
 
+from anyio import CancelScope
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
@@ -572,7 +573,8 @@ async def incremental_response(session: WorkerSession, payload: dict[str, Any], 
         if stream is not None:
             stream.abort()
             stream.future.add_done_callback(lambda _future: session.close())
-            await asyncio.shield(asyncio.to_thread(stream.cancel))
+            with CancelScope(shield=True):
+                await asyncio.shield(asyncio.to_thread(stream.cancel))
         else:
             session.close()
         metrics.finish(route, 499, queue_seconds=queue_seconds,
@@ -636,7 +638,10 @@ async def incremental_response(session: WorkerSession, payload: dict[str, Any], 
                 stream.abort()
                 # The lease stays held until confirmed worker exit / native completion.
                 stream.future.add_done_callback(lambda _future: session.close())
-                await asyncio.shield(asyncio.to_thread(stream.cancel))
+                # Starlette's disconnect listener cancels an AnyIO scope.
+                # Shield that scope too so cleanup confirms worker exit before returning.
+                with CancelScope(shield=True):
+                    await asyncio.shield(asyncio.to_thread(stream.cancel))
             else:
                 session.close()
             context.setdefault("terminal_status", status)
@@ -658,7 +663,8 @@ async def incremental_response(session: WorkerSession, payload: dict[str, Any], 
                     if not stream.future.done():
                         stream.abort()
                         stream.future.add_done_callback(lambda _future: session.close())
-                        await asyncio.shield(asyncio.to_thread(stream.cancel))
+                        with CancelScope(shield=True):
+                            await asyncio.shield(asyncio.to_thread(stream.cancel))
                     else:
                         session.close()
                     context["terminal_status"] = 499

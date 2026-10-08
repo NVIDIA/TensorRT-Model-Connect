@@ -86,8 +86,10 @@ int main() {
           "generate response preserves id");
     check(messages.at(1)["result"]["text"] == "reply:hello", "generate returns text");
     check(messages.at(1)["result"]["completion_tokens"] == 3, "generate returns token count");
-    check(messages.at(1)["result"]["model_call_ms"].get<double>() >= 0.0, "Task wall timing is recorded");
-    check(messages.at(1)["result"]["timing_scope"] == "public_task_call_wall", "Task timing scope is explicit");
+    check(messages.at(1)["result"]["model_call_ms"].get<double>() >= 0.0,
+          "Task wall timing is recorded");
+    check(messages.at(1)["result"]["timing_scope"] == "public_task_call_wall",
+          "Task timing scope is explicit");
     check(task.prompt_ == "hello", "worker forwards prompt");
     check(task.config_.max_new_tokens == 9, "worker forwards token limit");
     check(task.config_.top_k == 0 && task.config_.seed == 7, "worker forwards sampling");

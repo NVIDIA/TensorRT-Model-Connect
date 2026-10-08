@@ -3,7 +3,6 @@
 """ASGI send barriers prove HTTP delivery precedes native completion."""
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -42,7 +41,8 @@ def test_first_sse_delta_is_sent_before_worker_completion(tmp_path):
     release = tmp_path / "release"
     script = SCRIPT.replace('release=r.get("release")', f'release={str(release)!r}')
     binary = tmp_path / "worker"
-    binary.write_text(script); binary.chmod(0o755)
+    binary.write_text(script)
+    binary.chmod(0o755)
     registry = ModelRegistry([ModelSpec("test", tmp_path / "unused.bundle")], worker_binary=binary,
                              load_options=WorkerLoadOptions(), startup_timeout=3, request_timeout=3)
     records = tmp_path / "records.jsonl"

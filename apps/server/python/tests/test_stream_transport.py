@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Real subprocess tests for bounded streaming, admission and cancellation."""
-from pathlib import Path
 import threading
 
 import pytest

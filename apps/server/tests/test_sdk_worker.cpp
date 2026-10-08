@@ -180,22 +180,28 @@ void test_task_selection_and_failures(const std::filesystem::path& root,
                 "unavailable SDK Task fails before ready, with no legacy retry");
     }
 }
-void test_incremental_stream(const std::filesystem::path& root,
-                              const trtmc::LoadOptions& options) {
+void test_incremental_stream(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
     const auto bundle = write_bundle(root, "text_continuation", "stream_fixture");
-    const auto run = invoke(bundle, options, {
-        {{"id", "stream"}, {"op", "generate_stream"}, {"prompt", "hello"}, {"config", {{"suffix", "!"}}}},
-        {{"id", "stop"}, {"op", "shutdown"}}});
-    require(run.status == 0 && run.messages.size() == 4, "stream emits one delta and one terminal then shutdown");
+    const auto run = invoke(bundle, options,
+                            {{{"id", "stream"},
+                              {"op", "generate_stream"},
+                              {"prompt", "hello"},
+                              {"config", {{"suffix", "!"}}}},
+                             {{"id", "stop"}, {"op", "shutdown"}}});
+    require(run.status == 0 && run.messages.size() == 4,
+            "stream emits one delta and one terminal then shutdown");
     require(run.messages[0].at("protocol_version") == 2 &&
-            run.messages[0].at("capabilities") == Json::array({"text_generation", "streaming_text_continuation"}),
+                run.messages[0].at("capabilities") ==
+                    Json::array({"text_generation", "streaming_text_continuation"}),
             "ready advertises actual SDK stream capability");
     require(run.messages[1].at("id") == "stream" && run.messages[1].at("event") == "delta" &&
-            run.messages[1].at("result").at("text_delta") == "hello!", "delta precedes completion");
+                run.messages[1].at("result").at("text_delta") == "hello!",
+            "delta precedes completion");
     require(run.messages[2].at("id") == "stream" && run.messages[2].at("event") == "complete" &&
-            run.messages[2].at("result").at("text") == "hello!" &&
-            run.messages[2].at("result").at("timing_scope") == "public_task_stream_wall_including_backpressure" &&
-            run.messages[2].at("result").at("model_call_ms").get<double>() >= 0,
+                run.messages[2].at("result").at("text") == "hello!" &&
+                run.messages[2].at("result").at("timing_scope") ==
+                    "public_task_stream_wall_including_backpressure" &&
+                run.messages[2].at("result").at("model_call_ms").get<double>() >= 0,
             "terminal result carries scoped timing");
 }
 } // namespace
