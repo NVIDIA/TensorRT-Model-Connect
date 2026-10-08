@@ -20,6 +20,8 @@ Key differences from BERT:
 
 from __future__ import annotations
 
+from .cli import BuildRequest, coerce_request
+
 import json
 from typing import TYPE_CHECKING
 
@@ -62,7 +64,6 @@ def _load_ln(readers, prefix):
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -303,23 +304,8 @@ def _native_tokenizer_json(model_dir: Path) -> bytes:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("roberta does not support dynamic_kv_cache")
+    request = coerce_request(request)
 
-    if request.image_height is not None:
-        raise NotImplementedError("roberta does not support image_height")
-
-    if request.image_width is not None:
-        raise NotImplementedError("roberta does not support image_width")
-
-    if request.video_num_frames is not None:
-        raise NotImplementedError("roberta does not support video_num_frames")
-
-    if request.max_batch_size != 1:
-        raise NotImplementedError("roberta does not support max_batch_size")
-
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
 
     if request.task not in {"encoding", "embedding", "reranking"}:
         raise ValueError("roberta task must be encoding, embedding, or reranking")
@@ -338,10 +324,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("RoBERTa max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("RoBERTa has no family-owned quantized build")
-    if request.fp32_layers:
-        raise NotImplementedError("RoBERTa does not expose mixed-precision layers")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )

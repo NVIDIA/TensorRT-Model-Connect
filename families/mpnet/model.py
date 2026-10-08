@@ -15,6 +15,8 @@ Detection: model_type == "mpnet"
 
 from __future__ import annotations
 
+from .cli import BuildRequest, coerce_request
+
 from typing import TYPE_CHECKING
 
 from pathlib import Path
@@ -96,7 +98,6 @@ def _compute_relative_position_bias(
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -306,23 +307,8 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("mpnet does not support dynamic_kv_cache")
+    request = coerce_request(request)
 
-    if request.image_height is not None:
-        raise NotImplementedError("mpnet does not support image_height")
-
-    if request.image_width is not None:
-        raise NotImplementedError("mpnet does not support image_width")
-
-    if request.video_num_frames is not None:
-        raise NotImplementedError("mpnet does not support video_num_frames")
-
-    if request.max_batch_size != 1:
-        raise NotImplementedError("mpnet does not support max_batch_size")
-
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
 
     if request.task not in {"encoding", "embedding", "reranking"}:
         raise ValueError("mpnet task must be encoding, embedding, or reranking")
@@ -339,10 +325,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("MPNet max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("MPNet has no family-owned quantized build")
-    if request.fp32_layers:
-        raise NotImplementedError("MPNet does not expose mixed-precision layers")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
