@@ -523,7 +523,8 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
 
         lines += ["", "## AIPerf native client metrics (informational; no gate)", "", aiperf_metrics.NOTE]
         for profile, items in sorted(native.items()):
-            lines += ["", f"### {profile}", "", *aiperf_metrics.markdown(items)]
+            lines += ["", f"### {profile}", "", *aiperf_metrics.markdown(items, profile,
+                                                                        (rows[profile].get("precision") or {}).get("native"), level=4)]
     return "\n".join(lines) + "\n", counts
 
 

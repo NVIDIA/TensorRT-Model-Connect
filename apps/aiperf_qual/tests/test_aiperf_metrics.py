@@ -10,6 +10,28 @@ from trtmc_aiperf_qual import aiperf_metrics, campaign, execution, judge, report
 from trtmc_aiperf_qual.aiperf_runner import RAW_EXPORT, AiperfRun
 
 
+class VisibleText(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.details = 0
+        self.text = []
+        self.rows = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "details":
+            self.details += 1
+        if tag == "tr" and not self.details:
+            self.rows += 1
+
+    def handle_endtag(self, tag):
+        if tag == "details":
+            self.details -= 1
+
+    def handle_data(self, data):
+        if not self.details:
+            self.text.append(data)
+
+
 def record(session, side, summary, index=1):
     directory = session.out / side / f"run_{index:02d}"
     directory.mkdir(parents=True)
@@ -61,32 +83,14 @@ def test_native_exports_reach_json_markdown_and_campaign_html_without_changing_g
     assert "AIPerf native client metrics (informational; no gate)" in summary_text and "25.000 requests/sec" in summary_text
     page = report_html.render(rows, counts, rank, tmp_path / "report.html").read_text()
     assert "task &lt;example&gt;|dataset" in page and "25.000 requests/sec" in page
-    assert "Native eager fp16" in page and "TRTMC fp16" in page and "informational; no gate" in page
+    assert "Native mode: eager" in page and "<th>Precision</th>" in page and "informational; no gate" in page
     assert "speedup" not in page.lower() and "2.50x" not in page and "total-time ratio" not in page
-
-    class VisibleText(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.details = 0
-            self.text = []
-
-        def handle_starttag(self, tag, attrs):
-            if tag == "details":
-                self.details += 1
-
-        def handle_endtag(self, tag):
-            if tag == "details":
-                self.details -= 1
-
-        def handle_data(self, data):
-            if not self.details:
-                self.text.append(data)
 
     visible = VisibleText()
     visible.feed(page)
     text = " ".join(visible.text)
     assert all(value in text for value in ("12.500 ms", "30.000 ms", "25.000 requests/sec", "100.000 tokens/sec",
-                                          "100.000 %", "0.000 %", "Native eager fp16", "TRTMC fp16"))
+                                          "100.000 %", "0.000 %", "Native", "TRTMC", "fp16"))
 
 
 def test_run_percentiles_and_precisions_are_kept_separate_and_failed_attempts_are_excluded(tmp_path):
@@ -113,7 +117,8 @@ def test_unavailable_native_summary_stays_missing_instead_of_becoming_zero_or_a_
         path.write_text(contents)
     captured = aiperf_metrics.capture(AiperfRun(tmp_path, 0, []))
     assert captured["metrics"] == {}
-    assert aiperf_metrics.cells(captured)[-len(aiperf_metrics.COLUMNS):] == ["—"] * len(aiperf_metrics.COLUMNS)
+    grouped = aiperf_metrics.summaries([captured])[0]
+    assert aiperf_metrics.cells(grouped, range(len(aiperf_metrics.COLUMNS)))[-len(aiperf_metrics.COLUMNS):] == ["—"] * len(aiperf_metrics.COLUMNS)
 
 
 def test_nonfinite_native_metrics_are_unavailable_and_zero_error_rate_is_retained():
@@ -121,3 +126,77 @@ def test_nonfinite_native_metrics_are_unavailable_and_zero_error_rate_is_retaine
                                        "request_error_rate": {"unit": "%", "avg": 0.0}})
     assert "request_latency" not in extracted
     assert extracted["request_error_rate"] == {"unit": "%", "avg": 0.0}
+
+
+def metric_run(side, latency, index, **settings):
+    return {"workload": "example-catalog", "role": "performance", "concurrency": 1,
+            "mode": "eager", "precision": "fp16", "side": side, "batch_id": index,
+            "requests": 3, "aiperf_exit": 0, "metrics": {
+                "request_latency": {"unit": "ms", "p50": latency, "p99": latency + 10},
+                "request_throughput": {"unit": "requests/sec", "avg": 1 / latency},
+                "request_error_rate": {"unit": "%", "avg": 0.0}}, **settings}
+
+
+def test_repetitions_become_one_native_trtmc_pair_with_medians_and_totals():
+    runs = [metric_run(side, value, index) for side, values in
+            (("reference", [10, 100, 20]), ("candidate", [5, 8, 7])) for index, value in enumerate(values)]
+    original = json.dumps(runs, sort_keys=True)
+    panel, = aiperf_metrics.panels(runs, "example")
+    native, trtmc = panel["main"]
+    assert panel["label"] == "Catalog" and not panel["extras"]
+    assert native["runs"] == trtmc["runs"] == 3 and native["requests"] == trtmc["requests"] == 9
+    assert native["values"][0]["value"] == 20 and native["values"][1]["value"] == 30
+    assert trtmc["values"][0]["value"] == 7 and trtmc["values"][1]["value"] == 17
+    assert "Output token throughput" not in aiperf_metrics.headers(panel)
+    page = report_html._native_metrics(runs, "example")
+    visible = VisibleText()
+    visible.feed(page)
+    assert visible.rows == 3  # one header plus the Native/TRTMC rows
+    assert "20.000 ms" in page and "Across 3/3 runs: 10.000–100.000 ms" in page
+    assert "Side / mode / precision" not in page and "<th>Run</th>" not in page
+    assert "medians of run p50/p99" in aiperf_metrics.NOTE
+    assert json.dumps(runs, sort_keys=True) == original
+
+
+def test_wan_precision_mismatch_is_explicit_and_fp32_compile_references_stay_separate():
+    runs = [metric_run("reference", 900, 2, precision="fp32"),
+            metric_run("candidate", 30, 1), metric_run("reference", 40, 0, precision="bf16"),
+            metric_run("reference", 20, 3, precision="bf16", mode="compile")]
+    panel, = aiperf_metrics.panels(runs, native_precision="bf16")
+    assert [(item["side"], item["precision"]) for item in panel["main"]] == [("reference", "bf16"), ("candidate", "fp16")]
+    assert len(panel["extras"]) == 2 and panel["main"][0]["values"][0]["value"] == 40
+    assert "Precision differs" in aiperf_metrics.panel_note(panel)
+    page = report_html._native_metrics(runs, native_precision="bf16")
+    visible = VisibleText()
+    visible.feed(page)
+    text = " ".join(visible.text)
+    assert visible.rows == 3 and "bf16" in text and "fp16" in text
+    assert "fp32" not in text and "900.000 ms" not in text and "compile" not in text
+    assert "fp32" in page and "900.000 ms" in page and "Native mode: compile" in page
+    markdown = "\n".join(aiperf_metrics.markdown(runs, native_precision="bf16"))
+    assert "Additional native settings" in markdown and "900.000 ms" in markdown
+
+
+def test_different_workload_role_mode_precision_and_concurrency_never_merge():
+    base = metric_run("reference", 10, 0)
+    alternatives = [{"workload": "other"}, {"role": "both"}, {"mode": "compile"},
+                    {"precision": "fp32"}, {"concurrency": 4}, {"side": "candidate"}]
+    runs = [base, *(metric_run("reference", 100, i + 1, **changed) for i, changed in enumerate(alternatives)
+                    if "side" not in changed), metric_run("candidate", 100, 6)]
+    groups = aiperf_metrics.summaries(runs)
+    assert len(groups) == 7 and all(item["runs"] == 1 for item in groups)
+    assert sorted(item["values"][0]["value"] for item in groups) == [10, 100, 100, 100, 100, 100, 100]
+
+
+def test_partial_missing_units_and_failed_runs_remain_visible_in_summaries():
+    first, missing = metric_run("reference", 10, 0), metric_run("reference", 100, 1, metrics={}, aiperf_exit=1)
+    panel, = aiperf_metrics.panels([first, missing])
+    cells = aiperf_metrics.cells(panel["main"][0], panel["columns"])
+    assert "failed runs: 1/2" in cells[0] and "10.000 ms (1/2 runs)" in cells
+    assert "0.000 % (1/2 runs)" in cells
+    conflict = metric_run("reference", 1, 2, metrics={"request_latency": {"unit": "s", "p50": 1}})
+    panel, = aiperf_metrics.panels([first, conflict])
+    assert "— (units differ)" in aiperf_metrics.cells(panel["main"][0], panel["columns"])
+    missing_native, = aiperf_metrics.panels([metric_run("candidate", 5, 0)])
+    assert aiperf_metrics.cells(missing_native["main"][0], missing_native["columns"])[0] == "Native"
+    assert set(aiperf_metrics.cells(missing_native["main"][0], missing_native["columns"])[1:]) == {"—"}

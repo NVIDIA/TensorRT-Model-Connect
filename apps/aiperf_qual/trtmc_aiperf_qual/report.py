@@ -168,7 +168,8 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
                      f"{_fmt(ref.get('ci_percent'), 2)} | {'; '.join(item.get('reasons', []) + item.get('notes', []))} |")
     if result.get("aiperf_metrics"):
         lines += ["", "## AIPerf native client metrics (informational; no gate)", "", aiperf_metrics.NOTE, "",
-                  *aiperf_metrics.markdown(result["aiperf_metrics"])]
+                  *aiperf_metrics.markdown(result["aiperf_metrics"], result["model"],
+                                          reference.get("timing_precision") or reference.get("perf_precision"))]
     service_metrics = result.get("service_metrics") or {}
     if service_metrics.get("kind") == "media":
         lines += _media_service_metrics(service_metrics)

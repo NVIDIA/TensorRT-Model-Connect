@@ -116,12 +116,17 @@ verdict; the prototype's single execution lane and buffered SSE do not measure t
 
 Every recorded workload also includes AIPerf's native client statistics in `aiperf_metrics`: request
 latency p50/p99, request throughput, output-token throughput when available, and request error rate.
-JSON retains the exported statistics and units; Markdown and HTML show each side's values per workload,
-precision, and profiling run. HTML shows these tables directly below the model summary, with links from
-each model and the same search/result filters; expanding Evidence is unnecessary. These metrics reuse
-the existing exports without extra inference or a load sweep. Missing values stay unavailable,
-percentiles are not merged across runs, and these
-informational measurements never affect acceptance gates or the model verdict.
+JSON retains every run's exported statistics and units. Markdown and HTML show one Native/TRTMC table
+per workload, with separate precision, run-count, and total-request columns. Repeated runs use the median
+of each exported statistic; displayed latency p50/p99 are medians of run percentiles, not pooled request
+percentiles. Hovering a metric in HTML shows the range across runs. Different workloads, modes, precisions,
+and concurrency levels are never averaged together. The main Native row uses the declared timing precision
+when available; additional native settings (such as fp32 quality references or compiled modes) appear in
+a separate collapsed section. Precision mismatches remain explicit. Output-token throughput appears only
+where exported; missing metrics stay unavailable and partial statistics show available/total runs.
+HTML shows these tables directly below the model summary, with links from each model and the same
+search/result filters. Summaries reuse existing exports without extra inference or load sweeps and never
+affect acceptance gates or the model verdict.
 
 ```yaml
 performance:

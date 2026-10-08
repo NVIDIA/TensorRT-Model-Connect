@@ -7,7 +7,7 @@ for a result that is not Green, both sides' precision, each benchmark's values, 
 request, a rerun's result when an appendix is linked, and the evidence to expand (the full reason, Acc gates and
 failing samples with both outputs, the Perf comparison per reference mode, links to the evidence files, and a
 reproduction command). Rows are ordered White, Red, Yellow, Green.
-Per-run AIPerf client metrics follow the model table, visible without expanding evidence.
+AIPerf client summaries follow the model table, with Native/TRTMC rows per workload.
 """
 
 from __future__ import annotations
@@ -59,7 +59,8 @@ border:1px solid var(--line-strong);border-radius:10px;background:var(--panel)}
 .filters input,.filters select{min-height:32px;padding:5px 9px;border:1px solid var(--line-strong);border-radius:6px;
 background:#fff;font:inherit}.filters input{min-width:260px}.count{margin-left:auto;color:var(--muted);font-size:12px}
 .wrap{overflow:auto;border:1px solid var(--line-strong);border-radius:10px;background:var(--panel)}
-.client-metrics{margin-top:20px}.client-metrics h3{margin:0 0 8px}.client-metrics table{min-width:1240px}
+.client-metrics{margin-top:20px}.client-metrics h3{margin:0 0 8px}.client-metrics h4{margin:16px 0 4px}
+.client-metrics table{min-width:820px}.client-metrics details{margin-top:8px}
 table{width:100%;border-collapse:separate;border-spacing:0}.register{min-width:1240px}
 th,td{padding:8px 10px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);text-align:left;
 vertical-align:top}th:last-child,td:last-child{border-right:0}
@@ -279,13 +280,29 @@ def _ms(value: Any) -> str:
     return f"{value:.3f}" if isinstance(value, (int, float)) else "—"
 
 
-def _native_metrics(items: Sequence[Mapping[str, Any]]) -> str:
-    if not items:
-        return ""
-    header = "".join(f"<th>{_e(label)}</th>" for label in aiperf_metrics.HEADERS)
-    rows = "".join("<tr>" + "".join(f"<td>{_e(cell)}</td>" for cell in aiperf_metrics.cells(item)) + "</tr>"
-                   for item in items)
-    return f"<div class='wrap'><table><thead><tr>{header}</tr></thead><tbody>{rows}</tbody></table></div>"
+def _native_table(panel: Mapping[str, Any], items: Sequence[Mapping[str, Any]]) -> str:
+    header = "".join(f"<th>{_e(label)}</th>" for label in aiperf_metrics.headers(panel))
+    rows = []
+    for item in items:
+        values = item.get("values") or [{}] * len(aiperf_metrics.COLUMNS)
+        ranges = ["Across {available}/{total} runs: {min:.3f}–{max:.3f} {unit}".format(**values[i])
+                  if values[i].get("value") is not None else "Unavailable" for i in panel["columns"]]
+        cells = "".join(f"<td title='{_e(hint)}'>{_e(value)}</td>" for value, hint in
+                        zip(aiperf_metrics.cells(item, panel["columns"]), ["", "", "", "", *ranges]))
+        rows.append(f"<tr>{cells}</tr>")
+    return f"<div class='wrap'><table><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+
+
+def _native_metrics(items: Sequence[Mapping[str, Any]], profile: str = "", native_precision: str | None = None) -> str:
+    parts = []
+    for panel in aiperf_metrics.panels(items, profile, native_precision):
+        parts.append(f"<h4>{_e(panel['label'])}</h4><p class='detail'>{_e(aiperf_metrics.panel_note(panel))}</p>"
+                     + _native_table(panel, panel["main"]))
+        if panel["extras"]:
+            extra = "".join(f"<p class='detail'>Native mode: {_e(item.get('mode') or '—')}</p>"
+                            + _native_table(panel, [item]) for item in panel["extras"])
+            parts.append(f"<details><summary>Additional native settings ({len(panel['extras'])})</summary>{extra}</details>")
+    return "".join(parts)
 
 
 def _evidence(profile: str, row: Mapping[str, Any], base: Path) -> str:
@@ -316,7 +333,8 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
         metrics_link = f"<div class='detail'><a href='#aiperf-{index}'>AIPerf client metrics</a></div>" if metrics else ""
         if metrics:
             client_metrics.append(f"<section class='client-metrics' id='aiperf-{index}' data-result='{result}' "
-                                  f"data-k='{_e(key)}'><h3>{_e(profile)}</h3>{_native_metrics(metrics)}</section>")
+                                  f"data-k='{_e(key)}'><h3>{_e(profile)}</h3>"
+                                  f"{_native_metrics(metrics, profile, (row.get('precision') or {}).get('native'))}</section>")
         rerun = f"<td>{_signal(reruns[profile]) if profile in reruns else ''}</td>" if reruns else ""
         body.append(f"<tr class='m' data-result='{result}' data-k='{_e(key)}'><td>{_signal(result)}"
                     + (f"<div class='detail'>{_e(issue)}</div>" if issue else "")
@@ -355,7 +373,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                 f"content='width=device-width,initial-scale=1'><title>{_e(title)}</title><style>{STYLE}</style>"
                 f"<script>{SCRIPT}</script><header><p class='eyebrow'>Qualification report</p><h1>{_e(title)}</h1>"
                 "<p class='purpose'>TRTMC against the native model: benchmark accuracy, and the server model-call time "
-                "p50 of the catalog request. Per-run AIPerf client metrics appear below.</p>"
+                "p50 of the catalog request. AIPerf client summaries appear below.</p>"
                 + (f"<p class='meta'>{_e(context)}</p>" if context else "")
                 + (f"<p class='meta'>{related}</p>" if related else "")
                 + f"</header>{cards}{legend}{filters}<div class='wrap'><table class='register'><thead><tr>"
