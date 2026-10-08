@@ -74,7 +74,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         and arguments[1].startswith("-")
     ):
         base_parser.error("MODEL must immediately follow prepare-structure")
-    preliminary, _ = base_parser.parse_known_args(arguments)
+    # Only structure preparation needs a partial parse to discover family options.
+    if arguments and arguments[0] == "build":
+        preliminary = base_parser.parse_args(arguments)
+    else:
+        preliminary, _ = base_parser.parse_known_args(arguments)
     model_dir = _resolve_model(preliminary.model, preliminary.revision)
     metadata = load_model_metadata(model_dir)
     try:
