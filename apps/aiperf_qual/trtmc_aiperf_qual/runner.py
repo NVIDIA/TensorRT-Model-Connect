@@ -22,7 +22,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import absolute, compat, edits, execution, geneval, intelligibility, judge, replay_parity, sweep, world_model
+from . import absolute, aiperf_metrics, compat, edits, execution, geneval, intelligibility, judge, replay_parity, sweep, world_model
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
 from .report import write_report
@@ -754,6 +754,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
         result = _qualify(model, environment, out)
     result["schema_version"] = execution.SCHEMA
     result["performance"].extend(evidence.natural_performance())
+    result["aiperf_metrics"] = aiperf_metrics.entries(evidence.batches)
     for item in result["accuracy"]:
         item.pop("workload_perf", None)
     result["execution"] = {"records": str(out / "execution.jsonl"), "timing_contract": execution.TIMING_CONTRACT,

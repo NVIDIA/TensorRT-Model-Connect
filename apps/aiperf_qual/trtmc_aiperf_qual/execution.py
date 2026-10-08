@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from . import aiperf_metrics
 from .noninferiority import t_quantile
 
 SCHEMA = "trtmc.qualification/v2"
@@ -173,7 +174,7 @@ class Session:
                  "workload": metadata["name"], "role": metadata["role"],
                  "identity": identity, "gpu_busy_percent": metadata["gpu_busy_percent"],
                  "warmup": metadata["warmup"], "expected_requests": metadata.get("expected_requests"),
-                 "aiperf_exit": run.exit_code, "records": rows}
+                 "aiperf_exit": run.exit_code, "aiperf_metrics": aiperf_metrics.capture(run), "records": rows}
         self.batches.append(batch)
         self.out.mkdir(parents=True, exist_ok=True)
         with (self.out / "execution.jsonl").open("a") as handle:

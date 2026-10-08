@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from . import aiperf_metrics
 from .compat import report as normalized_report
 
 
@@ -171,6 +172,9 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
                      f"{_fmt(cand.get('ci_percent'), 2)} | {_fmt(ref.get('p50_ms'))}{unit} ({ref.get('aggregation', 'mean')}) | "
                      f"{_fmt(ref.get('ci_percent'), 2)} | "
                      f"{_fmt(item.get('speedup'), 2)} | {'; '.join(item.get('reasons', []) + item.get('notes', []))} |")
+    if result.get("aiperf_metrics"):
+        lines += ["", "## AIPerf native client metrics (informational; no gate)", "", aiperf_metrics.NOTE, "",
+                  *aiperf_metrics.markdown(result["aiperf_metrics"])]
     service_metrics = result.get("service_metrics") or {}
     if service_metrics.get("kind") == "media":
         lines += _media_service_metrics(service_metrics)

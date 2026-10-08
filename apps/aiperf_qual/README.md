@@ -113,6 +113,13 @@ promotes descriptive dataset results to an acceptance gate. `torch.compile` rema
 reference. Service metrics (client latency, throughput, load sweeps) are opt-in and do not affect the
 verdict; the prototype's single execution lane and buffered SSE do not measure token TTFT/ITL.
 
+Every recorded workload also includes AIPerf's native client statistics in `aiperf_metrics`: request
+latency p50/p99, request throughput, output-token throughput when available, and request error rate.
+JSON retains the exported statistics and units; Markdown and HTML show each side's values per workload,
+precision, and profiling run. These metrics reuse the existing exports without extra inference or a
+load sweep. Missing values stay unavailable, percentiles are not merged across runs, and these
+informational measurements never affect acceptance gates or the model verdict.
+
 ```yaml
 performance:
   measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5, min_run_s: 1.0}

@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from . import aiperf_metrics
 from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, ms, reported_perf, request_label, signal, signal_reason
 from .report import _fmt, counted
 
@@ -292,11 +293,21 @@ def _ms(value: Any) -> str:
     return f"{value:.3f}" if isinstance(value, (int, float)) else "—"
 
 
+def _native_metrics(items: Sequence[Mapping[str, Any]]) -> str:
+    if not items:
+        return ""
+    header = "".join(f"<th>{_e(label)}</th>" for label in aiperf_metrics.HEADERS)
+    rows = "".join("<tr>" + "".join(f"<td>{_e(cell)}</td>" for cell in aiperf_metrics.cells(item)) + "</tr>"
+                   for item in items)
+    return f"<p>{_e(aiperf_metrics.NOTE)}</p><table><tr>{header}</tr>{rows}</table>"
+
+
 def _evidence(profile: str, row: Mapping[str, Any], base: Path) -> str:
     directory = row.get("directory")
     return ("<details><summary>Evidence</summary><div class='evidence-body'>"
             f"<p>{_e(signal_reason(profile, row))}</p><p class='detail'>harness category {_e(row['category'])} · "
             f"host {_e(row.get('root'))}</p>{_accuracy(row.get('accuracy', []))}{_performance(row.get('perf', []))}"
+            f"{_native_metrics(row.get('aiperf_metrics', []))}"
             f"{_sweep(row.get('service_metrics') or {})}<p>{_links(Path(directory) if directory else None, base)}</p>"
             + (f"<p>reproduce: <code>{_e(row['repro'])}</code></p>" if row.get("repro") else "")
             + "</div></details>")

@@ -320,6 +320,7 @@ def _row(directory: Path) -> dict[str, Any] | None:
             return {"task": value.get("task"), "category": value["verdict"]["category"],
                     "precision": _precision(value, directory),
                     "directory": str(directory), "repro": value.get("repro"), "service_metrics": value.get("service_metrics"),
+                    "aiperf_metrics": value.get("aiperf_metrics", []),
                     "time": float(value.get("started") or path.stat().st_mtime),
                     "accuracy": value.get("accuracy", []), "perf": value.get("performance", []),
                     "backend": (value.get("reference") or {}).get("backend", ""),
@@ -516,6 +517,13 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
         reason = signal_reason(profile, row).replace("|", "/").replace("\n", " ")
         lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {row['root']} | "
                      f"{_accuracy_text(row['accuracy'])} | {_perf_text(profile, reported_perf(row))} | {reason} |")
+    native = {profile: row["aiperf_metrics"] for profile, row in rows.items() if row.get("aiperf_metrics")}
+    if native:
+        from . import aiperf_metrics
+
+        lines += ["", "## AIPerf native client metrics (informational; no gate)", "", aiperf_metrics.NOTE]
+        for profile, items in sorted(native.items()):
+            lines += ["", f"### {profile}", "", *aiperf_metrics.markdown(items)]
     return "\n".join(lines) + "\n", counts
 
 
