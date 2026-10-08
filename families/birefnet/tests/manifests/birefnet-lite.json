@@ -1,0 +1,20 @@
+{
+  "name": "birefnet-lite",
+  "hf_id": "ZhengPeng7/BiRefNet_lite",
+  "bundle": "birefnet-lite.bundle",
+  "family": "birefnet",
+  "task": "segmentation",
+  "precision": "fp16",
+  "image_height": 1024,
+  "image_width": 1024,
+  "testcases": [
+    {
+      "name": "birefnet-lite",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "min_mask_iou": 0.9,
+      "input_size": 1024
+    }
+  ],
+  "tensor_parallel_size": 1
+}

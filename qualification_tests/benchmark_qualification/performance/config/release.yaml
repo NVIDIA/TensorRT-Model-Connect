@@ -925,6 +925,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: birefnet.segment
+    family: birefnet
+    operation: segment
+    model: birefnet-lite
+    workload:
+      testcase: birefnet-lite
+    baseline:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: qwen.generate
     family: qwen
     operation: generate
