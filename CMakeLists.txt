@@ -383,6 +383,18 @@ set_target_properties(trtmc PROPERTIES
   INSTALL_RPATH "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
 )
 
+# Dev-only tool: loads one bundle ONCE and generates for many prompts in a
+# single process, to measure/compare decode behavior without re-paying the
+# ~60s per-process engine-deserialization cost of `trtmc run` for each
+# prompt. Not part of the installed/shipped CLI surface.
+add_executable(mtp_batch_runner apps/cli/batch_runner.cpp)
+target_link_libraries(mtp_batch_runner PRIVATE trtmc_runtime nlohmann_json::nlohmann_json)
+target_compile_options(mtp_batch_runner PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(mtp_batch_runner PROPERTIES
+  BUILD_RPATH "\$ORIGIN"
+  INSTALL_RPATH "\$ORIGIN"
+)
+
 if(TRTMC_BUILD_SERVER)
   add_library(trtmc_server STATIC
     apps/server/native_worker.cpp
