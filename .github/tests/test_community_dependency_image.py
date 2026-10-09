@@ -10,9 +10,11 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
+import time
 import urllib.response
 from email.message import Message
 from pathlib import Path
@@ -1703,6 +1705,7 @@ def candidate_docker_boundary(fixture, events: list[str], *, metadata: str | Non
         assert not fixture.auth_file.exists()
         if "/opt/trtmc-ci/build-inputs.json" in command:
             assert "--config" not in command and stdin is None
+            assert kwargs["stdout_limit"] == 65536
             return host_run(command, capture=True)
         assert "--config" in command
         configuration = Path(command[command.index("--config") + 1])
@@ -2170,7 +2173,7 @@ def test_private_pull_boundary_never_discloses_registry_errors(failure: str, cap
         )
     else:
         error = OSError(PRIVATE_PREFIX + " " + PRIVATE_TOKEN)
-    with patch.object(MODULE.subprocess, "run", side_effect=error):
+    with patch.object(MODULE, "_bounded_capture", side_effect=error):
         with pytest.raises(RuntimeError) as failure:
             MODULE._private_docker(command, stdin=PRIVATE_TOKEN)
     captured = capsys.readouterr()
@@ -2182,24 +2185,13 @@ def test_private_pull_boundary_never_discloses_registry_errors(failure: str, cap
 def test_metadata_transport_keeps_bytes_for_the_bounded_manifest_check():
     content = "{}" + " " * 65535
     command = [
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        "--entrypoint",
-        "/usr/bin/head",
-        LOCAL_CANDIDATE_ID,
+        sys.executable,
         "-c",
-        "65537",
-        "/opt/trtmc-ci/build-inputs.json",
+        "import sys; sys.stdout.write('{}' + ' ' * 65535)",
     ]
-    with patch.object(
-        MODULE.subprocess,
-        "run",
-        return_value=subprocess.CompletedProcess(command, 0, stdout=content, stderr=""),
-    ):
-        assert MODULE._private_docker(command) == content
+    assert MODULE._private_docker(command) == content
+    with pytest.raises(RuntimeError, match="output is suppressed"):
+        MODULE._private_docker(command, stdout_limit=65536)
 
 
 @pytest.mark.parametrize("failure", ["login", "pull", "inspect", "mutable-local-image"])
@@ -2656,3 +2648,178 @@ def test_final_gpu_artifact_is_gated_by_both_cleanup_paths_and_never_admits_cata
     assert final_upload["with"]["path"] == "${{ runner.temp }}/image-gpu-proof/qualification.json"
     assert all(job.get("permissions", {}).get("packages") != "write" for job in jobs.values())
     assert "dependency-image.json" not in json.dumps(WORKFLOW)
+
+
+@pytest.fixture
+def bounded_children(monkeypatch):
+    children = []
+    original_popen = MODULE.subprocess.Popen
+
+    def popen(*arguments, **kwargs):
+        child = original_popen(*arguments, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(MODULE.subprocess, "Popen", popen)
+    yield children
+    for child in children:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=1)
+
+
+def assert_capture_closed_and_reaped(children) -> None:
+    assert children
+    for child in children:
+        assert child.poll() is not None
+        assert child.stdout.closed and child.stderr.closed
+        assert child.stdin is None or child.stdin.closed
+
+
+@pytest.mark.parametrize("stream,descriptor", [("stdout", 1), ("stderr", 2)])
+def test_receiver_limits_each_actual_child_pipe_before_accumulation(
+    bounded_children, monkeypatch, stream, descriptor
+):
+    command = [
+        sys.executable,
+        "-c",
+        f"import os, time; os.write({descriptor}, b'x' * 8192); time.sleep(10)",
+    ]
+    requested_reads = []
+    original_read = MODULE.os.read
+
+    def read(descriptor, size):
+        if any(
+            not stream.closed and stream.fileno() == descriptor
+            for child in bounded_children
+            for stream in (child.stdout, child.stderr)
+        ):
+            requested_reads.append(size)
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(MODULE.os, "read", read)
+    started = time.monotonic()
+    with pytest.raises(MODULE.CapturedOutputLimit, match=stream) as failure:
+        MODULE._bounded_capture(command, timeout=2, stdout_limit=4096, stderr_limit=4096)
+    assert time.monotonic() - started < 2
+    assert requested_reads and max(requested_reads) <= 4097
+    assert len(failure.value.stdout.encode()) <= 4096
+    assert len(failure.value.stderr.encode()) <= 4096
+    assert_capture_closed_and_reaped(bounded_children)
+
+
+@pytest.mark.parametrize("descriptor", [1, 2])
+def test_public_probe_default_capture_is_bounded_and_diagnostics_keep_only_tail(
+    bounded_children, descriptor, capsys
+):
+    command = [
+        sys.executable,
+        "-c",
+        f"import os, time; os.write({descriptor}, b'x' * (1024 * 1024 + 65536)); time.sleep(10)",
+    ]
+    with pytest.raises(MODULE.CapturedOutputLimit):
+        MODULE.run(command, capture=True)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Captured" in captured.err and "x" * 16384 in captured.err
+    assert len(captured.err) < 16500
+    assert_capture_closed_and_reaped(bounded_children)
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_actual_credential_output_flood_is_suppressed_and_reaped(bounded_children, capture, capsys):
+    command = [
+        sys.executable,
+        "-c",
+        "import sys, time; token=sys.stdin.read(); sys.stdout.write(token * 100000); "
+        "sys.stdout.flush(); time.sleep(10)",
+    ]
+    with pytest.raises(RuntimeError, match="Credential command failed") as failure:
+        MODULE.run(command, capture=capture, stdin=PRIVATE_TOKEN)
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    assert PRIVATE_TOKEN not in str(failure.value)
+    assert_capture_closed_and_reaped(bounded_children)
+
+
+def test_private_metadata_receiver_rejects_the_65537th_actual_byte_during_read(
+    bounded_children, capsys
+):
+    command = [
+        sys.executable,
+        "-c",
+        "import os,time; os.write(1,b'x'*65537); time.sleep(10)",
+    ]
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="output is suppressed"):
+        MODULE._private_docker(command, stdout_limit=65536, timeout=2)
+    assert time.monotonic() - started < 2
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    assert_capture_closed_and_reaped(bounded_children)
+
+
+@pytest.mark.parametrize("stdin", [None, "x" * 65536])
+def test_private_timeout_closes_and_reaps_even_when_child_never_reads_token(
+    bounded_children, stdin, capsys
+):
+    command = [sys.executable, "-c", "import time; time.sleep(10)"]
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="output is suppressed"):
+        MODULE._private_docker(command, stdin=stdin, timeout=0.15)
+    assert time.monotonic() - started < 2
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    assert_capture_closed_and_reaped(bounded_children)
+
+
+@pytest.mark.parametrize("escaped", [False, True])
+def test_capture_deadline_survives_parent_exit_and_descendant_held_pipes(
+    tmp_path, bounded_children, monkeypatch, escaped
+):
+    descendant_pid = tmp_path / "descendant.pid"
+    command = [
+        sys.executable,
+        "-c",
+        "import os, pathlib, sys, time\n"
+        "if os.fork() == 0:\n"
+        " if sys.argv[2] == 'escaped': os.setsid()\n"
+        " pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        " time.sleep(5)\n"
+        "else: os._exit(0)\n",
+        str(descendant_pid),
+        "escaped" if escaped else "same-group",
+    ]
+    killed_groups = []
+    original_killpg = MODULE.os.killpg
+
+    def killpg(group, sig):
+        killed_groups.append(group)
+        return original_killpg(group, sig)
+
+    monkeypatch.setattr(MODULE.os, "killpg", killpg)
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            MODULE._bounded_capture(command, timeout=0.25)
+        assert time.monotonic() - started < 2
+        assert descendant_pid.is_file()
+        assert bounded_children[0].returncode == 0
+        assert bounded_children[0].pid in killed_groups
+        assert_capture_closed_and_reaped(bounded_children)
+    finally:
+        if descendant_pid.exists():
+            try:
+                os.kill(int(descendant_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize("stdin", ["x" * 65537, "\U0001f680" * 20000])
+def test_oversized_credential_stdin_is_rejected_before_any_child(stdin, capsys):
+    with patch.object(MODULE.subprocess, "Popen") as popen:
+        with pytest.raises(RuntimeError, match="output is suppressed"):
+            MODULE._private_docker([sys.executable, "-c", "pass"], stdin=stdin)
+    popen.assert_not_called()
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
