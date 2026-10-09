@@ -183,6 +183,17 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
             continue
         result = compat.report(json.loads(path.read_text()))
         model = compat.configuration(json.loads((out / "model.json").read_text()))
+        if selection_cache is None and environment is None and result.get("performance_source") == "quality":
+            from .benchmark_perf import refresh
+
+            result = refresh(out, result)
+            result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)), expected_modes=0)
+            preserve_original(out)
+            result["rejudged"] = {"time": time.time(), "original": ORIGINAL_REPORT,
+                                  "benchmark_timings_refreshed": True, "accuracy_contract_preserved": True}
+            write_report(out, result)
+            print(json.dumps({"out": str(out), **result["verdict"]}))
+            continue
         if selection_cache is not None:
             preserve_original(out)
             result = recover(out, model, result, archive)

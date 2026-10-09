@@ -268,7 +268,8 @@ def test_quality_measurement_verdict_does_not_claim_repeated_performance_gate(tm
     result = judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)
     assert result == {"acc": "pass", "perf": "measured", "lights": {}, "category": "measured"}
     item["complete"] = False
-    assert judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)["category"] == "error"
+    partial = judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)
+    assert partial["perf"] == "partial" and partial["category"] == "measured"
     item["complete"] = True
     base["accuracy"].append({"suite": "another-required-dataset", "source": "absolute", "status": "pass"})
     assert judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)["perf"] == "error"

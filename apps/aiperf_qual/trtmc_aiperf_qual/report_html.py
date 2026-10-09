@@ -231,12 +231,18 @@ def _performance(items: Sequence[Mapping[str, Any]]) -> str:
     for item in items:
         candidate, reference = item.get("candidate", {}), item.get("reference", {})
         light = item.get("light", "")
+        if item.get("kind") == "natural_dataset":
+            light = item.get("measurement_status", "measured")
         color = LIGHT_COLORS.get(light, "#6e7781")
         reasons = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
         unit = " per audio second" if candidate.get("unit") or reference.get("unit") else ""
         if item.get("kind") == "natural_dataset":
             reasons += (f" · shared quality outputs; {item.get('matched_pairs')}/{item.get('pairs')} "
-                        "paired responses have matching work; informational, no gate")
+                        "paired responses have matching work; informational, no gate"
+                        f" · Native {reference.get('valid_requests')}/{reference.get('requests')} timed"
+                        f" · TRTMC {candidate.get('valid_requests')}/{candidate.get('requests')} timed")
+            if item.get("out_of_capacity"):
+                reasons += f" · {item['out_of_capacity']} capacity rejections excluded on both sides"
         else:
             reasons += " · repeated fixed-workload gate"
         rows.append(f"<tr><td>{_e(item.get('request') or item.get('reference_mode'))}</td><td><span class='badge' "
