@@ -87,7 +87,7 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
             olmo_apply_chat_template(config.chat_template_format, prompt, cfg.enable_thinking);
         templated = true;
     }
-    auto ids = tokenizer.encode(effective);
+    auto ids = olmo_encode_causal_prompt(tokenizer, effective, config.id_eos);
     if (templated && ids.size() >= 2 && config.id_bos >= 0 && ids[0] == config.id_bos &&
         ids[1] == config.id_bos) {
         ids.erase(ids.begin());

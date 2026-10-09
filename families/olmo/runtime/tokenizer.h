@@ -26,4 +26,7 @@ std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size,
                                                bool add_special_tokens = false);
 
+std::vector<int32_t> olmo_encode_causal_prompt(const ITokenizer& tokenizer, const std::string& text,
+                                               int32_t eos_id);
+
 } // namespace trtmc
