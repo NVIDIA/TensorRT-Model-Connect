@@ -86,11 +86,12 @@ def test_missing_decode_count_is_unknown_unless_text_proves_matching_work(tmp_pa
     assert perf["measurement_status"] == "measured" and perf["comparable"] == bool(matched)
 
 
-def test_offline_rejudge_removes_native_floor_without_changing_scores(tmp_path):
+@pytest.mark.parametrize("source", ["absolute", None])
+def test_offline_rejudge_removes_native_floor_without_changing_scores(tmp_path, source):
     from trtmc_aiperf_qual.cli import rejudge_reports
 
     metrics = {"native_score": 0.0, "trtmc_score": 0.0, "test": {"outcome": "pass"}}
-    quality = [{"suite": "mmlu-0shot", "source": "absolute", "status": "not-comparable",
+    quality = [{"suite": "mmlu-0shot", "source": source, "status": "not-comparable",
                 "samples": 200, "expected_samples": 200, "metrics": metrics,
                 "gate": {"margin": 5.0, "min_native": 30.0}}]
     report = {**capture(tmp_path, [row(0, 40)], [row(0, 20)], quality), "provenance": {}}

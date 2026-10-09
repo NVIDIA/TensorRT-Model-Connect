@@ -191,10 +191,12 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
             # score. Preserve scores and statistical margins during replay.
             changed = False
             for entry in result.get("accuracy", []):
-                if entry.get("source") == "absolute" and (entry.get("metrics") or {}).get("test") and entry.get("status") != "error":
+                removed_floor = (entry.get("gate") or {}).pop("min_native", None) is not None
+                changed |= removed_floor
+                if ((entry.get("source") == "absolute" or removed_floor)
+                        and (entry.get("metrics") or {}).get("test") and entry.get("status") != "error"):
                     status, reasons = absolute.status(entry)
                     changed |= status != entry.get("status")
-                    changed |= (entry.get("gate") or {}).pop("min_native", None) is not None
                     entry.update(status=status, reasons=reasons)
             result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)), expected_modes=0)
             preserve_original(out)
