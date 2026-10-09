@@ -286,8 +286,9 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path):
             build_paired(request, None, execution)
 
 
+@pytest.mark.parametrize("weight_format", ["fp16", "fp8", "nvfp4"])
 @pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure"])
-def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, caplog, mode):
+def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, caplog, mode, weight_format):
     import json
     from tensorrt_model_connect.build import BuildRequest
     from families.llama.edge_llm import builder, dispatch
@@ -295,8 +296,20 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     source = tmp_path / "target"
     source.mkdir()
     (source / "config.json").write_text(json.dumps({
-        "max_position_embeddings": 4096, "hidden_size": 896,
+        "max_position_embeddings": 4096, "hidden_size": 4096,
     }))
+    raw = json.loads((source / "config.json").read_text())
+    if weight_format != "fp16":
+        (source / "hf_quant_config.json").write_text(json.dumps({
+            "producer": {"name": "modelopt"},
+            "quantization": {"quant_algo": weight_format.upper()},
+        }))
+        with pytest.raises(ValueError, match="conflicting"):
+            builder.checkpoint_weight_format(source, {"quantization_config": {
+                "quant_method": "modelopt",
+                "quant_algo": "NVFP4" if weight_format == "fp8" else "FP8",
+            }})
+    assert builder.checkpoint_weight_format(source, raw) == weight_format
     prefix = tmp_path / "package"
     manifest = prefix / "share/trtmc/edge-llm.json"
     if mode != "absent":
@@ -310,10 +323,10 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     if hasattr(dispatch, "source_quantization"):
         monkeypatch.setattr(dispatch, "source_quantization", lambda *_: "fp16")
     if hasattr(builder, "request_weight_format"):
-        monkeypatch.setattr(builder, "request_weight_format", lambda *_: "fp16")
+        monkeypatch.setattr(builder, "request_weight_format", lambda *_: weight_format)
     request = BuildRequest(source, tmp_path / "out", "llama", "text_generation", "fp16")
     writer = object()
-    target = {"os": "linux", "arch": "x86_64", "sm": 80}
+    target = {"os": "linux", "arch": "x86_64", "sm": 80 if weight_format == "fp16" else 120}
     target_calls = []
 
     def local_target():
@@ -339,7 +352,7 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
             raise KeyboardInterrupt()
         return {}, {}
 
-    monkeypatch.setattr(dispatch, "EDGE_DISPATCH", {("linux", "x86_64", 80, "fp16"): prepare})
+    monkeypatch.setattr(dispatch, "EDGE_DISPATCH", {("linux", "x86_64", target["sm"], weight_format): prepare})
     monkeypatch.setattr(builder, "publish", lambda *args: publications.append(args))
     def native(*args):
         native_calls.append(args)
@@ -361,6 +374,35 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     else:
         assert not logs and "Edge build failed" not in caplog.text
 
+    if mode == "success":
+        # An installed wheel supplies Python tooling, never the native C++ SDK.
+        from types import SimpleNamespace
+
+        package = {"python": "/sdk/private/python"}
+        platform = {"tensorrt_version": "11.1.0.106"}
+        responses = iter([
+            '["0.11.0", "11.1.0.106"]',
+            '["0.10.1", "11.1.0.106"]',
+            '["0.11.0", "11.0.0.114"]',
+            "not JSON",
+        ])
+        def probe(command, **kwargs):
+            assert command[0] == builder.sys.executable
+            assert command[1:3] == ["-I", "-c"]
+            assert kwargs == dict(check=True, capture_output=True, text=True, timeout=30)
+            return SimpleNamespace(stdout=next(responses))
+
+        monkeypatch.setattr(builder.subprocess, "run", probe)
+        assert builder.builder_python(package, platform) == builder.sys.executable
+        for _ in range(3):
+            assert builder.builder_python(package, platform) == package["python"]
+
+        def unavailable(*args, **kwargs):
+            raise builder.subprocess.TimeoutExpired("python", 30)
+
+        monkeypatch.setattr(builder.subprocess, "run", unavailable)
+        assert builder.builder_python(package, platform) == package["python"]
+
 
 def test_edge_windows_nonmatch_does_not_probe_compiler(tmp_path, monkeypatch, caplog):
     import json
@@ -369,6 +411,17 @@ def test_edge_windows_nonmatch_does_not_probe_compiler(tmp_path, monkeypatch, ca
 
     (tmp_path / "config.json").write_text(json.dumps({"max_position_embeddings": 4096}))
     request = BuildRequest(tmp_path, tmp_path / "out", "llama", "text_generation", "fp16")
+    admitted = {
+        "model_type": "llama", "num_hidden_layers": 32, "hidden_size": 4096,
+        "intermediate_size": 14336, "num_attention_heads": 32,
+        "num_key_value_heads": 8, "vocab_size": 128256,
+        "max_position_embeddings": 131072,
+    }
+    assert dispatch.candidate(request, admitted)
+    assert not dispatch.candidate(request, dict(admitted, max_position_embeddings=8192))
+    # The 1B quality failure remains admitted; access and numerical quality differ.
+    assert dispatch.candidate(request, dict(admitted, num_hidden_layers=16,
+                                           hidden_size=2048, intermediate_size=8192))
     monkeypatch.setattr(dispatch, "candidate", lambda *_: True)
     monkeypatch.setattr(dispatch.sys, "platform", "win32")
     monkeypatch.setenv("CUDACXX", r"C:\Program Files\CUDA\bin\nvcc.exe")

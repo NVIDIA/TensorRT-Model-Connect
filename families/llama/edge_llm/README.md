@@ -1,19 +1,35 @@
 # Llama Edge-LLM execution
 
 This family owns complete-network offload to the official GitHub Edge-LLM
-0.10.1 snapshot, revision `e8b29522938901f6df19ebeedd4b69bc8edbcd97`.
+0.11.0 snapshot, revision `95515c2f87fba8982db5a519f9022277667b3cc9`.
 CMake provisions the optional native SDK separately. Builds use its experimental
 Python builder; inference uses its persistent C++ `LLMInferenceRuntime` API.
 There is no implicit installation, download, cross-compilation or cross-family
 model dispatch.
 
-## Publication scope
+## Installed Python builder discovery
 
-The published route accepts matching dense Llama configuration shapes,
+The native CMake SDK is still required for the C++ adapter. The family uses the
+current Python interpreter when it can import Edge 0.11.0's builder and the same
+TensorRT release as that SDK, including a normal pip installation of the edgellm
+extra. Otherwise it uses the SDK's isolated source-installed Python.
+Use the interpreter containing the pip or source installation to run the
+Model Connect Python build command. No family environment override is needed.
+
+The 0.11.0 wheel does not contain the C++ headers and static SDK archives; it
+cannot replace native CMake provisioning. No provider DSO, worker protocol,
+version dispatch, registration file or automatic model-time installation is
+introduced. Only 0.11.0 is accepted by this adapter.
+
+## Adapter scope
+
+The ordinary route accepts matching dense Llama configuration shapes,
 text generation, FP16 compute, original unquantized source weights, TP1 and
 batch1. Ordinary execution is mapped to native Linux x86_64 SM80; the explicit
-EAGLE3 pair is mapped to SM120. FP8/NVFP4 Llama checkpoints and other platforms
-are not admitted by this publication. A matching shape is not qualification for
+EAGLE3 pair is mapped to SM120. The local packed-format extension admits ModelOpt FP8/NVFP4 8B sources on
+SM120 using upstream --dense auto to preserve source format.
+Its exact profiles pass both build-tree and installed-wheel checks below.
+Other platforms are not admitted. A matching shape is not qualification for
 every checkpoint, generation policy or capacity.
 
 A nonmatching ordinary request retains the original native builder. An Edge
@@ -67,39 +83,76 @@ A failed explicit pair never becomes a base-only deployment. The separate
 its own profile and controls; it is not an automatic replacement for this Edge
 profile. See [native speculative decoding](../SPECULATIVE_DECODING.md).
 
-## Recorded model qualification
+## Fresh Edge 0.11.0 qualification
 
-The following are **historical local build and inference results**, not fresh
-inference on the final publication head. All use native Linux x86_64, CUDA 13.3,
-TensorRT 11.1.0.106, FP16 compute, TP1 and batch1.
+These actual Model Connect builds use the official 0.11.0 Python wheel with the
+separately provisioned native SDK. The native adapters were compiled against
+Model Connect base `95f0da259ffddfd95ff7a67dc944583c2ae7e043` plus the family
+changes and SDK prerequisite. All five profiles also pass the same three cases
+through real installed Model Connect wheels and the existing persistent native
+worker. Module and runtime-library paths were verified against those
+installations. These are local results, not final PR-head CI or review approval.
 
-| Exact checkpoint / pair | GPU | Capacity | Independent HF comparison | Edge fixture ROUGE-1 / L |
+All profiles below use CUDA 13.3, TensorRT 11.1.0.106 and FP16
+compute, TP1/batch1 and greedy generation of up to 32 tokens. Capital, arithmetic
+and raw-continuation cases use the unchanged family semantic checks and NED
+limits (0.15 chat, 0.25 raw), against an independent FP32 Hugging Face reference.
+
+| Exact checkpoint / pair | GPU | Capacity | Model Connect / HF | Direct Edge / HF |
 | --- | --- | --- | --- | --- |
-| Llama-3.1-8B-Instruct | SM80 | 4096 | Exact raw/chat/EOS tokens | 0.4828 / 0.3218 |
-| Llama-3.2-1B-Instruct | SM80 | 4096 | Exact raw/chat/EOS tokens | 0.5543 / 0.4130 |
-| Llama-3.2-3B-Instruct | SM80 | 4096 | Exact raw/chat/EOS tokens | 0.4457 / 0.2500 |
-| Llama-3.1-8B-Instruct + EAGLE3 | SM120 | 2048 | Exact base-HF raw/chat/EOS tokens | 0.4809 / 0.3169 |
+| meta-llama/Llama-3.1-8B-Instruct | A100 SM80 | 256 | 3/3 pass, exact generated IDs, NED 0 | 3/3 pass, NED 0 |
+| meta-llama/Llama-3.2-3B-Instruct | A30 SM80 | 256 | 3/3 pass, exact generated IDs, NED 0 | 3/3 pass, NED 0 |
+| Llama-3.1-8B-Instruct + yuhuili/EAGLE3-LLaMA3.1-Instruct-8B | Blackwell SM120 | 2048 | 3/3 pass, exact base-HF IDs, NED 0 | 3/3 pass, NED 0 |
 
-Base models are in the public `meta-llama` namespace. Immutable revisions:
+Immutable revisions:
 
 - 3.1-8B: `0e9e39f249a16976918f6564b8830bc894c89659`.
-- 3.2-1B: `9213176726f574b556790deb65791e0c5aa438b6`.
 - 3.2-3B: `0cb88a4f764b7a12671c53f0838cd831a0843b95`.
 - EAGLE3 draft: `ada412b672e293d682423de84a095447bf38a637`.
 
-The recorded public/direct API checks also covered raw/chat/EOS behavior,
-capacity and unsupported-control rejection, repeated requests after errors,
-and self-contained bundles. Original Edge fixtures used the MC-built engines;
-context-reuse fixture ROUGE-1/L was 1.0/1.0 for all four profiles. The independent
-comparisons passed the existing Llama criteria without changing thresholds
-(default normalized edit distance 0.15 for chat and 0.25 for raw text).
+The paired profile reuses the exact primary-checkpoint FP32 oracle with case and
+revision checks. Direct Edge receives the same raw input tokens, including BOS;
+its CLI exposes output text, so no direct-CLI output-token-ID parity is claimed.
+This token alignment matters: a plain raw string without the tokenizer's BOS
+postprocessing is a different input, not a runtime discrepancy.
 
-Successful payloads were retired with approval; compact receipts and provenance
-remain. Replaying these exact checks requires rebuilding the engines. Historical
-local drivers are not newly registered CI cases or published test-framework code.
-Fresh CPU, native compilation, existing C++ checks and PR CI must be reported
-separately from model inference. No other Llama checkpoint, precision, platform,
-long-context behavior or stochastic equivalence is established by this table.
+Remaining failures and exclusions:
+
+- Llama-3.2-1B-Instruct, revision
+  `9213176726f574b556790deb65791e0c5aa438b6`, SM80/FP16/capacity256:
+  build/inference pass, but Model Connect, direct Edge and independent FP32 HF
+  all answer 14 to 9 + 7. The unchanged semantic gate requires 16. This historical exact-input result
+  used a 5 October 2026 template date; it was not rerun during installed closure.
+  It is not a fully quality-qualified profile; parity does not resolve the failure.
+- meta-llama/Meta-Llama-3-8B-Instruct, revision
+  `8afb486c1db24fe5011ec46dfbe5b5dccdb575c2`: checkpoint access returned HTTP403.
+  Build, inference and quality were not executed. This is an access-blocked
+  skipped experiment, not an Edge, TensorRT or Model Connect execution defect.
+
+The official packed profiles have now been validated separately, with FP16
+compute, native Blackwell SM120, capacity256, TP1/batch1 and greedy32:
+
+| Checkpoint | Revision | MC / direct cases | Chat NED | Raw NED / gate |
+| --- | --- | --- | --- | --- |
+| nvidia/Llama-3.1-8B-Instruct-FP8 | `42d9515ebd69eea3a87351d079c671c3c5ff0a31` | 3/3 pass each | 0 | 0 / 0.25 |
+| nvidia/Llama-3.1-8B-Instruct-NVFP4 | `bdb54e24298451af785c0ac63c1b485e9b7400a2` | 3/3 pass each | 0 | 0.092025 / 0.25 |
+
+Both packed profiles retain FP8 KV cache, and direct Edge text exactly matches
+Model Connect. Their independent reference uses original FP32 model weights
+with each packed checkpoint's exact tokenizer inputs. It is not an evaluation
+of packed weights through Hugging Face. The NVIDIA chat templates omit Meta's
+default system/date message: the initial cached-reference check rejected that
+input mismatch, and scoring was corrected without rebuilding engines, replaying
+native inference or changing gates. Original failed scoring receipts remain.
+The packed adapter maps source formats to upstream --dense auto; no new
+quantization recipe or shared-core selection is introduced. Installed-wheel replay preserves the same results and generated IDs. A clean
+package initially exposed a missing Edge runtime plugin; the SDK prerequisite
+now includes it in the wheel install component, and the corrected installed
+package passes all three Blackwell profiles without manual library copying.
+
+Historical 0.10.1 results are not evidence for 0.11.0. No other precision,
+platform, context length, stochastic behavior or catalog-wide coverage is
+established by these five successful profiles.
 
 ## Family-owned build options
 
@@ -133,8 +186,8 @@ build(with_execution(request, BuildExecutionInputs(
 )))
 ```
 
-A failed explicit pair is never replaced by a base-only bundle. Previously
-recorded full-model results above are historical, not fresh refactor-head E2Es.
+A failed explicit pair is never replaced by a base-only bundle. Fresh results above cover only the exact listed local profiles; PR CI and
+new-head installed-package validation remain separate.
 
 Ordinary builds without an installed optional Edge SDK select native without a
 warning. Malformed or incomplete installed packages still retain diagnostics and
@@ -150,3 +203,10 @@ publication. The legacy flat build command remains available for its existing
 ordinary options; new family options use `trtmc llama build`.
 Help is offline and does not need a local checkpoint. No shared parser hook or
 family registry entry is added.
+
+
+The current 8B profile is Llama3.1 with its 131072-token source context, not
+Llama3.0 merely because their layer geometry matches. Access to the attempted
+`meta-llama/Meta-Llama-3-8B-Instruct` checkpoint was denied, so no Edge profile
+for it is added. The original 1B route remains executable despite its recorded
+quality failure; quality scores are not dispatch criteria.

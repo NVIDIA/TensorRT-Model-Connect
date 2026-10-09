@@ -81,7 +81,7 @@ class Artifacts {
         }
         std::vector<std::string> required_files{
             "edge_llm/engine/tokenizer.json", "edge_llm/engine/tokenizer_config.json",
-            "edge_llm/engine/processed_chat_template.json", "edge_llm/checkpoint/config.json"};
+            "edge_llm/engine/chat_template.jinja", "edge_llm/checkpoint/config.json"};
         if (marker.value("execution_variant", "autoregressive") == "eagle3") {
             for (const auto* name :
                  {"spec_base.engine", "spec_draft.engine", "base_config.json", "draft_config.json"})
@@ -259,7 +259,10 @@ ITask* create(const BundleReader& bundle) {
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
         marker.at("max_batch_size") != 1 || marker.at("precision") != "fp16" ||
-        marker.at("weight_format") != "fp16" ||
+        (marker.at("weight_format") != "fp16" && marker.at("weight_format") != "fp8" &&
+         marker.at("weight_format") != "nvfp4") ||
+        (marker.value("execution_variant", "autoregressive") == "eagle3" &&
+         marker.at("weight_format") != "fp16") ||
         (marker.value("execution_variant", "autoregressive") != "autoregressive" &&
          marker.value("execution_variant", "autoregressive") != "eagle3") ||
         !marker.at("artifacts").is_array())
