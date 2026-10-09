@@ -186,6 +186,17 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
         if selection_cache is not None:
             preserve_original(out)
             result = recover(out, model, result, archive)
+            if environment is None:
+                # Accuracy recovery reuses the recorded contract. General rejudge
+                # also derives missing/parity entries from today's configuration;
+                # that must not change an unrelated result during recovery.
+                fixed = {item.get("request") for item in result.get("performance", []) if item.get("gate", True)}
+                result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)),
+                    expected_modes=0 if result.get("performance_source") == "quality" else len(fixed))
+                result["rejudged"] = {"time": time.time(), "original": ORIGINAL_REPORT}
+                write_report(out, result)
+                print(json.dumps({"out": str(out), **result["verdict"]}))
+                continue
         if environment is not None:
             model = current_settings(model, environment)
         policy = dict(model.get("performance") or {})

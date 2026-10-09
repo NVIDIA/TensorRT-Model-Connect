@@ -8,7 +8,6 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
 from . import absolute, execution
 from .aiperf_runner import AiperfRun

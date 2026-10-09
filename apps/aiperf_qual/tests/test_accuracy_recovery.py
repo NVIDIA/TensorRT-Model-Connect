@@ -101,3 +101,18 @@ def test_reader_validates_the_original_graders_canonical_gold(tmp_path):
     grades[0]["expected"] = "unrelated gold"
     with pytest.raises(ValueError, match="mismatched gold"):
         absolute.plugin_side(run, problems, grades=grades)
+
+
+def test_recovery_does_not_replace_unrelated_accuracy_entries(tmp_path):
+    from trtmc_aiperf_qual.cli import rejudge_reports
+
+    original = {"suite": "unavailable", "source": "missing", "status": "n/a", "reasons": ["native unavailable"]}
+    model = {"model": "test", "catalog_profile": "test", "operation": "generate", "task": "generate",
+             "absolute": [], "supplementary": [], "accuracy_source": "none", "performance": {}}
+    report = {"model": "test", "operation": "generate", "task": "generate", "accuracy": [original],
+              "performance": [], "performance_source": "quality", "provenance": {},
+              "verdict": {"category": "not-covered"}}
+    (tmp_path / "model.json").write_text(json.dumps(model))
+    (tmp_path / "report.json").write_text(json.dumps(report))
+    rejudge_reports([tmp_path], selection_cache=tmp_path / "unused-cache")
+    assert json.loads((tmp_path / "report.json").read_text())["accuracy"] == [original]
