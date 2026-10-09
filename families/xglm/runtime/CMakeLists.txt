@@ -35,3 +35,13 @@ set_target_properties(trtmc_model_xglm PROPERTIES
 install(TARGETS trtmc_model_xglm
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_xglm_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/xglm/tests/cpp/test_xglm_tokenizer.cpp)
+  target_include_directories(test_xglm_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_xglm_tokenizer PRIVATE
+    trtmc_model_xglm nlohmann_json::nlohmann_json)
+  add_test(NAME xglm_tokenizer COMMAND test_xglm_tokenizer)
+  set_tests_properties(xglm_tokenizer PROPERTIES LABELS "cpu")
+endif()
