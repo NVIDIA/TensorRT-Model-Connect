@@ -1363,6 +1363,7 @@ def run_containers(
                     f"CMAKE_CUDA_ARCHITECTURES={env.get('CMAKE_CUDA_ARCHITECTURES', '89')}",
                     family_image,
                     "python3.12",
+                    "-I",
                     "/opt/community_gpu_ci.py",
                     "--family",
                     family,

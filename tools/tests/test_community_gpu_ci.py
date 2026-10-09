@@ -1269,7 +1269,13 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
                 in command
             )
             assert "PYTHONPATH=/src" in command
-            assert command[-4:] == ["python3.12", "/opt/community_gpu_ci.py", "--family", family]
+            assert command[-5:] == [
+                "python3.12",
+                "-I",
+                "/opt/community_gpu_ci.py",
+                "--family",
+                family,
+            ]
             assert not any("HF_TOKEN" in value or "docker.sock" in value for value in command)
             events.append(("start", family, command[command.index("--name") + 1]))
             _container_receipt(command, family == failed_family)
@@ -1565,6 +1571,30 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
         assert alpha["entrypoint_started"] is True and alpha["status"] == "failed"
         assert beta["status"] == "not_run" and beta["cases"] == {"beta": "not_run"}
         assert not summary["passed"] and not summary["complete"]
+
+
+def test_wrapper_imports_ignore_pr_pythonpath_before_entry(tmp_path):
+    (tmp_path / "json.py").write_text("raise RuntimeError('PR_STDLIB_SHADOW')\n")
+    runner = str(Path(community_gpu_ci.__file__).resolve())
+    env = {**os.environ, "PYTHONPATH": str(tmp_path)}
+    unsafe = subprocess.run(
+        [sys.executable, runner, "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert unsafe.returncode != 0 and "PR_STDLIB_SHADOW" in unsafe.stderr
+    isolated = subprocess.run(
+        [sys.executable, "-I", runner, "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert isolated.returncode == 0, isolated.stderr
 
 
 def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
