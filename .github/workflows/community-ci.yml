@@ -1091,7 +1091,9 @@ jobs:
       instance_type: ${{ steps.reserve.outputs.instance_type }}
       organization_id: ${{ steps.reserve.outputs.organization_id }}
       allocation_requested: ${{ steps.reserve.outputs.allocation_requested }}
-      cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed }}
+      reserve_outcome: ${{ steps.reserve.outcome }}
+      no_allocation_confirmed: ${{ steps.no_allocation.outputs.no_allocation_confirmed }}
+      cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
 
     steps:
       - name: Check out trusted GPU orchestration
@@ -1187,6 +1189,15 @@ jobs:
             --lease-file "$lease_file" \
             --timeout 2700 \
             --attempts 1
+
+      - name: Confirm that reservation was skipped
+        id: no_allocation
+        if: ${{ always() && steps.reserve.outcome == 'skipped' }}
+        run: |
+          set -euo pipefail
+          echo "Reservation was skipped; no allocation was requested."
+          echo "no_allocation_confirmed=true" >> "$GITHUB_OUTPUT"
+          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
 
       - name: Preserve the GPU instance lease
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
@@ -1390,7 +1401,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           TEST_OUTCOME: ${{ steps.test.outcome }}
           TEST_CONCLUSION: ${{ steps.test.outputs.conclusion }}
-          CLEANUP_CONFIRMED: ${{ steps.release.outputs.cleanup_confirmed }}
+          CLEANUP_CONFIRMED: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
         run: |
           set -euo pipefail
           conclusion=failure
@@ -1441,17 +1452,31 @@ jobs:
       contents: read
       actions: read
     outputs:
-      cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed }}
+      cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
 
     steps:
+      - name: Confirm that no allocation needs a backstop
+        id: no_allocation
+        env:
+          RESERVE_OUTCOME: ${{ needs.provision-and-test.outputs.reserve_outcome }}
+          NO_ALLOCATION_CONFIRMED: ${{ needs.provision-and-test.outputs.no_allocation_confirmed }}
+        run: |
+          set -euo pipefail
+          if [ "$RESERVE_OUTCOME" = skipped ] && [ "$NO_ALLOCATION_CONFIRMED" = true ]; then
+            echo "The trusted owner confirms reservation was skipped; no Brev request is needed."
+            echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check out trusted GPU cleanup
         id: cleanup-checkout
+        if: ${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Install the pinned Brev CLI
+        if: ${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}
         env:
           BREV_VERSION: 0.6.335
           BREV_ARCHIVE_SHA256: 89d778e6f1e5e52495f3e0f10393f1666a1b16d180001b13faec6f906955e6f8
@@ -1469,11 +1494,13 @@ jobs:
 
       - name: Log in to Brev
         id: cleanup-login
+        if: ${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}
         env:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
         run: brev login --api-key "$BREV_API_KEY"
 
       - name: Recover the GPU instance lease
+        if: ${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}
         continue-on-error: true
         timeout-minutes: 1
         env:
@@ -1600,13 +1627,16 @@ jobs:
           GPU_RESULT: ${{ needs.provision-and-test.result }}
           OWNER_RELEASE_CONFIRMED: ${{ needs.provision-and-test.outputs.cleanup_confirmed }}
           BACKSTOP_RELEASE_CONFIRMED: ${{ needs.cleanup.outputs.cleanup_confirmed }}
+          NO_ALLOCATION_CONFIRMED: ${{ needs.provision-and-test.outputs.no_allocation_confirmed }}
           COMPLETE_RESULT: ${{ steps.complete.outcome }}
         run: |
           set -euo pipefail
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           state=failure
           description="Complete Community CI: failure"
-          if [ "$GPU_RESULT" != skipped ] \
+          if [ "${NO_ALLOCATION_CONFIRMED:-}" = true ]; then
+            description="Complete Community CI: infra_failure"
+          elif [ "$GPU_RESULT" != skipped ] \
             && [ "$OWNER_RELEASE_CONFIRMED" != true ] \
             && [ "$BACKSTOP_RELEASE_CONFIRMED" != true ]; then
             state=pending

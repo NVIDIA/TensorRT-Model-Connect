@@ -835,7 +835,7 @@ def test_gpu_status_and_cleanup_fail_closed(
         "JOB_STATUS": "${{ job.status }}",
         "TEST_OUTCOME": "${{ steps.test.outcome }}",
         "TEST_CONCLUSION": "${{ steps.test.outputs.conclusion }}",
-        "CLEANUP_CONFIRMED": "${{ steps.release.outputs.cleanup_confirmed }}",
+        "CLEANUP_CONFIRMED": "${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}",
     }
     assert "${{" not in result["run"]
     cleanup = steps["Always tear down the GPU instance"]
@@ -853,7 +853,9 @@ def test_gpu_status_and_cleanup_fail_closed(
         "instance_type": "${{ steps.reserve.outputs.instance_type }}",
         "organization_id": "${{ steps.reserve.outputs.organization_id }}",
         "allocation_requested": "${{ steps.reserve.outputs.allocation_requested }}",
-        "cleanup_confirmed": "${{ steps.release.outputs.cleanup_confirmed }}",
+        "reserve_outcome": "${{ steps.reserve.outcome }}",
+        "no_allocation_confirmed": "${{ steps.no_allocation.outputs.no_allocation_confirmed }}",
+        "cleanup_confirmed": "${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}",
     }
     cleanup_job = workflow["jobs"]["cleanup"]
     assert "always()" in cleanup_job["if"]
@@ -1681,6 +1683,134 @@ def test_trusted_inner_status_requires_release_before_a_gpu_verdict(
     assert "target_url=https://github.com/example/source/actions/runs/42" in arguments
     if expected == "pending":
         assert "description=Community CI release remains unconfirmed" in arguments
+
+
+@pytest.mark.parametrize(
+    "outcome,proof,confirmed",
+    [
+        ("skipped", "true", True),
+        ("skipped", "", False),
+        ("failure", "true", False),
+        ("cancelled", "true", False),
+        ("success", "true", False),
+        ("", "true", False),
+    ],
+)
+def test_backstop_requires_explicit_trusted_no_allocation_proof(
+    tmp_path, outcome, proof, confirmed
+):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    owner = workflow["jobs"]["provision-and-test"]
+    marker = next(s for s in owner["steps"] if s.get("id") == "no_allocation")
+    assert marker["if"] == "${{ always() && steps.reserve.outcome == 'skipped' }}"
+    assert owner["outputs"]["reserve_outcome"] == "${{ steps.reserve.outcome }}"
+    backup = workflow["jobs"]["cleanup"]
+    step = backup["steps"][0]
+    assert step["id"] == "no_allocation"
+    assert step["env"] == {
+        "RESERVE_OUTCOME": "${{ needs.provision-and-test.outputs.reserve_outcome }}",
+        "NO_ALLOCATION_CONFIRMED": "${{ needs.provision-and-test.outputs.no_allocation_confirmed }}",
+    }
+    output = tmp_path / "output"
+    calls = tmp_path / "brev-calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'brev() { printf "%s\\n" "$*" >> "$BREV_CALLS"; return 91; }\n' + step["run"],
+        ],
+        env={
+            **os.environ,
+            "RESERVE_OUTCOME": outcome,
+            "NO_ALLOCATION_CONFIRMED": proof,
+            "GITHUB_OUTPUT": str(output),
+            "BREV_CALLS": str(calls),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0 and not calls.exists()
+    assert output.exists() is confirmed
+    if confirmed:
+        assert output.read_text() == "cleanup_confirmed=true\n"
+    for name in (
+        "Check out trusted GPU cleanup",
+        "Install the pinned Brev CLI",
+        "Log in to Brev",
+        "Recover the GPU instance lease",
+    ):
+        guarded = next(s for s in backup["steps"] if s["name"] == name)
+        assert guarded["if"] == "${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}"
+    # Without proof these guards stay eligible; normal owned-ID cleanup is retained.
+    delete = next(s for s in backup["steps"] if s.get("id") == "release")
+    assert "cleanup-login.outcome == 'success'" in delete["if"]
+    assert "--until-deleted" in delete["run"]
+
+
+def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
+    owner = _workflow_step_script(
+        "community-ci.yml", "provision-and-test", "Confirm that reservation was skipped"
+    )
+    output = tmp_path / "owner-output"
+    calls = tmp_path / "brev-calls"
+    result = subprocess.run(
+        ["bash", "-c", 'brev() { printf "%s\\n" "$*" >> "$BREV_CALLS"; return 91; }\n' + owner],
+        env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(output), "BREV_CALLS": str(calls)},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0 and not calls.exists()
+    assert output.read_text().splitlines() == [
+        "no_allocation_confirmed=true",
+        "cleanup_confirmed=true",
+    ]
+    conclusion = _workflow_step_script(
+        "community-ci.yml", "provision-and-test", "Record the step conclusion"
+    )
+    result = subprocess.run(
+        ["bash", "-c", conclusion],
+        env={
+            "PATH": os.environ["PATH"],
+            "GITHUB_OUTPUT": str(tmp_path / "conclusion"),
+            "JOB_STATUS": "failure",
+            "TEST_OUTCOME": "skipped",
+            "TEST_CONCLUSION": "",
+            "CLEANUP_CONFIRMED": "true",
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0
+    assert (tmp_path / "conclusion").read_text() == "conclusion=failure\n"
+    publish = _workflow_step_script(
+        "community-ci.yml", "publish", "Publish the released Dev workflow conclusion"
+    )
+    writes = tmp_path / "writes"
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + publish],
+        env={
+            "PATH": os.environ["PATH"],
+            "HEAD_SHA": "a" * 40,
+            "GPU_RESULT": "failure",
+            "OWNER_RELEASE_CONFIRMED": "true",
+            "BACKSTOP_RELEASE_CONFIRMED": "true",
+            "NO_ALLOCATION_CONFIRMED": "true",
+            "COMPLETE_RESULT": "failure",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "42",
+            "STATUS_WRITES": str(writes),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0 and not calls.exists()
+    assert "state=failure" in writes.read_text().splitlines()
+    assert "description=Complete Community CI: infra_failure" in writes.read_text().splitlines()
 
 
 @pytest.mark.parametrize("ready_after", [1, 2, 7])
