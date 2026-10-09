@@ -378,6 +378,13 @@ def prepare_candidate(
             "family_environment_lock_sha256": inputs[
                 f"families/{family}/ci/environment-linux-amd64.lock"
             ],
+            "environment_recorder_sha256": inputs["requirements/image-environment.py"],
+            "base_environment_receipt_sha256": inputs[
+                "requirements/community-gpu-linux-amd64.json"
+            ],
+            "family_environment_receipt_sha256": inputs[
+                f"families/{family}/ci/environment-linux-amd64.json"
+            ],
             "resolved_dependencies_sha256": hashlib.sha256(
                 json.dumps(abi["resolved_dependencies"], separators=(",", ":")).encode()
             ).hexdigest(),
@@ -656,6 +663,9 @@ def export_qualification(output: Path, auth_directory: Path) -> None:
         "dependency_constraints_sha256",
         "base_environment_lock_sha256",
         "family_environment_lock_sha256",
+        "environment_recorder_sha256",
+        "base_environment_receipt_sha256",
+        "family_environment_receipt_sha256",
         "resolved_dependencies_sha256",
         "native_byok_passed",
         "family_e2e_passed",

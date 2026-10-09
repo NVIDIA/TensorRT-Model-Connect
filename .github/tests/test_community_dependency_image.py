@@ -1817,6 +1817,63 @@ def test_private_candidate_uses_real_protected_ancestor_and_erases_auth_before_i
 
 
 @pytest.mark.parametrize(
+    "field,relative",
+    [
+        ("environment_recorder_sha256", "requirements/image-environment.py"),
+        ("base_environment_receipt_sha256", "requirements/community-gpu-linux-amd64.json"),
+        (
+            "family_environment_receipt_sha256",
+            "families/nemotron_h/ci/environment-linux-amd64.json",
+        ),
+    ],
+)
+def test_complete_environment_hashes_survive_sanitized_qualification_export(
+    private_candidate_fixture, field, relative, capsys
+):
+    fixture = private_candidate_fixture
+    unrelated = {"registry_prefix": PRIVATE_PREFIX, "token": PRIVATE_TOKEN}
+    fixture.metadata["unrelated_metadata"] = unrelated
+    events: list[str] = []
+    private_docker, host_run = candidate_docker_boundary(fixture, events)
+    with (
+        patch.object(
+            MODULE.urllib.request.OpenerDirector,
+            "open",
+            side_effect=candidate_transport(fixture, events),
+        ),
+        patch.object(MODULE, "_private_docker", side_effect=private_docker),
+        patch.object(MODULE, "run", side_effect=host_run),
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        prepare_private_candidate(fixture)
+    candidate_path = fixture.output / "candidate.json"
+    prepared = json.loads(candidate_path.read_text())
+    expected = fixture.metadata["inputs"][relative]
+    assert prepared[field] == expected
+    assert "unrelated_metadata" not in prepared
+
+    def coordinator(command, *, env, check):
+        write_family_summary(env, completed_family_summary())
+
+    with patch.object(MODULE.subprocess, "run", side_effect=coordinator):
+        MODULE.qualify(
+            fixture.output, Path("/stage/python"), None, fixture.model, family="nemotron_h"
+        )
+    qualified = json.loads(candidate_path.read_text())
+    qualified["unrelated_metadata"] = unrelated
+    candidate_path.write_text(json.dumps(qualified))
+    with patch.object(MODULE.os, "chown"):
+        MODULE.export_qualification(fixture.output, fixture.auth_directory)
+    exported = json.loads((fixture.auth_directory / "qualification.json").read_text())
+    assert exported[field] == expected
+    assert exported["cases"] == {"unchanged_a": "passed"}
+    assert "unrelated_metadata" not in exported and "local_image" not in exported
+    captured = capsys.readouterr()
+    public = captured.out + captured.err + json.dumps(prepared) + json.dumps(exported)
+    assert PRIVATE_PREFIX not in public and PRIVATE_TOKEN not in public
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         "bootstrap",
