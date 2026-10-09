@@ -259,8 +259,16 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
             reasons.append("natural workload has no excluded warmup")
     pairs = [(indexed[0][key], indexed[1][key]) for key in indexed[0].keys() & indexed[1].keys()
              if indexed[0][key]["valid"] and indexed[1][key]["valid"]]
-    matched = sum(same_work(mine["work"], theirs["work"]) for mine, theirs in pairs)
-    unknown = sum(mine["work"] is None or theirs["work"] is None for mine, theirs in pairs)
+    def known_work(row: Mapping[str, Any]) -> bool:
+        if row["work"] is None:
+            return False
+        signature = dict(row["work"])
+        return (signature["output_tokens"] is not None if "output_tokens" in signature else
+                all(value is not None for value in signature.values()))
+
+    matches = [same_work(mine["work"], theirs["work"]) for mine, theirs in pairs]
+    matched = sum(matches)
+    unknown = sum(not equal and any(not known_work(row) for row in pair) for pair, equal in zip(pairs, matches))
     if pairs and matched != len(pairs):
         reasons.append(f"actual work differs or is unknown on {len(pairs) - matched} paired responses")
     result: dict[str, Any] = {"request": name, "reference_mode": "eager", "kind": "natural_dataset", "gate": False,

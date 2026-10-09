@@ -76,6 +76,16 @@ def test_missing_work_is_distinguished_from_different_work(tmp_path):
     assert perf["measurement_status"] == "measured" and not perf["comparable"]
 
 
+@pytest.mark.parametrize("text, matched, unknown", [("C", 1, 0), ("another answer", 0, 1)])
+def test_missing_decode_count_is_unknown_unless_text_proves_matching_work(tmp_path, text, matched, unknown):
+    report = capture(tmp_path, [row(0, 40, tokens=None, text=text)], [row(0, 20)])
+    perf, = report["performance"]
+    assert perf["matched_pairs"] == matched
+    assert perf["unknown_work_pairs"] == unknown
+    assert perf["different_work_pairs"] == 0
+    assert perf["measurement_status"] == "measured" and perf["comparable"] == bool(matched)
+
+
 def test_offline_rejudge_removes_native_floor_without_changing_scores(tmp_path):
     from trtmc_aiperf_qual.cli import rejudge_reports
 
