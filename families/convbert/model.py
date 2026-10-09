@@ -238,7 +238,6 @@ class _ConvBertModel:
 
 
 _BUNDLE_FILES = (
-    "tokenizer.json",
     "tokenizer_config.json",
     "vocab.json",
     "merges.txt",
@@ -259,8 +258,8 @@ def _positive_int(value: object, name: str) -> int:
     return result
 
 
-def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
-    """Resolve this family's exact native-tokenizer framing."""
+def _tokenizer_runtime_contract(model_dir: Path) -> tuple[dict[str, object], bytes]:
+    """Serialize this family's tokenizer and its exact native framing."""
 
     import tempfile
 
@@ -309,11 +308,12 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
             raise RuntimeError("tokenizer special-token framing is not a prefix/suffix")
         prefix_ids = default_ids[:frame]
         suffix_ids = default_ids[frame + len(plain_ids) :]
-    return {
+    runtime = {
         "tokenizer_add_special_tokens": False,
         "tokenizer_prefix_ids": prefix_ids,
         "tokenizer_suffix_ids": suffix_ids,
     }
+    return runtime, tokenizer.backend_tokenizer.to_str().encode("utf-8")
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
@@ -386,10 +386,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             parallel_config=parallel,
         )
         writer.add_bytes("engine.plan", plan)
+    runtime, tokenizer_json = _tokenizer_runtime_contract(model_dir)
+    writer.add_bytes("tokenizer.json", tokenizer_json)
     writer.add_json(
         "runtime.json",
         {
-            **_tokenizer_runtime_contract(model_dir),
+            **runtime,
             "tensor_parallel_size": parallel.tp_size,
         },
     )
