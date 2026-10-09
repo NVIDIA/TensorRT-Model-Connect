@@ -13,7 +13,7 @@
 
 namespace trtmc::gemma::edge_llm {
 
-inline constexpr const char* kRevision = "e8b29522938901f6df19ebeedd4b69bc8edbcd97";
+inline constexpr const char* kRevision = "95515c2f87fba8982db5a519f9022277667b3cc9";
 
 /// Return whether an artifact is a normalized file below one of the two Edge roots.
 inline bool safe_artifact_path(const std::string& name) {
@@ -29,14 +29,26 @@ inline bool safe_artifact_path(const std::string& name) {
            (name.rfind("edge_llm/engine/", 0) == 0 || name.rfind("edge_llm/checkpoint/", 0) == 0);
 }
 
+/// Keep command-successful sampled requests executable, even if speculation falls back.
+inline bool allows_sampling(const std::string& variant) {
+    return variant == "autoregressive" || variant == "dspark" || variant == "eagle3" ||
+           variant == "dflash";
+}
+
+/// Edge 0.11 uses vanilla decoding for these sampled speculative requests.
+inline bool sampling_uses_vanilla(const std::string& variant) {
+    return variant == "eagle3" || variant == "dflash";
+}
+
 /// Reject invalid sampling settings and controls with no equivalent Edge request API.
-inline void validate_generation(const TextGenerationConfig& c, bool dspark = false) {
-    if (!dspark && c.temperature > 0 && c.top_k != 1)
-        throw std::invalid_argument("Gemma4 MTP supports only greedy generation");
+inline void validate_generation(const TextGenerationConfig& c, bool allow_sampling = false) {
+    if (!allow_sampling && c.temperature > 0 && c.top_k != 1)
+        throw std::invalid_argument(
+            "This Gemma4 Edge execution variant supports only greedy generation");
     if (!std::isfinite(c.temperature) || c.temperature < 0 || !std::isfinite(c.top_p) ||
-        c.top_p <= 0 || c.top_p > 1 || c.top_k < 0)
+        c.top_p <= 0 || c.top_p > 1 || c.top_k < 0 || c.seed < -1)
         throw std::invalid_argument("Invalid Gemma4 Edge sampling parameters");
-    if (c.min_p != 0 || c.seed != -1 || c.eos_token_id != -1 || c.repetition_penalty != 1 ||
+    if (c.min_p != 0 || c.eos_token_id != -1 || c.repetition_penalty != 1 ||
         !c.lora_adapter_id.empty() || c.stop_on_boxed_answer ||
         (c.text_generation_mode != "auto" && c.text_generation_mode != "autoregressive") ||
         c.source_language_token_id != -1 || c.forced_bos_token_id != -1 || c.guidance_scale != -1 ||

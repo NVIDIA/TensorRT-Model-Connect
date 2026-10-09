@@ -16,7 +16,7 @@ def execution_inputs(
         if companion:
             raise ValueError("--companion requires --execution-variant")
         return None
-    if execution_variant not in ['mtp','dspark']:
+    if execution_variant not in {"mtp", "dspark", "eagle3", "dflash"}:
         raise ValueError("unsupported gemma execution variant")
     checkpoints = []
     for value in companion:

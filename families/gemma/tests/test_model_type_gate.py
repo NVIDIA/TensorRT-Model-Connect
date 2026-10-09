@@ -204,15 +204,20 @@ def test_untyped_execution_fails_before_side_effects(tmp_path, monkeypatch):
 
 
 
-@pytest.mark.parametrize("variant", ["mtp", "dspark"])
+@pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
+@pytest.mark.parametrize("variant", [None, "mtp", "dspark", "eagle3", "dflash"])
 @pytest.mark.parametrize("precision", [None, "fp16", "fp32", "bf16"])
 def test_edge_cli_routes_through_the_ordinary_family_entrypoint(
-    tmp_path, monkeypatch, variant, precision
+    tmp_path, monkeypatch, variant, precision, model_type
 ):
-    from families.gemma.edge_llm import builder as edge_builder
+    from families.gemma.edge_llm import builder as edge_builder, standalone
     from tensorrt_model_connect import family_cli as build_cli
 
-    source = _model_dir(tmp_path / "target", "gemma4_unified")
+    source = _model_dir(tmp_path / "target", model_type)
+    config = json.loads((source / "config.json").read_text())
+    config["text_config"] = {"model_type": model_type + "_text"}
+    config["vision_config"] = {}
+    (source / "config.json").write_text(json.dumps(config))
     draft = tmp_path / "draft"
     draft.mkdir()
     output = tmp_path / "pair.bundle"
@@ -221,19 +226,31 @@ def test_edge_cli_routes_through_the_ordinary_family_entrypoint(
     def paired(request, writer, execution):
         assert isinstance(request, GemmaBuildRequest)
         assert request.execution is execution
+        assert request.task == "text_generation"
         assert request.precision == ("fp16" if precision is None else precision)
         seen.append(execution)
         writer.set_header(family="gemma", task=request.task, backend=request.backend)
         writer.add_json("edge-test.json", {"variant": execution.variant})
 
+    def standalone_prepared(request, raw, target, staging, log_path):
+        assert request.task == "images_text_to_text"
+        assert request.precision == ("fp16" if precision is None else precision)
+        assert raw["model_type"] == model_type
+        seen.append("autoregressive")
+        return {}, {"execution_variant": "autoregressive"}
+
     monkeypatch.setattr(edge_builder, "build", paired)
+    monkeypatch.setattr(standalone, "local_target", lambda: {})
+    monkeypatch.setattr(standalone, "prepare", standalone_prepared)
     precision_args = [] if precision is None else ["--precision", precision]
-    assert build_cli.main(["gemma",
-        "build", str(source), *precision_args,
-        "-o", str(output), "--execution-variant", variant,
-        "--companion", f"draft={draft}",
-    ]) == 0
-    assert seen == [BuildExecutionInputs(variant, (NamedCheckpoint("draft", draft),))]
+    execution_args = [] if variant is None else [
+        "--execution-variant", variant, "--companion", f"draft={draft}",
+    ]
+    assert build_cli.main(["gemma", "build", str(source), *precision_args,
+                          "-o", str(output), *execution_args]) == 0
+    expected = ("autoregressive" if variant is None else
+                BuildExecutionInputs(variant, (NamedCheckpoint("draft", draft),)))
+    assert seen == [expected]
     assert output.is_file()
 
 
@@ -284,6 +301,20 @@ def test_edge_request_keeps_graph_callback_and_all_ordinary_fields(tmp_path):
     def callback(layer):
         return layer
     ordinary = replace(execution_request(tmp_path), graph_transform=callback, max_sequence_length=128)
+    # Standalone Edge must not silently discard ordinary build controls.
+    from families.gemma.edge_llm import standalone
+
+    for overrides in (
+        {"max_batch_size": 2}, {"quantization": "fp8"},
+        {"context_parallel_size": 2}, {"dynamic_kv_cache": True},
+        {"fp32_layers": [0]}, {"image_height": 448},
+        {"image_width": 448}, {"video_num_frames": 2},
+        {"graph_transform": callback},
+    ):
+        unsupported = replace(execution_request(tmp_path), **overrides)
+        with pytest.raises(ValueError, match="without build overrides"):
+            standalone.prepare(unsupported, {}, {}, tmp_path, tmp_path / "unused.log")
+
     extended = with_execution(ordinary, inputs(tmp_path))
     for field in fields(BuildRequest):
         assert getattr(extended, field.name) is getattr(ordinary, field.name)
