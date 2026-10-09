@@ -36,7 +36,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
-        assert manifest["task"] in {"text_generation", "embedding"}, path
+        assert manifest["task"] in {"text_continuation", "embedding"}, path
         assert isinstance(manifest["precision"], str), path
         assert isinstance(manifest["max_sequence_length"], int), path
         assert isinstance(manifest["tensor_parallel_size"], int), path
@@ -186,7 +186,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             model_dir=model_dir,
             output_path=bundle,
             family=_FAMILY,
-            task="text_generation",
+            task="text_continuation",
             precision=manifest["precision"],
             max_sequence_length=manifest["max_sequence_length"],
             tensor_parallel_size=manifest["tensor_parallel_size"],
@@ -215,7 +215,7 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
     )
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
-    assert payload["task"] == "text_generation"
+    assert payload["task"] == "text_continuation"
     if tp_size > 1:
         rank_sections = {
             name
@@ -883,6 +883,11 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     record_evidence("thresholds", thresholds)
     with evidence_stage("compare"):
         _assert_correctness(payload, case, thresholds, *reference[:-1])
+    if tp_size == 1:
+        from families.qwen.tests.sdk import check_consumers
+
+        with evidence_stage("sdk"):
+            check_consumers(bundle, runtime_root, prompt, case, payload, model_dir, tmp_path)
 
 
 def _embedding_consumer_binary() -> Path:
@@ -964,6 +969,7 @@ def _embedding_e2e(manifest, case, model_dir, runtime_root, torch, tmp_path):
         inputs = {key: value.to("cuda") for key, value in inputs.items()}
         with torch.inference_mode():
             hidden = model(**inputs).last_hidden_state
+            hidden_size = model.config.hidden_size
             expected = (
                 torch.nn.functional.normalize(hidden[:, -1, :], p=2, dim=-1)[0]
                 .float()
@@ -981,7 +987,7 @@ def _embedding_e2e(manifest, case, model_dir, runtime_root, torch, tmp_path):
         {"cosine_similarity": 0.99, "l2_distance": 0.1, "embedding_norm_tolerance": 0.001},
     )
     with evidence_stage("compare"):
-        assert actual.shape == expected.shape == (1024,)
+        assert actual.shape == expected.shape == (hidden_size,)
         assert np.isfinite(actual).all() and np.isfinite(expected).all()
         assert abs(float(np.linalg.norm(actual)) - 1) <= 0.001
         assert abs(float(np.linalg.norm(expected)) - 1) <= 0.001

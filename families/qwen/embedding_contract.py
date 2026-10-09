@@ -28,6 +28,28 @@ _QWEN3_EMBEDDING_06B_ARCHITECTURE = {
     "max_position_embeddings": 32768,
     "eos_token_id": 151643,
 }
+_QWEN3_EMBEDDING_4B_ARCHITECTURE = {
+    "hidden_size": 2560,
+    "intermediate_size": 9728,
+    "num_hidden_layers": 36,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 8,
+    "head_dim": 128,
+    "vocab_size": 151665,
+    "max_position_embeddings": 40960,
+    "eos_token_id": 151645,
+}
+_QWEN3_EMBEDDING_8B_ARCHITECTURE = {
+    "hidden_size": 4096,
+    "intermediate_size": 12288,
+    "num_hidden_layers": 36,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 8,
+    "head_dim": 128,
+    "vocab_size": 151665,
+    "max_position_embeddings": 40960,
+    "eos_token_id": 151645,
+}
 
 
 @dataclass(frozen=True)
@@ -102,7 +124,11 @@ def detect_qwen3_embedding_contract(
         "max_position_embeddings": config.max_position_embeddings,
         "eos_token_id": config.eos_token_id,
     }
-    if observed_architecture != _QWEN3_EMBEDDING_06B_ARCHITECTURE:
+    if observed_architecture not in (
+        _QWEN3_EMBEDDING_06B_ARCHITECTURE,
+        _QWEN3_EMBEDDING_4B_ARCHITECTURE,
+        _QWEN3_EMBEDDING_8B_ARCHITECTURE,
+    ):
         return None
 
     pooling = _pooling_config(config)
