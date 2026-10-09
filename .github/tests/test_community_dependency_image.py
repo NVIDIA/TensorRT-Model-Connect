@@ -408,6 +408,19 @@ def test_failed_publication_never_exports_a_receipt_or_relaxes_private_gates(tmp
     chown.assert_not_called()
 
 
+def test_qualification_uses_common_hub_pin_and_complete_trusted_checkout():
+    steps = WORKFLOW["jobs"]["produce"]["steps"]
+    access = next(step for step in steps if step.get("id") == "access")
+    assert "--staging-hub-requirement" in access["run"]
+    assert '--ci-sha "$GITHUB_SHA"' in access["run"]
+    setup = next(step for step in steps if "HUB_REQUIREMENT" in step.get("env", {}))
+    assert setup["env"]["HUB_REQUIREMENT"] == "${{ steps.access.outputs.hub_requirement }}"
+    assert "'$HUB_REQUIREMENT'" in setup["run"]
+    assert "huggingface-hub==0.36.0" not in setup["run"]
+    assert "test -f '$repo/tools/community_gpu_ci.py'" in setup["run"]
+    assert "test -f '$repo/tools/community_gpu_images.py'" in setup["run"]
+
+
 def test_qualification_download_uses_only_the_ssh_owned_auth_receipt():
     steps = WORKFLOW["jobs"]["produce"]["steps"]
     proof = next(step for step in steps if step.get("id") == "proof")
@@ -484,6 +497,7 @@ def test_producer_requires_coverage_of_its_qualified_family(tmp_path: Path) -> N
             family="nemotron_h",
         )
     assert "--require-family-coverage" in run.call_args.args[0]
+    assert "--dependencies-prepared" in run.call_args.args[0]
     command = run.call_args.args[0]
     assert command[command.index("--repository") + 1] == "/protected/model"
     assert command[command.index("--image") + 1] == "local-family"

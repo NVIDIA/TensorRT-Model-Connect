@@ -454,6 +454,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_community_ci.py",
         "tools/tests/test_community_gpu_ci.py",
         "tools/tests/test_community_gpu_images.py",
+        "tools/tests/test_community_gpu_plan.py",
         "tools/tests/test_community_hf_cache.py",
         "tools/tests/test_devtoolkit.py",
         "tools/tests/test_devtoolkit_capabilities.py",

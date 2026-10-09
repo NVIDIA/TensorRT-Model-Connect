@@ -1102,6 +1102,53 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Select the qualified host RAM profile
+        id: host_profile
+        timeout-minutes: 2
+        env:
+          TRTMC_GPU_SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
+          TRTMC_GPU_FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
+          TRTMC_GPU_DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
+          TRTMC_GPU_ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
+          SOURCE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
+          PROTECTED_DEPENDENCY_CATALOG: ${{ secrets.TRTMC_COMMUNITY_DEPENDENCY_CATALOG }}
+          REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
+          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME }}
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/trtmc-gpu-plan.json"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth 2 origin "$SOURCE_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$SOURCE_SHA"
+          python3 -m tools.community_gpu_ci --export-gpu-plan "$plan" \
+            --repository "$GITHUB_WORKSPACE" --source-sha "$SOURCE_SHA"
+          catalog="$RUNNER_TEMP/trtmc-gpu-host-profiles.json"
+          protected_catalog=$(mktemp "$RUNNER_TEMP/trtmc-protected-dependency-catalog.XXXXXX")
+          trap 'rm -f "$protected_catalog"' EXIT
+          catalog_args=()
+          if [ -z "${PROTECTED_DEPENDENCY_CATALOG:-}" ]; then
+            echo "::error::Configure the protected shared base catalog before allocation."
+            exit 1
+          fi
+          printf '%s' "$PROTECTED_DEPENDENCY_CATALOG" > "$protected_catalog"
+          catalog_args+=(--protected-dependency-catalog "$protected_catalog")
+          unset PROTECTED_DEPENDENCY_CATALOG
+          python3 -m tools.community_gpu_ci \
+            --export-dependency-catalog "$catalog" \
+            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA" "${catalog_args[@]}"
+          python3 -m tools.community_gpu_ci --require-shared-base --dependency-catalog "$catalog"
+          hub_requirement="$(python3 -m tools.community_gpu_ci --staging-hub-requirement \
+            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
+          unset REGISTRY_TOKEN
+          dependency_images=$(python3 -c \
+            'import json,sys; print("true" if json.load(open(sys.argv[1]))["families"] else "false")' "$catalog")
+          ram="$(python3 -m tools.community_gpu_ci \
+            --required-host-ram-gib --dependency-catalog "$catalog" --plan-file "$plan" \
+            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
+          echo "host_ram_gib=$ram" >> "$GITHUB_OUTPUT"
+          echo "hub_requirement=$hub_requirement" >> "$GITHUB_OUTPUT"
+          echo "dependency_images=$dependency_images" >> "$GITHUB_OUTPUT"
+
       - name: Install the Brev CLI
         env:
           BREV_VERSION: 0.6.335
@@ -1122,37 +1169,6 @@ jobs:
         env:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
         run: brev login --api-key "$BREV_API_KEY"
-
-      - name: Select the qualified host RAM profile
-        id: host_profile
-        timeout-minutes: 2
-        env:
-          TRTMC_GPU_SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
-          TRTMC_GPU_FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
-          TRTMC_GPU_DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
-          TRTMC_GPU_ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
-          PROTECTED_DEPENDENCY_CATALOG: ${{ secrets.TRTMC_COMMUNITY_DEPENDENCY_CATALOG }}
-        run: |
-          set -euo pipefail
-          catalog="$RUNNER_TEMP/trtmc-gpu-host-profiles.json"
-          protected_catalog=$(mktemp "$RUNNER_TEMP/trtmc-protected-dependency-catalog.XXXXXX")
-          trap 'rm -f "$protected_catalog"' EXIT
-          catalog_args=()
-          if [ -n "${PROTECTED_DEPENDENCY_CATALOG:-}" ]; then
-            printf '%s' "$PROTECTED_DEPENDENCY_CATALOG" > "$protected_catalog"
-            catalog_args+=(--protected-dependency-catalog "$protected_catalog")
-          fi
-          unset PROTECTED_DEPENDENCY_CATALOG
-          python3 -m tools.community_gpu_ci \
-            --export-dependency-catalog "$catalog" \
-            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA" "${catalog_args[@]}"
-          dependency_images=$(python3 -c \
-            'import json,sys; print("true" if json.load(open(sys.argv[1]))["families"] else "false")' "$catalog")
-          ram="$(python3 -m tools.community_gpu_ci \
-            --required-host-ram-gib --dependency-catalog "$catalog" \
-            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
-          echo "host_ram_gib=$ram" >> "$GITHUB_OUTPUT"
-          echo "dependency_images=$dependency_images" >> "$GITHUB_OUTPUT"
 
       - name: Reserve a GPU instance
         id: reserve
@@ -1225,8 +1241,9 @@ jobs:
           CI_SHA: ${{ github.sha }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
-          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME || 'github-actions' }}
+          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME }}
           DEPENDENCY_IMAGES: ${{ steps.host_profile.outputs.dependency_images }}
+          HUB_REQUIREMENT: ${{ steps.host_profile.outputs.hub_requirement }}
         run: |
           set -euo pipefail
           # Never place the token in remote command arguments or build context.
@@ -1238,7 +1255,7 @@ jobs:
               # Keep cleanup bounded if SSH fails. VM teardown remains the
               # fallback, including when a partial copy preceded a failure.
               if timeout 30s brev exec "$checkpoint_instance" \
-                "rm -f -- '$remote_auth/token' '$remote_auth/registry-token' '$remote_auth/dependency-catalog.json' && rmdir -- '$remote_auth'"; then
+                "rm -f -- '$remote_auth/token' '$remote_auth/registry-token' '$remote_auth/dependency-catalog.json' '$remote_auth/gpu-plan.json' && rmdir -- '$remote_auth'"; then
                 checkpoint_instance=""
               else
                 echo "::warning::Could not remove the checkpoint token from $checkpoint_instance; VM teardown is still required." >&2
@@ -1312,17 +1329,13 @@ jobs:
           # The host coordinator and container entrypoint belong to the chosen
           # CI commit. Neither imports contributor code outside the container.
           [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
-          retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py" || { capture_git_fetch_diagnostics; exit 1; }
-          # A freshly created instance's SSH session may not have its Docker
-          # group membership yet. The first live GPU run reached this point
-          # and failed on docker.sock, so do not depend on propagation timing.
-          retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements" || exit 1
+          retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py && git show $CI_SHA:tools/community_gpu_images.py > /tmp/community_gpu_images.py" || { capture_git_fetch_diagnostics; exit 1; }
           # Checkpoints are downloaded by the trusted coordinator before the
           # family container switches Hugging Face into offline mode.
           # Ubuntu host images do not ship ensurepip by default, so the
           # staging venv needs python3-venv installed before creation.
           retry_backoff brev exec "$INSTANCE_NAME" "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-venv" || exit 1
-          retry_backoff brev exec "$INSTANCE_NAME" "python3 -m venv /tmp/trtmc-community-stage-venv && /tmp/trtmc-community-stage-venv/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0" || exit 1
+          retry_backoff brev exec "$INSTANCE_NAME" "python3 -m venv /tmp/trtmc-community-stage-venv && /tmp/trtmc-community-stage-venv/bin/python -m pip install --disable-pip-version-check '$HUB_REQUIREMENT'" || exit 1
 
           # Copy into a private directory outside source and checkpoint mounts.
           # The trusted coordinator consumes and unlinks the token before any
@@ -1334,13 +1347,17 @@ jobs:
           # Keep private registry coordinates outside source and all mounts.
           dependency_catalog="$remote_auth/dependency-catalog.json"
           retry brev copy "$RUNNER_TEMP/trtmc-gpu-host-profiles.json" "$INSTANCE_NAME:$dependency_catalog" || exit 1
-          if [ "${DEPENDENCY_IMAGES:-false}" = true ] && [ -n "${REGISTRY_TOKEN:-}" ]; then
-            # Introduce the read credential only after the PR base image was
-            # built. The trusted host deletes it before any model container.
-            printf '%s' "$REGISTRY_TOKEN" > "$registry_token"
-            retry brev copy "$registry_token" "$INSTANCE_NAME:$remote_auth/registry-token" || exit 1
-          fi
+          plan_file="$remote_auth/gpu-plan.json"
+          retry brev copy "$RUNNER_TEMP/trtmc-gpu-plan.json" "$INSTANCE_NAME:$plan_file" || exit 1
+          printf '%s' "$REGISTRY_TOKEN" > "$registry_token"
           unset REGISTRY_TOKEN
+          pull_shared_base() {
+            # The helper erases its token on every attempt. Restore only the
+            # dedicated read credential before repeating the existing retry.
+            retry brev copy "$registry_token" "$INSTANCE_NAME:$remote_auth/registry-token" || return 1
+            brev exec "$INSTANCE_NAME" "sudo python3 -I /tmp/community_gpu_images.py --pull-base --catalog '$dependency_catalog' --token-file '$remote_auth/registry-token' --username '$REGISTRY_USERNAME' --tag trtmc-quickstart-gpu"
+          }
+          retry_backoff pull_shared_base || exit 1
 
           # Each selected family gets a fresh container on this one VM. The
           # coordinator waits for its removal before starting the next family,
@@ -1354,7 +1371,7 @@ jobs:
             "TRTMC_GPU_FAMILIES=$FAMILIES" \
             "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
             "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
-            python3 -m tools.community_gpu_ci --execution-budget)"
+            python3 -m tools.community_gpu_ci --execution-budget --plan-file "$RUNNER_TEMP/trtmc-gpu-plan.json")"
           echo "Selected-family execution budget: ${execution_budget}s"
           python3 -m tools.brev_exec \
             --instance "$INSTANCE_NAME" \
@@ -1369,7 +1386,7 @@ jobs:
             "TRTMC_GPU_RESULTS_DIR=/tmp/trtmc-community-results-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
             /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect --checkpoint-token-file "$remote_auth/token" \
-            --dependency-catalog "$dependency_catalog" --registry-token-file "$remote_auth/registry-token" --registry-username "${REGISTRY_USERNAME:-github-actions}"
+            --dependency-catalog "$dependency_catalog" --plan-file "$plan_file" --registry-token-file "$remote_auth/registry-token" --registry-username "$REGISTRY_USERNAME"
           cleanup_checkpoint_token
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
