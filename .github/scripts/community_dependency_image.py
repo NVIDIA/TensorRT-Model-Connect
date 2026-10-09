@@ -12,11 +12,14 @@ import json
 import os
 import platform
 import re
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -52,18 +55,130 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+class CapturedOutputLimit(subprocess.SubprocessError):
+    """Retain only already-bounded public diagnostics after a capture limit."""
+
+    def __init__(self, stream: str, stdout: bytes, stderr: bytes):
+        super().__init__(f"Captured {stream} exceeds the output limit")
+        self.stdout = stdout.decode("utf-8", errors="replace")
+        self.stderr = stderr.decode("utf-8", errors="replace")
+
+
+def _bounded_capture(
+    command: list[str],
+    *,
+    stdin: str | None = None,
+    timeout: float = 900,
+    stdout_limit: int = 1024 * 1024,
+    stderr_limit: int = 1024 * 1024,
+) -> subprocess.CompletedProcess:
+    """Reject excess bytes while reading, including pipes held by descendants."""
+    if stdin is not None and len(stdin) > 65536:
+        raise CapturedOutputLimit("stdin", b"", b"")
+    pending = stdin.encode("utf-8") if stdin is not None else b""
+    if len(pending) > 65536:
+        raise CapturedOutputLimit("stdin", b"", b"")
+    deadline = time.monotonic() + timeout
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    limits = {"stdout": stdout_limit, "stderr": stderr_limit}
+    written = 0
+    failed = True
+    try:
+        with selectors.DefaultSelector() as selector:
+            for label in buffers:
+                stream = getattr(process, label)
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, label)
+            if process.stdin is not None:
+                os.set_blocking(process.stdin.fileno(), False)
+                selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        timeout,
+                        output=bytes(buffers["stdout"]).decode("utf-8", errors="replace"),
+                        stderr=bytes(buffers["stderr"]).decode("utf-8", errors="replace"),
+                    )
+                for key, _ in selector.select(min(remaining, 0.1)):
+                    stream, label = key.fileobj, key.data
+                    if label == "stdin":
+                        try:
+                            written += os.write(stream.fileno(), pending[written : written + 16384])
+                        except BrokenPipeError:
+                            written = len(pending)
+                        except BlockingIOError:
+                            continue
+                        if written == len(pending):
+                            selector.unregister(stream)
+                            stream.close()
+                        continue
+                    available = limits[label] - len(buffers[label])
+                    try:
+                        chunk = os.read(stream.fileno(), min(65536, available + 1))
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(stream)
+                        stream.close()
+                    elif len(chunk) > available:
+                        raise CapturedOutputLimit(
+                            label, bytes(buffers["stdout"]), bytes(buffers["stderr"])
+                        )
+                    else:
+                        buffers[label].extend(chunk)
+            returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+        failed = False
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout=bytes(buffers["stdout"]).decode("utf-8", errors="replace"),
+            stderr=bytes(buffers["stderr"]).decode("utf-8", errors="replace"),
+        )
+    finally:
+        if failed:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=0.25)
+            except subprocess.TimeoutExpired:
+                pass
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+
 def run(command: list[str], *, capture: bool = False, stdin: str | None = None) -> str:
     try:
-        result = subprocess.run(
-            command, check=True, text=True, capture_output=capture or stdin is not None, input=stdin
-        )
-    except subprocess.CalledProcessError as error:
+        if capture or stdin is not None:
+            result = _bounded_capture(command, stdin=stdin)
+            if result.returncode:
+                raise subprocess.CalledProcessError(
+                    result.returncode, command, output=result.stdout, stderr=result.stderr
+                )
+        else:
+            result = subprocess.run(command, check=True, text=True)
+    except (OSError, subprocess.SubprocessError) as error:
         if stdin is not None:
             raise RuntimeError("Credential command failed; captured output is suppressed") from None
         if capture:
-            for label, stream in (("stdout", error.stdout), ("stderr", error.stderr)):
+            for label in ("stdout", "stderr"):
+                stream = getattr(error, label, None)
                 if stream:
-                    print(f"Captured {label} tail:\n{stream[-16384:]}", file=sys.stderr, flush=True)
+                    tail = stream.encode("utf-8", errors="replace")[-16384:].decode(
+                        "utf-8", errors="ignore"
+                    )
+                    print(f"Captured {label} tail:\n{tail}", file=sys.stderr, flush=True)
         raise
     return result.stdout if capture else ""
 
@@ -131,10 +246,21 @@ def _private_json(path: Path) -> dict:
         os.close(descriptor)
 
 
-def _private_docker(command: list[str], *, stdin: str | None = None, timeout: int = 900) -> str:
+def _private_docker(
+    command: list[str],
+    *,
+    stdin: str | None = None,
+    timeout: float = 900,
+    stdout_limit: int = 1024 * 1024,
+    stderr_limit: int = 1024 * 1024,
+) -> str:
     try:
-        result = subprocess.run(
-            command, input=stdin, capture_output=True, text=True, timeout=timeout
+        result = _bounded_capture(
+            command,
+            stdin=stdin,
+            timeout=timeout,
+            stdout_limit=stdout_limit,
+            stderr_limit=stderr_limit,
         )
     except (OSError, subprocess.SubprocessError):
         raise RuntimeError("Private candidate transport failed; output is suppressed") from None
@@ -320,6 +446,7 @@ def prepare_candidate(
                 "/opt/trtmc-ci/build-inputs.json",
             ],
             timeout=60,
+            stdout_limit=65536,
         )
         if len(embedded.encode()) > 65536:
             raise RuntimeError("The embedded public build manifest exceeds the size limit")
