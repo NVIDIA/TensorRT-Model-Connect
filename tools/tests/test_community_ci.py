@@ -714,6 +714,47 @@ def test_cpu_image_builds_from_the_minimal_requirements_context(
     assert calls[0][-1] == "requirements"
 
 
+def test_cpu_source_policy_changes_only_the_registry_for_one_immutable_pin(tmp_path):
+    script = _workflow_step_script(
+        "community-ci.yml", "unit", "Use the official NVIDIA source for the pinned CUDA base"
+    )
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    source = tmp_path / "Dockerfile.community-cpu"
+    source.write_text("FROM example.invalid/unrelated:unchanged\n")
+    environment = tmp_path / "environment"
+    # No Docker operation is needed to check the workflow's generated policy;
+    # a separate real BuildKit experiment verifies conversion and DENY controls.
+    result = subprocess.run(
+        ["bash", "-c", 'docker() { test "$*" = "buildx version"; };\n' + script],
+        cwd=tmp_path,
+        env={**os.environ, "RUNNER_TEMP": str(runner), "GITHUB_ENV": str(environment)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout == ""
+    values = dict(line.split("=", 1) for line in environment.read_text().splitlines())
+    assert values["DOCKER_BUILDKIT"] == "1"
+    policy = json.loads(Path(values["EXPERIMENTAL_BUILDKIT_SOURCE_POLICY"]).read_text())
+    assert len(policy["rules"]) == 1
+    rule = policy["rules"][0]
+    assert rule["action"] == "CONVERT" and rule["selector"]["matchType"] == "EXACT"
+    original, mirrored = rule["selector"]["identifier"], rule["updates"]["identifier"]
+    assert original.startswith("docker-image://docker.io/nvidia/cuda:")
+    assert mirrored == original.replace("docker-image://docker.io/", "docker-image://nvcr.io/", 1)
+    assert (
+        original.split("@", 1)[1]
+        == "sha256:bcf7d05f0b13b9bbb86d9a4cd039d331894b8f1145ad009d1af75023bcd1dc5c"
+    )
+    assert "*" not in original
+    assert source.read_text() == "FROM example.invalid/unrelated:unchanged\n"
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    steps = workflow["jobs"]["unit"]["steps"]
+    assert steps[-2]["run"] == script
+    assert steps[-1]["run"] == "python3 -m tools.community_ci unit"
+
+
 @pytest.mark.parametrize(
     ("job_status", "test_outcome", "test_conclusion", "expected"),
     [
