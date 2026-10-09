@@ -113,6 +113,7 @@ Dinov3ImageFeaturePipeline::Dinov3ImageFeaturePipeline(std::unique_ptr<ITrtModul
     pooler_count_ = pooler_count;
     hidden_shape_ = std::move(hidden_shape);
     pooler_shape_ = std::move(pooler_shape);
+    model_->enable_cuda_graph();
 }
 
 ImageFeaturesResult Dinov3ImageFeaturePipeline::extract_image_features(const float* pixels,
