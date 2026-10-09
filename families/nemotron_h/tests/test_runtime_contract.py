@@ -85,7 +85,8 @@ def _edge_cli_source(tmp_path):
 
 
 @pytest.mark.parametrize("precision", [None, "fp16", "fp32"])
-def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
+@pytest.mark.parametrize("variant", ["dflash", "dspark", "dspark_tree"])
+def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision, variant):
     from tensorrt_model_connect import family_cli as build_cli
     from families.nemotron_h.edge_llm import dispatch
     from families.nemotron_h.edge_llm.config import NemotronHBuildRequest
@@ -97,7 +98,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
     def paired(request, writer, execution):
         assert isinstance(request, NemotronHBuildRequest)
         assert request.execution is execution
-        assert execution.variant == "dflash"
+        assert execution.variant == variant
         assert [(item.role, item.model_dir) for item in execution.checkpoints] == [("draft", draft)]
         seen.append(request)
         writer.set_header(family="nemotron_h", task=request.task, backend=request.backend)
@@ -107,7 +108,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
     options = ["--precision", precision] if precision else []
     assert build_cli.main(["nemotron_h",
         "build", str(source), *options, "-o", str(output),
-        "--execution-variant", "dflash", "--companion", f"draft={draft}",
+        "--execution-variant", variant, "--companion", f"draft={draft}",
     ]) == 0
     assert len(seen) == 1
     assert seen[0].precision == (precision or "fp16")
@@ -119,7 +120,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
     _build_bundle(
         {"precision": "fp16", "max_sequence_length": 64, "tensor_parallel_size": 1},
         source, output,
-        execution=BuildExecutionInputs("dflash", (NamedCheckpoint("draft", draft),)),
+        execution=BuildExecutionInputs(variant, (NamedCheckpoint("draft", draft),)),
     )
     assert len(seen) == 2
     assert seen[-1].precision == "fp16"
@@ -153,7 +154,7 @@ def test_edge_cli_help_is_family_owned(tmp_path, capsys):
         build_cli.main(["nemotron_h", "build", str(source), "--help"])
     assert caught.value.code == 0
     help_text = capsys.readouterr().out
-    assert "--execution-variant {dflash}" in help_text
+    assert "--execution-variant {dflash,dspark,dspark_tree}" in help_text
     assert "--companion" in help_text
 
 
