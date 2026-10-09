@@ -21,6 +21,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -183,8 +184,37 @@ def require_private_package(prefix: str, token: str, expected_id: int | None) ->
             if response.status != 200 or len(raw) > MAX_FILE:
                 raise ImagePreparationError("Private base metadata is unavailable")
         metadata = object_json(raw)
+    except urllib.error.HTTPError as error:
+        details = [f"HTTP {error.code}"]
+        headers = error.headers or {}
+        scopes = headers.get("X-OAuth-Scopes")
+        if scopes is not None:
+            present = "read:packages" in {scope.strip() for scope in scopes.split(",")}
+            details.append("token read:packages scope=" + ("present" if present else "absent"))
+        if headers.get("X-GitHub-SSO", "").lower().startswith("required"):
+            details.append("organization SSO authorization required")
+        # Return only recognized reason labels, never the API response, private
+        # package coordinates, authorization URL, token, or arbitrary text.
+        try:
+            raw = error.read(8193)
+            message = object_json(raw).get("message", "") if len(raw) <= 8192 else ""
+            message = message.lower() if isinstance(message, str) else ""
+        except (ImagePreparationError, OSError, ValueError, TypeError):
+            message = ""
+        for words, reason in (
+            (("ip allow list", "ip allowlist"), "organization IP allowlist restriction"),
+            (("oauth app access restrictions",), "organization OAuth app restriction"),
+            (("rate limit",), "GitHub API rate limit"),
+            (("bad credentials",), "credential rejected"),
+            (("resource not accessible by personal access token",), "token access rejected"),
+        ):
+            if any(word in message for word in words):
+                details.append(reason)
+        raise ImagePreparationError(
+            "Private base access could not be verified (" + "; ".join(details) + ")"
+        ) from None
     except (OSError, ValueError):
-        raise ImagePreparationError("Private base access could not be verified") from None
+        raise ImagePreparationError("Private base API network request failed") from None
     if (
         metadata.get("name") != package
         or metadata.get("visibility") != "private"

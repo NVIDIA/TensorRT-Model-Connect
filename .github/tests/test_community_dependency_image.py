@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.response
 from email.message import Message
 from pathlib import Path
@@ -1535,7 +1536,7 @@ def test_access_check_cli_uses_only_public_token_and_preserves_safe_result(
         ("pull_request_target", "refs/heads/main", "maintain", False),
     ],
 )
-def test_access_check_job_authorizes_current_actor_without_private_reader(
+def test_access_check_job_authorizes_current_actor_without_reader_in_negative_step(
     tmp_path, event, ref, role, allowed
 ):
     caller = yaml.load(
@@ -1544,11 +1545,13 @@ def test_access_check_job_authorizes_current_actor_without_private_reader(
     job = caller["jobs"]["check-dependency-image-access"]
     assert job["permissions"] == {"contents": "read", "packages": "read"}
     assert job["environment"]["name"] == "gpu-ci-dispatch"
-    assert "BREV" not in json.dumps(job) and "REGISTRY_READ_TOKEN" not in json.dumps(job)
+    assert "BREV" not in json.dumps(job)
     assert not job.get("needs")
     step = job["steps"][0]
     assert step["env"]["REQUEST_ACTOR"] == "${{ github.triggering_actor }}"
     check = next(s for s in job["steps"] if "access-check \\" in s.get("run", ""))
+    assert "REGISTRY_READ_TOKEN" not in json.dumps(check)
+    assert "REGISTRY_READ_TOKEN" not in json.dumps(step)
     assert check["env"]["GH_TOKEN"] == "${{ github.token }}"
     assert check["env"]["TRTMC_COMMUNITY_REGISTRY"] == "${{ secrets.TRTMC_COMMUNITY_REGISTRY }}"
     assert "collaborators/$REQUEST_ACTOR/permission" in check["run"]
@@ -1576,6 +1579,204 @@ def test_access_check_job_authorizes_current_actor_without_private_reader(
     assert (result.returncode == 0) is allowed, result.stderr
     if trace.exists():
         assert "current-rerun-actor" in trace.read_text()
+
+
+def dedicated_reader_step():
+    caller = yaml.load(
+        (ROOT / ".github/workflows/community-ci.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    job = caller["jobs"]["check-dependency-image-access"]
+    step = next(
+        s
+        for s in job["steps"]
+        if s["name"] == "Verify the dedicated reader for the same shared base"
+    )
+    assert step["if"] == "${{ inputs.audit_family == 'base' }}"
+    assert step["timeout-minutes"] == "3"
+    assert step["env"]["REGISTRY_TOKEN"] == "${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}"
+    negative = next(
+        s for s in job["steps"] if s["name"] == "Check anonymous and public repository token denial"
+    )
+    evidence = next(s for s in job["steps"] if s["name"] == "Preserve the access denial evidence")
+    assert job["steps"].index(negative) < job["steps"].index(evidence) < job["steps"].index(step)
+    return step
+
+
+@pytest.fixture
+def dedicated_reader_inline(tmp_path, monkeypatch):
+    """Execute the actual workflow Python with only I/O boundaries substituted."""
+    from tools import community_gpu_ci as ci
+    from tools import community_gpu_images as images
+
+    inputs = {name: hashlib.sha256(name.encode()).hexdigest() for name in images.BASE_INPUTS}
+    prefix = "ghcr.io/private-fixture-org/hidden-image-prefix"
+    digest = "sha256:" + "e" * 64
+    catalog = {
+        "schema_version": 1,
+        "ci_sha": "f" * 40,
+        "registry_prefix": prefix,
+        "families": {},
+        "base": {
+            "schema_version": 1,
+            "kind": "community-base",
+            "platform": "linux/amd64",
+            "registry_visibility": "private",
+            "image": prefix + "/base@" + digest,
+            "environment_source_sha": "a" * 40,
+            "inputs": inputs,
+            "input_key": images.base_key(inputs),
+            "cpu_environment_verified": True,
+            "local_image_id": "sha256:" + "b" * 64,
+            "package_id": 123,
+        },
+    }
+    context = SimpleNamespace(
+        images=images,
+        catalog=catalog,
+        prefix=prefix,
+        digest=digest,
+        token="sensitive-reader-token",
+        username="sensitive-reader-account",
+        roots=[],
+        requests=[],
+        docker=[],
+        configs=[],
+        metadata_status=None,
+        docker_failure=None,
+    )
+    monkeypatch.chdir(tmp_path)
+    for key, value in {
+        "REGISTRY_TOKEN": context.token,
+        "REGISTRY_PREFIX": prefix,
+        "PROTECTED_DEPENDENCY_CATALOG": json.dumps(catalog),
+        "REQUESTED_DIGEST": digest,
+        "GITHUB_SHA": catalog["ci_sha"],
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    def export(repository, sha, output, source):
+        assert repository == tmp_path and sha == catalog["ci_sha"]
+        assert json.loads(source.read_text()) == catalog
+        assert stat.S_IMODE(source.stat().st_mode) == 0o600
+        context.roots.append(output.parent)
+        output.write_text(json.dumps(catalog))
+
+    def transport(opener, request, *, timeout):
+        assert timeout == 30 and request.get_method() == "GET"
+        assert request.get_header("Authorization") == "Bearer " + context.token
+        context.requests.append(request.full_url)
+        if request.full_url == "https://api.github.com/user":
+            payload = {"login": context.username}
+        else:
+            assert request.full_url == (
+                "https://api.github.com/orgs/private-fixture-org/packages/container/"
+                "hidden-image-prefix%2Fbase"
+            )
+            if context.metadata_status:
+                headers = Message()
+                headers["X-OAuth-Scopes"] = "read:packages"
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    context.metadata_status,
+                    context.token + context.prefix,
+                    headers,
+                    io.BytesIO(json.dumps({"message": context.token + context.prefix}).encode()),
+                )
+            payload = {
+                "id": 123,
+                "name": "hidden-image-prefix/base",
+                "visibility": "private",
+                "package_type": "container",
+            }
+        response = io.BytesIO(json.dumps(payload).encode())
+        response.status = 200
+        return response
+
+    def docker(command, environment, stdin, timeout, capture):
+        assert command[:2] == ["docker", "--config"]
+        config = Path(command[2])
+        assert config.exists() and stat.S_IMODE(config.stat().st_mode) == 0o700
+        assert context.token not in json.dumps(environment)
+        operation = command[3:]
+        context.docker.append(operation)
+        context.configs.append(config)
+        if operation[0] == "login":
+            assert operation == [
+                "login",
+                "ghcr.io",
+                "--username",
+                context.username,
+                "--password-stdin",
+            ]
+            assert stdin == context.token and timeout == 30
+            (config / "config.json").write_text(context.token)
+        else:
+            assert operation == ["manifest", "inspect", prefix + "/base@" + digest]
+            assert stdin is None and timeout == 60
+            assert (config / "config.json").read_text() == context.token
+        assert capture is False
+        if operation[0] == context.docker_failure:
+            raise subprocess.CalledProcessError(1, command, stderr=context.token + context.prefix)
+        return context.token + context.prefix
+
+    monkeypatch.setattr(ci, "export_dependency_catalog", export)
+    monkeypatch.setattr(images.urllib.request.OpenerDirector, "open", transport)
+    monkeypatch.setattr(images, "_captured", docker)
+    script = dedicated_reader_step()["run"].split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    context.execute = lambda: exec(compile(script, "dedicated-reader-workflow", "exec"), {})
+    return context
+
+
+@pytest.mark.parametrize("metadata_status", [None, 403])
+@pytest.mark.parametrize("docker_failure", [None, "login", "manifest"])
+def test_dedicated_reader_checks_metadata_and_same_manifest_then_erases_auth(
+    dedicated_reader_inline, metadata_status, docker_failure, capsys
+):
+    context = dedicated_reader_inline
+    context.metadata_status = metadata_status
+    context.docker_failure = docker_failure
+    failure = ""
+    if metadata_status or docker_failure:
+        with pytest.raises(SystemExit) as error:
+            context.execute()
+        failure = str(error.value)
+    else:
+        context.execute()
+    assert len(context.requests) == 2
+    assert [command[0] for command in context.docker] == (
+        ["login"] if docker_failure == "login" else ["login", "manifest"]
+    )
+    assert context.roots and all(not path.exists() for path in context.roots + context.configs)
+    captured = capsys.readouterr()
+    output = captured.out + captured.err + failure
+    assert all(value not in output for value in (context.token, context.prefix, context.username))
+    if metadata_status:
+        assert "HTTP 403" in output
+        if not docker_failure:
+            assert "Dedicated reader pinned manifest: accessible" in output
+    if not metadata_status and not docker_failure:
+        assert "Dedicated reader verified:" in output
+
+
+@pytest.mark.parametrize("invalid", ["digest", "registry", "mutable_catalog"])
+def test_dedicated_reader_rejects_different_or_mutable_reference_before_login(
+    dedicated_reader_inline, monkeypatch, invalid, capsys
+):
+    context = dedicated_reader_inline
+    if invalid == "digest":
+        monkeypatch.setenv("REQUESTED_DIGEST", "sha256:" + "0" * 64)
+    elif invalid == "registry":
+        monkeypatch.setenv("REGISTRY_PREFIX", "ghcr.io/different-owner/different-image")
+    else:
+        context.catalog["base"]["image"] = context.prefix + "/base:latest"
+        monkeypatch.setenv("PROTECTED_DEPENDENCY_CATALOG", json.dumps(context.catalog))
+    with pytest.raises(SystemExit) as error:
+        context.execute()
+    assert context.requests == [] and context.docker == []
+    assert context.roots and all(not path.exists() for path in context.roots)
+    captured = capsys.readouterr()
+    output = captured.out + captured.err + str(error.value)
+    assert context.token not in output and context.prefix not in output
 
 
 PRIVATE_PREFIX = "ghcr.io/test-owner/private-dependencies"

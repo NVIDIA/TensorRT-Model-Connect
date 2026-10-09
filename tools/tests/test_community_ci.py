@@ -815,6 +815,7 @@ def test_gpu_step_conclusion_requires_completed_success(
         "GPU_AUTHORIZED",
         "GPU_RESULT",
         "TEST_RESULT",
+        "GPU_FAILURE_CLASS",
         "CLEANUP_RESULT",
     ],
 )
@@ -831,6 +832,7 @@ def test_complete_pipeline_requires_every_cpu_and_gpu_stage(failed, bad_result):
         ),
         "success",
     )
+    states["GPU_FAILURE_CLASS"] = "none"
     if failed:
         states[failed] = bad_result
     result = subprocess.run(
@@ -892,6 +894,7 @@ def test_gpu_status_and_cleanup_fail_closed(
     assert "|| true" not in cleanup["run"]
     assert job["outputs"] == {
         "conclusion": "${{ steps.result.outputs.conclusion }}",
+        "failure_class": "${{ steps.classification.outputs.failure_class }}",
         "instance_name": "${{ steps.reserve.outputs.instance_name }}",
         "lease_artifact_name": "${{ steps.reserve.outputs.lease_artifact_name }}",
         "instance_type": "${{ steps.reserve.outputs.instance_type }}",
@@ -1715,13 +1718,21 @@ def test_trusted_inner_status_requires_release_before_a_gpu_verdict(
     assert "always()" in step["if"] and "workflow_dispatch" in step["if"]
     assert "inputs.ci_lane == 'dev'" in step["if"]
     assert step["env"]["HEAD_SHA"] == "${{ needs.authorize.outputs.head_sha }}"
+    assert step["env"]["CPU_RESULT"] == "${{ needs.required.result }}"
+    assert step["env"]["RUN_GPU"] == "${{ needs.gpu-authorize.outputs.run_gpu }}"
+    assert step["env"]["GPU_FAILURE_CLASS"] == (
+        "${{ needs.provision-and-test.outputs.failure_class }}"
+    )
     writes = tmp_path / "writes"
     result = subprocess.run(
         ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + step["run"]],
         env={
             **os.environ,
             "HEAD_SHA": "a" * 40,
+            "CPU_RESULT": "success" if gpu != "skipped" else "failure",
+            "RUN_GPU": "true" if gpu != "skipped" else "false",
             "GPU_RESULT": gpu,
+            "GPU_FAILURE_CLASS": "none" if gpu == "success" else "pr_failure",
             "OWNER_RELEASE_CONFIRMED": owner,
             "BACKSTOP_RELEASE_CONFIRMED": backstop,
             "COMPLETE_RESULT": complete,
@@ -1852,7 +1863,10 @@ def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
         env={
             "PATH": os.environ["PATH"],
             "HEAD_SHA": "a" * 40,
+            "CPU_RESULT": "success",
+            "RUN_GPU": "true",
             "GPU_RESULT": "failure",
+            "GPU_FAILURE_CLASS": "infra_failure",
             "OWNER_RELEASE_CONFIRMED": "true",
             "BACKSTOP_RELEASE_CONFIRMED": "true",
             "NO_ALLOCATION_CONFIRMED": "true",
@@ -1867,8 +1881,171 @@ def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
         timeout=5,
     )
     assert result.returncode == 0 and not calls.exists()
-    assert "state=failure" in writes.read_text().splitlines()
+    assert "state=error" in writes.read_text().splitlines()
     assert "description=Complete Community CI: infra_failure" in writes.read_text().splitlines()
+
+
+@pytest.mark.parametrize(
+    "receipt,expected_class",
+    [
+        ("missing", "infra_failure"),
+        ("null", "infra_failure"),
+        ("malformed", "infra_failure"),
+        ("oversized", "infra_failure"),
+        ("wrong-schema", "infra_failure"),
+        ("pre-entry", "infra_failure"),
+        ("interrupted", "infra_failure"),
+        ("missing-entry-marker", "infra_failure"),
+        ("mixed", "infra_failure"),
+        ("false-success", "infra_failure"),
+        ("pr-failure", "pr_failure"),
+        ("post-entry-oom", "pr_failure"),
+        ("success", "none"),
+    ],
+)
+@pytest.mark.parametrize("released", [False, True])
+def test_gpu_receipt_classification_reaches_only_a_released_final_status(
+    tmp_path, receipt, expected_class, released
+):
+    """Run the real workflow scripts, including missing pre-coordinator output."""
+    row = {
+        "family": "example",
+        "status": "failed",
+        "phase": "validation",
+        "failure_class": "pr_failure",
+        "entrypoint_started": True,
+        "requested_cases": ["one"],
+        "cases": {"one": "failed"},
+    }
+    report = {"schema_version": 1, "families": [row], "passed": True, "complete": True}
+    if receipt == "wrong-schema":
+        report["schema_version"] = 2
+    elif receipt == "pre-entry":
+        row.update(phase="checkpoints", failure_class="infra_failure", entrypoint_started=False)
+        row["cases"]["one"] = "not_run"
+    elif receipt == "interrupted":
+        row.update(status="running", phase="container")
+        row["cases"]["one"] = "not_run"
+    elif receipt == "missing-entry-marker":
+        row.pop("entrypoint_started")
+    elif receipt == "mixed":
+        report["families"].append(
+            {
+                **row,
+                "family": "other",
+                "failure_class": "infra_failure",
+                "entrypoint_started": False,
+            }
+        )
+    elif receipt == "post-entry-oom":
+        row.update(phase="container", evidence="Docker reported OOMKilled for this container")
+        row["cases"]["one"] = "not_run"
+    elif receipt in {"success", "false-success"}:
+        row.update(status="passed", phase="complete", failure_class=None)
+        row["cases"]["one"] = "passed" if receipt == "success" else "not_run"
+    path = tmp_path / "summary.json"
+    if receipt != "missing":
+        payload = {
+            "null": "null\n",
+            "malformed": "{\n",
+            "oversized": " " * (4 * 1024 * 1024 + 1),
+        }.get(receipt, json.dumps(report))
+        path.write_text(payload)
+    output = tmp_path / "output"
+    classify = _workflow_step_script(
+        "community-ci.yml", "provision-and-test", "Classify the GPU result"
+    )
+    result = subprocess.run(
+        ["bash", "-c", classify],
+        cwd=REPO_ROOT,
+        env={**os.environ, "SUMMARY_FILE": str(path), "GITHUB_OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text() == f"failure_class={expected_class}\n"
+
+    publish = _workflow_step_script(
+        "community-ci.yml", "publish", "Publish the released Dev workflow conclusion"
+    )
+    writes = tmp_path / "writes"
+    success = receipt in {"success", "false-success"}
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + publish],
+        env={
+            **os.environ,
+            "HEAD_SHA": "a" * 40,
+            "CPU_RESULT": "success",
+            "RUN_GPU": "true",
+            "GPU_RESULT": "success" if success else "failure",
+            "GPU_FAILURE_CLASS": expected_class,
+            "OWNER_RELEASE_CONFIRMED": "true" if released else "",
+            "BACKSTOP_RELEASE_CONFIRMED": "",
+            "NO_ALLOCATION_CONFIRMED": "",
+            "COMPLETE_RESULT": "success" if success else "failure",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "42",
+            "STATUS_WRITES": str(writes),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    arguments = writes.read_text().splitlines()
+    expected_state = {"none": "success", "infra_failure": "error", "pr_failure": "failure"}[
+        expected_class
+    ]
+    if not released:
+        assert "state=pending" in arguments
+        assert "description=Community CI release remains unconfirmed" in arguments
+    else:
+        assert f"state={expected_state}" in arguments
+        description = "success" if expected_class == "none" else expected_class
+        assert f"description=Complete Community CI: {description}" in arguments
+
+
+@pytest.mark.parametrize("category", ["", "unrecognized", "infra_failure"])
+@pytest.mark.parametrize("cpu", ["success", "failure"])
+def test_absent_classification_output_defaults_to_infra_only_after_cpu_passes(
+    tmp_path, category, cpu
+):
+    """A skipped/failed classifier cannot blame the PR or relabel CPU failures."""
+    publish = _workflow_step_script(
+        "community-ci.yml", "publish", "Publish the released Dev workflow conclusion"
+    )
+    writes = tmp_path / "writes"
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + publish],
+        env={
+            **os.environ,
+            "HEAD_SHA": "a" * 40,
+            "CPU_RESULT": cpu,
+            "RUN_GPU": "true",
+            "GPU_RESULT": "failure",
+            "GPU_FAILURE_CLASS": category,
+            "OWNER_RELEASE_CONFIRMED": "true",
+            "BACKSTOP_RELEASE_CONFIRMED": "",
+            "NO_ALLOCATION_CONFIRMED": "",
+            "COMPLETE_RESULT": "failure",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "42",
+            "STATUS_WRITES": str(writes),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    arguments = writes.read_text().splitlines()
+    expected_state, expected_class = (
+        ("error", "infra_failure") if cpu == "success" else ("failure", "failure")
+    )
+    assert f"state={expected_state}" in arguments
+    assert f"description=Complete Community CI: {expected_class}" in arguments
 
 
 @pytest.mark.parametrize("ready_after", [1, 2, 7])
@@ -2592,16 +2769,22 @@ def _host_selection_fixture(tmp_path, profile=64):
     }
     lock.write_text('{"resources":{"host_ram_gib":256},"image":"attacker:latest"}')
     # The actual trusted Python admission runs in a subprocess. Supply a fixed
-    # /user response at its HTTP boundary; resolver validation has unit coverage.
+    # identity/package responses at its HTTP boundary; parsers have unit coverage.
     http_fixture = tmp_path / "identity-http-fixture"
     http_fixture.mkdir()
     (http_fixture / "sitecustomize.py").write_text(
-        "import io, json, os, urllib.request\n"
+        "import io, json, os, urllib.request, urllib.error\n"
         "from types import SimpleNamespace\n"
         "def identity(request, timeout):\n"
-        "    assert request.full_url == 'https://api.github.com/user'\n"
         "    assert request.get_header('Authorization') == 'Bearer dedicated-test-reader-token'\n"
         "    assert timeout > 0\n"
+        "    if request.full_url == 'https://api.github.com/orgs/test-owner/packages/container/private-dependencies%2Fbase':\n"
+        "        if os.environ.get('PACKAGE_FIXTURE_MODE') == 'denied':\n"
+        "            raise urllib.error.HTTPError(request.full_url, 403, 'Forbidden', {}, io.BytesIO(b'{}'))\n"
+        "        response = io.BytesIO(json.dumps({'name':'private-dependencies/base','package_type':'container','visibility':'private'}).encode())\n"
+        "        response.status = 200\n"
+        "        return response\n"
+        "    assert request.full_url == 'https://api.github.com/user'\n"
         "    if os.environ.get('IDENTITY_FIXTURE_MODE') == 'error':\n"
         "        raise OSError('dedicated-test-reader-token upstream error')\n"
         "    login = 'test-reader' if os.environ.get('IDENTITY_FIXTURE_MODE') != 'invalid' else 'invalid\\nlogin'\n"
@@ -2682,7 +2865,8 @@ def test_trusted_host_selection_step_runs_before_any_allocation(
 
 
 @pytest.mark.parametrize(
-    "fault", ["registry", "base", "token", "identity", "invalid_identity", "base_inputs"]
+    "fault",
+    ["registry", "base", "token", "identity", "invalid_identity", "base_inputs", "package_access"],
 )
 def test_invalid_protected_catalog_stops_the_real_preallocation_step(tmp_path, gpu_job, fault):
     repository, catalog, environment = _host_selection_fixture(tmp_path)
@@ -2692,6 +2876,8 @@ def test_invalid_protected_catalog_stops_the_real_preallocation_step(tmp_path, g
         del catalog["base"]
     elif fault in {"identity", "invalid_identity"}:
         environment["IDENTITY_FIXTURE_MODE"] = "error" if fault == "identity" else "invalid"
+    elif fault == "package_access":
+        environment["PACKAGE_FIXTURE_MODE"] = "denied"
     elif fault == "base_inputs":
         from tools import community_gpu_images as images
 
@@ -2715,6 +2901,8 @@ def test_invalid_protected_catalog_stops_the_real_preallocation_step(tmp_path, g
     assert secret not in result.stdout + result.stderr
     assert "dedicated-test-reader-token" not in result.stdout + result.stderr
     assert not list(tmp_path.glob("trtmc-protected-dependency-catalog.*"))
+    if fault == "package_access":
+        assert "HTTP 403" in result.stderr
 
 
 def test_failed_blocking_reservation_stops_normal_test_admission(tmp_path, gpu_job):

@@ -3,6 +3,7 @@
 
 import copy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -408,6 +409,76 @@ def test_missing_or_invalid_reader_token_never_sends_an_auth_request(monkeypatch
     )
     with pytest.raises(images.ImagePreparationError, match="missing or invalid"):
         images.registry_reader_login(token)
+
+
+@pytest.mark.parametrize(
+    "status,headers,message,expected",
+    [
+        (
+            403,
+            {
+                "X-OAuth-Scopes": "read:packages",
+                "X-GitHub-SSO": "required;url=https://private.invalid/secret",
+            },
+            "Forbidden",
+            "organization SSO authorization required",
+        ),
+        (403, {"X-OAuth-Scopes": "repo"}, "Forbidden", "token read:packages scope=absent"),
+        (
+            403,
+            {},
+            "Private organization has an IP allow list containing secret details",
+            "organization IP allowlist restriction",
+        ),
+        (403, {}, "API rate limit exceeded: secret", "GitHub API rate limit"),
+        (401, {}, "Bad credentials: secret", "credential rejected"),
+        (
+            403,
+            {},
+            "Resource not accessible by personal access token: secret",
+            "token access rejected",
+        ),
+        (404, {}, "Not Found: private coordinates and secret", "HTTP 404"),
+    ],
+)
+def test_package_access_errors_keep_safe_http_evidence(
+    monkeypatch, status, headers, message, expected
+):
+    def open_request(request, *, timeout):
+        assert request.get_header("Authorization") == "Bearer reader-secret"
+        assert (
+            request.full_url
+            == "https://api.github.com/orgs/example/packages/container/private-ci%2Fbase"
+        )
+        raise urllib.error.HTTPError(
+            request.full_url,
+            status,
+            "private response",
+            headers,
+            io.BytesIO(json.dumps({"message": message}).encode()),
+        )
+
+    monkeypatch.setattr(
+        images.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_request)
+    )
+    with pytest.raises(images.ImagePreparationError) as error:
+        images.require_private_package(PREFIX, "reader-secret", None)
+    text = str(error.value)
+    assert f"HTTP {status}" in text and expected in text
+    assert "reader-secret" not in text and "private.invalid" not in text
+    assert "private-ci" not in text and "private coordinates" not in text and "secret" not in text
+
+
+def test_package_network_error_is_not_misreported_as_token_rejection(monkeypatch):
+    def fail(*args, **kwargs):
+        raise OSError("private-url reader-secret certificate error")
+
+    monkeypatch.setattr(
+        images.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=fail)
+    )
+    with pytest.raises(images.ImagePreparationError, match="API network request failed") as error:
+        images.require_private_package(PREFIX, "reader-secret", None)
+    assert "reader-secret" not in str(error.value) and "private-url" not in str(error.value)
 
 
 def test_real_process_output_is_bounded_during_read(monkeypatch):
