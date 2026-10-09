@@ -16,6 +16,11 @@ requirements, constraints and environment locks. TensorRT is inherited from the
 NGC SDK; no private TensorRT wheel or project prebuilt-image download is needed.
 The PyTorch CUDA wheels and remaining packages come from public indexes.
 
+Use `--from-base sha256:<local image ID>` to extend an existing local Linux/amd64
+base without rebuilding it. Before building the family layer, the helper verifies
+the base against the current public package, APT and ABI lock and receipt.
+`--base-image` continues to name the rebuilt base in the default path.
+
 After the locked build, enter that locally built environment with a compatible
 NVIDIA driver and container runtime:
 

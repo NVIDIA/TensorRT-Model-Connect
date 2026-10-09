@@ -7,23 +7,29 @@ mode=locked
 max_jobs=8
 image=trtmc-nemotron-h-dependencies:local
 base_image=trtmc-community-base:local
+from_base=""
 oci_source=${TRTMC_OCI_SOURCE:-https://github.com/NVIDIA/TensorRT-Model-Connect}
 output=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bootstrap) mode=bootstrap; shift ;;
-    --max-jobs|--output|--image|--base-image|--oci-source)
+    --max-jobs|--output|--image|--base-image|--from-base|--oci-source)
       if [ "$#" -lt 2 ]; then echo "Missing option value" >&2; exit 2; fi
       case "$1" in
         --max-jobs) max_jobs="$2" ;;
         --output) output="$2" ;;
         --image) image="$2" ;;
         --base-image) base_image="$2" ;;
+        --from-base)
+          if ! [[ "$2" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "--from-base requires an immutable local image ID" >&2; exit 2
+          fi
+          from_base="$2" ;;
         --oci-source) oci_source="$2" ;;
       esac
       shift 2 ;;
     --help)
-      echo 'Usage: build-dependencies.sh [--bootstrap] --output DIRECTORY [--max-jobs N] [--image TAG] [--base-image TAG] [--oci-source HTTPS_URL]'
+      echo 'Usage: build-dependencies.sh [--bootstrap] --output DIRECTORY [--max-jobs N] [--image TAG] [--base-image TAG] [--from-base sha256:LOCAL_IMAGE_ID] [--oci-source HTTPS_URL]'
       exit 0 ;;
     *) echo "Unknown option" >&2; exit 2 ;;
   esac
@@ -41,14 +47,17 @@ PY
 repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)
 family="$repository/families/nemotron_h"
 snapshot=20261008T000000Z
-if [ "$mode" = locked ]; then
+if [ "$mode" = locked ] || [ -n "$from_base" ]; then
   python3 "$repository/requirements/image-environment.py" validate-lock --lock "$repository/requirements/community-gpu-linux-amd64.lock"
+fi
+if [ "$mode" = locked ]; then
   python3 "$repository/requirements/image-environment.py" validate-lock --lock "$family/ci/environment-linux-amd64.lock"
 fi
 mkdir -p -- "$output"
 output=$(cd -- "$output" && pwd)
 recipe_context=$(mktemp -d)
-trap 'rm -rf -- "$recipe_context"' EXIT
+base_check_context=""
+trap 'rm -rf -- "$recipe_context"; if [ -n "$base_check_context" ]; then rm -rf -- "$base_check_context"; fi' EXIT
 cp -- "$family/requirements.txt" "$recipe_context/requirements.txt"
 cp -- "$family/ci/Dockerfile.dependencies" "$recipe_context/Dockerfile"
 cp -- "$family/ci/constraints-linux-amd64.txt" "$recipe_context/constraints-linux-amd64.txt"
@@ -72,11 +81,28 @@ record = {'schema_version': 1, 'source_sha': sys.argv[4], 'mode': sys.argv[3],
 (output / 'build-inputs.json').write_text(json.dumps(record, sort_keys=True, indent=2) + '\n')
 print(json.dumps({'mode': record['mode'], 'source_sha': record['source_sha'], 'input_files': len(paths)}))
 PY
-docker build --platform linux/amd64 --file "$repository/Dockerfile.dev.x86-gpu" \
-  --build-arg "TRTMC_ENV_LOCK_MODE=$mode" --build-arg "UBUNTU_SNAPSHOT=$snapshot" \
-  --label "org.opencontainers.image.source=$oci_source" \
-  --label "org.opencontainers.image.revision=$revision" --tag "$base_image" "$repository/requirements"
-base_id=$(docker image inspect --format '{{.Id}}' "$base_image")
+if [ -n "$from_base" ]; then
+  identity=$(docker image inspect --format '{{.Id}} {{.Os}} {{.Architecture}}' "$from_base")
+  if [ "$identity" != "$from_base linux amd64" ]; then
+    echo "The existing base must be the exact local Linux amd64 image" >&2; exit 1
+  fi
+  base_id="$from_base"
+  base_check_context=$(mktemp -d)
+  cp -- "$repository/requirements/image-environment.py" "$base_check_context/image-environment.py"
+  cp -- "$repository/requirements/community-gpu-linux-amd64.lock" "$base_check_context/environment.lock"
+  cp -- "$repository/requirements/community-gpu-linux-amd64.json" "$base_check_context/environment.json"
+  # Check the current public package, APT and ABI contract before extending a cached base.
+  docker run --rm --network none --volume "$base_check_context:/opt/trtmc-base-verify:ro" \
+    --entrypoint /opt/venv/bin/python "$base_id" /opt/trtmc-base-verify/image-environment.py verify \
+    --lock /opt/trtmc-base-verify/environment.lock \
+    --receipt /opt/trtmc-base-verify/environment.json --snapshot "$snapshot"
+else
+  docker build --platform linux/amd64 --file "$repository/Dockerfile.dev.x86-gpu" \
+    --build-arg "TRTMC_ENV_LOCK_MODE=$mode" --build-arg "UBUNTU_SNAPSHOT=$snapshot" \
+    --label "org.opencontainers.image.source=$oci_source" \
+    --label "org.opencontainers.image.revision=$revision" --tag "$base_image" "$repository/requirements"
+  base_id=$(docker image inspect --format '{{.Id}}' "$base_image")
+fi
 if ! [[ "$base_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then echo "Base image ID is invalid" >&2; exit 1; fi
 frozen_base="trtmc-nemotron-h-base:${base_id#sha256:}"
 docker tag "$base_id" "$frozen_base"
