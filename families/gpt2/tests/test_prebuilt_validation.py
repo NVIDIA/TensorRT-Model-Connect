@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prebuilt profiling must validate the actual builder-recorded checkpoint."""
 import json
+from pathlib import Path
 import struct
 
 import pytest
@@ -141,3 +142,31 @@ def test_prebuilt_reader_rejects_a_truncated_header(tmp_path):
     bundle.write_bytes(b"BUNDLE\x01\x00" + struct.pack("<Q", 100) + b"{}")
     with pytest.raises(AssertionError, match="truncated prebuilt bundle header"):
         _read_provenance(bundle)
+
+
+@pytest.mark.parametrize("optimized", [False, True], ids=["normal", "optimized"])
+@pytest.mark.parametrize("invalid", ["version", "checkpoint", "build", "signature"])
+def test_prebuilt_guards_survive_optimized_python(tmp_path, monkeypatch, optimized, invalid):
+    source = Path(__file__).parents[1] / "bundle_provenance.py"
+    namespace = {"__name__": "optimized_provenance"}
+    exec(
+        compile(source.read_text(encoding="utf-8"), str(source), "exec", optimize=int(optimized)),
+        namespace,
+    )
+    model_dir, manifest, bundle = _inputs(tmp_path, monkeypatch)
+    selected = checkpoint_identity(model_dir)
+    _write_bundle(bundle, manifest, selected)
+    validate = namespace["validate_prebuilt_bundle"]
+    assert validate(bundle, model_dir, manifest, "a" * 40)["checkpoint"] == selected
+
+    if invalid == "signature":
+        bundle.write_bytes(b"INVALID!" + bundle.read_bytes()[8:])
+    else:
+        provenance = _read_provenance(bundle)
+        provenance[invalid] = None
+        writer = BundleWriter(bundle)
+        writer.set_header(family="gpt2", task="text_generation", backend="trt")
+        writer.add_json("checkpoint_provenance.json", provenance)
+        writer.finish()
+    with pytest.raises(AssertionError):
+        validate(bundle, model_dir, manifest, "a" * 40)

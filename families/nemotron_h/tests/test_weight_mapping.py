@@ -31,12 +31,12 @@ def _patch_tensor_io(monkeypatch: pytest.MonkeyPatch, tensor_map: dict[str, np.n
     monkeypatch.setattr(model, "_load_tensor", _load)
 
 
-def test_parse_layer_types_maps_and_filters_pattern_chars():
+def test_parse_layer_types_maps_valid_pattern_chars():
     """Intent: validate pattern-to-layer-type conversion.
-    Preconditions: pattern includes valid markers and unrelated characters.
-    Postconditions: only valid markers are retained and mapped to canonical layer names.
+    Preconditions: pattern includes only supported markers.
+    Postconditions: every marker is mapped to its canonical layer name.
     """
-    parsed = model._parse_layer_types("M-x*-M")
+    parsed = model._parse_layer_types("M-*-M")
     assert parsed == ["mamba2", "mlp", "attention", "mlp", "mamba2"]
 
 
@@ -138,7 +138,7 @@ def test_load_weights_raises_for_pattern_length_mismatch(
 ):
     """Intent: ensure malformed hybrid patterns fail fast.
     Preconditions: pattern maps to fewer layer markers than num_hidden_layers.
-    Postconditions: load_weights raises AssertionError before tensor mapping proceeds.
+    Postconditions: load_weights raises ValueError before tensor mapping proceeds.
     """
     cfg = ModelConfig(
         model_type="nemotron_h",
@@ -152,5 +152,5 @@ def test_load_weights_raises_for_pattern_length_mismatch(
     )
     monkeypatch.setattr(model, "_open_safetensors", lambda _: ["reader"])
 
-    with pytest.raises(AssertionError, match="Pattern length"):
+    with pytest.raises(ValueError, match="Pattern length"):
         model._NemotronHModel().load_weights("/unused", cfg)

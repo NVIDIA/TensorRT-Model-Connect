@@ -25,33 +25,42 @@ def _json_object(payload: bytes, description: str) -> dict:
         value = json.loads(payload)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise AssertionError(f"invalid prebuilt {description} JSON") from error
-    assert isinstance(value, dict), f"invalid prebuilt {description} object"
+    if not isinstance(value, dict):
+        raise AssertionError(f"invalid prebuilt {description} object")
     return value
 
 
 def _read_provenance(bundle: Path) -> dict:
     with bundle.open("rb") as source:
-        assert source.read(8) == b"BUNDLE\x01\x00", "invalid prebuilt bundle signature"
+        if source.read(8) != b"BUNDLE\x01\x00":
+            raise AssertionError("invalid prebuilt bundle signature")
         size_bytes = source.read(8)
-        assert len(size_bytes) == 8, "truncated prebuilt bundle header"
+        if len(size_bytes) != 8:
+            raise AssertionError("truncated prebuilt bundle header")
         size = struct.unpack("<Q", size_bytes)[0]
-        assert 0 < size <= 100 * 1024 * 1024, "invalid prebuilt bundle header size"
+        if not 0 < size <= 100 * 1024 * 1024:
+            raise AssertionError("invalid prebuilt bundle header size")
         header_bytes = source.read(size)
-        assert len(header_bytes) == size, "truncated prebuilt bundle header"
+        if len(header_bytes) != size:
+            raise AssertionError("truncated prebuilt bundle header")
         header = _json_object(header_bytes, "header")
-        assert header.get("family") == "gpt2" and header.get("task") == "text_generation", (
-            "prebuilt bundle has the wrong family or task"
-        )
+        if header.get("family") != "gpt2" or header.get("task") != "text_generation":
+            raise AssertionError("prebuilt bundle has the wrong family or task")
         sections = header.get("sections")
-        assert isinstance(sections, dict), "invalid prebuilt bundle sections object"
+        if not isinstance(sections, dict):
+            raise AssertionError("invalid prebuilt bundle sections object")
         section = sections.get("checkpoint_provenance.json")
-        assert section is not None, "prebuilt bundle lacks build provenance; rebuild it with TRTMC"
-        assert isinstance(section, dict), "invalid prebuilt provenance section object"
+        if section is None:
+            raise AssertionError("prebuilt bundle lacks build provenance; rebuild it with TRTMC")
+        if not isinstance(section, dict):
+            raise AssertionError("invalid prebuilt provenance section object")
         offset, length = section.get("offset"), section.get("length")
-        assert (type(offset) is int and type(length) is int and offset >= 0
-                and 0 < length <= 1024 * 1024), "invalid prebuilt provenance section range"
+        if not (type(offset) is int and type(length) is int and offset >= 0
+                and 0 < length <= 1024 * 1024):
+            raise AssertionError("invalid prebuilt provenance section range")
         start = 16 + size + offset
-        assert start + length <= bundle.stat().st_size, "prebuilt provenance section exceeds bundle"
+        if start + length > bundle.stat().st_size:
+            raise AssertionError("prebuilt provenance section exceeds bundle")
         source.seek(start)
         return _json_object(source.read(length), "provenance")
 
@@ -61,14 +70,13 @@ def validate_prebuilt_bundle(
 ) -> dict:
     """Compare builder-recorded inputs with the selected, pinned HF snapshot."""
     provenance = _read_provenance(bundle)
-    assert provenance.get("version") == 1, "unsupported prebuilt provenance version"
+    if provenance.get("version") != 1:
+        raise AssertionError("unsupported prebuilt provenance version")
     selected = {"hf_id": manifest["hf_id"], "revision": revision}
-    assert checkpoint_identity(model_dir) == selected, (
-        "prebuilt validation requires the selected immutable HF snapshot"
-    )
-    assert provenance.get("checkpoint") == selected, (
-        "prebuilt checkpoint provenance differs from the selected checkpoint"
-    )
+    if checkpoint_identity(model_dir) != selected:
+        raise AssertionError("prebuilt validation requires the selected immutable HF snapshot")
+    if provenance.get("checkpoint") != selected:
+        raise AssertionError("prebuilt checkpoint provenance differs from the selected checkpoint")
     expected = {
         "precision": manifest["precision"],
         "max_sequence_length": manifest["max_sequence_length"],
@@ -76,5 +84,6 @@ def validate_prebuilt_bundle(
         "quantization": manifest.get("quantization") or "none",
         "fp32_layers": list(manifest.get("fp32_layers", ())),
     }
-    assert provenance.get("build") == expected, "prebuilt build profile differs from the family manifest"
+    if provenance.get("build") != expected:
+        raise AssertionError("prebuilt build profile differs from the family manifest")
     return provenance
