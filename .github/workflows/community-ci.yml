@@ -491,11 +491,15 @@ jobs:
           [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "ci_ref=$CI_REF" >> "$GITHUB_OUTPUT"
-          gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state=pending -f context="$STATUS_CONTEXT" \
-            -f description="Community CI is running" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+          # Dev's trusted inner run owns every update after dispatch; a delayed
+          # response must not overwrite an already finalized child result.
+          if [ "$LANE" = stable ]; then
+            gh api --silent --method POST \
+              "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+              -f state=pending -f context="$STATUS_CONTEXT" \
+              -f description="Community CI is running" \
+              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+          fi
 
       # Follow the exact run returned by GitHub, so every stage in that CI
       # branch contributes to the verdict, including newly added Dev stages.
@@ -523,7 +527,11 @@ jobs:
           fi
           deadline=$((SECONDS + 18000))
           while [ "$SECONDS" -lt "$deadline" ]; do
-            run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID")"
+            if ! run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID")"; then
+              echo "::warning::Community CI observation is unavailable; the existing run is still authoritative."
+              sleep 30
+              continue
+            fi
             if [ "$(jq -r '.status' <<< "$run")" = completed ]; then
               # GitHub may return a placeholder title while a newly dispatched
               # run is initializing. Verify identity before publishing its result.
@@ -539,17 +547,24 @@ jobs:
               fi
               state=failure
               if [ "$(jq -r '.conclusion' <<< "$run")" = success ]; then state=success; fi
-              gh api --silent --method POST \
-                "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-                -f state="$state" -f context="$STATUS_CONTEXT" \
-                -f description="Complete Community CI: $state" \
-                -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID"
+              if [ "$LANE" = stable ]; then
+                gh api --silent --method POST \
+                  "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+                  -f state="$state" -f context="$STATUS_CONTEXT" \
+                  -f description="Complete Community CI: $state" \
+                  -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID"
+              fi
               echo "reported=true" >> "$GITHUB_OUTPUT"
               test "$state" = success
               exit 0
             fi
             sleep 30
           done
+          if [ "$LANE" = dev ]; then
+            echo "::warning::Observation ended after five hours; the inner run will publish after release."
+            echo "reported=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           echo "::error::Community CI did not complete within five hours."
           exit 1
 
@@ -558,8 +573,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
+          LANE: ${{ matrix.lane }}
         run: |
           set -euo pipefail
+          if [ "$LANE" = dev ]; then
+            echo "::warning::The Dev observer failed; final status remains owned by the inner release gate."
+            exit 0
+          fi
           gh api --silent --method POST \
             "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
             -f state=failure -f context="$STATUS_CONTEXT" \
@@ -1420,6 +1440,8 @@ jobs:
     permissions:
       contents: read
       actions: read
+    outputs:
+      cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed }}
 
     steps:
       - name: Check out trusted GPU cleanup
@@ -1466,6 +1488,7 @@ jobs:
             --dir "$RUNNER_TEMP/gpu-ci-lease"
 
       - name: Delete the deterministic GPU instance
+        id: release
         if: ${{ always() && steps.cleanup-checkout.outcome == 'success' && steps.cleanup-login.outcome == 'success' }}
         env:
           INSTANCE_NAME: ${{ needs.provision-and-test.outputs.instance_name }}
@@ -1484,6 +1507,7 @@ jobs:
           if [ ! -f "$lease_file" ]; then
             if [ "$OWNER_CLEANUP_CONFIRMED" = true ]; then
               echo "The owning job already confirmed this allocation was released."
+              echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             # Recover intent from the original trusted producer, never from a rerun name.
@@ -1527,6 +1551,7 @@ jobs:
             --instance "$INSTANCE_NAME" \
             --lease-file "$lease_file" \
             --until-deleted
+          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
 
   publish:
     name: ${{ github.event_name == 'pull_request' && 'Stable Community CI' || inputs.ci_lane == 'dev' && 'Dev Community CI' || 'Stable Community CI' }} result
@@ -1534,9 +1559,11 @@ jobs:
     if: ${{ always() && needs.authorize.outputs.enabled == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      statuses: write
     steps:
       - name: Require the complete Community CI result
+        id: complete
         env:
           EVENT_NAME: ${{ github.event_name }}
           RUN_GPU: ${{ needs.gpu-authorize.outputs.run_gpu }}
@@ -1564,3 +1591,32 @@ jobs:
             test "$TEST_RESULT" = success
             test "$CLEANUP_RESULT" = success
           fi
+
+      - name: Publish the released Dev workflow conclusion
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.ci_lane == 'dev' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          GPU_RESULT: ${{ needs.provision-and-test.result }}
+          OWNER_RELEASE_CONFIRMED: ${{ needs.provision-and-test.outputs.cleanup_confirmed }}
+          BACKSTOP_RELEASE_CONFIRMED: ${{ needs.cleanup.outputs.cleanup_confirmed }}
+          COMPLETE_RESULT: ${{ steps.complete.outcome }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          state=failure
+          description="Complete Community CI: failure"
+          if [ "$GPU_RESULT" != skipped ] \
+            && [ "$OWNER_RELEASE_CONFIRMED" != true ] \
+            && [ "$BACKSTOP_RELEASE_CONFIRMED" != true ]; then
+            state=pending
+            description="Community CI release remains unconfirmed"
+          elif [ "$COMPLETE_RESULT" = success ]; then
+            state=success
+            description="Complete Community CI: success"
+          fi
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$state" -f context="Dev Community CI" \
+            -f description="$description" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

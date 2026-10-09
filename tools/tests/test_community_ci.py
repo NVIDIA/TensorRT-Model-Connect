@@ -1570,14 +1570,117 @@ def test_only_complete_pipeline_publishes_stable_and_dev_results(
         text=True,
     )
     assert (result.returncode == 0) is (expected == "success"), result.stderr
-    if expected is None:
+    if expected is None or lane == "dev":
         assert not (tmp_path / "calls").exists()
-    else:
+    if expected is not None:
+        assert (tmp_path / "output").read_text() == "reported=true\n"
+        assert int((tmp_path / "counter").read_text()) == (2 if queued_first else 1)
+    if expected is not None and lane == "stable":
         calls = (tmp_path / "calls").read_text().splitlines()
         assert f"state={expected}" in calls
         assert f"context={lane.title()} Community CI" in calls
-        assert (tmp_path / "output").read_text() == "reported=true\n"
-        assert int((tmp_path / "counter").read_text()) == (2 if queued_first else 1)
+
+
+@pytest.mark.parametrize("api_unavailable", [False, True])
+def test_dev_observer_timeout_never_finalizes_the_resource_owner(tmp_path, api_unavailable):
+    script = r"""
+gh() {
+  if [[ "$*" == *"/actions/runs/"* ]]; then
+    if [ "$API_UNAVAILABLE" = true ]; then return 1; fi
+    printf '%s\n' '{"status":"in_progress"}'
+  else
+    printf '%s\n' "$*" >> "$STATUS_WRITES"
+  fi
+}
+sleep() { SECONDS=$((SECONDS + 18001)); }
+""" + _workflow_step_script(
+        "community-ci.yml", "dispatch", "Publish the complete workflow conclusion"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "PIPELINE_RUN_ID": "42",
+            "CI_BRANCH": "ci/developer",
+            "LANE": "dev",
+            "PR_NUMBER": "17",
+            "HEAD_SHA": "a" * 40,
+            "SOURCE_SNAPSHOT": json.dumps({"merge_sha": "b" * 40}),
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "API_UNAVAILABLE": str(api_unavailable).lower(),
+            "STATUS_WRITES": str(tmp_path / "writes"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "writes").exists()
+    assert (tmp_path / "output").read_text() == "reported=true\n"
+    assert "inner run will publish after release" in result.stdout
+    fallback = _workflow_step_script("community-ci.yml", "dispatch", "Report a failed CI request")
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$*" >> "$STATUS_WRITES"; }\n' + fallback],
+        env={**os.environ, "LANE": "dev", "STATUS_WRITES": str(tmp_path / "writes")},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0 and not (tmp_path / "writes").exists()
+
+
+@pytest.mark.parametrize(
+    "owner,backstop,gpu,complete,expected",
+    [
+        ("true", "true", "success", "success", "success"),
+        ("true", "true", "failure", "failure", "failure"),
+        ("", "true", "failure", "failure", "failure"),
+        ("true", "", "failure", "failure", "failure"),
+        ("", "", "failure", "failure", "pending"),
+        ("", "", "success", "success", "pending"),
+        ("", "", "skipped", "failure", "failure"),
+    ],
+)
+def test_trusted_inner_status_requires_release_before_a_gpu_verdict(
+    tmp_path, owner, backstop, gpu, complete, expected
+):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    publisher = workflow["jobs"]["publish"]
+    assert {"provision-and-test", "cleanup"} <= set(publisher["needs"])
+    assert publisher["permissions"] == {"statuses": "write"}
+    step = next(
+        s for s in publisher["steps"] if s["name"] == "Publish the released Dev workflow conclusion"
+    )
+    assert "always()" in step["if"] and "workflow_dispatch" in step["if"]
+    assert "inputs.ci_lane == 'dev'" in step["if"]
+    assert step["env"]["HEAD_SHA"] == "${{ needs.authorize.outputs.head_sha }}"
+    writes = tmp_path / "writes"
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + step["run"]],
+        env={
+            **os.environ,
+            "HEAD_SHA": "a" * 40,
+            "GPU_RESULT": gpu,
+            "OWNER_RELEASE_CONFIRMED": owner,
+            "BACKSTOP_RELEASE_CONFIRMED": backstop,
+            "COMPLETE_RESULT": complete,
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "42",
+            "STATUS_WRITES": str(writes),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    arguments = writes.read_text().splitlines()
+    assert f"state={expected}" in arguments
+    assert "context=Dev Community CI" in arguments
+    assert "target_url=https://github.com/example/source/actions/runs/42" in arguments
+    if expected == "pending":
+        assert "description=Community CI release remains unconfirmed" in arguments
 
 
 @pytest.mark.parametrize("ready_after", [1, 2, 7])
@@ -2122,6 +2225,7 @@ class JobHarness:
     def __init__(self, tmp_path: Path, job: dict):
         self.directory = tmp_path
         self.steps = {step.get("id", step["name"]): step for step in job["steps"]}
+        self.steps.update({step["name"]: step for step in job["steps"]})
         self.trace = tmp_path / "trace"
         catalog = tmp_path / "trtmc-gpu-host-profiles.json"
         if not catalog.exists():

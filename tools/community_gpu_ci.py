@@ -19,6 +19,7 @@ import tempfile
 import time
 import uuid
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,13 +109,19 @@ def _family_result(env: dict[str, str], family: str):
         "family": family,
         "status": "running",
         "phase": "plan",
-        "failure_class": "configuration",
+        "failure_class": "infra_failure",
+        "entrypoint_started": False,
         "requested_cases": [],
     }
     try:
         yield report
     except Exception as error:
-        report.update(status="failed", exit_code=1, evidence=str(error)[-4000:])
+        report.update(
+            status="failed",
+            exit_code=1,
+            failure_class="pr_failure" if report["entrypoint_started"] else "infra_failure",
+            evidence=str(error)[-4000:],
+        )
         raise
     else:
         report.update(status="passed", phase="complete", failure_class=None, exit_code=0)
@@ -385,10 +392,46 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
         _run_family(repository, env, family, report)
 
 
-def _run_family(repository: Path, env: dict[str, str], family: str, report: dict) -> None:
-    from tools.ci.context import CiContext
-    from tools.ci.e2e import E2ERunner
+def prepare_family_impact(repository: Path, plan: FamilyPlan) -> None:
+    """Reserve one generated input for the existing repository CI entrypoint."""
+    tracked = subprocess.run(
+        ["git", "-C", str(repository), "ls-files", "--error-unmatch", "impact.json"],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if tracked.returncode == 0:
+        raise CommunityGpuError("The PR tracks the reserved Community impact input")
+    if tracked.returncode != 1:
+        raise CommunityGpuError("Cannot verify the reserved Community impact input")
+    destination = repository / "impact.json"
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise CommunityGpuError("The reserved Community impact input is not a regular file")
+    _save_json(destination, {"families": [plan.family], "testcases": list(plan.testcases)})
 
+
+def _family_command(
+    repository: Path,
+    env: dict[str, str],
+    command: Sequence[str | Path],
+    *,
+    limit: str | None = None,
+) -> None:
+    """Run the existing native/CLI entrypoints without importing PR helpers."""
+    arguments = [str(value) for value in command]
+    if limit is not None:
+        arguments = ["timeout", "--kill-after=2m", limit, *arguments]
+    subprocess.run(arguments, cwd=repository, env=env, check=True)
+
+
+def _entrypoint_started(path: Path, family: str) -> bool:
+    try:
+        return _dependency_bytes(Path(str(path) + ".entrypoint")) == (family + "\n").encode()
+    except (CommunityGpuError, OSError):
+        return False
+
+
+def _run_family(repository: Path, env: dict[str, str], family: str, report: dict) -> None:
     repository = repository.resolve()
     plan = family_plan(repository, family)
     if not plan.testcases:
@@ -399,32 +442,45 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
         **env,
         "CMAKE_CUDA_ARCHITECTURES": env.get("CMAKE_CUDA_ARCHITECTURES", "89"),
     }
-    context = CiContext(repository, build_env)
     print(f"Running Community GPU E2E: {family} ({', '.join(plan.testcases)})", flush=True)
-    # Install before configuring native targets so they use this family's ABI.
-    _phase(report, env, "dependencies", "dependency")
-    _install_family_requirements(context, (plan,))
+    # Dependencies and assets are prepared by the trusted host before this
+    # wrapper runs. Do not import contributor Python during environment probes.
+    _phase(report, env, "gpu", "infra_failure")
+    _family_command(
+        repository,
+        build_env,
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import tensorrt, torch, tvm_ffi; assert torch.cuda.is_available(); "
+            "print(f'GPU count: {torch.cuda.device_count()}')",
+        ],
+    )
+    if env.get("TRTMC_CHECKPOINTS_PRESTAGED") != "1":
+        raise CommunityGpuError("Family checkpoints were not prepared before the PR entrypoint")
+    impact = _dependency_json(_dependency_bytes(repository / "impact.json", root=repository))
+    if impact.get("families") != [family] or impact.get("testcases") != list(plan.testcases):
+        raise CommunityGpuError("The prepared family selection does not match its PR entrypoint")
     targets = [f"trtmc_model_{plan.family}"]
     declaration = repository / "families" / plan.family / "cli.json"
     if declaration.is_file() and native_cli_library(declaration) is not None:
         targets.append(f"trtmc_cli_{plan.family}")
-    _phase(report, env, "gpu", "environment")
-    context.run(
-        [
-            sys.executable,
-            "-c",
-            "import torch; assert torch.cuda.is_available(); "
-            "print(f'GPU count: {torch.cuda.device_count()}')",
-        ]
-    )
-
     build = Path(env.get("TRTMC_NATIVE_BUILD_DIR", "/tmp/trtmc-community-gpu-build"))
     if not build.is_absolute() or Path("/tmp") not in build.parents:
         raise CommunityGpuError(f"Community GPU build directory must be inside /tmp: {build}")
     if build.exists():
         raise CommunityGpuError(f"Community GPU build directory already exists: {build}")
-    _phase(report, env, "configure", "build")
-    context.run(
+    # The marker precedes the first contributor-controlled native or Python
+    # entrypoint. Its sidecar survives a missing or malformed result JSON.
+    report["entrypoint_started"] = True
+    if destination := env.get("TRTMC_GPU_RESULT_FILE"):
+        Path(destination + ".entrypoint").write_text(family + "\n", encoding="utf-8")
+    _phase(report, env, "configure", "pr_failure")
+    print(f"TRTMC_PR_ENTRYPOINT_STARTED={family}", flush=True)
+    _family_command(
+        repository,
+        build_env,
         [
             "cmake",
             "-S",
@@ -436,10 +492,12 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
             "-DCMAKE_BUILD_TYPE=Release",
             "-DTRTMC_BUILD_TESTS=ON",
             "-DTRTMC_BUILD_EXAMPLES=OFF",
-        ]
+        ],
     )
-    _phase(report, env, "build", "build")
-    context.run(
+    _phase(report, env, "build", "pr_failure")
+    _family_command(
+        repository,
+        build_env,
         [
             "cmake",
             "--build",
@@ -459,7 +517,9 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
         **env,
         "HF_HOME": env.get("HF_HOME", "/tmp/trtmc-community-huggingface"),
     }
-    context.run(
+    _family_command(
+        repository,
+        build_env,
         [
             "cmake",
             "--build",
@@ -471,11 +531,8 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
         ],
         limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
     )
-    _phase(report, env, "runtime", "harness")
+    _phase(report, env, "runtime", "pr_failure")
     runtime_root = _runtime_root(build, plan, repository)
-    if env.get("TRTMC_CHECKPOINTS_PRESTAGED") != "1":
-        _phase(report, env, "checkpoints", "dependency")
-        _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
     runtime_env = {
         **checkpoint_env,
         "CMAKE_CUDA_ARCHITECTURES": build_env["CMAKE_CUDA_ARCHITECTURES"],
@@ -493,10 +550,11 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
         "TRTMC_NATIVE_BUILD_DIR": str(build),
         "TRTMC_E2E_TIMEOUT": env.get("TRTMC_E2E_TIMEOUT", "40m"),
     }
-    _phase(report, env, "validation", "validation")
-    E2ERunner(CiContext(repository, runtime_env))._run(
-        (plan.family,),
-        plan.testcases,
+    _phase(report, env, "validation", "pr_failure")
+    _family_command(
+        repository,
+        runtime_env,
+        [sys.executable, "-m", "tools.ci", "pipeline", "selective-e2e"],
     )
     print(f"Community GPU family passed: {plan.family}", flush=True)
 
@@ -509,11 +567,14 @@ def _container_result(
     expected_cases: tuple[str, ...] | None = None,
 ) -> dict:
     """Treat container evidence as bounded data, never as a command or retry policy."""
+    entered = _entrypoint_started(path, family)
+    category = "pr_failure" if entered else "infra_failure"
     record = {
         "family": family,
         "status": "failed",
         "phase": "container",
-        "failure_class": "unknown",
+        "failure_class": category,
+        "entrypoint_started": entered,
         "exit_code": exit_code,
         "requested_cases": list(expected_cases or ()),
         "cases": {name: "not_run" for name in expected_cases or ()},
@@ -560,6 +621,8 @@ def _container_result(
             raise ValueError("invalid result phase")
         if value.get("failure_class") not in {
             None,
+            "infra_failure",
+            "pr_failure",
             "configuration",
             "dependency",
             "environment",
@@ -579,7 +642,6 @@ def _container_result(
                 for key in (
                     "status",
                     "phase",
-                    "failure_class",
                     "requested_cases",
                     "cases",
                     "duration_seconds",
@@ -591,25 +653,27 @@ def _container_result(
         record["cases"] = {name: cases.get(name, "not_run") for name in requested}
         if exit_code == 0 and value["status"] == "passed":
             if (
-                not requested
+                not entered
+                or not requested
                 or set(cases) != set(requested)
                 or any(v != "passed" for v in cases.values())
             ):
                 raise ValueError("family passed without complete selected E2E evidence")
+            record["failure_class"] = None
         else:
             record["status"] = "failed"
             if value["status"] == "passed":
-                record["failure_class"] = "unknown"
+                record["failure_class"] = category
     except (OSError, ValueError, TypeError, RecursionError):
         record.update(
             status="failed",
-            failure_class="unknown",
+            failure_class=category,
             evidence="missing, incomplete or invalid family result",
         )
     if state.get("OOMKilled") is True:
         record.update(
             status="failed",
-            failure_class="resource",
+            failure_class=category,
             evidence="Docker reported OOMKilled for this container",
         )
     return record
@@ -1524,13 +1588,7 @@ def main() -> int:
                 )
             _stage_checkpoints((plan,), args.cache_dir)
         else:
-            # Source imports happen only inside the selected family's container.
-            from tools.ci.process import CiError
-
-            try:
-                run(args.repository, dict(os.environ), args.family)
-            except CiError as error:
-                raise CommunityGpuError(str(error)) from error
+            run(args.repository, dict(os.environ), args.family)
     except (CommunityGpuError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"ERROR: {error}", file=sys.stderr, flush=True)
         return 1

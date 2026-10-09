@@ -903,32 +903,21 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         )
     build = Path("/tmp") / f"{tmp_path.name}-native-build"
     commands: list[list[str]] = []
-    e2e_calls: list[tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]] = []
+    e2e_calls: list[dict[str, str]] = []
+    destination = tmp_path / "result.json"
+    (tmp_path / "impact.json").write_text(
+        json.dumps({"families": ["alpha"], "testcases": ["alpha-smoke"]})
+    )
 
-    class FakeContext:
-        """Record orchestration without requiring CUDA or a compiler."""
+    def command(repository, env, argv, **_kwargs):
+        rendered = [str(argument) for argument in argv]
+        commands.append(rendered)
+        if rendered[:2] == ["cmake", "-S"]:
+            assert Path(str(destination) + ".entrypoint").read_text() == "alpha\n"
+        if rendered[1:] == ["-m", "tools.ci", "pipeline", "selective-e2e"]:
+            e2e_calls.append(env)
 
-        def __init__(self, repository: Path, env: dict[str, str]):
-            self.repository = repository
-            self.env = env
-
-        def run(self, command, **_kwargs) -> subprocess.CompletedProcess[str]:
-            commands.append([str(argument) for argument in command])
-            return subprocess.CompletedProcess(command, 0)
-
-    class FakeE2ERunner:
-        """Capture the exact family and testcase contract passed by the entrypoint."""
-
-        def __init__(self, context: FakeContext):
-            self.context = context
-
-        def _run(self, families: tuple[str, ...], testcases: tuple[str, ...]) -> None:
-            e2e_calls.append((self.context.env, families, testcases))
-
-    monkeypatch.setattr(ci_context, "CiContext", FakeContext)
-    monkeypatch.setattr(ci_e2e, "E2ERunner", FakeE2ERunner)
-    monkeypatch.setattr(community_gpu_ci, "_install_family_requirements", lambda *_args: None)
-    monkeypatch.setattr(community_gpu_ci, "_stage_checkpoints", lambda *_args: None)
+    monkeypatch.setattr(community_gpu_ci, "_family_command", command)
     monkeypatch.setattr(
         community_gpu_ci,
         "_runtime_root",
@@ -943,6 +932,8 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
             "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
             "TRTMC_GPU_ADDED_FAMILIES": "[]",
             "TRTMC_NATIVE_BUILD_DIR": str(build),
+            "TRTMC_CHECKPOINTS_PRESTAGED": "1",
+            "TRTMC_GPU_RESULT_FILE": str(destination),
         },
         "alpha",
     )
@@ -958,19 +949,146 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         expected_targets.append("trtmc_cli_alpha")
     assert native_builds[1][native_builds[1].index("--target") + 1 :] == expected_targets
     assert len(e2e_calls) == 1
-    runtime, families, testcases = e2e_calls[0]
-    assert families == ("alpha",)
-    assert testcases == ("alpha-smoke",)
+    runtime = e2e_calls[0]
+    assert json.loads((tmp_path / "impact.json").read_text()) == {
+        "families": ["alpha"],
+        "testcases": ["alpha-smoke"],
+    }
     assert runtime["TRTMC_BINARY"] == str(build / "trtmc")
     assert runtime["TRTMC_RUNTIME_ROOT"] == str(build / "runtime")
     assert runtime["TRTMC_NATIVE_BUILD_DIR"] == str(build)
     assert runtime["HF_HUB_OFFLINE"] == "1"
 
 
+@pytest.mark.parametrize("failure", ["probe", "configure", "test", ""])
+def test_actual_pr_cli_starts_only_after_preparation(tmp_path, monkeypatch, failure):
+    """Execute fake native tools and the repository's real Python CLI process."""
+    _family(
+        tmp_path,
+        "alpha",
+        [{"family": "alpha", "testcases": [{"name": "alpha-smoke", "premerge": True}]}],
+    )
+    (tmp_path / "impact.json").write_text(
+        json.dumps({"families": ["alpha"], "testcases": ["alpha-smoke"]})
+    )
+    package = tmp_path / "tools/ci"
+    package.mkdir(parents=True)
+    (package.parent / "__init__.py").write_text("")
+    (package / "__init__.py").write_text("")
+    (package / "context.py").write_text("raise RuntimeError('PR helper imported during prep')\n")
+    (package / "__main__.py").write_text(
+        "import json,os,sys\nfrom pathlib import Path\n"
+        "p=Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "assert Path(str(p)+'.entrypoint').read_text()=='alpha\\n'\n"
+        "assert sys.argv[1:]==['pipeline','selective-e2e']\n"
+        "assert json.loads(Path('impact.json').read_text())['testcases']==['alpha-smoke']\n"
+        "with Path(os.environ['BOUNDARY_EVENTS']).open('a') as s: s.write('pr-cli\\n')\n"
+        "if os.environ['BOUNDARY_FAILURE']=='test': raise SystemExit(17)\n"
+        "build=Path(os.environ['TRTMC_NATIVE_BUILD_DIR'])\n"
+        "assert Path(os.environ['TRTMC_BINARY']).is_file()\n"
+        "assert Path(os.environ['TRTMC_RUNTIME_ROOT']).is_dir()\n"
+        "(build/'trtmc-alpha-e2e-junit.xml').write_text('<testsuites><testsuite>'"
+        "+'<testcase name=\"test_official_checkpoint_e2e[alpha-smoke]\"/>'"
+        "+'</testsuite></testsuites>')\n"
+    )
+    tools = tmp_path / "fake-bin"
+    tools.mkdir()
+    cmake = tools / "cmake"
+    cmake.write_text(
+        f"#!{sys.executable}\nimport os,sys\nfrom pathlib import Path\n"
+        "p=Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "assert Path(str(p)+'.entrypoint').read_text()=='alpha\\n'\n"
+        "with Path(os.environ['BOUNDARY_EVENTS']).open('a') as s: s.write('cmake\\n')\n"
+        "if '-S' in sys.argv and os.environ['BOUNDARY_FAILURE']=='configure': raise SystemExit(13)\n"
+        "build=Path(os.environ['TRTMC_NATIVE_BUILD_DIR']); build.mkdir(exist_ok=True)\n"
+        "for name in ('trtmc','libtrtmc_core.so','libtrtmc_runtime.so','libtrtmc_c.so',"
+        "'libtrtmc_c.so.1','libtrtmc_backend_trt.so','libtrtmc_model_alpha.so'):\n"
+        " (build/name).touch()\n"
+    )
+    cmake.chmod(0o755)
+    destination = tmp_path / "result.json"
+    events = tmp_path / "events"
+    env = {
+        **os.environ,
+        "PATH": f"{tools}:{os.environ['PATH']}",
+        "TRTMC_CHECKPOINTS_PRESTAGED": "1",
+        "TRTMC_NATIVE_BUILD_DIR": str(tmp_path / "build"),
+        "TRTMC_GPU_RESULT_FILE": str(destination),
+        "BOUNDARY_EVENTS": str(events),
+        "BOUNDARY_FAILURE": failure,
+    }
+    original = community_gpu_ci._family_command
+
+    def run(repository, environment, argv, **options):
+        if "-I" in argv:
+            assert not events.exists()
+            assert not Path(str(destination) + ".entrypoint").exists()
+            if failure == "probe":
+                raise subprocess.CalledProcessError(7, argv)
+            return
+        original(repository, environment, argv, **options)
+
+    monkeypatch.setattr(community_gpu_ci, "_family_command", run)
+    if failure:
+        with pytest.raises(subprocess.CalledProcessError):
+            community_gpu_ci.run(tmp_path, env, "alpha")
+    else:
+        community_gpu_ci.run(tmp_path, env, "alpha")
+    result = json.loads(destination.read_text())
+    entered = failure != "probe"
+    assert result["entrypoint_started"] is entered
+    if failure:
+        assert result["failure_class"] == ("pr_failure" if entered else "infra_failure")
+    else:
+        assert result["status"] == "passed" and result["cases"] == {"alpha-smoke": "passed"}
+    observed = events.read_text().splitlines() if events.exists() else []
+    assert observed == (
+        []
+        if failure == "probe"
+        else ["cmake"]
+        if failure == "configure"
+        else ["cmake", "cmake", "cmake", "pr-cli"]
+    )
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_prepared_selection_never_overwrites_a_tracked_pr_input(tmp_path, tracked):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    impact = tmp_path / "impact.json"
+    impact.write_text('{"contributor":"input"}')
+    if tracked:
+        subprocess.run(["git", "-C", str(tmp_path), "add", "impact.json"], check=True)
+        with pytest.raises(CiError, match="tracks the reserved"):
+            community_gpu_ci.prepare_family_impact(
+                tmp_path, community_gpu_ci.FamilyPlan("alpha", ("required",), ())
+            )
+        assert impact.read_text() == '{"contributor":"input"}'
+    else:
+        community_gpu_ci.prepare_family_impact(
+            tmp_path, community_gpu_ci.FamilyPlan("alpha", ("required",), ())
+        )
+        assert json.loads(impact.read_text()) == {"families": ["alpha"], "testcases": ["required"]}
+
+
+@pytest.mark.parametrize("corrupt_result", [False, True])
+def test_post_entry_failure_stays_pr_failure_with_missing_or_invalid_receipt(
+    tmp_path, corrupt_result
+):
+    path = tmp_path / "result.json"
+    Path(str(path) + ".entrypoint").write_text("alpha\n")
+    if corrupt_result:
+        path.write_text("invalid JSON")
+    result = community_gpu_ci._container_result(path, "alpha", 17, {}, ("required",))
+    assert result["failure_class"] == "pr_failure"
+    assert result["entrypoint_started"] is True and result["status"] == "failed"
+    assert result["cases"] == {"required": "not_run"}
+
+
 def _container_receipt(command: list[str], failed: bool = False) -> None:
     """Emulate a completed container, including its selected E2E evidence."""
     cache = next(value for value in command if value.endswith(":/tmp/trtmc-community-huggingface"))
     family = command[-1]
+    (Path(cache.rsplit(":", 1)[0]) / "result.json.entrypoint").write_text(family + "\n")
     (Path(cache.rsplit(":", 1)[0]) / "result.json").write_text(
         json.dumps(
             {
@@ -1234,6 +1352,7 @@ def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
         "elif sys.argv[1] == 'inspect': print('{}')\n"
         "elif sys.argv[1] == 'run':\n"
         "    cache = next(v for v in sys.argv if v.endswith(':/tmp/trtmc-community-huggingface'))\n"
+        "    (Path(cache.rsplit(':', 1)[0]) / 'result.json.entrypoint').write_text('alpha\\n')\n"
         "    (Path(cache.rsplit(':', 1)[0]) / 'result.json').write_text(json.dumps({\n"
         "        'schema_version': 1, 'family': 'alpha', 'status': 'passed',\n"
         "        'phase': 'complete', 'failure_class': None,\n"
@@ -3052,10 +3171,11 @@ def test_family_result_preserves_failed_skipped_and_unrun_cases(tmp_path):
     with pytest.raises(RuntimeError, match="original validation error"):
         with community_gpu_ci._family_result(env, "alpha") as record:
             record["requested_cases"] = ["one", "two", "three", "four"]
+            record["entrypoint_started"] = True
             community_gpu_ci._phase(record, env, "validation", "validation")
             raise RuntimeError("original validation error")
     result = json.loads(destination.read_text())
-    assert result["status"] == "failed" and result["failure_class"] == "validation"
+    assert result["status"] == "failed" and result["failure_class"] == "pr_failure"
     assert result["cases"] == {
         "one": "passed",
         "two": "failed",
@@ -3091,10 +3211,11 @@ def test_container_exit_zero_requires_complete_owned_e2e_evidence(tmp_path, muta
         path.symlink_to(outside)
     result = community_gpu_ci._container_result(path, "alpha", 0, {})
     assert result["status"] == "failed"
-    assert result["failure_class"] == "unknown"
+    assert result["failure_class"] == "infra_failure"
 
 
-def test_confirmed_container_oom_is_a_resource_failure(tmp_path):
+@pytest.mark.parametrize("entered", [False, True])
+def test_confirmed_container_oom_is_classified_by_entrypoint_boundary(tmp_path, entered):
     path = tmp_path / "result.json"
     path.write_text(
         json.dumps(
@@ -3109,8 +3230,11 @@ def test_confirmed_container_oom_is_a_resource_failure(tmp_path):
             }
         )
     )
+    if entered:
+        Path(str(path) + ".entrypoint").write_text("alpha\n")
     result = community_gpu_ci._container_result(path, "alpha", 137, {"OOMKilled": True})
-    assert result["failure_class"] == "resource" and result["status"] == "failed"
+    assert result["failure_class"] == ("pr_failure" if entered else "infra_failure")
+    assert result["status"] == "failed" and result["entrypoint_started"] is entered
     assert result["phase"] == "validation" and result["cases"]["one"] == "not_run"
 
 
@@ -3154,7 +3278,7 @@ def test_container_cannot_replace_the_host_selected_case_inventory(tmp_path):
         )
     )
     result = community_gpu_ci._container_result(path, "alpha", 0, {}, ("required", "other"))
-    assert result["status"] == "failed" and result["failure_class"] == "unknown"
+    assert result["status"] == "failed" and result["failure_class"] == "infra_failure"
     assert result["cases"] == {"required": "not_run", "other": "not_run"}
 
 
@@ -3188,8 +3312,9 @@ def test_real_container_client_timeout_cleans_up_before_next_family(tmp_path, mo
         "elif sys.argv[1] == 'run':\n"
         "    family = sys.argv[-1]\n"
         "    with events.open('a') as f: f.write('start ' + family + '\\n')\n"
-        "    if family == 'alpha': time.sleep(10)\n"
         "    cache = next(v for v in sys.argv if v.endswith(':/tmp/trtmc-community-huggingface'))\n"
+        "    (Path(cache.rsplit(':',1)[0]) / 'result.json.entrypoint').write_text(family+'\\n')\n"
+        "    if family == 'alpha': time.sleep(10)\n"
         "    (Path(cache.rsplit(':',1)[0]) / 'result.json').write_text(json.dumps({\n"
         "        'schema_version':1,'family':family,'status':'passed','phase':'complete',\n"
         "        'failure_class':None,'requested_cases':[family],'cases':{family:'passed'}}))\n"
