@@ -7,7 +7,7 @@ candidate:
   family: modernbert
   checkpoint: answerdotai/ModernBERT-base
   revision: 8949b909ec900327062f0ebf497f51aef5e6f0c8
-  task: encoding
+  task: text_to_pooled_features
   precision: fp32
   bundle: modernbert-base.bundle
   build:

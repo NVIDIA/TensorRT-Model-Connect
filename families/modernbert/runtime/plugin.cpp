@@ -45,11 +45,22 @@ std::int32_t require_tensor_parallel_size(const nlohmann::json& config) {
 }
 
 std::string require_task(const BundleInfo& info) {
-    if (info.task == IEncoding::kTask || info.task == IEmbedding::kTask ||
-        info.task == IReranking::kTask) {
+    if (info.task == internal::ITextToPooledFeatures::kTask ||
+        info.task == internal::ITextToEmbedding::kTask ||
+        info.task == internal::ITextPairToRelevance::kTask) {
         return info.task;
     }
     throw std::runtime_error("ModernBERT does not implement task: " + info.task);
+}
+
+std::int64_t require_positive_integer(const nlohmann::json& config, const char* name) {
+    if (!config.contains(name) || !config.at(name).is_number_integer())
+        throw std::invalid_argument("ModernBERT runtime.json requires integer " +
+                                    std::string(name));
+    const auto value = config.at(name).get<std::int64_t>();
+    if (value <= 0 || value > std::numeric_limits<std::int32_t>::max())
+        throw std::invalid_argument("ModernBERT runtime.json has invalid " + std::string(name));
+    return value;
 }
 
 } // namespace
@@ -60,6 +71,11 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::invalid_argument("modernbert does not support --kv-cache-size");
     const auto config = trtmc::modernbert_factory::require_config(context.reader);
     const auto tp_size = trtmc::modernbert_factory::require_tensor_parallel_size(config);
+    const auto task = trtmc::modernbert_factory::require_task(context.reader.info());
+    const auto vocab_size =
+        trtmc::modernbert_factory::require_positive_integer(config, "vocab_size");
+    const auto max_sequence_length =
+        trtmc::modernbert_factory::require_positive_integer(config, "max_sequence_length");
     const auto group = trtmc::modernbert::initialize_tensor_parallel_group(tp_size);
     const std::string section =
         tp_size == 1 ? "engine.plan" : "engine.rank" + std::to_string(group.rank) + ".plan";
@@ -75,6 +91,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto tokenizer = trtmc::create_tokenizer_from_bundle(context.reader);
     if (!tokenizer)
         throw std::runtime_error("ModernBERT bundle does not contain its required tokenizer");
-    const auto task = trtmc::modernbert_factory::require_task(context.reader.info());
-    return new trtmc::EncoderPipeline(std::move(loaded.module), task, std::move(tokenizer));
+    return new trtmc::modernbert::EncoderPipeline(
+        std::move(loaded.module), task, std::move(tokenizer), vocab_size, max_sequence_length);
 }

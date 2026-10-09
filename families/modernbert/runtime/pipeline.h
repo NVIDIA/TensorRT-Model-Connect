@@ -5,52 +5,51 @@
 
 #pragma once
 
-// EncoderPipeline: single-pass encoder models (BERT, embedding, reranking).
-
 #include "families/modernbert/runtime/tokenizer.h"
+#include "trtmc/internal/features.h"
+#include "trtmc/internal/model.h"
 #include "trtmc/runtime/trt_module.h"
-#include "trtmc/task.h"
 
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtmc {
+namespace trtmc::modernbert {
 
-class EncoderPipeline final : public IEmbedding, public IEncoding, public IReranking {
+class EncoderPipeline final : public internal::IModel,
+                              public internal::ITextToPooledFeatures,
+                              public internal::ITextToEmbedding,
+                              public internal::ITextPairToRelevance,
+                              public internal::ITextQueryDocumentsToRelevance {
   public:
-    const char* task() const noexcept override {
-        if (mode_ == "embedding")
-            return IEmbedding::kTask;
-        if (mode_ == "reranking")
-            return IReranking::kTask;
-        return IEncoding::kTask;
-    }
+    EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string task,
+                    std::shared_ptr<ITokenizer> tokenizer, std::int64_t vocab_size,
+                    std::int64_t max_sequence_length);
 
-    EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string mode,
-                    std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
-
-    EmbeddingResult embed(const std::string& text) override;
-    EmbeddingResult encode(const std::string& text) override;
-    float rerank(const std::string& query, const std::string& document) override;
-    std::vector<float> rerank_batch(const std::string& query,
-                                    const std::vector<std::string>& documents) override {
-        std::vector<float> scores;
-        scores.reserve(documents.size());
-        for (const auto& document : documents)
-            scores.push_back(rerank(query, document));
-        return scores;
-    }
-
-    // Token-ID-based encoding (for unit tests and internal callers).
-    EmbeddingResult encode_ids(const std::vector<int32_t>& input_ids);
+    const char* task() const noexcept override { return task_.c_str(); }
+    std::vector<internal::TaskInstance> task_bindings() override;
+    internal::PooledFeaturesResult run(const internal::TextToPooledFeaturesRequest&,
+                                       internal::ConfigView) override;
+    internal::SemanticEmbeddingResult run(const internal::TextToEmbeddingRequest&,
+                                          internal::ConfigView) override;
+    internal::RelevanceResult run(const internal::TextPairToRelevanceRequest&,
+                                  internal::ConfigView) override;
+    internal::DocumentRelevanceResult run(const internal::TextQueryDocumentsToRelevanceRequest&,
+                                          internal::ConfigView) override;
 
   private:
+    void require_task(std::string_view task, internal::ConfigView config) const;
+    std::vector<std::int32_t> resolve_ids(const internal::TextSource&) const;
+    std::vector<float> forward(const std::vector<std::int32_t>& ids);
+
     std::unique_ptr<ITrtModule> encoder_;
-    std::string mode_; // "encoder_only", "embedding", "reranking"
+    std::string task_;
     std::shared_ptr<ITokenizer> tokenizer_;
-    std::string model_id_;
+    std::int64_t vocab_size_;
+    std::int64_t max_sequence_length_;
+    std::size_t fixed_sequence_length_{0};
+    DType mask_dtype_;
+    std::size_t hidden_size_;
 };
 
-} // namespace trtmc
+} // namespace trtmc::modernbert
