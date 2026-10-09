@@ -273,6 +273,12 @@ def build_dual_profile_decoder_engine(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    if quant_ctx is not None:
+        # Keeps per-layer tactic names in the plan so FP8 lowering can be inspected.
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
+        # Fused gate/up kernels fail to compile with scalar-scale FP8 inputs.
+        trt_config.build_route = "-peep:match_dual_gemm=off"
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
