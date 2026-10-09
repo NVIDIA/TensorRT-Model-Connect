@@ -144,7 +144,7 @@ class Session:
     batches: list[dict[str, Any]] = field(default_factory=list)
 
     def record(self, run: Any, metadata: Mapping[str, Any]) -> None:
-        from .absolute import capacity_rejection
+        from .absolute import capacity_rejection, unanswered
 
         identity = dict(metadata["identity"])
         units = metadata.get("units")
@@ -167,7 +167,7 @@ class Session:
             except (TypeError, ValueError):
                 ms = None
             valid_time = ms is not None and math.isfinite(ms) and ms > 0
-            valid = raw.get("status") == 200 and not raw.get("error") and not (
+            valid = not unanswered(raw) and not (
                 raw.get("metadata") or {}).get("was_cancelled")
             try:
                 work = self.work_evidence(observation(body)) if valid else None

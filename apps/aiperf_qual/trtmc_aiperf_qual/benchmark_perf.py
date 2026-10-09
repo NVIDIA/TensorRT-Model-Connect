@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 from . import absolute, execution, judge
@@ -36,14 +37,15 @@ def refresh(out: Path, report: dict) -> dict:
                if not batch.get("superseded") and batch["batch_id"] not in superseded]
     excluded = {item["suite"] for item in report.get("accuracy", [])
                 if item.get("out_of_capacity") and item.get("status") != "error"}
-    # Older execution exports omit rejection reasons. Read their original raw
-    # error records only when accuracy explicitly excluded capacity rejections.
-    raw = {}
+    # Recover older classifications only from the matching original response.
+    # Empty HTTP 200 answers remain wrong for accuracy, but have valid timings.
+    raw, recovered = {}, 0
     for batch in batches:
-        if batch["workload"] not in excluded or batch["identity"].get("side") != "candidate":
-            continue
         for row in batch["records"]:
-            if row["output_valid"] or "capacity_rejection" in row:
+            capacity = (batch["workload"] in excluded and batch["identity"].get("side") == "candidate"
+                        and "capacity_rejection" not in row)
+            timed = row.get("model_call_ms") is not None
+            if row["output_valid"] or not (capacity or timed):
                 continue
             ref = row["output_ref"]
             directory = ref["aiperf_run"]
@@ -52,11 +54,31 @@ def refresh(out: Path, report: dict) -> dict:
             source = raw[directory][ref["record_index"]]
             payload = source.get("payload") or {}
             sha = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            if row["request_sha"] != sha or str(row["sample_id"]) != source["metadata"].get("conversation_id"):
-                raise ValueError("saved capacity rejection does not match its execution identity")
-            row["capacity_rejection"] = absolute.capacity_rejection(source)
+            metadata = source.get("metadata") or {}
+            sample = metadata.get("conversation_id") or metadata.get("session_num", ref["record_index"])
+            if row["request_sha"] != sha or str(row["sample_id"]) != str(sample):
+                raise ValueError("saved response does not match its execution identity")
+            if capacity:
+                row["capacity_rejection"] = absolute.capacity_rejection(source)
+            if (timed and (source.get("error") or {}).get("type") == "InvalidInferenceResultError"
+                    and not absolute.unanswered(source) and not metadata.get("was_cancelled")):
+                body = execution.response_body(source)
+                ms = (body.get("trtmc_timing") or {}).get("model_call_ms")
+                if ms is None or float(ms) != row["model_call_ms"] or not math.isfinite(float(ms)) or float(ms) <= 0:
+                    raise ValueError("saved response does not match its execution timing")
+                operation = batch["identity"].get("operation") or report.get("operation")
+                row.update(valid=True, output_valid=True,
+                           work=judge.work_signature(operation, execution.observation(body))
+                           if operation else None)
+                recovered += 1
     same_work = lambda mine, theirs: judge.work_check(  # noqa: E731
         {"work": [mine] if mine is not None else []}, {"work": [theirs] if theirs is not None else []}) is None
     evidence = execution.Session(out, {}, lambda: None, lambda value: value, same_work, batches=batches)
     performance = [item for item in report.get("performance", []) if item.get("kind") != "natural_dataset"]
-    return {**report, "performance": [*performance, *evidence.natural_performance(report.get("accuracy", []))]}
+    updated = {**report, "performance": [*performance, *evidence.natural_performance(report.get("accuracy", []))]}
+    if recovered:
+        path = out / "execution.timing-recovered.jsonl"
+        path.write_text("".join(json.dumps(batch) + "\n" for batch in batches))
+        updated["execution"] = {**report["execution"], "records": str(path),
+                                "timing_recovered_records": recovered}
+    return updated

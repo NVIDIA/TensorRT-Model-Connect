@@ -35,7 +35,8 @@ def capture(out, candidate, native, accuracy=None):
         evidence.record(SimpleNamespace(directory=directory, exit_code=0, raw_records=lambda: records), {
             "name": "mmlu-0shot", "role": "both", "warmup": 1, "gpu_busy_percent": 0,
             "expected_requests": len(records), "identity": {
-                "side": side, "precision": "fp16", "concurrency": 1, "timing_scope": "task-call-wall"}})
+                "side": side, "operation": "generate", "precision": "fp16", "concurrency": 1,
+                "timing_scope": "task-call-wall"}})
     quality = accuracy or [{"suite": "mmlu-0shot", "source": "absolute", "status": "pass"}]
     return {"model": "demo", "performance_source": "quality", "accuracy": quality,
             "performance": evidence.natural_performance(quality),
@@ -144,6 +145,60 @@ def test_capacity_count_mismatch_is_not_silently_filtered(tmp_path):
     with pytest.raises(ValueError, match="capacity rejections"):
         capture(tmp_path, [row(0, 40), rejected(1)], [row(0, 20), row(1, 200)], [
             {"suite": "mmlu-0shot", "status": "pass", "out_of_capacity": 2}])
+
+
+def old_empty_answer_report(out):
+    report = capture(out, [row(0, 40, tokens=0, text="", error={
+        "type": "InvalidInferenceResultError", "message": "empty answer"})], [row(0, 20)])
+    path = out / "execution.jsonl"
+    batches = [json.loads(line) for line in path.read_text().splitlines()]
+    batches[0]["records"][0].update(valid=False, output_valid=False, work=None)
+    path.write_text("".join(json.dumps(batch) + "\n" for batch in batches))
+    return report
+
+
+def test_refresh_recovers_timing_of_a_wrong_empty_answer_without_changing_accuracy(tmp_path):
+    report = old_empty_answer_report(tmp_path)
+    original = {path: path.read_bytes() for path in tmp_path.rglob("*.jsonl")}
+    updated = benchmark_perf.refresh(tmp_path, report)
+    assert verdict(updated)["perf"] == "measured"
+    assert updated["performance"][0]["candidate"]["p50_ms"] == 40
+    assert updated["accuracy"] == report["accuracy"]
+    assert updated["execution"]["timing_recovered_records"] == 1
+    assert updated["execution"]["records"] != report["execution"]["records"]
+    assert all(path.read_bytes() == data for path, data in original.items())
+    assert benchmark_perf.refresh(tmp_path, updated) == updated
+
+
+@pytest.mark.parametrize("field", ["request_sha", "sample_id"])
+def test_refresh_refuses_empty_answer_recovery_with_a_different_request_identity(tmp_path, field):
+    report = old_empty_answer_report(tmp_path)
+    path = tmp_path / "execution.jsonl"
+    batches = [json.loads(line) for line in path.read_text().splitlines()]
+    batches[0]["records"][0][field] = "different-request"
+    path.write_text("".join(json.dumps(batch) + "\n" for batch in batches))
+    with pytest.raises(ValueError, match="execution identity"):
+        benchmark_perf.refresh(tmp_path, report)
+
+
+def test_refresh_keeps_real_http_failures_partial(tmp_path):
+    report = capture(tmp_path, [row(0, 40, status=500)], [row(0, 20)])
+    updated = benchmark_perf.refresh(tmp_path, report)
+    assert verdict(updated)["perf"] == "error"
+    assert updated["execution"] == report["execution"]
+
+
+def test_refresh_does_not_invent_matching_work_without_an_operation(tmp_path):
+    report = old_empty_answer_report(tmp_path)
+    path = tmp_path / "execution.jsonl"
+    batches = [json.loads(line) for line in path.read_text().splitlines()]
+    batches[0]["identity"].pop("operation")
+    path.write_text("".join(json.dumps(batch) + "\n" for batch in batches))
+    updated = benchmark_perf.refresh(tmp_path, report)
+    perf, = updated["performance"]
+    assert perf["unknown_work_pairs"] == 1
+    assert perf["matched_pairs"] == 0
+    assert perf["candidate"]["p50_ms"] == 40
 
 
 def test_capacity_excluded_problem_leaves_all_seed_repetitions(tmp_path):

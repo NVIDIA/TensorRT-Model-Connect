@@ -114,6 +114,16 @@ def test_failed_or_missing_responses_cannot_disappear_into_a_fast_subset(tmp_pat
     assert "unpaired" in " ".join(result["reasons"])
 
 
+def test_empty_benchmark_answer_still_has_a_valid_task_timing(tmp_path):
+    evidence = new_session(tmp_path)
+    empty = {"type": "InvalidInferenceResultError", "message": "empty text response"}
+    collect(evidence, "candidate", [raw(0, 10, 0, error=empty)])
+    collect(evidence, "reference", [raw(0, 20, 0, error=empty)])
+    result, = evidence.natural_performance()
+    assert result["complete"] and result["measurement_status"] == "measured"
+    assert result["candidate"]["valid_requests"] == result["reference"]["valid_requests"] == 1
+
+
 def test_matching_export_gaps_on_both_sides_do_not_prove_complete_work(tmp_path):
     evidence = new_session(tmp_path)
     collect(evidence, "candidate", [raw(0, 10)])
