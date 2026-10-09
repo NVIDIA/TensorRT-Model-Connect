@@ -48,11 +48,15 @@ make_request(const std::string& prompt, const TextGenerationConfig& config, bool
     request.requests.resize(1);
     auto& messages = request.requests.front().messages;
     if (has_image) {
-        messages.push_back({"system", {{"text", "You are a helpful assistant."}}});
-        messages.push_back({"user", {{"image", ""}, {"text", prompt}}});
-    } else {
-        messages.push_back({"user", {{"text", prompt}}});
+        auto& system = messages.emplace_back();
+        system.role = "system";
+        system.contents.push_back({"text", "You are a helpful assistant."});
     }
+    auto& user = messages.emplace_back();
+    user.role = "user";
+    if (has_image)
+        user.contents.push_back({"image", ""});
+    user.contents.push_back({"text", prompt});
     request.applyChatTemplate = has_image;
     request.enableThinking = false;
     request.temperature = config.temperature;

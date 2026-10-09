@@ -86,6 +86,18 @@
           "default": 1
         },
         {
+          "name": "int4_gemm_plugin_version",
+          "flags": [
+            "--int4-gemm-plugin-version"
+          ],
+          "type": "int",
+          "choices": [
+            1,
+            2
+          ],
+          "help": "Edge AWQ INT4 backend; default 2. Version 1 is mapped for the tested InternVL3-2B SM80 profile."
+        },
+        {
           "name": "verbose",
           "flags": [
             "--verbose"
