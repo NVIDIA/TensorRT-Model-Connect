@@ -244,8 +244,8 @@ ITask* create(const BundleReader& bundle) {
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
         marker.at("max_batch_size") != 1 || marker.at("precision") != "fp16" ||
-        (marker.at("weight_format") != "fp16" &&
-         !(marker.at("weight_format") == "int4_awq" && marker.value("builder_flow", "") == "onnx")) ||
+        (marker.at("weight_format") != "fp16" && !(marker.at("weight_format") == "int4_awq" &&
+                                                   marker.value("builder_flow", "") == "onnx")) ||
         marker.at("component_weight_formats").at("llm") != marker.at("weight_format") ||
         marker.at("component_weight_formats").at("visual") != "fp16" ||
         marker.at("visual_image_tokens") != 256 || !marker.at("artifacts").is_array())

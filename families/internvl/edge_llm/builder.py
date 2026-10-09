@@ -180,8 +180,10 @@ def int4_plugin_version(request, config: dict, target: dict, weight_format: str)
         return None
     version = 2 if version is None else version
     if version == 1 and not (
-        config.get("model_type") == "qwen2" and config.get("hidden_size") == 1536
-        and config.get("num_hidden_layers") == 28 and target.get("sm") == 80
+        config.get("model_type") == "qwen2"
+        and config.get("hidden_size") == 1536
+        and config.get("num_hidden_layers") == 28
+        and target.get("sm") == 80
     ):
         raise UnavailableEdgeConfiguration(
             "INT4 plugin version1 is mapped only for the tested InternVL3-2B AWQ SM80 profile"
@@ -213,7 +215,7 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path) -> 
     package = installed_package(target, onnx=onnx_flow)
     if weight_format == "int4_awq" and not package.get("all_native_kernels"):
         raise UnavailableEdgeConfiguration(
-            "InternVL AWQ requires an Edge SDK built with TRTMC_EDGELLM_ALL_KERNELS=ON"
+            "InternVL AWQ requires an Edge SDK with all native kernels enabled; see the family Edge-LLM README"
         )
     checkpoint = staging / "edge_llm/checkpoint"
     checkpoint.mkdir(parents=True)
