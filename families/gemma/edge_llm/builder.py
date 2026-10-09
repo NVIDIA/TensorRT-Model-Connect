@@ -18,7 +18,7 @@ from tensorrt_model_connect.build import (
     cmake_prefixes, detect_local_platform, subprocess_environment,
 )
 
-EDGE_REVISION = "e8b29522938901f6df19ebeedd4b69bc8edbcd97"
+EDGE_REVISION = "95515c2f87fba8982db5a519f9022277667b3cc9"
 
 
 def local_target() -> dict:
@@ -26,7 +26,7 @@ def local_target() -> dict:
     return detect_local_platform()
 
 
-def installed_package(target: dict) -> dict:
+def installed_package(target: dict, *, media: bool = False) -> dict:
     """Resolve CMake installation via standard prefixes; never install anything.
 
     Args:
@@ -46,14 +46,17 @@ def installed_package(target: dict) -> dict:
         package = json.loads(manifest.read_text(encoding="utf-8"))
         if package.get("schema_version") != 1 or package.get("revision") != EDGE_REVISION:
             raise ValueError(f"Edge package has an unsupported revision/schema: {manifest}")
-        if package.get("version") != "0.10.1" or package.get("arch") != target["arch"]:
+        if package.get("version") != "0.11.0" or package.get("arch") != target["arch"]:
             raise ValueError("Edge package version/architecture differs from executing worker")
         if target["sm"] not in package.get("architectures", []):
             raise ValueError("Edge package was not built for this local GPU")
         cuda_version = ".".join(str(package.get("cuda_version", "")).split(".")[:2])
         if cuda_version != target["cuda_version"] or package.get("tensorrt_version") != target["tensorrt_version"]:
             raise ValueError("Edge package CUDA/TensorRT differs from executing worker")
-        for name in ("python", "plugin") + (("onnx_builder",) if package.get("onnx") else ()):
+        names = ("python", "plugin") + (("onnx_builder",) if package.get("onnx") else ())
+        if media:
+            names += ("visual_builder", "audio_builder")
+        for name in names:
             relative = Path(package[name])
             path = (prefix / relative).resolve()
             if relative.is_absolute() or not path.is_relative_to(prefix.resolve()):
@@ -68,31 +71,10 @@ def installed_package(target: dict) -> dict:
 
 _LOG = logging.getLogger(__name__)
 
-# Validate the exact source template; the runtime owns its single-user rendering.
-_CHAT_ADMISSION = r"""
-from transformers import AutoTokenizer
-import sys
-tokenizer = AutoTokenizer.from_pretrained(sys.argv[1], local_files_only=True, trust_remote_code=False)
-for thinking in (False, True):
-    for text in ("hello", "  hello\n", "\u2003hello\u3000"):
-        expected = "<bos>"
-        if thinking:
-            expected += "<|turn>system\n<|think|>\n<turn|>\n"
-        expected += "<|turn>user\n" + text.strip() + "<turn|>\n<|turn>model\n"
-        if not thinking:
-            expected += "<|channel>thought\n<channel|>"
-        actual = tokenizer.apply_chat_template([{"role": "user", "content": text}],
-            tokenize=False, add_generation_prompt=True, enable_thinking=thinking)
-        if actual != expected:
-            raise ValueError("Gemma4 source chat template differs from the family runtime mapping")
-print("Gemma4 single-user chat template admission passed")
-"""
-
-
 def validate_pair(request, execution) -> tuple[dict, Path, int]:
-    """Admit only explicit unquantized Gemma4 unified assistant text execution."""
-    if execution.variant not in {"mtp", "dspark"} or tuple(c.role for c in execution.checkpoints) != ("draft",):
-        raise ValueError("Gemma4 pairs require variant=mtp or dspark and one named draft checkpoint")
+    """Admit an explicit unquantized Gemma4 target and its matching text draft."""
+    if execution.variant not in {"mtp", "dspark", "eagle3", "dflash"} or tuple(c.role for c in execution.checkpoints) != ("draft",):
+        raise ValueError("Gemma4 pairs require variant=mtp, dspark, eagle3 or dflash and one named draft checkpoint")
     if (request.backend != "trt" or request.task != "text_generation"
             or request.precision != "fp16" or request.quantization not in {None, "none"}
             or request.max_batch_size != 1 or request.tensor_parallel_size != 1
@@ -104,35 +86,51 @@ def validate_pair(request, execution) -> tuple[dict, Path, int]:
     source, draft = Path(request.model_dir), execution.checkpoints[0].model_dir
     raw = json.loads((source / "config.json").read_text())
     companion = json.loads((draft / "config.json").read_text())
-    if not isinstance(raw, dict) or raw.get("model_type") != "gemma4_unified":
-        raise ValueError("Gemma4 MTP expects a Gemma4 unified target")
+    if not isinstance(raw, dict) or raw.get("model_type") not in {"gemma4", "gemma4_unified"}:
+        raise ValueError("Gemma4 paired execution expects a Gemma4 target")
     if not isinstance(companion, dict):
         raise ValueError("Gemma4 requires a companion configuration object")
     base = raw.get("text_config")
     if not isinstance(base, dict):
         raise ValueError("Gemma4 target requires nested text configuration")
     if execution.variant == "mtp":
-        if companion.get("model_type") != "gemma4_unified_assistant":
-            raise ValueError("Gemma4 MTP expects a unified assistant")
+        if companion.get("model_type") != raw["model_type"] + "_assistant":
+            raise ValueError("Gemma4 MTP requires the matching target architecture assistant")
         assistant = companion.get("text_config")
         if not isinstance(assistant, dict) or companion.get("backbone_hidden_size") != base.get("hidden_size"):
             raise ValueError("Gemma4 MTP target and assistant geometry is incompatible")
     else:
         assistant = companion
-        if (companion.get("architectures") != ["Gemma4DSparkModel"]
-                or companion.get("target_model_type") != "gemma4_unified"
+        architectures = {
+            "dspark": ("Gemma4DSparkModel",),
+            "eagle3": ("Gemma4Eagle3Model",),
+            "dflash": ("Gemma4DSparkModel", "DFlashDraftModel"),
+        }[execution.variant]
+        if (raw["model_type"] != "gemma4_unified"
+                or companion.get("architectures") not in ([name] for name in architectures)
+                or companion.get("target_model_type", "gemma4_unified" if execution.variant == "dflash" else None) != "gemma4_unified"
                 or companion.get("hidden_size") != base.get("hidden_size")
-                or companion.get("num_target_layers") != base.get("num_hidden_layers")
-                or companion.get("block_size") != 7):
-            raise ValueError("Gemma4 DSpark requires a matching target and block7 draft")
-        layers = companion.get("target_layer_ids")
+                or companion.get("num_target_layers") != base.get("num_hidden_layers")):
+            raise ValueError("Gemma4 speculative draft does not match the target geometry")
+        if execution.variant == "dspark" and companion.get("block_size") != 7:
+            raise ValueError("Gemma4 DSpark requires a block7 draft")
+        if execution.variant == "eagle3" and companion.get("ttt_length") != 7:
+            raise ValueError("This Gemma4 EAGLE3 profile requires a TTT7 draft")
+        metadata = companion.get("dflash_config", {}) if execution.variant == "dflash" else {}
+        if not isinstance(metadata, dict):
+            raise ValueError("Invalid Gemma4 DFlash metadata")
+        block_size = metadata.get("block_size", companion.get("block_size"))
+        if execution.variant == "dflash" and (type(block_size) is not int or block_size not in (7, 16)):
+            raise ValueError("This Gemma4 DFlash profile requires the original block7 or block16 draft")
+        layers = metadata.get("target_layer_ids", companion.get("target_layer_ids"))
         if (not isinstance(layers, list) or not layers
                 or any(type(i) is not int or not 0 <= i < base["num_hidden_layers"] for i in layers)
                 or len(set(layers)) != len(layers)):
-            raise ValueError("Invalid Gemma4 DSpark target layer IDs")
-        mask = companion.get("mask_token_id")
-        if type(mask) is not int or not 0 <= mask < base["vocab_size"]:
-            raise ValueError("Invalid Gemma4 DSpark mask token")
+            raise ValueError("Invalid Gemma4 speculative target layer IDs")
+        if execution.variant in {"dspark", "dflash"}:
+            mask = metadata.get("mask_token_id", companion.get("mask_token_id"))
+            if type(mask) is not int or not 0 <= mask < base["vocab_size"]:
+                raise ValueError("Invalid Gemma4 speculative mask token")
     if (assistant.get("vocab_size") != base.get("vocab_size")
             or base.get("enable_moe_block") or assistant.get("enable_moe_block")):
         raise ValueError("Gemma4 pair vocabulary or dense topology is incompatible")
@@ -145,7 +143,8 @@ def validate_pair(request, execution) -> tuple[dict, Path, int]:
             raise ValueError("Gemma4 paired execution requires both local safetensors checkpoints")
     limit = request.max_sequence_length or 1024
     capacities = (base.get("max_position_embeddings"), assistant.get("max_position_embeddings"))
-    if any(type(v) is not int or v < limit for v in capacities) or not (4 if execution.variant == "mtp" else 8) < limit <= 1024:
+    verify_size = block_size if execution.variant == "dflash" else {"mtp": 4, "dspark": 8, "eagle3": 60}[execution.variant]
+    if any(type(v) is not int or v < limit for v in capacities) or not verify_size < limit <= 1024:
         raise ValueError("Gemma4 pair requires context above its verify size and at most 1024")
     return raw, draft, limit
 
@@ -167,22 +166,38 @@ def prepare(request, raw, draft: Path, limit: int, target: dict, staging: Path, 
         prepend_paths={"LD_LIBRARY_PATH": str(Path(package["plugin"]).parent)},
     )
     exporter = [package["python"], "-I", "-m", "tensorrt_edgellm.scripts.export",
-                str(source), str(onnx)]
+                str(source), str(onnx), "--dtype", "float16"]
     if variant == "mtp":
         commands = [exporter + ["--mtp", "--mtp-draft-dir", str(draft.resolve()),
                                 "--skip-visual", "--skip-audio"]]
         draft_subdir, verify_size, draft_size, spec_type = "mtp_draft", 4, 4, "gemma4_mtp"
-    else:
+    elif variant == "dspark":
         commands = [exporter + [flag, "--dspark-draft-dir", str(draft.resolve()),
                                 "--skip-visual", "--skip-audio"]
                     for flag in ("--dspark-base", "--dspark-draft")]
         draft_subdir, verify_size, draft_size, spec_type = "dspark_draft", 8, 7, "dspark"
+    elif variant == "dflash":
+        companion = json.loads((draft / "config.json").read_text())
+        metadata = companion.get("dflash_config", {})
+        block_size = metadata.get("block_size", companion.get("block_size"))
+        commands = [exporter + [flag, "--dflash-draft-dir", str(draft.resolve()),
+                                "--skip-visual", "--skip-audio"]
+                    for flag in ("--dflash-base", "--dflash-draft")]
+        draft_subdir, verify_size, draft_size, spec_type = "dflash_draft", block_size, block_size, "dflash"
+    else:
+        commands = [
+            exporter + ["--eagle-base", "--eagle-draft-dir", str(draft.resolve()),
+                        "--skip-visual", "--skip-audio"],
+            [package["python"], "-I", "-m", "tensorrt_edgellm.scripts.export",
+             str(draft.resolve()), str(onnx / "eagle_draft"), "--dtype", "float16",
+             "--skip-visual", "--skip-audio"],
+        ]
+        draft_subdir, verify_size, draft_size, spec_type = "eagle_draft/llm", 60, 60, "eagle3"
     for subdirectory, flag in (("llm", "--specBase"), (draft_subdir, "--specDraft")):
         commands.append([package["onnx_builder"], "--onnxDir", str(onnx / subdirectory),
                          "--engineDir", str(engine), flag, "--maxInputLen", str(min(limit, 512)),
                          "--maxKVCacheCapacity", str(limit), "--maxBatchSize", "1",
                          "--maxVerifyTreeSize", str(verify_size), "--maxDraftTreeSize", str(draft_size)])
-    commands.insert(0, [package["python"], "-I", "-c", _CHAT_ADMISSION, str(source)])
     with log_path.open("a", encoding="utf-8") as log:
         for command in commands:
             log.write(json.dumps(command) + "\n")
@@ -191,16 +206,23 @@ def prepare(request, raw, draft: Path, limit: int, target: dict, staging: Path, 
                            cwd=staging, env=env)
     required = ("spec_base.engine", "spec_draft.engine", "base_config.json", "draft_config.json",
                 "embedding.safetensors", "tokenizer.json", "tokenizer_config.json",
-                "processed_chat_template.json")
+                "chat_template.jinja")
+    if raw["text_config"].get("hidden_size_per_layer_input", 0):
+        required += ("ple_embedding.safetensors",)
     if variant == "dspark":
         required += ("dspark_heads.safetensors", "dspark_heads_info.json")
     for name in required:
         if not (engine / name).is_file() or (engine / name).stat().st_size == 0:
-            raise ValueError(f"Edge Gemma4 MTP builder omitted required artifact: {name}")
+            raise ValueError(f"Edge Gemma4 paired builder omitted required artifact: {name}")
     for role in ("base", "draft"):
         config = json.loads((engine / f"{role}_config.json").read_text())
         if config.get("spec_decode_type") != spec_type:
             raise ValueError("Edge returned a different Gemma4 speculative contract")
+    if variant == "eagle3":
+        layers = json.loads((draft / "config.json").read_text())["target_layer_ids"]
+        base_config = json.loads((engine / "base_config.json").read_text())
+        if base_config.get("eagle_hidden_state_layers") != layers:
+            raise ValueError("Edge EAGLE3 target hidden-state taps differ from the original draft")
     files = {}
     for directory in (engine, checkpoint):
         for path in sorted(directory.rglob("*")):
@@ -208,10 +230,14 @@ def prepare(request, raw, draft: Path, limit: int, target: dict, staging: Path, 
                 raise ValueError(f"Gemma4 Edge output must not contain symlinks: {path}")
             if path.is_file():
                 files[path.relative_to(staging).as_posix()] = path
+    # Validated engines are self-contained; release export scratch before bundling.
+    shutil.rmtree(onnx)
     return files, {
         "version": 1, "edge_revision": EDGE_REVISION, "target": target, "precision": "fp16",
         "max_sequence_length": limit, "max_input_length": min(limit, 512), "max_batch_size": 1,
         "execution_variant": variant, "builder_flow": "onnx", "artifacts": list(files),
+        "verify_size": verify_size,
+        "ple": bool(raw["text_config"].get("hidden_size_per_layer_input", 0)),
     }
 
 
@@ -226,7 +252,7 @@ def build(request, writer, execution) -> None:
         try:
             target = local_target()
             if (target["os"], target["arch"], target["sm"]) != ("linux", "x86_64", 80):
-                raise ValueError("This Gemma4 MTP Edge profile maps native x86_64 SM80")
+                raise ValueError("This Gemma4 paired Edge profile maps native x86_64 SM80")
             files, marker = prepare(request, raw, draft, limit, target, Path(directory), log_path, execution.variant)
         except Exception as error:
             with log_path.open("a", encoding="utf-8") as log:

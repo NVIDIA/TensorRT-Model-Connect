@@ -407,6 +407,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         build_pair(request, writer, request.execution)
         return
 
+    from .edge_llm.standalone import try_build
+
+    if try_build(request, writer):
+        return
+
     if request.dynamic_kv_cache:
         raise NotImplementedError("gemma does not support dynamic_kv_cache")
 

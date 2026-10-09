@@ -35,9 +35,13 @@
           ],
           "type": "string",
           "choices": [
-            "text_generation"
+            "text_generation",
+            "text_continuation",
+            "images_text_to_text",
+            "audio_text_to_text",
+            "image_audio_text_to_text"
           ],
-          "default": "text_generation"
+          "help": "Default: the checkpoint's family-owned primary task"
         },
         {
           "name": "precision",
@@ -50,7 +54,7 @@
             "fp16",
             "bf16"
           ],
-          "help": "Build precision (default: fp16 for paired execution, fp32 otherwise)"
+          "help": "Default: fp16 for Gemma4 Edge, fp32 for the native family"
         },
         {
           "name": "backend",
@@ -102,7 +106,9 @@
           "type": "string",
           "choices": [
             "mtp",
-            "dspark"
+            "dspark",
+            "eagle3",
+            "dflash"
           ],
           "help": "Explicit paired execution mode; no automatic draft discovery"
         },
