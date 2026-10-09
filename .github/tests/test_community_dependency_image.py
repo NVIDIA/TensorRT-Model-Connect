@@ -1217,6 +1217,33 @@ def test_registry_token_endpoint_denial_is_distinct_from_unknown(status):
     assert calls.call_count == 2 and receipt["denied"] is (status in (401, 403, 404))
 
 
+@pytest.mark.parametrize(
+    "media_type",
+    [
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+    ],
+)
+def test_readable_manifest_formats_cannot_be_mistaken_for_denial(media_type):
+    def registry(request, *, timeout):
+        if "/token?" in request.full_url:
+            return RegistryResponse(b'{"token":"manifest-reader"}')
+        # This registry serves a known readable digest only when its format is
+        # negotiated. An incomplete Accept header would incorrectly get 404.
+        if media_type not in request.get_header("Accept", "").split(", "):
+            raise MODULE.urllib.error.HTTPError(request.full_url, 404, "not acceptable", {}, None)
+        return RegistryResponse(b"")
+
+    with patch.object(MODULE.urllib.request.OpenerDirector, "open", side_effect=registry):
+        receipt = MODULE.check_registry_access(
+            "alpha", AUDIT_DIGEST, "ghcr.io/test-owner/cache", "token", "test-actor"
+        )
+    assert not receipt["denied"] and all(
+        receipt[actor]["status"] == "accessible"
+        for actor in ("anonymous", "public_repository_token")
+    )
+
+
 @pytest.mark.parametrize("body", [b"{}", b"[]", b'{"token":null}', b"not-json", b"x" * 65537])
 def test_invalid_registry_exchange_is_unknown_without_response_disclosure(body):
     with patch.object(

@@ -204,7 +204,9 @@ without the private reader secret. Both must receive HTTP 401, 403, or 404 from
 the registry token exchange or manifest check. Timeouts, malformed responses,
 redirects, and server errors remain unknown and fail the diagnostic. The safe
 receipt records only family, digest and access statuses; it neither admits an
-image nor replaces the separate positive private-reader qualification.
+image nor replaces the separate positive private-reader check of the same family
+and digest. A 404 can also mean a missing image; denial evidence requires that
+matching positive check before claiming the private package's access controls.
 
 Maintainers can dispatch `task=dependency-image-audit` on a protected branch with
 `audit_family` and an immutable `audit_digest`. This mode uses only package read

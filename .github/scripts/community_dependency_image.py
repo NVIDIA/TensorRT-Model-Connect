@@ -352,7 +352,14 @@ def check_registry_access(family: str, digest: str, prefix: str, token: str, use
                 manifest_url,
                 {
                     "Authorization": f"Bearer {bearer}",
-                    "Accept": "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json",
+                    "Accept": ", ".join(
+                        (
+                            "application/vnd.oci.image.index.v1+json",
+                            "application/vnd.oci.image.manifest.v1+json",
+                            "application/vnd.docker.distribution.manifest.v2+json",
+                            "application/vnd.docker.distribution.manifest.list.v2+json",
+                        )
+                    ),
                 },
                 method="HEAD",
             )
