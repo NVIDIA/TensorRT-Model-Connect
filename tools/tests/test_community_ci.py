@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import shlex
 
+import hashlib
 import json
 import os
 import shutil
@@ -822,8 +823,10 @@ def test_gpu_status_and_cleanup_fail_closed(
     assert "python3 -m tools.brev_exec provision" in reserve["run"]
     assert 'echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"' in reserve["run"]
     test_step = steps["Build the GPU image and validate the exact PR merge"]
-    assert "sudo docker build -f Dockerfile.dev.x86-gpu" in test_step["run"]
-    assert "huggingface-hub==0.36.0" in test_step["run"]
+    assert "sudo docker build -f Dockerfile.dev.x86-gpu" not in test_step["run"]
+    assert "/tmp/community_gpu_images.py --pull-base" in test_step["run"]
+    assert "'$HUB_REQUIREMENT'" in test_step["run"]
+    assert "git show $CI_SHA:tools/community_gpu_images.py" in test_step["run"]
     assert (
         "/tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py "
         "--containers --repository /tmp/model_connect" in test_step["run"]
@@ -835,7 +838,7 @@ def test_gpu_status_and_cleanup_fail_closed(
         "JOB_STATUS": "${{ job.status }}",
         "TEST_OUTCOME": "${{ steps.test.outcome }}",
         "TEST_CONCLUSION": "${{ steps.test.outputs.conclusion }}",
-        "CLEANUP_CONFIRMED": "${{ steps.release.outputs.cleanup_confirmed }}",
+        "CLEANUP_CONFIRMED": "${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}",
     }
     assert "${{" not in result["run"]
     cleanup = steps["Always tear down the GPU instance"]
@@ -853,7 +856,9 @@ def test_gpu_status_and_cleanup_fail_closed(
         "instance_type": "${{ steps.reserve.outputs.instance_type }}",
         "organization_id": "${{ steps.reserve.outputs.organization_id }}",
         "allocation_requested": "${{ steps.reserve.outputs.allocation_requested }}",
-        "cleanup_confirmed": "${{ steps.release.outputs.cleanup_confirmed }}",
+        "reserve_outcome": "${{ steps.reserve.outcome }}",
+        "no_allocation_confirmed": "${{ steps.no_allocation.outputs.no_allocation_confirmed }}",
+        "cleanup_confirmed": "${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}",
     }
     cleanup_job = workflow["jobs"]["cleanup"]
     assert "always()" in cleanup_job["if"]
@@ -884,6 +889,7 @@ def test_gpu_status_and_cleanup_fail_closed(
         "-m tools.brev_exec cleanup --instance trtmc-gpu-ci-123-1 "
         f"--lease-file {tmp_path}/gpu-ci-lease/trtmc-gpu-ci-lease.json --until-deleted",
     ]
+    _workflow_plan(tmp_path)
     # Execute the real workflow script with remote operations stubbed. A copy
     # can leave a partial token even when it reports failure. The ready VM must
     # receive token cleanup on every exit; test failures must not replace it.
@@ -901,15 +907,21 @@ brev() {
     copy)
       printf 'copy %s\n' "${3%%:*}" >> "$AUTH_TRACE"
       if [[ "$3" == */registry-token ]]; then
-        test "${CI_TEST_BASE_IMAGE_BUILT:-0}" = 1 || return 96
+        test "${CI_TEST_TRUSTED_MODULES_STAGED:-0}" = 1 || return 96
+        CI_TEST_REGISTRY_COPIED=1
         test "$(cat "$2")" = test-registry-secret || return 97
         printf 'registry-copy %s\n' "${3%%:*}" >> "$AUTH_TRACE"
       fi
       test "$AUTH_FAILURE" != copy || return 1
       ;;
     exec)
-      if [[ "$3" == *'sudo docker build'* ]]; then
-        CI_TEST_BASE_IMAGE_BUILT=1
+      if [[ "$3" == *'git show '* && "$3" == *'community_gpu_images.py'* ]]; then
+        CI_TEST_TRUSTED_MODULES_STAGED=1
+      fi
+      if [[ "$3" == *'--pull-base'* ]]; then
+        test "${CI_TEST_REGISTRY_COPIED:-0}" = 1 || return 96
+        CI_TEST_REGISTRY_COPIED=0
+        CI_TEST_BASE_PULLED=1
       fi
       if [[ "$3" == "rm -f -- "* ]]; then
         printf 'cleanup %s\n' "$2" >> "$AUTH_TRACE"
@@ -931,6 +943,8 @@ python3() {
   test "$3" != provision || exit 98
   test -z "${HF_TOKEN+x}" || exit 99
   test -z "${REGISTRY_TOKEN+x}" || exit 97
+  test "${CI_TEST_BASE_PULLED:-0}" = 1 || exit 96
+  test "${CI_TEST_REGISTRY_COPIED:-0}" = 0 || exit 96
   printf 'coordinate %s\n' "$INSTANCE_NAME" >> "$AUTH_TRACE"
   test "$AUTH_FAILURE" != exit || exit 17
   test "$AUTH_FAILURE" != coordinate
@@ -962,6 +976,8 @@ python3() {
             "HF_TOKEN": "test-checkpoint-secret",
             "REGISTRY_TOKEN": "test-registry-secret",
             "DEPENDENCY_IMAGES": str(registry_cache).lower(),
+            "REGISTRY_USERNAME": "test-reader",
+            "HUB_REQUIREMENT": "huggingface-hub==1.33.0",
         },
         capture_output=True,
         text=True,
@@ -980,9 +996,7 @@ python3() {
         assert cleanup_index > events.index(f"copy {instance}")
     assert not list(tmp_path.glob("trtmc-checkpoint-token.*"))
     assert not list(tmp_path.glob("trtmc-registry-token.*"))
-    assert any(event.startswith("registry-copy ") for event in events) is (
-        registry_cache and failure != "copy"
-    )
+    assert any(event.startswith("registry-copy ") for event in events) is (failure != "copy")
     assert "test-checkpoint-secret" not in (
         auth_result.stdout + auth_result.stderr + trace.read_text(encoding="utf-8")
     )
@@ -1293,8 +1307,9 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert profile["env"]["PROTECTED_DEPENDENCY_CATALOG"] == (
         "${{ secrets.TRTMC_COMMUNITY_DEPENDENCY_CATALOG }}"
     )
-    assert test["run"].index("sudo docker build") < test["run"].index(
-        "printf '%s' \"$REGISTRY_TOKEN\""
+    assert "sudo docker build" not in test["run"]
+    assert test["run"].index("unset REGISTRY_TOKEN") < test["run"].index(
+        "retry_backoff pull_shared_base"
     )
     assert (
         """trap 'rm -f "$checkpoint_token" "$registry_token"; cleanup_checkpoint_token' EXIT"""
@@ -1306,7 +1321,11 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert "HF_TOKEN=" not in test["run"]
     assert "git show $CI_SHA:tools/community_gpu_ci.py" in test["run"]
     assert "git fetch --depth 2 origin $MERGE_SHA" in test["run"]
-    assert "huggingface-hub==0.36.0" in test["run"]
+    assert "huggingface-hub==0.36.0" not in test["run"]
+    assert "'$HUB_REQUIREMENT'" in test["run"]
+    assert test["env"]["HUB_REQUIREMENT"] == "${{ steps.host_profile.outputs.hub_requirement }}"
+    assert "--staging-hub-requirement" in profile["run"]
+    assert "git show $CI_SHA:tools/community_gpu_images.py" in test["run"]
     assert (
         "/tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py "
         "--containers --repository /tmp/model_connect" in test["run"]
@@ -1570,14 +1589,245 @@ def test_only_complete_pipeline_publishes_stable_and_dev_results(
         text=True,
     )
     assert (result.returncode == 0) is (expected == "success"), result.stderr
-    if expected is None:
+    if expected is None or lane == "dev":
         assert not (tmp_path / "calls").exists()
-    else:
+    if expected is not None:
+        assert (tmp_path / "output").read_text() == "reported=true\n"
+        assert int((tmp_path / "counter").read_text()) == (2 if queued_first else 1)
+    if expected is not None and lane == "stable":
         calls = (tmp_path / "calls").read_text().splitlines()
         assert f"state={expected}" in calls
         assert f"context={lane.title()} Community CI" in calls
-        assert (tmp_path / "output").read_text() == "reported=true\n"
-        assert int((tmp_path / "counter").read_text()) == (2 if queued_first else 1)
+
+
+@pytest.mark.parametrize("api_unavailable", [False, True])
+def test_dev_observer_timeout_never_finalizes_the_resource_owner(tmp_path, api_unavailable):
+    script = r"""
+gh() {
+  if [[ "$*" == *"/actions/runs/"* ]]; then
+    if [ "$API_UNAVAILABLE" = true ]; then return 1; fi
+    printf '%s\n' '{"status":"in_progress"}'
+  else
+    printf '%s\n' "$*" >> "$STATUS_WRITES"
+  fi
+}
+sleep() { SECONDS=$((SECONDS + 18001)); }
+""" + _workflow_step_script(
+        "community-ci.yml", "dispatch", "Publish the complete workflow conclusion"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "PIPELINE_RUN_ID": "42",
+            "CI_BRANCH": "ci/developer",
+            "LANE": "dev",
+            "PR_NUMBER": "17",
+            "HEAD_SHA": "a" * 40,
+            "SOURCE_SNAPSHOT": json.dumps({"merge_sha": "b" * 40}),
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "API_UNAVAILABLE": str(api_unavailable).lower(),
+            "STATUS_WRITES": str(tmp_path / "writes"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "writes").exists()
+    assert (tmp_path / "output").read_text() == "reported=true\n"
+    assert "inner run will publish after release" in result.stdout
+    fallback = _workflow_step_script("community-ci.yml", "dispatch", "Report a failed CI request")
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$*" >> "$STATUS_WRITES"; }\n' + fallback],
+        env={**os.environ, "LANE": "dev", "STATUS_WRITES": str(tmp_path / "writes")},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0 and not (tmp_path / "writes").exists()
+
+
+@pytest.mark.parametrize(
+    "owner,backstop,gpu,complete,expected",
+    [
+        ("true", "true", "success", "success", "success"),
+        ("true", "true", "failure", "failure", "failure"),
+        ("", "true", "failure", "failure", "failure"),
+        ("true", "", "failure", "failure", "failure"),
+        ("", "", "failure", "failure", "pending"),
+        ("", "", "success", "success", "pending"),
+        ("", "", "skipped", "failure", "failure"),
+    ],
+)
+def test_trusted_inner_status_requires_release_before_a_gpu_verdict(
+    tmp_path, owner, backstop, gpu, complete, expected
+):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    publisher = workflow["jobs"]["publish"]
+    assert {"provision-and-test", "cleanup"} <= set(publisher["needs"])
+    assert publisher["permissions"] == {"statuses": "write"}
+    step = next(
+        s for s in publisher["steps"] if s["name"] == "Publish the released Dev workflow conclusion"
+    )
+    assert "always()" in step["if"] and "workflow_dispatch" in step["if"]
+    assert "inputs.ci_lane == 'dev'" in step["if"]
+    assert step["env"]["HEAD_SHA"] == "${{ needs.authorize.outputs.head_sha }}"
+    writes = tmp_path / "writes"
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + step["run"]],
+        env={
+            **os.environ,
+            "HEAD_SHA": "a" * 40,
+            "GPU_RESULT": gpu,
+            "OWNER_RELEASE_CONFIRMED": owner,
+            "BACKSTOP_RELEASE_CONFIRMED": backstop,
+            "COMPLETE_RESULT": complete,
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "42",
+            "STATUS_WRITES": str(writes),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    arguments = writes.read_text().splitlines()
+    assert f"state={expected}" in arguments
+    assert "context=Dev Community CI" in arguments
+    assert "target_url=https://github.com/example/source/actions/runs/42" in arguments
+    if expected == "pending":
+        assert "description=Community CI release remains unconfirmed" in arguments
+
+
+@pytest.mark.parametrize(
+    "outcome,proof,confirmed",
+    [
+        ("skipped", "true", True),
+        ("skipped", "", False),
+        ("failure", "true", False),
+        ("cancelled", "true", False),
+        ("success", "true", False),
+        ("", "true", False),
+    ],
+)
+def test_backstop_requires_explicit_trusted_no_allocation_proof(
+    tmp_path, outcome, proof, confirmed
+):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    owner = workflow["jobs"]["provision-and-test"]
+    marker = next(s for s in owner["steps"] if s.get("id") == "no_allocation")
+    assert marker["if"] == "${{ always() && steps.reserve.outcome == 'skipped' }}"
+    assert owner["outputs"]["reserve_outcome"] == "${{ steps.reserve.outcome }}"
+    backup = workflow["jobs"]["cleanup"]
+    step = backup["steps"][0]
+    assert step["id"] == "no_allocation"
+    assert step["env"] == {
+        "RESERVE_OUTCOME": "${{ needs.provision-and-test.outputs.reserve_outcome }}",
+        "NO_ALLOCATION_CONFIRMED": "${{ needs.provision-and-test.outputs.no_allocation_confirmed }}",
+    }
+    output = tmp_path / "output"
+    calls = tmp_path / "brev-calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'brev() { printf "%s\\n" "$*" >> "$BREV_CALLS"; return 91; }\n' + step["run"],
+        ],
+        env={
+            **os.environ,
+            "RESERVE_OUTCOME": outcome,
+            "NO_ALLOCATION_CONFIRMED": proof,
+            "GITHUB_OUTPUT": str(output),
+            "BREV_CALLS": str(calls),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0 and not calls.exists()
+    assert output.exists() is confirmed
+    if confirmed:
+        assert output.read_text() == "cleanup_confirmed=true\n"
+    for name in (
+        "Check out trusted GPU cleanup",
+        "Install the pinned Brev CLI",
+        "Log in to Brev",
+        "Recover the GPU instance lease",
+    ):
+        guarded = next(s for s in backup["steps"] if s["name"] == name)
+        assert guarded["if"] == "${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}"
+    # Without proof these guards stay eligible; normal owned-ID cleanup is retained.
+    delete = next(s for s in backup["steps"] if s.get("id") == "release")
+    assert "cleanup-login.outcome == 'success'" in delete["if"]
+    assert "--until-deleted" in delete["run"]
+
+
+def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
+    owner = _workflow_step_script(
+        "community-ci.yml", "provision-and-test", "Confirm that reservation was skipped"
+    )
+    output = tmp_path / "owner-output"
+    calls = tmp_path / "brev-calls"
+    result = subprocess.run(
+        ["bash", "-c", 'brev() { printf "%s\\n" "$*" >> "$BREV_CALLS"; return 91; }\n' + owner],
+        env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(output), "BREV_CALLS": str(calls)},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0 and not calls.exists()
+    assert output.read_text().splitlines() == [
+        "no_allocation_confirmed=true",
+        "cleanup_confirmed=true",
+    ]
+    conclusion = _workflow_step_script(
+        "community-ci.yml", "provision-and-test", "Record the step conclusion"
+    )
+    result = subprocess.run(
+        ["bash", "-c", conclusion],
+        env={
+            "PATH": os.environ["PATH"],
+            "GITHUB_OUTPUT": str(tmp_path / "conclusion"),
+            "JOB_STATUS": "failure",
+            "TEST_OUTCOME": "skipped",
+            "TEST_CONCLUSION": "",
+            "CLEANUP_CONFIRMED": "true",
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0
+    assert (tmp_path / "conclusion").read_text() == "conclusion=failure\n"
+    publish = _workflow_step_script(
+        "community-ci.yml", "publish", "Publish the released Dev workflow conclusion"
+    )
+    writes = tmp_path / "writes"
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + publish],
+        env={
+            "PATH": os.environ["PATH"],
+            "HEAD_SHA": "a" * 40,
+            "GPU_RESULT": "failure",
+            "OWNER_RELEASE_CONFIRMED": "true",
+            "BACKSTOP_RELEASE_CONFIRMED": "true",
+            "NO_ALLOCATION_CONFIRMED": "true",
+            "COMPLETE_RESULT": "failure",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "42",
+            "STATUS_WRITES": str(writes),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0 and not calls.exists()
+    assert "state=failure" in writes.read_text().splitlines()
+    assert "description=Complete Community CI: infra_failure" in writes.read_text().splitlines()
 
 
 @pytest.mark.parametrize("ready_after", [1, 2, 7])
@@ -2049,6 +2299,32 @@ def test_promoted_cpu_compatibility_uses_the_actual_stable_result(
     )
 
 
+def _workflow_plan(directory):
+    path = directory / "trtmc-gpu-plan.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_sha": "b" * 40,
+                "source_tree": "c" * 40,
+                "selection": {
+                    "scope": "families",
+                    "selected_families": ["bert"],
+                    "families": ["bert"],
+                    "direct_families": ["bert"],
+                    "added_families": [],
+                },
+                "active_families": ["bert"],
+                "families": [
+                    {"family": "bert", "cases": ["bert"], "deferred_cases": [], "checkpoints": []}
+                ],
+            }
+        )
+    )
+    path.chmod(0o600)
+    return path
+
+
 # Execute the checked-in shell scripts. These functions replace only external
 # provider and coordinator operations, and preserve their real shell exit codes.
 STUBS = r"""
@@ -2063,6 +2339,13 @@ brev() {
       if [[ "$3" == */dependency-catalog.json ]]; then
         command python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["families"] == {}' "$2" || return 96
         printf 'catalog-private\t%s\n' "${3%%:*}" >> "$TRACE"
+      elif [[ "$3" == */gpu-plan.json ]]; then
+        command python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["active_families"] == ["bert"]' "$2" || return 96
+        printf 'plan-private\t%s\n' "${3%%:*}" >> "$TRACE"
+      elif [[ "$3" == */registry-token ]]; then
+        test "$(cat "$2")" = "$EXPECTED_REGISTRY_TOKEN" || return 96
+        REGISTRY_COPIED=1
+        printf 'registry-private\t%s\n' "${3%%:*}" >> "$TRACE"
       else
         test "$(cat "$2")" = "$EXPECTED_TOKEN" || return 96
         printf 'token-private\t%s\n' "${3%%:*}" >> "$TRACE"
@@ -2073,6 +2356,11 @@ brev() {
       if [[ "$3" == "rm -f -- "* ]]; then
         printf 'token-cleanup\t%s\n' "$2" >> "$TRACE"
         test "$CLEANUP_FAILS" != true || return 8
+      elif [[ "$3" == *"--pull-base"* ]]; then
+        test "${REGISTRY_COPIED:-0}" = 1 || return 96
+        REGISTRY_COPIED=0
+        printf 'base-pull\t%s\n' "$2" >> "$TRACE"
+        return "${BASE_PULL_EXIT:-0}"
       elif [[ "$3" == "git init "* && -n "${LOCAL_GIT_SETUP:-}" ]]; then
         bash -c "$LOCAL_GIT_SETUP"
         return "$?"
@@ -2103,6 +2391,7 @@ python3() {
       ;;
     tools.brev_exec:*)
       test -z "${HF_TOKEN+x}" || return 93
+      test "${REGISTRY_COPIED:-0}" = 0 || return 96
       printf 'coordinate\t%s\n' "$*" >> "$TRACE"
       return "$COORDINATOR_EXIT"
       ;;
@@ -2122,11 +2411,13 @@ class JobHarness:
     def __init__(self, tmp_path: Path, job: dict):
         self.directory = tmp_path
         self.steps = {step.get("id", step["name"]): step for step in job["steps"]}
+        self.steps.update({step["name"]: step for step in job["steps"]})
         self.trace = tmp_path / "trace"
         catalog = tmp_path / "trtmc-gpu-host-profiles.json"
         if not catalog.exists():
             catalog.write_text('{"families":{}}')
         catalog.chmod(0o600)
+        _workflow_plan(tmp_path)
         self.environment = {
             **os.environ,
             "TRACE": str(self.trace),
@@ -2154,6 +2445,10 @@ class JobHarness:
             "CUDA_ARCHITECTURES": "89",
             "HF_TOKEN": "workflow-test-checkpoint-token",
             "EXPECTED_TOKEN": "workflow-test-checkpoint-token",
+            "REGISTRY_TOKEN": "workflow-test-registry-token",
+            "EXPECTED_REGISTRY_TOKEN": "workflow-test-registry-token",
+            "REGISTRY_USERNAME": "test-reader",
+            "HUB_REQUIREMENT": "huggingface-hub==1.33.0",
         }
 
     def run(self, step: str, **updates: str) -> subprocess.CompletedProcess:
@@ -2186,20 +2481,17 @@ class JobHarness:
         return values["instance_name"]
 
 
-@pytest.mark.parametrize("profile", [64, 128, "invalid"])
-@pytest.mark.parametrize("protected", [False, True])
-def test_trusted_host_selection_step_runs_before_any_allocation(
-    tmp_path, gpu_job, profile, protected
-):
-    """Execute the actual exporter/selector CLI against Git blobs, not the PR working lock."""
+def _host_selection_fixture(tmp_path, profile=64):
+    """Committed common inputs plus hostile uncommitted PR image overrides."""
+    from tools import community_gpu_images as images
     from tools.tests.test_community_gpu_ci import _dependency_entry
+    from tools.tests.test_community_gpu_plan import owner
 
     repository = tmp_path / "source"
     repository.mkdir()
     entry = _dependency_entry(repository, "alpha")
     prefix = "ghcr.io/test-owner/private-dependencies"
-    if protected:
-        entry["lock"]["image"] = f"{prefix}/alpha@sha256:{'a' * 64}"
+    entry["lock"]["image"] = f"{prefix}/alpha@sha256:{'a' * 64}"
     entry["lock"]["resources"] = {"host_ram_gib": 64 if profile == 64 else 128}
     if profile != 64:
         entry["lock"]["qualification_host"] = {
@@ -2210,6 +2502,16 @@ def test_trusted_host_selection_step_runs_before_any_allocation(
         }
     lock = repository / "families/alpha/ci/dependency-image.json"
     lock.write_text(json.dumps(entry["lock"]))
+    owner(repository)
+    for relative in images.BASE_INPUTS:
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text("huggingface-hub==1.33.0\n" if relative.endswith(".lock") else "{}\n")
+    inputs = {
+        relative: hashlib.sha256((repository / relative).read_bytes()).hexdigest()
+        for relative in images.BASE_INPUTS
+    }
 
     def git(*args):
         return subprocess.check_output(["git", "-C", str(repository), *args], text=True).strip()
@@ -2228,91 +2530,150 @@ def test_trusted_host_selection_step_runs_before_any_allocation(
         "trusted host inputs",
     )
     ci_sha = git("rev-parse", "HEAD")
-    secret = (
-        json.dumps(
-            {
-                "schema_version": 1,
-                "ci_sha": "ignored",
-                "registry_prefix": prefix,
-                "families": {"alpha": entry},
-            }
-        )
-        if protected
-        else ""
-    )
+    git("remote", "add", "origin", str(repository))
+    catalog = {
+        "schema_version": 1,
+        "ci_sha": "ignored",
+        "registry_prefix": prefix,
+        "families": {"alpha": entry},
+        "base": {
+            "schema_version": 1,
+            "kind": "community-base",
+            "platform": "linux/amd64",
+            "registry_visibility": "private",
+            "image": prefix + "/base@sha256:" + "c" * 64,
+            "environment_source_sha": ci_sha,
+            "inputs": inputs,
+            "input_key": images.base_key(inputs),
+            "cpu_environment_verified": True,
+            "local_image_id": "sha256:" + "d" * 64,
+        },
+    }
     lock.write_text('{"resources":{"host_ram_gib":256},"image":"attacker:latest"}')
+    # The actual trusted Python admission runs in a subprocess. Supply a fixed
+    # /user response at its HTTP boundary; resolver validation has unit coverage.
+    http_fixture = tmp_path / "identity-http-fixture"
+    http_fixture.mkdir()
+    (http_fixture / "sitecustomize.py").write_text(
+        "import io, json, os, urllib.request\n"
+        "from types import SimpleNamespace\n"
+        "def identity(request, timeout):\n"
+        "    assert request.full_url == 'https://api.github.com/user'\n"
+        "    assert request.get_header('Authorization') == 'Bearer dedicated-test-reader-token'\n"
+        "    assert timeout > 0\n"
+        "    if os.environ.get('IDENTITY_FIXTURE_MODE') == 'error':\n"
+        "        raise OSError('dedicated-test-reader-token upstream error')\n"
+        "    login = 'test-reader' if os.environ.get('IDENTITY_FIXTURE_MODE') != 'invalid' else 'invalid\\nlogin'\n"
+        "    response = io.BytesIO(json.dumps({'login': login}).encode())\n"
+        "    response.status = 200\n"
+        "    return response\n"
+        "urllib.request.build_opener = lambda *handlers: SimpleNamespace(open=identity)\n"
+    )
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(http_fixture) + os.pathsep + str(REPO_ROOT),
+        "GITHUB_WORKSPACE": str(repository),
+        "GITHUB_SHA": ci_sha,
+        "SOURCE_SHA": ci_sha,
+        "GITHUB_OUTPUT": str(tmp_path / "host-output"),
+        "RUNNER_TEMP": str(tmp_path),
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": '["alpha"]',
+        "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        "REGISTRY_TOKEN": "dedicated-test-reader-token",
+    }
+    return repository, catalog, environment
+
+
+@pytest.mark.parametrize("profile", [64, 128, "invalid"])
+@pytest.mark.parametrize("protected", [False, True])
+def test_trusted_host_selection_step_runs_before_any_allocation(
+    tmp_path, gpu_job, profile, protected
+):
+    """Execute actual Git-object planning and protected admission before allocation."""
+    repository, catalog, environment = _host_selection_fixture(tmp_path, profile)
+    secret = json.dumps(catalog) if protected else ""
+    environment["PROTECTED_DEPENDENCY_CATALOG"] = secret
     step = next(step for step in gpu_job["steps"] if step.get("id") == "host_profile")
     assert step.get("continue-on-error", False) is False
-    assert [s.get("id") for s in gpu_job["steps"]].index("host_profile") < [
-        s.get("id") for s in gpu_job["steps"]
-    ].index("reserve")
+    assert "REGISTRY_USERNAME" not in step["env"]
+    steps = gpu_job["steps"]
+    execution = next(item for item in steps if item.get("id") == "test")
+    assert execution["env"]["REGISTRY_USERNAME"] == (
+        "${{ steps.host_profile.outputs.registry_username }}"
+    )
+    assert steps.index(step) < next(
+        i for i, item in enumerate(steps) if item["name"] == "Install the Brev CLI"
+    )
     output = tmp_path / "host-output"
     result = subprocess.run(
         ["bash", "-c", step["run"]],
-        cwd=REPO_ROOT,
-        env={
-            **os.environ,
-            "PYTHONPATH": str(REPO_ROOT),
-            "GITHUB_WORKSPACE": str(repository),
-            "GITHUB_SHA": ci_sha,
-            "GITHUB_OUTPUT": str(output),
-            "RUNNER_TEMP": str(tmp_path),
-            "TRTMC_GPU_SCOPE": "families",
-            "TRTMC_GPU_FAMILIES": '["alpha"]',
-            "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
-            "TRTMC_GPU_ADDED_FAMILIES": "[]",
-            "PROTECTED_DEPENDENCY_CATALOG": secret,
-        },
+        cwd=repository,
+        env=environment,
         capture_output=True,
         text=True,
         timeout=10,
     )
     assert secret == "" or secret not in result.stdout + result.stderr
+    assert environment["REGISTRY_TOKEN"] not in result.stdout + result.stderr
     assert not list(tmp_path.glob("trtmc-protected-dependency-catalog.*"))
-    if result.returncode == 0:
-        exported = tmp_path / "trtmc-gpu-host-profiles.json"
-        assert exported.stat().st_mode & 0o777 == 0o600
-        assert json.loads(exported.read_text())["ci_sha"] == ci_sha
     harness = JobHarness(tmp_path, gpu_job)
-    if result.returncode == 0:
-        assert output.read_text().splitlines() == [
-            f"host_ram_gib={profile}",
-            "dependency_images=true",
-        ]
-        reserved = harness.run("reserve", HOST_RAM_GIB=str(profile))
-        assert (
-            reserved.returncode == 0
-            and f"--host-ram-gib {profile}" in harness.events("provision")[0]
-        )
-    if profile == "invalid":
+    if profile == "invalid" or not protected:
         assert result.returncode != 0 and not output.exists() and not harness.events("provision")
+        if not protected:
+            assert "Configure the protected shared base catalog" in result.stdout
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    exported = tmp_path / "trtmc-gpu-host-profiles.json"
+    assert exported.stat().st_mode & 0o777 == 0o600
+    assert json.loads(exported.read_text())["ci_sha"] == environment["GITHUB_SHA"]
+    assert output.read_text().splitlines() == [
+        "registry_username=test-reader",
+        f"host_ram_gib={profile}",
+        "hub_requirement=huggingface-hub==1.33.0",
+        "dependency_images=true",
+    ]
+    reserved = harness.run("reserve", HOST_RAM_GIB=str(profile))
+    assert (
+        reserved.returncode == 0 and f"--host-ram-gib {profile}" in harness.events("provision")[0]
+    )
+
+
+@pytest.mark.parametrize(
+    "fault", ["registry", "base", "token", "identity", "invalid_identity", "base_inputs"]
+)
+def test_invalid_protected_catalog_stops_the_real_preallocation_step(tmp_path, gpu_job, fault):
+    repository, catalog, environment = _host_selection_fixture(tmp_path)
+    if fault == "registry":
+        catalog["registry_prefix"] = "credential-sensitive-prefix"
+    elif fault == "base":
+        del catalog["base"]
+    elif fault in {"identity", "invalid_identity"}:
+        environment["IDENTITY_FIXTURE_MODE"] = "error" if fault == "identity" else "invalid"
+    elif fault == "base_inputs":
+        from tools import community_gpu_images as images
+
+        catalog["base"]["inputs"][images.BASE_INPUTS[0]] = "0" * 64
+        catalog["base"]["input_key"] = images.base_key(catalog["base"]["inputs"])
     else:
-        assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_invalid_protected_catalog_stops_the_real_preallocation_step(tmp_path, gpu_job):
+        environment["REGISTRY_" + fault.upper()] = ""
+    secret = json.dumps(catalog)
+    environment["PROTECTED_DEPENDENCY_CATALOG"] = secret
     step = next(step for step in gpu_job["steps"] if step.get("id") == "host_profile")
-    output = tmp_path / "host-output"
-    secret = '{"schema_version":1,"registry_prefix":"credential-sensitive-prefix","families":{}}'
     result = subprocess.run(
         ["bash", "-c", step["run"]],
-        cwd=REPO_ROOT,
-        env={
-            **os.environ,
-            "GITHUB_WORKSPACE": str(REPO_ROOT),
-            "GITHUB_SHA": "a" * 40,
-            "GITHUB_OUTPUT": str(output),
-            "RUNNER_TEMP": str(tmp_path),
-            "PROTECTED_DEPENDENCY_CATALOG": secret,
-        },
+        cwd=repository,
+        env=environment,
         capture_output=True,
         text=True,
         timeout=10,
     )
-    assert result.returncode != 0 and not output.exists()
+    assert result.returncode != 0 and not (tmp_path / "host-output").exists()
     assert "credential-sensitive-prefix" not in result.stdout + result.stderr
+    assert secret not in result.stdout + result.stderr
+    assert "dedicated-test-reader-token" not in result.stdout + result.stderr
     assert not list(tmp_path.glob("trtmc-protected-dependency-catalog.*"))
-    assert not (tmp_path / "trtmc-gpu-host-profiles.json").exists()
 
 
 def test_failed_blocking_reservation_stops_normal_test_admission(tmp_path, gpu_job):
@@ -2428,7 +2789,7 @@ def test_gpu_coordinator_runs_once_on_the_ready_instance(tmp_path, gpu_job, coor
     coordinated = harness.events("coordinate")
     assert len(coordinated) == 1
     assert f"--instance {instance}" in coordinated[0]
-    assert "--timeout 3720" in coordinated[0]
+    assert "--timeout 10920" in coordinated[0]
     remote = harness.events("brev")
     assert not any(call.startswith(("create ", "delete ")) for call in remote)
     assert not any(call == f"exec {instance} true" for call in remote)
@@ -2466,6 +2827,26 @@ def test_failed_token_copy_cleans_up_without_model_execution_or_reprovision(
         result.stdout + result.stderr + harness.trace.read_text()
     )
     assert ("VM teardown is still required" in result.stderr) is cleanup_fails
+
+
+@pytest.mark.parametrize("pull_exit,attempts", [(0, 1), (42, 6)])
+def test_shared_base_pull_restores_scrubbed_reader_on_each_existing_attempt(
+    tmp_path, gpu_job, pull_exit, attempts
+):
+    harness = JobHarness(tmp_path, gpu_job)
+    instance = harness.environment["RESERVED_INSTANCE"]
+    result = harness.run("test", INSTANCE_NAME=instance, BASE_PULL_EXIT=str(pull_exit))
+    assert (result.returncode == 0) is (pull_exit == 0), result.stdout + result.stderr
+    assert harness.events("registry-private") == [instance] * attempts
+    assert harness.events("base-pull") == [instance] * attempts
+    assert len(harness.events("coordinate")) == (1 if pull_exit == 0 else 0)
+    assert harness.events("token-cleanup") == [instance]
+    assert not harness.events("provision")
+    assert not any(call.startswith(("create ", "delete ")) for call in harness.events("brev"))
+    assert not list(tmp_path.glob("trtmc-registry-token.*"))
+    assert harness.environment["EXPECTED_REGISTRY_TOKEN"] not in (
+        result.stdout + result.stderr + harness.trace.read_text()
+    )
 
 
 def test_dependency_network_retry_does_not_repeat_gpu_test_or_replace_vm(tmp_path, gpu_job):

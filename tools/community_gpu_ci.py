@@ -19,6 +19,7 @@ import tempfile
 import time
 import uuid
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,9 +42,21 @@ MAX_EXECUTION_SECONDS = 10800
 SUMMARY_PREFIX = "TRTMC_GPU_SUMMARY="
 MAX_DEPENDENCY_CATALOG_BYTES = 1024 * 1024
 DEPENDENCY_REGISTRY = "ghcr.io/nvidia/tensorrt-model-connect-community"
+FAMILY_PREPARATION_SECONDS = 7200
 
 
-def execution_budget_seconds(env: dict[str, str]) -> int:
+def _image_preparation():
+    """Load the sibling staged from the same trusted CI commit, never from the PR."""
+    path = Path(__file__).resolve().with_name("community_gpu_images.py")
+    spec = importlib.util.spec_from_file_location("trtmc_community_image_preparation", path)
+    if spec is None or spec.loader is None:
+        raise CommunityGpuError("Trusted image preparation module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def execution_budget_seconds(env: dict[str, str], plan_file: Path | None = None) -> int:
     """Budget the selected owners while leaving the job time for final cleanup."""
     families = selected_families(
         env.get("TRTMC_GPU_SCOPE", ""),
@@ -51,8 +64,15 @@ def execution_budget_seconds(env: dict[str, str]) -> int:
         env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
         env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
     )
+    if plan_file is not None:
+        frozen = _read_gpu_plan(plan_file)
+        if frozen["selection"] != _plan_selection(env):
+            raise CommunityGpuError("Frozen GPU selection does not match this execution")
+        families = tuple(frozen["active_families"])
     return min(
-        MAX_EXECUTION_SECONDS, len(families) * (STAGING_TIMEOUT_SECONDS + FAMILY_TIMEOUT_SECONDS)
+        MAX_EXECUTION_SECONDS,
+        len(families)
+        * (FAMILY_PREPARATION_SECONDS + STAGING_TIMEOUT_SECONDS + FAMILY_TIMEOUT_SECONDS),
     )
 
 
@@ -108,13 +128,19 @@ def _family_result(env: dict[str, str], family: str):
         "family": family,
         "status": "running",
         "phase": "plan",
-        "failure_class": "configuration",
+        "failure_class": "infra_failure",
+        "entrypoint_started": False,
         "requested_cases": [],
     }
     try:
         yield report
     except Exception as error:
-        report.update(status="failed", exit_code=1, evidence=str(error)[-4000:])
+        report.update(
+            status="failed",
+            exit_code=1,
+            failure_class="pr_failure" if report["entrypoint_started"] else "infra_failure",
+            evidence=str(error)[-4000:],
+        )
         raise
     else:
         report.update(status="passed", phase="complete", failure_class=None, exit_code=0)
@@ -134,6 +160,202 @@ class FamilyPlan:
     testcases: tuple[str, ...]
     checkpoints: tuple[tuple[str, str | None], ...]
     deferred_testcases: tuple[str, ...] = ()
+
+
+def _plan_selection(env: dict[str, str]) -> dict:
+    selected = selected_families(
+        env.get("TRTMC_GPU_SCOPE", ""),
+        env.get("TRTMC_GPU_FAMILIES", ""),
+        env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
+        env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
+    )
+    return {
+        "scope": env["TRTMC_GPU_SCOPE"],
+        "selected_families": list(selected),
+        "families": list(_family_list(env.get("TRTMC_GPU_FAMILIES", ""), "families")),
+        "direct_families": list(_family_list(env.get("TRTMC_GPU_DIRECT_FAMILIES", ""), "direct")),
+        "added_families": list(_family_list(env.get("TRTMC_GPU_ADDED_FAMILIES", ""), "added")),
+    }
+
+
+def _plan_rows(plans: dict[str, FamilyPlan]) -> list[dict]:
+    return [
+        {
+            "family": owner,
+            "cases": list(plan.testcases),
+            "deferred_cases": list(plan.deferred_testcases),
+            "checkpoints": [
+                {"repo_id": repo, "revision": revision} for repo, revision in plan.checkpoints
+            ],
+        }
+        for owner, plan in sorted(plans.items())
+    ]
+
+
+def _git_plan(repository: Path, *arguments: str) -> str:
+    """Read Git objects with the trusted sibling's bounded process primitive."""
+    try:
+        return _image_preparation()._captured(
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository.resolve()}",
+                "-C",
+                str(repository),
+                *arguments,
+            ],
+            dict(os.environ),
+            None,
+            30,
+            True,
+        )
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+        raise CommunityGpuError("The frozen GPU Git objects are unavailable") from None
+
+
+def _static_gpu_plan(repository: Path, source_sha: str, env: dict[str, str]) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise CommunityGpuError("Static GPU planning requires an immutable source commit")
+    if (
+        _git_plan(repository, "rev-parse", "--verify", source_sha + "^{commit}").strip()
+        != source_sha
+    ):
+        raise CommunityGpuError("The GPU source commit changed during planning")
+    tree = _git_plan(repository, "rev-parse", source_sha + "^{tree}").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", tree):
+        raise CommunityGpuError("The frozen GPU source tree is invalid")
+    entries = {}
+    for raw in _git_plan(repository, "ls-tree", "-r", "-z", source_sha, "--", "families").split(
+        "\0"
+    ):
+        if not raw:
+            continue
+        metadata, path = raw.split("\t", 1)
+        mode, kind, oid = metadata.split(" ")
+        entries[path] = (mode, kind, oid)
+    selection = _plan_selection(env)
+    with tempfile.TemporaryDirectory(prefix="trtmc-static-gpu-plan-") as directory:
+        shadow = Path(directory)
+
+        def materialize(owner: str) -> None:
+            for relative in (f"families/{owner}/model.py", f"families/{owner}/tests/test_e2e.py"):
+                if entries.get(relative, ())[:2] not in {("100644", "blob"), ("100755", "blob")}:
+                    raise CommunityGpuError(
+                        "The selected family has no regular native/test declaration"
+                    )
+                target = shadow / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.touch()
+            prefix = f"families/{owner}/tests/manifests/"
+            for relative, (mode, kind, oid) in entries.items():
+                if not relative.startswith(prefix) or not relative.endswith(".json"):
+                    continue
+                if (
+                    len(Path(relative).parts) != 5
+                    or mode not in {"100644", "100755"}
+                    or kind != "blob"
+                ):
+                    raise CommunityGpuError(
+                        "The GPU manifest is not a regular family-owned JSON blob"
+                    )
+                size = int(_git_plan(repository, "cat-file", "-s", oid).strip())
+                if size > MAX_DEPENDENCY_CATALOG_BYTES:
+                    raise CommunityGpuError("The GPU manifest exceeds the size limit")
+                target = shadow / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(_git_plan(repository, "cat-file", "blob", oid), encoding="utf-8")
+
+        plans = {}
+        for owner in selection["selected_families"]:
+            materialize(owner)
+            plans[owner] = family_plan(shadow, owner)
+        active = tuple(owner for owner, plan in plans.items() if plan.testcases)
+        if not active:
+            for owner in SHARED_SMOKE_FAMILIES:
+                if owner not in plans:
+                    materialize(owner)
+                    plans[owner] = family_plan(shadow, owner)
+                if not plans[owner].testcases:
+                    raise CommunityGpuError("The GPU fallback requires runnable baseline coverage")
+            active = SHARED_SMOKE_FAMILIES
+    return {
+        "schema_version": 1,
+        "source_sha": source_sha,
+        "source_tree": tree,
+        "selection": selection,
+        "active_families": list(active),
+        "families": _plan_rows(plans),
+    }
+
+
+def export_gpu_plan(
+    repository: Path, source_sha: str, env: dict[str, str], destination: Path
+) -> None:
+    """Freeze only static PR metadata before any cloud allocation or PR import."""
+    _save_json(destination, _static_gpu_plan(repository, source_sha, env), private=True)
+
+
+def _read_gpu_plan(path: Path) -> dict:
+    value = _dependency_json(_dependency_bytes(path))
+    if (
+        type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
+        or not re.fullmatch(r"[0-9a-f]{40}", str(value.get("source_sha", "")))
+        or not re.fullmatch(r"[0-9a-f]{40}", str(value.get("source_tree", "")))
+        or not isinstance(value.get("selection"), dict)
+        or not isinstance(value.get("families"), list)
+    ):
+        raise CommunityGpuError("The frozen GPU plan is invalid")
+    active = value.get("active_families")
+    if (
+        not isinstance(active, list)
+        or not active
+        or any(
+            not isinstance(owner, str) or not FAMILY_PATTERN.fullmatch(owner) for owner in active
+        )
+        or active != sorted(set(active))
+    ):
+        raise CommunityGpuError("The frozen GPU plan has no valid active families")
+    return value
+
+
+def verify_gpu_plan(
+    repository: Path, env: dict[str, str], path: Path
+) -> tuple[dict[str, FamilyPlan], tuple[str, ...]]:
+    frozen = _read_gpu_plan(path)
+    source = frozen["source_sha"]
+    if _git_plan(repository, "rev-parse", "HEAD").strip() != source:
+        raise CommunityGpuError("The VM checkout does not match the frozen GPU source")
+    _git_plan(repository, "diff", "--quiet", "HEAD", "--")
+    if _static_gpu_plan(repository, source, env) != frozen:
+        raise CommunityGpuError("The VM GPU plan differs from the preallocation plan")
+    owners = [row["family"] for row in frozen["families"]]
+    plans = {owner: family_plan(repository, owner) for owner in owners}
+    if _plan_rows(plans) != frozen["families"]:
+        raise CommunityGpuError("The checked-out family metadata differs from its frozen plan")
+    return plans, tuple(frozen["active_families"])
+
+
+def staging_hub_requirement(repository: Path, ci_sha: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", ci_sha):
+        raise CommunityGpuError("Hub staging requires a trusted immutable CI commit")
+    lock = _git_plan(repository, "show", ci_sha + ":requirements/community-gpu-linux-amd64.lock")
+    rows = [
+        line.strip()
+        for line in lock.splitlines()
+        if re.fullmatch(r"huggingface-hub==[A-Za-z0-9][A-Za-z0-9_.+!-]*", line.strip())
+    ]
+    if len(rows) != 1:
+        raise CommunityGpuError("The trusted common lock must pin exactly one Hub client")
+    return rows[0]
+
+
+def require_shared_base(catalog_path: Path, token: str) -> str:
+    catalog = _dependency_catalog(catalog_path)
+    _image_preparation().validate_base(catalog.get("base"), _dependency_registry(catalog))
+    if not token.strip():
+        raise CommunityGpuError("Configure the dedicated private base reader before allocation")
+    return _image_preparation().registry_reader_login(token)
 
 
 def native_cli_library(declaration: Path) -> str | None:
@@ -281,7 +503,7 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
     if not checkpoints:
         return
 
-    from huggingface_hub import HfApi, snapshot_download
+    from huggingface_hub import HfApi, get_cached_repo_tree, snapshot_download
 
     api = HfApi()
     for repo_id, requested_revision in checkpoints:
@@ -301,6 +523,23 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
             raise CommunityGpuError(
                 f"checkpoint revision changed while staging {repo_id}: "
                 f"resolved={resolved}, downloaded={snapshot.name}"
+            )
+        # Newer Hub clients need the immutable repository tree as well as the
+        # checkpoint bytes. A legacy snapshot-only cache otherwise triggers a
+        # Hub.tree request from unchanged family code in HF_HUB_OFFLINE mode.
+        # Require metadata and complete local files before entering PR code.
+        get_cached_repo_tree(repo_id, revision=resolved, cache_dir=cache_dir)
+        cached = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                revision=requested_revision,
+                cache_dir=cache_dir,
+                local_files_only=True,
+            )
+        )
+        if cached != snapshot:
+            raise CommunityGpuError(
+                f"offline checkpoint differs from the staged revision: {repo_id}"
             )
         print(f"Staged checkpoint {repo_id}@{resolved}")
 
@@ -385,10 +624,55 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
         _run_family(repository, env, family, report)
 
 
-def _run_family(repository: Path, env: dict[str, str], family: str, report: dict) -> None:
-    from tools.ci.context import CiContext
-    from tools.ci.e2e import E2ERunner
+def prepare_family_impact(repository: Path, plan: FamilyPlan) -> None:
+    """Reserve one generated input for the existing repository CI entrypoint."""
+    tracked = subprocess.run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+            "ls-files",
+            "--error-unmatch",
+            "impact.json",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if tracked.returncode == 0:
+        raise CommunityGpuError("The PR tracks the reserved Community impact input")
+    if tracked.returncode != 1:
+        raise CommunityGpuError("Cannot verify the reserved Community impact input")
+    destination = repository / "impact.json"
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise CommunityGpuError("The reserved Community impact input is not a regular file")
+    _save_json(destination, {"families": [plan.family], "testcases": list(plan.testcases)})
 
+
+def _family_command(
+    repository: Path,
+    env: dict[str, str],
+    command: Sequence[str | Path],
+    *,
+    limit: str | None = None,
+) -> None:
+    """Run the existing native/CLI entrypoints without importing PR helpers."""
+    arguments = [str(value) for value in command]
+    if limit is not None:
+        arguments = ["timeout", "--kill-after=2m", limit, *arguments]
+    subprocess.run(arguments, cwd=repository, env=env, check=True)
+
+
+def _entrypoint_started(path: Path, family: str) -> bool:
+    try:
+        return _dependency_bytes(Path(str(path) + ".entrypoint")) == (family + "\n").encode()
+    except (CommunityGpuError, OSError):
+        return False
+
+
+def _run_family(repository: Path, env: dict[str, str], family: str, report: dict) -> None:
     repository = repository.resolve()
     plan = family_plan(repository, family)
     if not plan.testcases:
@@ -399,32 +683,45 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
         **env,
         "CMAKE_CUDA_ARCHITECTURES": env.get("CMAKE_CUDA_ARCHITECTURES", "89"),
     }
-    context = CiContext(repository, build_env)
     print(f"Running Community GPU E2E: {family} ({', '.join(plan.testcases)})", flush=True)
-    # Install before configuring native targets so they use this family's ABI.
-    _phase(report, env, "dependencies", "dependency")
-    _install_family_requirements(context, (plan,))
+    # Dependencies and assets are prepared by the trusted host before this
+    # wrapper runs. Do not import contributor Python during environment probes.
+    _phase(report, env, "gpu", "infra_failure")
+    _family_command(
+        repository,
+        build_env,
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import tensorrt, torch, tvm_ffi; assert torch.cuda.is_available(); "
+            "print(f'GPU count: {torch.cuda.device_count()}')",
+        ],
+    )
+    if env.get("TRTMC_CHECKPOINTS_PRESTAGED") != "1":
+        raise CommunityGpuError("Family checkpoints were not prepared before the PR entrypoint")
+    impact = _dependency_json(_dependency_bytes(repository / "impact.json", root=repository))
+    if impact.get("families") != [family] or impact.get("testcases") != list(plan.testcases):
+        raise CommunityGpuError("The prepared family selection does not match its PR entrypoint")
     targets = [f"trtmc_model_{plan.family}"]
     declaration = repository / "families" / plan.family / "cli.json"
     if declaration.is_file() and native_cli_library(declaration) is not None:
         targets.append(f"trtmc_cli_{plan.family}")
-    _phase(report, env, "gpu", "environment")
-    context.run(
-        [
-            sys.executable,
-            "-c",
-            "import torch; assert torch.cuda.is_available(); "
-            "print(f'GPU count: {torch.cuda.device_count()}')",
-        ]
-    )
-
     build = Path(env.get("TRTMC_NATIVE_BUILD_DIR", "/tmp/trtmc-community-gpu-build"))
     if not build.is_absolute() or Path("/tmp") not in build.parents:
         raise CommunityGpuError(f"Community GPU build directory must be inside /tmp: {build}")
     if build.exists():
         raise CommunityGpuError(f"Community GPU build directory already exists: {build}")
-    _phase(report, env, "configure", "build")
-    context.run(
+    # The marker precedes the first contributor-controlled native or Python
+    # entrypoint. Its sidecar survives a missing or malformed result JSON.
+    report["entrypoint_started"] = True
+    if destination := env.get("TRTMC_GPU_RESULT_FILE"):
+        Path(destination + ".entrypoint").write_text(family + "\n", encoding="utf-8")
+    _phase(report, env, "configure", "pr_failure")
+    print(f"TRTMC_PR_ENTRYPOINT_STARTED={family}", flush=True)
+    _family_command(
+        repository,
+        build_env,
         [
             "cmake",
             "-S",
@@ -436,10 +733,12 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
             "-DCMAKE_BUILD_TYPE=Release",
             "-DTRTMC_BUILD_TESTS=ON",
             "-DTRTMC_BUILD_EXAMPLES=OFF",
-        ]
+        ],
     )
-    _phase(report, env, "build", "build")
-    context.run(
+    _phase(report, env, "build", "pr_failure")
+    _family_command(
+        repository,
+        build_env,
         [
             "cmake",
             "--build",
@@ -459,7 +758,9 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
         **env,
         "HF_HOME": env.get("HF_HOME", "/tmp/trtmc-community-huggingface"),
     }
-    context.run(
+    _family_command(
+        repository,
+        build_env,
         [
             "cmake",
             "--build",
@@ -471,11 +772,8 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
         ],
         limit=env.get("CPP_BUILD_TIMEOUT", "30m"),
     )
-    _phase(report, env, "runtime", "harness")
+    _phase(report, env, "runtime", "pr_failure")
     runtime_root = _runtime_root(build, plan, repository)
-    if env.get("TRTMC_CHECKPOINTS_PRESTAGED") != "1":
-        _phase(report, env, "checkpoints", "dependency")
-        _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
     runtime_env = {
         **checkpoint_env,
         "CMAKE_CUDA_ARCHITECTURES": build_env["CMAKE_CUDA_ARCHITECTURES"],
@@ -493,10 +791,11 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
         "TRTMC_NATIVE_BUILD_DIR": str(build),
         "TRTMC_E2E_TIMEOUT": env.get("TRTMC_E2E_TIMEOUT", "40m"),
     }
-    _phase(report, env, "validation", "validation")
-    E2ERunner(CiContext(repository, runtime_env))._run(
-        (plan.family,),
-        plan.testcases,
+    _phase(report, env, "validation", "pr_failure")
+    _family_command(
+        repository,
+        runtime_env,
+        [sys.executable, "-m", "tools.ci", "pipeline", "selective-e2e"],
     )
     print(f"Community GPU family passed: {plan.family}", flush=True)
 
@@ -509,11 +808,14 @@ def _container_result(
     expected_cases: tuple[str, ...] | None = None,
 ) -> dict:
     """Treat container evidence as bounded data, never as a command or retry policy."""
+    entered = _entrypoint_started(path, family)
+    category = "pr_failure" if entered else "infra_failure"
     record = {
         "family": family,
         "status": "failed",
         "phase": "container",
-        "failure_class": "unknown",
+        "failure_class": category,
+        "entrypoint_started": entered,
         "exit_code": exit_code,
         "requested_cases": list(expected_cases or ()),
         "cases": {name: "not_run" for name in expected_cases or ()},
@@ -560,6 +862,8 @@ def _container_result(
             raise ValueError("invalid result phase")
         if value.get("failure_class") not in {
             None,
+            "infra_failure",
+            "pr_failure",
             "configuration",
             "dependency",
             "environment",
@@ -579,7 +883,6 @@ def _container_result(
                 for key in (
                     "status",
                     "phase",
-                    "failure_class",
                     "requested_cases",
                     "cases",
                     "duration_seconds",
@@ -591,25 +894,28 @@ def _container_result(
         record["cases"] = {name: cases.get(name, "not_run") for name in requested}
         if exit_code == 0 and value["status"] == "passed":
             if (
-                not requested
+                not entered
+                or not requested
                 or set(cases) != set(requested)
                 or any(v != "passed" for v in cases.values())
             ):
                 raise ValueError("family passed without complete selected E2E evidence")
+            record["failure_class"] = None
         else:
             record["status"] = "failed"
             if value["status"] == "passed":
-                record["failure_class"] = "unknown"
+                record["failure_class"] = category
     except (OSError, ValueError, TypeError, RecursionError):
         record.update(
             status="failed",
-            failure_class="unknown",
+            failure_class=category,
             evidence="missing, incomplete or invalid family result",
+            cases={name: "not_run" for name in record["requested_cases"]},
         )
     if state.get("OOMKilled") is True:
         record.update(
             status="failed",
-            failure_class="resource",
+            failure_class=category,
             evidence="Docker reported OOMKilled for this container",
         )
     return record
@@ -695,6 +1001,14 @@ def export_dependency_catalog(
         _validate_dependency_catalog(source)
         if "registry_prefix" in source:
             catalog["registry_prefix"] = source["registry_prefix"]
+        if "base" in source:
+            preparation = _image_preparation()
+            expected = {
+                path: hashlib.sha256(blob(path)).hexdigest() for path in preparation.BASE_INPUTS
+            }
+            catalog["base"] = preparation.validate_base(
+                source["base"], _dependency_registry(catalog), expected
+            )
         for family, entry in source["families"].items():
             if not isinstance(entry, dict) or not isinstance(entry.get("lock"), dict):
                 raise CommunityGpuError("Invalid protected dependency entry")
@@ -764,6 +1078,8 @@ def _validate_dependency_catalog(catalog: dict) -> None:
     if not all(isinstance(name, str) and FAMILY_PATTERN.fullmatch(name) for name in families):
         raise CommunityGpuError("Invalid dependency catalog family")
     _dependency_registry(catalog)
+    if "base" in catalog:
+        _image_preparation().validate_base(catalog["base"], _dependency_registry(catalog))
 
 
 def _dependency_catalog(path: Path) -> dict:
@@ -773,7 +1089,11 @@ def _dependency_catalog(path: Path) -> dict:
 
 
 def required_host_ram_gib(
-    repository: Path, env: dict[str, str], catalog_path: Path, ci_sha: str
+    repository: Path,
+    env: dict[str, str],
+    catalog_path: Path,
+    ci_sha: str,
+    plan_file: Path | None = None,
 ) -> int:
     """Select the largest admitted owner profile before any cloud allocation."""
     catalog = _dependency_catalog(catalog_path)
@@ -785,6 +1105,11 @@ def required_host_ram_gib(
         env.get("TRTMC_GPU_DIRECT_FAMILIES", ""),
         env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
     )
+    if plan_file is not None:
+        frozen = _read_gpu_plan(plan_file)
+        if frozen["selection"] != _plan_selection(env):
+            raise CommunityGpuError("Host resources do not match the frozen GPU selection")
+        selected = tuple(frozen["active_families"])
     ram = 64
     for family in selected:
         if family in catalog["families"]:
@@ -1015,6 +1340,8 @@ def run_containers(
     registry_token_file: Path | None = None,
     registry_username: str = "github-actions",
     require_family_coverage: bool = False,
+    plan_file: Path | None = None,
+    dependencies_prepared: bool = False,
 ) -> None:
     """Run selected owners sequentially, preserving partial coverage and cleanup."""
     repository = repository.resolve(strict=True)
@@ -1041,8 +1368,17 @@ def run_containers(
                 )
             plans[family] = plan
         active = SHARED_SMOKE_FAMILIES
+    if plan_file is not None:
+        frozen_plans, frozen_active = verify_gpu_plan(repository, env, plan_file)
+        if frozen_plans != plans or frozen_active != active:
+            raise CommunityGpuError("The effective GPU selection differs from its frozen plan")
     started = time.monotonic()
-    deadline = started + execution_budget_seconds(env)
+    # Budget the effective plan, including the existing baseline fallback.
+    deadline = started + min(
+        MAX_EXECUTION_SECONDS,
+        len(active)
+        * (FAMILY_PREPARATION_SECONDS + STAGING_TIMEOUT_SECONDS + FAMILY_TIMEOUT_SECONDS),
+    )
     records = {
         family: {
             "family": family,
@@ -1066,9 +1402,24 @@ def run_containers(
     image_id = inspected.stdout.strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise CommunityGpuError("Docker did not resolve an immutable GPU image ID")
-    dependency_images, dependency_errors, dependency_misses = _dependency_image_ids(
-        repository, active, dependency_catalog, registry_token_file, registry_username, deadline
+    shared_base = (
+        _dependency_catalog(dependency_catalog).get("base")
+        if dependency_catalog is not None
+        else None
     )
+    if shared_base is not None:
+        if image_id != shared_base["local_image_id"]:
+            raise CommunityGpuError("The selected image does not match the verified shared base")
+        # The workflow has pulled and verified the common base once. Family
+        # declarations are materialized only as their turn is reached below.
+        dependency_images, dependency_errors, dependency_misses = {}, {}, {}
+        if registry_token_file is not None:
+            registry_token_file.unlink(missing_ok=True)
+    else:
+        dependency_images, dependency_errors, dependency_misses = _dependency_image_ids(
+            repository, active, dependency_catalog, registry_token_file, registry_username, deadline
+        )
+    preparation = _image_preparation()
     runner = Path(__file__).resolve()
     run_id = uuid.uuid4().hex
     failures = []
@@ -1090,7 +1441,7 @@ def run_containers(
                 records[family].update(
                     status="failed",
                     phase="dependencies",
-                    failure_class="dependency",
+                    failure_class="infra_failure",
                     exit_code=1,
                     evidence=dependency_errors[family],
                 )
@@ -1102,11 +1453,45 @@ def run_containers(
                 failures.append("coordinator budget exhausted; remaining families were not run")
                 for row in records.values():
                     if row["status"] == "not_run":
-                        row.update(failure_class="budget", evidence="coordinator deadline reached")
+                        row.update(
+                            failure_class="infra_failure", evidence="coordinator deadline reached"
+                        )
                 break
+            row = records[family]
+            row.update(
+                status="running",
+                phase="environment",
+                failure_class="infra_failure",
+                entrypoint_started=False,
+            )
+            _summary(records, env, started)
+            try:
+                prepare_family_impact(repository, plans[family])
+                family_image = dependency_images.get(family)
+                if dependencies_prepared:
+                    family_image = image_id
+                elif family_image is None:
+                    family_image = preparation.ensure_family_image(
+                        repository, family, image_id, deadline
+                    )
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                row.update(status="failed", exit_code=1, evidence=str(error)[-4000:])
+                failures.append(f"{family}: environment preparation failed")
+                _summary(records, env, started)
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                row.update(
+                    status="failed",
+                    exit_code=124,
+                    evidence="coordinator deadline reached during environment preparation",
+                )
+                failures.append(f"{family}: environment preparation exhausted coordinator budget")
+                _summary(records, env, started)
+                continue
             name = f"trtmc-community-{run_id}-{family}"
             row = records[family]
-            row.update(status="running", phase="checkpoints", failure_class="dependency")
+            row.update(status="running", phase="checkpoints", failure_class="infra_failure")
             _summary(records, env, started)
             with tempfile.TemporaryDirectory(prefix=f"{name}-") as cache:
                 stage_command = [
@@ -1143,7 +1528,7 @@ def run_containers(
                 except subprocess.TimeoutExpired:
                     row.update(
                         status="failed",
-                        failure_class="budget",
+                        failure_class="infra_failure",
                         exit_code=124,
                         evidence="checkpoint staging deadline reached",
                     )
@@ -1194,13 +1579,14 @@ def run_containers(
                     "TRTMC_GPU_RESULT_FILE=/tmp/trtmc-community-huggingface/result.json",
                     "--env",
                     f"CMAKE_CUDA_ARCHITECTURES={env.get('CMAKE_CUDA_ARCHITECTURES', '89')}",
-                    dependency_images.get(family, image_id),
+                    family_image,
                     "python3.12",
+                    "-I",
                     "/opt/community_gpu_ci.py",
                     "--family",
                     family,
                 ]
-                row.update(phase="container", failure_class="unknown")
+                row.update(phase="container", failure_class="infra_failure")
                 _summary(records, env, started)
                 print(f"Starting isolated Community GPU container: {family}", flush=True)
                 try:
@@ -1250,7 +1636,6 @@ def run_containers(
                     )
                     row.update(
                         status="failed",
-                        failure_class="budget",
                         exit_code=124,
                         evidence="family or coordinator deadline reached",
                     )
@@ -1269,19 +1654,22 @@ def run_containers(
                         records[family].update(
                             status="failed",
                             phase="cleanup",
-                            failure_class="infrastructure",
+                            failure_class="infra_failure",
                             evidence="container removal could not be confirmed",
                         )
                         raise CommunityGpuError(
                             f"Cannot remove Community GPU container {name}: {cleanup.stderr.strip()}"
                         )
-                    records[family]["dependency_image_id"] = dependency_images.get(family, image_id)
+                    records[family]["dependency_image_id"] = family_image
+                    records[family]["base_image_id"] = image_id
                     records[family]["dependency_cache"] = (
                         "input_mismatch"
                         if family in dependency_misses
                         else "qualified"
                         if family in dependency_images
-                        else "unlisted"
+                        else "prepared"
+                        if family_image != image_id
+                        else "base"
                     )
                     if family in dependency_images:
                         records[family]["dependency_provenance"] = _dependency_provenance(
@@ -1450,6 +1838,9 @@ def main() -> int:
     mode.add_argument("--summarize-log", type=Path)
     mode.add_argument("--export-dependency-catalog", type=Path)
     mode.add_argument("--required-host-ram-gib", action="store_true")
+    mode.add_argument("--export-gpu-plan", type=Path)
+    mode.add_argument("--staging-hub-requirement", action="store_true")
+    mode.add_argument("--require-shared-base", action="store_true")
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--image", default="trtmc-quickstart-gpu")
     parser.add_argument("--cache-dir", type=Path)
@@ -1461,6 +1852,9 @@ def main() -> int:
     parser.add_argument("--registry-username", default="github-actions")
     parser.add_argument("--ci-sha")
     parser.add_argument("--require-family-coverage", action="store_true")
+    parser.add_argument("--plan-file", type=Path)
+    parser.add_argument("--source-sha")
+    parser.add_argument("--dependencies-prepared", action="store_true")
     args = parser.parse_args()
     try:
         if args.checkpoint_token_file is not None and not args.containers:
@@ -1469,12 +1863,26 @@ def main() -> int:
             raise CommunityGpuError("Protected catalog input requires catalog export")
         if args.require_family_coverage and not args.containers:
             raise CommunityGpuError("--require-family-coverage requires --containers")
+        if args.dependencies_prepared and not args.containers:
+            raise CommunityGpuError("--dependencies-prepared requires --containers")
         if (
             args.dependency_catalog is not None
-            and not (args.containers or args.required_host_ram_gib)
+            and not (args.containers or args.required_host_ram_gib or args.require_shared_base)
         ) or (args.registry_token_file is not None and not args.containers):
             raise CommunityGpuError("Dependency image inputs require --containers")
-        if args.export_dependency_catalog is not None:
+        if args.export_gpu_plan is not None:
+            export_gpu_plan(
+                args.repository, args.source_sha or "", dict(os.environ), args.export_gpu_plan
+            )
+        elif args.staging_hub_requirement:
+            print(staging_hub_requirement(args.repository, args.ci_sha or ""))
+        elif args.require_shared_base:
+            if args.dependency_catalog is None:
+                raise CommunityGpuError("Shared base preflight requires its protected catalog")
+            print(
+                require_shared_base(args.dependency_catalog, os.environ.get("REGISTRY_TOKEN", ""))
+            )
+        elif args.export_dependency_catalog is not None:
             export_dependency_catalog(
                 args.repository,
                 args.ci_sha or "",
@@ -1486,11 +1894,15 @@ def main() -> int:
                 raise CommunityGpuError("Host selection requires the trusted dependency catalog")
             print(
                 required_host_ram_gib(
-                    args.repository, dict(os.environ), args.dependency_catalog, args.ci_sha or ""
+                    args.repository,
+                    dict(os.environ),
+                    args.dependency_catalog,
+                    args.ci_sha or "",
+                    args.plan_file,
                 )
             )
         elif args.execution_budget:
-            print(execution_budget_seconds(dict(os.environ)))
+            print(execution_budget_seconds(dict(os.environ), args.plan_file))
         elif args.summarize_log is not None:
             summary = summarize_log(args.summarize_log, args.summary_file)
             print(json.dumps(summary, sort_keys=True))
@@ -1513,6 +1925,8 @@ def main() -> int:
                 registry_token_file=args.registry_token_file,
                 registry_username=args.registry_username,
                 require_family_coverage=args.require_family_coverage,
+                plan_file=args.plan_file,
+                dependencies_prepared=args.dependencies_prepared,
             )
         elif args.stage_family:
             if args.cache_dir is None:
@@ -1524,14 +1938,8 @@ def main() -> int:
                 )
             _stage_checkpoints((plan,), args.cache_dir)
         else:
-            # Source imports happen only inside the selected family's container.
-            from tools.ci.process import CiError
-
-            try:
-                run(args.repository, dict(os.environ), args.family)
-            except CiError as error:
-                raise CommunityGpuError(str(error)) from error
-    except (CommunityGpuError, OSError, ValueError, subprocess.SubprocessError) as error:
+            run(args.repository, dict(os.environ), args.family)
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"ERROR: {error}", file=sys.stderr, flush=True)
         return 1
     return 0

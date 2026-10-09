@@ -64,7 +64,6 @@ def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
         "HF_TOKEN",
         "TRTMC_COMMUNITY_REGISTRY_READ_TOKEN",
         "TRTMC_COMMUNITY_REGISTRY",
-        "TRTMC_COMMUNITY_REGISTRY_USERNAME",
     }
     assert all(
         value == "${{ secrets." + name + " }}" for name, value in producer["secrets"].items()
@@ -74,7 +73,6 @@ def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
         "HF_TOKEN",
         "TRTMC_COMMUNITY_REGISTRY_READ_TOKEN",
         "TRTMC_COMMUNITY_REGISTRY",
-        "TRTMC_COMMUNITY_REGISTRY_USERNAME",
     }
     assert set(producer["secrets"]) == set(WORKFLOW["on"]["workflow_call"]["secrets"])
     for name in ("snapshot", "authorize", "required"):
@@ -408,6 +406,19 @@ def test_failed_publication_never_exports_a_receipt_or_relaxes_private_gates(tmp
     chown.assert_not_called()
 
 
+def test_qualification_uses_common_hub_pin_and_complete_trusted_checkout():
+    steps = WORKFLOW["jobs"]["produce"]["steps"]
+    access = next(step for step in steps if step.get("id") == "access")
+    assert "--staging-hub-requirement" in access["run"]
+    assert '--ci-sha "$GITHUB_SHA"' in access["run"]
+    setup = next(step for step in steps if "HUB_REQUIREMENT" in step.get("env", {}))
+    assert setup["env"]["HUB_REQUIREMENT"] == "${{ steps.access.outputs.hub_requirement }}"
+    assert "'$HUB_REQUIREMENT'" in setup["run"]
+    assert "huggingface-hub==0.36.0" not in setup["run"]
+    assert "test -f '$repo/tools/community_gpu_ci.py'" in setup["run"]
+    assert "test -f '$repo/tools/community_gpu_images.py'" in setup["run"]
+
+
 def test_qualification_download_uses_only_the_ssh_owned_auth_receipt():
     steps = WORKFLOW["jobs"]["produce"]["steps"]
     proof = next(step for step in steps if step.get("id") == "proof")
@@ -484,6 +495,7 @@ def test_producer_requires_coverage_of_its_qualified_family(tmp_path: Path) -> N
             family="nemotron_h",
         )
     assert "--require-family-coverage" in run.call_args.args[0]
+    assert "--dependencies-prepared" in run.call_args.args[0]
     command = run.call_args.args[0]
     assert command[command.index("--repository") + 1] == "/protected/model"
     assert command[command.index("--image") + 1] == "local-family"
@@ -2495,16 +2507,19 @@ def test_workflow_copies_private_auth_as_json_and_erases_it_even_on_copy_failure
 
 
 @pytest.mark.parametrize(
-    "token,prefix,username,allowed",
+    "token,prefix,identity_available,allowed",
     [
-        ("read-secret", PRIVATE_PREFIX, "test-actor", True),
-        ("", PRIVATE_PREFIX, "test-actor", False),
-        ("read-secret", "https://ghcr.io/test-owner/cache", "test-actor", False),
-        ("read-secret", PRIVATE_PREFIX, "", False),
-        ("read-secret", PRIVATE_PREFIX, "login:secret", False),
+        ("read-secret", PRIVATE_PREFIX, True, True),
+        ("", PRIVATE_PREFIX, True, False),
+        ("read-secret", "https://ghcr.io/test-owner/cache", True, False),
+        ("read-secret", PRIVATE_PREFIX, False, False),
     ],
 )
-def test_private_reader_must_be_configured_before_vm_allocation(token, prefix, username, allowed):
+def test_private_reader_is_resolved_before_vm_allocation(
+    tmp_path, token, prefix, identity_available, allowed
+):
+    from tools import community_gpu_images as images
+
     steps = WORKFLOW["jobs"]["produce"]["steps"]
     gate = next(
         step
@@ -2512,18 +2527,42 @@ def test_private_reader_must_be_configured_before_vm_allocation(token, prefix, u
         if step["name"] == "Require protected candidate access before allocation"
     )
     reserve = next(step for step in steps if step.get("id") == "reserve")
+    prepare = next(step for step in steps if " prepare-candidate " in step.get("run", ""))
     assert steps.index(gate) < steps.index(reserve)
     assert gate["env"]["REGISTRY_TOKEN"] == "${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}"
+    assert "REGISTRY_USERNAME" not in gate["env"]
+    assert prepare["env"]["REGISTRY_USERNAME"] == "${{ steps.access.outputs.registry_username }}"
     program = gate["run"].split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
-    with patch.dict(
-        os.environ,
-        {"REGISTRY_TOKEN": token, "REGISTRY_PREFIX": prefix, "REGISTRY_USERNAME": username},
+    output = tmp_path / "access-output"
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "REGISTRY_TOKEN": token,
+                "REGISTRY_PREFIX": prefix,
+                "GITHUB_OUTPUT": str(output),
+            },
+            clear=True,
+        ),
+        patch.object(
+            images,
+            "registry_reader_login",
+            return_value="test-actor",
+            side_effect=None if identity_available else images.ImagePreparationError("unavailable"),
+        ) as resolve,
     ):
         if allowed:
             exec(compile(program, "protected-candidate-reader", "exec"), {})
+            assert output.read_text() == "registry_username=test-actor\n"
+            resolve.assert_called_once_with(token)
         else:
             with pytest.raises(SystemExit):
                 exec(compile(program, "protected-candidate-reader", "exec"), {})
+            assert not output.exists()
+            if not token or prefix != PRIVATE_PREFIX:
+                resolve.assert_not_called()
+            else:
+                resolve.assert_called_once_with(token)
 
 
 def final_gpu_proof_program() -> str:

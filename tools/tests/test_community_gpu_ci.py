@@ -27,6 +27,21 @@ from tools.community_gpu_ci import CommunityGpuError as CiError
 from tools.ci import context as ci_context, e2e as ci_e2e
 
 
+def _untracked_impact(command: list[str], repository: Path) -> subprocess.CompletedProcess:
+    """Model Git's exact reserved-input check without accepting arbitrary host commands."""
+    assert command == [
+        "git",
+        "-c",
+        f"safe.directory={repository}",
+        "-C",
+        str(repository),
+        "ls-files",
+        "--error-unmatch",
+        "impact.json",
+    ]
+    return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"untracked input")
+
+
 def _dependency_entry(repository: Path, family: str, digest: str = "a") -> dict:
     """A fake provider receipt with real physical dependency inputs."""
     paths = {
@@ -469,7 +484,7 @@ def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
     monkeypatch,
     alpha_state,
 ):
-    """Actual orchestration uses immutable IDs, retains cold installs, and runs other owners."""
+    """Orchestration selects immutable prepared images only after reader auth is erased."""
     _planned_owners(tmp_path, "alpha", "beta", "gamma")
     entries = {
         family: _dependency_entry(tmp_path, family, digest)
@@ -485,9 +500,35 @@ def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
     token.write_text("private-registry-secret")
     base = "sha256:" + "b" * 64
     ids = {family: "sha256:" + digest * 64 for family, digest in (("alpha", "1"), ("gamma", "3"))}
-    config_paths, pulls, runs = [], [], []
+    config_paths, pulls, runs, prepared = [], [], [], []
+    prepared_alpha = "sha256:" + "d" * 64
+    real_preparation = community_gpu_ci._image_preparation()
+
+    def prepare(repository, family, base_image_id, deadline):
+        assert repository == tmp_path and base_image_id == base
+        assert deadline > time.monotonic()
+        assert (
+            not token.exists() and config_paths and all(not path.exists() for path in config_paths)
+        )
+        prepared.append(family)
+        if family == "alpha":
+            assert alpha_state == "changed"
+            assert (
+                repository / "families/alpha/requirements.txt"
+            ).read_text() == "new-package==2\n"
+            return prepared_alpha
+        assert family == "beta"
+        return real_preparation.ensure_family_image(repository, family, base_image_id, deadline)
+
+    monkeypatch.setattr(
+        community_gpu_ci,
+        "_image_preparation",
+        lambda: SimpleNamespace(ensure_family_image=prepare),
+    )
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         assert "private-registry-secret" not in " ".join(map(str, command))
         if "--config" in command:
             config = Path(command[command.index("--config") + 1])
@@ -530,10 +571,11 @@ def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
             tmp_path, env, "base", dependency_catalog=catalog, registry_token_file=token
         )
     assert runs == (
-        [("alpha", ids["alpha"] if alpha_state == "qualified" else base)]
+        [("alpha", ids["alpha"] if alpha_state == "qualified" else prepared_alpha)]
         if alpha_state != "corrupt"
         else []
     ) + [("beta", base), ("gamma", ids["gamma"])]
+    assert prepared == (["alpha"] if alpha_state == "changed" else []) + ["beta"]
     assert pulls == ([entries["alpha"]["lock"]["image"]] if alpha_state == "qualified" else []) + [
         entries["gamma"]["lock"]["image"]
     ]
@@ -543,11 +585,13 @@ def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
         "gamma": "passed"
     }
     if alpha_state == "changed":
+        assert outcomes["alpha"]["dependency_image_id"] == prepared_alpha
+        assert outcomes["alpha"]["base_image_id"] == base
         assert outcomes["alpha"]["dependency_cache"] == "input_mismatch" and outcomes["alpha"][
             "cases"
         ] == {"alpha": "passed"}
     elif alpha_state == "corrupt":
-        assert outcomes["alpha"]["failure_class"] == "dependency" and outcomes["alpha"][
+        assert outcomes["alpha"]["failure_class"] == "infra_failure" and outcomes["alpha"][
             "cases"
         ] == {"alpha": "not_run"}
     assert community_gpu_ci._checked_summary(summary)["families"] == summary["families"]
@@ -596,6 +640,8 @@ def test_missing_registry_token_fails_cached_owner_but_runs_unlisted_owner(tmp_p
     started = []
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         assert "--config" not in command
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
@@ -617,7 +663,7 @@ def test_missing_registry_token_fails_cached_owner_but_runs_unlisted_owner(tmp_p
     assert started == ["beta"]
     summary = json.loads((tmp_path / "results/summary.json").read_text())
     results = {r["family"]: r for r in summary["families"]}
-    assert results["alpha"]["failure_class"] == "dependency" and results["alpha"]["cases"] == {
+    assert results["alpha"]["failure_class"] == "infra_failure" and results["alpha"]["cases"] == {
         "alpha": "not_run"
     }
     assert results["beta"]["cases"] == {"beta": "passed"} and not summary["passed"]
@@ -851,7 +897,7 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
     snapshot = tmp_path / revision
     snapshot.mkdir()
     (snapshot / "checkpoint.pt").write_bytes(b"weights")
-    calls: list[tuple[str, str | None, Path]] = []
+    calls = []
 
     class FakeApi:
         """Return one immutable revision for the requested model."""
@@ -860,15 +906,23 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
             assert revision is None
             return SimpleNamespace(sha=revision_value)
 
-    def download(*, repo_id: str, revision: str | None, cache_dir: Path) -> str:
-        calls.append((repo_id, revision, cache_dir))
+    def download(
+        *, repo_id: str, revision: str | None, cache_dir: Path, local_files_only=False
+    ) -> str:
+        calls.append(("snapshot", repo_id, revision, cache_dir, local_files_only))
         return str(snapshot)
+
+    def cached_tree(repo_id: str, *, revision: str, cache_dir: Path):
+        calls.append(("tree", repo_id, revision, cache_dir))
+        return [SimpleNamespace(path="checkpoint.pt")]
 
     revision_value = revision
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(HfApi=FakeApi, snapshot_download=download),
+        SimpleNamespace(
+            HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download
+        ),
     )
     plan = community_gpu_ci.FamilyPlan(
         "alpha",
@@ -878,10 +932,50 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
 
     community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
 
-    assert calls == [("example/alpha", None, tmp_path / "cache")]
+    assert calls == [
+        ("snapshot", "example/alpha", None, tmp_path / "cache", False),
+        ("tree", "example/alpha", revision, tmp_path / "cache"),
+        ("snapshot", "example/alpha", None, tmp_path / "cache", True),
+    ]
 
     revision_value = "b" * 40
     with pytest.raises(CiError, match="revision changed"):
+        community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
+
+
+@pytest.mark.parametrize("failure", ["tree_missing", "snapshot_incomplete", "revision_changed"])
+def test_checkpoint_staging_rejects_unusable_offline_cache(tmp_path, monkeypatch, failure):
+    """A successful online download is insufficient evidence for offline entry."""
+    revision = "a" * 40
+    snapshot = tmp_path / revision
+    snapshot.mkdir()
+
+    class FakeApi:
+        def model_info(self, _repo_id, revision):
+            return SimpleNamespace(sha="a" * 40)
+
+    def cached_tree(*_args, **_kwargs):
+        if failure == "tree_missing":
+            raise ValueError("repository tree metadata missing")
+        return [SimpleNamespace(path="checkpoint.pt")]
+
+    def download(**kwargs):
+        if kwargs.get("local_files_only"):
+            if failure == "snapshot_incomplete":
+                raise ValueError("cached snapshot is incomplete")
+            if failure == "revision_changed":
+                return str(tmp_path / ("b" * 40))
+        return str(snapshot)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(
+            HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download
+        ),
+    )
+    plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), (("example/alpha", revision),))
+    with pytest.raises((ValueError, CiError), match="missing|incomplete|differs"):
         community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
 
 
@@ -903,32 +997,21 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         )
     build = Path("/tmp") / f"{tmp_path.name}-native-build"
     commands: list[list[str]] = []
-    e2e_calls: list[tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]] = []
+    e2e_calls: list[dict[str, str]] = []
+    destination = tmp_path / "result.json"
+    (tmp_path / "impact.json").write_text(
+        json.dumps({"families": ["alpha"], "testcases": ["alpha-smoke"]})
+    )
 
-    class FakeContext:
-        """Record orchestration without requiring CUDA or a compiler."""
+    def command(repository, env, argv, **_kwargs):
+        rendered = [str(argument) for argument in argv]
+        commands.append(rendered)
+        if rendered[:2] == ["cmake", "-S"]:
+            assert Path(str(destination) + ".entrypoint").read_text() == "alpha\n"
+        if rendered[1:] == ["-m", "tools.ci", "pipeline", "selective-e2e"]:
+            e2e_calls.append(env)
 
-        def __init__(self, repository: Path, env: dict[str, str]):
-            self.repository = repository
-            self.env = env
-
-        def run(self, command, **_kwargs) -> subprocess.CompletedProcess[str]:
-            commands.append([str(argument) for argument in command])
-            return subprocess.CompletedProcess(command, 0)
-
-    class FakeE2ERunner:
-        """Capture the exact family and testcase contract passed by the entrypoint."""
-
-        def __init__(self, context: FakeContext):
-            self.context = context
-
-        def _run(self, families: tuple[str, ...], testcases: tuple[str, ...]) -> None:
-            e2e_calls.append((self.context.env, families, testcases))
-
-    monkeypatch.setattr(ci_context, "CiContext", FakeContext)
-    monkeypatch.setattr(ci_e2e, "E2ERunner", FakeE2ERunner)
-    monkeypatch.setattr(community_gpu_ci, "_install_family_requirements", lambda *_args: None)
-    monkeypatch.setattr(community_gpu_ci, "_stage_checkpoints", lambda *_args: None)
+    monkeypatch.setattr(community_gpu_ci, "_family_command", command)
     monkeypatch.setattr(
         community_gpu_ci,
         "_runtime_root",
@@ -943,6 +1026,8 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
             "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
             "TRTMC_GPU_ADDED_FAMILIES": "[]",
             "TRTMC_NATIVE_BUILD_DIR": str(build),
+            "TRTMC_CHECKPOINTS_PRESTAGED": "1",
+            "TRTMC_GPU_RESULT_FILE": str(destination),
         },
         "alpha",
     )
@@ -958,19 +1043,146 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         expected_targets.append("trtmc_cli_alpha")
     assert native_builds[1][native_builds[1].index("--target") + 1 :] == expected_targets
     assert len(e2e_calls) == 1
-    runtime, families, testcases = e2e_calls[0]
-    assert families == ("alpha",)
-    assert testcases == ("alpha-smoke",)
+    runtime = e2e_calls[0]
+    assert json.loads((tmp_path / "impact.json").read_text()) == {
+        "families": ["alpha"],
+        "testcases": ["alpha-smoke"],
+    }
     assert runtime["TRTMC_BINARY"] == str(build / "trtmc")
     assert runtime["TRTMC_RUNTIME_ROOT"] == str(build / "runtime")
     assert runtime["TRTMC_NATIVE_BUILD_DIR"] == str(build)
     assert runtime["HF_HUB_OFFLINE"] == "1"
 
 
+@pytest.mark.parametrize("failure", ["probe", "configure", "test", ""])
+def test_actual_pr_cli_starts_only_after_preparation(tmp_path, monkeypatch, failure):
+    """Execute fake native tools and the repository's real Python CLI process."""
+    _family(
+        tmp_path,
+        "alpha",
+        [{"family": "alpha", "testcases": [{"name": "alpha-smoke", "premerge": True}]}],
+    )
+    (tmp_path / "impact.json").write_text(
+        json.dumps({"families": ["alpha"], "testcases": ["alpha-smoke"]})
+    )
+    package = tmp_path / "tools/ci"
+    package.mkdir(parents=True)
+    (package.parent / "__init__.py").write_text("")
+    (package / "__init__.py").write_text("")
+    (package / "context.py").write_text("raise RuntimeError('PR helper imported during prep')\n")
+    (package / "__main__.py").write_text(
+        "import json,os,sys\nfrom pathlib import Path\n"
+        "p=Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "assert Path(str(p)+'.entrypoint').read_text()=='alpha\\n'\n"
+        "assert sys.argv[1:]==['pipeline','selective-e2e']\n"
+        "assert json.loads(Path('impact.json').read_text())['testcases']==['alpha-smoke']\n"
+        "with Path(os.environ['BOUNDARY_EVENTS']).open('a') as s: s.write('pr-cli\\n')\n"
+        "if os.environ['BOUNDARY_FAILURE']=='test': raise SystemExit(17)\n"
+        "build=Path(os.environ['TRTMC_NATIVE_BUILD_DIR'])\n"
+        "assert Path(os.environ['TRTMC_BINARY']).is_file()\n"
+        "assert Path(os.environ['TRTMC_RUNTIME_ROOT']).is_dir()\n"
+        "(build/'trtmc-alpha-e2e-junit.xml').write_text('<testsuites><testsuite>'"
+        "+'<testcase name=\"test_official_checkpoint_e2e[alpha-smoke]\"/>'"
+        "+'</testsuite></testsuites>')\n"
+    )
+    tools = tmp_path / "fake-bin"
+    tools.mkdir()
+    cmake = tools / "cmake"
+    cmake.write_text(
+        f"#!{sys.executable}\nimport os,sys\nfrom pathlib import Path\n"
+        "p=Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "assert Path(str(p)+'.entrypoint').read_text()=='alpha\\n'\n"
+        "with Path(os.environ['BOUNDARY_EVENTS']).open('a') as s: s.write('cmake\\n')\n"
+        "if '-S' in sys.argv and os.environ['BOUNDARY_FAILURE']=='configure': raise SystemExit(13)\n"
+        "build=Path(os.environ['TRTMC_NATIVE_BUILD_DIR']); build.mkdir(exist_ok=True)\n"
+        "for name in ('trtmc','libtrtmc_core.so','libtrtmc_runtime.so','libtrtmc_c.so',"
+        "'libtrtmc_c.so.1','libtrtmc_backend_trt.so','libtrtmc_model_alpha.so'):\n"
+        " (build/name).touch()\n"
+    )
+    cmake.chmod(0o755)
+    destination = tmp_path / "result.json"
+    events = tmp_path / "events"
+    env = {
+        **os.environ,
+        "PATH": f"{tools}:{os.environ['PATH']}",
+        "TRTMC_CHECKPOINTS_PRESTAGED": "1",
+        "TRTMC_NATIVE_BUILD_DIR": str(tmp_path / "build"),
+        "TRTMC_GPU_RESULT_FILE": str(destination),
+        "BOUNDARY_EVENTS": str(events),
+        "BOUNDARY_FAILURE": failure,
+    }
+    original = community_gpu_ci._family_command
+
+    def run(repository, environment, argv, **options):
+        if "-I" in argv:
+            assert not events.exists()
+            assert not Path(str(destination) + ".entrypoint").exists()
+            if failure == "probe":
+                raise subprocess.CalledProcessError(7, argv)
+            return
+        original(repository, environment, argv, **options)
+
+    monkeypatch.setattr(community_gpu_ci, "_family_command", run)
+    if failure:
+        with pytest.raises(subprocess.CalledProcessError):
+            community_gpu_ci.run(tmp_path, env, "alpha")
+    else:
+        community_gpu_ci.run(tmp_path, env, "alpha")
+    result = json.loads(destination.read_text())
+    entered = failure != "probe"
+    assert result["entrypoint_started"] is entered
+    if failure:
+        assert result["failure_class"] == ("pr_failure" if entered else "infra_failure")
+    else:
+        assert result["status"] == "passed" and result["cases"] == {"alpha-smoke": "passed"}
+    observed = events.read_text().splitlines() if events.exists() else []
+    assert observed == (
+        []
+        if failure == "probe"
+        else ["cmake"]
+        if failure == "configure"
+        else ["cmake", "cmake", "cmake", "pr-cli"]
+    )
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_prepared_selection_never_overwrites_a_tracked_pr_input(tmp_path, tracked):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    impact = tmp_path / "impact.json"
+    impact.write_text('{"contributor":"input"}')
+    if tracked:
+        subprocess.run(["git", "-C", str(tmp_path), "add", "impact.json"], check=True)
+        with pytest.raises(CiError, match="tracks the reserved"):
+            community_gpu_ci.prepare_family_impact(
+                tmp_path, community_gpu_ci.FamilyPlan("alpha", ("required",), ())
+            )
+        assert impact.read_text() == '{"contributor":"input"}'
+    else:
+        community_gpu_ci.prepare_family_impact(
+            tmp_path, community_gpu_ci.FamilyPlan("alpha", ("required",), ())
+        )
+        assert json.loads(impact.read_text()) == {"families": ["alpha"], "testcases": ["required"]}
+
+
+@pytest.mark.parametrize("corrupt_result", [False, True])
+def test_post_entry_failure_stays_pr_failure_with_missing_or_invalid_receipt(
+    tmp_path, corrupt_result
+):
+    path = tmp_path / "result.json"
+    Path(str(path) + ".entrypoint").write_text("alpha\n")
+    if corrupt_result:
+        path.write_text("invalid JSON")
+    result = community_gpu_ci._container_result(path, "alpha", 17, {}, ("required",))
+    assert result["failure_class"] == "pr_failure"
+    assert result["entrypoint_started"] is True and result["status"] == "failed"
+    assert result["cases"] == {"required": "not_run"}
+
+
 def _container_receipt(command: list[str], failed: bool = False) -> None:
     """Emulate a completed container, including its selected E2E evidence."""
     cache = next(value for value in command if value.endswith(":/tmp/trtmc-community-huggingface"))
     family = command[-1]
+    (Path(cache.rsplit(":", 1)[0]) / "result.json.entrypoint").write_text(family + "\n")
     (Path(cache.rsplit(":", 1)[0]) / "result.json").write_text(
         json.dumps(
             {
@@ -1002,6 +1214,24 @@ def _planned_owners(repository: Path, *families: str) -> None:
         )
 
 
+def test_wrong_shared_base_cannot_reach_preparation_or_pr(tmp_path, monkeypatch):
+    _planned_owners(tmp_path, "alpha")
+    expected, wrong = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    monkeypatch.setattr(
+        community_gpu_ci, "_dependency_catalog", lambda _: {"base": {"local_image_id": expected}}
+    )
+
+    def inspect_only(command, **kwargs):
+        assert command == ["docker", "image", "inspect", "--format", "{{.Id}}", "base"]
+        return subprocess.CompletedProcess(command, 0, stdout=wrong)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", inspect_only)
+    with pytest.raises(CiError, match="does not match the verified shared base"):
+        community_gpu_ci.run_containers(
+            tmp_path, _gpu_environment("alpha"), "base", dependency_catalog=tmp_path / "catalog"
+        )
+
+
 @pytest.mark.parametrize("failed_family", [None, "alpha"])
 def test_containers_are_sequential_and_failures_do_not_skip_families(
     tmp_path: Path,
@@ -1015,6 +1245,8 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
     image = "sha256:" + "a" * 64
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
         if "--stage-family" in command:
@@ -1037,7 +1269,13 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
                 in command
             )
             assert "PYTHONPATH=/src" in command
-            assert command[-4:] == ["python3.12", "/opt/community_gpu_ci.py", "--family", family]
+            assert command[-5:] == [
+                "python3.12",
+                "-I",
+                "/opt/community_gpu_ci.py",
+                "--family",
+                family,
+            ]
             assert not any("HF_TOKEN" in value or "docker.sock" in value for value in command)
             events.append(("start", family, command[command.index("--name") + 1]))
             _container_receipt(command, family == failed_family)
@@ -1068,6 +1306,118 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
     assert len({name for kind, _, name in events if kind == "start"}) == 3
 
 
+@pytest.mark.parametrize("failure", ["dependencies", "checkpoints", "pr"])
+def test_preparation_failures_and_pr_failures_keep_distinct_phases_and_cleanup(
+    tmp_path, monkeypatch, failure
+):
+    _planned_owners(tmp_path, "alpha", "beta")
+    base = "sha256:" + "a" * 64
+    images = {family: "sha256:" + digest * 64 for family, digest in (("alpha", "b"), ("beta", "c"))}
+    events = []
+
+    def prepare(repository, family, base_image_id, deadline):
+        assert repository == tmp_path and base_image_id == base
+        assert deadline > time.monotonic()
+        assert json.loads((repository / "impact.json").read_text()) == {
+            "families": [family],
+            "testcases": [family],
+        }
+        events.append(("prepare", family))
+        if family == "alpha" and failure == "dependencies":
+            raise RuntimeError("dependency build failed")
+        return images[family]
+
+    def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout=base)
+        if "--stage-family" in command:
+            family = command[command.index("--stage-family") + 1]
+            events.append(("stage", family))
+            return subprocess.CompletedProcess(
+                command, 7 if family == "alpha" and failure == "checkpoints" else 0
+            )
+        if command[:2] == ["docker", "run"]:
+            family = command[-1]
+            assert images[family] in command
+            events.append(("run", family))
+            failed = family == "alpha" and failure == "pr"
+            _container_receipt(command, failed)
+            return subprocess.CompletedProcess(command, 17 if failed else 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        assert command[:3] == ["docker", "rm", "--force"]
+        family = command[-1].rsplit("-", 1)[1]
+        events.append(("remove", family))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(ensure_family_image=prepare)
+    )
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="alpha"):
+        community_gpu_ci.run_containers(tmp_path, env, "base")
+    alpha_events = [("prepare", "alpha")]
+    if failure != "dependencies":
+        alpha_events.append(("stage", "alpha"))
+    if failure == "pr":
+        alpha_events.extend([("run", "alpha"), ("remove", "alpha")])
+    assert events == alpha_events + [
+        (phase, "beta") for phase in ("prepare", "stage", "run", "remove")
+    ]
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    rows = {row["family"]: row for row in summary["families"]}
+    alpha = rows["alpha"]
+    assert alpha["status"] == "failed"
+    assert alpha["failure_class"] == ("pr_failure" if failure == "pr" else "infra_failure")
+    assert alpha["entrypoint_started"] is (failure == "pr")
+    if failure != "pr":
+        assert alpha["phase"] == ("environment" if failure == "dependencies" else "checkpoints")
+    assert alpha["cases"] == {"alpha": "failed" if failure == "pr" else "not_run"}
+    assert rows["beta"]["cases"] == {"beta": "passed"}
+    assert rows["beta"]["dependency_cache"] == "prepared"
+    assert not summary["passed"]
+
+
+def test_preparation_exhausting_budget_never_starts_checkpoints_or_pr(tmp_path, monkeypatch):
+    _planned_owners(tmp_path, "alpha", "beta")
+    clock = [0.0]
+    prepared = []
+    base = "sha256:" + "a" * 64
+
+    def prepare(repository, family, base_image_id, deadline):
+        assert repository == tmp_path and base_image_id == base
+        prepared.append(family)
+        clock[0] = deadline + 1
+        return base
+
+    def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        assert command[:3] == ["docker", "image", "inspect"]
+        return subprocess.CompletedProcess(command, 0, stdout=base)
+
+    monkeypatch.setattr(community_gpu_ci.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(ensure_family_image=prepare)
+    )
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="budget exhausted"):
+        community_gpu_ci.run_containers(tmp_path, env, "base")
+    assert prepared == ["alpha"]
+    report = json.loads((tmp_path / "results/summary.json").read_text())
+    assert not report["passed"] and not report["complete"]
+    alpha, beta = report["families"]
+    assert alpha["family"] == "alpha" and alpha["status"] == "failed"
+    assert alpha["entrypoint_started"] is False and alpha["exit_code"] == 124
+    assert beta["family"] == "beta" and beta["status"] == "not_run"
+    assert all(row["failure_class"] == "infra_failure" for row in report["families"])
+    assert all(row["cases"] == {row["family"]: "not_run"} for row in report["families"])
+
+
 @pytest.mark.parametrize("token_from_file", [False, True])
 def test_checkpoint_staging_forwards_only_network_configuration(
     tmp_path: Path,
@@ -1081,6 +1431,8 @@ def test_checkpoint_staging_forwards_only_network_configuration(
     _planned_owners(tmp_path, "alpha")
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
         if "--stage-family" in command or command[:2] == ["docker", "run"]:
@@ -1183,6 +1535,8 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
     _planned_owners(tmp_path, "alpha", "beta")
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
         if "--stage-family" in command:
@@ -1202,6 +1556,7 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
         "TRTMC_GPU_FAMILIES": '["alpha","beta"]',
         "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta"]',
         "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results"),
     }
     if already_removed:
         community_gpu_ci.run_containers(tmp_path, env, "image")
@@ -1210,10 +1565,41 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
         with pytest.raises(CiError, match="Cannot remove.*daemon unavailable"):
             community_gpu_ci.run_containers(tmp_path, env, "image")
         assert started == ["alpha"]
+        summary = json.loads((tmp_path / "results/summary.json").read_text())
+        alpha, beta = summary["families"]
+        assert alpha["phase"] == "cleanup" and alpha["failure_class"] == "infra_failure"
+        assert alpha["entrypoint_started"] is True and alpha["status"] == "failed"
+        assert beta["status"] == "not_run" and beta["cases"] == {"beta": "not_run"}
+        assert not summary["passed"] and not summary["complete"]
+
+
+def test_wrapper_imports_ignore_pr_pythonpath_before_entry(tmp_path):
+    (tmp_path / "json.py").write_text("raise RuntimeError('PR_STDLIB_SHADOW')\n")
+    runner = str(Path(community_gpu_ci.__file__).resolve())
+    env = {**os.environ, "PYTHONPATH": str(tmp_path)}
+    unsafe = subprocess.run(
+        [sys.executable, runner, "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert unsafe.returncode != 0 and "PR_STDLIB_SHADOW" in unsafe.stderr
+    isolated = subprocess.run(
+        [sys.executable, "-I", runner, "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert isolated.returncode == 0, isolated.stderr
 
 
 def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
     """An untrusted tools package cannot execute in the VM coordinator."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     _family(
         tmp_path,
         "alpha",
@@ -1234,6 +1620,7 @@ def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
         "elif sys.argv[1] == 'inspect': print('{}')\n"
         "elif sys.argv[1] == 'run':\n"
         "    cache = next(v for v in sys.argv if v.endswith(':/tmp/trtmc-community-huggingface'))\n"
+        "    (Path(cache.rsplit(':', 1)[0]) / 'result.json.entrypoint').write_text('alpha\\n')\n"
         "    (Path(cache.rsplit(':', 1)[0]) / 'result.json').write_text(json.dumps({\n"
         "        'schema_version': 1, 'family': 'alpha', 'status': 'passed',\n"
         "        'phase': 'complete', 'failure_class': None,\n"
@@ -1265,10 +1652,22 @@ def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
 )
 def test_real_containers_do_not_share_family_state(tmp_path: Path, monkeypatch) -> None:
     """A failed family cannot contaminate later families' packages, builds, or cache."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    owners = community_gpu_ci.SHARED_SMOKE_FAMILIES
+    _planned_owners(tmp_path, *owners)
+    trusted_runner = str(Path(community_gpu_ci.__file__).resolve())
+    preparation = community_gpu_ci._image_preparation()
     probe = tmp_path / "probe.py"
     probe.write_text(
-        "import pathlib, sys, sysconfig\n"
+        "import json, os, pathlib, sys, sysconfig\n"
+        "if '--stage-family' in sys.argv:\n"
+        # No fixture owner has a checkpoint; keep the real trusted staging path.
+        f"    os.execv(sys.executable, [sys.executable, {trusted_runner!r}, *sys.argv[1:]])\n"
         "family = sys.argv[-1]\n"
+        "selection = json.loads(pathlib.Path('/src/impact.json').read_text())\n"
+        "assert selection == {'families':[family], 'testcases':[family]}\n"
+        "result = pathlib.Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "pathlib.Path(str(result) + '.entrypoint').write_text(family + '\\n')\n"
         "paths = [pathlib.Path(sysconfig.get_paths()['purelib']) / 'trtmc_isolation_probe.py', "
         "pathlib.Path('/tmp/trtmc-community-gpu-build/probe'), "
         "pathlib.Path('/tmp/trtmc-community-huggingface/probe')]\n"
@@ -1284,21 +1683,71 @@ def test_real_containers_do_not_share_family_state(tmp_path: Path, monkeypatch) 
         "else:\n"
         "    raise AssertionError('Source mount is writable')\n"
         "print(f'{family}: fresh Python environment, build, cache, and read-only source', flush=True)\n"
-        "sys.exit(17 if family == 'bert' else 0)\n"
+        "failed = family == 'bert'\n"
+        "result.write_text(json.dumps({'schema_version':1, 'family':family,\n"
+        "    'status':'failed' if failed else 'passed', 'phase':'complete',\n"
+        "    'failure_class':'pr_failure' if failed else None, 'entrypoint_started':True,\n"
+        "    'requested_cases':[family], 'cases':{family:'failed' if failed else 'passed'}}))\n"
+        "sys.exit(17 if failed else 0)\n"
     )
+    original_run = subprocess.run
+    events, names = [], []
+
+    def run(command, **kwargs):
+        if command[:2] == ["docker", "run"]:
+            name = command[command.index("--name") + 1]
+            names.append(name)
+            events.append(("start", command[-1]))
+            assert len(events) == len(names) * 2 - 1
+        result = original_run(command, **kwargs)
+        if command[:3] == ["docker", "rm", "--force"]:
+            name = command[-1]
+            assert name == names[-1]
+            absent = original_run(
+                ["docker", "inspect", name], capture_output=True, text=True, timeout=30
+            )
+            assert absent.returncode != 0 and f"No such object: {name}" in absent.stderr
+            events.append(("remove", name.rsplit("-", 1)[1]))
+        return result
+
+    # Only replace the container payload. The real coordinator still prepares
+    # its trusted sibling, stages manifests, runs Docker, and confirms removal.
     monkeypatch.setattr(community_gpu_ci, "__file__", str(probe))
-    with pytest.raises(CiError) as error:
-        community_gpu_ci.run_containers(
-            tmp_path,
-            {
-                "TRTMC_GPU_SCOPE": "all",
-                "TRTMC_GPU_FAMILIES": "[]",
-                "TRTMC_GPU_DIRECT_FAMILIES": "[]",
-                "TRTMC_GPU_ADDED_FAMILIES": "[]",
-            },
-            os.environ["TRTMC_COMMUNITY_CONTAINER_TEST_IMAGE"],
+    monkeypatch.setattr(community_gpu_ci, "_image_preparation", lambda: preparation)
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", run)
+    try:
+        with pytest.raises(CiError) as error:
+            community_gpu_ci.run_containers(
+                tmp_path,
+                {
+                    "TRTMC_GPU_SCOPE": "all",
+                    "TRTMC_GPU_FAMILIES": "[]",
+                    "TRTMC_GPU_DIRECT_FAMILIES": "[]",
+                    "TRTMC_GPU_ADDED_FAMILIES": "[]",
+                    "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results"),
+                },
+                os.environ["TRTMC_COMMUNITY_CONTAINER_TEST_IMAGE"],
+            )
+        assert str(error.value) == (
+            "Community GPU family failures: bert: container exited 17 (pr_failure)"
         )
-    assert str(error.value) == "Community GPU family failures: bert: container exited 17"
+        assert events == [(phase, family) for family in owners for phase in ("start", "remove")]
+        assert len(set(names)) == len(owners)
+        summary = json.loads((tmp_path / "results/summary.json").read_text())
+        assert summary["complete"] and not summary["passed"]
+        assert [row["family"] for row in summary["families"]] == list(owners)
+        for row in summary["families"]:
+            family = row["family"]
+            expected = "failed" if family == "bert" else "passed"
+            assert row["status"] == expected and row["cases"] == {family: expected}
+            assert row["entrypoint_started"] is True
+            assert row["failure_class"] == ("pr_failure" if family == "bert" else None)
+            assert row["exit_code"] == (17 if family == "bert" else 0)
+        assert not (tmp_path / "should-not-exist").exists()
+    finally:
+        # A failing assertion must also leave no containers from this fixture.
+        for name in names:
+            original_run(["docker", "rm", "--force", name], capture_output=True, timeout=30)
 
 
 def test_brev_wrapper_caches_application_failure_without_retry(tmp_path: Path) -> None:
@@ -3026,9 +3475,13 @@ def _gpu_environment(*families: str) -> dict[str, str]:
     }
 
 
-def test_execution_budget_scales_without_consuming_cleanup_budget():
-    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha")) == 3600
-    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha", "beta")) == 7200
+def test_execution_budget_includes_preparation_within_the_existing_global_cap():
+    assert community_gpu_ci.FAMILY_PREPARATION_SECONDS == 7200
+    assert community_gpu_ci.STAGING_TIMEOUT_SECONDS == 900
+    assert community_gpu_ci.FAMILY_TIMEOUT_SECONDS == 2700
+    assert community_gpu_ci.MAX_EXECUTION_SECONDS == 10800
+    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha")) == 10800
+    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha", "beta")) == 10800
     assert (
         community_gpu_ci.execution_budget_seconds(
             _gpu_environment(*(f"family_{chr(97 + i)}" for i in range(20)))
@@ -3052,10 +3505,11 @@ def test_family_result_preserves_failed_skipped_and_unrun_cases(tmp_path):
     with pytest.raises(RuntimeError, match="original validation error"):
         with community_gpu_ci._family_result(env, "alpha") as record:
             record["requested_cases"] = ["one", "two", "three", "four"]
+            record["entrypoint_started"] = True
             community_gpu_ci._phase(record, env, "validation", "validation")
             raise RuntimeError("original validation error")
     result = json.loads(destination.read_text())
-    assert result["status"] == "failed" and result["failure_class"] == "validation"
+    assert result["status"] == "failed" and result["failure_class"] == "pr_failure"
     assert result["cases"] == {
         "one": "passed",
         "two": "failed",
@@ -3091,10 +3545,12 @@ def test_container_exit_zero_requires_complete_owned_e2e_evidence(tmp_path, muta
         path.symlink_to(outside)
     result = community_gpu_ci._container_result(path, "alpha", 0, {})
     assert result["status"] == "failed"
-    assert result["failure_class"] == "unknown"
+    assert result["failure_class"] == "infra_failure"
+    assert all(outcome == "not_run" for outcome in result["cases"].values())
 
 
-def test_confirmed_container_oom_is_a_resource_failure(tmp_path):
+@pytest.mark.parametrize("entered", [False, True])
+def test_confirmed_container_oom_is_classified_by_entrypoint_boundary(tmp_path, entered):
     path = tmp_path / "result.json"
     path.write_text(
         json.dumps(
@@ -3109,8 +3565,11 @@ def test_confirmed_container_oom_is_a_resource_failure(tmp_path):
             }
         )
     )
+    if entered:
+        Path(str(path) + ".entrypoint").write_text("alpha\n")
     result = community_gpu_ci._container_result(path, "alpha", 137, {"OOMKilled": True})
-    assert result["failure_class"] == "resource" and result["status"] == "failed"
+    assert result["failure_class"] == ("pr_failure" if entered else "infra_failure")
+    assert result["status"] == "failed" and result["entrypoint_started"] is entered
     assert result["phase"] == "validation" and result["cases"]["one"] == "not_run"
 
 
@@ -3125,14 +3584,14 @@ def test_exhausted_coordinator_budget_marks_every_unstarted_family(tmp_path, mon
         return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
 
     monkeypatch.setattr(community_gpu_ci.subprocess, "run", inspect_only)
-    monkeypatch.setattr(community_gpu_ci, "execution_budget_seconds", lambda _env: 0)
+    monkeypatch.setattr(community_gpu_ci, "MAX_EXECUTION_SECONDS", 0)
     with pytest.raises(CiError, match="remaining families were not run"):
         community_gpu_ci.run_containers(tmp_path, env, "image")
     report = json.loads((tmp_path / "results/summary.json").read_text())
     assert not report["passed"] and not report["complete"]
     assert [row["family"] for row in report["families"]] == ["alpha", "beta"]
     assert all(
-        row["status"] == "not_run" and row["failure_class"] == "budget"
+        row["status"] == "not_run" and row["failure_class"] == "infra_failure"
         for row in report["families"]
     )
     assert len(calls) == 1
@@ -3154,7 +3613,7 @@ def test_container_cannot_replace_the_host_selected_case_inventory(tmp_path):
         )
     )
     result = community_gpu_ci._container_result(path, "alpha", 0, {}, ("required", "other"))
-    assert result["status"] == "failed" and result["failure_class"] == "unknown"
+    assert result["status"] == "failed" and result["failure_class"] == "infra_failure"
     assert result["cases"] == {"required": "not_run", "other": "not_run"}
 
 
@@ -3168,6 +3627,7 @@ def test_fifo_result_cannot_block_host_cleanup(tmp_path):
 
 
 def test_real_container_client_timeout_cleans_up_before_next_family(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     for family in ("alpha", "beta"):
         _family(
             tmp_path,
@@ -3188,8 +3648,9 @@ def test_real_container_client_timeout_cleans_up_before_next_family(tmp_path, mo
         "elif sys.argv[1] == 'run':\n"
         "    family = sys.argv[-1]\n"
         "    with events.open('a') as f: f.write('start ' + family + '\\n')\n"
-        "    if family == 'alpha': time.sleep(10)\n"
         "    cache = next(v for v in sys.argv if v.endswith(':/tmp/trtmc-community-huggingface'))\n"
+        "    (Path(cache.rsplit(':',1)[0]) / 'result.json.entrypoint').write_text(family+'\\n')\n"
+        "    if family == 'alpha': time.sleep(10)\n"
         "    (Path(cache.rsplit(':',1)[0]) / 'result.json').write_text(json.dumps({\n"
         "        'schema_version':1,'family':family,'status':'passed','phase':'complete',\n"
         "        'failure_class':None,'requested_cases':[family],'cases':{family:'passed'}}))\n"
@@ -3208,7 +3669,7 @@ def test_real_container_client_timeout_cleans_up_before_next_family(tmp_path, mo
         "remove beta",
     ]
     result = json.loads((tmp_path / "results/summary.json").read_text())
-    assert result["families"][0]["failure_class"] == "budget"
+    assert result["families"][0]["failure_class"] == "pr_failure"
     assert result["families"][1]["status"] == "passed"
     assert not result["passed"] and not result["complete"]
 
@@ -3312,7 +3773,7 @@ def _deferred_owner(repository: Path, family: str) -> None:
 
 
 @pytest.mark.parametrize("failed_baseline", [None, community_gpu_ci.SHARED_SMOKE_FAMILIES[0]])
-def test_fully_deferred_owner_runs_all_real_baselines_with_no_extra_budget(
+def test_fully_deferred_owner_runs_all_real_baselines_with_effective_plan_budget(
     tmp_path, monkeypatch, failed_baseline
 ):
     _deferred_owner(tmp_path, "alpha")
@@ -3320,9 +3781,24 @@ def test_fully_deferred_owner_runs_all_real_baselines_with_no_extra_budget(
     plan = community_gpu_ci.family_plan(tmp_path, "alpha")
     assert plan.testcases == () and plan.deferred_testcases == ("large",)
     assert plan.checkpoints == ()
-    events, staged, timeouts = [], [], []
+    events, staged, timeouts, preparation_deadlines = [], [], [], []
+    # Remove the cap only in this fixture so selection errors cannot be hidden by
+    # both a one-owner plan and the five-owner fallback reaching the same cap.
+    monkeypatch.setattr(community_gpu_ci, "MAX_EXECUTION_SECONDS", 100000)
+    monkeypatch.setattr(community_gpu_ci.time, "monotonic", lambda: 1000.0)
+    real_preparation = community_gpu_ci._image_preparation()
+
+    def prepare(repository, family, base_image_id, deadline):
+        preparation_deadlines.append(deadline)
+        return real_preparation.ensure_family_image(repository, family, base_image_id, deadline)
+
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(ensure_family_image=prepare)
+    )
 
     def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
         if "--stage-family" in command:
@@ -3350,11 +3826,12 @@ def test_fully_deferred_owner_runs_all_real_baselines_with_no_extra_budget(
     else:
         community_gpu_ci.run_containers(tmp_path, env, "base")
     assert (
-        original_budget == 3600
+        original_budget == 10800
         and community_gpu_ci.execution_budget_seconds(env) == original_budget
     )
     assert all(timeout <= original_budget for timeout in timeouts)
     assert staged == list(community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    assert preparation_deadlines == [1000 + len(staged) * original_budget] * len(staged)
     assert events == [(kind, family) for family in staged for kind in ("start", "remove")]
     summary = json.loads((tmp_path / "results/summary.json").read_text())
     rows = {row["family"]: row for row in summary["families"]}
@@ -3386,6 +3863,8 @@ def test_mixed_active_and_deferred_owners_do_not_admit_baselines(tmp_path, monke
     staged, started = [], []
 
     def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
         if "--stage-family" in command:
