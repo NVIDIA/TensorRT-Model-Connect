@@ -270,8 +270,10 @@ def inspect(image: str, *, config: str | None = None, private: bool = False) -> 
         entries = json.loads(
             docker(["image", "inspect", image], capture=True, config=config, private=private)
         )
+        if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+            raise ValueError
         value = entries[0]
-        if len(entries) != 1 or not IMAGE_ID.fullmatch(value.get("Id", "")):
+        if not isinstance(value.get("Id"), str) or not IMAGE_ID.fullmatch(value["Id"]):
             raise ValueError
         if value.get("Architecture") != "amd64" or value.get("Os") != "linux":
             raise ValueError

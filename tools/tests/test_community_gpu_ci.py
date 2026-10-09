@@ -1214,6 +1214,24 @@ def _planned_owners(repository: Path, *families: str) -> None:
         )
 
 
+def test_wrong_shared_base_cannot_reach_preparation_or_pr(tmp_path, monkeypatch):
+    _planned_owners(tmp_path, "alpha")
+    expected, wrong = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    monkeypatch.setattr(
+        community_gpu_ci, "_dependency_catalog", lambda _: {"base": {"local_image_id": expected}}
+    )
+
+    def inspect_only(command, **kwargs):
+        assert command == ["docker", "image", "inspect", "--format", "{{.Id}}", "base"]
+        return subprocess.CompletedProcess(command, 0, stdout=wrong)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", inspect_only)
+    with pytest.raises(CiError, match="does not match the verified shared base"):
+        community_gpu_ci.run_containers(
+            tmp_path, _gpu_environment("alpha"), "base", dependency_catalog=tmp_path / "catalog"
+        )
+
+
 @pytest.mark.parametrize("failed_family", [None, "alpha"])
 def test_containers_are_sequential_and_failures_do_not_skip_families(
     tmp_path: Path,

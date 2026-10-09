@@ -1192,6 +1192,8 @@ def run_containers(
         else None
     )
     if shared_base is not None:
+        if image_id != shared_base["local_image_id"]:
+            raise CommunityGpuError("The selected image does not match the verified shared base")
         # The workflow has pulled and verified the common base once. Family
         # declarations are materialized only as their turn is reached below.
         dependency_images, dependency_errors, dependency_misses = {}, {}, {}
