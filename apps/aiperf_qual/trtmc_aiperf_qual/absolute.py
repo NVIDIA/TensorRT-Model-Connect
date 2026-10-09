@@ -12,8 +12,8 @@ problems, and each side is scored against the gold answers:
 
 Each entry is a paired non-inferiority decision (``noninferiority``): pass when
 TRTMC's regression against the native model is shown to be below the benchmark's margin, fail when it
-is shown to exceed it, inconclusive otherwise; ``not-comparable`` when the native score is below the
-benchmark's suitability floor ``min_native``. A sampled model answers once per seed on each side and
+is shown to exceed it, inconclusive otherwise. Native absolute capability does not veto the comparison.
+A sampled model answers once per seed on each side and
 is judged on the per-problem seed means.
 """
 
@@ -821,6 +821,11 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
                     runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
                                                     out / f"absolute-native-{precision}")
                             for item in model["absolute"]}
+                    for name, side in runs.items():
+                        answers = side.get("observations") or side.get("records") or {}
+                        if side.get("failed") and not any(answers.values()):
+                            raise RuntimeError(f"{name}: no successful native responses "
+                                               f"({next(iter(side['failed'].values()))})")
                 finally:  # sharing an MPS daemon, no copy leaves while the other side's copies still answer
                     if finished is not None:
                         finished.set()

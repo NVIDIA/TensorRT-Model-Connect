@@ -437,6 +437,36 @@ def test_trtmcs_failed_requests_are_wrong_answers_with_their_reason(tmp_path):
     assert entry["failures"][0]["actual"] == absolute.NO_ANSWER
 
 
+@pytest.mark.parametrize("failed, expected_precision", [(True, "fp32"), (False, "fp16")])
+def test_native_precision_fallback_on_failed_requests_but_not_wrong_answers(tmp_path, monkeypatch, failed, expected_precision):
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual.config import Environment
+
+    calls, superseded = [], []
+
+    @contextmanager
+    def serving(*args, precision, **kwargs):
+        calls.append(precision)
+        yield {"precision": precision, "replicas": 1}
+
+    def run_side(environment, service, *args):
+        if service["precision"] == "fp16" and failed:
+            return {"observations": {"greedy": {}}, "failed": {"greedy": "expected Float, found Half"}}
+        return {"records": {"greedy": {0: {"passed": False}}}, "failed": {}}
+
+    monkeypatch.setattr(absolute, "serving_replicas", serving)
+    monkeypatch.setattr(absolute, "run_side", run_side)
+    monkeypatch.setattr(absolute.execution, "supersede", lambda start: superseded.append(start))
+    model = {"absolute": [{"suite": "s"}], "reference": {"perf_precision": "fp16", "precision": "fp32"}}
+    native = absolute.run_native(Environment({"native_replicas": 1}), model, "python", {"s": [{}]}, tmp_path)
+    assert native["precision"] == expected_precision
+    assert calls == (["fp16", "fp32"] if failed else ["fp16"])
+    assert bool(superseded) == failed
+    if failed:
+        assert "expected Float, found Half" in native["fallback_from"]
+
+
 def test_the_native_side_tries_the_next_precision(tmp_path):
     from contextlib import contextmanager
     from unittest.mock import patch

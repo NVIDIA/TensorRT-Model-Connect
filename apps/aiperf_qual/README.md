@@ -66,6 +66,8 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
   missing, an `error`, as does a problem the native model did not answer.
 - A parity benchmark against a native model that ran at another precision than TRTMC (the candidate's failed
   natively) uses its `mismatched_precision_gate`.
+- A native precision whose requests all fail tries the configured fallback precision and preserves the failed
+  attempt. Low scores from successfully returned answers do not trigger precision fallback.
 - Both sides run separately with one server and concurrency 1. Legacy Acc replica, MPS, and overlap settings
   are ignored by qualification; their contended timings cannot serve as speed evidence.
 - Every AIPerf run has a deadline: three times the profile's seconds in the run's ledger (`run-all --ledger`, at
