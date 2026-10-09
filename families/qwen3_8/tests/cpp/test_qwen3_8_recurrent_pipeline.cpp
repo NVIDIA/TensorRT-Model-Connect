@@ -43,12 +43,20 @@
 #include <vector>
 
 static int failures = 0;
+static bool skipped = false;
 
 static void check(bool condition, const char* test_name) {
     if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+// A test body that bails out has verified nothing, so it is a skip and not a
+// pass. ctest reads 77 through this target's SKIP_RETURN_CODE.
+static void skip(const char* what) {
+    std::cerr << "SKIP: " << what << '\n';
+    skipped = true;
 }
 
 static trtmc::TrtLogger g_logger;
@@ -116,7 +124,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
 static void test_mamba_pipeline() {
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP: can't build engine\n";
+        skip("can't build engine");
         return;
     }
 
@@ -155,7 +163,7 @@ static void test_mamba_pipeline() {
 static void test_rwkv_pipeline() {
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP: can't build engine\n";
+        skip("can't build engine");
         return;
     }
 
@@ -194,7 +202,7 @@ static void test_rwkv_pipeline() {
 static void test_hybrid_pipeline() {
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP: can't build engine\n";
+        skip("can't build engine");
         return;
     }
 
@@ -228,7 +236,7 @@ static void test_hybrid_pipeline() {
     auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *bconfig));
     if (!plan) {
-        std::cerr << "SKIP: can't build engine\n";
+        skip("can't build engine");
         cudaStreamDestroy(stream);
         return;
     }
@@ -236,7 +244,7 @@ static void test_hybrid_pipeline() {
     auto hybrid_engine = trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
     if (!hybrid_engine) {
-        std::cerr << "SKIP: can't build engine\n";
+        skip("can't build engine");
         cudaStreamDestroy(stream);
         return;
     }
@@ -270,7 +278,7 @@ static void test_hybrid_pipeline() {
 static void test_generate_applies_chat_template() {
     auto engine = build_mock_decoder();
     if (!engine) {
-        std::cerr << "SKIP: can't build engine\n";
+        skip("can't build engine");
         return;
     }
 
@@ -328,7 +336,9 @@ int main() {
     test_rwkv_pipeline();
     test_hybrid_pipeline();
     test_generate_applies_chat_template();
-    if (failures > 0)
+    if (failures > 0) {
         std::cerr << failures << " FAILED\n";
-    return failures;
+        return failures;
+    }
+    return skipped ? 77 : 0;
 }
