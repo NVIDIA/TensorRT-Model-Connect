@@ -38,10 +38,11 @@ If Dev is enabled, it receives that exact captured snapshot through a dispatch
 of `community-ci.yml` from the selected CI branch. A moving PR merge ref cannot
 silently change Dev's source. A newer PR head invalidates an older request.
 
-The metadata jobs follow the exact Stable and Dev run IDs and publish their
-complete workflow conclusions as `Stable Community CI` and `Dev Community CI`.
-This includes future stages added on Dev. Each result is published independently;
-Stable does not wait for Dev. Only these metadata jobs need dispatch permission.
+The metadata jobs follow the exact Stable and Dev run IDs. Stable keeps its
+existing result publisher. Dev publishes its final result from the execution
+workflow after cleanup is confirmed; a metadata observer timeout or API error
+cannot replace the execution result. Each lane completes independently, so
+Stable does not wait for Dev. Only the metadata jobs need dispatch permission.
 
 ## Switch and branch selection
 
@@ -88,8 +89,8 @@ in its existing Internal/Nightly qualification scope. Its `premerge` flag and
 passing criteria remain unchanged. Community reports deferred cases by name and
 does not claim to have qualified them. A fully deferred owner gets no checkpoint
 staging or container. If every requested owner is fully deferred, normal CI runs
-the existing five shared smoke families within the original requested-owner
-budget; mixed selections run only their active owners. Missing premerge cases
+the existing five shared smoke families with a budget for that effective plan;
+mixed selections run only their active owners. Missing premerge cases
 and invalid flags remain errors. Dependency-image producers require actual
 coverage of every selected owner, so shared smoke cannot qualify their images.
 
@@ -135,32 +136,46 @@ under load remain separate validation concerns.
 
 ### Sequential family containers
 
-One GPU execution reserves one Brev VM and builds one base image. The coordinator
-then starts a fresh container for each selected family, waits for it to finish,
-removes it, and starts the next family. Shared smoke coverage remains BERT, GPT-2,
+After CPU passes, trusted CI reads the frozen PR's declarative test manifests and
+checks its test plan before reserving a VM. It does not import PR Python during
+this preparation. The VM verifies the same frozen plan before execution.
+
+One GPU execution reserves one Brev VM and pulls one verified private shared
+base by immutable digest. The base identity depends only on its common Dockerfile
+and environment inputs, so a family dependency change does not rebuild the base.
+For each selected family, the coordinator prepares its declared dependency layer
+on that base, stages its checkpoints, then starts a fresh test container. It waits
+for the container to finish and confirms removal before starting the next family.
+Shared smoke coverage remains BERT, GPT-2,
 Qwen, timm ViT, and Whisper; directly changed or added families remain selected.
 Failures are collected while the coordinator continues with the remaining
-selected families. Checkpoint staging has a 15-minute per-family limit and the
+selected families. Dependency preparation has a two-hour per-family limit,
+separate from the test entry point. Checkpoint staging has a 15-minute limit and the
 family container has a 45-minute limit. The aggregate budget grows with selected
 owners, up to three hours. Any families not admitted before that deadline remain
 explicitly `not_run`, and the workflow fails with incomplete coverage. No testcase
 selection or numerical passing criterion is reduced to fit this budget.
 
-Dependency images are optional caches, admitted through family-owned
-`families/<family>/ci/dependency-image.json` locks only after real qualification
-and cleanup have passed. Promotion of a published candidate into a lock remains
-manual. Private registry coordinates instead belong in the protected
+The ordinary Dev path requires a verified shared-base entry in the protected
 `gpu-ci-dispatch` environment's `TRTMC_COMMUNITY_DEPENDENCY_CATALOG` JSON secret.
-Its shape is `schema_version: 1`, optional `registry_prefix`, and `families`,
-whose entries contain the existing qualified `lock` records. No private
-coordinates belong in public source, logs, or PR text. A malformed nonempty
-catalog fails before allocation; an absent catalog preserves the normal path.
-The trusted coordinator stamps its own CI commit and recipe hashes from Git
-objects, never from the PR tree or secret-provided hashes. It compares the base Dockerfile,
-base requirements, and family requirements with the actual PR source. A changed
-input uses the normal base image and ordinary family installation, so dependency
-update PRs can still be tested before a new image is published. Invalid lock
-metadata fails that owner explicitly while other owners continue.
+Its shape is `schema_version: 1`, `registry_prefix`, `base`, and `families`.
+The `base` record contains the immutable image identity and verified common
+input hashes. Trusted CI compares those hashes with its own Git objects.
+Missing or invalid base metadata, reader token or reader username fails before
+allocation. Registry credentials are used only to pull the base and are erased
+before any family Dockerfile or container executes. No private coordinates belong
+in public source, logs, or PR text.
+
+Each family owns `requirements.txt` and may provide `ci/Dockerfile.dependencies`
+with its additional public dependency inputs. Only selected owners prepare a
+layer; the preparation context excludes project source, other families and
+credentials. A family layer must extend the pulled common base. The public
+Dockerfile and family requirements remain available for local reproduction
+without access to the private registry.
+
+Previously qualified family image locks remain supported by the separate image
+qualification path. Their admission still requires actual qualification and
+cleanup; an ordinary dynamically prepared layer does not receive that claim.
 
 Before reserving a VM, the trusted CI commit's selected owner locks determine
 the host RAM profile. An omitted `resources.host_ram_gib` uses 64 GiB. The only
@@ -248,8 +263,8 @@ The image/setup/test step is capped at four hours inside the six-hour GPU job,
 leaving at least an hour for release after the 45-minute reservation. Family
 containers are restricted to three quarters of host RAM, no additional swap,
 and all but two host CPUs. Docker OOM state is inspected before each container
-is explicitly removed; it is reported as a resource failure rather than a
-transport failure. Failed removal prevents admission of the next family.
+is explicitly removed and retained as evidence. Failed removal prevents
+admission of the next family.
 
 Per-family results retain the failing stage, classification, duration, and every
 selected E2E case's verdict. Missing, skipped, malformed, or incomplete results
@@ -259,11 +274,22 @@ cleanup, the workflow renders these results in the job summary and preserves the
 raw durable-worker log and parsed summary as artifacts. Summary text is
 diagnostic; command success and confirmed VM removal remain mandatory gates.
 
+The responsibility boundary is the frozen PR's entry point. Preparation errors
+are `infra_failure`. After environment and checkpoint checks, the wrapper records
+entry and runs the PR's native build and `python3 -m tools.ci pipeline selective-e2e`.
+Failures after entry default to `pr_failure`, including OOM for now; the receipt
+retains the evidence needed for a later, more detailed diagnosis. Cleanup is an
+independent infrastructure obligation and must still succeed. A proven skipped
+reservation needs no Brev operation, while an uncertain allocation cannot be
+reported as released.
+
 Each container owns its Python dependencies, native build, runtime directory,
 temporary files, and checkpoint cache. The PR source and selected CI runner are
-mounted read-only. Dependencies are installed before native configuration with
-`--no-build-isolation`, so native package build hooks can use the image's PyTorch.
-This pip option does not share environments between family containers. Repository
+mounted read-only. Dependencies are installed in the selected family's image
+layer before test entry, with `--no-build-isolation` so native package build hooks
+can use the image's PyTorch. Host checkpoint staging uses the common lock's exact
+Hugging Face client version and prepares snapshot metadata as well as file bytes,
+so offline consumers do not need reference metadata requests. Repository
 credentials and the Docker socket are not mounted into the test containers.
 
 Develop and qualify GPU runner changes on `ci/developer`. A PR for this change
