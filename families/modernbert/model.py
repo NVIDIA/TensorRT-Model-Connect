@@ -67,6 +67,7 @@ class _ModernBertModel:
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
+        hf_root = "model." if _has_tensor(readers, "model.embeddings.tok_embeddings.weight") else ""
 
         hidden = config.hidden_size
         num_layers = config.num_hidden_layers
@@ -75,17 +76,19 @@ class _ModernBertModel:
         weights = WeightDict()
 
         # Word embedding
-        embedding = _load_tensor(readers, "model.embeddings.tok_embeddings.weight")
+        embedding = _load_tensor(readers, f"{hf_root}embeddings.tok_embeddings.weight")
         assert embedding.shape == (config.vocab_size, hidden)
         weights["embedding"] = embedding.astype(np.float32)
 
         # Embedding LayerNorm (no bias)
-        weights["embed_norm"] = _load_tensor(readers, "model.embeddings.norm.weight").astype(
+        weights["embed_norm"] = _load_tensor(readers, f"{hf_root}embeddings.norm.weight").astype(
             np.float32
         )
 
         # Final LayerNorm
-        weights["final_norm"] = _load_tensor(readers, "model.final_norm.weight").astype(np.float32)
+        weights["final_norm"] = _load_tensor(readers, f"{hf_root}final_norm.weight").astype(
+            np.float32
+        )
 
         # MLM head weights (optional)
         if _has_tensor(readers, "head.dense.weight"):
@@ -99,7 +102,7 @@ class _ModernBertModel:
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
-            hf_prefix = f"model.layers.{layer_idx}"
+            hf_prefix = f"{hf_root}layers.{layer_idx}"
 
             # Attention LayerNorm (layer 0 has no attn_norm)
             attn_norm_key = f"{hf_prefix}.attn_norm.weight"

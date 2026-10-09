@@ -1,0 +1,19 @@
+{
+  "name": "granite-embedding-small-english-r2",
+  "hf_id": "ibm-granite/granite-embedding-small-english-r2",
+  "hf_revision": "2ab6fa8ea2d674564defd37171ae19079b864b33",
+  "bundle": "granite-embedding-small-english-r2.bundle",
+  "family": "modernbert",
+  "task": "encoding",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "granite-embedding-small-english-r2",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "A man is slicing open a fish."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}
