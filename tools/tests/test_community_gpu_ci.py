@@ -1604,10 +1604,22 @@ def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
 )
 def test_real_containers_do_not_share_family_state(tmp_path: Path, monkeypatch) -> None:
     """A failed family cannot contaminate later families' packages, builds, or cache."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    owners = community_gpu_ci.SHARED_SMOKE_FAMILIES
+    _planned_owners(tmp_path, *owners)
+    trusted_runner = str(Path(community_gpu_ci.__file__).resolve())
+    preparation = community_gpu_ci._image_preparation()
     probe = tmp_path / "probe.py"
     probe.write_text(
-        "import pathlib, sys, sysconfig\n"
+        "import json, os, pathlib, sys, sysconfig\n"
+        "if '--stage-family' in sys.argv:\n"
+        # No fixture owner has a checkpoint; keep the real trusted staging path.
+        f"    os.execv(sys.executable, [sys.executable, {trusted_runner!r}, *sys.argv[1:]])\n"
         "family = sys.argv[-1]\n"
+        "selection = json.loads(pathlib.Path('/src/impact.json').read_text())\n"
+        "assert selection == {'families':[family], 'testcases':[family]}\n"
+        "result = pathlib.Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "pathlib.Path(str(result) + '.entrypoint').write_text(family + '\\n')\n"
         "paths = [pathlib.Path(sysconfig.get_paths()['purelib']) / 'trtmc_isolation_probe.py', "
         "pathlib.Path('/tmp/trtmc-community-gpu-build/probe'), "
         "pathlib.Path('/tmp/trtmc-community-huggingface/probe')]\n"
@@ -1623,21 +1635,71 @@ def test_real_containers_do_not_share_family_state(tmp_path: Path, monkeypatch) 
         "else:\n"
         "    raise AssertionError('Source mount is writable')\n"
         "print(f'{family}: fresh Python environment, build, cache, and read-only source', flush=True)\n"
-        "sys.exit(17 if family == 'bert' else 0)\n"
+        "failed = family == 'bert'\n"
+        "result.write_text(json.dumps({'schema_version':1, 'family':family,\n"
+        "    'status':'failed' if failed else 'passed', 'phase':'complete',\n"
+        "    'failure_class':'pr_failure' if failed else None, 'entrypoint_started':True,\n"
+        "    'requested_cases':[family], 'cases':{family:'failed' if failed else 'passed'}}))\n"
+        "sys.exit(17 if failed else 0)\n"
     )
+    original_run = subprocess.run
+    events, names = [], []
+
+    def run(command, **kwargs):
+        if command[:2] == ["docker", "run"]:
+            name = command[command.index("--name") + 1]
+            names.append(name)
+            events.append(("start", command[-1]))
+            assert len(events) == len(names) * 2 - 1
+        result = original_run(command, **kwargs)
+        if command[:3] == ["docker", "rm", "--force"]:
+            name = command[-1]
+            assert name == names[-1]
+            absent = original_run(
+                ["docker", "inspect", name], capture_output=True, text=True, timeout=30
+            )
+            assert absent.returncode != 0 and f"No such object: {name}" in absent.stderr
+            events.append(("remove", name.rsplit("-", 1)[1]))
+        return result
+
+    # Only replace the container payload. The real coordinator still prepares
+    # its trusted sibling, stages manifests, runs Docker, and confirms removal.
     monkeypatch.setattr(community_gpu_ci, "__file__", str(probe))
-    with pytest.raises(CiError) as error:
-        community_gpu_ci.run_containers(
-            tmp_path,
-            {
-                "TRTMC_GPU_SCOPE": "all",
-                "TRTMC_GPU_FAMILIES": "[]",
-                "TRTMC_GPU_DIRECT_FAMILIES": "[]",
-                "TRTMC_GPU_ADDED_FAMILIES": "[]",
-            },
-            os.environ["TRTMC_COMMUNITY_CONTAINER_TEST_IMAGE"],
+    monkeypatch.setattr(community_gpu_ci, "_image_preparation", lambda: preparation)
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", run)
+    try:
+        with pytest.raises(CiError) as error:
+            community_gpu_ci.run_containers(
+                tmp_path,
+                {
+                    "TRTMC_GPU_SCOPE": "all",
+                    "TRTMC_GPU_FAMILIES": "[]",
+                    "TRTMC_GPU_DIRECT_FAMILIES": "[]",
+                    "TRTMC_GPU_ADDED_FAMILIES": "[]",
+                    "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results"),
+                },
+                os.environ["TRTMC_COMMUNITY_CONTAINER_TEST_IMAGE"],
+            )
+        assert str(error.value) == (
+            "Community GPU family failures: bert: container exited 17 (pr_failure)"
         )
-    assert str(error.value) == "Community GPU family failures: bert: container exited 17"
+        assert events == [(phase, family) for family in owners for phase in ("start", "remove")]
+        assert len(set(names)) == len(owners)
+        summary = json.loads((tmp_path / "results/summary.json").read_text())
+        assert summary["complete"] and not summary["passed"]
+        assert [row["family"] for row in summary["families"]] == list(owners)
+        for row in summary["families"]:
+            family = row["family"]
+            expected = "failed" if family == "bert" else "passed"
+            assert row["status"] == expected and row["cases"] == {family: expected}
+            assert row["entrypoint_started"] is True
+            assert row["failure_class"] == ("pr_failure" if family == "bert" else None)
+            assert row["exit_code"] == (17 if family == "bert" else 0)
+        assert not (tmp_path / "should-not-exist").exists()
+    finally:
+        # A failing assertion must also leave no containers from this fixture.
+        for name in names:
+            original_run(["docker", "rm", "--force", name], capture_output=True, timeout=30)
 
 
 def test_brev_wrapper_caches_application_failure_without_retry(tmp_path: Path) -> None:
