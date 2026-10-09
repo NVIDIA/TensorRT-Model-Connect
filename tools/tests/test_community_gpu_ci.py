@@ -3212,6 +3212,7 @@ def test_container_exit_zero_requires_complete_owned_e2e_evidence(tmp_path, muta
     result = community_gpu_ci._container_result(path, "alpha", 0, {})
     assert result["status"] == "failed"
     assert result["failure_class"] == "infra_failure"
+    assert all(outcome == "not_run" for outcome in result["cases"].values())
 
 
 @pytest.mark.parametrize("entered", [False, True])

@@ -669,6 +669,7 @@ def _container_result(
             status="failed",
             failure_class=category,
             evidence="missing, incomplete or invalid family result",
+            cases={name: "not_run" for name in record["requested_cases"]},
         )
     if state.get("OOMKilled") is True:
         record.update(
