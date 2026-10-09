@@ -100,7 +100,9 @@
           ],
           "type": "string",
           "choices": [
-            "dflash"
+            "dflash",
+            "dspark",
+            "dspark_tree"
           ],
           "help": "Explicit paired execution mode; no automatic draft discovery"
         },

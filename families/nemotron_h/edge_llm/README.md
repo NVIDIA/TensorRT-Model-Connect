@@ -3,9 +3,14 @@
 The family owns source-policy admission, command mapping, tokenizer/EOS semantics,
 engine composition and runtime orchestration. TensorRT Edge-LLM owns model graphs,
 lowering and execution. Provision the [optional native SDK](../../../cmake/edge_llm/README.md)
-from official GitHub Edge-LLM 0.10.1, revision
-`e8b29522938901f6df19ebeedd4b69bc8edbcd97`. No internal source changes or
+from official GitHub Edge-LLM 0.11.0, revision
+`95515c2f87fba8982db5a519f9022277667b3cc9`. No internal source changes or
 cross-compilation are used.
+
+A compatible installed 0.11.0 wheel can provide the Python builder tools;
+otherwise the family uses the provisioned SDK interpreter. The native C++ SDK
+is still required. Interpreter discovery does not install packages or introduce
+multi-version dispatch.
 
 ## Ordinary and paired builds
 
@@ -16,7 +21,7 @@ The adapter preserves source scales, exclusions and KV policy. For packed
 sources, only supported external-weight kinds are requested; FP16 bias tensors
 are baked into the engine rather than externalized through a missing recipe.
 
-The explicit Lightning DFlash pair instead uses the original ONNX exporter and
+The explicit Lightning DFlash and DSpark pairs use the original ONNX exporter and
 native ONNX builder. Enable `TRTMC_EDGELLM_ALL_KERNELS=ON` and
 `TRTMC_EDGELLM_ONNX=ON`, set `CMAKE_PREFIX_PATH` to the SDK installation, and
 configure the runtime with `TRTMC_ENABLE_EDGELLM=ON`. Add
@@ -56,28 +61,74 @@ submitted counts, total capacity and generation completion are checked.
 
 The runtime is persistent and serialized, with scoped plugin, stream and artifact
 ownership. Supported ordinary sampling controls are forwarded; unmapped controls
-are rejected. DFlash uses block16/verify16 and is greedy-only because the pinned
-runtime forces greedy verification. Runtime errors are not converted to native
+are rejected. The current DFlash adapter uses block16/verify16 and remains
+greedy-only; stochastic paired execution is not qualified. Runtime errors are not converted to native
 inference.
 
-## Recorded model qualification
+## Documented Edge 0.11.0 scope and results
 
-These are **historical local Model Connect build/inference qualifications**,
-not assertions that every publication head or CI executes these profiles.
-CUDA 13.3 and TensorRT 11.1.0.106 were used. Ordinary MC profiles use capacity 256;
-the DFlash profile uses input/KV1024. All are text-only TP 1/batch 1.
-Independent NED must be at most 0.15; the original Edge 128-token fixture gates
-remain ROUGE-1 >=0.25 and ROUGE-L >=0.20.
+This scope follows the pinned public [supported-model catalog](https://github.com/NVIDIA/TensorRT-Edge-LLM/blob/95515c2f87fba8982db5a519f9022277667b3cc9/docs/source/user_guide/getting_started/supported-models.md):
+eight standalone Nemotron-H checkpoints and the listed Lightning DFlash,
+DSpark chain, and greedy DSpark DDTree modes. Every listed case has a passing,
+accuracy-failing, or resource-blocked disposition; this is not an all-model pass.
+Nemotron Omni and ASR use distinct interfaces and are not this language family.
 
-| Exact source model | GPU | Independent gate | MC ROUGE-1 / ROUGE-L |
+- **Nine passing profiles:** the table below.
+- **Nano30B NVFP4:** build and inference work, but the unchanged output-128
+  accuracy gate fails. The adapter remains available.
+- **Super120B NVFP4:** not executed because compatible single-device capacity
+  was insufficient; there is no qualified family tensor-parallel route.
+  This is a resource limitation, not an observed Edge command failure.
+
+The following exact profiles were rebuilt and run locally on native SM120 with
+CUDA 13.3 and TensorRT 11.1.0.106: FP16 compute, original declared source
+quantization, capacity 256, TP 1/batch 1. These are not family-wide or long-context
+qualifications. The source revisions for passing profiles are listed below. No quality threshold was changed.
+
+| Exact source model | Independent NED | MC ROUGE-1 / ROUGE-L | Direct Edge ROUGE-1 / ROUGE-L |
 | --- | --- | --- | --- |
-| NVIDIA-Nemotron-3-Nano-4B-BF16 | SM120 | NED 0.0 | 0.5371 / 0.2514 |
-| NVIDIA-Nemotron-3-Nano-4B-FP8 | SM120 | NED 0.0 | 0.5402 / 0.2644 |
-| NVIDIA-Nemotron-Nano-9B-v2 | SM80 | Existing HF pytest gate passed; numeric NED not serialized | 0.4318 / 0.2727 |
-| NVIDIA-Nemotron-Nano-9B-v2-FP8 | SM120 | NED 0.0 | 0.3750 / 0.2614 |
-| NVIDIA-Nemotron-Nano-9B-v2-NVFP4 | SM120 | NED 0.0 | 0.4130 / 0.2391 |
-| NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 | SM120 | NED 0.0 | 0.4643 / 0.2500 |
-| Same Lightning target + DFlash companion | SM120 | NED 0.0 | 0.4848 / 0.2545 |
+| NVIDIA-Nemotron-3-Nano-4B-BF16 | 0.0 | 0.5263 / 0.2690 | 0.5263 / 0.2690 |
+| NVIDIA-Nemotron-3-Nano-4B-FP8 | 0.0 | 0.5600 / 0.2971 | 0.5600 / 0.2971 |
+| NVIDIA-Nemotron-Nano-9B-v2-NVFP4 | 0.0 | 0.6061 / 0.3152 | 0.3842 / 0.2599 |
+| NVIDIA-Nemotron-Nano-9B-v2 | 0.0 | 0.5153 / 0.3190 | 0.3864 / 0.2614 |
+| NVIDIA-Nemotron-Nano-9B-v2-FP8 | 0.0 | 0.5125 / 0.3000 | 0.4270 / 0.2697 |
+| NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 | 0.0 | 0.4819 / 0.2530 | 0.4819 / 0.2530 |
+| Same Lightning target + DFlash companion, greedy | 0.0 | 0.4719 / 0.2809 | 0.4719 / 0.2809 |
+| Same Lightning target + DSpark companion, chain | 0.0 | 0.4835 / 0.2967 | 0.4835 / 0.2967 |
+| Same Lightning target + DSpark companion, greedy DDTree | 0.0 | 0.4938 / 0.2963 | 0.4938 / 0.2963 |
+
+Independent checks reuse the owning ten-token, non-thinking greedy testcase and
+its NED <=0.15 gate. The 4B/9B FP8 oracles use their corresponding original BF16 models
+with byte-identical tokenizer/template. The 9B and Lightning NVFP4 oracles use the existing
+strict ModelOpt weight decode into BF16 HF. The Lightning target oracle is reused
+for the DFlash and DSpark pairs after immutable source and prompt identity checks. Neither emulates activation/KV
+quantization rounding. Official Transformers 5.14.1 provides the builtin
+Nemotron-H reference; the older builder environment is kept separate.
+
+Both MC and direct Edge also run the 128-token `llm_basic.json` fixture
+with its unchanged ROUGE-1 >=0.25 and ROUGE-L >=0.20 gates. Ordinary profiles
+preserve the original stochastic controls. DFlash V1 and DSpark DDTree require greedy `top_k=1`;
+its prompt, reference, output budget and thresholds remain unchanged. This is
+not a qualification of stochastic DFlash or DSpark DDTree. DFlash recorded 69
+speculative verifications with mean acceptance length 1.855; DSpark chain 54 /
+2.370 and DDTree 35 / 3.657. Chain uses the original stochastic fixture. The direct control uses
+the MC-built engine, not a separately built engine. Sampling text need not be
+identical. These local recipes use existing owning helpers; they are not additional
+registered CI cases. Other capacities and platforms are not covered by these results.
+
+Nano30B builds and runs, but fails the original output-128 ROUGE-L gate in both
+MC (0.1594) and direct Edge (0.1618). A separately sampled greedy HF diagnostic
+also fails (0.1231), with verbose text truncated before the CEO answer. Actual
+MC, Edge and HF prompt token IDs match. This suggests a response-budget/fixture
+interaction, not an established TensorRT or Edge defect; the failure remains open.
+Super120B is unexecuted because the available supported devices lack capacity
+and this adapter has no qualified parallel route for that checkpoint.
+
+The initial Lightning standalone build requested external-weight kinds forbidden
+by Edge for mixed W4A16 NVFP4. The family now follows the upstream externalization
+policy; the successful rebuild and inference above validate the fix.
+
+## Source revisions
 
 All models are from the public `nvidia` namespace. Immutable revisions, in table
 order, are:
@@ -89,28 +140,7 @@ order, are:
 - 9B-v2-NVFP4: `8556c9164ddb43fe1f4f4ad730593b3c5e3f7328`.
 - Lightning target: `bee7596271d1495f6992ae224aefde4410e816b8`.
 - Lightning DFlash companion: `8abcc4db8f34a5080c31eef05d4467afc06c6b9e`.
-
-The independent references use builtin HF BF16 mathematical execution. Packed
-sources are decoded with official ModelOpt routines and strict full-state loading;
-these oracles do not emulate activation/KV quantization rounding. DFlash reused
-a source-byte/reference-function-verified independent reference rather than
-regenerating it. Its Edge fixture uses explicit greedy controls, not a claim of
-sampling parity.
-
-Passing payloads were retired with approval; compact results and provenance were
-retained. Replaying all seven model checks requires rebuilding those payloads.
-Fresh publication compilation/unit/source checks must be reported separately.
-Only the existing plain 9B case is a registered owning E2E among these profiles;
-the other exact models/pair used local recipes with existing family helpers.
-
-## Still outside these qualifications
-
-The separate direct-Edge 9B-NVFP4 capacity 1024 run failed ROUGE-L 0.1957 against 0.20
-on a different SM120 GPU. The MC256 pass does not resolve that failure.
-The earlier 4B-BF16 capacity 4096 compiler failure, long-context/context-reuse,
-TP4, other models/platforms and stochastic equivalence remain outside this proof.
-Nano30B, Super120B and Omni are not qualified by the table above.
-No quality gate, failed result or hardware limitation is hidden by these passes.
+- Lightning DSpark companion (0.11.0 only): `8a0177116d138011e63103110f136ec0ca09ebbf`.
 
 ## Family-owned build options
 
@@ -141,8 +171,7 @@ build(with_execution(request, BuildExecutionInputs(
 )))
 ```
 
-A failed explicit pair is never replaced by a base-only bundle. Previously
-recorded full-model results above are historical, not fresh refactor-head E2Es.
+A failed explicit pair is never replaced by a base-only bundle. The full-model results above were collected during the rollout; publication-head checks must be reported separately.
 
 Ordinary builds without an installed optional Edge SDK select native without a
 warning. Malformed or incomplete installed packages still retain diagnostics and
@@ -158,3 +187,22 @@ publication. The legacy flat build command remains available for its existing
 ordinary options; new family options use `trtmc nemotron_h build`.
 Help is offline and does not need a local checkpoint. No shared parser hook or
 family registry entry is added.
+
+### Lightning DSpark profiles
+
+The family command accepts the listed Lightning DSpark draft through the same
+local companion mechanism. The ONNX exporter and Edge runtime own the complete
+speculative graphs and scheduler; no shared Model Connect selection is involved.
+
+```sh
+trtmc nemotron_h build /models/lightning --precision fp16 \
+  --execution-variant dspark --companion draft=/models/lightning-dspark \
+  --max-sequence-length 256 --output lightning-dspark.bundle
+```
+
+Use `--execution-variant dspark_tree` for greedy DDTree. These profiles map the
+published block8, anchor-only layout to a nine-position draft profile. Chain
+verification uses nine positions and preserves sampling; tree verification uses
+16 positions with draft fanout four and rejects non-greedy requests. The bundle
+includes the required DSpark heads and metadata. Both capacity-256 paired profiles have their own real build, inference and
+quality results above; standalone results are not used as paired qualification.

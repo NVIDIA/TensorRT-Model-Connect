@@ -16,7 +16,7 @@ def execution_inputs(
         if companion:
             raise ValueError("--companion requires --execution-variant")
         return None
-    if execution_variant not in ['dflash']:
+    if execution_variant not in {"dflash", "dspark", "dspark_tree"}:
         raise ValueError("unsupported nemotron_h execution variant")
     checkpoints = []
     for value in companion:
