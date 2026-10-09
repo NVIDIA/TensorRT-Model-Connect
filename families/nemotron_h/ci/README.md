@@ -1,122 +1,93 @@
-# Nemotron-H Community dependency image
+# Build the Nemotron-H dependency environment from public source
 
-This protected producer moves native dependency compilation out of PR GPU jobs.
-It builds only the Nemotron-H dependency layer; every PR still gets one VM and
-runs each selected family in a separate container.
-
-The producer workflow checks the **triggering actor** for maintain/admin access,
-accepts only a manual upstream dispatch from `main` or `ci/developer`, and uses
-the existing branch-restricted `gpu-ci-dispatch` environment. It checks access
-again inside the allocation job, including failed-job reruns.
-
-The trusted Dev commit supplies provisioning, blocking cleanup, the producer
-recipe and the GPU coordinator. Authorization freezes the protected `main`
-commit separately. That main commit supplies the GPU base Dockerfile,
-requirements and model/native test source. PR heads and merge refs are never
-inputs to this producer.
-
-The family Dockerfile declares the native dependency imports. The shared CI
-controller validates the family directory name and derives its recipe, native
-target and selected-family environment mechanically; it contains no Nemotron-H
-dependency versions or validation policy.
-
-## Qualification and publication
-
-One AWS `g6.8xlarge` VM with 128 GiB host RAM, one L4, and 500 GiB disk performs
-the expensive x86 build and qualification. The original 64 GiB builder passed
-dependency and native ABI checks but Docker reported OOM during model validation.
-The larger builder retains the container's 75 percent memory limit and all
-original tests. The small GitHub-hosted job only controls it. The producer:
-
-1. Builds the exact protected-main GPU base and the unchanged family requirements
-   with the full dependency resolver and `pip check`.
-2. Imports native dependencies on an actual L4 and records Python, TensorRT,
-   Torch/CUDA/C++ABI, final TVM-FFI and the complete resolved package closure.
-3. Builds the protected-main native targets with `TRTMC_ENABLE_BYOK=ON`, runs
-   the native GPU bridge test, and rejects missing/skipped/failed results.
-4. Runs every existing premerge Nemotron-H E2E case through the trusted Dev
-   coordinator. Dependencies are already installed; no criteria are changed.
-5. Only after qualification, copies a short-lived `GITHUB_TOKEN` to a private
-   host file, logs in through stdin with a private temporary Docker config,
-   requires an authenticated HTTP 200 proving the existing target package is
-   private before any full image push, verifies private
-   visibility again after each push, and removes both credential locations.
-6. Blocks until the owned VM is confirmed deleted, then uploads the candidate
-   receipt. An independent job recovers the original lease and confirms
-   deletion again without reconstructing a new attempt's allocation name.
-
-The build Docker contexts contain only public base requirements or the family
-requirements/recipe. Neither registry nor checkpoint credentials enter a build
-context or image. Checkpoint credentials are consumed on the trusted staging
-host before family containers. Registry credentials are introduced after those
-containers finish. Later PR consumption must use a separate short-lived
-`packages:read` credential on the trusted host and remove its Docker config
-before launching contributor containers.
-
-## Private package prerequisite
-
-An administrator must establish the target package with private visibility and
-grant the workflow repository package access before this producer can upload a
-full dependency image. Bootstrap only with a harmless, non-sensitive artifact,
-then verify that the authenticated package lookup returns HTTP 200 and actual
-`private` visibility. An absent package, denied authentication, unavailable API,
-or non-private response blocks publication; the producer does not assume a
-first push will create a private package.
-
-A public package cannot be converted back to private. Do not upload the full
-image to discover its visibility or attempt to repair visibility after that
-push. Follow GitHub's [package visibility and access guidance](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)
-before rerunning the producer. The post-push private check remains required.
-
-The current Mamba pin requires `apache-tvm-ffi<=0.1.9`, whereas the base includes
-`0.1.12`. The producer records the final closure and tests the default native
-bridge against it. It does not use `--no-deps`, override the package constraint,
-or silently disable BYOK. An ABI/build/test failure prevents publication and
-requires a family-owned dependency fix; a metadata-only or ARM image is not a
-qualified substitute.
-
-## Catalog promotion
-
-A successful workflow creates a reviewable receipt, not an automatic source
-commit. Admit it only after the **entire** workflow, including both cleanup
-paths, completes successfully. The eventual family-owned lock entry must carry:
-
-- Private qualified-family GHCR `image@sha256:...`, platform `linux/amd64`.
-- Immutable local base-image ID and base provenance, without standalone base
-  qualification or publication. The ABI/E2E gates apply to the family layer.
-- Protected model commit/tree and trusted producer/helper commit.
-- GPU-base Dockerfile, base requirements and family requirements SHA256.
-- Dependency recipe SHA256, complete resolved closure and canonical closure SHA.
-- Observed Python ABI, Torch/CUDA/C++ABI, TensorRT, final TVM-FFI, L4/SM89 and the
-  native/family qualification results.
-
-The generic consumer must read the entry from trusted CI code, compare it with
-actual PR input hashes, and pull by digest. It must not trust a PR-selected image
-or a mutable tag. A missing entry or changed dependency inputs use the normal
-base image and full family installation; tests and budgets remain unchanged.
-Corrupt qualification records or failed authenticated pulls are explicit family
-dependency failures. No digest is checked in until a real x86/L4 producer run
-has established these facts.
-
-## Dev invocation
-
-A new `workflow_dispatch` filename may need default-branch registration before
-GitHub accepts direct dispatches. The file also supports `workflow_call`, so the
-already registered Community CI entry can call it on Dev without changing main.
-The registered Community CI workflow routes this explicit manual mode separately
-from PR snapshots, tests, and commit statuses:
+The private CI builder and external users use this same public entry:
 
 ```bash
-gh workflow run community-ci.yml --repo NVIDIA/TensorRT-Model-Connect \
-  --ref ci/developer -f task=dependency-image
+./families/nemotron_h/ci/build-dependencies.sh \
+  --max-jobs 2 --output /tmp/trtmc-nemotron-environment \
+  --image trtmc-nemotron-h-dependencies:local
 ```
 
-The caller retains `cancel-in-progress: false` and passes only the named Brev and
-Hugging Face secrets. The callee uses its protected job environment and a
-short-lived `GITHUB_TOKEN`; it does not require a PAT.
+Run it from a clean, pinned checkout on Linux x86_64 with Docker access and
+adequate build RAM and disk. It first builds the existing
+`Dockerfile.dev.x86-gpu`, starting from the public NGC TensorRT SDK pinned by
+digest, then builds `Dockerfile.dependencies` from only this family's public
+requirements, constraints and environment locks. TensorRT is inherited from the
+NGC SDK; no private TensorRT wheel or project prebuilt-image download is needed.
+The PyTorch CUDA wheels and remaining packages come from public indexes.
 
-The steps before owner cleanup total at most 300 minutes, leaving at least one
-hour of the hosted job's 360 minute limit for cleanup. The producer never replaces a VM for a
-package or model failure. Platform force-kill still bounds any hosted job;
-the independent cleanup job is the backstop. No cron or shared family image is
-introduced.
+After the locked build, enter that locally built environment with a compatible
+NVIDIA driver and container runtime:
+
+```bash
+docker run --rm -it --gpus all \
+  --volume "$PWD:/workspace/tensorrt-model-connect" \
+  --workdir /workspace/tensorrt-model-connect \
+  trtmc-nemotron-h-dependencies:local bash
+```
+
+Mount the model checkout you intend to test. The embedded manifest's `source_sha`
+is the environment recipe SHA; the mounted checkout's HEAD is the model or PR
+SHA. CI records these separately because reproducing package/ABI versions does
+not prove that another model revision passes the original tests. Checkpoints are
+not bundled in this dependency image.
+
+`--base-image` changes the locally built base tag. `--max-jobs` limits native
+dependency compilation. `--output` receives the two version locks, two public
+environment receipts, and hashes of every consumed recipe input. The entry
+performs builds and `pip check` without requiring a GPU. Its receipts explicitly
+do **not** claim native BYOK or model E2E qualification; those gates remain
+separate before CI image admission. A successful build is not model parity proof.
+
+The identical public input manifest is embedded in the family image at
+`/opt/trtmc-ci/build-inputs.json` and copied to the output directory. It binds the
+environment source commit, build mode and eleven public input hashes. It contains
+no registry URL, credential or private source-label override, and never marks
+native or model qualification passed. A later qualifier must verify these
+environment inputs separately from the model source commit it tests.
+
+`--oci-source` (or `TRTMC_OCI_SOURCE`) overrides the image's source label with an
+HTTPS repository URL without credentials. A private publisher must supply its
+own intended repository association before publishing; public environment
+receipts do not include that override. This label does not set registry ACLs.
+
+## Refreshing the environment locks
+
+The checked-in snapshot records 83 base-venv packages, 100 family-venv packages,
+and 362 installed APT packages from a real Linux x86_64 build. Use the default
+locked command to reproduce this software environment. These package receipts
+do not imply GPU or model qualification.
+
+Maintainers refreshing dependencies must explicitly request a new capture:
+
+```bash
+./families/nemotron_h/ci/build-dependencies.sh --bootstrap \
+  --max-jobs 2 --output /tmp/trtmc-nemotron-environment \
+  --image trtmc-nemotron-h-bootstrap:local
+```
+
+Review and copy `base-environment.lock` and `.json` to
+`requirements/community-gpu-linux-amd64.lock` and `.json`. Copy the family pair
+to `families/nemotron_h/ci/environment-linux-amd64.lock` and `.json`, commit the
+public package-only snapshot, then rerun the default locked command. The recorder
+enumerates only the image venv's own distribution directories, so it does not
+create conflicting duplicate pins from inherited NGC system packages. Locks
+contain exact package versions, not credentials, repository login data or private
+wheel coordinates. Compatibility constraints are family-owned and supplement,
+rather than replace, the complete resolved lock.
+
+Both Dockerfiles use [Ubuntu archive snapshot](https://snapshot.ubuntu.com/)
+`20261008T000000Z` for added build
+tools. Locked builds compare the complete installed APT inventory, venv versions
+and Python/Torch/CUDA/C++ABI/TensorRT/TVM-FFI metadata with the captured receipts.
+The public snapshot service has a retention window; unavailable snapshots or
+package versions must fail instead of silently selecting newer inputs.
+
+This aims to reproduce package and ABI versions from identical public inputs.
+It does not promise byte-identical images or compiled wheels: compiler output,
+build timestamps and image attestations may differ. A changed snapshot or input
+requires a new capture, locked rebuild and GPU qualification.
+
+Sources and checkpoints are mounted only during validation, and credentials
+remain outside Docker build contexts. The helper never publishes an image or
+changes a registry. Distribution of full project CI images remains private.

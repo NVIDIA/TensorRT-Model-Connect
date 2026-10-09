@@ -6,6 +6,12 @@ description: Build the CLI, TensorRT backend, and Qwen DSO for one selected GPU.
 Use this path on Linux x86_64 or aarch64 for the first Qwen inference from
 source. Start at the repository root.
 
+For the x86 GPU Nemotron-H dependency environment, use the
+[family-owned public build recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/ci/developer/families/nemotron_h/ci/README.md).
+It builds from the public pinned NGC SDK and public package indexes; it does not
+require a project prebuilt image. Environment capture and locked rebuild are
+separate from GPU model qualification.
+
 ## Automated environment preparation
 
 The repository-local `apps/devtoolkit` Python API selects

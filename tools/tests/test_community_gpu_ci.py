@@ -225,26 +225,55 @@ def test_protected_registry_prefix_cannot_redirect_credentials(tmp_path, prefix)
 
 
 @pytest.mark.parametrize(
-    "field",
+    "field,relative",
     [
-        "dependency_constraints_sha256",
-        "dependency_build_helper_sha256",
-        "base_environment_lock_sha256",
-        "family_environment_lock_sha256",
+        ("dependency_constraints_sha256", "families/alpha/ci/constraints-linux-amd64.txt"),
+        ("dependency_build_helper_sha256", "families/alpha/ci/build-dependencies.sh"),
+        ("base_environment_lock_sha256", "requirements/community-gpu-linux-amd64.lock"),
+        ("family_environment_lock_sha256", "families/alpha/ci/environment-linux-amd64.lock"),
+        ("environment_recorder_sha256", "requirements/image-environment.py"),
+        ("base_environment_receipt_sha256", "requirements/community-gpu-linux-amd64.json"),
+        ("family_environment_receipt_sha256", "families/alpha/ci/environment-linux-amd64.json"),
     ],
 )
-def test_public_dependency_lock_or_helper_changes_require_cold_install(tmp_path, field):
+def test_public_dependency_lock_or_helper_changes_require_cold_install(tmp_path, field, relative):
     entry = _dependency_entry(tmp_path, "alpha")
-    path = tmp_path / community_gpu_ci._dependency_optional_inputs("alpha")[field]
+    path = tmp_path / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("original public dependency input\n")
     entry["lock"][field] = hashlib.sha256(path.read_bytes()).hexdigest()
     assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
     path.write_text("changed public dependency input\n")
     assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry) is None
+    # A legacy receipt lacking this optional field retains its original behavior.
+    entry["lock"].pop(field)
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
     entry["lock"][field] = "invalid hash"
     with pytest.raises(CiError, match="invalid input hash"):
         community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "environment_recorder_sha256",
+        "base_environment_receipt_sha256",
+        "family_environment_receipt_sha256",
+    ],
+)
+def test_new_public_input_hashes_are_preserved_without_private_coordinates(tmp_path, field):
+    entry = _dependency_entry(tmp_path, "alpha")
+    entry["lock"][field] = "f" * 64
+    entry["lock"]["private_note"] = "private-location-sensitive-token"
+    path = tmp_path / "catalog.json"
+    value = {"schema_version": 1, "ci_sha": "a" * 40, "families": {"alpha": entry}}
+    path.write_text(json.dumps(value))
+    provenance = community_gpu_ci._dependency_provenance(path, "alpha")
+    assert provenance[field] == "f" * 64 and "sensitive-token" not in json.dumps(provenance)
+    entry["lock"][field] = "ghcr.io/test-owner/private-cache?sensitive-token"
+    path.write_text(json.dumps(value))
+    provenance = community_gpu_ci._dependency_provenance(path, "alpha")
+    assert field not in provenance and "ghcr.io" not in json.dumps(provenance)
 
 
 def test_public_provenance_never_exports_private_coordinates_or_metadata(tmp_path):

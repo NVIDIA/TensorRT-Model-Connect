@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -52,12 +53,32 @@ def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
         "${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image' }}"
     )
     assert producer["uses"] == "./.github/workflows/community-dependency-image.yml"
+    assert producer["with"] == {
+        "family": "${{ inputs.audit_family }}",
+        "digest": "${{ inputs.audit_digest }}",
+    }
+    assert set(producer["secrets"]) == {
+        "BREV_API_KEY",
+        "HF_TOKEN",
+        "TRTMC_COMMUNITY_REGISTRY_READ_TOKEN",
+        "TRTMC_COMMUNITY_REGISTRY",
+        "TRTMC_COMMUNITY_REGISTRY_USERNAME",
+    }
+    assert all(
+        value == "${{ secrets." + name + " }}" for name, value in producer["secrets"].items()
+    )
+    assert set(WORKFLOW["on"]["workflow_call"]["secrets"]) == {
+        "BREV_API_KEY",
+        "HF_TOKEN",
+        "TRTMC_COMMUNITY_REGISTRY_READ_TOKEN",
+        "TRTMC_COMMUNITY_REGISTRY",
+        "TRTMC_COMMUNITY_REGISTRY_USERNAME",
+    }
     assert set(producer["secrets"]) == set(WORKFLOW["on"]["workflow_call"]["secrets"])
-    assert set(producer["secrets"]) == {"BREV_API_KEY", "HF_TOKEN"}
     for name in ("snapshot", "authorize", "required"):
         assert "inputs.task != 'dependency-image'" in jobs[name]["if"]
     for name, job in jobs.items():
-        if name not in {"produce-dependency-image", "withdraw-dependency-image"}:
+        if name != "withdraw-dependency-image":
             assert job.get("permissions", {}).get("packages") != "write"
     withdrawal = jobs["withdraw-dependency-image"]
     assert withdrawal["permissions"] == {"contents": "read", "packages": "write"}
@@ -385,12 +406,13 @@ def test_failed_publication_never_exports_a_receipt_or_relaxes_private_gates(tmp
     chown.assert_not_called()
 
 
-def test_publication_download_uses_only_the_ssh_owned_auth_receipt():
+def test_qualification_download_uses_only_the_ssh_owned_auth_receipt():
     steps = WORKFLOW["jobs"]["produce"]["steps"]
-    publish = next(step for step in steps if step.get("id") == "publish")
-    assert "$INSTANCE_NAME:$REMOTE_AUTH/published-candidate.json" in publish["run"]
-    assert "$INSTANCE_NAME:$REMOTE_PROOF/published-candidate.json" not in publish["run"]
-    assert publish["timeout-minutes"] == "20"
+    proof = next(step for step in steps if step.get("id") == "proof")
+    assert "$INSTANCE_NAME:$REMOTE_AUTH/qualification.json" in proof["run"]
+    assert "$INSTANCE_NAME:$REMOTE_PROOF/qualification.json" not in proof["run"]
+    assert "export-qualification" in proof["run"]
+    assert proof["timeout-minutes"] == "5"
 
 
 @pytest.mark.parametrize(
@@ -417,11 +439,128 @@ def test_family_e2e_does_not_run_before_native_abi_gate(tmp_path: Path) -> None:
     run.assert_not_called()
 
 
+def completed_family_summary(family: str = "nemotron_h") -> dict:
+    return {
+        "schema_version": 1,
+        "complete": True,
+        "passed": True,
+        "families": [
+            {
+                "family": family,
+                "status": "passed",
+                "phase": "complete",
+                "failure_class": None,
+                "requested_cases": ["unchanged_a"],
+                "cases": {"unchanged_a": "passed"},
+                "deferred_cases": [],
+            }
+        ],
+    }
+
+
+def write_family_summary(environment: dict, summary: dict) -> None:
+    directory = Path(environment["TRTMC_GPU_RESULTS_DIR"])
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "summary.json").write_text(json.dumps(summary))
+
+
 def test_producer_requires_coverage_of_its_qualified_family(tmp_path: Path) -> None:
     candidate(tmp_path)
-    with patch.object(MODULE.subprocess, "run") as run:
-        MODULE.qualify(tmp_path, Path("/stage/python"), None, family="nemotron_h")
+
+    def coordinator(command, *, env, check):
+        summary = completed_family_summary()
+        summary["families"][0]["dependency_image"] = "ghcr.io/private/unexported"
+        summary["families"][0]["secret_payload"] = "never-export-row-payload"
+        write_family_summary(env, summary)
+
+    with patch.object(MODULE.subprocess, "run", side_effect=coordinator) as run:
+        MODULE.qualify(
+            tmp_path,
+            Path("/stage/python"),
+            None,
+            repository=Path("/protected/model"),
+            family="nemotron_h",
+        )
     assert "--require-family-coverage" in run.call_args.args[0]
+    command = run.call_args.args[0]
+    assert command[command.index("--repository") + 1] == "/protected/model"
+    assert command[command.index("--image") + 1] == "local-family"
+    environment = run.call_args.kwargs["env"]
+    assert json.loads(environment["TRTMC_GPU_FAMILIES"]) == ["nemotron_h"]
+    assert json.loads(environment["TRTMC_GPU_DIRECT_FAMILIES"]) == ["nemotron_h"]
+    assert json.loads(environment["TRTMC_GPU_ADDED_FAMILIES"]) == []
+    receipt = json.loads((tmp_path / "candidate.json").read_text())
+    assert receipt["cases"] == {"unchanged_a": "passed"}
+    assert "ghcr.io" not in json.dumps(receipt)
+    assert "never-export-row-payload" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing",
+        "incomplete",
+        "failed",
+        "wrong-owner",
+        "empty",
+        "skipped",
+        "missing-requested",
+        "stale",
+    ],
+)
+def test_family_qualification_requires_fresh_complete_actual_owner_e2e_evidence(
+    tmp_path: Path, failure: str
+):
+    path = candidate(tmp_path, family=False)
+    summary = completed_family_summary()
+    row = summary["families"][0]
+    if failure == "incomplete":
+        summary["complete"] = False
+    elif failure == "failed":
+        summary["passed"] = False
+    elif failure == "wrong-owner":
+        row["family"] = "another_family"
+    elif failure == "empty":
+        row["requested_cases"] = []
+        row["cases"] = {}
+    elif failure == "skipped":
+        row["cases"] = {"unchanged_a": "skipped"}
+    elif failure == "missing-requested":
+        row["requested_cases"] = ["unchanged_a", "unchanged_b"]
+    if failure == "stale":
+        directory = tmp_path / "family-results"
+        directory.mkdir()
+        (directory / "summary.json").write_text(json.dumps(summary))
+
+    def coordinator(command, *, env, check):
+        if failure not in {"missing", "stale"}:
+            write_family_summary(env, summary)
+
+    with patch.object(MODULE.subprocess, "run", side_effect=coordinator):
+        with pytest.raises(RuntimeError):
+            MODULE.qualify(tmp_path, Path("/stage/python"), None, family="nemotron_h")
+    assert json.loads(path.read_text())["family_e2e_passed"] is False
+
+
+def test_failed_original_e2e_clears_any_previous_pass_and_blocks_export(tmp_path):
+    path = candidate(tmp_path)
+    auth = tmp_path / "auth"
+    auth.mkdir(mode=0o700)
+    directory = tmp_path / "family-results"
+    directory.mkdir()
+    (directory / "summary.json").write_text(json.dumps(completed_family_summary()))
+    with patch.object(
+        MODULE.subprocess,
+        "run",
+        side_effect=subprocess.CalledProcessError(17, ["original-family-runner"]),
+    ):
+        with pytest.raises(subprocess.CalledProcessError):
+            MODULE.qualify(tmp_path, Path("/stage/python"), None, family="nemotron_h")
+    assert json.loads(path.read_text())["family_e2e_passed"] is False
+    assert not (directory / "summary.json").exists()
+    with pytest.raises(RuntimeError):
+        MODULE.export_qualification(tmp_path, auth)
+    assert not (auth / "qualification.json").exists()
 
 
 def admission_program(entry: str) -> str:
@@ -469,30 +608,35 @@ def test_workflow_keeps_credentials_late_and_both_cleanup_paths() -> None:
     jobs = WORKFLOW["jobs"]
     produce = jobs["produce"]
     steps = produce["steps"]
-    build = next(
-        step
-        for step in steps
-        if step.get("name") == "Build full dependencies and validate native ABI"
-    )
-    qualify = next(
-        step
-        for step in steps
-        if step.get("name") == "Qualify the unchanged Nemotron-H workloads on L4"
-    )
-    publish = next(step for step in steps if step.get("id") == "publish")
+    prepare = next(step for step in steps if " prepare-candidate " in step.get("run", ""))
+    qualify = next(step for step in steps if " qualify --family " in step.get("run", ""))
+    proof = next(step for step in steps if step.get("id") == "proof")
     release = next(step for step in steps if step.get("id") == "release")
-    assert "REGISTRY_TOKEN" not in build.get("env", {})
-    assert "HF_TOKEN" not in build.get("env", {})
+    assert prepare["env"]["REGISTRY_TOKEN"] == "${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}"
+    assert "HF_TOKEN" not in prepare.get("env", {})
     assert "REGISTRY_TOKEN" not in qualify.get("env", {})
-    assert steps.index(build) < steps.index(qualify) < steps.index(publish) < steps.index(release)
+    assert "REGISTRY_TOKEN" not in proof.get("env", {})
+    assert steps.index(prepare) < steps.index(qualify) < steps.index(proof) < steps.index(release)
+    commands = "\n".join(step.get("run", "") for step in steps)
+    assert '" build --family' not in commands and '" publish --family' not in commands
+    assert "docker build" not in commands and "docker push" not in commands
+    assert '--auth-file "$REMOTE_AUTH/registry-auth.json"' in prepare["run"]
+    assert "unset REGISTRY_TOKEN REGISTRY_PREFIX REGISTRY_USERNAME" in prepare["run"]
+    assert "trap 'rm -f \"$auth_file\"' EXIT" in prepare["run"]
+    assert '--repository "$REMOTE_MODEL"' in prepare["run"]
+    assert '--repository "$REMOTE_MODEL"' in qualify["run"]
+    assert "unset HF_TOKEN" in qualify["run"]
     assert "always()" in release["if"] and "--until-deleted" in release["run"]
     backup = jobs["cleanup"]
     assert "always()" in backup["if"]
-    assert "--until-deleted" in backup["steps"][-1]["run"]
-    assert "GITHUB_RUN_ATTEMPT" not in backup["steps"][-1]["run"]
+    backup_release = next(
+        step for step in backup["steps"] if "--until-deleted" in step.get("run", "")
+    )
+    assert "always()" in backup_release["if"]
+    assert "GITHUB_RUN_ATTEMPT" not in backup_release["run"]
     assert WORKFLOW["concurrency"]["cancel-in-progress"] == "false"
     assert produce["timeout-minutes"] == "360" and backup["timeout-minutes"] == "360"
-    assert produce["permissions"]["packages"] == "write"
+    assert "packages" not in produce["permissions"]
     assert "packages" not in backup["permissions"]
     copies = [
         line.strip()
@@ -528,6 +672,8 @@ def test_authorization_uses_triggering_actor_and_freezes_protected_main(tmp_path
         "GITHUB_SHA": "a" * 40,
         "GITHUB_ACTOR": "original",
         "REQUEST_ACTOR": "current-maintainer",
+        "CANDIDATE_FAMILY": "nemotron_h",
+        "CANDIDATE_DIGEST": "sha256:" + "c" * 64,
         "GITHUB_OUTPUT": str(tmp_path / "output"),
     }
     responses = [
@@ -541,7 +687,13 @@ def test_authorization_uses_triggering_actor_and_freezes_protected_main(tmp_path
         exec(compile(program, "producer-authorization", "exec"), {})
     assert "current-maintainer/permission" in lookup.call_args_list[0].args[0][-1]
     assert lookup.call_args_list[1].args[0][-1].endswith("git/ref/heads/main")
-    assert (tmp_path / "output").read_text() == "allowed=true\nmodel_sha=" + "d" * 40 + "\n"
+    assert (tmp_path / "output").read_text() == (
+        "allowed=true\nmodel_sha="
+        + "d" * 40
+        + "\nfamily=nemotron_h\ndigest=sha256:"
+        + "c" * 64
+        + "\n"
+    )
 
 
 @pytest.mark.parametrize("entry", ["producer", "audit"])
@@ -1410,3 +1562,1097 @@ def test_access_check_job_authorizes_current_actor_without_private_reader(
     assert (result.returncode == 0) is allowed, result.stderr
     if trace.exists():
         assert "current-rerun-actor" in trace.read_text()
+
+
+PRIVATE_PREFIX = "ghcr.io/test-owner/private-dependencies"
+PRIVATE_TOKEN = "candidate-read-secret"
+CANDIDATE_DIGEST = "sha256:" + "c" * 64
+LOCAL_CANDIDATE_ID = "sha256:" + "d" * 64
+
+
+def candidate_input_paths(family: str = "nemotron_h") -> tuple[str, ...]:
+    """Keep the producer's complete public input contract explicit in this test."""
+    return (
+        "Dockerfile.dev.x86-gpu",
+        "requirements/community-ci.txt",
+        "requirements/image-environment.py",
+        "requirements/community-gpu-linux-amd64.lock",
+        "requirements/community-gpu-linux-amd64.json",
+        f"families/{family}/requirements.txt",
+        f"families/{family}/ci/Dockerfile.dependencies",
+        f"families/{family}/ci/build-dependencies.sh",
+        f"families/{family}/ci/constraints-linux-amd64.txt",
+        f"families/{family}/ci/environment-linux-amd64.lock",
+        f"families/{family}/ci/environment-linux-amd64.json",
+    )
+
+
+def fixture_git(repository: Path, *arguments: str) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(repository), *arguments],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    ).strip()
+
+
+def fixture_commit(repository: Path, message: str) -> str:
+    fixture_git(repository, "add", ".")
+    fixture_git(repository, "commit", "--quiet", "-m", message)
+    return fixture_git(repository, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def private_candidate_fixture(tmp_path: Path, monkeypatch):
+    environment = tmp_path / "environment"
+    model = tmp_path / "model"
+    for repository in (environment, model):
+        repository.mkdir()
+        fixture_git(repository, "init", "--quiet")
+        fixture_git(repository, "config", "user.name", "Candidate fixture")
+        fixture_git(repository, "config", "user.email", "fixture@example.invalid")
+    for index, relative in enumerate(candidate_input_paths()):
+        target = environment / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"public input {index}\n")
+    input_hashes = {
+        relative: hashlib.sha256((environment / relative).read_bytes()).hexdigest()
+        for relative in candidate_input_paths()
+    }
+    environment_sha = fixture_commit(environment, "Complete public environment inputs")
+    (environment / "README.md").write_text("Later protected CI commit\n")
+    (environment / "requirements/community-ci.txt").write_text("Later public dependency input\n")
+    protected_sha = fixture_commit(environment, "Protected branch advances")
+    fixture_git(environment, "update-ref", "refs/remotes/origin/main", protected_sha)
+    requirement = model / "families/nemotron_h/requirements.txt"
+    requirement.parent.mkdir(parents=True)
+    requirement.write_bytes((environment / "families/nemotron_h/requirements.txt").read_bytes())
+    model_sha = fixture_commit(model, "Frozen protected model snapshot")
+    fixture_git(model, "update-ref", "refs/remotes/origin/main", model_sha)
+    auth_directory = tmp_path / "auth"
+    auth_directory.mkdir(mode=0o700)
+    auth_file = auth_directory / "registry.json"
+    auth_file.write_text(
+        json.dumps(
+            {"registry_prefix": PRIVATE_PREFIX, "username": "test-actor", "token": PRIVATE_TOKEN}
+        )
+    )
+    auth_file.chmod(0o600)
+    metadata = {
+        "schema_version": 1,
+        "source_sha": environment_sha,
+        "mode": "locked",
+        "inputs": input_hashes,
+        "native_byok_passed": False,
+        "family_e2e_passed": False,
+    }
+    monkeypatch.setattr(MODULE, "SOURCE", environment)
+    return SimpleNamespace(
+        environment=environment,
+        environment_sha=environment_sha,
+        protected_sha=protected_sha,
+        model=model,
+        model_sha=model_sha,
+        metadata=metadata,
+        auth_directory=auth_directory,
+        auth_file=auth_file,
+        output=tmp_path / "proof",
+    )
+
+
+def prepare_private_candidate(fixture) -> None:
+    MODULE.prepare_candidate(
+        fixture.output,
+        fixture.model,
+        fixture.auth_file,
+        family="nemotron_h",
+        candidate_digest=CANDIDATE_DIGEST,
+    )
+
+
+def candidate_transport(fixture, events: list[str], *, visibility: str = "private"):
+    def transport(request, *, timeout):
+        assert timeout == 30
+        assert request.full_url.startswith("https://api.github.com/")
+        assert request.get_method() == "GET"
+        assert request.get_header("Authorization") == "Bearer " + PRIVATE_TOKEN
+        assert not fixture.auth_file.exists()
+        if request.full_url == "https://api.github.com/users/test-owner":
+            events.append("owner-get")
+            body = {"login": "test-owner", "type": "Organization"}
+        else:
+            assert request.full_url == (
+                "https://api.github.com/orgs/test-owner/packages/container/"
+                "private-dependencies%2Fnemotron_h"
+            )
+            events.append("package-get")
+            body = {"name": "private-dependencies/nemotron_h", "visibility": visibility}
+        response = io.BytesIO(json.dumps(body).encode())
+        response.status = 200
+        return response
+
+    return transport
+
+
+def candidate_docker_boundary(fixture, events: list[str], *, metadata: str | None = None):
+    """Fake Docker only, preserving real Git ancestry and blob reads."""
+    configurations: list[Path] = []
+    original_run = MODULE.run
+
+    def private_docker(command, *, stdin=None, **kwargs):
+        assert command[0] == "docker" and PRIVATE_TOKEN not in str(command)
+        assert not fixture.auth_file.exists()
+        if "/opt/trtmc-ci/build-inputs.json" in command:
+            assert "--config" not in command and stdin is None
+            return host_run(command, capture=True)
+        assert "--config" in command
+        configuration = Path(command[command.index("--config") + 1])
+        assert configuration.is_dir()
+        configurations.append(configuration)
+        if "login" in command:
+            events.append("login")
+            assert stdin == PRIVATE_TOKEN
+            assert command[-1] == "--password-stdin"
+            (configuration / "config.json").write_text("private credential simulation")
+            return ""
+        assert stdin is None
+        if "pull" in command:
+            events.append("pull")
+            assert command[-1] == PRIVATE_PREFIX + "/nemotron_h@" + CANDIDATE_DIGEST
+            assert command[command.index("--platform") + 1] == "linux/amd64"
+            return ""
+        if "inspect" in command:
+            events.append("inspect")
+            assert command[-1] == PRIVATE_PREFIX + "/nemotron_h@" + CANDIDATE_DIGEST
+            return LOCAL_CANDIDATE_ID
+        pytest.fail(f"Unexpected private Docker operation: {command[1:3]}")
+
+    def host_run(command, *, capture=False, stdin=None):
+        if command[0] == "git":
+            return original_run(command, capture=capture, stdin=stdin)
+        assert command[:3] == ["docker", "run", "--rm"]
+        assert not fixture.auth_file.exists()
+        assert configurations and all(not directory.exists() for directory in configurations)
+        assert PRIVATE_PREFIX not in str(command) and PRIVATE_TOKEN not in str(command)
+        assert "--network" in command and command[command.index("--network") + 1] == "none"
+        assert LOCAL_CANDIDATE_ID in command
+        if "/opt/trtmc-ci/build-inputs.json" in command:
+            events.append("metadata")
+            assert command == [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--entrypoint",
+                "/usr/bin/head",
+                LOCAL_CANDIDATE_ID,
+                "-c",
+                "65537",
+                "/opt/trtmc-ci/build-inputs.json",
+            ]
+            return metadata if metadata is not None else json.dumps(fixture.metadata)
+        if MODULE.PROBE in command:
+            events.append("probe")
+            return "TRTMC_IMAGE_PROFILE=" + json.dumps(
+                {
+                    "platform": "linux/amd64",
+                    "python_abi": "cp312",
+                    "torch": "2.12.0+cu130",
+                    "cuda": "13.0",
+                    "tensorrt": "11.1.0.106",
+                    "cxx11abi": True,
+                    "apache_tvm_ffi": "0.1.7",
+                    "gpu": "NVIDIA L4",
+                    "sm": [8, 9],
+                    "resolved_dependencies": ["apache-tvm-ffi==0.1.7", "torch==2.12.0+cu130"],
+                }
+            )
+        if command[-4:] == ["python", "-m", "pip", "check"]:
+            events.append("pip-check")
+            return ""
+        assert command[-3:-1] == ["bash", "-c"]
+        assert "test_byok_tvm_ffi" in command[-1]
+        assert "--output-junit /proof/native-byok.xml" in command[-1]
+        assert "-R '^byok_tvm_ffi$'" in command[-1]
+        events.append("native-byok")
+        fixture.output.mkdir(parents=True, exist_ok=True)
+        (fixture.output / "native-byok.xml").write_text(
+            '<testsuite><testcase name="byok_tvm_ffi"/></testsuite>'
+        )
+        return ""
+
+    return private_docker, host_run
+
+
+def test_private_candidate_uses_real_protected_ancestor_and_erases_auth_before_image_code(
+    private_candidate_fixture, capsys
+):
+    fixture = private_candidate_fixture
+    events: list[str] = []
+    private_docker, host_run = candidate_docker_boundary(fixture, events)
+    with (
+        patch.object(
+            MODULE.urllib.request.OpenerDirector,
+            "open",
+            side_effect=candidate_transport(fixture, events),
+        ),
+        patch.object(MODULE, "_private_docker", side_effect=private_docker),
+        patch.object(MODULE, "run", side_effect=host_run),
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        prepare_private_candidate(fixture)
+    assert events[:6] == ["owner-get", "package-get", "login", "pull", "inspect", "metadata"]
+    assert set(events[6:]) == {"probe", "pip-check", "native-byok"}
+    receipt = json.loads((fixture.output / "candidate.json").read_text())
+    assert receipt["source_sha"] == receipt["environment_source_sha"] == fixture.environment_sha
+    assert receipt["model_source_sha"] == fixture.model_sha
+    assert fixture.environment_sha != fixture.protected_sha
+    assert receipt["digest"] == CANDIDATE_DIGEST
+    assert receipt["local_image"] == LOCAL_CANDIDATE_ID
+    assert receipt["native_byok_passed"] is True and receipt["family_e2e_passed"] is False
+    assert not fixture.auth_file.exists()
+    captured = capsys.readouterr()
+    public = captured.out + captured.err + json.dumps(receipt)
+    assert all(secret not in public for secret in (PRIVATE_PREFIX, PRIVATE_TOKEN, "test-actor"))
+
+
+@pytest.mark.parametrize(
+    "field,relative",
+    [
+        ("environment_recorder_sha256", "requirements/image-environment.py"),
+        ("base_environment_receipt_sha256", "requirements/community-gpu-linux-amd64.json"),
+        (
+            "family_environment_receipt_sha256",
+            "families/nemotron_h/ci/environment-linux-amd64.json",
+        ),
+    ],
+)
+def test_complete_environment_hashes_survive_sanitized_qualification_export(
+    private_candidate_fixture, field, relative, capsys
+):
+    fixture = private_candidate_fixture
+    unrelated = {"registry_prefix": PRIVATE_PREFIX, "token": PRIVATE_TOKEN}
+    fixture.metadata["unrelated_metadata"] = unrelated
+    events: list[str] = []
+    private_docker, host_run = candidate_docker_boundary(fixture, events)
+    with (
+        patch.object(
+            MODULE.urllib.request.OpenerDirector,
+            "open",
+            side_effect=candidate_transport(fixture, events),
+        ),
+        patch.object(MODULE, "_private_docker", side_effect=private_docker),
+        patch.object(MODULE, "run", side_effect=host_run),
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        prepare_private_candidate(fixture)
+    candidate_path = fixture.output / "candidate.json"
+    prepared = json.loads(candidate_path.read_text())
+    expected = fixture.metadata["inputs"][relative]
+    assert prepared[field] == expected
+    assert "unrelated_metadata" not in prepared
+
+    def coordinator(command, *, env, check):
+        write_family_summary(env, completed_family_summary())
+
+    with patch.object(MODULE.subprocess, "run", side_effect=coordinator):
+        MODULE.qualify(
+            fixture.output, Path("/stage/python"), None, fixture.model, family="nemotron_h"
+        )
+    qualified = json.loads(candidate_path.read_text())
+    qualified["unrelated_metadata"] = unrelated
+    candidate_path.write_text(json.dumps(qualified))
+    with patch.object(MODULE.os, "chown"):
+        MODULE.export_qualification(fixture.output, fixture.auth_directory)
+    exported = json.loads((fixture.auth_directory / "qualification.json").read_text())
+    assert exported[field] == expected
+    assert exported["cases"] == {"unchanged_a": "passed"}
+    assert "unrelated_metadata" not in exported and "local_image" not in exported
+    captured = capsys.readouterr()
+    public = captured.out + captured.err + json.dumps(prepared) + json.dumps(exported)
+    assert PRIVATE_PREFIX not in public and PRIVATE_TOKEN not in public
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "bootstrap",
+        "boolean-schema",
+        "missing-input",
+        "extra-input",
+        "tampered-input",
+        "mutable-source",
+        "unprotected-source",
+        "model-requirements",
+        "native-proof-true",
+        "e2e-proof-true",
+        "nonboolean-native-proof",
+        "nonboolean-e2e-proof",
+        "oversized-json",
+        "oversized-padded-json",
+        "duplicate-key",
+        "malformed-json",
+    ],
+)
+def test_private_candidate_rejects_untrusted_embedded_provenance_before_probe_or_native(
+    private_candidate_fixture, mutation: str
+):
+    fixture = private_candidate_fixture
+    metadata = fixture.metadata
+    text = None
+    if mutation == "bootstrap":
+        metadata["mode"] = "bootstrap"
+    elif mutation == "boolean-schema":
+        metadata["schema_version"] = True
+    elif mutation == "missing-input":
+        metadata["inputs"].pop("requirements/image-environment.py")
+    elif mutation == "extra-input":
+        metadata["inputs"]["private/source.cpp"] = "f" * 64
+    elif mutation == "tampered-input":
+        metadata["inputs"]["requirements/community-ci.txt"] = "f" * 64
+    elif mutation == "mutable-source":
+        metadata["source_sha"] = "main"
+    elif mutation == "unprotected-source":
+        fixture_git(fixture.environment, "checkout", "--quiet", "--orphan", "unprotected")
+        fixture_git(fixture.environment, "rm", "--quiet", "-r", "--cached", ".")
+        metadata["source_sha"] = fixture_commit(fixture.environment, "Unrelated contributor tree")
+    elif mutation == "model-requirements":
+        (fixture.model / "families/nemotron_h/requirements.txt").write_text(
+            "different public inputs\n"
+        )
+        fixture_commit(fixture.model, "Model requirements differ")
+    elif mutation == "native-proof-true":
+        metadata["native_byok_passed"] = True
+    elif mutation == "e2e-proof-true":
+        metadata["family_e2e_passed"] = True
+    elif mutation == "nonboolean-native-proof":
+        metadata["native_byok_passed"] = 0
+    elif mutation == "nonboolean-e2e-proof":
+        metadata["family_e2e_passed"] = 0
+    elif mutation == "oversized-json":
+        text = "x" * 65537
+    elif mutation == "oversized-padded-json":
+        text = json.dumps(metadata)
+        text += " " * (65537 - len(text.encode()))
+    elif mutation == "duplicate-key":
+        text = json.dumps(metadata).replace(
+            '"schema_version": 1', '"schema_version": 1, "schema_version": 1'
+        )
+    elif mutation == "malformed-json":
+        text = "sensitive-token malformed metadata"
+    events: list[str] = []
+    private_docker, host_run = candidate_docker_boundary(fixture, events, metadata=text)
+    with (
+        patch.object(
+            MODULE.urllib.request.OpenerDirector,
+            "open",
+            side_effect=candidate_transport(fixture, events),
+        ),
+        patch.object(MODULE, "_private_docker", side_effect=private_docker),
+        patch.object(MODULE, "run", side_effect=host_run),
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        with pytest.raises(RuntimeError):
+            prepare_private_candidate(fixture)
+    assert events[-1] == "metadata"
+    assert not any(event in events for event in ("probe", "pip-check", "native-byok"))
+    assert not (fixture.output / "candidate.json").exists()
+    assert not fixture.auth_file.exists()
+
+
+@pytest.mark.parametrize("protected_ref", ["main", "ci/developer"])
+def test_environment_provenance_accepts_either_protected_branch_ancestor(
+    private_candidate_fixture, protected_ref: str
+):
+    fixture = private_candidate_fixture
+    fixture_git(fixture.environment, "update-ref", "-d", "refs/remotes/origin/main")
+    fixture_git(
+        fixture.environment,
+        "update-ref",
+        "refs/remotes/origin/" + protected_ref,
+        fixture.protected_sha,
+    )
+    events: list[str] = []
+    private_docker, host_run = candidate_docker_boundary(fixture, events)
+    with (
+        patch.object(
+            MODULE.urllib.request.OpenerDirector,
+            "open",
+            side_effect=candidate_transport(fixture, events),
+        ),
+        patch.object(MODULE, "_private_docker", side_effect=private_docker),
+        patch.object(MODULE, "run", side_effect=host_run),
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        prepare_private_candidate(fixture)
+    assert json.loads((fixture.output / "candidate.json").read_text())["native_byok_passed"] is True
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        401,
+        403,
+        404,
+        500,
+        "public",
+        "internal",
+        "missing",
+        "invalid",
+        "network",
+        "non200",
+        "duplicate-visibility",
+        "duplicate-name",
+    ],
+)
+def test_private_candidate_requires_authenticated_200_private_before_any_docker(
+    private_candidate_fixture, lookup, capsys
+):
+    fixture = private_candidate_fixture
+    requests = []
+
+    def transport(request, *, timeout):
+        requests.append(request)
+        assert request.get_header("Authorization") == "Bearer " + PRIVATE_TOKEN
+        assert not fixture.auth_file.exists()
+        if request.full_url.endswith("/users/test-owner"):
+            response = io.BytesIO(b'{"login":"test-owner","type":"Organization"}')
+            response.status = 200
+            return response
+        if isinstance(lookup, int):
+            raise MODULE.urllib.error.HTTPError(
+                request.full_url, lookup, PRIVATE_TOKEN, {}, io.BytesIO(PRIVATE_PREFIX.encode())
+            )
+        if lookup == "network":
+            raise OSError(PRIVATE_TOKEN + " " + PRIVATE_PREFIX)
+        payload = (
+            b'{"name":"private-dependencies/nemotron_h","visibility":"public","visibility":"private"}'
+            if lookup == "duplicate-visibility"
+            else b'{"name":"foreign-package","name":"private-dependencies/nemotron_h","visibility":"private"}'
+            if lookup == "duplicate-name"
+            else b"not-json"
+            if lookup == "invalid"
+            else json.dumps(
+                {
+                    "visibility": None
+                    if lookup == "missing"
+                    else "private"
+                    if lookup == "non200"
+                    else lookup
+                }
+            ).encode()
+        )
+        response = io.BytesIO(payload)
+        response.status = 202 if lookup == "non200" else 200
+        return response
+
+    with (
+        patch.object(MODULE.urllib.request.OpenerDirector, "open", side_effect=transport),
+        patch.object(MODULE, "_private_docker") as docker,
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        with pytest.raises(RuntimeError) as failure:
+            prepare_private_candidate(fixture)
+    docker.assert_not_called()
+    assert len(requests) == 2
+    assert not fixture.auth_file.exists()
+    captured = capsys.readouterr()
+    public = str(failure.value) + captured.out + captured.err
+    assert all(secret not in public for secret in (PRIVATE_TOKEN, PRIVATE_PREFIX))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-token",
+        "missing-username",
+        "invalid-prefix",
+        "duplicate-key",
+        "malformed",
+        "oversized",
+        "world-readable",
+        "symlink",
+        "fifo",
+    ],
+)
+def test_candidate_auth_is_bounded_regular_private_json_before_any_contact(
+    private_candidate_fixture, mutation: str
+):
+    fixture = private_candidate_fixture
+    auth = json.loads(fixture.auth_file.read_text())
+    if mutation == "missing-token":
+        auth["token"] = ""
+    elif mutation == "missing-username":
+        auth["username"] = ""
+    elif mutation == "invalid-prefix":
+        auth["registry_prefix"] = "ghcr.io/credential@owner?token=" + PRIVATE_TOKEN
+    fixture.auth_file.write_text(json.dumps(auth))
+    if mutation == "duplicate-key":
+        fixture.auth_file.write_text(
+            json.dumps(auth).replace(
+                '"token": "' + PRIVATE_TOKEN + '"',
+                '"token": "' + PRIVATE_TOKEN + '", "token": "' + PRIVATE_TOKEN + '"',
+            )
+        )
+    elif mutation == "malformed":
+        fixture.auth_file.write_text(PRIVATE_TOKEN)
+    elif mutation == "oversized":
+        fixture.auth_file.write_text("x" * 65537)
+    elif mutation == "world-readable":
+        fixture.auth_file.chmod(0o644)
+    elif mutation in ("symlink", "fifo"):
+        fixture.auth_file.unlink()
+        if mutation == "symlink":
+            target = fixture.auth_directory / "private-target"
+            target.write_text(json.dumps(auth))
+            target.chmod(0o600)
+            fixture.auth_file.symlink_to(target)
+        else:
+            os.mkfifo(fixture.auth_file, 0o600)
+    with (
+        patch.object(MODULE.urllib.request.OpenerDirector, "open") as contact,
+        patch.object(MODULE, "_private_docker") as docker,
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        with pytest.raises(RuntimeError):
+            prepare_private_candidate(fixture)
+    contact.assert_not_called()
+    docker.assert_not_called()
+    assert not fixture.auth_file.exists()
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [
+        "latest",
+        "sha256:" + "a" * 63,
+        "sha256:" + "A" * 64,
+        "ghcr.io/private/image@sha256:" + "a" * 64,
+    ],
+)
+def test_prepare_candidate_rejects_mutable_or_coordinate_digest_before_contact(
+    private_candidate_fixture, digest: str
+):
+    fixture = private_candidate_fixture
+    with (
+        patch.object(MODULE.urllib.request.OpenerDirector, "open") as contact,
+        patch.object(MODULE, "_private_docker") as docker,
+    ):
+        with pytest.raises(RuntimeError):
+            MODULE.prepare_candidate(
+                fixture.output,
+                fixture.model,
+                fixture.auth_file,
+                family="nemotron_h",
+                candidate_digest=digest,
+            )
+    contact.assert_not_called()
+    docker.assert_not_called()
+    assert not fixture.auth_file.exists()
+
+
+@pytest.mark.parametrize("failure", ["process", "timeout", "os-error"])
+def test_private_pull_boundary_never_discloses_registry_errors(failure: str, capsys):
+    command = ["docker", "pull", PRIVATE_PREFIX + "/nemotron_h@" + CANDIDATE_DIGEST]
+    if failure == "process":
+        error = subprocess.CalledProcessError(
+            17,
+            command,
+            output=PRIVATE_TOKEN + " " + PRIVATE_PREFIX,
+            stderr=PRIVATE_PREFIX + " " + PRIVATE_TOKEN,
+        )
+    elif failure == "timeout":
+        error = subprocess.TimeoutExpired(
+            command,
+            30,
+            output=PRIVATE_TOKEN,
+            stderr=PRIVATE_PREFIX,
+        )
+    else:
+        error = OSError(PRIVATE_PREFIX + " " + PRIVATE_TOKEN)
+    with patch.object(MODULE.subprocess, "run", side_effect=error):
+        with pytest.raises(RuntimeError) as failure:
+            MODULE._private_docker(command, stdin=PRIVATE_TOKEN)
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    assert PRIVATE_PREFIX not in str(failure.value) and PRIVATE_TOKEN not in str(failure.value)
+    assert failure.value.__cause__ is None and failure.value.__suppress_context__
+
+
+def test_metadata_transport_keeps_bytes_for_the_bounded_manifest_check():
+    content = "{}" + " " * 65535
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--entrypoint",
+        "/usr/bin/head",
+        LOCAL_CANDIDATE_ID,
+        "-c",
+        "65537",
+        "/opt/trtmc-ci/build-inputs.json",
+    ]
+    with patch.object(
+        MODULE.subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess(command, 0, stdout=content, stderr=""),
+    ):
+        assert MODULE._private_docker(command) == content
+
+
+@pytest.mark.parametrize("failure", ["login", "pull", "inspect", "mutable-local-image"])
+def test_failed_private_pull_cleans_auth_and_config_without_executing_image_code(
+    private_candidate_fixture, failure: str
+):
+    fixture = private_candidate_fixture
+    events: list[str] = []
+    base_docker, host_run = candidate_docker_boundary(fixture, events)
+    configurations = []
+
+    def private_docker(command, **kwargs):
+        configurations.append(Path(command[command.index("--config") + 1]))
+        result = base_docker(command, **kwargs)
+        if failure in command:
+            raise RuntimeError("Private candidate transport failed; output is suppressed")
+        if failure == "mutable-local-image" and "inspect" in command:
+            return "local-candidate:latest"
+        return result
+
+    with (
+        patch.object(
+            MODULE.urllib.request.OpenerDirector,
+            "open",
+            side_effect=candidate_transport(fixture, events),
+        ),
+        patch.object(MODULE, "_private_docker", side_effect=private_docker),
+        patch.object(MODULE, "run", side_effect=host_run),
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        with pytest.raises(RuntimeError):
+            prepare_private_candidate(fixture)
+    assert configurations and all(not configuration.exists() for configuration in configurations)
+    assert not fixture.auth_file.exists()
+    assert "metadata" not in events and "probe" not in events and "native-byok" not in events
+    assert not (fixture.output / "candidate.json").exists()
+
+
+def test_prepare_candidate_cli_passes_only_auth_path_not_secret_or_coordinate(
+    private_candidate_fixture,
+):
+    fixture = private_candidate_fixture
+    argv = [
+        str(SOURCE),
+        "prepare-candidate",
+        "--family",
+        "nemotron_h",
+        "--digest",
+        CANDIDATE_DIGEST,
+        "--repository",
+        str(fixture.model),
+        "--auth-file",
+        str(fixture.auth_file),
+        "--output",
+        str(fixture.output),
+    ]
+    with patch.object(sys, "argv", argv), patch.object(MODULE, "prepare_candidate") as prepare:
+        MODULE.main()
+    prepare.assert_called_once_with(
+        fixture.output,
+        fixture.model,
+        fixture.auth_file,
+        family="nemotron_h",
+        candidate_digest=CANDIDATE_DIGEST,
+    )
+    assert PRIVATE_PREFIX not in str(argv) and PRIVATE_TOKEN not in str(argv)
+
+
+@pytest.mark.parametrize("proof", ["skipped", "failed", "missing", "unrelated"])
+def test_preparation_cannot_create_native_pass_from_missing_or_skipped_ctest(
+    private_candidate_fixture, proof: str
+):
+    fixture = private_candidate_fixture
+    events: list[str] = []
+    private_docker, successful_host_run = candidate_docker_boundary(fixture, events)
+
+    def host_run(command, **kwargs):
+        result = successful_host_run(command, **kwargs)
+        if command[0] == "docker" and "native-byok" in events:
+            report = fixture.output / "native-byok.xml"
+            if proof == "missing":
+                report.unlink()
+            else:
+                report.write_text(
+                    '<testsuite><testcase name="'
+                    + ("unrelated" if proof == "unrelated" else "byok_tvm_ffi")
+                    + '">'
+                    + {"skipped": "<skipped/>", "failed": "<failure/>", "unrelated": ""}[proof]
+                    + "</testcase></testsuite>"
+                )
+        return result
+
+    with (
+        patch.object(
+            MODULE.urllib.request.OpenerDirector,
+            "open",
+            side_effect=candidate_transport(fixture, events),
+        ),
+        patch.object(MODULE, "_private_docker", side_effect=private_docker),
+        patch.object(MODULE, "run", side_effect=host_run),
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        with pytest.raises((RuntimeError, FileNotFoundError)):
+            prepare_private_candidate(fixture)
+    receipt_path = fixture.output / "candidate.json"
+    if receipt_path.exists():
+        receipt = json.loads(receipt_path.read_text())
+        assert receipt["native_byok_passed"] is False and receipt["family_e2e_passed"] is False
+    assert not fixture.auth_file.exists()
+
+
+def test_qualification_export_chowns_only_sanitized_nonsecret_pending_receipt(tmp_path):
+    proof, auth = tmp_path / "proof", tmp_path / "auth"
+    proof.mkdir(mode=0o700)
+    auth.mkdir(mode=0o700)
+    path = candidate(proof)
+    record = json.loads(path.read_text())
+    record.update(
+        {
+            "schema_version": 1,
+            "environment_source_sha": "e" * 40,
+            "model_source_sha": "f" * 40,
+            "digest": CANDIDATE_DIGEST,
+            "cases": {"unchanged_a": "passed"},
+            "inputs": {"Dockerfile.dev.x86-gpu": "d" * 64},
+            "abi": {"python_abi": "cp312", "cuda": "13.0", "tensorrt": "11.1.0.106"},
+            "local_image": PRIVATE_PREFIX + "/nemotron_h@" + CANDIDATE_DIGEST,
+            "registry_prefix": PRIVATE_PREFIX,
+            "token": PRIVATE_TOKEN,
+            "cleanup_confirmed": True,
+            "admitted": True,
+        }
+    )
+    path.write_text(json.dumps(record))
+    original_mode = stat.S_IMODE(proof.stat().st_mode)
+    original_owner = proof.stat().st_uid, proof.stat().st_gid
+    with patch.object(MODULE.os, "chown") as chown:
+        MODULE.export_qualification(proof, auth)
+    exported = auth / "qualification.json"
+    chown.assert_called_once_with(exported, auth.stat().st_uid, auth.stat().st_gid)
+    receipt = json.loads(exported.read_text())
+    assert receipt["cases"] == {"unchanged_a": "passed"}
+    assert receipt["source_sha"] == "a" * 40
+    assert receipt["environment_source_sha"] == "e" * 40
+    assert receipt["model_source_sha"] == "f" * 40
+    assert receipt["digest"] == CANDIDATE_DIGEST
+    assert receipt["native_byok_passed"] is True and receipt["family_e2e_passed"] is True
+    assert receipt["cleanup_confirmed"] is False and receipt["admitted"] is False
+    assert stat.S_IMODE(exported.stat().st_mode) == 0o600
+    assert stat.S_IMODE(proof.stat().st_mode) == original_mode
+    assert (proof.stat().st_uid, proof.stat().st_gid) == original_owner
+    assert all(key not in receipt for key in ("local_image", "registry_prefix", "token"))
+    assert all(secret not in exported.read_text() for secret in (PRIVATE_PREFIX, PRIVATE_TOKEN))
+
+
+@pytest.mark.parametrize("native,e2e", [(False, True), (True, False), (1, True), (True, 1)])
+def test_qualification_export_requires_both_exact_actual_passes(tmp_path, native, e2e):
+    proof, auth = tmp_path / "proof", tmp_path / "auth"
+    auth.mkdir(mode=0o700)
+    candidate(proof, native=native, family=e2e)
+    with patch.object(MODULE.os, "chown") as chown:
+        with pytest.raises(RuntimeError):
+            MODULE.export_qualification(proof, auth)
+    chown.assert_not_called()
+    assert not (auth / "qualification.json").exists()
+
+
+@pytest.mark.parametrize("coordinate", [PRIVATE_PREFIX, "https://private.example/receipt"])
+def test_qualification_export_rejects_nested_nonpublic_coordinates(tmp_path, coordinate):
+    proof, auth = tmp_path / "proof", tmp_path / "auth"
+    auth.mkdir(mode=0o700)
+    path = candidate(proof)
+    record = json.loads(path.read_text())
+    record["abi"] = {"unexpected": coordinate}
+    path.write_text(json.dumps(record))
+    with patch.object(MODULE.os, "chown") as chown:
+        with pytest.raises(RuntimeError):
+            MODULE.export_qualification(proof, auth)
+    chown.assert_not_called()
+    assert not (auth / "qualification.json").exists()
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [
+        {"type": "Organization", "login": None},
+        {"type": "Organization", "login": []},
+        {"type": "Organization", "login": "another-owner"},
+        {"type": "Repository", "login": "test-owner"},
+        {"type": [], "login": "test-owner"},
+        {"login": "test-owner"},
+    ],
+)
+def test_private_candidate_owner_must_be_verified_before_package_or_docker(
+    private_candidate_fixture, owner
+):
+    fixture = private_candidate_fixture
+    response = io.BytesIO(json.dumps(owner).encode())
+    response.status = 200
+    with (
+        patch.object(
+            MODULE.urllib.request.OpenerDirector, "open", return_value=response
+        ) as contact,
+        patch.object(MODULE, "_private_docker") as docker,
+        patch.object(MODULE.platform, "machine", return_value="x86_64"),
+    ):
+        with pytest.raises(RuntimeError):
+            prepare_private_candidate(fixture)
+    assert contact.call_count == 1
+    docker.assert_not_called()
+    assert not fixture.auth_file.exists()
+
+
+def test_private_candidate_supports_a_verified_user_owned_private_package():
+    requests = []
+
+    def transport(request, *, timeout):
+        requests.append(request)
+        assert timeout == 30 and request.get_method() == "GET"
+        assert request.get_header("Authorization") == "Bearer " + PRIVATE_TOKEN
+        if len(requests) == 1:
+            assert request.full_url == "https://api.github.com/users/test-owner"
+            body = {"login": "test-owner", "type": "User"}
+        else:
+            assert request.full_url == (
+                "https://api.github.com/users/test-owner/packages/container/"
+                "private-dependencies%2Fnemotron_h"
+            )
+            body = {"name": "private-dependencies/nemotron_h", "visibility": "private"}
+        response = io.BytesIO(json.dumps(body).encode())
+        response.status = 200
+        return response
+
+    with patch.object(MODULE.urllib.request.OpenerDirector, "open", side_effect=transport):
+        MODULE._require_private_candidate(PRIVATE_PREFIX, "nemotron_h", PRIVATE_TOKEN)
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("copy_fails", [False, True])
+def test_workflow_copies_private_auth_as_json_and_erases_it_even_on_copy_failure(
+    tmp_path, copy_fails
+):
+    prepare = next(
+        step
+        for step in WORKFLOW["jobs"]["produce"]["steps"]
+        if " prepare-candidate " in step.get("run", "")
+    )
+    trace, copied_auth = tmp_path / "trace", tmp_path / "copied-auth.json"
+    script = r"""
+    brev() {
+      test "$1" = copy
+      cp "$2" "$CAPTURE_AUTH"
+      printf '%s\n' "$*" >> "$TRACE"
+      if [ "$COPY_FAILS" = true ]; then return 17; fi
+    }
+    timeout() { shift 3; "$@"; }
+    python3() {
+      if [ "$1" = - ]; then command python3 "$@"; return; fi
+      test "${REGISTRY_TOKEN+x}" != x
+      test "${REGISTRY_PREFIX+x}" != x
+      test "${REGISTRY_USERNAME+x}" != x
+      printf '%s\n' "$*" >> "$TRACE"
+    }
+    """
+    result = subprocess.run(
+        ["bash", "-c", script + prepare["run"]],
+        env={
+            **os.environ,
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "INSTANCE_NAME": "fake-instance",
+            "REMOTE_REPO": "/tmp/protected-ci",
+            "REMOTE_MODEL": "/tmp/protected-model",
+            "REMOTE_PROOF": "/tmp/public-proof",
+            "REMOTE_AUTH": "/tmp/private-auth",
+            "CANDIDATE_FAMILY": "nemotron_h",
+            "CANDIDATE_DIGEST": CANDIDATE_DIGEST,
+            "REGISTRY_TOKEN": PRIVATE_TOKEN + "\n'quoted-value",
+            "REGISTRY_PREFIX": PRIVATE_PREFIX,
+            "REGISTRY_USERNAME": "test-actor",
+            "CAPTURE_AUTH": str(copied_auth),
+            "TRACE": str(trace),
+            "COPY_FAILS": "true" if copy_fails else "false",
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == (17 if copy_fails else 0), result.stderr
+    assert not (tmp_path / "community-image-read-auth.json").exists()
+    assert json.loads(copied_auth.read_text()) == {
+        "registry_prefix": PRIVATE_PREFIX,
+        "username": "test-actor",
+        "token": PRIVATE_TOKEN + "\n'quoted-value",
+    }
+    assert stat.S_IMODE(copied_auth.stat().st_mode) == 0o600
+    output = result.stdout + result.stderr + trace.read_text()
+    assert PRIVATE_TOKEN not in output and PRIVATE_PREFIX not in output
+    assert ("prepare-candidate" in trace.read_text()) is (not copy_fails)
+
+
+@pytest.mark.parametrize(
+    "token,prefix,username,allowed",
+    [
+        ("read-secret", PRIVATE_PREFIX, "test-actor", True),
+        ("", PRIVATE_PREFIX, "test-actor", False),
+        ("read-secret", "https://ghcr.io/test-owner/cache", "test-actor", False),
+        ("read-secret", PRIVATE_PREFIX, "", False),
+        ("read-secret", PRIVATE_PREFIX, "login:secret", False),
+    ],
+)
+def test_private_reader_must_be_configured_before_vm_allocation(token, prefix, username, allowed):
+    steps = WORKFLOW["jobs"]["produce"]["steps"]
+    gate = next(
+        step
+        for step in steps
+        if step["name"] == "Require protected candidate access before allocation"
+    )
+    reserve = next(step for step in steps if step.get("id") == "reserve")
+    assert steps.index(gate) < steps.index(reserve)
+    assert gate["env"]["REGISTRY_TOKEN"] == "${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}"
+    program = gate["run"].split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    with patch.dict(
+        os.environ,
+        {"REGISTRY_TOKEN": token, "REGISTRY_PREFIX": prefix, "REGISTRY_USERNAME": username},
+    ):
+        if allowed:
+            exec(compile(program, "protected-candidate-reader", "exec"), {})
+        else:
+            with pytest.raises(SystemExit):
+                exec(compile(program, "protected-candidate-reader", "exec"), {})
+
+
+def final_gpu_proof_program() -> str:
+    step = next(
+        step
+        for step in WORKFLOW["jobs"]["cleanup"]["steps"]
+        if step.get("name") == "Confirm cleanup in the final GPU qualification proof"
+    )
+    return step["run"].split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+
+@pytest.mark.parametrize("backstop", ["true", "false", ""])
+def test_final_gpu_proof_requires_actual_backstop_confirmation(tmp_path, backstop):
+    directory = tmp_path / "image-gpu-proof"
+    directory.mkdir()
+    pending = {
+        "native_byok_passed": True,
+        "family_e2e_passed": True,
+        "cleanup_confirmed": False,
+        "admitted": False,
+        "cases": {"unchanged_a": "passed"},
+    }
+    (directory / "qualification-pending.json").write_text(json.dumps(pending))
+    with patch.dict(
+        os.environ,
+        {"RUNNER_TEMP": str(tmp_path), "GITHUB_RUN_ID": "123", "BACKSTOP_CONFIRMED": backstop},
+    ):
+        if backstop == "true":
+            exec(compile(final_gpu_proof_program(), "final-gpu-proof", "exec"), {})
+        else:
+            with pytest.raises(SystemExit):
+                exec(compile(final_gpu_proof_program(), "final-gpu-proof", "exec"), {})
+    final = directory / "qualification.json"
+    assert final.exists() is (backstop == "true")
+    if final.exists():
+        proof = json.loads(final.read_text())
+        assert proof["owner_cleanup_confirmed"] is True
+        assert proof["backstop_cleanup_confirmed"] is True
+        assert proof["cleanup_confirmed"] is True
+        assert proof["admitted"] is False
+        assert proof["resources"] == {"host_ram_gib": 128}
+        assert proof["qualification_host"] == {
+            "ram_gib": 128,
+            "gpu_count": 1,
+            "arch": "x86_64",
+            "run_id": "123",
+        }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("native_byok_passed", False),
+        ("native_byok_passed", 1),
+        ("family_e2e_passed", False),
+        ("family_e2e_passed", 1),
+        ("cleanup_confirmed", True),
+        ("cleanup_confirmed", 0),
+        ("admitted", True),
+        ("admitted", 0),
+    ],
+)
+def test_pending_gpu_proof_cannot_prematurely_claim_admission_or_cleanup(tmp_path, field, value):
+    directory = tmp_path / "image-gpu-proof"
+    directory.mkdir()
+    pending = {
+        "native_byok_passed": True,
+        "family_e2e_passed": True,
+        "cleanup_confirmed": False,
+        "admitted": False,
+    }
+    pending[field] = value
+    (directory / "qualification-pending.json").write_text(json.dumps(pending))
+    with patch.dict(
+        os.environ,
+        {"RUNNER_TEMP": str(tmp_path), "GITHUB_RUN_ID": "123", "BACKSTOP_CONFIRMED": "true"},
+    ):
+        with pytest.raises(SystemExit):
+            exec(compile(final_gpu_proof_program(), "final-gpu-proof", "exec"), {})
+    assert not (directory / "qualification.json").exists()
+
+
+def test_final_gpu_artifact_is_gated_by_both_cleanup_paths_and_never_admits_catalog():
+    jobs = WORKFLOW["jobs"]
+    owner_steps = jobs["produce"]["steps"]
+    owner_release = next(step for step in owner_steps if step.get("id") == "release")
+    pending_upload = next(
+        step
+        for step in owner_steps
+        if step.get("name") == "Preserve sanitized pending proof after owner cleanup"
+    )
+    assert owner_steps.index(owner_release) < owner_steps.index(pending_upload)
+    assert "steps.release.outputs.cleanup_confirmed == 'true'" in pending_upload["if"]
+    backup = jobs["cleanup"]
+    assert backup["needs"] == ["authorize", "produce"]
+    backup_steps = backup["steps"]
+    backup_release = next(step for step in backup_steps if "--until-deleted" in step.get("run", ""))
+    finalizer = next(
+        step
+        for step in backup_steps
+        if step.get("name") == "Confirm cleanup in the final GPU qualification proof"
+    )
+    final_upload = next(
+        step
+        for step in backup_steps
+        if step.get("name") == "Preserve final GPU proof only after both cleanup confirmations"
+    )
+    assert backup_release["id"] == "backstop_release"
+    assert (
+        finalizer["env"]["BACKSTOP_CONFIRMED"]
+        == "${{ steps.backstop_release.outputs.cleanup_confirmed }}"
+    )
+    assert (
+        backup_steps.index(backup_release)
+        < backup_steps.index(finalizer)
+        < backup_steps.index(final_upload)
+    )
+    for step in (finalizer, final_upload):
+        assert "success()" in step["if"]
+        assert "needs.produce.result == 'success'" in step["if"]
+        assert "needs.produce.outputs.cleanup_confirmed == 'true'" in step["if"]
+    assert final_upload["with"]["path"] == "${{ runner.temp }}/image-gpu-proof/qualification.json"
+    assert all(job.get("permissions", {}).get("packages") != "write" for job in jobs.values())
+    assert "dependency-image.json" not in json.dumps(WORKFLOW)

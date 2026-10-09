@@ -13,6 +13,8 @@ ARG TORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
 ARG TORCH_VERSION=2.12.0+cu130
 ARG TORCHVISION_VERSION=0.27.0+cu130
 ARG TORCHAUDIO_VERSION=2.11.0+cu130
+ARG UBUNTU_SNAPSHOT=20261008T000000Z
+ARG TRTMC_ENV_LOCK_MODE=locked
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
@@ -20,8 +22,9 @@ ENV TORCH_CUDA_ARCH_LIST=8.9
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+RUN case "$UBUNTU_SNAPSHOT" in ????????T??????Z) ;; *) exit 2 ;; esac && \
+    apt-get update --snapshot "$UBUNTU_SNAPSHOT" && \
+    apt-get install -y --no-install-recommends --snapshot "$UBUNTU_SNAPSHOT" \
       build-essential \
       cmake \
       git \
@@ -39,8 +42,10 @@ RUN python3.12 -m venv --system-site-packages ${VIRTUAL_ENV} && \
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 COPY community-ci.txt /tmp/trtmc-community-ci.txt
+COPY image-environment.py community-gpu-linux-amd64.lock community-gpu-linux-amd64.json /opt/trtmc-ci/
 
-RUN pip install -U pip && \
+RUN if [ "$TRTMC_ENV_LOCK_MODE" = bootstrap ]; then \
+    pip install -U pip && \
     pip install \
       "cuda-python>=13.0.3,<14" \
       "huggingface_hub>=0.23" \
@@ -57,8 +62,16 @@ RUN pip install -U pip && \
       "torchaudio==${TORCHAUDIO_VERSION}" \
       --index-url "${TORCH_CUDA_INDEX}" && \
     pip install "setuptools>=80,<82" && \
-    pip install --requirement /tmp/trtmc-community-ci.txt && \
-    rm -f /tmp/trtmc-community-ci.txt
+    pip install --requirement /tmp/trtmc-community-ci.txt; \
+    elif [ "$TRTMC_ENV_LOCK_MODE" = locked ]; then \
+      python /opt/trtmc-ci/image-environment.py validate-lock --lock /opt/trtmc-ci/community-gpu-linux-amd64.lock && \
+      pip install "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
+        --index-url "${TORCH_CUDA_INDEX}" && \
+      pip install --no-build-isolation --requirement /opt/trtmc-ci/community-gpu-linux-amd64.lock && \
+      python /opt/trtmc-ci/image-environment.py verify \
+        --lock /opt/trtmc-ci/community-gpu-linux-amd64.lock \
+        --receipt /opt/trtmc-ci/community-gpu-linux-amd64.json --snapshot "$UBUNTU_SNAPSHOT"; \
+    else exit 2; fi && python -m pip check && rm -f /tmp/trtmc-community-ci.txt
 
 ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu
 ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu

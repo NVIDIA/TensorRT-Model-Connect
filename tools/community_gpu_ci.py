@@ -808,6 +808,9 @@ def _dependency_optional_inputs(family: str) -> dict[str, str]:
         "dependency_build_helper_sha256": f"families/{family}/ci/build-dependencies.sh",
         "base_environment_lock_sha256": "requirements/community-gpu-linux-amd64.lock",
         "family_environment_lock_sha256": f"families/{family}/ci/environment-linux-amd64.lock",
+        "environment_recorder_sha256": "requirements/image-environment.py",
+        "base_environment_receipt_sha256": "requirements/community-gpu-linux-amd64.json",
+        "family_environment_receipt_sha256": f"families/{family}/ci/environment-linux-amd64.json",
     }
 
 

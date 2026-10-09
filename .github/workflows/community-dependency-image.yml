@@ -1,14 +1,37 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Community Nemotron-H dependency image
+name: Community dependency image GPU qualification
 on:
   workflow_dispatch:
+    inputs:
+      family:
+        description: Public model family to qualify
+        required: true
+        default: nemotron_h
+        type: string
+      digest:
+        description: Immutable private candidate digest
+        required: true
+        type: string
   workflow_call:
+    inputs:
+      family:
+        required: true
+        type: string
+      digest:
+        required: true
+        type: string
     secrets:
       BREV_API_KEY:
         required: false
       HF_TOKEN:
+        required: false
+      TRTMC_COMMUNITY_REGISTRY_READ_TOKEN:
+        required: false
+      TRTMC_COMMUNITY_REGISTRY:
+        required: false
+      TRTMC_COMMUNITY_REGISTRY_USERNAME:
         required: false
 permissions:
   contents: read
@@ -23,12 +46,16 @@ jobs:
     outputs:
       allowed: ${{ steps.authorize.outputs.allowed }}
       model_sha: ${{ steps.authorize.outputs.model_sha }}
+      family: ${{ steps.authorize.outputs.family }}
+      digest: ${{ steps.authorize.outputs.digest }}
     steps:
-      - name: Authorize a protected manual producer
+      - name: Authorize a protected manual qualification
         id: authorize
         env:
           GH_TOKEN: ${{ github.token }}
           REQUEST_ACTOR: ${{ github.triggering_actor }}
+          CANDIDATE_FAMILY: ${{ inputs.family }}
+          CANDIDATE_DIGEST: ${{ inputs.digest }}
         run: |
           python3 - <<'PY'
           import json
@@ -52,13 +79,17 @@ jobs:
           role = permission.get("role_name", permission.get("permission"))
           if role not in {"admin", "maintain"}:
               raise SystemExit("Dependency production requires maintain or admin permission")
+          family = os.environ["CANDIDATE_FAMILY"]
+          digest = os.environ["CANDIDATE_DIGEST"]
+          if not re.fullmatch(r"[a-z][a-z0-9_]*", family) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+              raise SystemExit("Qualification requires a declared family and immutable digest")
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
               main = json.loads(subprocess.check_output([
                   "gh", "api", f"repos/{repo}/git/ref/heads/main"
               ], text=True))["object"]["sha"]
               if not re.fullmatch(r"[0-9a-f]{40}", main):
                   raise SystemExit("The protected main snapshot is unavailable")
-              output.write("allowed=true\nmodel_sha=" + main + "\n")
+              output.write("allowed=true\nmodel_sha=" + main + "\nfamily=" + family + "\ndigest=" + digest + "\n")
           PY
 
   produce:
@@ -72,7 +103,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-      packages: write
     outputs:
       instance_name: ${{ steps.reserve.outputs.instance_name }}
       instance_type: ${{ steps.reserve.outputs.instance_type }}
@@ -80,6 +110,7 @@ jobs:
       allocation_requested: ${{ steps.reserve.outputs.allocation_requested }}
       lease_artifact_name: ${{ steps.reserve.outputs.lease_artifact_name }}
       cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed }}
+      proof_artifact_name: ${{ steps.proof.outputs.proof_artifact_name }}
     steps:
       - name: Reauthorize the current triggering actor before allocating
         timeout-minutes: 1
@@ -96,6 +127,25 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Require protected candidate access before allocation
+        timeout-minutes: 1
+        env:
+          REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
+          REGISTRY_PREFIX: ${{ secrets.TRTMC_COMMUNITY_REGISTRY }}
+          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          prefix = os.environ.get("REGISTRY_PREFIX", "")
+          username = os.environ.get("REGISTRY_USERNAME", "")
+          if not os.environ.get("REGISTRY_TOKEN", "").strip():
+              raise SystemExit("Configure the dedicated private registry read credential before qualification")
+          if not re.fullmatch(r"ghcr\.io/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*", prefix):
+              raise SystemExit("Configure a protected private registry prefix before qualification")
+          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", username):
+              raise SystemExit("Configure the private registry reader username before qualification")
+          PY
       - name: Install the pinned Brev CLI
         timeout-minutes: 5
         env:
@@ -157,59 +207,79 @@ jobs:
             --log "$RUNNER_TEMP/image-setup.log" \
             --result-file "/tmp/trtmc-image-setup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --timeout 900 -- bash -c \
-            "set -eu; git init '$repo'; cd '$repo'; git config remote.origin.url 'https://github.com/$GITHUB_REPOSITORY.git'; git fetch --depth 1 origin '$GITHUB_SHA'; test \"\$(git rev-parse FETCH_HEAD)\" = '$GITHUB_SHA'; git checkout --detach '$GITHUB_SHA'; git init '$model'; cd '$model'; git config remote.origin.url 'https://github.com/$GITHUB_REPOSITORY.git'; git fetch --depth 1 origin '$MODEL_SHA'; test \"\$(git rev-parse FETCH_HEAD)\" = '$MODEL_SHA'; git checkout --detach '$MODEL_SHA'; sudo apt-get update -qq; sudo apt-get install -y --no-install-recommends python3-venv; python3 -m venv /tmp/trtmc-image-stage; /tmp/trtmc-image-stage/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0; install -d -m 0700 '$auth'"
-      - name: Build full dependencies and validate native ABI
+            "set -eu; git init '$repo'; cd '$repo'; git config remote.origin.url 'https://github.com/$GITHUB_REPOSITORY.git'; git fetch --depth 1 origin '$GITHUB_SHA'; test \"\$(git rev-parse FETCH_HEAD)\" = '$GITHUB_SHA'; git checkout --detach '$GITHUB_SHA'; git fetch --unshallow --filter=blob:none origin '+refs/heads/main:refs/remotes/origin/main' '+refs/heads/ci/developer:refs/remotes/origin/ci/developer'; git init '$model'; cd '$model'; git config remote.origin.url 'https://github.com/$GITHUB_REPOSITORY.git'; git fetch --depth 1 origin '$MODEL_SHA'; test \"\$(git rev-parse FETCH_HEAD)\" = '$MODEL_SHA'; git checkout --detach '$MODEL_SHA'; sudo apt-get update -qq; sudo apt-get install -y --no-install-recommends python3-venv; python3 -m venv /tmp/trtmc-image-stage; /tmp/trtmc-image-stage/bin/python -m pip install --disable-pip-version-check huggingface-hub==0.36.0; install -d -m 0700 '$auth'"
+      - name: Pull the private candidate and validate native ABI
         timeout-minutes: 125
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+          CANDIDATE_FAMILY: ${{ needs.authorize.outputs.family }}
+          CANDIDATE_DIGEST: ${{ needs.authorize.outputs.digest }}
+          REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
+          REGISTRY_PREFIX: ${{ secrets.TRTMC_COMMUNITY_REGISTRY }}
+          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME }}
         run: |
           set -euo pipefail
+          auth_file="$RUNNER_TEMP/community-image-read-auth.json"
+          umask 077
+          trap 'rm -f "$auth_file"' EXIT
+          python3 - "$auth_file" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+          pathlib.Path(sys.argv[1]).write_text(json.dumps({
+              "registry_prefix": os.environ["REGISTRY_PREFIX"],
+              "username": os.environ["REGISTRY_USERNAME"],
+              "token": os.environ["REGISTRY_TOKEN"],
+          }))
+          PY
+          unset REGISTRY_TOKEN REGISTRY_PREFIX REGISTRY_USERNAME
+          timeout --signal=TERM --kill-after=10s 120s brev copy "$auth_file" "$INSTANCE_NAME:$REMOTE_AUTH/registry-auth.json"
           python3 -m tools.brev_exec --instance "$INSTANCE_NAME" \
-            --log "$RUNNER_TEMP/dependency-build.log" \
-            --result-file "/tmp/trtmc-image-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --log "$RUNNER_TEMP/dependency-native.log" \
+            --result-file "/tmp/trtmc-image-native-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --timeout 7200 -- sudo python3 \
-            "$REMOTE_REPO/.github/scripts/community_dependency_image.py" build --family nemotron_h --repository "$REMOTE_MODEL" --output "$REMOTE_PROOF"
-      - name: Qualify the unchanged Nemotron-H workloads on L4
+            "$REMOTE_REPO/.github/scripts/community_dependency_image.py" prepare-candidate \
+            --family "$CANDIDATE_FAMILY" --digest "$CANDIDATE_DIGEST" \
+            --repository "$REMOTE_MODEL" --output "$REMOTE_PROOF" \
+            --auth-file "$REMOTE_AUTH/registry-auth.json"
+      - name: Qualify the unchanged family workloads on L4
         timeout-minutes: 66
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          CANDIDATE_FAMILY: ${{ needs.authorize.outputs.family }}
         run: |
           set -euo pipefail
           token="$RUNNER_TEMP/community-image-hf-token"
           umask 077
           printf '%s' "$HF_TOKEN" > "$token"
+          unset HF_TOKEN
           trap 'rm -f "$token"' EXIT
           timeout --signal=TERM --kill-after=10s 120s brev copy "$token" "$INSTANCE_NAME:$REMOTE_AUTH/hf-token"
           python3 -m tools.brev_exec --instance "$INSTANCE_NAME" \
             --log "$RUNNER_TEMP/dependency-qualification.log" \
             --result-file "/tmp/trtmc-image-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --timeout 3720 -- sudo python3 \
-            "$REMOTE_REPO/.github/scripts/community_dependency_image.py" qualify --family nemotron_h \
+            "$REMOTE_REPO/.github/scripts/community_dependency_image.py" qualify --family "$CANDIDATE_FAMILY" \
             --output "$REMOTE_PROOF" --repository "$REMOTE_MODEL" --stage-python /tmp/trtmc-image-stage/bin/python \
             --token-file "$REMOTE_AUTH/hf-token"
-      - name: Publish qualified candidates with short-lived host credentials
-        timeout-minutes: 20
-        id: publish
+      - name: Copy only sanitized pending GPU proof
+        timeout-minutes: 5
+        id: proof
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
-          REGISTRY_TOKEN: ${{ github.token }}
-          REGISTRY_USERNAME: ${{ github.actor }}
+          CANDIDATE_FAMILY: ${{ needs.authorize.outputs.family }}
         run: |
           set -euo pipefail
-          token="$RUNNER_TEMP/community-image-registry-token"
-          umask 077
-          printf '%s' "$REGISTRY_TOKEN" > "$token"
-          trap 'rm -f "$token"' EXIT
-          timeout --signal=TERM --kill-after=10s 120s brev copy "$token" "$INSTANCE_NAME:$REMOTE_AUTH/registry-token"
+          echo "proof_artifact_name=community-image-gpu-pending-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           python3 -m tools.brev_exec --instance "$INSTANCE_NAME" \
-            --log "$RUNNER_TEMP/dependency-publication.log" \
-            --result-file "/tmp/trtmc-image-publication-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --timeout 900 -- sudo python3 \
-            "$REMOTE_REPO/.github/scripts/community_dependency_image.py" publish --family nemotron_h \
-            --output "$REMOTE_PROOF" --token-file "$REMOTE_AUTH/registry-token" \
-            --username "$REGISTRY_USERNAME"
-          timeout --signal=TERM --kill-after=10s 120s brev copy "$INSTANCE_NAME:$REMOTE_AUTH/published-candidate.json" "$RUNNER_TEMP/published-candidate.json"
+            --log "$RUNNER_TEMP/dependency-proof.log" \
+            --result-file "/tmp/trtmc-image-proof-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --timeout 120 -- sudo python3 \
+            "$REMOTE_REPO/.github/scripts/community_dependency_image.py" export-qualification \
+            --family "$CANDIDATE_FAMILY" --output "$REMOTE_PROOF" --auth-directory "$REMOTE_AUTH"
+          timeout --signal=TERM --kill-after=10s 120s brev copy "$INSTANCE_NAME:$REMOTE_AUTH/qualification.json" "$RUNNER_TEMP/qualification-pending.json"
       - name: Always remove private host token files
         timeout-minutes: 3
         if: ${{ always() && steps.reserve.outputs.instance_name != '' && env.REMOTE_AUTH != '' }}
@@ -240,13 +310,13 @@ jobs:
           overwrite: true
           if-no-files-found: error
           retention-days: 14
-      - name: Preserve a catalog candidate only after successful cleanup
-        if: ${{ success() && steps.publish.outcome == 'success' && steps.release.outputs.cleanup_confirmed == 'true' }}
+      - name: Preserve sanitized pending proof after owner cleanup
+        if: ${{ success() && steps.proof.outcome == 'success' && steps.release.outputs.cleanup_confirmed == 'true' }}
         timeout-minutes: 5
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: community-nemotron-h-image-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/published-candidate.json
+          name: ${{ steps.proof.outputs.proof_artifact_name }}
+          path: ${{ runner.temp }}/qualification-pending.json
           if-no-files-found: error
           retention-days: 30
 
@@ -297,6 +367,7 @@ jobs:
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
             --name "$LEASE_ARTIFACT_NAME" --dir "$RUNNER_TEMP/image-lease"
       - name: Independently confirm deletion of the original builder
+        id: backstop_release
         if: ${{ always() && steps.login.outcome == 'success' }}
         env:
           INSTANCE_NAME: ${{ needs.produce.outputs.instance_name }}
@@ -336,3 +407,50 @@ jobs:
           fi
           python3 -m tools.brev_exec cleanup --instance "$INSTANCE_NAME" \
             --lease-file "$lease" --until-deleted
+          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+      - name: Recover pending proof only after both release paths
+        if: ${{ success() && needs.produce.result == 'success' && needs.produce.outputs.cleanup_confirmed == 'true' }}
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROOF_ARTIFACT_NAME: ${{ needs.produce.outputs.proof_artifact_name }}
+        run: |
+          set -euo pipefail
+          test -n "$PROOF_ARTIFACT_NAME"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "$PROOF_ARTIFACT_NAME" --dir "$RUNNER_TEMP/image-gpu-proof"
+      - name: Confirm cleanup in the final GPU qualification proof
+        if: ${{ success() && needs.produce.result == 'success' && needs.produce.outputs.cleanup_confirmed == 'true' }}
+        timeout-minutes: 1
+        env:
+          BACKSTOP_CONFIRMED: ${{ steps.backstop_release.outputs.cleanup_confirmed }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          if os.environ.get("BACKSTOP_CONFIRMED") != "true":
+              raise SystemExit("The independent deletion proof is unavailable; no qualification")
+          source = pathlib.Path(os.environ["RUNNER_TEMP"]) / "image-gpu-proof/qualification-pending.json"
+          proof = json.loads(source.read_text())
+          if proof.get("native_byok_passed") is not True or proof.get("family_e2e_passed") is not True:
+              raise SystemExit("The candidate has no successful original GPU qualification")
+          if proof.get("cleanup_confirmed") is not False or proof.get("admitted") is not False:
+              raise SystemExit("Pending proof cannot claim cleanup or admission")
+          proof["owner_cleanup_confirmed"] = True
+          proof["backstop_cleanup_confirmed"] = True
+          proof["cleanup_confirmed"] = True
+          proof["qualification_host"] = {"ram_gib": 128, "gpu_count": 1,
+              "arch": "x86_64", "run_id": os.environ["GITHUB_RUN_ID"]}
+          proof["resources"] = {"host_ram_gib": 128}
+          source.with_name("qualification.json").write_text(json.dumps(proof, sort_keys=True) + "\n")
+          PY
+      - name: Preserve final GPU proof only after both cleanup confirmations
+        if: ${{ success() && needs.produce.result == 'success' && needs.produce.outputs.cleanup_confirmed == 'true' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-image-gpu-qualified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/image-gpu-proof/qualification.json
+          if-no-files-found: error
+          retention-days: 30

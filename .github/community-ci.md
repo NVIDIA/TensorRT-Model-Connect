@@ -188,6 +188,34 @@ deletes both credential and configuration before any contributor container
 starts. No registry token or Docker socket enters those containers. Native
 builds, family installation, and every original E2E assertion still run. No lock
 or image is admitted merely because the producer's local mechanics tests pass.
+
+`task=dependency-image` now qualifies an already private candidate; the public
+Source workflow never builds or pushes that candidate and has no package write
+permission. Reuse `audit_family` and `audit_digest` for this protected manual
+task. Missing private registry configuration or a dedicated read credential
+fails before a VM is reserved. Publication belongs to the private CPU controller
+using the one public family recipe and locked dependency inputs.
+The reusable-workflow caller passes only the named credentials; the called
+`gpu-ci-dispatch` job resolves its protected environment values. The public
+repository token is never a substitute for the separate private reader.
+
+The qualifier verifies authenticated private visibility, pulls only the supplied
+digest on the trusted host, and erases registry auth before any candidate
+container starts. Its embedded public `build-inputs.json` must describe a locked
+environment source commit in protected `main` or `ci/developer` history. All 11
+input hashes are checked against that commit's Git objects, and family
+requirements must also match the frozen protected MAIN used for the model tests.
+`environment_source_sha` and `model_source_sha` are separate evidence fields.
+The unchanged import/ABI probe, native BYOK test, and original selected family
+E2Es then run against the actual pulled image. A fresh complete case receipt is
+required; baseline substitution cannot qualify an owner image.
+
+The owner exports only public source/input hashes, digest, ABI and actual case
+outcomes. Its pending proof explicitly has `cleanup_confirmed: false` and
+`admitted: false`. A final GPU proof is uploaded only after the owner and
+independent backstop both confirm cleanup; a backstop fallback noop cannot
+produce that proof. Candidate admission into the protected catalog remains a
+separate manual review, including the matching positive/negative access checks.
 Public result provenance contains only public source and input hashes, including
 optional dependency helper, constraints, and resolved environment lock hashes.
 When present, these additional inputs must match the PR or require a cold install.

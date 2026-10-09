@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -90,6 +91,346 @@ def validated_family(family: str) -> str:
     if not re.fullmatch(r"[a-z][a-z0-9_]*", family):
         raise RuntimeError("The dependency family must be a declared family directory name")
     return family
+
+
+def _candidate_json(content: bytes | str) -> dict:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(content, object_pairs_hook=unique)
+        if not isinstance(value, dict):
+            raise ValueError("not an object")
+        return value
+    except (ValueError, UnicodeError, RecursionError):
+        raise RuntimeError("Candidate JSON evidence is invalid") from None
+
+
+def _private_json(path: Path) -> dict:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise RuntimeError("Private candidate credentials are unavailable") from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+            raise ValueError("not a private regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            content = stream.read(65537)
+        if len(content) > 65536:
+            raise ValueError("oversized auth")
+        return _candidate_json(content)
+    except (ValueError, UnicodeError, RecursionError):
+        raise RuntimeError("Private candidate credentials are invalid") from None
+    finally:
+        os.close(descriptor)
+
+
+def _private_docker(command: list[str], *, stdin: str | None = None, timeout: int = 900) -> str:
+    try:
+        result = subprocess.run(
+            command, input=stdin, capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError("Private candidate transport failed; output is suppressed") from None
+    if result.returncode:
+        raise RuntimeError("Private candidate transport failed; output is suppressed")
+    return result.stdout
+
+
+def _require_private_candidate(prefix: str, family: str, token: str) -> None:
+    owner, _, package = prefix.removeprefix("ghcr.io/").partition("/")
+    package = f"{package}/{family}" if package else family
+
+    def get(route):
+        request = urllib.request.Request(
+            "https://api.github.com/" + route,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+                if response.status != 200:
+                    raise ValueError("not HTTP200")
+                body = response.read(1024 * 1024 + 1)
+            if len(body) > 1024 * 1024:
+                raise ValueError("oversized response")
+            return _candidate_json(body)
+        except (OSError, ValueError, RecursionError, RuntimeError):
+            raise RuntimeError("Private candidate visibility could not be verified") from None
+
+    profile = get(f"users/{owner}")
+    if (
+        profile.get("type") not in ("User", "Organization")
+        or not isinstance(profile.get("login"), str)
+        or profile["login"].lower() != owner
+    ):
+        raise RuntimeError("Private candidate owner could not be verified")
+    kind = "orgs" if profile["type"] == "Organization" else "users"
+    package_info = get(f"{kind}/{owner}/packages/container/" + urllib.parse.quote(package, safe=""))
+    if package_info.get("visibility") != "private" or package_info.get("name") != package:
+        raise RuntimeError("The candidate must be an existing private package")
+
+
+def _environment_paths(family: str) -> tuple[str, ...]:
+    return (
+        "Dockerfile.dev.x86-gpu",
+        "requirements/community-ci.txt",
+        "requirements/image-environment.py",
+        "requirements/community-gpu-linux-amd64.lock",
+        "requirements/community-gpu-linux-amd64.json",
+        f"families/{family}/requirements.txt",
+        f"families/{family}/ci/Dockerfile.dependencies",
+        f"families/{family}/ci/build-dependencies.sh",
+        f"families/{family}/ci/constraints-linux-amd64.txt",
+        f"families/{family}/ci/environment-linux-amd64.lock",
+        f"families/{family}/ci/environment-linux-amd64.json",
+    )
+
+
+def _public_git(repository: Path, *arguments: str) -> bytes:
+    try:
+        return subprocess.run(
+            ["git", "-c", f"safe.directory={repository}", "-C", str(repository), *arguments],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError("Protected public source evidence is unavailable") from None
+
+
+def _environment_provenance(repository: Path, family: str, manifest: object) -> dict:
+    if not isinstance(manifest, dict):
+        raise RuntimeError("The embedded public build manifest is invalid")
+    environment_sha = manifest.get("source_sha")
+    inputs = manifest.get("inputs")
+    if (
+        type(manifest.get("schema_version")) is not int
+        or manifest["schema_version"] != 1
+        or manifest.get("mode") != "locked"
+        or manifest.get("native_byok_passed") is not False
+        or manifest.get("family_e2e_passed") is not False
+        or not isinstance(environment_sha, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", environment_sha)
+        or not isinstance(inputs, dict)
+        or set(inputs) != set(_environment_paths(family))
+        or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in inputs.values()
+        )
+    ):
+        raise RuntimeError("The candidate has no complete locked public environment manifest")
+    protected = False
+    for ref in ("refs/remotes/origin/main", "refs/remotes/origin/ci/developer"):
+        try:
+            _public_git(SOURCE, "merge-base", "--is-ancestor", environment_sha, ref)
+            protected = True
+        except RuntimeError:
+            pass
+    if not protected:
+        raise RuntimeError("The environment source is not in protected public history")
+    for path, expected in inputs.items():
+        object_name = f"{environment_sha}:{path}"
+        size = int(_public_git(SOURCE, "cat-file", "-s", object_name))
+        if (
+            size > 1024 * 1024
+            or hashlib.sha256(_public_git(SOURCE, "show", object_name)).hexdigest() != expected
+        ):
+            raise RuntimeError("The public environment inputs do not match the candidate")
+    model_sha = _public_git(repository, "rev-parse", "HEAD").decode().strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", model_sha):
+        raise RuntimeError("The protected model source is invalid")
+    requirement = f"families/{family}/requirements.txt"
+    if (
+        hashlib.sha256(_public_git(repository, "show", f"{model_sha}:{requirement}")).hexdigest()
+        != inputs[requirement]
+    ):
+        raise RuntimeError("The environment dependencies do not match protected model requirements")
+    return {
+        "environment_source_sha": environment_sha,
+        "model_source_sha": model_sha,
+        "inputs": inputs,
+    }
+
+
+def prepare_candidate(
+    output: Path, repository: Path, auth_file: Path, *, family: str, candidate_digest: str
+) -> None:
+    """Pull one private CPU candidate, erase auth, and run the original GPU qualification."""
+    try:
+        family = validated_family(family)
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", candidate_digest):
+            raise RuntimeError("Candidate qualification requires an immutable digest")
+        if platform.machine() != "x86_64":
+            raise RuntimeError("Candidate qualification requires a real x86_64 host")
+        auth = _private_json(auth_file)
+        prefix, username, token = (
+            auth.get(field) for field in ("registry_prefix", "username", "token")
+        )
+        if (
+            not isinstance(prefix, str)
+            or not re.fullmatch(
+                r"ghcr\.io/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*", prefix
+            )
+            or not isinstance(username, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", username)
+            or not isinstance(token, str)
+            or not token.strip()
+        ):
+            raise RuntimeError("Private candidate credentials are invalid")
+        auth_file.unlink(missing_ok=True)
+        _require_private_candidate(prefix, family, token)
+        reference = f"{prefix}/{family}@{candidate_digest}"
+        with tempfile.TemporaryDirectory(prefix="trtmc-candidate-auth-") as config:
+            docker = ["docker", "--config", config]
+            _private_docker(
+                [*docker, "login", "ghcr.io", "--username", username, "--password-stdin"],
+                stdin=token,
+                timeout=30,
+            )
+            _private_docker([*docker, "pull", "--platform", "linux/amd64", reference])
+            image = _private_docker(
+                [*docker, "image", "inspect", "--format", "{{.Id}}", reference], timeout=30
+            ).strip()
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+                raise RuntimeError("The private candidate has no immutable local image ID")
+        auth.clear()
+        token = prefix = reference = ""
+        embedded = _private_docker(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--entrypoint",
+                "/usr/bin/head",
+                image,
+                "-c",
+                "65537",
+                "/opt/trtmc-ci/build-inputs.json",
+            ],
+            timeout=60,
+        )
+        if len(embedded.encode()) > 65536:
+            raise RuntimeError("The embedded public build manifest exceeds the size limit")
+        try:
+            manifest = _candidate_json(embedded)
+        except RuntimeError:
+            raise RuntimeError("The embedded public build manifest is invalid") from None
+        provenance = _environment_provenance(repository, family, manifest)
+        output.mkdir(parents=True, exist_ok=True)
+        run(["docker", "run", "--rm", "--network", "none", image, "python", "-m", "pip", "check"])
+        probe = run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--gpus",
+                "all",
+                "--network",
+                "none",
+                image,
+                "python",
+                "-c",
+                PROBE,
+            ],
+            capture=True,
+        )
+        profiles = [
+            line.removeprefix("TRTMC_IMAGE_PROFILE=")
+            for line in probe.splitlines()
+            if line.startswith("TRTMC_IMAGE_PROFILE=")
+        ]
+        if len(profiles) != 1:
+            raise RuntimeError("The native import probe did not produce exactly one ABI profile")
+        abi = json.loads(profiles[0])
+        inputs = provenance["inputs"]
+        candidate = {
+            "schema_version": 1,
+            "family": family,
+            "digest": candidate_digest,
+            "local_image": image,
+            "source_sha": provenance["environment_source_sha"],
+            **provenance,
+            "producer_source_sha": _public_git(SOURCE, "rev-parse", "HEAD").decode().strip(),
+            "platform": "linux/amd64",
+            "registry_visibility": "private",
+            "abi": abi,
+            "base_dockerfile_sha256": inputs["Dockerfile.dev.x86-gpu"],
+            "base_requirements_sha256": inputs["requirements/community-ci.txt"],
+            "family_requirements_sha256": inputs[f"families/{family}/requirements.txt"],
+            "dependency_recipe_sha256": inputs[f"families/{family}/ci/Dockerfile.dependencies"],
+            "dependency_build_helper_sha256": inputs[f"families/{family}/ci/build-dependencies.sh"],
+            "dependency_constraints_sha256": inputs[
+                f"families/{family}/ci/constraints-linux-amd64.txt"
+            ],
+            "base_environment_lock_sha256": inputs["requirements/community-gpu-linux-amd64.lock"],
+            "family_environment_lock_sha256": inputs[
+                f"families/{family}/ci/environment-linux-amd64.lock"
+            ],
+            "environment_recorder_sha256": inputs["requirements/image-environment.py"],
+            "base_environment_receipt_sha256": inputs[
+                "requirements/community-gpu-linux-amd64.json"
+            ],
+            "family_environment_receipt_sha256": inputs[
+                f"families/{family}/ci/environment-linux-amd64.json"
+            ],
+            "resolved_dependencies_sha256": hashlib.sha256(
+                json.dumps(abi["resolved_dependencies"], separators=(",", ":")).encode()
+            ).hexdigest(),
+            "native_byok_passed": False,
+            "family_e2e_passed": False,
+            "cleanup_confirmed": False,
+        }
+        save(output / "candidate.json", candidate)
+        _native_qualification(output, repository, image, family)
+        candidate["native_byok_passed"] = True
+        save(output / "candidate.json", candidate)
+    finally:
+        auth_file.unlink(missing_ok=True)
+
+
+def _native_qualification(output: Path, repository: Path, image: str, family: str) -> None:
+    command = (
+        "set -eu; cmake -S /src -B /proof/native -G Ninja "
+        "-DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89 "
+        "-DTRTMC_BUILD_TESTS=ON -DTRTMC_BUILD_EXAMPLES=ON "
+        "-DTRTMC_BUILD_SERVER=OFF -DTRTMC_BUILD_BACKEND_RTX=OFF "
+        "-DTRTMC_ENABLE_BYOK=ON; cmake --build /proof/native --parallel 8 --target "
+        f"trtmc trtmc_runtime trtmc_c trtmc_backend_trt trtmc_model_{family} "
+        "test_byok_tvm_ffi; ctest --test-dir /proof/native --output-on-failure "
+        "--output-junit /proof/native-byok.xml -R '^byok_tvm_ffi$'"
+    )
+    run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--gpus",
+            "all",
+            "--network",
+            "none",
+            "--volume",
+            f"{repository}:/src:ro",
+            "--volume",
+            f"{output}:/proof",
+            image,
+            "bash",
+            "-c",
+            command,
+        ]
+    )
+    require_native_pass(output / "native-byok.xml")
 
 
 def build(output: Path, repository: Path, *, family: str) -> None:
@@ -218,36 +559,7 @@ def build(output: Path, repository: Path, *, family: str) -> None:
             "family_e2e_passed": False,
         },
     )
-    command = (
-        "set -eu; cmake -S /src -B /proof/native -G Ninja "
-        "-DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89 "
-        "-DTRTMC_BUILD_TESTS=ON -DTRTMC_BUILD_EXAMPLES=ON "
-        "-DTRTMC_BUILD_SERVER=OFF -DTRTMC_BUILD_BACKEND_RTX=OFF "
-        "-DTRTMC_ENABLE_BYOK=ON; cmake --build /proof/native --parallel 8 --target "
-        f"trtmc trtmc_runtime trtmc_c trtmc_backend_trt trtmc_model_{family} "
-        "test_byok_tvm_ffi; ctest --test-dir /proof/native --output-on-failure "
-        "--output-junit /proof/native-byok.xml -R '^byok_tvm_ffi$'"
-    )
-    run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--gpus",
-            "all",
-            "--network",
-            "none",
-            "--volume",
-            f"{repository}:/src:ro",
-            "--volume",
-            f"{output}:/proof",
-            image,
-            "bash",
-            "-c",
-            command,
-        ]
-    )
-    require_native_pass(output / "native-byok.xml")
+    _native_qualification(output, repository, image, family)
     candidate = json.loads((output / "candidate.json").read_text())
     candidate["native_byok_passed"] = True
     save(output / "candidate.json", candidate)
@@ -267,6 +579,10 @@ def qualify(
         raise RuntimeError("The candidate belongs to a different family")
     if candidate.get("native_byok_passed") is not True:
         raise RuntimeError("Native ABI qualification is required before family E2E")
+    candidate["family_e2e_passed"] = False
+    save(output / "candidate.json", candidate)
+    summary_file = output / "family-results" / "summary.json"
+    summary_file.unlink(missing_ok=True)
     environment = dict(os.environ)
     environment.update(
         {
@@ -275,6 +591,7 @@ def qualify(
             "TRTMC_GPU_DIRECT_FAMILIES": json.dumps([family]),
             "TRTMC_GPU_ADDED_FAMILIES": "[]",
             "CMAKE_CUDA_ARCHITECTURES": "89",
+            "TRTMC_GPU_RESULTS_DIR": str(summary_file.parent),
         }
     )
     command = [
@@ -291,8 +608,78 @@ def qualify(
     if token_file is not None:
         command += ["--checkpoint-token-file", str(token_file)]
     subprocess.run(command, env=environment, check=True)
+    if not summary_file.is_file() or summary_file.stat().st_size > 1024 * 1024:
+        raise RuntimeError("The original family E2E has no bounded coverage receipt")
+    summary = _candidate_json(summary_file.read_bytes())
+    rows = summary.get("families")
+    if (
+        summary.get("complete") is not True
+        or summary.get("passed") is not True
+        or not isinstance(rows, list)
+        or len(rows) != 1
+        or not isinstance(rows[0], dict)
+        or rows[0].get("family") != family
+        or rows[0].get("status") != "passed"
+        or not isinstance(rows[0].get("cases"), dict)
+        or not rows[0]["cases"]
+        or not isinstance(rows[0].get("requested_cases"), list)
+        or any(not isinstance(name, str) for name in rows[0]["requested_cases"])
+        or any(value != "passed" for value in rows[0]["cases"].values())
+        or set(rows[0].get("requested_cases", [])) != set(rows[0]["cases"])
+        or rows[0].get("deferred_cases", [])
+    ):
+        raise RuntimeError("The original family E2E coverage is incomplete")
+    candidate["cases"] = rows[0]["cases"]
     candidate["family_e2e_passed"] = True
     save(output / "candidate.json", candidate)
+
+
+def export_qualification(output: Path, auth_directory: Path) -> None:
+    """Copy only nonsecret GPU evidence for the owner/backstop cleanup handoff."""
+    candidate = _candidate_json((output / "candidate.json").read_bytes())
+    if (
+        candidate.get("native_byok_passed") is not True
+        or candidate.get("family_e2e_passed") is not True
+    ):
+        raise RuntimeError("Export requires native ABI and original family E2E qualification")
+    fields = {
+        "schema_version",
+        "family",
+        "digest",
+        "source_sha",
+        "environment_source_sha",
+        "model_source_sha",
+        "producer_source_sha",
+        "inputs",
+        "platform",
+        "registry_visibility",
+        "abi",
+        "cases",
+        "base_dockerfile_sha256",
+        "base_requirements_sha256",
+        "family_requirements_sha256",
+        "dependency_recipe_sha256",
+        "dependency_build_helper_sha256",
+        "dependency_constraints_sha256",
+        "base_environment_lock_sha256",
+        "family_environment_lock_sha256",
+        "environment_recorder_sha256",
+        "base_environment_receipt_sha256",
+        "family_environment_receipt_sha256",
+        "resolved_dependencies_sha256",
+        "native_byok_passed",
+        "family_e2e_passed",
+    }
+    receipt = {field: value for field, value in candidate.items() if field in fields}
+    receipt.update(cleanup_confirmed=False, admitted=False)
+    content = json.dumps(receipt)
+    if "ghcr.io" in content or "://" in content:
+        raise RuntimeError("The public GPU qualification receipt contains nonpublic coordinates")
+    path = auth_directory / "qualification.json"
+    owner = auth_directory.stat()
+    save(path, receipt)
+    path.chmod(0o600)
+    os.chown(path, owner.st_uid, owner.st_gid)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -555,17 +942,46 @@ def publish(output: Path, registry: str, username: str, token_file: Path, *, fam
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("build", "qualify", "publish", "audit", "access-check"))
+    parser.add_argument(
+        "phase",
+        choices=(
+            "build",
+            "qualify",
+            "publish",
+            "audit",
+            "access-check",
+            "prepare-candidate",
+            "export-qualification",
+        ),
+    )
     parser.add_argument("--family", type=validated_family, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repository", type=Path)
     parser.add_argument("--stage-python", type=Path)
     parser.add_argument("--token-file", type=Path)
+    parser.add_argument("--auth-file", type=Path)
+    parser.add_argument("--auth-directory", type=Path)
     parser.add_argument("--registry", default="ghcr.io/nvidia/tensorrt-model-connect-community")
     parser.add_argument("--username")
     parser.add_argument("--digest")
     args = parser.parse_args()
-    if args.phase == "access-check":
+    if args.phase == "prepare-candidate":
+        if args.repository is None or args.auth_file is None or args.digest is None:
+            parser.error(
+                "Candidate preparation requires protected model source, private auth and digest"
+            )
+        prepare_candidate(
+            args.output,
+            args.repository,
+            args.auth_file,
+            family=args.family,
+            candidate_digest=args.digest,
+        )
+    elif args.phase == "export-qualification":
+        if args.auth_directory is None:
+            parser.error("Export requires the private SSH-owned handoff directory")
+        export_qualification(args.output, args.auth_directory)
+    elif args.phase == "access-check":
         if args.digest is None:
             parser.error("Access checking requires an immutable digest")
         record = check_registry_access(
