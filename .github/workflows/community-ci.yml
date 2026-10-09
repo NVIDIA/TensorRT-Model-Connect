@@ -235,6 +235,61 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Verify the dedicated reader for the same shared base
+        if: ${{ inputs.audit_family == 'base' }}
+        timeout-minutes: 3
+        env:
+          REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
+          REGISTRY_PREFIX: ${{ secrets.TRTMC_COMMUNITY_REGISTRY }}
+          PROTECTED_DEPENDENCY_CATALOG: ${{ secrets.TRTMC_COMMUNITY_DEPENDENCY_CATALOG }}
+          REQUESTED_DIGEST: ${{ inputs.audit_digest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import tempfile
+          from pathlib import Path
+          from tools import community_gpu_ci as ci
+          from tools import community_gpu_images as images
+
+          try:
+              with tempfile.TemporaryDirectory(prefix="private-base-reader-") as directory:
+                  root = Path(directory)
+                  source, catalog = root / "input.json", root / "catalog.json"
+                  source.write_text(os.environ["PROTECTED_DEPENDENCY_CATALOG"])
+                  source.chmod(0o600)
+                  ci.export_dependency_catalog(Path.cwd(), os.environ["GITHUB_SHA"], catalog, source)
+                  data = ci._dependency_catalog(catalog)
+                  reference = os.environ["REGISTRY_PREFIX"] + "/base@" + os.environ["REQUESTED_DIGEST"]
+                  if data["base"]["image"] != reference:
+                      raise images.ImagePreparationError("Access checks must use the same protected base")
+                  token = os.environ.get("REGISTRY_TOKEN", "").strip()
+                  username = images.registry_reader_login(token)
+                  failures = []
+                  try:
+                      images.require_private_package(data["registry_prefix"], token, data["base"].get("package_id"))
+                      print("Private package metadata: verified")
+                  except images.ImagePreparationError as error:
+                      failures.append(str(error))
+                      print("Private package metadata: " + str(error))
+                  config = root / "docker-auth"
+                  config.mkdir(mode=0o700)
+                  try:
+                      images.docker(["login", "ghcr.io", "--username", username, "--password-stdin"],
+                                    stdin=token, config=str(config), private=True, timeout=30)
+                      images.docker(["manifest", "inspect", reference],
+                                    config=str(config), private=True, timeout=60)
+                      print("Dedicated reader pinned manifest: accessible")
+                  except images.ImagePreparationError as error:
+                      failures.append(str(error))
+                      print("Dedicated reader pinned manifest: unavailable")
+                  if failures:
+                      raise images.ImagePreparationError("; ".join(failures))
+              print("Dedicated reader verified: private package metadata and pinned base manifest")
+          except (RuntimeError, OSError, ValueError) as error:
+              raise SystemExit("Private base reader preflight failed: " + str(error)) from None
+          PY
+
   produce-dependency-image:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image' }}
     permissions:
@@ -1111,6 +1166,7 @@ jobs:
       contents: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
+      failure_class: ${{ steps.classification.outputs.failure_class }}
       instance_name: ${{ steps.reserve.outputs.instance_name }}
       lease_artifact_name: ${{ steps.reserve.outputs.lease_artifact_name }}
       instance_type: ${{ steps.reserve.outputs.instance_type }}
@@ -1437,6 +1493,51 @@ jobs:
             --summary-file "$GITHUB_STEP_SUMMARY" \
             > "$RUNNER_TEMP/trtmc-community-gpu-summary.json"
 
+      - name: Classify the GPU result
+        if: always()
+        id: classification
+        env:
+          SUMMARY_FILE: ${{ runner.temp }}/trtmc-community-gpu-summary.json
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from tools.community_gpu_ci import _checked_summary
+
+          # Only a validated terminal coordinator receipt can attribute a
+          # failure to the PR. Provision/setup failures have no such receipt.
+          category = "infra_failure"
+          try:
+              path = Path(os.environ["SUMMARY_FILE"])
+              if path.stat().st_size > 4 * 1024 * 1024:
+                  raise ValueError("oversized GPU summary")
+              summary = _checked_summary(json.loads(path.read_text()))
+              if summary is not None:
+                  active = [row for row in summary["families"] if row["status"] != "deferred"]
+                  failures = [row for row in active if row["status"] != "passed"]
+                  valid_passes = all(
+                      row.get("entrypoint_started") is True
+                      and row.get("failure_class") is None
+                      and bool(row["cases"])
+                      and all(value == "passed" for value in row["cases"].values())
+                      for row in active if row["status"] == "passed"
+                  )
+                  if summary["passed"] and summary["complete"] and valid_passes:
+                      category = "none"
+                  elif failures and valid_passes and all(
+                      row["status"] == "failed"
+                      and row.get("entrypoint_started") is True
+                      and row.get("failure_class") == "pr_failure"
+                      for row in failures
+                  ):
+                      category = "pr_failure"
+          except (OSError, ValueError, TypeError, RecursionError):
+              pass
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"failure_class={category}\n")
+          PY
+
       - name: Record the step conclusion
         if: always()
         id: result
@@ -1642,6 +1743,7 @@ jobs:
           GPU_AUTHORIZED: ${{ needs.gpu-authorize.result }}
           GPU_RESULT: ${{ needs.provision-and-test.result }}
           TEST_RESULT: ${{ needs.provision-and-test.outputs.conclusion }}
+          GPU_FAILURE_CLASS: ${{ needs.provision-and-test.outputs.failure_class }}
           CLEANUP_RESULT: ${{ needs.cleanup.result }}
         run: |
           set -euo pipefail
@@ -1659,6 +1761,7 @@ jobs:
             test "$RUN_GPU" = true
             test "$GPU_RESULT" = success
             test "$TEST_RESULT" = success
+            test "$GPU_FAILURE_CLASS" = none
             test "$CLEANUP_RESULT" = success
           fi
 
@@ -1667,7 +1770,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          CPU_RESULT: ${{ needs.required.result }}
+          RUN_GPU: ${{ needs.gpu-authorize.outputs.run_gpu }}
           GPU_RESULT: ${{ needs.provision-and-test.result }}
+          GPU_FAILURE_CLASS: ${{ needs.provision-and-test.outputs.failure_class }}
           OWNER_RELEASE_CONFIRMED: ${{ needs.provision-and-test.outputs.cleanup_confirmed }}
           BACKSTOP_RELEASE_CONFIRMED: ${{ needs.cleanup.outputs.cleanup_confirmed }}
           NO_ALLOCATION_CONFIRMED: ${{ needs.provision-and-test.outputs.no_allocation_confirmed }}
@@ -1677,16 +1783,25 @@ jobs:
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           state=failure
           description="Complete Community CI: failure"
-          if [ "${NO_ALLOCATION_CONFIRMED:-}" = true ]; then
-            description="Complete Community CI: infra_failure"
-          elif [ "$GPU_RESULT" != skipped ] \
+          if [ "$GPU_RESULT" != skipped ] \
             && [ "$OWNER_RELEASE_CONFIRMED" != true ] \
             && [ "$BACKSTOP_RELEASE_CONFIRMED" != true ]; then
             state=pending
             description="Community CI release remains unconfirmed"
-          elif [ "$COMPLETE_RESULT" = success ]; then
+          elif [ "$COMPLETE_RESULT" = success ] \
+            && { [ "$RUN_GPU" != true ] || [ "$GPU_FAILURE_CLASS" = none ]; }; then
             state=success
             description="Complete Community CI: success"
+          elif [ "$CPU_RESULT" = success ] && [ "$RUN_GPU" = true ]; then
+            # Missing, malformed or interrupted GPU receipts must not blame
+            # the PR for a failure before its entry point was reached.
+            state=error
+            description="Complete Community CI: infra_failure"
+            if [ "$GPU_FAILURE_CLASS" = pr_failure ] \
+              && [ "${NO_ALLOCATION_CONFIRMED:-}" != true ]; then
+              state=failure
+              description="Complete Community CI: pr_failure"
+            fi
           fi
           gh api --silent --method POST \
             "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \

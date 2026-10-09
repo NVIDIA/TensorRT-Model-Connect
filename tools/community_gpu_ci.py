@@ -352,10 +352,14 @@ def staging_hub_requirement(repository: Path, ci_sha: str) -> str:
 
 def require_shared_base(catalog_path: Path, token: str) -> str:
     catalog = _dependency_catalog(catalog_path)
-    _image_preparation().validate_base(catalog.get("base"), _dependency_registry(catalog))
+    preparation = _image_preparation()
+    prefix = _dependency_registry(catalog)
+    base = preparation.validate_base(catalog.get("base"), prefix)
     if not token.strip():
         raise CommunityGpuError("Configure the dedicated private base reader before allocation")
-    return _image_preparation().registry_reader_login(token)
+    login = preparation.registry_reader_login(token)
+    preparation.require_private_package(prefix, token.strip(), base.get("package_id"))
+    return login
 
 
 def native_cli_library(declaration: Path) -> str | None:
