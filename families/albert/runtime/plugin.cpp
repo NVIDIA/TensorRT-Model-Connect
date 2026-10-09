@@ -6,6 +6,7 @@
 #include "families/albert/runtime/distributed_runtime.h"
 #include "families/albert/runtime/pipeline.h"
 #include "families/albert/runtime/plugin_helpers.h"
+#include "trtmc/internal/features.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
@@ -45,9 +46,18 @@ std::int32_t require_tensor_parallel_size(const nlohmann::json& config) {
 }
 
 std::string require_task(const BundleInfo& info) {
-    if (info.task == IEncoding::kTask || info.task == IEmbedding::kTask ||
-        info.task == IReranking::kTask) {
+    using trtmc::internal::ITextPairToRelevance;
+    using trtmc::internal::ITextToEmbedding;
+    using trtmc::internal::ITextToPooledFeatures;
+    using trtmc::internal::ITextToTokenFeatures;
+    if (info.task == std::string(ITextToPooledFeatures::kTask) ||
+        info.task == std::string(ITextToTokenFeatures::kTask) ||
+        info.task == std::string(ITextToEmbedding::kTask) ||
+        info.task == std::string(ITextPairToRelevance::kTask)) {
         return info.task;
+    }
+    if (info.task == "encoding") {
+        return std::string(ITextToPooledFeatures::kTask);
     }
     throw std::runtime_error("Albert does not implement task: " + info.task);
 }
