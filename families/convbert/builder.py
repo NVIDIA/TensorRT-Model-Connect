@@ -99,6 +99,8 @@ def build_convbert_encoder_engine(
 
     # Additive attention mask: [1, 1, S]
     mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
+    sequence_mask = network.add_shuffle(mask_float.get_output(0))
+    sequence_mask.reshape_dims = (S, 1)
     ones_mask = graph_ops.add_constant(
         network, (1,), np.array([1.0], dtype=work_np_dtype),
         dtype=work_np_dtype)
@@ -156,6 +158,7 @@ def build_convbert_encoder_engine(
             conv_kernel_size=conv_kernel_size,
             seq_length=S,
             attn_mask=attn_mask,
+            sequence_mask=sequence_mask.get_output(0),
             hidden_act=hidden_act,
             eps=eps,
             dtype=work_np_dtype,
@@ -355,6 +358,7 @@ def _add_convbert_layer(
     conv_kernel_size: int,
     seq_length: int,
     attn_mask: trt.ITensor,
+    sequence_mask: trt.ITensor,
     hidden_act: str,
     eps: float,
     dtype: np.dtype = np.float32,
@@ -401,9 +405,11 @@ def _add_convbert_layer(
 
     # === Branch 2: Span-based dynamic convolution ===
 
-    # SeparableConv1D on hidden_states
+    # The runtime supplies a contiguous valid prefix. Its convolution boundary
+    # must be zero, just as for the native unpadded sequence.
+    conv_hidden = network.add_elementwise(hidden, sequence_mask, trt.ElementWiseOperation.PROD)
     key_conv_attn = _add_separable_conv1d(
-        network, hidden,
+        network, conv_hidden.get_output(0),
         hidden_size, all_head_size, conv_kernel_size, S,
         weights[f"{prefix}.sep_conv_dw"],
         weights[f"{prefix}.sep_conv_pw"],
@@ -437,6 +443,8 @@ def _add_convbert_layer(
     conv_out = graph_ops.add_bias_sum(
         network, conv_out, all_head_size,
         weights[f"{prefix}.conv_out_bias"], dtype=dtype)
+    conv_out = network.add_elementwise(
+        conv_out, sequence_mask, trt.ElementWiseOperation.PROD).get_output(0)
 
     # Transpose to [all_head_size, seq] for unfold
     conv_out_t = network.add_shuffle(conv_out)
