@@ -136,6 +136,7 @@ def test_abstract_build_entrypoint_preserves_both_supported_profiles(
         task="monocular_geometry",
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         precision=precision,
         image_height=None,
         image_width=None,

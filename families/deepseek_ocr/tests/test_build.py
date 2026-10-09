@@ -97,6 +97,7 @@ def test_tp_build_writes_rank_plans_and_builds_vision_once(monkeypatch, tmp_path
         model_dir=tmp_path,
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         task="vision_language_generation",
         precision="fp32",
         max_sequence_length=4096,
