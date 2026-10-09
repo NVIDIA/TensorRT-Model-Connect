@@ -86,3 +86,18 @@ def test_live_reader_rejects_old_misaligned_grades(tmp_path):
     problems = SelectionArchive(cache).selection(run)
     with pytest.raises(ValueError, match="mismatched gold"):
         absolute.plugin_side(run, problems)
+
+
+def test_reader_validates_the_original_graders_canonical_gold(tmp_path):
+    cache, _, _ = fixture(tmp_path)
+    run = AiperfRun(tmp_path / "reference/mmlu-0shot-greedy", 0, [])
+    problems = SelectionArchive(cache).selection(run)
+    problems[0]["gold"] = "A  . "
+    grades = run.accuracy_records()
+    for row in grades:
+        index = run.conversation_indices()[row["conversation_id"]]
+        row.update(grader_name="trtmc_sentence_exact", expected="A." if index == 0 else problems[index]["gold"])
+    assert len(absolute.plugin_side(run, problems, grades=grades)["records"]) == 4
+    grades[0]["expected"] = "unrelated gold"
+    with pytest.raises(ValueError, match="mismatched gold"):
+        absolute.plugin_side(run, problems, grades=grades)

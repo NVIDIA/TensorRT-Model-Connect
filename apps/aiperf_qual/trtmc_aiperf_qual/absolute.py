@@ -374,7 +374,22 @@ def plugin_side(run, problems: Sequence[Mapping[str, Any]], *, capacity: bool = 
             continue
         if position in records:
             raise ValueError(f"duplicate accuracy conversation {record['conversation_id']!r}")
-        if str(record.get("expected", "")).strip() != str(problems[position]["gold"]).strip():
+        expected = str(record.get("expected", "")).strip()
+        gold = str(problems[position]["gold"]).strip()
+        if expected != gold and record.get("grader_name"):
+            # Some graders export a canonical gold (for example normalized
+            # sentence punctuation). Validate with that same grader, not a new rule.
+            import asyncio
+
+            from aiperf.plugin import plugins
+            from aiperf.plugin.enums import PluginType
+
+            grader = plugins.get_class(PluginType.ACCURACY_GRADER, record["grader_name"])(run=None)
+            try:
+                gold = asyncio.run(grader.grade("", problems[position]["gold"])).ground_truth.strip()
+            finally:
+                asyncio.run(grader.aclose())
+        if expected != gold:
             raise ValueError(f"accuracy conversation {record['conversation_id']!r} has a mismatched gold answer")
         records[position] = record
     side = {"records": records, "exit": run.exit_code, "timings": timings(raw, indices)}
