@@ -46,4 +46,15 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_roberta_added_token_whitespace PRIVATE nlohmann_json::nlohmann_json)
   target_compile_options(test_roberta_added_token_whitespace PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME roberta_added_token_whitespace COMMAND test_roberta_added_token_whitespace)
+
+  add_executable(test_roberta_precompiled_normalizer
+    ${PROJECT_SOURCE_DIR}/families/roberta/tests/cpp/test_roberta_precompiled_normalizer.cpp
+    unigram_tokenizer.cpp
+  )
+  target_include_directories(test_roberta_precompiled_normalizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_roberta_precompiled_normalizer PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_roberta_precompiled_normalizer PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME roberta_precompiled_normalizer COMMAND test_roberta_precompiled_normalizer
+    ${PROJECT_SOURCE_DIR}/families/roberta/tests/data/precompiled-unigram.json
+  )
 endif()
