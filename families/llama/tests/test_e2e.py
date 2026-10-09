@@ -363,15 +363,12 @@ def _hf_reference(
     prompt: str,
     actual_ids: list[int],
     torch,
+    *,
+    reference=None,
 ) -> tuple[list[int], str, float | None, str]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     trust_remote_code = bool(manifest.get("trust_remote_code", False))
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir,
-        local_files_only=True,
-        trust_remote_code=trust_remote_code,
-    )
     reference_precision = case.get(
         "reference_precision",
         manifest.get("reference_precision", manifest["precision"]),
@@ -382,16 +379,25 @@ def _hf_reference(
         "bf16": torch.bfloat16,
     }
     assert reference_precision in dtypes, reference_precision
-    model = (
-        AutoModelForCausalLM.from_pretrained(
+    if reference is None:
+        tokenizer = AutoTokenizer.from_pretrained(
             model_dir,
             local_files_only=True,
             trust_remote_code=trust_remote_code,
-            dtype=dtypes[reference_precision],
         )
-        .eval()
-        .to("cuda")
-    )
+        model = (
+            AutoModelForCausalLM.from_pretrained(
+                model_dir,
+                local_files_only=True,
+                trust_remote_code=trust_remote_code,
+                dtype=dtypes[reference_precision],
+            )
+            .eval()
+            .to("cuda")
+        )
+    else:
+        tokenizer, model = reference
+        assert model.dtype == dtypes[reference_precision], "preloaded reference precision differs"
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:
@@ -445,10 +451,11 @@ def _hf_reference(
             reference_text = tokenizer.decode(reference_ids, skip_special_tokens=True).strip()
 
     actual_decoded = tokenizer.decode(actual_ids, skip_special_tokens=True).strip()
-    del model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if reference is None:
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return reference_ids, reference_text, sampling_support, actual_decoded
 
 

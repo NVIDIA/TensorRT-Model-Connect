@@ -45,8 +45,9 @@ inline trt_edgellm::rt::LLMGenerationRequest make_request(const std::string& pro
     validate_generation(config);
     trt_edgellm::rt::LLMGenerationRequest request{};
     request.requests.resize(1);
-    request.requests.front().messages.push_back(
-        {"user", {{"text", config.use_chat_template ? prompt : raw_prefix + prompt}}});
+    auto& message = request.requests.front().messages.emplace_back();
+    message.role = "user";
+    message.contents.push_back({"text", config.use_chat_template ? prompt : raw_prefix + prompt});
     request.applyChatTemplate = config.use_chat_template;
     request.enableThinking = config.enable_thinking;
     request.temperature = config.temperature;

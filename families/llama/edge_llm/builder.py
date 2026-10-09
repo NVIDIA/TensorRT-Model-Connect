@@ -9,13 +9,14 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from tensorrt_model_connect.build import cmake_prefixes, detect_local_platform
 
 from ..build_routing import native_kv_architecture_capability
 from ..config import ModelConfig
 
-EDGE_REVISION = "e8b29522938901f6df19ebeedd4b69bc8edbcd97"
+EDGE_REVISION = "95515c2f87fba8982db5a519f9022277667b3cc9"
 
 
 def local_target() -> dict:
@@ -52,7 +53,7 @@ def installed_package(target: dict) -> dict:
         package = json.loads(manifest.read_text(encoding="utf-8"))
         if package.get("schema_version") != 1 or package.get("revision") != EDGE_REVISION:
             raise ValueError(f"Edge package has an unsupported revision/schema: {manifest}")
-        if package.get("version") != "0.10.1" or package.get("arch") != target["arch"]:
+        if package.get("version") != "0.11.0" or package.get("arch") != target["arch"]:
             raise ValueError("Edge package version/architecture differs from executing worker")
         if target["sm"] not in package.get("architectures", []):
             raise ValueError("Edge package was not built for this local GPU")
@@ -77,18 +78,66 @@ def installed_package(target: dict) -> dict:
     )
 
 
+def builder_python(package: dict, target: dict) -> str:
+    """Use installed 0.11.0 Python tools when compatible, otherwise the SDK Python.
+
+    The native SDK remains required. This only discovers an interpreter; it
+    never installs packages or substitutes the wheel's runtime for the C++ SDK.
+    An incompatible ambient install is ignored.
+    """
+    interpreter = sys.executable
+    try:
+        if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
+            raise ValueError("Edge builder Python must be an existing absolute interpreter path")
+        probe = subprocess.run(
+            [
+                interpreter,
+                "-I",
+                "-c",
+                "import json, tensorrt, tensorrt_edgellm; "
+                "from experimental.builder.cli import main; "
+                "print(json.dumps([tensorrt_edgellm.__version__, tensorrt.__version__]))",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if json.loads(probe.stdout) != ["0.11.0", target["tensorrt_version"]]:
+            raise ValueError(
+                "Edge builder Python must match Edge 0.11.0 and the native TensorRT SDK"
+            )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return package["python"]
+    return interpreter
+
+
 def checkpoint_weight_format(model_dir: Path, raw: dict) -> str:
-    """Admit original unquantized sources; packed Llama profiles are not qualified."""
-    if raw.get("quantization_config") is not None or any(
-        (model_dir / name).exists()
-        for name in ("quantize_config.json", "quant_config.json", "hf_quant_config.json")
-    ):
-        raise ValueError("Llama Edge publication supports only original unquantized checkpoints")
-    return "fp16"
+    """Recognize original and ModelOpt FP8/NVFP4 sources; never quantize weights."""
+    if any((model_dir / name).exists() for name in ("quantize_config.json", "quant_config.json")):
+        raise ValueError("Unsupported Llama Edge quantization metadata")
+    declarations = []
+    embedded = raw.get("quantization_config")
+    if embedded is not None:
+        if not isinstance(embedded, dict) or embedded.get("quant_method", "modelopt") != "modelopt":
+            raise ValueError("Llama Edge requires ModelOpt packed checkpoints")
+        declarations.append(embedded.get("quant_algo"))
+    sidecar = model_dir / "hf_quant_config.json"
+    if sidecar.exists():
+        metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict) or metadata.get("producer", {}).get("name") != "modelopt":
+            raise ValueError("Llama Edge requires ModelOpt packed checkpoints")
+        declarations.append(metadata.get("quantization", {}).get("quant_algo"))
+    if not declarations:
+        return "fp16"
+    formats = {"FP8": "fp8", "NVFP4": "nvfp4"}
+    if any(value not in formats for value in declarations) or len(set(declarations)) != 1:
+        raise ValueError("Unsupported or conflicting Llama Edge quantization metadata")
+    return formats[declarations[0]]
 
 
 def request_weight_format(request, raw: dict) -> str:
-    """Require original source weights without introducing a quantization recipe."""
+    """Require the declared source format without introducing a quantization recipe."""
     source = checkpoint_weight_format(Path(request.model_dir), raw)
     requested = source if request.quantization is None else request.quantization
     if requested == "none":
@@ -150,7 +199,7 @@ def prepare(
     engine = staging / "edge_llm/engine"
     # Calling upstream main preserves its complete build/artifact orchestration.
     command = [
-        package["python"],
+        builder_python(package, target),
         "-I",
         "-c",
         "from experimental.builder.cli import main; main()",
@@ -163,7 +212,7 @@ def prepare(
         "--plugin-path",
         package["plugin"],
         "--dense",
-        "fp16",
+        "fp16" if weight_format == "fp16" else "auto",
         "--max-input-len",
         str(limit),
         "--max-kv-cache-capacity",
@@ -188,7 +237,7 @@ def prepare(
         *engine_files,
         "tokenizer.json",
         "tokenizer_config.json",
-        "processed_chat_template.json",
+        "chat_template.jinja",
     ):
         if not (engine / name).is_file() or (engine / name).stat().st_size == 0:
             raise ValueError(f"Edge builder did not produce required artifact: {name}")

@@ -13,7 +13,7 @@
 
 namespace trtmc::llama::edge_llm {
 
-inline constexpr const char* kRevision = "e8b29522938901f6df19ebeedd4b69bc8edbcd97";
+inline constexpr const char* kRevision = "95515c2f87fba8982db5a519f9022277667b3cc9";
 
 /// Return whether an artifact is a normalized file below one of the two Edge roots.
 inline bool safe_artifact_path(const std::string& name) {
