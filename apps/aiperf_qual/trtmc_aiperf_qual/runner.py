@@ -756,7 +756,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     with execution.session(evidence):
         result = _qualify(model, environment, out)
     result["schema_version"] = execution.SCHEMA
-    result["performance"].extend(evidence.natural_performance())
+    result["performance"].extend(evidence.natural_performance(result["accuracy"]))
     if quality_only(model):
         result["performance_source"] = "quality"
         result["performance_expected"] = [item["suite"] for item in model.get("absolute", [])]
