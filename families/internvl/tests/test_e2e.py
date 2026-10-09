@@ -324,13 +324,14 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     from PIL import Image
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
+    device = case.get("reference_device", "cuda")
     image = Image.open(_asset(case["test_image"])).convert("RGB")
     processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
     model = (
         AutoModelForImageTextToText.from_pretrained(
             model_dir, trust_remote_code=True, torch_dtype=_torch_dtype(case["reference_precision"])
         )
-        .to("cuda")
+        .to(device)
         .eval()
     )
     encoded = processor(
@@ -339,7 +340,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         return_tensors="pt",
     )
     encoded = {
-        key: value.to("cuda") if hasattr(value, "to") else value for key, value in encoded.items()
+        key: value.to(device) if hasattr(value, "to") else value for key, value in encoded.items()
     }
     with torch.no_grad():
         generated = model.generate(

@@ -83,7 +83,7 @@ class Artifacts {
              {"edge_llm/engine/visual/visual.engine", "edge_llm/engine/visual/config.json",
               "edge_llm/engine/llm.engine", "edge_llm/engine/config.json",
               "edge_llm/engine/tokenizer.json", "edge_llm/engine/tokenizer_config.json",
-              "edge_llm/engine/processed_chat_template.json", "edge_llm/checkpoint/config.json"})
+              "edge_llm/engine/chat_template.jinja", "edge_llm/checkpoint/config.json"})
             if (!names.count(required) || bundle.find_section(required)->length == 0)
                 throw std::runtime_error(std::string("Required InternVL Edge artifact missing: ") +
                                          required);
@@ -244,7 +244,8 @@ ITask* create(const BundleReader& bundle) {
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
         marker.at("max_batch_size") != 1 || marker.at("precision") != "fp16" ||
-        marker.at("weight_format") != "fp16" ||
+        (marker.at("weight_format") != "fp16" && !(marker.at("weight_format") == "int4_awq" &&
+                                                   marker.value("builder_flow", "") == "onnx")) ||
         marker.at("component_weight_formats").at("llm") != marker.at("weight_format") ||
         marker.at("component_weight_formats").at("visual") != "fp16" ||
         marker.at("visual_image_tokens") != 256 || !marker.at("artifacts").is_array())

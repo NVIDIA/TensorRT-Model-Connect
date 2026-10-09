@@ -28,7 +28,7 @@ if(TARGET EdgeLLM::Core)
   )
 endif()
 
-# Edge 0.10.1 has no visual-feature dump CLI. This helper serves the existing
+# Edge has no visual-feature dump CLI. This helper serves the existing
 # InternVL image-health E2E and is not installed as a product executable.
 if(TRTMC_BUILD_TESTS AND TARGET EdgeLLM::Core)
   add_executable(internvl_edge_vision_features

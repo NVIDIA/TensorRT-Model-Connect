@@ -193,7 +193,7 @@ def test_internvl_does_not_register_unowned_companion_options():
     assert "--companion" not in flags
 
 
-@pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure"])
+@pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure", "capacity_failure", "larger_device", "quality_failure", "quality_failure_sm120", "native_capacity_failure", "native_larger_device"])
 def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, caplog, mode):
     import json
     from tensorrt_model_connect.build import BuildRequest
@@ -204,9 +204,22 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     (source / "config.json").write_text(json.dumps({
         "max_position_embeddings": 4096, "hidden_size": 896,
     }))
+    if mode in {"capacity_failure", "larger_device", "native_capacity_failure", "native_larger_device"}:
+        (source / "config.json").write_text(json.dumps({
+            "max_position_embeddings": 4096, "model_type": "qwen3",
+            "num_hidden_layers": 40, "hidden_size": 5120,
+        }))
+    if mode == "quality_failure_sm120":
+        (source / "config.json").write_text(json.dumps({
+            "max_position_embeddings": 32768, "model_type": "qwen2",
+            "num_hidden_layers": 28, "hidden_size": 1536,
+        }))
+    monkeypatch.setattr(dispatch, "device_memory_bytes", lambda: (
+        40 if mode == "capacity_failure" else 64 if mode == "native_larger_device" else 48
+    ) * 1024 ** 3)
     prefix = tmp_path / "package"
     manifest = prefix / "share/trtmc/edge-llm.json"
-    if mode != "absent":
+    if mode not in {"absent", "native_capacity_failure", "native_larger_device"}:
         manifest.parent.mkdir(parents=True)
         manifest.write_text("{" if mode == "corrupt" else "{}")
     monkeypatch.setattr(builder, "cmake_prefixes", lambda: [prefix])
@@ -217,10 +230,13 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     if hasattr(dispatch, "source_quantization"):
         monkeypatch.setattr(dispatch, "source_quantization", lambda *_: "fp16")
     if hasattr(builder, "request_weight_format"):
-        monkeypatch.setattr(builder, "request_weight_format", lambda *_: "fp16")
-    request = BuildRequest(source, tmp_path / "out", "internvl", "vision_language_generation", "fp16")
+        monkeypatch.setattr(builder, "request_weight_format", lambda *_: "int4_awq" if mode.startswith("quality_failure") else "fp16")
+    request = BuildRequest(source, tmp_path / "out", "internvl", "vision_language_generation", "fp16",
+                           max_sequence_length=384)
     writer = object()
-    target = {"os": "linux", "arch": "x86_64", "sm": 80}
+    target = {"os": "linux", "arch": "x86_64", "sm": 80, "tensorrt_version": "11.1.0.106"}
+    if mode == "quality_failure_sm120":
+        target["sm"] = 120
     target_calls = []
 
     def local_target():
@@ -246,20 +262,28 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
             raise KeyboardInterrupt()
         return {}, {}
 
-    monkeypatch.setattr(dispatch, "EDGE_DISPATCH", {("linux", "x86_64", 80, "fp16"): prepare})
+    monkeypatch.setattr(dispatch, "EDGE_DISPATCH", {("linux", "x86_64", target["sm"], fmt): prepare for fmt in ("fp16", "int4_awq")})
     monkeypatch.setattr(builder, "publish", lambda *args: publications.append(args))
     def native(*args):
         native_calls.append(args)
-    if mode == "cancel":
+    if mode == "capacity_failure":
+        with pytest.raises(dispatch.UnavailableEdgeConfiguration, match="49,913,047,296"):
+            dispatch.build(request, writer, native)
+        assert not stages
+    elif mode == "native_capacity_failure":
+        with pytest.raises(dispatch.UnavailableEdgeConfiguration, match="native FP16"):
+            dispatch.build(request, writer, native)
+        assert not stages
+    elif mode == "cancel":
         with pytest.raises(KeyboardInterrupt):
             dispatch.build(request, writer, native)
     else:
         dispatch.build(request, writer, native)
     assert all(not path.exists() for path in stages)
     assert native_calls == ([(request, writer)] if mode in {
-        "absent", "corrupt", "failure", "device_failure",
+        "absent", "corrupt", "failure", "device_failure", "native_larger_device",
     } else [])
-    assert len(publications) == (1 if mode == "success" else 0)
+    assert len(publications) == (1 if mode in {"success", "larger_device", "quality_failure", "quality_failure_sm120"} else 0)
     assert len(target_calls) == (0 if mode == "absent" else 1)
     logs = list(tmp_path.glob(".out.edge-*.log"))
     if mode in {"corrupt", "failure", "device_failure"}:
@@ -306,6 +330,21 @@ def test_declared_build_matches_legacy_request(tmp_path, monkeypatch, options):
     assert captured[0].task == "vision_language_generation"
     assert captured[0].precision == ("fp16" if options else "fp32")
     assert not output.exists()
+    from families.internvl.edge_llm.builder import int4_plugin_version, UnavailableEdgeConfiguration
+    args = [str(source), "-o", str(output), "--int4-gemm-plugin-version", "1"]
+    assert family_cli.main(["internvl", "build", *args]) == 0
+    selected = captured[-1]
+    assert selected.int4_gemm_plugin_version == 1
+    with pytest.raises(ValueError, match="int4_gemm_plugin_version"):
+        replace(selected, int4_gemm_plugin_version=True)
+    config = {"model_type": "qwen2", "hidden_size": 1536, "num_hidden_layers": 28}
+    assert int4_plugin_version(selected, config, {"sm": 80}, "int4_awq") == 1
+    with pytest.raises(UnavailableEdgeConfiguration, match="SM80"):
+        int4_plugin_version(selected, config, {"sm": 120}, "int4_awq")
+    with pytest.raises(UnavailableEdgeConfiguration, match="AWQ"):
+        int4_plugin_version(selected, config, {"sm": 80}, "fp16")
+    assert int4_plugin_version(replace(selected, int4_gemm_plugin_version=None),
+                               config, {"sm": 120}, "int4_awq") == 2
 
 
 def test_declared_help_is_offline_and_dependency_free():
@@ -328,3 +367,4 @@ assert "huggingface_hub" not in sys.modules
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert "trtmc internvl build" in result.stdout
+    assert "--int4-gemm-plugin-version" in result.stdout
