@@ -851,7 +851,7 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
     snapshot = tmp_path / revision
     snapshot.mkdir()
     (snapshot / "checkpoint.pt").write_bytes(b"weights")
-    calls: list[tuple[str, str | None, Path]] = []
+    calls = []
 
     class FakeApi:
         """Return one immutable revision for the requested model."""
@@ -860,15 +860,19 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
             assert revision is None
             return SimpleNamespace(sha=revision_value)
 
-    def download(*, repo_id: str, revision: str | None, cache_dir: Path) -> str:
-        calls.append((repo_id, revision, cache_dir))
+    def download(*, repo_id: str, revision: str | None, cache_dir: Path, local_files_only=False) -> str:
+        calls.append(("snapshot", repo_id, revision, cache_dir, local_files_only))
         return str(snapshot)
+
+    def cached_tree(repo_id: str, *, revision: str, cache_dir: Path):
+        calls.append(("tree", repo_id, revision, cache_dir))
+        return [SimpleNamespace(path="checkpoint.pt")]
 
     revision_value = revision
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(HfApi=FakeApi, snapshot_download=download),
+        SimpleNamespace(HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download),
     )
     plan = community_gpu_ci.FamilyPlan(
         "alpha",
@@ -878,10 +882,48 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
 
     community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
 
-    assert calls == [("example/alpha", None, tmp_path / "cache")]
+    assert calls == [
+        ("snapshot", "example/alpha", None, tmp_path / "cache", False),
+        ("tree", "example/alpha", revision, tmp_path / "cache"),
+        ("snapshot", "example/alpha", None, tmp_path / "cache", True),
+    ]
 
     revision_value = "b" * 40
     with pytest.raises(CiError, match="revision changed"):
+        community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
+
+
+@pytest.mark.parametrize("failure", ["tree_missing", "snapshot_incomplete", "revision_changed"])
+def test_checkpoint_staging_rejects_unusable_offline_cache(tmp_path, monkeypatch, failure):
+    """A successful online download is insufficient evidence for offline entry."""
+    revision = "a" * 40
+    snapshot = tmp_path / revision
+    snapshot.mkdir()
+
+    class FakeApi:
+        def model_info(self, _repo_id, revision):
+            return SimpleNamespace(sha="a" * 40)
+
+    def cached_tree(*_args, **_kwargs):
+        if failure == "tree_missing":
+            raise ValueError("repository tree metadata missing")
+        return [SimpleNamespace(path="checkpoint.pt")]
+
+    def download(**kwargs):
+        if kwargs.get("local_files_only"):
+            if failure == "snapshot_incomplete":
+                raise ValueError("cached snapshot is incomplete")
+            if failure == "revision_changed":
+                return str(tmp_path / ("b" * 40))
+        return str(snapshot)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download),
+    )
+    plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), (("example/alpha", revision),))
+    with pytest.raises((ValueError, CiError), match="missing|incomplete|differs"):
         community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
 
 

@@ -288,7 +288,7 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
     if not checkpoints:
         return
 
-    from huggingface_hub import HfApi, snapshot_download
+    from huggingface_hub import HfApi, get_cached_repo_tree, snapshot_download
 
     api = HfApi()
     for repo_id, requested_revision in checkpoints:
@@ -309,6 +309,21 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
                 f"checkpoint revision changed while staging {repo_id}: "
                 f"resolved={resolved}, downloaded={snapshot.name}"
             )
+        # Newer Hub clients need the immutable repository tree as well as the
+        # checkpoint bytes. A legacy snapshot-only cache otherwise triggers a
+        # Hub.tree request from unchanged family code in HF_HUB_OFFLINE mode.
+        # Require metadata and complete local files before entering PR code.
+        get_cached_repo_tree(repo_id, revision=resolved, cache_dir=cache_dir)
+        cached = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                revision=requested_revision,
+                cache_dir=cache_dir,
+                local_files_only=True,
+            )
+        )
+        if cached != snapshot:
+            raise CommunityGpuError(f"offline checkpoint differs from the staged revision: {repo_id}")
         print(f"Staged checkpoint {repo_id}@{resolved}")
 
 
