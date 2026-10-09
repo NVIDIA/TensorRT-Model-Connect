@@ -1,12 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE
+# Build the public base locally before using this family-owned layer.
+ARG BASE_IMAGE=trtmc-community-base:local
 FROM ${BASE_IMAGE}
 ARG MAX_JOBS=8
+ARG TRTMC_ENV_LOCK_MODE=locked
+ARG UBUNTU_SNAPSHOT=20261008T000000Z
 ENV MAX_JOBS=${MAX_JOBS}
 ENV TRTMC_DEPENDENCY_IMPORTS=causal_conv1d,mamba_ssm
-COPY requirements.txt /opt/trtmc-ci/nemotron_h/requirements.txt
-RUN python -m pip install --disable-pip-version-check --no-cache-dir \
-      --no-build-isolation --requirement /opt/trtmc-ci/nemotron_h/requirements.txt && \
-    python -m pip check
+COPY requirements.txt constraints-linux-amd64.txt environment-linux-amd64.lock environment-linux-amd64.json /opt/trtmc-ci/nemotron_h/
+COPY build-inputs.json /opt/trtmc-ci/build-inputs.json
+RUN case "$TRTMC_ENV_LOCK_MODE" in \
+      bootstrap) python -m pip install --disable-pip-version-check --no-cache-dir --no-build-isolation \
+        --constraint /opt/trtmc-ci/nemotron_h/constraints-linux-amd64.txt \
+        --requirement /opt/trtmc-ci/nemotron_h/requirements.txt ;; \
+      locked) python /opt/trtmc-ci/image-environment.py validate-lock --lock /opt/trtmc-ci/nemotron_h/environment-linux-amd64.lock && \
+        python -m pip install --disable-pip-version-check --no-cache-dir --no-build-isolation \
+        --constraint /opt/trtmc-ci/nemotron_h/constraints-linux-amd64.txt \
+        --constraint /opt/trtmc-ci/nemotron_h/environment-linux-amd64.lock \
+        --requirement /opt/trtmc-ci/nemotron_h/requirements.txt \
+        --requirement /opt/trtmc-ci/nemotron_h/environment-linux-amd64.lock ;; \
+      *) exit 2 ;; esac && python -m pip check && \
+    if [ "$TRTMC_ENV_LOCK_MODE" = locked ]; then \
+      python /opt/trtmc-ci/image-environment.py verify \
+        --lock /opt/trtmc-ci/nemotron_h/environment-linux-amd64.lock \
+        --receipt /opt/trtmc-ci/nemotron_h/environment-linux-amd64.json --snapshot "$UBUNTU_SNAPSHOT"; \
+    fi
