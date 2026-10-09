@@ -27,6 +27,21 @@ from tools.community_gpu_ci import CommunityGpuError as CiError
 from tools.ci import context as ci_context, e2e as ci_e2e
 
 
+def _untracked_impact(command: list[str], repository: Path) -> subprocess.CompletedProcess:
+    """Model Git's exact reserved-input check without accepting arbitrary host commands."""
+    assert command == [
+        "git",
+        "-c",
+        f"safe.directory={repository}",
+        "-C",
+        str(repository),
+        "ls-files",
+        "--error-unmatch",
+        "impact.json",
+    ]
+    return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"untracked input")
+
+
 def _dependency_entry(repository: Path, family: str, digest: str = "a") -> dict:
     """A fake provider receipt with real physical dependency inputs."""
     paths = {
@@ -469,7 +484,7 @@ def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
     monkeypatch,
     alpha_state,
 ):
-    """Actual orchestration uses immutable IDs, retains cold installs, and runs other owners."""
+    """Orchestration selects immutable prepared images only after reader auth is erased."""
     _planned_owners(tmp_path, "alpha", "beta", "gamma")
     entries = {
         family: _dependency_entry(tmp_path, family, digest)
@@ -485,9 +500,35 @@ def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
     token.write_text("private-registry-secret")
     base = "sha256:" + "b" * 64
     ids = {family: "sha256:" + digest * 64 for family, digest in (("alpha", "1"), ("gamma", "3"))}
-    config_paths, pulls, runs = [], [], []
+    config_paths, pulls, runs, prepared = [], [], [], []
+    prepared_alpha = "sha256:" + "d" * 64
+    real_preparation = community_gpu_ci._image_preparation()
+
+    def prepare(repository, family, base_image_id, deadline):
+        assert repository == tmp_path and base_image_id == base
+        assert deadline > time.monotonic()
+        assert (
+            not token.exists() and config_paths and all(not path.exists() for path in config_paths)
+        )
+        prepared.append(family)
+        if family == "alpha":
+            assert alpha_state == "changed"
+            assert (
+                repository / "families/alpha/requirements.txt"
+            ).read_text() == "new-package==2\n"
+            return prepared_alpha
+        assert family == "beta"
+        return real_preparation.ensure_family_image(repository, family, base_image_id, deadline)
+
+    monkeypatch.setattr(
+        community_gpu_ci,
+        "_image_preparation",
+        lambda: SimpleNamespace(ensure_family_image=prepare),
+    )
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         assert "private-registry-secret" not in " ".join(map(str, command))
         if "--config" in command:
             config = Path(command[command.index("--config") + 1])
@@ -530,10 +571,11 @@ def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
             tmp_path, env, "base", dependency_catalog=catalog, registry_token_file=token
         )
     assert runs == (
-        [("alpha", ids["alpha"] if alpha_state == "qualified" else base)]
+        [("alpha", ids["alpha"] if alpha_state == "qualified" else prepared_alpha)]
         if alpha_state != "corrupt"
         else []
     ) + [("beta", base), ("gamma", ids["gamma"])]
+    assert prepared == (["alpha"] if alpha_state == "changed" else []) + ["beta"]
     assert pulls == ([entries["alpha"]["lock"]["image"]] if alpha_state == "qualified" else []) + [
         entries["gamma"]["lock"]["image"]
     ]
@@ -543,11 +585,13 @@ def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
         "gamma": "passed"
     }
     if alpha_state == "changed":
+        assert outcomes["alpha"]["dependency_image_id"] == prepared_alpha
+        assert outcomes["alpha"]["base_image_id"] == base
         assert outcomes["alpha"]["dependency_cache"] == "input_mismatch" and outcomes["alpha"][
             "cases"
         ] == {"alpha": "passed"}
     elif alpha_state == "corrupt":
-        assert outcomes["alpha"]["failure_class"] == "dependency" and outcomes["alpha"][
+        assert outcomes["alpha"]["failure_class"] == "infra_failure" and outcomes["alpha"][
             "cases"
         ] == {"alpha": "not_run"}
     assert community_gpu_ci._checked_summary(summary)["families"] == summary["families"]
@@ -596,6 +640,8 @@ def test_missing_registry_token_fails_cached_owner_but_runs_unlisted_owner(tmp_p
     started = []
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         assert "--config" not in command
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
@@ -617,7 +663,7 @@ def test_missing_registry_token_fails_cached_owner_but_runs_unlisted_owner(tmp_p
     assert started == ["beta"]
     summary = json.loads((tmp_path / "results/summary.json").read_text())
     results = {r["family"]: r for r in summary["families"]}
-    assert results["alpha"]["failure_class"] == "dependency" and results["alpha"]["cases"] == {
+    assert results["alpha"]["failure_class"] == "infra_failure" and results["alpha"]["cases"] == {
         "alpha": "not_run"
     }
     assert results["beta"]["cases"] == {"beta": "passed"} and not summary["passed"]
@@ -1181,6 +1227,8 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
     image = "sha256:" + "a" * 64
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
         if "--stage-family" in command:
@@ -1234,6 +1282,118 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
     assert len({name for kind, _, name in events if kind == "start"}) == 3
 
 
+@pytest.mark.parametrize("failure", ["dependencies", "checkpoints", "pr"])
+def test_preparation_failures_and_pr_failures_keep_distinct_phases_and_cleanup(
+    tmp_path, monkeypatch, failure
+):
+    _planned_owners(tmp_path, "alpha", "beta")
+    base = "sha256:" + "a" * 64
+    images = {family: "sha256:" + digest * 64 for family, digest in (("alpha", "b"), ("beta", "c"))}
+    events = []
+
+    def prepare(repository, family, base_image_id, deadline):
+        assert repository == tmp_path and base_image_id == base
+        assert deadline > time.monotonic()
+        assert json.loads((repository / "impact.json").read_text()) == {
+            "families": [family],
+            "testcases": [family],
+        }
+        events.append(("prepare", family))
+        if family == "alpha" and failure == "dependencies":
+            raise RuntimeError("dependency build failed")
+        return images[family]
+
+    def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout=base)
+        if "--stage-family" in command:
+            family = command[command.index("--stage-family") + 1]
+            events.append(("stage", family))
+            return subprocess.CompletedProcess(
+                command, 7 if family == "alpha" and failure == "checkpoints" else 0
+            )
+        if command[:2] == ["docker", "run"]:
+            family = command[-1]
+            assert images[family] in command
+            events.append(("run", family))
+            failed = family == "alpha" and failure == "pr"
+            _container_receipt(command, failed)
+            return subprocess.CompletedProcess(command, 17 if failed else 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        assert command[:3] == ["docker", "rm", "--force"]
+        family = command[-1].rsplit("-", 1)[1]
+        events.append(("remove", family))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(ensure_family_image=prepare)
+    )
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="alpha"):
+        community_gpu_ci.run_containers(tmp_path, env, "base")
+    alpha_events = [("prepare", "alpha")]
+    if failure != "dependencies":
+        alpha_events.append(("stage", "alpha"))
+    if failure == "pr":
+        alpha_events.extend([("run", "alpha"), ("remove", "alpha")])
+    assert events == alpha_events + [
+        (phase, "beta") for phase in ("prepare", "stage", "run", "remove")
+    ]
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    rows = {row["family"]: row for row in summary["families"]}
+    alpha = rows["alpha"]
+    assert alpha["status"] == "failed"
+    assert alpha["failure_class"] == ("pr_failure" if failure == "pr" else "infra_failure")
+    assert alpha["entrypoint_started"] is (failure == "pr")
+    if failure != "pr":
+        assert alpha["phase"] == ("environment" if failure == "dependencies" else "checkpoints")
+    assert alpha["cases"] == {"alpha": "failed" if failure == "pr" else "not_run"}
+    assert rows["beta"]["cases"] == {"beta": "passed"}
+    assert rows["beta"]["dependency_cache"] == "prepared"
+    assert not summary["passed"]
+
+
+def test_preparation_exhausting_budget_never_starts_checkpoints_or_pr(tmp_path, monkeypatch):
+    _planned_owners(tmp_path, "alpha", "beta")
+    clock = [0.0]
+    prepared = []
+    base = "sha256:" + "a" * 64
+
+    def prepare(repository, family, base_image_id, deadline):
+        assert repository == tmp_path and base_image_id == base
+        prepared.append(family)
+        clock[0] = deadline + 1
+        return base
+
+    def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        assert command[:3] == ["docker", "image", "inspect"]
+        return subprocess.CompletedProcess(command, 0, stdout=base)
+
+    monkeypatch.setattr(community_gpu_ci.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(ensure_family_image=prepare)
+    )
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="budget exhausted"):
+        community_gpu_ci.run_containers(tmp_path, env, "base")
+    assert prepared == ["alpha"]
+    report = json.loads((tmp_path / "results/summary.json").read_text())
+    assert not report["passed"] and not report["complete"]
+    alpha, beta = report["families"]
+    assert alpha["family"] == "alpha" and alpha["status"] == "failed"
+    assert alpha["entrypoint_started"] is False and alpha["exit_code"] == 124
+    assert beta["family"] == "beta" and beta["status"] == "not_run"
+    assert all(row["failure_class"] == "infra_failure" for row in report["families"])
+    assert all(row["cases"] == {row["family"]: "not_run"} for row in report["families"])
+
+
 @pytest.mark.parametrize("token_from_file", [False, True])
 def test_checkpoint_staging_forwards_only_network_configuration(
     tmp_path: Path,
@@ -1247,6 +1407,8 @@ def test_checkpoint_staging_forwards_only_network_configuration(
     _planned_owners(tmp_path, "alpha")
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
         if "--stage-family" in command or command[:2] == ["docker", "run"]:
@@ -1349,6 +1511,8 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
     _planned_owners(tmp_path, "alpha", "beta")
 
     def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
         if "--stage-family" in command:
@@ -1368,6 +1532,7 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
         "TRTMC_GPU_FAMILIES": '["alpha","beta"]',
         "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta"]',
         "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results"),
     }
     if already_removed:
         community_gpu_ci.run_containers(tmp_path, env, "image")
@@ -1376,10 +1541,17 @@ def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch
         with pytest.raises(CiError, match="Cannot remove.*daemon unavailable"):
             community_gpu_ci.run_containers(tmp_path, env, "image")
         assert started == ["alpha"]
+        summary = json.loads((tmp_path / "results/summary.json").read_text())
+        alpha, beta = summary["families"]
+        assert alpha["phase"] == "cleanup" and alpha["failure_class"] == "infra_failure"
+        assert alpha["entrypoint_started"] is True and alpha["status"] == "failed"
+        assert beta["status"] == "not_run" and beta["cases"] == {"beta": "not_run"}
+        assert not summary["passed"] and not summary["complete"]
 
 
 def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
     """An untrusted tools package cannot execute in the VM coordinator."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     _family(
         tmp_path,
         "alpha",
@@ -3193,9 +3365,13 @@ def _gpu_environment(*families: str) -> dict[str, str]:
     }
 
 
-def test_execution_budget_scales_without_consuming_cleanup_budget():
-    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha")) == 3600
-    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha", "beta")) == 7200
+def test_execution_budget_includes_preparation_within_the_existing_global_cap():
+    assert community_gpu_ci.FAMILY_PREPARATION_SECONDS == 7200
+    assert community_gpu_ci.STAGING_TIMEOUT_SECONDS == 900
+    assert community_gpu_ci.FAMILY_TIMEOUT_SECONDS == 2700
+    assert community_gpu_ci.MAX_EXECUTION_SECONDS == 10800
+    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha")) == 10800
+    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha", "beta")) == 10800
     assert (
         community_gpu_ci.execution_budget_seconds(
             _gpu_environment(*(f"family_{chr(97 + i)}" for i in range(20)))
@@ -3298,14 +3474,14 @@ def test_exhausted_coordinator_budget_marks_every_unstarted_family(tmp_path, mon
         return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
 
     monkeypatch.setattr(community_gpu_ci.subprocess, "run", inspect_only)
-    monkeypatch.setattr(community_gpu_ci, "execution_budget_seconds", lambda _env: 0)
+    monkeypatch.setattr(community_gpu_ci, "MAX_EXECUTION_SECONDS", 0)
     with pytest.raises(CiError, match="remaining families were not run"):
         community_gpu_ci.run_containers(tmp_path, env, "image")
     report = json.loads((tmp_path / "results/summary.json").read_text())
     assert not report["passed"] and not report["complete"]
     assert [row["family"] for row in report["families"]] == ["alpha", "beta"]
     assert all(
-        row["status"] == "not_run" and row["failure_class"] == "budget"
+        row["status"] == "not_run" and row["failure_class"] == "infra_failure"
         for row in report["families"]
     )
     assert len(calls) == 1
@@ -3341,6 +3517,7 @@ def test_fifo_result_cannot_block_host_cleanup(tmp_path):
 
 
 def test_real_container_client_timeout_cleans_up_before_next_family(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     for family in ("alpha", "beta"):
         _family(
             tmp_path,
@@ -3382,7 +3559,7 @@ def test_real_container_client_timeout_cleans_up_before_next_family(tmp_path, mo
         "remove beta",
     ]
     result = json.loads((tmp_path / "results/summary.json").read_text())
-    assert result["families"][0]["failure_class"] == "budget"
+    assert result["families"][0]["failure_class"] == "pr_failure"
     assert result["families"][1]["status"] == "passed"
     assert not result["passed"] and not result["complete"]
 
@@ -3486,7 +3663,7 @@ def _deferred_owner(repository: Path, family: str) -> None:
 
 
 @pytest.mark.parametrize("failed_baseline", [None, community_gpu_ci.SHARED_SMOKE_FAMILIES[0]])
-def test_fully_deferred_owner_runs_all_real_baselines_with_no_extra_budget(
+def test_fully_deferred_owner_runs_all_real_baselines_with_effective_plan_budget(
     tmp_path, monkeypatch, failed_baseline
 ):
     _deferred_owner(tmp_path, "alpha")
@@ -3494,9 +3671,24 @@ def test_fully_deferred_owner_runs_all_real_baselines_with_no_extra_budget(
     plan = community_gpu_ci.family_plan(tmp_path, "alpha")
     assert plan.testcases == () and plan.deferred_testcases == ("large",)
     assert plan.checkpoints == ()
-    events, staged, timeouts = [], [], []
+    events, staged, timeouts, preparation_deadlines = [], [], [], []
+    # Remove the cap only in this fixture so selection errors cannot be hidden by
+    # both a one-owner plan and the five-owner fallback reaching the same cap.
+    monkeypatch.setattr(community_gpu_ci, "MAX_EXECUTION_SECONDS", 100000)
+    monkeypatch.setattr(community_gpu_ci.time, "monotonic", lambda: 1000.0)
+    real_preparation = community_gpu_ci._image_preparation()
+
+    def prepare(repository, family, base_image_id, deadline):
+        preparation_deadlines.append(deadline)
+        return real_preparation.ensure_family_image(repository, family, base_image_id, deadline)
+
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(ensure_family_image=prepare)
+    )
 
     def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
         if "--stage-family" in command:
@@ -3524,11 +3716,12 @@ def test_fully_deferred_owner_runs_all_real_baselines_with_no_extra_budget(
     else:
         community_gpu_ci.run_containers(tmp_path, env, "base")
     assert (
-        original_budget == 3600
+        original_budget == 10800
         and community_gpu_ci.execution_budget_seconds(env) == original_budget
     )
     assert all(timeout <= original_budget for timeout in timeouts)
     assert staged == list(community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    assert preparation_deadlines == [1000 + len(staged) * original_budget] * len(staged)
     assert events == [(kind, family) for family in staged for kind in ("start", "remove")]
     summary = json.loads((tmp_path / "results/summary.json").read_text())
     rows = {row["family"]: row for row in summary["families"]}
@@ -3560,6 +3753,8 @@ def test_mixed_active_and_deferred_owners_do_not_admit_baselines(tmp_path, monke
     staged, started = [], []
 
     def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
         if "--stage-family" in command:
