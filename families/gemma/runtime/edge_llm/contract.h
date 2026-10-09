@@ -31,8 +31,8 @@ inline bool safe_artifact_path(const std::string& name) {
 
 /// Keep command-successful sampled requests executable, even if speculation falls back.
 inline bool allows_sampling(const std::string& variant) {
-    return variant == "autoregressive" || variant == "dspark" ||
-           variant == "eagle3" || variant == "dflash";
+    return variant == "autoregressive" || variant == "dspark" || variant == "eagle3" ||
+           variant == "dflash";
 }
 
 /// Edge 0.11 uses vanilla decoding for these sampled speculative requests.
@@ -43,7 +43,8 @@ inline bool sampling_uses_vanilla(const std::string& variant) {
 /// Reject invalid sampling settings and controls with no equivalent Edge request API.
 inline void validate_generation(const TextGenerationConfig& c, bool allow_sampling = false) {
     if (!allow_sampling && c.temperature > 0 && c.top_k != 1)
-        throw std::invalid_argument("This Gemma4 Edge execution variant supports only greedy generation");
+        throw std::invalid_argument(
+            "This Gemma4 Edge execution variant supports only greedy generation");
     if (!std::isfinite(c.temperature) || c.temperature < 0 || !std::isfinite(c.top_p) ||
         c.top_p <= 0 || c.top_p > 1 || c.top_k < 0 || c.seed < -1)
         throw std::invalid_argument("Invalid Gemma4 Edge sampling parameters");

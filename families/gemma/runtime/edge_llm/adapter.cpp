@@ -205,8 +205,10 @@ make_runtime(const Artifacts& artifacts, cudaStream_t stream, const nlohmann::js
     trt_edgellm::rt::SpecDecodeDraftingConfig drafting{};
     drafting.draftingTopK = eagle3 ? 10 : 1;
     drafting.draftingStep = eagle3 ? 6 : (dspark || dflash) ? 1 : 3;
-    drafting.verifySize = dflash ? marker.at("verify_size").get<int>()
-                                : eagle3 ? 60 : dspark ? 8 : 4;
+    drafting.verifySize = dflash   ? marker.at("verify_size").get<int>()
+                          : eagle3 ? 60
+                          : dspark ? 8
+                                   : 4;
     drafting.dsparkSchedulerMode = trt_edgellm::rt::DSparkSchedulerMode::kOff;
     return std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>(
         artifacts.engine(), "", std::unordered_map<std::string, std::string>{}, drafting, stream,
@@ -227,12 +229,14 @@ class EdgeTask final : public ITextGeneration,
           capacity_(marker.at("max_sequence_length").get<int>()),
           input_limit_(marker.at("max_input_length").get<int>()),
           sampling_(allows_sampling(marker.at("execution_variant").get<std::string>())),
-          sampled_vanilla_(sampling_uses_vanilla(marker.at("execution_variant").get<std::string>())),
+          sampled_vanilla_(
+              sampling_uses_vanilla(marker.at("execution_variant").get<std::string>())),
           headroom_(marker.at("execution_variant") == "autoregressive" ? 1
-                    : marker.at("execution_variant") == "dflash"       ? marker.at("verify_size").get<int>()
-                    : marker.at("execution_variant") == "eagle3"       ? 60
-                    : marker.at("execution_variant") == "dspark"       ? 8
-                                                                       : 4),
+                    : marker.at("execution_variant") == "dflash"
+                        ? marker.at("verify_size").get<int>()
+                    : marker.at("execution_variant") == "eagle3" ? 60
+                    : marker.at("execution_variant") == "dspark" ? 8
+                                                                 : 4),
           vision_(marker.value("vision", false)), audio_(marker.value("audio", false)),
           primary_(marker.value("task", "text_generation")) {}
 
@@ -280,9 +284,10 @@ class EdgeTask final : public ITextGeneration,
     /// Invoke Edge once; failures propagate without attempting native inference.
     TextResult generate(const std::string& prompt, const TextGenerationConfig& config) override {
         if (sampled_vanilla_ && config.temperature > 0 && config.top_k != 1)
-            std::cerr << "Warning: Gemma Edge 0.11 uses vanilla fallback for this sampled speculative "
-                        "request; speculative activity is not qualified. Sampling controls "
-                        "are forwarded unchanged.\n";
+            std::cerr
+                << "Warning: Gemma Edge 0.11 uses vanilla fallback for this sampled speculative "
+                   "request; speculative activity is not qualified. Sampling controls "
+                   "are forwarded unchanged.\n";
         return execute(make_request(prompt, config, default_max_new_tokens(), sampling_));
     }
 
@@ -365,7 +370,8 @@ ITask* create(const BundleReader& bundle) {
          marker.value("execution_variant", "") != "dflash" &&
          marker.value("execution_variant", "") != "autoregressive") ||
         marker.value("builder_flow", "") != "onnx")
-        throw std::runtime_error("Gemma4 requires an autoregressive, MTP, DSpark, EAGLE3 or DFlash ONNX contract");
+        throw std::runtime_error(
+            "Gemma4 requires an autoregressive, MTP, DSpark, EAGLE3 or DFlash ONNX contract");
     if (marker.at("execution_variant") == "dflash" &&
         (marker.value("verify_size", 0) != 7 && marker.value("verify_size", 0) != 16))
         throw std::runtime_error("Invalid Gemma4 DFlash block-size contract");
