@@ -9,6 +9,8 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import urllib.error
+from types import SimpleNamespace
 
 import pytest
 
@@ -318,6 +320,94 @@ def test_auth_failure_removes_token_and_does_not_execute_image(tmp_path, monkeyp
             {"base": base_manifest(), "registry_prefix": PREFIX}, token, "reader", "local-base"
         )
     assert not token.exists()
+
+
+def _reader_response(monkeypatch, raw, *, status=200, error=None):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, amount):
+            assert amount == images.MAX_FILE + 1
+            return raw[:amount]
+
+    def open_request(request, *, timeout):
+        assert request.full_url == "https://api.github.com/user"
+        assert request.get_header("Authorization") == "Bearer dedicated-test-reader-token"
+        assert timeout == 30
+        if error is not None:
+            raise error
+        response = Response()
+        response.status = status
+        return response
+
+    def opener(handler):
+        assert isinstance(handler, images.NoRedirect)
+        assert handler.redirect_request(None, None, 302, "", {}, "https://other.invalid/") is None
+        return SimpleNamespace(open=open_request)
+
+    monkeypatch.setattr(images.urllib.request, "build_opener", opener)
+
+
+def test_registry_reader_username_is_derived_from_token_without_manual_config(monkeypatch, capsys):
+    monkeypatch.delenv("TRTMC_COMMUNITY_REGISTRY_USERNAME", raising=False)
+    monkeypatch.delenv("REGISTRY_USERNAME", raising=False)
+    _reader_response(monkeypatch, b'{"login":"reader-account","other":"must-not-log"}')
+    assert images.registry_reader_login("dedicated-test-reader-token\n") == "reader-account"
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    "raw,status",
+    [
+        (b"{}", 401),
+        (b"{}", 403),
+        (b"{}", 302),
+        (b"{}", 500),
+        (b"not JSON", 200),
+        (b"[]", 200),
+        (b'{"login":null}', 200),
+        (b'{"login":"reader\\nmalformed"}', 200),
+        (b'{"login":"reader\'; command"}', 200),
+        (b'{"login":"one","login":"two"}', 200),
+        (b"x" * (images.MAX_FILE + 1), 200),
+    ],
+)
+def test_reader_identity_errors_fail_without_echoing_response(monkeypatch, capsys, raw, status):
+    _reader_response(monkeypatch, raw, status=status)
+    with pytest.raises(images.ImagePreparationError) as error:
+        images.registry_reader_login("dedicated-test-reader-token")
+    assert "dedicated-test-reader-token" not in str(error.value)
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("dedicated-test-reader-token"),
+        OSError("dedicated-test-reader-token"),
+        urllib.error.HTTPError(
+            "https://api.github.com/user", 403, "dedicated-test-reader-token", {}, None
+        ),
+    ],
+)
+def test_reader_identity_transport_errors_are_redacted(monkeypatch, error):
+    _reader_response(monkeypatch, b"", error=error)
+    with pytest.raises(images.ImagePreparationError, match="could not be identified") as caught:
+        images.registry_reader_login("dedicated-test-reader-token")
+    assert "dedicated-test-reader-token" not in str(caught.value)
+
+
+@pytest.mark.parametrize("token", [None, "", " \n", "contains whitespace"])
+def test_missing_or_invalid_reader_token_never_sends_an_auth_request(monkeypatch, token):
+    monkeypatch.setattr(
+        images.urllib.request, "build_opener", lambda *_: pytest.fail("HTTP request")
+    )
+    with pytest.raises(images.ImagePreparationError, match="missing or invalid"):
+        images.registry_reader_login(token)
 
 
 def test_real_process_output_is_bounded_during_read(monkeypatch):

@@ -31,8 +31,6 @@ on:
         required: false
       TRTMC_COMMUNITY_REGISTRY:
         required: false
-      TRTMC_COMMUNITY_REGISTRY_USERNAME:
-        required: false
 permissions:
   contents: read
 concurrency:
@@ -133,20 +131,24 @@ jobs:
         env:
           REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
           REGISTRY_PREFIX: ${{ secrets.TRTMC_COMMUNITY_REGISTRY }}
-          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import os
           import re
+          from pathlib import Path
+          from tools.community_gpu_images import ImagePreparationError, registry_reader_login
           prefix = os.environ.get("REGISTRY_PREFIX", "")
-          username = os.environ.get("REGISTRY_USERNAME", "")
           if not os.environ.get("REGISTRY_TOKEN", "").strip():
               raise SystemExit("Configure the dedicated private registry read credential before qualification")
           if not re.fullmatch(r"ghcr\.io/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*", prefix):
               raise SystemExit("Configure a protected private registry prefix before qualification")
-          if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", username):
-              raise SystemExit("Configure the private registry reader username before qualification")
+          try:
+              username = registry_reader_login(os.environ["REGISTRY_TOKEN"])
+          except ImagePreparationError as error:
+              raise SystemExit(str(error)) from None
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write("registry_username=" + username + "\n")
           PY
           hub_requirement="$(python3 -m tools.community_gpu_ci --staging-hub-requirement \
             --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
@@ -222,7 +224,7 @@ jobs:
           CANDIDATE_DIGEST: ${{ needs.authorize.outputs.digest }}
           REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
           REGISTRY_PREFIX: ${{ secrets.TRTMC_COMMUNITY_REGISTRY }}
-          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME }}
+          REGISTRY_USERNAME: ${{ steps.access.outputs.registry_username }}
         run: |
           set -euo pipefail
           auth_file="$RUNNER_TEMP/community-image-read-auth.json"

@@ -161,8 +161,9 @@ The ordinary Dev path requires a verified shared-base entry in the protected
 Its shape is `schema_version: 1`, `registry_prefix`, `base`, and `families`.
 The `base` record contains the immutable image identity and verified common
 input hashes. Trusted CI compares those hashes with its own Git objects.
-Missing or invalid base metadata, reader token or reader username fails before
-allocation. Registry credentials are used only to pull the base and are erased
+Missing or invalid base metadata, a missing reader token, or failure to resolve
+the token owner through GitHub fails before allocation. Only trusted preparation
+uses registry credentials to resolve the reader and pull the base; it erases them
 before any family Dockerfile or container executes. No private coordinates belong
 in public source, logs, or PR text.
 
@@ -192,8 +193,10 @@ execution plans are materialized. If a later plan defers an owner, its admitted
 host profile may be retained conservatively.
 
 Matching locks select private GHCR images by immutable digest. The separate
-`TRTMC_COMMUNITY_REGISTRY_READ_TOKEN` secret and
-`TRTMC_COMMUNITY_REGISTRY_USERNAME` secret or variable provide read access.
+`TRTMC_COMMUNITY_REGISTRY_READ_TOKEN` secret provides read access. Use a classic
+personal access token with `read:packages` whose account can read the private
+package. Trusted preparation resolves its GitHub login through `GET /user`; no
+separate username secret or additional `read:user` scope is required.
 The normal GPU job has no package permission and never substitutes its public
 repository `GITHUB_TOKEN`. Do not grant the public repository access to the
 private package. A read credential

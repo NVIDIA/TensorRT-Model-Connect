@@ -249,7 +249,6 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       TRTMC_COMMUNITY_REGISTRY_READ_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
       TRTMC_COMMUNITY_REGISTRY: ${{ secrets.TRTMC_COMMUNITY_REGISTRY }}
-      TRTMC_COMMUNITY_REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME }}
 
   snapshot:
     name: Capture the Community CI snapshot
@@ -1113,7 +1112,6 @@ jobs:
           SOURCE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
           PROTECTED_DEPENDENCY_CATALOG: ${{ secrets.TRTMC_COMMUNITY_DEPENDENCY_CATALOG }}
           REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
-          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME }}
         run: |
           set -euo pipefail
           plan="$RUNNER_TEMP/trtmc-gpu-plan.json"
@@ -1136,7 +1134,8 @@ jobs:
           python3 -m tools.community_gpu_ci \
             --export-dependency-catalog "$catalog" \
             --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA" "${catalog_args[@]}"
-          python3 -m tools.community_gpu_ci --require-shared-base --dependency-catalog "$catalog"
+          registry_username="$(python3 -m tools.community_gpu_ci \
+            --require-shared-base --dependency-catalog "$catalog")"
           hub_requirement="$(python3 -m tools.community_gpu_ci --staging-hub-requirement \
             --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
           unset REGISTRY_TOKEN
@@ -1145,6 +1144,7 @@ jobs:
           ram="$(python3 -m tools.community_gpu_ci \
             --required-host-ram-gib --dependency-catalog "$catalog" --plan-file "$plan" \
             --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
+          echo "registry_username=$registry_username" >> "$GITHUB_OUTPUT"
           echo "host_ram_gib=$ram" >> "$GITHUB_OUTPUT"
           echo "hub_requirement=$hub_requirement" >> "$GITHUB_OUTPUT"
           echo "dependency_images=$dependency_images" >> "$GITHUB_OUTPUT"
@@ -1241,7 +1241,7 @@ jobs:
           CI_SHA: ${{ github.sha }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
-          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME }}
+          REGISTRY_USERNAME: ${{ steps.host_profile.outputs.registry_username }}
           DEPENDENCY_IMAGES: ${{ steps.host_profile.outputs.dependency_images }}
           HUB_REQUIREMENT: ${{ steps.host_profile.outputs.hub_requirement }}
         run: |

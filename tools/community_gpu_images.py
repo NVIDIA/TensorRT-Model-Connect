@@ -136,6 +136,37 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def registry_reader_login(token: str) -> str:
+    """Resolve a PAT's public login without an extra user scope or manual setting."""
+    if not isinstance(token, str):
+        raise ImagePreparationError("The private registry reader token is missing or invalid")
+    token = token.strip()
+    if not token or len(token) > MAX_FILE or any(character.isspace() for character in token):
+        raise ImagePreparationError("The private registry reader token is missing or invalid")
+    request = urllib.request.Request(
+        "https://api.github.com/user",
+        headers={
+            "Authorization": "Bearer " + token,
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+            raw = response.read(MAX_FILE + 1)
+            if response.status != 200 or len(raw) > MAX_FILE:
+                raise ImagePreparationError("The private registry reader could not be identified")
+        user = object_json(raw)
+    except (ImagePreparationError, OSError, ValueError):
+        raise ImagePreparationError("The private registry reader could not be identified") from None
+    login = user.get("login")
+    if not isinstance(login, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", login
+    ):
+        raise ImagePreparationError("The private registry reader response has no valid login")
+    return login
+
+
 def require_private_package(prefix: str, token: str, expected_id: int | None) -> None:
     owner, _, name = prefix.removeprefix("ghcr.io/").partition("/")
     package = (name + "/" if name else "") + "base"

@@ -350,11 +350,12 @@ def staging_hub_requirement(repository: Path, ci_sha: str) -> str:
     return rows[0]
 
 
-def require_shared_base(catalog_path: Path, token: str, username: str) -> None:
+def require_shared_base(catalog_path: Path, token: str) -> str:
     catalog = _dependency_catalog(catalog_path)
     _image_preparation().validate_base(catalog.get("base"), _dependency_registry(catalog))
-    if not token.strip() or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", username):
+    if not token.strip():
         raise CommunityGpuError("Configure the dedicated private base reader before allocation")
+    return _image_preparation().registry_reader_login(token)
 
 
 def native_cli_library(declaration: Path) -> str | None:
@@ -1878,10 +1879,8 @@ def main() -> int:
         elif args.require_shared_base:
             if args.dependency_catalog is None:
                 raise CommunityGpuError("Shared base preflight requires its protected catalog")
-            require_shared_base(
-                args.dependency_catalog,
-                os.environ.get("REGISTRY_TOKEN", ""),
-                os.environ.get("REGISTRY_USERNAME", ""),
+            print(
+                require_shared_base(args.dependency_catalog, os.environ.get("REGISTRY_TOKEN", ""))
             )
         elif args.export_dependency_catalog is not None:
             export_dependency_catalog(

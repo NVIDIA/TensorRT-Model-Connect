@@ -2550,9 +2550,28 @@ def _host_selection_fixture(tmp_path, profile=64):
         },
     }
     lock.write_text('{"resources":{"host_ram_gib":256},"image":"attacker:latest"}')
+    # The actual trusted Python admission runs in a subprocess. Supply a fixed
+    # /user response at its HTTP boundary; resolver validation has unit coverage.
+    http_fixture = tmp_path / "identity-http-fixture"
+    http_fixture.mkdir()
+    (http_fixture / "sitecustomize.py").write_text(
+        "import io, json, os, urllib.request\n"
+        "from types import SimpleNamespace\n"
+        "def identity(request, timeout):\n"
+        "    assert request.full_url == 'https://api.github.com/user'\n"
+        "    assert request.get_header('Authorization') == 'Bearer dedicated-test-reader-token'\n"
+        "    assert timeout > 0\n"
+        "    if os.environ.get('IDENTITY_FIXTURE_MODE') == 'error':\n"
+        "        raise OSError('dedicated-test-reader-token upstream error')\n"
+        "    login = 'test-reader' if os.environ.get('IDENTITY_FIXTURE_MODE') != 'invalid' else 'invalid\\nlogin'\n"
+        "    response = io.BytesIO(json.dumps({'login': login}).encode())\n"
+        "    response.status = 200\n"
+        "    return response\n"
+        "urllib.request.build_opener = lambda *handlers: SimpleNamespace(open=identity)\n"
+    )
     environment = {
         **os.environ,
-        "PYTHONPATH": str(REPO_ROOT),
+        "PYTHONPATH": str(http_fixture) + os.pathsep + str(REPO_ROOT),
         "GITHUB_WORKSPACE": str(repository),
         "GITHUB_SHA": ci_sha,
         "SOURCE_SHA": ci_sha,
@@ -2563,7 +2582,6 @@ def _host_selection_fixture(tmp_path, profile=64):
         "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
         "TRTMC_GPU_ADDED_FAMILIES": "[]",
         "REGISTRY_TOKEN": "dedicated-test-reader-token",
-        "REGISTRY_USERNAME": "test-reader",
     }
     return repository, catalog, environment
 
@@ -2579,7 +2597,12 @@ def test_trusted_host_selection_step_runs_before_any_allocation(
     environment["PROTECTED_DEPENDENCY_CATALOG"] = secret
     step = next(step for step in gpu_job["steps"] if step.get("id") == "host_profile")
     assert step.get("continue-on-error", False) is False
+    assert "REGISTRY_USERNAME" not in step["env"]
     steps = gpu_job["steps"]
+    execution = next(item for item in steps if item.get("id") == "test")
+    assert execution["env"]["REGISTRY_USERNAME"] == (
+        "${{ steps.host_profile.outputs.registry_username }}"
+    )
     assert steps.index(step) < next(
         i for i, item in enumerate(steps) if item["name"] == "Install the Brev CLI"
     )
@@ -2606,6 +2629,7 @@ def test_trusted_host_selection_step_runs_before_any_allocation(
     assert exported.stat().st_mode & 0o777 == 0o600
     assert json.loads(exported.read_text())["ci_sha"] == environment["GITHUB_SHA"]
     assert output.read_text().splitlines() == [
+        "registry_username=test-reader",
         f"host_ram_gib={profile}",
         "hub_requirement=huggingface-hub==1.33.0",
         "dependency_images=true",
@@ -2616,13 +2640,17 @@ def test_trusted_host_selection_step_runs_before_any_allocation(
     )
 
 
-@pytest.mark.parametrize("fault", ["registry", "base", "token", "username", "base_inputs"])
+@pytest.mark.parametrize(
+    "fault", ["registry", "base", "token", "identity", "invalid_identity", "base_inputs"]
+)
 def test_invalid_protected_catalog_stops_the_real_preallocation_step(tmp_path, gpu_job, fault):
     repository, catalog, environment = _host_selection_fixture(tmp_path)
     if fault == "registry":
         catalog["registry_prefix"] = "credential-sensitive-prefix"
     elif fault == "base":
         del catalog["base"]
+    elif fault in {"identity", "invalid_identity"}:
+        environment["IDENTITY_FIXTURE_MODE"] = "error" if fault == "identity" else "invalid"
     elif fault == "base_inputs":
         from tools import community_gpu_images as images
 
