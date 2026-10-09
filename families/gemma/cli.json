@@ -95,6 +95,18 @@
           "default": false
         },
         {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "fp8"
+          ],
+          "help": "Self-quantize the BF16 checkpoint's projections to FP8"
+        },
+        {
           "name": "execution_variant",
           "flags": [
             "--execution-variant"

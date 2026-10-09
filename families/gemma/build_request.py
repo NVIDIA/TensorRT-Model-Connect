@@ -35,11 +35,11 @@ class BuildRequest:
     max_batch_size: ClassVar[int] = 1
     tensor_parallel_size: int = 1
     context_parallel_size: ClassVar[int] = 1
-    quantization: ClassVar[str | None] = None
     fp32_layers: ClassVar[tuple[int, ...]] = ()
     dynamic_kv_cache: ClassVar[bool] = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
+    quantization: str | None = None
 
     def __post_init__(self) -> None:
         if not self.precision:
@@ -80,14 +80,11 @@ def coerce_request(request: object) -> BuildRequest:
         "video_num_frames": None,
         "max_batch_size": 1,
         "context_parallel_size": 1,
-        "quantization": None,
         "fp32_layers": (),
         "dynamic_kv_cache": False,
     }
     for name, default in unsupported.items():
         value = getattr(request, name, default)
-        if name == "quantization" and value == "none":
-            continue
         if value != default:
             raise NotImplementedError(f"gemma does not support {name}")
     names = {field.name for field in fields(BuildRequest)}
