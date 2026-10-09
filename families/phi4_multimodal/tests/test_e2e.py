@@ -369,11 +369,54 @@ def _assert_native_vision_health(features) -> None:
     assert np.any(values != 0)
 
 
-def test_native_vision_health_rejects_invalid_output() -> None:
+def test_native_vision_health_rejects_invalid_output(monkeypatch, tmp_path) -> None:
     _assert_native_vision_health(np.asarray([1.0], dtype=np.float32))
     for invalid in ([], [0.0], [np.nan]):
         with pytest.raises(AssertionError):
             _assert_native_vision_health(invalid)
+
+    # The same health check must consume actual Edge feature output, not text.
+    import struct
+    from PIL import Image
+    from families.phi4_multimodal.tests import vision_oracle
+
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("TRTMC_RUNTIME_ROOT", str(runtime))
+    bundle = tmp_path / "model.bundle"
+    marker = {"max_sequence_length": 8192, "artifacts": []}
+
+    def write_marker():
+        data = json.dumps(marker).encode()
+        header = json.dumps(
+            {"sections": {"edge_llm.json": {"offset": 0, "length": len(data)}}}
+        ).encode()
+        bundle.write_bytes(vision_oracle._BUNDLE_MAGIC + struct.pack("<Q", len(header)) + header + data)
+
+    calls = []
+
+    def run_features(argv, *, check, timeout):
+        assert check and timeout == 1800
+        assert argv[0] == str(
+            runtime / "families/phi4_multimodal/phi4_multimodal_edge_vision_features"
+        )
+        assert argv[3] == str(runtime / "libNvInfer_edgellm_plugin.so")
+        assert argv[5:8] == ["2", "3", "8192"]
+        assert Path(argv[4]).read_bytes() == bytes([255, 0, 0]) * 6
+        np.asarray([1.0, -2.0], dtype=np.float16).tofile(argv[8])
+        calls.append(argv)
+
+    monkeypatch.setattr(vision_oracle.subprocess, "run", run_features)
+    write_marker()
+    image = Image.new("RGB", (3, 2), (255, 0, 0))
+    features = vision_oracle.native_vision_features(bundle, image)
+    np.testing.assert_array_equal(features, [1.0, -2.0])
+    _assert_native_vision_health(features)
+    assert len(calls) == 1
+    marker["artifacts"] = ["edge_llm/engine/../outside"]
+    write_marker()
+    with pytest.raises(ValueError, match="Unsafe Edge artifact"):
+        vision_oracle.native_vision_features(bundle, image)
+    assert len(calls) == 1
 
 
 def test_canonical_vl_contract_aligns_an_embedded_single_word_answer() -> None:

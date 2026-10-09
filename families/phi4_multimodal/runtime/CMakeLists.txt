@@ -67,3 +67,5 @@ if(TRTMC_BUILD_TESTS)
   )
   set_tests_properties(test_phi4_multimodal_runtime_config_contract PROPERTIES LABELS cpu)
 endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/edge_llm/Adapter.cmake")
