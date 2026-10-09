@@ -817,6 +817,32 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Use the official NVIDIA source for the pinned CUDA base
+        run: |
+          set -euo pipefail
+          docker buildx version
+          python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          # Both registries serve the same immutable NVIDIA manifest. Keep the
+          # PR Dockerfile and test commands intact while avoiding Hub's shared
+          # anonymous pull quota on hosted runners. Only this exact pin matches.
+          reference = "nvidia/cuda:13.3.0-base-ubuntu24.04@sha256:bcf7d05f0b13b9bbb86d9a4cd039d331894b8f1145ad009d1af75023bcd1dc5c"
+          policy = Path(os.environ["RUNNER_TEMP"]) / "community-cpu-source-policy.json"
+          policy.write_text(json.dumps({
+              "rules": [{
+                  "action": "CONVERT",
+                  "selector": {"identifier": "docker-image://docker.io/" + reference, "matchType": "EXACT"},
+                  "updates": {"identifier": "docker-image://nvcr.io/" + reference},
+              }],
+          }) + "\n")
+          with Path(os.environ["GITHUB_ENV"]).open("a") as environment:
+              environment.write("DOCKER_BUILDKIT=1\n")
+              environment.write("EXPERIMENTAL_BUILDKIT_SOURCE_POLICY=" + str(policy) + "\n")
+          PY
+
       - name: Run hardened source-only units
         run: python3 -m tools.community_ci unit
 
