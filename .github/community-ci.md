@@ -149,8 +149,14 @@ selection or numerical passing criterion is reduced to fit this budget.
 Dependency images are optional caches, admitted through family-owned
 `families/<family>/ci/dependency-image.json` locks only after real qualification
 and cleanup have passed. Promotion of a published candidate into a lock remains
-manual. The trusted coordinator exports locks and recipe hashes from the chosen
-CI commit's Git objects, never from the PR tree. It compares the base Dockerfile,
+manual. Private registry coordinates instead belong in the protected
+`gpu-ci-dispatch` environment's `TRTMC_COMMUNITY_DEPENDENCY_CATALOG` JSON secret.
+Its shape is `schema_version: 1`, optional `registry_prefix`, and `families`,
+whose entries contain the existing qualified `lock` records. No private
+coordinates belong in public source, logs, or PR text. A malformed nonempty
+catalog fails before allocation; an absent catalog preserves the normal path.
+The trusted coordinator stamps its own CI commit and recipe hashes from Git
+objects, never from the PR tree or secret-provided hashes. It compares the base Dockerfile,
 base requirements, and family requirements with the actual PR source. A changed
 input uses the normal base image and ordinary family installation, so dependency
 update PRs can still be tested before a new image is published. Invalid lock
@@ -170,13 +176,35 @@ This preallocation selector uses authorized requested owners before the PR's
 execution plans are materialized. If a later plan defers an owner, its admitted
 host profile may be retained conservatively.
 
-Matching locks select private GHCR images by immutable digest. A read credential
+Matching locks select private GHCR images by immutable digest. The separate
+`TRTMC_COMMUNITY_REGISTRY_READ_TOKEN` secret and
+`TRTMC_COMMUNITY_REGISTRY_USERNAME` secret or variable provide read access.
+The normal GPU job has no package permission and never substitutes its public
+repository `GITHUB_TOKEN`. Do not grant the public repository access to the
+private package. A read credential
 is copied to the trusted VM only after its PR base image build; the coordinator
 pulls all selected cached images using a temporary Docker configuration and
 deletes both credential and configuration before any contributor container
 starts. No registry token or Docker socket enters those containers. Native
 builds, family installation, and every original E2E assertion still run. No lock
 or image is admitted merely because the producer's local mechanics tests pass.
+Public result provenance contains only public source and input hashes, including
+optional dependency helper, constraints, and resolved environment lock hashes.
+When present, these additional inputs must match the PR or require a cold install.
+Private registry access limits direct registry downloads. Authorized contributor
+containers can read their image files and have network access, so dependency
+layers must contain only public dependencies and build recipes, with no project
+source, model weights, or secrets.
+
+Maintainers can dispatch `task=dependency-image-access-check` with the existing
+`audit_family` and immutable `audit_digest` inputs. Its registry prefix comes
+only from the protected `TRTMC_COMMUNITY_REGISTRY` secret. The separate hosted
+job uses anonymous access and the public repository token with `packages: read`,
+without the private reader secret. Both must receive HTTP 401, 403, or 404 from
+the registry token exchange or manifest check. Timeouts, malformed responses,
+redirects, and server errors remain unknown and fail the diagnostic. The safe
+receipt records only family, digest and access statuses; it neither admits an
+image nor replaces the separate positive private-reader qualification.
 
 Maintainers can dispatch `task=dependency-image-audit` on a protected branch with
 `audit_family` and an immutable `audit_digest`. This mode uses only package read

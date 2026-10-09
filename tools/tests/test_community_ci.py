@@ -229,6 +229,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
         "${{ !cancelled() && (github.event_name == 'pull_request' || "
         "(github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' "
         "&& inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' "
+        "&& inputs.task != 'dependency-image-access-check' "
         "&& inputs.source_snapshot != '')) }}"
     )
     assert jobs["required"]["needs"] == [
@@ -887,10 +888,9 @@ def test_gpu_status_and_cleanup_fail_closed(
     # can leave a partial token even when it reports failure. The ready VM must
     # receive token cleanup on every exit; test failures must not replace it.
     trace = tmp_path / "auth-trace"
-    if registry_cache:
-        lock = tmp_path / "families/alpha/ci/dependency-image.json"
-        lock.parent.mkdir(parents=True)
-        lock.write_text("{}")  # Only catalog presence is relevant to this workflow harness.
+    catalog = tmp_path / "trtmc-gpu-host-profiles.json"
+    catalog.write_text(json.dumps({"families": {"alpha": {}} if registry_cache else {}}))
+    catalog.chmod(0o600)
     stubs = r"""
 sleep() { :; }
 timeout() { shift; "$@"; }
@@ -961,6 +961,7 @@ python3() {
             "CUDA_ARCHITECTURES": "89",
             "HF_TOKEN": "test-checkpoint-secret",
             "REGISTRY_TOKEN": "test-registry-secret",
+            "DEPENDENCY_IMAGES": str(registry_cache).lower(),
         },
         capture_output=True,
         text=True,
@@ -1280,13 +1281,18 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert "sleep" not in step["run"]
     gpu = executor["jobs"]["provision-and-test"]
     test = next(step for step in gpu["steps"] if step.get("id") == "test")
-    assert gpu["permissions"] == {"contents": "read", "packages": "read"}
-    assert test["env"]["REGISTRY_TOKEN"] == "${{ github.token }}"
+    assert gpu["permissions"] == {"contents": "read"}
+    assert test["env"]["REGISTRY_TOKEN"] == "${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}"
+    assert "github.token" not in json.dumps(test)
     assert test["env"]["HF_TOKEN"] == "${{ secrets.HF_TOKEN }}"
     assert """printf '%s' "$HF_TOKEN" > "$checkpoint_token" """.strip() in test["run"]
     assert "unset HF_TOKEN" in test["run"]
     assert "unset REGISTRY_TOKEN" in test["run"]
-    assert "--ci-sha '$CI_SHA'" in test["run"]
+    profile = next(step for step in gpu["steps"] if step.get("id") == "host_profile")
+    assert '--ci-sha "$GITHUB_SHA"' in profile["run"]
+    assert profile["env"]["PROTECTED_DEPENDENCY_CATALOG"] == (
+        "${{ secrets.TRTMC_COMMUNITY_DEPENDENCY_CATALOG }}"
+    )
     assert test["run"].index("sudo docker build") < test["run"].index(
         "printf '%s' \"$REGISTRY_TOKEN\""
     )
@@ -2054,8 +2060,13 @@ brev() {
     copy)
       test -z "${HF_TOKEN+x}" || return 98
       test "$(stat -c '%a' "$2")" = 600 || return 97
-      test "$(cat "$2")" = "$EXPECTED_TOKEN" || return 96
-      printf 'token-private\t%s\n' "${3%%:*}" >> "$TRACE"
+      if [[ "$3" == */dependency-catalog.json ]]; then
+        command python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["families"] == {}' "$2" || return 96
+        printf 'catalog-private\t%s\n' "${3%%:*}" >> "$TRACE"
+      else
+        test "$(cat "$2")" = "$EXPECTED_TOKEN" || return 96
+        printf 'token-private\t%s\n' "${3%%:*}" >> "$TRACE"
+      fi
       test "$COPY_FAILS" != true || return 9
       ;;
     exec)
@@ -2112,6 +2123,10 @@ class JobHarness:
         self.directory = tmp_path
         self.steps = {step.get("id", step["name"]): step for step in job["steps"]}
         self.trace = tmp_path / "trace"
+        catalog = tmp_path / "trtmc-gpu-host-profiles.json"
+        if not catalog.exists():
+            catalog.write_text('{"families":{}}')
+        catalog.chmod(0o600)
         self.environment = {
             **os.environ,
             "TRACE": str(self.trace),
@@ -2172,13 +2187,19 @@ class JobHarness:
 
 
 @pytest.mark.parametrize("profile", [64, 128, "invalid"])
-def test_trusted_host_selection_step_runs_before_any_allocation(tmp_path, gpu_job, profile):
+@pytest.mark.parametrize("protected", [False, True])
+def test_trusted_host_selection_step_runs_before_any_allocation(
+    tmp_path, gpu_job, profile, protected
+):
     """Execute the actual exporter/selector CLI against Git blobs, not the PR working lock."""
     from tools.tests.test_community_gpu_ci import _dependency_entry
 
     repository = tmp_path / "source"
     repository.mkdir()
     entry = _dependency_entry(repository, "alpha")
+    prefix = "ghcr.io/test-owner/private-dependencies"
+    if protected:
+        entry["lock"]["image"] = f"{prefix}/alpha@sha256:{'a' * 64}"
     entry["lock"]["resources"] = {"host_ram_gib": 64 if profile == 64 else 128}
     if profile != 64:
         entry["lock"]["qualification_host"] = {
@@ -2207,6 +2228,18 @@ def test_trusted_host_selection_step_runs_before_any_allocation(tmp_path, gpu_jo
         "trusted host inputs",
     )
     ci_sha = git("rev-parse", "HEAD")
+    secret = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "ci_sha": "ignored",
+                "registry_prefix": prefix,
+                "families": {"alpha": entry},
+            }
+        )
+        if protected
+        else ""
+    )
     lock.write_text('{"resources":{"host_ram_gib":256},"image":"attacker:latest"}')
     step = next(step for step in gpu_job["steps"] if step.get("id") == "host_profile")
     assert step.get("continue-on-error", False) is False
@@ -2228,14 +2261,24 @@ def test_trusted_host_selection_step_runs_before_any_allocation(tmp_path, gpu_jo
             "TRTMC_GPU_FAMILIES": '["alpha"]',
             "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
             "TRTMC_GPU_ADDED_FAMILIES": "[]",
+            "PROTECTED_DEPENDENCY_CATALOG": secret,
         },
         capture_output=True,
         text=True,
         timeout=10,
     )
+    assert secret == "" or secret not in result.stdout + result.stderr
+    assert not list(tmp_path.glob("trtmc-protected-dependency-catalog.*"))
+    if result.returncode == 0:
+        exported = tmp_path / "trtmc-gpu-host-profiles.json"
+        assert exported.stat().st_mode & 0o777 == 0o600
+        assert json.loads(exported.read_text())["ci_sha"] == ci_sha
     harness = JobHarness(tmp_path, gpu_job)
     if result.returncode == 0:
-        assert output.read_text().strip() == f"host_ram_gib={profile}"
+        assert output.read_text().splitlines() == [
+            f"host_ram_gib={profile}",
+            "dependency_images=true",
+        ]
         reserved = harness.run("reserve", HOST_RAM_GIB=str(profile))
         assert (
             reserved.returncode == 0
@@ -2245,6 +2288,31 @@ def test_trusted_host_selection_step_runs_before_any_allocation(tmp_path, gpu_jo
         assert result.returncode != 0 and not output.exists() and not harness.events("provision")
     else:
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_invalid_protected_catalog_stops_the_real_preallocation_step(tmp_path, gpu_job):
+    step = next(step for step in gpu_job["steps"] if step.get("id") == "host_profile")
+    output = tmp_path / "host-output"
+    secret = '{"schema_version":1,"registry_prefix":"credential-sensitive-prefix","families":{}}'
+    result = subprocess.run(
+        ["bash", "-c", step["run"]],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "GITHUB_WORKSPACE": str(REPO_ROOT),
+            "GITHUB_SHA": "a" * 40,
+            "GITHUB_OUTPUT": str(output),
+            "RUNNER_TEMP": str(tmp_path),
+            "PROTECTED_DEPENDENCY_CATALOG": secret,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0 and not output.exists()
+    assert "credential-sensitive-prefix" not in result.stdout + result.stderr
+    assert not list(tmp_path.glob("trtmc-protected-dependency-catalog.*"))
+    assert not (tmp_path / "trtmc-gpu-host-profiles.json").exists()
 
 
 def test_failed_blocking_reservation_stops_normal_test_admission(tmp_path, gpu_job):

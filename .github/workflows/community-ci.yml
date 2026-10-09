@@ -6,7 +6,7 @@ name: Community CI
 # Community CI GPU promotion v1
 
 run-name: >-
-  ${{ inputs.task == 'dependency-image-withdraw' && 'Community dependency image withdrawal' || inputs.task == 'dependency-image-audit' && 'Community dependency image metadata audit' || inputs.task == 'dependency-image' && 'Community GPU dependency image qualification' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
+  ${{ inputs.task == 'dependency-image-access-check' && 'Community dependency image access check' || inputs.task == 'dependency-image-withdraw' && 'Community dependency image withdrawal' || inputs.task == 'dependency-image-audit' && 'Community dependency image metadata audit' || inputs.task == 'dependency-image' && 'Community GPU dependency image qualification' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
 
 # Stable keeps the existing pull_request pipeline. Trusted metadata jobs pair
 # its immutable snapshot with the optional Dev execution of this same workflow.
@@ -24,7 +24,7 @@ on:
         required: false
         type: choice
         default: test
-        options: [test, dependency-image, dependency-image-audit, dependency-image-withdraw]
+        options: [test, dependency-image, dependency-image-audit, dependency-image-withdraw, dependency-image-access-check]
       audit_family:
         description: Project family package to inspect in audit mode
         required: false
@@ -183,6 +183,58 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  check-dependency-image-access:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image-access-check' }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: gpu-ci-dispatch
+      deployment: false
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Authorize a protected negative access check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = NVIDIA/TensorRT-Model-Connect
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          case "$GITHUB_REF" in refs/heads/main|refs/heads/ci/developer) ;; *) exit 1 ;; esac
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUEST_ACTOR/permission" --jq '.role_name // .permission')
+          case "$role" in admin|maintain) ;; *) exit 1 ;; esac
+      - name: Check out only the protected access check
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check anonymous and public repository token denial
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+          TRTMC_COMMUNITY_REGISTRY: ${{ secrets.TRTMC_COMMUNITY_REGISTRY }}
+          AUDIT_FAMILY: ${{ inputs.audit_family }}
+          AUDIT_DIGEST: ${{ inputs.audit_digest }}
+        run: |
+          set -euo pipefail
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUEST_ACTOR/permission" --jq '.role_name // .permission')
+          case "$role" in admin|maintain) ;; *) exit 1 ;; esac
+          python3 .github/scripts/community_dependency_image.py access-check \
+            --family "$AUDIT_FAMILY" --digest "$AUDIT_DIGEST" \
+            --output "$RUNNER_TEMP/dependency-image-access-check"
+      - name: Preserve the access denial evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-dependency-image-access-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dependency-image-access-check/dependency-image-access-check.json
+          if-no-files-found: ignore
+          retention-days: 7
+
   produce-dependency-image:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image' }}
     permissions:
@@ -199,7 +251,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request_target' ||
-       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.source_snapshot == ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.task != 'dependency-image-access-check' && inputs.source_snapshot == ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -514,7 +566,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request' ||
-       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.source_snapshot != ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.task != 'dependency-image-access-check' && inputs.source_snapshot != ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -746,7 +798,7 @@ jobs:
 
   required:
     name: Community CPU / Required
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.source_snapshot != '')) }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.task != 'dependency-image-access-check' && inputs.source_snapshot != '')) }}
     needs:
       - authorize
       - source-quality
@@ -1007,7 +1059,6 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
-      packages: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
       instance_name: ${{ steps.reserve.outputs.instance_name }}
@@ -1053,16 +1104,28 @@ jobs:
           TRTMC_GPU_FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
           TRTMC_GPU_DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
           TRTMC_GPU_ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
+          PROTECTED_DEPENDENCY_CATALOG: ${{ secrets.TRTMC_COMMUNITY_DEPENDENCY_CATALOG }}
         run: |
           set -euo pipefail
           catalog="$RUNNER_TEMP/trtmc-gpu-host-profiles.json"
+          protected_catalog=$(mktemp "$RUNNER_TEMP/trtmc-protected-dependency-catalog.XXXXXX")
+          trap 'rm -f "$protected_catalog"' EXIT
+          catalog_args=()
+          if [ -n "${PROTECTED_DEPENDENCY_CATALOG:-}" ]; then
+            printf '%s' "$PROTECTED_DEPENDENCY_CATALOG" > "$protected_catalog"
+            catalog_args+=(--protected-dependency-catalog "$protected_catalog")
+          fi
+          unset PROTECTED_DEPENDENCY_CATALOG
           python3 -m tools.community_gpu_ci \
             --export-dependency-catalog "$catalog" \
-            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA"
+            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA" "${catalog_args[@]}"
+          dependency_images=$(python3 -c \
+            'import json,sys; print("true" if json.load(open(sys.argv[1]))["families"] else "false")' "$catalog")
           ram="$(python3 -m tools.community_gpu_ci \
             --required-host-ram-gib --dependency-catalog "$catalog" \
             --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
           echo "host_ram_gib=$ram" >> "$GITHUB_OUTPUT"
+          echo "dependency_images=$dependency_images" >> "$GITHUB_OUTPUT"
 
       - name: Reserve a GPU instance
         id: reserve
@@ -1125,8 +1188,9 @@ jobs:
           CUDA_ARCHITECTURES: ${{ vars.TRTMC_COMMUNITY_CUDA_ARCHITECTURES || '89' }}
           CI_SHA: ${{ github.sha }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          REGISTRY_TOKEN: ${{ github.token }}
-          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
+          REGISTRY_USERNAME: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_USERNAME || vars.TRTMC_COMMUNITY_REGISTRY_USERNAME || 'github-actions' }}
+          DEPENDENCY_IMAGES: ${{ steps.host_profile.outputs.dependency_images }}
         run: |
           set -euo pipefail
           # Never place the token in remote command arguments or build context.
@@ -1138,7 +1202,7 @@ jobs:
               # Keep cleanup bounded if SSH fails. VM teardown remains the
               # fallback, including when a partial copy preceded a failure.
               if timeout 30s brev exec "$checkpoint_instance" \
-                "rm -f -- '$remote_auth/token' '$remote_auth/registry-token' && rmdir -- '$remote_auth'"; then
+                "rm -f -- '$remote_auth/token' '$remote_auth/registry-token' '$remote_auth/dependency-catalog.json' && rmdir -- '$remote_auth'"; then
                 checkpoint_instance=""
               else
                 echo "::warning::Could not remove the checkpoint token from $checkpoint_instance; VM teardown is still required." >&2
@@ -1230,11 +1294,11 @@ jobs:
           retry brev exec "$INSTANCE_NAME" "install -d -m 0700 $remote_auth" || exit 1
           checkpoint_instance="$INSTANCE_NAME"
           retry brev copy "$checkpoint_token" "$INSTANCE_NAME:$remote_auth/token" || exit 1
-          # Owner locks and recipes come from the protected CI commit, while
-          # dependency input hashes are checked against the PR source.
-          dependency_catalog="/tmp/trtmc-community-dependency-catalog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-          retry brev exec "$INSTANCE_NAME" "/tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --export-dependency-catalog '$dependency_catalog' --repository /tmp/model_connect --ci-sha '$CI_SHA'" || exit 1
-          if compgen -G 'families/*/ci/dependency-image.json' > /dev/null; then
+          # The hosted trusted step stamps protected owner locks and recipes.
+          # Keep private registry coordinates outside source and all mounts.
+          dependency_catalog="$remote_auth/dependency-catalog.json"
+          retry brev copy "$RUNNER_TEMP/trtmc-gpu-host-profiles.json" "$INSTANCE_NAME:$dependency_catalog" || exit 1
+          if [ "${DEPENDENCY_IMAGES:-false}" = true ] && [ -n "${REGISTRY_TOKEN:-}" ]; then
             # Introduce the read credential only after the PR base image was
             # built. The trusted host deletes it before any model container.
             printf '%s' "$REGISTRY_TOKEN" > "$registry_token"

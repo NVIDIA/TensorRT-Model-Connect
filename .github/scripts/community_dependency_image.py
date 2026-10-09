@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -301,6 +302,82 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def check_registry_access(family: str, digest: str, prefix: str, token: str, username: str) -> dict:
+    """Require anonymous and public-repository credentials to be denied, without admission."""
+    family = validated_family(family)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise RuntimeError("Access checking requires an immutable digest")
+    if not re.fullmatch(
+        r"ghcr\.io/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*", prefix
+    ):
+        raise RuntimeError("Access checking requires a protected GHCR registry prefix")
+    if not token:
+        raise RuntimeError("The public repository token is unavailable")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?", username):
+        raise RuntimeError("The public workflow registry username is unavailable")
+    path = f"{prefix.removeprefix('ghcr.io/')}/{family}"
+    token_url = "https://ghcr.io/token?" + urllib.parse.urlencode(
+        {"service": "ghcr.io", "scope": f"repository:{path}:pull"}
+    )
+    manifest_url = f"https://ghcr.io/v2/{path}/manifests/{digest}"
+
+    def request(url, headers, *, method="GET"):
+        try:
+            req = urllib.request.Request(url, headers=headers, method=method)
+            with urllib.request.build_opener(NoRedirect()).open(req, timeout=15) as response:
+                body = response.read(65537) if method == "GET" else b""
+                if len(body) > 65536:
+                    return 0, None
+                return response.status, body
+        except urllib.error.HTTPError as error:
+            return error.code, None
+        except (OSError, ValueError):
+            return 0, None
+
+    def probe(credential):
+        headers = {}
+        if credential:
+            encoded = base64.b64encode(f"{username}:{credential}".encode()).decode()
+            headers["Authorization"] = f"Basic {encoded}"
+        status, body = request(token_url, headers)
+        if status == 200:
+            try:
+                value = json.loads(body)
+                bearer = value.get("token", value.get("access_token"))
+                if not isinstance(bearer, str) or not bearer or len(bearer) > 16384:
+                    raise ValueError("invalid registry token")
+            except (ValueError, TypeError, AttributeError, RecursionError):
+                return {"status": "unknown", "http_status": 200}
+            status, _ = request(
+                manifest_url,
+                {
+                    "Authorization": f"Bearer {bearer}",
+                    "Accept": "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json",
+                },
+                method="HEAD",
+            )
+        return {
+            "status": "denied"
+            if status in {401, 403, 404}
+            else "accessible"
+            if 200 <= status < 300
+            else "unknown",
+            "http_status": status or None,
+        }
+
+    receipt = {
+        "schema_version": 1,
+        "family": family,
+        "digest": digest,
+        "anonymous": probe(None),
+        "public_repository_token": probe(token),
+    }
+    receipt["denied"] = all(
+        receipt[actor]["status"] == "denied" for actor in ("anonymous", "public_repository_token")
+    )
+    return receipt
+
+
 def require_private_package(reference: str, token: str) -> None:
     package = reference.removeprefix("ghcr.io/nvidia/").split(":", 1)[0]
     request = urllib.request.Request(
@@ -471,7 +548,7 @@ def publish(output: Path, registry: str, username: str, token_file: Path, *, fam
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("build", "qualify", "publish", "audit"))
+    parser.add_argument("phase", choices=("build", "qualify", "publish", "audit", "access-check"))
     parser.add_argument("--family", type=validated_family, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repository", type=Path)
@@ -481,7 +558,21 @@ def main() -> None:
     parser.add_argument("--username")
     parser.add_argument("--digest")
     args = parser.parse_args()
-    if args.phase == "audit":
+    if args.phase == "access-check":
+        if args.digest is None:
+            parser.error("Access checking requires an immutable digest")
+        record = check_registry_access(
+            args.family,
+            args.digest,
+            os.environ.get("TRTMC_COMMUNITY_REGISTRY", ""),
+            os.environ.get("GH_TOKEN", ""),
+            os.environ.get("GITHUB_ACTOR", ""),
+        )
+        save(args.output / "dependency-image-access-check.json", record)
+        print(json.dumps(record, sort_keys=True), flush=True)
+        if not record["denied"]:
+            raise RuntimeError("Private registry denial was not established; no admission")
+    elif args.phase == "audit":
         if args.digest is None:
             parser.error("Package audit requires an immutable digest")
         record = audit_package(args.family, args.digest, os.environ.get("GH_TOKEN", ""))
