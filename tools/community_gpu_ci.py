@@ -42,6 +42,18 @@ MAX_EXECUTION_SECONDS = 10800
 SUMMARY_PREFIX = "TRTMC_GPU_SUMMARY="
 MAX_DEPENDENCY_CATALOG_BYTES = 1024 * 1024
 DEPENDENCY_REGISTRY = "ghcr.io/nvidia/tensorrt-model-connect-community"
+FAMILY_PREPARATION_SECONDS = 7200
+
+
+def _image_preparation():
+    """Load the sibling staged from the same trusted CI commit, never from the PR."""
+    path = Path(__file__).resolve().with_name("community_gpu_images.py")
+    spec = importlib.util.spec_from_file_location("trtmc_community_image_preparation", path)
+    if spec is None or spec.loader is None:
+        raise CommunityGpuError("Trusted image preparation module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def execution_budget_seconds(env: dict[str, str]) -> int:
@@ -53,7 +65,9 @@ def execution_budget_seconds(env: dict[str, str]) -> int:
         env.get("TRTMC_GPU_ADDED_FAMILIES", ""),
     )
     return min(
-        MAX_EXECUTION_SECONDS, len(families) * (STAGING_TIMEOUT_SECONDS + FAMILY_TIMEOUT_SECONDS)
+        MAX_EXECUTION_SECONDS,
+        len(families)
+        * (FAMILY_PREPARATION_SECONDS + STAGING_TIMEOUT_SECONDS + FAMILY_TIMEOUT_SECONDS),
     )
 
 
@@ -412,7 +426,16 @@ def run(repository: Path, env: dict[str, str], family: str) -> None:
 def prepare_family_impact(repository: Path, plan: FamilyPlan) -> None:
     """Reserve one generated input for the existing repository CI entrypoint."""
     tracked = subprocess.run(
-        ["git", "-C", str(repository), "ls-files", "--error-unmatch", "impact.json"],
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+            "ls-files",
+            "--error-unmatch",
+            "impact.json",
+        ],
         check=False,
         capture_output=True,
         timeout=30,
@@ -777,6 +800,14 @@ def export_dependency_catalog(
         _validate_dependency_catalog(source)
         if "registry_prefix" in source:
             catalog["registry_prefix"] = source["registry_prefix"]
+        if "base" in source:
+            preparation = _image_preparation()
+            expected = {
+                path: hashlib.sha256(blob(path)).hexdigest() for path in preparation.BASE_INPUTS
+            }
+            catalog["base"] = preparation.validate_base(
+                source["base"], _dependency_registry(catalog), expected
+            )
         for family, entry in source["families"].items():
             if not isinstance(entry, dict) or not isinstance(entry.get("lock"), dict):
                 raise CommunityGpuError("Invalid protected dependency entry")
@@ -846,6 +877,8 @@ def _validate_dependency_catalog(catalog: dict) -> None:
     if not all(isinstance(name, str) and FAMILY_PATTERN.fullmatch(name) for name in families):
         raise CommunityGpuError("Invalid dependency catalog family")
     _dependency_registry(catalog)
+    if "base" in catalog:
+        _image_preparation().validate_base(catalog["base"], _dependency_registry(catalog))
 
 
 def _dependency_catalog(path: Path) -> dict:
@@ -1124,7 +1157,12 @@ def run_containers(
             plans[family] = plan
         active = SHARED_SMOKE_FAMILIES
     started = time.monotonic()
-    deadline = started + execution_budget_seconds(env)
+    # Budget the effective plan, including the existing baseline fallback.
+    deadline = started + min(
+        MAX_EXECUTION_SECONDS,
+        len(active)
+        * (FAMILY_PREPARATION_SECONDS + STAGING_TIMEOUT_SECONDS + FAMILY_TIMEOUT_SECONDS),
+    )
     records = {
         family: {
             "family": family,
@@ -1148,9 +1186,22 @@ def run_containers(
     image_id = inspected.stdout.strip()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise CommunityGpuError("Docker did not resolve an immutable GPU image ID")
-    dependency_images, dependency_errors, dependency_misses = _dependency_image_ids(
-        repository, active, dependency_catalog, registry_token_file, registry_username, deadline
+    shared_base = (
+        _dependency_catalog(dependency_catalog).get("base")
+        if dependency_catalog is not None
+        else None
     )
+    if shared_base is not None:
+        # The workflow has pulled and verified the common base once. Family
+        # declarations are materialized only as their turn is reached below.
+        dependency_images, dependency_errors, dependency_misses = {}, {}, {}
+        if registry_token_file is not None:
+            registry_token_file.unlink(missing_ok=True)
+    else:
+        dependency_images, dependency_errors, dependency_misses = _dependency_image_ids(
+            repository, active, dependency_catalog, registry_token_file, registry_username, deadline
+        )
+    preparation = _image_preparation()
     runner = Path(__file__).resolve()
     run_id = uuid.uuid4().hex
     failures = []
@@ -1172,7 +1223,7 @@ def run_containers(
                 records[family].update(
                     status="failed",
                     phase="dependencies",
-                    failure_class="dependency",
+                    failure_class="infra_failure",
                     exit_code=1,
                     evidence=dependency_errors[family],
                 )
@@ -1184,11 +1235,33 @@ def run_containers(
                 failures.append("coordinator budget exhausted; remaining families were not run")
                 for row in records.values():
                     if row["status"] == "not_run":
-                        row.update(failure_class="budget", evidence="coordinator deadline reached")
+                        row.update(
+                            failure_class="infra_failure", evidence="coordinator deadline reached"
+                        )
                 break
+            row = records[family]
+            row.update(
+                status="running",
+                phase="environment",
+                failure_class="infra_failure",
+                entrypoint_started=False,
+            )
+            _summary(records, env, started)
+            try:
+                prepare_family_impact(repository, plans[family])
+                family_image = dependency_images.get(family)
+                if family_image is None:
+                    family_image = preparation.ensure_family_image(
+                        repository, family, image_id, deadline
+                    )
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                row.update(status="failed", exit_code=1, evidence=str(error)[-4000:])
+                failures.append(f"{family}: environment preparation failed")
+                _summary(records, env, started)
+                continue
             name = f"trtmc-community-{run_id}-{family}"
             row = records[family]
-            row.update(status="running", phase="checkpoints", failure_class="dependency")
+            row.update(status="running", phase="checkpoints", failure_class="infra_failure")
             _summary(records, env, started)
             with tempfile.TemporaryDirectory(prefix=f"{name}-") as cache:
                 stage_command = [
@@ -1225,7 +1298,7 @@ def run_containers(
                 except subprocess.TimeoutExpired:
                     row.update(
                         status="failed",
-                        failure_class="budget",
+                        failure_class="infra_failure",
                         exit_code=124,
                         evidence="checkpoint staging deadline reached",
                     )
@@ -1276,13 +1349,13 @@ def run_containers(
                     "TRTMC_GPU_RESULT_FILE=/tmp/trtmc-community-huggingface/result.json",
                     "--env",
                     f"CMAKE_CUDA_ARCHITECTURES={env.get('CMAKE_CUDA_ARCHITECTURES', '89')}",
-                    dependency_images.get(family, image_id),
+                    family_image,
                     "python3.12",
                     "/opt/community_gpu_ci.py",
                     "--family",
                     family,
                 ]
-                row.update(phase="container", failure_class="unknown")
+                row.update(phase="container", failure_class="infra_failure")
                 _summary(records, env, started)
                 print(f"Starting isolated Community GPU container: {family}", flush=True)
                 try:
@@ -1332,7 +1405,6 @@ def run_containers(
                     )
                     row.update(
                         status="failed",
-                        failure_class="budget",
                         exit_code=124,
                         evidence="family or coordinator deadline reached",
                     )
@@ -1351,19 +1423,22 @@ def run_containers(
                         records[family].update(
                             status="failed",
                             phase="cleanup",
-                            failure_class="infrastructure",
+                            failure_class="infra_failure",
                             evidence="container removal could not be confirmed",
                         )
                         raise CommunityGpuError(
                             f"Cannot remove Community GPU container {name}: {cleanup.stderr.strip()}"
                         )
-                    records[family]["dependency_image_id"] = dependency_images.get(family, image_id)
+                    records[family]["dependency_image_id"] = family_image
+                    records[family]["base_image_id"] = image_id
                     records[family]["dependency_cache"] = (
                         "input_mismatch"
                         if family in dependency_misses
                         else "qualified"
                         if family in dependency_images
-                        else "unlisted"
+                        else "prepared"
+                        if family_image != image_id
+                        else "base"
                     )
                     if family in dependency_images:
                         records[family]["dependency_provenance"] = _dependency_provenance(
@@ -1607,7 +1682,7 @@ def main() -> int:
             _stage_checkpoints((plan,), args.cache_dir)
         else:
             run(args.repository, dict(os.environ), args.family)
-    except (CommunityGpuError, OSError, ValueError, subprocess.SubprocessError) as error:
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"ERROR: {error}", file=sys.stderr, flush=True)
         return 1
     return 0

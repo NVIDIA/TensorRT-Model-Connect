@@ -354,12 +354,12 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
     """Build only one selected family's declared layer on the already pulled common base."""
     if not IMAGE_ID.fullmatch(base_image_id):
         raise ImagePreparationError("Family preparation requires an immutable local base ID")
-    base = inspect(base_image_id)
-    if base["Id"] != base_image_id:
-        raise ImagePreparationError("Local shared base identity changed")
     files = _family_inputs(repository, family)
     if not files:
         return base_image_id
+    base = inspect(base_image_id)
+    if base["Id"] != base_image_id:
+        raise ImagePreparationError("Local shared base identity changed")
     key = hashlib.sha256(
         json.dumps(
             {
@@ -406,7 +406,15 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
         # The existing public family recipe consumes the public provenance file.
         # It contains no private image reference, token or OCI source override.
         revision = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository}",
+                "-C",
+                str(repository),
+                "rev-parse",
+                "HEAD",
+            ],
             check=True,
             text=True,
             capture_output=True,
