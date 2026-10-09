@@ -32,7 +32,7 @@ function(_edgellm_check_trt_selection include_dir library)
 endfunction()
 option(TRTMC_EDGELLM_ALL_KERNELS "Build all pinned Edge operator groups supported by the native GPU" OFF)
 option(TRTMC_EDGELLM_ONNX "Install the pinned ONNX exporter and native engine builder" OFF)
-set(_edge_cute_groups "fmha|gdn")
+set(_edge_cute_groups "fmha;gdn")
 set(_edge_cute_cli_groups "fmha,gdn")
 if(TRTMC_EDGELLM_ALL_KERNELS)
   set(_edge_cute_groups ALL)
@@ -44,8 +44,8 @@ if(TRTMC_EDGELLM_ONNX)
   list(APPEND _edge_build_targets llm_build)
   list(APPEND _edge_onnx_byproducts "${CMAKE_BINARY_DIR}/_deps/edgellm/install/bin/edgellm-onnx-build")
 endif()
-set(_edge_version "0.10.1")
-set(_edge_revision "e8b29522938901f6df19ebeedd4b69bc8edbcd97")
+set(_edge_version "0.11.0")
+set(_edge_revision "95515c2f87fba8982db5a519f9022277667b3cc9")
 set(_edge_root "${CMAKE_BINARY_DIR}/_deps/edgellm")
 set(_edge_prefix "${_edge_root}/install")
 set(TRTMC_EDGELLM_CUDA_ARCHITECTURE "${CMAKE_CUDA_ARCHITECTURES}" CACHE STRING "One local GPU architecture for Edge-LLM")
@@ -71,10 +71,13 @@ set(CMAKE_IGNORE_PATH "${_edge_saved_ignore_path}")
 function(_edgellm_install_plugin)
   # Preserve the complete SONAME chain when lib and lib64 differ. Install-time
   # expansion also honors cmake --install --prefix and DESTDIR.
-  install(CODE "file(INSTALL
-    DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\"
-    TYPE SHARED_LIBRARY FOLLOW_SYMLINK_CHAIN
-    FILES \"$<TARGET_FILE:EdgeLLM::Plugin>\")" COMPONENT EdgeLLM)
+  # Conan wheels install only sdk. Keep the dependency-only component too.
+  foreach(_component IN ITEMS sdk EdgeLLM)
+    install(CODE "file(INSTALL
+      DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\"
+      TYPE SHARED_LIBRARY FOLLOW_SYMLINK_CHAIN
+      FILES \"$<TARGET_FILE:EdgeLLM::Plugin>\")" COMPONENT "${_component}")
+  endforeach()
 endfunction()
 function(_edgellm_check_external_artifacts)
   foreach(_tool IN ITEMS EdgeLLM_PYTHON_EXECUTABLE EdgeLLM_BUILDER_LAUNCHER)
@@ -88,9 +91,11 @@ function(_edgellm_check_external_artifacts)
       message(FATAL_ERROR "External EdgeLLM package is incomplete: ${_target} missing at ${_artifact}")
     endif()
   endforeach()
-  if(NOT EXISTS "${EdgeLLM_PREFIX}/lib/libcutedsl.a" OR IS_DIRECTORY "${EdgeLLM_PREFIX}/lib/libcutedsl.a")
-    message(FATAL_ERROR "External EdgeLLM package is incomplete: missing libcutedsl.a")
-  endif()
+  foreach(_archive IN ITEMS libcutedsl.a libedgellmChatTemplate.a libxgrammarCore.a)
+    if(NOT EXISTS "${EdgeLLM_PREFIX}/lib/${_archive}" OR IS_DIRECTORY "${EdgeLLM_PREFIX}/lib/${_archive}")
+      message(FATAL_ERROR "External EdgeLLM package is incomplete: missing ${_archive}")
+    endif()
+  endforeach()
 endfunction()
 
 if(EdgeLLM_FOUND AND NOT EdgeLLM_PREFIX STREQUAL _edge_prefix)
@@ -164,23 +169,15 @@ ExternalProject_Add(trtmc_edgellm_dependency
   PREFIX "${_edge_root}/ep" SOURCE_DIR "${_edge_source}" BINARY_DIR "${_edge_build}"
   GIT_REPOSITORY "${_edge_repository}" GIT_TAG "${_edge_revision}"
   GIT_SUBMODULES_RECURSE TRUE UPDATE_DISCONNECTED TRUE
-  LIST_SEPARATOR |
   # Preparation installs tools; it does not patch upstream sources. Keep it in
   # the configure step so template changes invalidate disconnected builds too.
   CONFIGURE_COMMAND "${CMAKE_COMMAND}" -P "${_edge_root}/Prepare.cmake"
-    COMMAND "${_edge_prefix}/libexec/trtmc-edge-llm/bin/cmake"
-    -S <SOURCE_DIR> -B <BINARY_DIR> -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-    "-DCMAKE_CUDA_COMPILER=${CMAKE_CUDA_COMPILER}"
-    "-DCMAKE_CUDA_ARCHITECTURES=${TRTMC_EDGELLM_CUDA_ARCHITECTURE}"
-    "-DCUDA_DIR=${CUDAToolkit_LIBRARY_ROOT}" "-DCUDAToolkit_ROOT=${CUDAToolkit_LIBRARY_ROOT}"
-    "-DCUDA_CTK_VERSION=${CUDAToolkit_VERSION_MAJOR}.${CUDAToolkit_VERSION_MINOR}"
-    "-DTRT_PACKAGE_DIR=${TRTMC_EDGELLM_TRT_ROOT}" "-DPython3_EXECUTABLE=${_edge_python}"
-    -DEDGELLM_WHEEL_PAYLOAD_DIR=unused "-DENABLE_CUTE_DSL=${_edge_cute_groups}"
-    "-DCUTE_DSL_ARTIFACT_TAG=sm_${TRTMC_EDGELLM_CUDA_ARCHITECTURE}"
   BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --target ${_edge_build_targets}
     --parallel "${TRTMC_EDGELLM_JOBS}"
   INSTALL_COMMAND "${CMAKE_COMMAND}" -P "${_edge_root}/Install.cmake"
   BUILD_BYPRODUCTS "${_edge_prefix}/lib/libedgellmCore.a"
+    "${_edge_prefix}/lib/libedgellmChatTemplate.a"
+    "${_edge_prefix}/lib/libxgrammarCore.a"
     "${_edge_prefix}/lib/libNvInfer_edgellm_plugin.so"
     "${_edge_prefix}/lib/libcutedsl.a" ${_edge_onnx_byproducts}
   LOG_DOWNLOAD ON LOG_CONFIGURE ON LOG_BUILD ON LOG_INSTALL ON LOG_OUTPUT_ON_FAILURE ON)

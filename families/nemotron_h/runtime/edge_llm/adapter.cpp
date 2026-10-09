@@ -204,7 +204,7 @@ drafting_config(const nlohmann::json& marker) {
 trt_edgellm::rt::ModelArtifacts
 runtime_artifacts(const Artifacts& files, const nlohmann::json& marker, cudaStream_t stream) {
     auto artifacts = trt_edgellm::rt::ModelArtifacts::loadFromEngineDir(
-        files.engine(), drafting_config(marker), files.checkpoint(), "", stream);
+        files.engine(), drafting_config(marker), files.checkpoint(), "", false, stream);
     artifacts.tokenizer = load_tokenizer(files.tokenizer(),
                                          marker.at("native_eos_token_ids").get<std::vector<int>>());
     artifacts.deployment.base.eosTokenIds =
