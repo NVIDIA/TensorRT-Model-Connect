@@ -38,6 +38,7 @@ class BuildRequest:
     quantization: ClassVar[str | None] = None
     fp32_layers: ClassVar[tuple[int, ...]] = ()
     dynamic_kv_cache: ClassVar[bool] = False
+    mtp_seq_len: ClassVar[int | None] = None
     verbose: bool = False
     graph_transform: GraphTransform | None = None
 
@@ -83,6 +84,7 @@ def coerce_request(request: object) -> BuildRequest:
         "quantization": None,
         "fp32_layers": (),
         "dynamic_kv_cache": False,
+        "mtp_seq_len": None,
     }
     for name, default in unsupported.items():
         value = getattr(request, name, default)

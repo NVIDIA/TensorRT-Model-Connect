@@ -870,8 +870,6 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one BERT bundle without shared model orchestration."""
-    if request.mtp_seq_len is not None:
-        raise NotImplementedError("BERT does not support MTP speculative decoding")
     request = coerce_request(request)
 
     if request.task not in {"encoding", "embedding", "reranking"}:
