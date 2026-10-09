@@ -237,6 +237,7 @@ def test_build_writes_the_exact_native_kv_bundle(monkeypatch, tmp_path: Path) ->
         context_parallel_size=1,
         quantization=None,
         fp32_layers=(),
+        mtp_seq_len=None,
         verbose=False,
     )
     model.build(request, writer)

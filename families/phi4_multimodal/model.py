@@ -301,6 +301,8 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Phi-4 Multimodal vision-language bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Phi-4 Multimodal does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("phi4_multimodal does not support dynamic_kv_cache")
 

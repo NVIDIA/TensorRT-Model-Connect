@@ -336,6 +336,8 @@ def _compile_ltx_vae_decoder_engine(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one LTX-Video image-generation bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("LTX-Video does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("ltx_video does not support dynamic_kv_cache")
 

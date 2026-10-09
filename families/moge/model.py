@@ -1415,6 +1415,8 @@ def build_moge_engine(
 
 def build(request, writer) -> None:
     """Build one native MoGe-2 bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("MoGe does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("moge does not support dynamic_kv_cache")
 

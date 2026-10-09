@@ -166,6 +166,7 @@ def test_plain_build_publishes_abstract_classification_bundle(
         model_dir=tmp_path,
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         family="timm_repvgg",
         task="classification",
         precision="fp16",

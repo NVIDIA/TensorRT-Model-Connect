@@ -74,6 +74,7 @@ def test_build_marks_both_decoder_plans_as_one_active_split_build(monkeypatch, t
     request = SimpleNamespace(
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         image_height=None,
         image_width=None,
         video_num_frames=None,
@@ -157,6 +158,7 @@ def test_build_streams_tp_rank_plans_and_builds_vision_once(
     request = SimpleNamespace(
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         image_height=None,
         image_width=None,
         video_num_frames=None,

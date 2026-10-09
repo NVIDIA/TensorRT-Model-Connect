@@ -465,6 +465,7 @@ def test_reranking_bundle_uses_checkpoint_pooling(monkeypatch, tmp_path: Path) -
             model_dir=tmp_path,
             backend="trt",
             dynamic_kv_cache=False,
+            mtp_seq_len=None,
             image_height=None,
             image_width=None,
             video_num_frames=None,

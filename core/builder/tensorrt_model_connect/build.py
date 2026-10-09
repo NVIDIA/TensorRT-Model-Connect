@@ -47,6 +47,12 @@ class BuildRequest:
     dynamic_kv_cache: bool = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
+    # qwen3_8-specific: number of tokens the MTP head drafts per
+    # speculative-decode round (seq_len = mtp_seq_len, i.e. 1 real token +
+    # (mtp_seq_len-1) drafts). None -> family default. Follows the same
+    # family-specific-knob-on-the-shared-request precedent as fp32_layers;
+    # not yet wired to any CLI flag, same as fp32_layers.
+    mtp_seq_len: int | None = None
 
     def __post_init__(self) -> None:
         if not self.precision:
@@ -75,6 +81,8 @@ class BuildRequest:
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
             raise ValueError("graph_transform must be callable when provided")
+        if self.mtp_seq_len is not None and self.mtp_seq_len < 2:
+            raise ValueError("mtp_seq_len must be >= 2 when provided")
 
 
 def subprocess_environment(

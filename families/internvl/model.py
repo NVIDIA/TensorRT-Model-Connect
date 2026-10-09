@@ -396,6 +396,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     from .build_request import coerce_request
 
     request = coerce_request(request)
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("InternVL does not support MTP speculative decoding")
     from .edge_llm.dispatch import build as dispatch_build
 
     def _build_native(request: "BuildRequest", writer: "BundleWriter") -> None:

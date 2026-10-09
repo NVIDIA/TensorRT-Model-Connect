@@ -746,6 +746,8 @@ _RUNTIME_FIELDS = (
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one SAM3 text-prompted segmentation bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("SAM3 does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("sam3 does not support dynamic_kv_cache")
 

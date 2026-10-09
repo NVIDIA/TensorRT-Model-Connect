@@ -1029,6 +1029,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if request.task != "text_generation":
             raise ValueError("nemotron_h supports only task=text_generation")
 
+        if request.mtp_seq_len is not None:
+            raise NotImplementedError("Nemotron-H does not support MTP speculative decoding")
+
         model_dir = Path(request.model_dir)
         config = ModelConfig.from_dir(model_dir)
         if str(config.model_type).lower() not in {"nemotron_h", "nemotron_hybrid"}:

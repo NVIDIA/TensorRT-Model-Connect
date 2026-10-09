@@ -412,6 +412,8 @@ def _serialize_preprocessor_weights(dit_weights: WeightDict) -> bytes:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Z-Image image-generation bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Z-Image does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("z_image does not support dynamic_kv_cache")
 

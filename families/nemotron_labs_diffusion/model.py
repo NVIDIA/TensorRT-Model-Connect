@@ -231,6 +231,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Nemotron Labs Diffusion has no family-owned quantized build")
     if request.fp32_layers:
         raise NotImplementedError("Nemotron Labs Diffusion does not expose mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Nemotron Labs Diffusion does not support MTP speculative decoding")
     model = _NemotronLabsDiffusionModel()
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config, precision=precision)

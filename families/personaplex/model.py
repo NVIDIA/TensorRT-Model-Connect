@@ -1382,6 +1382,8 @@ def _build_mimi_decoder_engine(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one PersonaPlex speech-to-speech bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("PersonaPlex does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("personaplex does not support dynamic_kv_cache")
 

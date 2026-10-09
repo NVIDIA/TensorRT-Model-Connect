@@ -73,6 +73,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: Qwen38Model, **
         "precision",
         "layer_types",
         "decoder_engine_layout",
+        "has_mtp",
+        "mtp_num_draft_tokens",
     }
     missing = fields - runtime.keys()
     if missing:
@@ -164,8 +166,40 @@ def build(request, writer) -> None:
         debug_layer_outputs=False,
     )
 
+    has_mtp = "mtp_layer.fc" in weights
+    mtp_plan = None
+    draft_chain_plan = None
+    multi_token_plan = None
+    # mtp_seq_len = 1 real token + (mtp_seq_len-1) drafted tokens verified
+    # per speculative-decode round. Default of 2 (1 draft) matches the
+    # only configuration validated end-to-end on real hardware so far;
+    # larger values draft more tokens per round via build_mtp_draft_chain_engine's
+    # in-graph self-chaining (see that function's docstring) at the cost of
+    # a more expensive recovery path on any non-full-accept round (see
+    # Qwen38MtpScheduler's class-level comment in mtp_scheduler.h).
+    mtp_seq_len = int(request.mtp_seq_len) if request.mtp_seq_len is not None else 2
+    if has_mtp:
+        mtp_plan = model.build_mtp_engine(
+            config, weights, max_sequence_length,
+            precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
+        )
+        draft_chain_plan = model.build_mtp_draft_chain_engine(
+            config, weights, max_sequence_length, mtp_seq_len - 1,
+            precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
+        )
+        multi_token_plan = model.build_engine_multi_token(
+            config, weights, max_sequence_length, mtp_seq_len,
+            precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
+        )
+
     writer.set_header(family="qwen3_8", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
+    if mtp_plan is not None:
+        writer.add_bytes("mtp_engine.plan", mtp_plan)
+    if draft_chain_plan is not None:
+        writer.add_bytes("mtp_draft_chain_engine.plan", draft_chain_plan)
+    if multi_token_plan is not None:
+        writer.add_bytes("multi_token_engine.plan", multi_token_plan)
     writer.add_json(
         "runtime.json",
         _runtime_config(
@@ -175,6 +209,8 @@ def build(request, writer) -> None:
             precision=precision,
             max_cache_length=max_sequence_length,
             decoder_engine_layout="single",
+            has_mtp=has_mtp,
+            mtp_num_draft_tokens=(mtp_seq_len - 1) if has_mtp else 0,
         ),
     )
     for filename in _BUNDLE_FILES:

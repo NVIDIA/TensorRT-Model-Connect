@@ -1462,6 +1462,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Nemotron Speech Streaming does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("Nemotron Speech Streaming does not support fp32_layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Nemotron Speech Streaming does not support MTP speculative decoding")
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)

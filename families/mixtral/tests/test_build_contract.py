@@ -71,6 +71,7 @@ def test_active_case_routes_fp32_layers_to_builder(monkeypatch, tmp_path) -> Non
         model_dir=tmp_path,
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         image_height=None,
         image_width=None,
         video_num_frames=None,

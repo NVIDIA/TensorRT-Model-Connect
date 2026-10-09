@@ -514,6 +514,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("yolov5 does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("yolov5 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("yolov5 does not support MTP speculative decoding")
     _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model_dir = Path(request.model_dir)
     checkpoint = Checkpoint.open(model_dir)

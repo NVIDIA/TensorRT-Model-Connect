@@ -238,6 +238,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Nemotron VoiceChat does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("Nemotron VoiceChat does not support fp32_layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Nemotron VoiceChat does not support MTP speculative decoding")
 
     model_path = Path(request.model_dir)
     precision = request.precision

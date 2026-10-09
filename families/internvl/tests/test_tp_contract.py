@@ -99,6 +99,7 @@ def test_build_emits_one_dual_profile_plan_per_rank(monkeypatch, tmp_path) -> No
         model_dir=tmp_path,
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         image_height=None,
         image_width=None,
         video_num_frames=None,

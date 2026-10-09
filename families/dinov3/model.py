@@ -682,6 +682,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("DINOv3 does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("DINOv3 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("DINOv3 does not support MTP speculative decoding")
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("DINOv3 does not support tensor parallelism")
     model = _Dinov3Model()

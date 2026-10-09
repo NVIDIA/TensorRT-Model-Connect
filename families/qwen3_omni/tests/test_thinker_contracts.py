@@ -62,6 +62,7 @@ def test_build_writes_only_the_thinker_text_bundle(monkeypatch, tmp_path) -> Non
         model_dir=tmp_path,
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         task="text_generation",
         precision="bf16",
         max_sequence_length=256,

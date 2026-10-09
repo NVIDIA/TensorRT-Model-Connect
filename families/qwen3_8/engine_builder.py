@@ -291,6 +291,14 @@ class Qwen38Model:
                 weights["w_lm_head"] = _transpose_2d(
                     embedding, "embedding_tied", precision)
 
+        # MTP (multi-token-prediction) draft head: optional, top-level
+        # `mtp.*` keys (not under `model.language_model.`). Not every
+        # checkpoint ships this -- only load it when present.
+        if _has_tensor(readers, "mtp.fc.weight"):
+            self._load_mtp_weights(
+                readers, weights, hidden, attn_size,
+                num_heads, num_kv_heads, head_dim, precision=precision)
+
         # Metadata for engine builder
         weights["_layer_types"] = layer_types
         weights["_d_inner"] = d_inner
@@ -455,6 +463,88 @@ class Qwen38Model:
             if not _owned(quant_ctx, f"{prefix}.w_down"):
                 weights[f"{prefix}.w_down"] = _transpose_2d(
                     _load_tensor(readers, down_key), "down_proj", precision)
+
+    def _load_mtp_weights(
+        self, readers, weights,
+        hidden, attn_size, num_heads, num_kv_heads, head_dim,
+        *, precision: str = "fp32",
+    ):
+        """Load the MTP (multi-token-prediction) draft-head weights.
+
+        Checkpoint keys live at a top-level `mtp.*` prefix (not under
+        `model.language_model.`), and are plain bf16 -- never NVFP4/FP8
+        packed in any published checkpoint seen so far (no `.weight_scale`
+        companion tensors) -- so this always uses the plain `_load_tensor`
+        path, no `quant_ctx`/`_owned()` skip logic. Stored under the
+        `mtp_layer.*` prefix in `weights` so it can be fed straight into
+        `_add_full_attention_layer` (same shapes/roles as a normal
+        full-attention layer's weights) plus `mtp_layer.fc`,
+        `mtp_layer.pre_fc_norm_embedding`, `mtp_layer.pre_fc_norm_hidden`,
+        and the shared `mtp_final_norm`.
+        """
+        prefix = "mtp_layer"
+
+        fc_raw = _load_tensor(readers, "mtp.fc.weight")
+        weights[f"{prefix}.fc"] = _transpose_2d(fc_raw, "mtp.fc", precision)
+
+        # (1+weight) centering, same convention as every other norm in this
+        # family (see input_norm/final_norm above).
+        weights[f"{prefix}.pre_fc_norm_embedding"] = (
+            1.0 + _load_tensor(
+                readers, "mtp.pre_fc_norm_embedding.weight").astype(np.float32))
+        weights[f"{prefix}.pre_fc_norm_hidden"] = (
+            1.0 + _load_tensor(
+                readers, "mtp.pre_fc_norm_hidden.weight").astype(np.float32))
+
+        layer_prefix = "mtp.layers.0"
+        weights[f"{prefix}.input_norm"] = (
+            1.0 + _load_tensor(
+                readers, f"{layer_prefix}.input_layernorm.weight"
+            ).astype(np.float32))
+        weights[f"{prefix}.post_attn_norm"] = (
+            1.0 + _load_tensor(
+                readers, f"{layer_prefix}.post_attention_layernorm.weight"
+            ).astype(np.float32))
+
+        attn_prefix = f"{layer_prefix}.self_attn"
+        q_raw = _load_tensor(readers, f"{attn_prefix}.q_proj.weight")
+        q_reshaped = q_raw.reshape(num_heads, 2 * head_dim, hidden)
+        q_part = q_reshaped[:, :head_dim, :].reshape(attn_size, hidden)
+        gate_part = q_reshaped[:, head_dim:, :].reshape(attn_size, hidden)
+        weights[f"{prefix}.w_q"] = _transpose_2d(q_part, "mtp.q_proj", precision)
+        weights[f"{prefix}.w_gate_attn"] = _transpose_2d(
+            gate_part, "mtp.gate_proj", precision)
+
+        weights[f"{prefix}.w_k"] = _transpose_2d(
+            _load_tensor(readers, f"{attn_prefix}.k_proj.weight"),
+            "mtp.k_proj", precision)
+        weights[f"{prefix}.w_v"] = _transpose_2d(
+            _load_tensor(readers, f"{attn_prefix}.v_proj.weight"),
+            "mtp.v_proj", precision)
+        weights[f"{prefix}.w_o"] = _transpose_2d(
+            _load_tensor(readers, f"{attn_prefix}.o_proj.weight"),
+            "mtp.o_proj", precision)
+
+        q_norm_raw = _load_tensor(
+            readers, f"{attn_prefix}.q_norm.weight").astype(np.float32)
+        weights[f"{prefix}.q_norm"] = np.tile(1.0 + q_norm_raw, num_heads)
+        k_norm_raw = _load_tensor(
+            readers, f"{attn_prefix}.k_norm.weight").astype(np.float32)
+        weights[f"{prefix}.k_norm"] = np.tile(1.0 + k_norm_raw, num_kv_heads)
+
+        mlp_prefix = f"{layer_prefix}.mlp"
+        weights[f"{prefix}.w_gate"] = _transpose_2d(
+            _load_tensor(readers, f"{mlp_prefix}.gate_proj.weight"),
+            "mtp.mlp.gate_proj", precision)
+        weights[f"{prefix}.w_up"] = _transpose_2d(
+            _load_tensor(readers, f"{mlp_prefix}.up_proj.weight"),
+            "mtp.mlp.up_proj", precision)
+        weights[f"{prefix}.w_down"] = _transpose_2d(
+            _load_tensor(readers, f"{mlp_prefix}.down_proj.weight"),
+            "mtp.mlp.down_proj", precision)
+
+        weights["mtp_final_norm"] = (
+            1.0 + _load_tensor(readers, "mtp.norm.weight").astype(np.float32))
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
@@ -697,6 +787,18 @@ class Qwen38Model:
                 network, hidden_state, hidden, final_norm, eps_tensor,
                 dtype=work_np_dtype)
 
+        # --- MTP hidden-state tap ---
+        # Exposed unconditionally (cheap: one identity+cast) so a paired MTP
+        # engine (build_mtp_engine) can consume it -- build_engine itself
+        # doesn't know whether model.py will build one.
+        hidden_state_out = hidden_state
+        if hidden_state_out.dtype != trt.float32:
+            hidden_state_out = network.add_cast(
+                hidden_state_out, trt.float32).get_output(0)
+        hidden_state_out = network.add_identity(hidden_state_out).get_output(0)
+        hidden_state_out.name = "hidden_state"
+        network.mark_output(hidden_state_out)
+
         # --- LM head ---
         lm_head_matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
         logits = lm_head_matmul(
@@ -748,6 +850,902 @@ class Qwen38Model:
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT engine build failed")
+
+        return bytes(plan)
+
+    def build_mtp_engine(
+        self, config: ModelConfig, weights: WeightDict,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
+    ) -> bytes:
+        """Build the MTP (multi-token-prediction) draft-head TRT engine.
+
+        Mirrors vLLM's Qwen3-Next MTP forward pass (`qwen3_next_mtp.py`):
+            embeds = pre_fc_norm_embedding(embed_tokens(next_token_id))
+            hs     = pre_fc_norm_hidden(hidden_state)   # main engine's final hidden state at pos n
+            fused  = fc(cat([embeds, hs], dim=-1))      # embeds first, hidden second
+            fused  = one ordinary decoder layer (mtp.layers.0) -- real
+                     self-attention with its OWN KV cache, not stateless
+            logits = lm_head(norm(fused))                # draft token n+2
+
+        `quant_ctx` should be the SAME context passed to the main engine's
+        `build_engine()` (or None for an unquantized build). MTP's own
+        `mtp_layer.*` weights are never registered in it (see
+        `_load_mtp_weights` -- unquantized in every checkpoint seen so far,
+        `quant_ctx.maybe_quantized_matmul` falls back to a plain constant
+        matmul for any unregistered name), so passing it through is a no-op
+        for the decoder layer. It matters for `lm_head`: when the main
+        model is NVFP4-quantized, `w_lm_head` is *shared* with the main
+        engine and is NVFP4-owned too -- `load_weights()` never
+        materializes a plain copy for it (`_owned(quant_ctx, "w_lm_head")`),
+        so building this engine with `quant_ctx=None` regardless of the
+        main build's quantization would read an empty weight for `lm_head`.
+
+        Caller contract: `next_token_id` is the token the main engine just
+        produced at position n (i.e. token n+1); `position_id` must be the
+        position that token would use on a normal decode step (n+1);
+        `mtp_cache_k`/`mtp_cache_v` are this engine's OWN persistent cache,
+        separate from the main engine's per-layer caches, fed back from
+        `mtp_present_k`/`mtp_present_v` every step (not skippable -- MTP's
+        attention history desyncs from the main model's token stream
+        otherwise).
+        """
+        if "mtp_layer.fc" not in weights:
+            raise ValueError(
+                "weights has no MTP head -- checkpoint does not ship mtp.* tensors")
+
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        attn_size: int = weights["_attn_size"]
+        mlp_size: int = weights["_mlp_size"]
+        partial_rotary_factor: float = weights["_partial_rotary_factor"]
+        rope_theta: float = weights["_rope_theta"]
+
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+        head_dim = attn_size // num_heads
+        kv_attention_size = num_kv_heads * head_dim
+        rotary_embedding_dim = int(head_dim * partial_rotary_factor)
+        attention_window = max_cache_length + 1
+
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "bf16":
+            # Constants are staged as FP16 bytes (TensorRT's Weights constructor
+            # does not accept ml_dtypes.bfloat16 arrays directly) and explicitly
+            # cast to BF16 in-graph by graph_ops._cast_back_to_trt_dtype, which
+            # every constant-building helper already calls to match its
+            # activation's runtime dtype -- mirroring families/qwen's own
+            # "storage np_dtype is fp16, runtime trt_dtype is bfloat16" pattern.
+            work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32, fp16, or bf16")
+
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+
+        # --- Inputs ---
+        next_token_id = network.add_input("next_token_id", trt.int32, (1,))
+        position_id = network.add_input("position_id", trt.int32, (1,))
+        hidden_state_in = network.add_input(
+            "hidden_state", trt.float32, (1, hidden))
+        attention_mask = network.add_input(
+            "attention_mask", trt.float32, (1, attention_window))
+        cache_k = network.add_input(
+            "mtp_cache_k", work_trt_dtype, (max_cache_length, kv_attention_size))
+        cache_v = network.add_input(
+            "mtp_cache_v", work_trt_dtype, (max_cache_length, kv_attention_size))
+
+        if work_trt_dtype != trt.float32:
+            attention_mask = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
+            hidden_state_in = network.add_cast(
+                hidden_state_in, work_trt_dtype).get_output(0)
+
+        # --- Shared constants ---
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
+        eps_tensor = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+        cos_half = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, rope_theta,
+            cosine=True, partial_rotary_factor=partial_rotary_factor)
+        sin_half = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, rope_theta,
+            cosine=False, partial_rotary_factor=partial_rotary_factor)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half.shape, cos_half, dtype=work_np_dtype)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half.shape, sin_half, dtype=work_np_dtype)
+
+        # --- inputs_embeds = pre_fc_norm_embedding(embed_tokens(next_token_id)) ---
+        gather = network.add_gather(embedding_table, next_token_id, 0)
+        gather_out = gather.get_output(0)
+        if work_trt_dtype != trt.float32:
+            # embedding_table is stored at work_np_dtype (fp16 even for bf16
+            # builds -- see the precision dispatch above), so the gather
+            # output is still Half here. Cast up to work_trt_dtype before
+            # apply_norm, matching hidden_state_in's cast above -- apply_norm
+            # preserves its input's actual runtime dtype through to output,
+            # so leaving this uncast made inputs_embeds come out Half while
+            # hs (built from the already-cast hidden_state_in) came out
+            # BFloat16, and the concat below rejected the mixed types.
+            gather_out = network.add_cast(gather_out, work_trt_dtype).get_output(0)
+        inputs_embeds = graph_blocks.apply_norm(
+            network, gather_out, hidden,
+            weights["mtp_layer.pre_fc_norm_embedding"], None,
+            eps_tensor, "rmsnorm", dtype=work_np_dtype)
+
+        # --- hidden_states = pre_fc_norm_hidden(hidden_state) ---
+        hs = graph_blocks.apply_norm(
+            network, hidden_state_in, hidden,
+            weights["mtp_layer.pre_fc_norm_hidden"], None,
+            eps_tensor, "rmsnorm", dtype=work_np_dtype)
+
+        # --- fused = fc(cat([inputs_embeds, hidden_states])) ---
+        fused_cat = network.add_concatenation([inputs_embeds, hs])
+        fused_cat.axis = 1
+        matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
+        fused = matmul(
+            fused_cat.get_output(0), 2 * hidden, hidden,
+            weights["mtp_layer.fc"], "mtp_layer.fc")
+
+        # --- one ordinary decoder layer: real self-attention + its own KV cache ---
+        # Mirrors build_engine's per-layer `layer_cast`: every tensor entering
+        # _add_full_attention_layer must match work_trt_dtype exactly (TensorRT
+        # requires RotaryEmbedding's cosCache/sinCache and IAttention's inputs
+        # to share one runtime dtype), and cos/sin/eps constants are staged at
+        # work_np_dtype (fp16 storage even for bf16 builds) so they still need
+        # an explicit cast for bf16 precision.
+        def _layer_cast(tensor):
+            if tensor.dtype == work_trt_dtype:
+                return tensor
+            return network.add_cast(tensor, work_trt_dtype).get_output(0)
+
+        result = _add_full_attention_layer(
+            network=network,
+            hidden=_layer_cast(fused),
+            cache_k=_layer_cast(cache_k),
+            cache_v=_layer_cast(cache_v),
+            attention_mask=_layer_cast(attention_mask),
+            position_id=position_id,
+            cos_half_tensor=_layer_cast(cos_half_tensor),
+            sin_half_tensor=_layer_cast(sin_half_tensor),
+            eps_tensor=_layer_cast(eps_tensor),
+            weights=weights,
+            prefix="mtp_layer",
+            hidden_size=hidden,
+            attn_size=attn_size,
+            kv_attention_size=kv_attention_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            rotary_embedding_dim=rotary_embedding_dim,
+            max_cache_length=max_cache_length,
+            mlp_size=mlp_size,
+            dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
+        )
+        mtp_hidden = result["hidden"]
+        present_k = result["present_k"]
+        present_v = result["present_v"]
+
+        # Debug/verification output: the pre-final-norm hidden state, used
+        # to cross-check build_mtp_draft_chain_engine's in-graph self-
+        # chaining against manually self-chained calls to this (already
+        # proven) single-step engine as an independent reference.
+        mtp_hidden_state_out = mtp_hidden
+        if mtp_hidden_state_out.dtype != trt.float32:
+            mtp_hidden_state_out = network.add_cast(
+                mtp_hidden_state_out, trt.float32).get_output(0)
+        mtp_hidden_state_out.name = "mtp_hidden_state"
+        network.mark_output(mtp_hidden_state_out)
+
+        # --- norm -> lm_head ---
+        if mtp_hidden.dtype != work_trt_dtype:
+            mtp_hidden = network.add_cast(mtp_hidden, work_trt_dtype).get_output(0)
+        mtp_hidden = graph_ops.add_rms_norm(
+            network, mtp_hidden, hidden, weights["mtp_final_norm"], eps_tensor,
+            dtype=work_np_dtype)
+
+        lm_head_matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
+        mtp_logits = lm_head_matmul(
+            mtp_hidden, hidden, vocab, weights.get("w_lm_head"), "w_lm_head")
+        if mtp_logits.dtype != trt.float32:
+            mtp_logits = network.add_cast(mtp_logits, trt.float32).get_output(0)
+        mtp_logits.name = "mtp_logits"
+        network.mark_output(mtp_logits)
+
+        if present_k.dtype != work_trt_dtype:
+            present_k = network.add_cast(present_k, work_trt_dtype).get_output(0)
+        if present_v.dtype != work_trt_dtype:
+            present_v = network.add_cast(present_v, work_trt_dtype).get_output(0)
+        present_k.name = "mtp_present_k"
+        present_v.name = "mtp_present_v"
+        network.mark_output(present_k)
+        network.mark_output(present_v)
+
+        if verbose:
+            print(f"[trtmc build] Building Qwen3.8 MTP draft-head TRT engine "
+                  f"(hidden={hidden}, attn_size={attn_size}, mlp={mlp_size}) ...",
+                  file=sys.stderr)
+
+        plan = builder.build_serialized_network(network, trt_config)
+        if plan is None:
+            raise RuntimeError("TensorRT MTP engine build failed")
+
+        return bytes(plan)
+
+    def build_mtp_draft_chain_engine(
+        self, config: ModelConfig, weights: WeightDict,
+        max_cache_length: int, num_draft_tokens: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
+    ) -> bytes:
+        """Build an MTP engine that drafts `num_draft_tokens` tokens in one
+        call, by repeating the single trained mtp.layers.0 block
+        `num_draft_tokens` times against the SAME weights -- no extra
+        trained parameters. This is the standard technique mainstream
+        frameworks (vLLM/SGLang) use for single-layer MTP/EAGLE drafting
+        beyond depth 1: repeat t's own hidden state and in-graph-argmax
+        token id feed repeat t+1, entirely inside one engine, with zero
+        host round-trips between repeats (repeat 0's real-hidden-state
+        input is identical to build_mtp_engine's whole body -- this
+        function generalizes it to num_draft_tokens>=1 repeats).
+
+        Caller contract for inputs: identical to build_mtp_engine's single
+        step (next_token_id/position_id/hidden_state are the REAL,
+        already-confirmed anchor; mtp_cache_k/v are MTP's persistent cache
+        before this call).
+
+        Outputs are per-repeat stacked tensors, row t = repeat t's result:
+          mtp_draft_token_ids:     (num_draft_tokens,) int32 -- in-graph
+            argmax, directly usable as (part of) the verify engine's
+            token_ids input, no host argmax needed.
+          mtp_draft_hidden_states: (num_draft_tokens, hidden) fp32 -- MTP's
+            own hidden state per repeat, needed to seed the NEXT round's
+            draft-chain call after a reject/partial-accept resync.
+          mtp_draft_logits:        (num_draft_tokens, vocab) fp32 -- mainly
+            diagnostic; the in-graph argmax already drives the chain.
+          mtp_present_k/v:         (num_draft_tokens, kv_dim) -- MTP's own
+            new cache rows. SPECULATIVE beyond whatever prefix length
+            verification eventually confirms -- caller commits only the
+            accepted-prefix rows into MTP's persistent cache, discards
+            the rest (same partial-prefix-commit requirement as the main
+            model's Qwen38HybridState already has for N>1 draft depth).
+        """
+        if "mtp_layer.fc" not in weights:
+            raise ValueError(
+                "weights has no MTP head -- checkpoint does not ship mtp.* tensors")
+        if num_draft_tokens < 1:
+            raise ValueError("num_draft_tokens must be >= 1")
+
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        attn_size: int = weights["_attn_size"]
+        mlp_size: int = weights["_mlp_size"]
+        partial_rotary_factor: float = weights["_partial_rotary_factor"]
+        rope_theta: float = weights["_rope_theta"]
+
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+        head_dim = attn_size // num_heads
+        kv_attention_size = num_kv_heads * head_dim
+        rotary_embedding_dim = int(head_dim * partial_rotary_factor)
+        attention_window = max_cache_length + 1
+
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "bf16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32, fp16, or bf16")
+
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+
+        # --- Inputs (identical to build_mtp_engine's single-step inputs) ---
+        next_token_id = network.add_input("next_token_id", trt.int32, (1,))
+        position_id = network.add_input("position_id", trt.int32, (1,))
+        hidden_state_in = network.add_input("hidden_state", trt.float32, (1, hidden))
+        attention_mask_in = network.add_input(
+            "attention_mask", trt.float32, (1, attention_window))
+        cache_k_in = network.add_input(
+            "mtp_cache_k", work_trt_dtype, (max_cache_length, kv_attention_size))
+        cache_v_in = network.add_input(
+            "mtp_cache_v", work_trt_dtype, (max_cache_length, kv_attention_size))
+
+        def _layer_cast(tensor):
+            if tensor.dtype == work_trt_dtype:
+                return tensor
+            return network.add_cast(tensor, work_trt_dtype).get_output(0)
+
+        attention_mask = _layer_cast(attention_mask_in)
+        hidden_state_in = _layer_cast(hidden_state_in)
+
+        # --- Shared constants. RoPE table sized for the worst case: the
+        # last repeat's furthest position. ---
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
+        eps_tensor = graph_ops.add_constant(
+            network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+        table_len = attention_window + num_draft_tokens
+        cos_half = graph_ops.make_rope_table_half_dim(
+            table_len, head_dim, rope_theta,
+            cosine=True, partial_rotary_factor=partial_rotary_factor)
+        sin_half = graph_ops.make_rope_table_half_dim(
+            table_len, head_dim, rope_theta,
+            cosine=False, partial_rotary_factor=partial_rotary_factor)
+        cos_half_tensor = _layer_cast(graph_ops.add_constant(
+            network, cos_half.shape, cos_half, dtype=work_np_dtype))
+        sin_half_tensor = _layer_cast(graph_ops.add_constant(
+            network, sin_half.shape, sin_half, dtype=work_np_dtype))
+        eps_tensor = _layer_cast(eps_tensor)
+
+        matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
+
+        running_cache_k = _layer_cast(cache_k_in)
+        running_cache_v = _layer_cast(cache_v_in)
+        cur_token_id = next_token_id       # (1,) int32
+        cur_hidden_in = hidden_state_in    # (1, hidden); real for repeat 0, self-chained after
+
+        draft_token_ids = []
+        draft_hidden_states = []
+        draft_logits = []
+        draft_present_k = []
+        draft_present_v = []
+
+        for t in range(num_draft_tokens):
+            # --- inputs_embeds = pre_fc_norm_embedding(embed_tokens(cur_token_id)) ---
+            gather = network.add_gather(embedding_table, cur_token_id, 0)
+            gather_out = _layer_cast(gather.get_output(0))
+            inputs_embeds = graph_blocks.apply_norm(
+                network, gather_out, hidden,
+                weights["mtp_layer.pre_fc_norm_embedding"], None,
+                eps_tensor, "rmsnorm", dtype=work_np_dtype)
+
+            # --- hidden_states = pre_fc_norm_hidden(cur_hidden_in) ---
+            hs = graph_blocks.apply_norm(
+                network, _layer_cast(cur_hidden_in), hidden,
+                weights["mtp_layer.pre_fc_norm_hidden"], None,
+                eps_tensor, "rmsnorm", dtype=work_np_dtype)
+
+            # --- fused = fc(cat([inputs_embeds, hs])) ---
+            fused_cat = network.add_concatenation([inputs_embeds, hs])
+            fused_cat.axis = 1
+            fused = matmul(
+                fused_cat.get_output(0), 2 * hidden, hidden,
+                weights["mtp_layer.fc"], "mtp_layer.fc")
+
+            # --- this repeat's absolute RoPE position = position_id + t ---
+            if t == 0:
+                step_position_id = position_id
+            else:
+                t_const = graph_ops.add_constant(
+                    network, (1,), np.array([t], dtype=np.int32), dtype=np.int32)
+                step_pos = network.add_elementwise(
+                    position_id, t_const, trt.ElementWiseOperation.SUM)
+                step_position_id = step_pos.get_output(0)
+
+            # --- this repeat's mask: attention_mask (the input) already
+            # has width max_cache_length+1 -- it bakes in the self-attend
+            # column for repeat 0, unlike build_engine_multi_token's base
+            # mask (width max_cache_length, no self-attend column). Each
+            # later repeat t needs exactly t MORE always-valid columns, one
+            # per token generated by repeats 0..t-1 (repeat t's own
+            # self-attend is already the "+1" baked into attention_mask).
+            # Rebuilt fresh from the fixed persistent prefix each repeat,
+            # not an incrementally-grown running mask -- same pattern as
+            # build_engine_multi_token's per-substep zeros_t extension. ---
+            if t == 0:
+                step_mask = attention_mask
+            else:
+                zeros_t = graph_ops.add_constant(
+                    network, (1, t), np.zeros((1, t), dtype=work_np_dtype),
+                    dtype=work_np_dtype)
+                zeros_t = _layer_cast(zeros_t)
+                mask_concat = network.add_concatenation([attention_mask, zeros_t])
+                mask_concat.axis = 1
+                step_mask = mask_concat.get_output(0)
+
+            result = _add_full_attention_layer(
+                network=network,
+                hidden=_layer_cast(fused),
+                cache_k=running_cache_k,
+                cache_v=running_cache_v,
+                attention_mask=step_mask,
+                position_id=step_position_id,
+                cos_half_tensor=cos_half_tensor,
+                sin_half_tensor=sin_half_tensor,
+                eps_tensor=eps_tensor,
+                weights=weights,
+                prefix="mtp_layer",
+                hidden_size=hidden,
+                attn_size=attn_size,
+                kv_attention_size=kv_attention_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                rotary_embedding_dim=rotary_embedding_dim,
+                max_cache_length=max_cache_length + t,
+                mlp_size=mlp_size,
+                dtype=work_np_dtype,
+                quant_ctx=quant_ctx,
+            )
+            step_hidden = result["hidden"]
+            new_k = _layer_cast(result["present_k"])
+            new_v = _layer_cast(result["present_v"])
+
+            # --- norm -> lm_head for this repeat's logits ---
+            normed_out = _layer_cast(step_hidden)
+            normed_out = graph_ops.add_rms_norm(
+                network, normed_out, hidden, weights["mtp_final_norm"], eps_tensor,
+                dtype=work_np_dtype)
+            lm_head_matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
+            logits_t = lm_head_matmul(
+                normed_out, hidden, vocab, weights.get("w_lm_head"), "w_lm_head")
+            if logits_t.dtype != trt.float32:
+                logits_t = network.add_cast(logits_t, trt.float32).get_output(0)
+            draft_logits.append(logits_t)
+
+            # --- in-graph argmax: this repeat's draft token ---
+            topk = network.add_topk(logits_t, trt.TopKOperation.MAX, 1, 1 << 1)
+            idx_reshape = network.add_shuffle(topk.get_output(1))
+            idx_reshape.reshape_dims = (1,)
+            token_id_t = idx_reshape.get_output(0)
+            draft_token_ids.append(token_id_t)
+
+            step_hidden_out = step_hidden
+            if step_hidden_out.dtype != trt.float32:
+                step_hidden_out = network.add_cast(step_hidden_out, trt.float32).get_output(0)
+            draft_hidden_states.append(step_hidden_out)
+
+            draft_present_k.append(new_k)
+            draft_present_v.append(new_v)
+
+            # --- grow cache (real K/V values, must accumulate -- unlike
+            # the mask, which is cheaply rebuildable from scratch) ---
+            grow_k = network.add_concatenation([running_cache_k, new_k])
+            grow_k.axis = 0
+            grow_v = network.add_concatenation([running_cache_v, new_v])
+            grow_v.axis = 0
+            running_cache_k = grow_k.get_output(0)
+            running_cache_v = grow_v.get_output(0)
+
+            cur_token_id = token_id_t
+            cur_hidden_in = step_hidden  # self-chained, NOT the real main-model hidden_state
+
+        # --- Outputs: stack per-repeat tensors ---
+        ids_cat = network.add_concatenation(draft_token_ids)
+        ids_cat.axis = 0
+        ids_out = ids_cat.get_output(0)
+        ids_out.name = "mtp_draft_token_ids"
+        network.mark_output(ids_out)
+
+        hs_cat = network.add_concatenation(draft_hidden_states)
+        hs_cat.axis = 0
+        hs_out = hs_cat.get_output(0)
+        hs_out.name = "mtp_draft_hidden_states"
+        network.mark_output(hs_out)
+
+        logits_cat = network.add_concatenation(draft_logits)
+        logits_cat.axis = 0
+        logits_out = logits_cat.get_output(0)
+        logits_out.name = "mtp_draft_logits"
+        network.mark_output(logits_out)
+
+        pk_cat = network.add_concatenation(draft_present_k)
+        pk_cat.axis = 0
+        pk_out = pk_cat.get_output(0)
+        pk_out.name = "mtp_present_k"
+        network.mark_output(pk_out)
+
+        pv_cat = network.add_concatenation(draft_present_v)
+        pv_cat.axis = 0
+        pv_out = pv_cat.get_output(0)
+        pv_out.name = "mtp_present_v"
+        network.mark_output(pv_out)
+
+        if verbose:
+            print(f"[trtmc build] Building Qwen3.8 MTP draft-chain TRT engine "
+                  f"(num_draft_tokens={num_draft_tokens}, hidden={hidden}) ...",
+                  file=sys.stderr)
+
+        plan = builder.build_serialized_network(network, trt_config)
+        if plan is None:
+            raise RuntimeError("TensorRT MTP draft-chain engine build failed")
+        return bytes(plan)
+
+    def build_engine_multi_token(
+        self, config: ModelConfig, weights: WeightDict,
+        max_cache_length: int, seq_len: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
+    ) -> bytes:
+        """Build a TRT engine that processes `seq_len` NEW tokens in one call,
+        emitting `seq_len` rows of logits -- one prediction per position.
+
+        Exists to let MTP's draft token(s) be verified against what the main
+        model actually predicts, in one engine call instead of `seq_len`
+        separate ones (the real speculative-decoding throughput win; see
+        `build_mtp_engine`'s docstring and the PR discussion for why a
+        single-token-only main engine can't do this).
+
+        Implementation: NOT a rewrite of the per-layer graph code. This
+        chains `seq_len` ordinary single-token sub-steps together inside one
+        TensorRT network, reusing `_add_deltanet_layer`/
+        `_add_full_attention_layer` verbatim per sub-step -- the same
+        composition every existing multi-step *driver loop* in this family
+        already does across separate engine calls, just fused into one
+        `build_serialized_network()` call so it runs as a single kernel
+        launch sequence with no host round-trip between sub-steps.
+
+        DeltaNet layers need no change at all: their recurrence
+        (`conv_state`/`ssm_state`) is already expressed as "one call = one
+        step", so chaining `result["present_conv"/"present_ssm"]` from
+        sub-step t into sub-step t+1's `conv_state_in`/`ssm_state_in` is
+        exactly what the existing function already supports.
+
+        Full-attention layers also need no change to `_add_full_attention_layer`
+        itself: sub-step t is called with `max_cache_length=max_cache_length+t`
+        (so its internal `attention_window = max_cache_length+t+1` grows by
+        one each sub-step) and a `cache_k`/`cache_v` tensor of matching
+        width, built by concatenating the previous sub-step's cache with
+        this sub-step's own new K/V row. Since every value here (`seq_len`,
+        `t`, `max_cache_length`) is a Python-level constant at graph-build
+        time, these growing shapes are ordinary static TRT shapes, not
+        dynamic ones.
+
+        Attention-mask contract: `attention_mask` input covers only the
+        *persistent* cache (`max_cache_length` columns, same convention as
+        `build_engine`'s single-token mask). No external input is needed for
+        the `seq_len` new tokens' mutual causal visibility -- sub-step t's
+        attention only ever reads a cache tensor of width
+        `max_cache_length+t+1` (this sub-step's own row plus everything
+        already grown), so any "future" new-token column is structurally
+        unreachable, not merely masked. Each sub-step appends `t+1` zero
+        (unmasked) columns onto the external mask itself for this reason.
+
+        Outputs:
+          - `logits`: shape `(seq_len, vocab)`, one row per sub-step.
+          - `hidden_states`: shape `(seq_len, hidden_size)`, the final-normed
+            hidden state behind each `logits` row -- reusable to derive the
+            next MTP draft without another main-engine call.
+          - `present_conv_{i}`/`present_ssm_{i}`: FINAL state after all
+            `seq_len` sub-steps (DeltaNet layers). CAUTION: only valid to
+            commit as the new persistent state if every sub-step's token was
+            real/accepted -- if a later sub-step's token turns out to be a
+            rejected draft, this reflects the wrong recurrence and must be
+            discarded (re-run the single-token engine on the accepted
+            prefix instead).
+          - `present_k_{i}`/`present_v_{i}`: shape `(seq_len, kv_attention_size)`
+            -- one new K/V row per sub-step, for the caller to write back
+            into the persistent cache at consecutive positions.
+        """
+        if seq_len < 1:
+            raise ValueError(f"seq_len must be >= 1, got {seq_len}")
+
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        num_layers = config.num_hidden_layers
+
+        layer_types: list[str] = weights["_layer_types"]
+        d_inner: int = weights["_d_inner"]
+        d_conv: int = weights["_d_conv"]
+        conv_dim: int = weights["_conv_dim"]
+        deltanet_num_heads: int = weights["_deltanet_num_heads"]
+        deltanet_num_kv_heads: int = weights["_deltanet_num_kv_heads"]
+        deltanet_head_dim: int = weights["_deltanet_head_dim"]
+        num_mamba: int = weights["_num_mamba_layers"]
+        num_attn: int = weights["_num_attention_layers"]
+        attn_size: int = weights["_attn_size"]
+        mlp_size: int = weights["_mlp_size"]
+        partial_rotary_factor: float = weights["_partial_rotary_factor"]
+        rope_theta: float = weights["_rope_theta"]
+
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "bf16":
+            # Constants are staged as FP16 bytes (TensorRT's Weights constructor
+            # does not accept ml_dtypes.bfloat16 arrays directly) and explicitly
+            # cast to BF16 in-graph by graph_ops._cast_back_to_trt_dtype, which
+            # every constant-building helper already calls to match its
+            # activation's runtime dtype -- mirroring families/qwen's own
+            # "storage np_dtype is fp16, runtime trt_dtype is bfloat16" pattern.
+            work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"Unsupported Qwen3.8 precision {precision!r}; expected fp32, fp16, or bf16")
+
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+        head_dim = attn_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim,
+            quant_ctx=quant_ctx)
+        rotary_embedding_dim = int(head_dim * partial_rotary_factor)
+
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        trt_config = builder.create_builder_config()
+        trt_config.builder_optimization_level = 1
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+
+        # --- Inputs ---
+        token_ids = network.add_input("token_ids", trt.int32, (seq_len,))
+        position_ids = network.add_input("position_ids", trt.int32, (seq_len,))
+        attention_mask = network.add_input(
+            "attention_mask", trt.float32, (1, max_cache_length))
+
+        conv_state_inputs = []
+        ssm_state_inputs = []
+        for mi in range(num_mamba):
+            cs = network.add_input(
+                graph_ops.layer_tensor_name("conv_state", mi),
+                trt.float32, (conv_dim, d_conv))
+            ss = network.add_input(
+                graph_ops.layer_tensor_name("ssm_state", mi),
+                trt.float32, (deltanet_num_heads, deltanet_head_dim, deltanet_head_dim))
+            conv_state_inputs.append(cs)
+            ssm_state_inputs.append(ss)
+
+        cache_k_inputs = []
+        cache_v_inputs = []
+        for ai in range(num_attn):
+            ck = network.add_input(
+                graph_ops.layer_tensor_name("cache_k", ai),
+                work_trt_dtype, (max_cache_length, kv_attention_size))
+            cv = network.add_input(
+                graph_ops.layer_tensor_name("cache_v", ai),
+                work_trt_dtype, (max_cache_length, kv_attention_size))
+            cache_k_inputs.append(ck)
+            cache_v_inputs.append(cv)
+
+        (
+            attention_mask,
+            conv_state_inputs,
+            ssm_state_inputs,
+            cache_k_inputs,
+            cache_v_inputs,
+        ) = _prepare_runtime_inputs(
+            network, work_trt_dtype, attention_mask,
+            conv_state_inputs, ssm_state_inputs,
+            cache_k_inputs, cache_v_inputs,
+        )
+
+        # --- Shared constants ---
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
+        eps_tensor = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+
+        # Sized for the worst case: the last sub-step's furthest position.
+        table_len = max_cache_length + seq_len
+        cos_half = graph_ops.make_rope_table_half_dim(
+            table_len, head_dim, rope_theta,
+            cosine=True, partial_rotary_factor=partial_rotary_factor)
+        sin_half = graph_ops.make_rope_table_half_dim(
+            table_len, head_dim, rope_theta,
+            cosine=False, partial_rotary_factor=partial_rotary_factor)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half.shape, cos_half, dtype=work_np_dtype)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half.shape, sin_half, dtype=work_np_dtype)
+
+        # Constants are staged at work_np_dtype (fp16 storage even for bf16
+        # builds), so for bf16 they still need an explicit cast up to
+        # work_trt_dtype before reaching RotaryEmbedding/IAttention layers,
+        # which require all their input tensors to share one runtime dtype.
+        if work_trt_dtype != trt.float32:
+            eps_tensor = network.add_cast(eps_tensor, work_trt_dtype).get_output(0)
+            cos_half_tensor = network.add_cast(cos_half_tensor, work_trt_dtype).get_output(0)
+            sin_half_tensor = network.add_cast(sin_half_tensor, work_trt_dtype).get_output(0)
+
+        # --- Embed all seq_len tokens up front ---
+        gather = network.add_gather(embedding_table, token_ids, 0)
+        embeds = gather.get_output(0)  # (seq_len, hidden)
+        if work_trt_dtype != trt.float32:
+            embeds = network.add_cast(embeds, work_trt_dtype).get_output(0)
+
+        running_conv = list(conv_state_inputs)
+        running_ssm = list(ssm_state_inputs)
+        running_cache_k = list(cache_k_inputs)
+        running_cache_v = list(cache_v_inputs)
+        per_step_logits = []
+        per_step_hidden = []
+        per_layer_new_k = [[] for _ in range(num_attn)]
+        per_layer_new_v = [[] for _ in range(num_attn)]
+
+        for t in range(seq_len):
+            hidden_slice = network.add_slice(
+                embeds, start=(t, 0), shape=(1, hidden), stride=(1, 1))
+            hidden_state = hidden_slice.get_output(0)
+            pos_slice = network.add_slice(
+                position_ids, start=(t,), shape=(1,), stride=(1,))
+            position_id_t = pos_slice.get_output(0)
+
+            # This sub-step's own t+1 new-token columns are always causally
+            # valid (unmasked) -- see docstring above.
+            zeros_t = graph_ops.add_constant(
+                network, (1, t + 1),
+                np.zeros((1, t + 1), dtype=work_np_dtype), dtype=work_np_dtype)
+            if zeros_t.dtype != attention_mask.dtype:
+                zeros_t = network.add_cast(zeros_t, attention_mask.dtype).get_output(0)
+            mask_concat = network.add_concatenation([attention_mask, zeros_t])
+            mask_concat.axis = 1
+            mask_t = mask_concat.get_output(0)
+
+            mamba_counter = 0
+            attn_counter = 0
+            for layer_idx in range(num_layers):
+                prefix = f"layer.{layer_idx}"
+                lt = layer_types[layer_idx]
+
+                if lt == "deltanet":
+                    result = _add_deltanet_layer(
+                        network=network,
+                        hidden=hidden_state,
+                        conv_state_in=running_conv[mamba_counter],
+                        ssm_state_in=running_ssm[mamba_counter],
+                        eps_tensor=eps_tensor,
+                        weights=weights,
+                        prefix=prefix,
+                        hidden_size=hidden,
+                        d_inner=d_inner,
+                        d_conv=d_conv,
+                        conv_dim=conv_dim,
+                        num_heads=deltanet_num_heads,
+                        num_kv_heads=deltanet_num_kv_heads,
+                        head_dim=deltanet_head_dim,
+                        mlp_size=mlp_size,
+                        dtype=work_np_dtype,
+                        quant_ctx=quant_ctx,
+                    )
+                    hidden_state = result["hidden"]
+                    running_conv[mamba_counter] = result["present_conv"]
+                    running_ssm[mamba_counter] = result["present_ssm"]
+                    mamba_counter += 1
+
+                elif lt == "attention":
+                    result = _add_full_attention_layer(
+                        network=network,
+                        hidden=hidden_state,
+                        cache_k=running_cache_k[attn_counter],
+                        cache_v=running_cache_v[attn_counter],
+                        attention_mask=mask_t,
+                        position_id=position_id_t,
+                        cos_half_tensor=cos_half_tensor,
+                        sin_half_tensor=sin_half_tensor,
+                        eps_tensor=eps_tensor,
+                        weights=weights,
+                        prefix=prefix,
+                        hidden_size=hidden,
+                        attn_size=attn_size,
+                        kv_attention_size=kv_attention_size,
+                        num_heads=num_heads,
+                        num_kv_heads=num_kv_heads,
+                        head_dim=head_dim,
+                        rotary_embedding_dim=rotary_embedding_dim,
+                        max_cache_length=max_cache_length + t,
+                        mlp_size=mlp_size,
+                        dtype=work_np_dtype,
+                        quant_ctx=quant_ctx,
+                    )
+                    hidden_state = result["hidden"]
+                    new_k = result["present_k"]
+                    new_v = result["present_v"]
+                    per_layer_new_k[attn_counter].append(new_k)
+                    per_layer_new_v[attn_counter].append(new_v)
+
+                    grow_k = network.add_concatenation(
+                        [running_cache_k[attn_counter], new_k])
+                    grow_k.axis = 0
+                    grow_v = network.add_concatenation(
+                        [running_cache_v[attn_counter], new_v])
+                    grow_v.axis = 0
+                    running_cache_k[attn_counter] = grow_k.get_output(0)
+                    running_cache_v[attn_counter] = grow_v.get_output(0)
+                    attn_counter += 1
+
+            # --- Final norm + lm_head for this sub-step ---
+            hs = hidden_state
+            if hs.dtype != work_trt_dtype:
+                hs = network.add_cast(hs, work_trt_dtype).get_output(0)
+            final_norm = weights.get("final_norm")
+            if final_norm is not None and len(final_norm) > 0:
+                hs = graph_ops.add_rms_norm(
+                    network, hs, hidden, final_norm, eps_tensor,
+                    dtype=work_np_dtype)
+            hs_out = hs
+            if hs_out.dtype != trt.float32:
+                hs_out = network.add_cast(hs_out, trt.float32).get_output(0)
+            per_step_hidden.append(hs_out)
+
+            lm_head_matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
+            logits_t = lm_head_matmul(
+                hs, hidden, vocab, weights.get("w_lm_head"), "w_lm_head")
+            b_out = np.zeros(vocab, dtype=work_np_dtype)
+            logits_t = graph_ops.add_bias_sum(
+                network, logits_t, vocab, b_out, dtype=work_np_dtype)
+            if logits_t.dtype != trt.float32:
+                logits_t = network.add_cast(logits_t, trt.float32).get_output(0)
+            per_step_logits.append(logits_t)
+
+        # --- Outputs ---
+        logits_cat = network.add_concatenation(per_step_logits)
+        logits_cat.axis = 0
+        logits_out = logits_cat.get_output(0)
+        logits_out.name = "logits"
+        network.mark_output(logits_out)
+
+        # hidden_states[t] = final-normed hidden state used to produce
+        # logits[t] -- lets a caller re-derive the NEXT MTP draft from any
+        # sub-step's result without an extra main-engine call (e.g. after
+        # accept, bootstrap the following round from hidden_states[-1]; on
+        # reject, hidden_states[0] is still valid since sub-step 0's token
+        # was real regardless of what happened at later sub-steps).
+        hidden_states_cat = network.add_concatenation(per_step_hidden)
+        hidden_states_cat.axis = 0
+        hidden_states_out = hidden_states_cat.get_output(0)
+        hidden_states_out.name = "hidden_states"
+        network.mark_output(hidden_states_out)
+
+        for mi in range(num_mamba):
+            pc = running_conv[mi]
+            ps = running_ssm[mi]
+            if pc.dtype != trt.float32:
+                pc = network.add_cast(pc, trt.float32).get_output(0)
+            if ps.dtype != trt.float32:
+                ps = network.add_cast(ps, trt.float32).get_output(0)
+            pc.name = graph_ops.layer_tensor_name("present_conv", mi)
+            ps.name = graph_ops.layer_tensor_name("present_ssm", mi)
+            network.mark_output(pc)
+            network.mark_output(ps)
+
+        for ai in range(num_attn):
+            stacked_k = network.add_concatenation(per_layer_new_k[ai])
+            stacked_k.axis = 0
+            stacked_v = network.add_concatenation(per_layer_new_v[ai])
+            stacked_v.axis = 0
+            pk = stacked_k.get_output(0)
+            pv = stacked_v.get_output(0)
+            if pk.dtype != work_trt_dtype:
+                pk = network.add_cast(pk, work_trt_dtype).get_output(0)
+            if pv.dtype != work_trt_dtype:
+                pv = network.add_cast(pv, work_trt_dtype).get_output(0)
+            pk.name = graph_ops.layer_tensor_name("present_k", ai)
+            pv.name = graph_ops.layer_tensor_name("present_v", ai)
+            network.mark_output(pk)
+            network.mark_output(pv)
+
+        if verbose:
+            print(f"[trtmc build] Building Qwen3.8 multi-token ({seq_len}-token) "
+                  f"TRT engine (hidden={hidden}, cache={max_cache_length}) ...",
+                  file=sys.stderr)
+
+        plan = builder.build_serialized_network(network, trt_config)
+        if plan is None:
+            raise RuntimeError("TensorRT multi-token engine build failed")
 
         return bytes(plan)
 

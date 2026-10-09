@@ -1666,6 +1666,8 @@ class _SamModel:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one SAM prompted-segmentation bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("SAM does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("sam does not support dynamic_kv_cache")
 

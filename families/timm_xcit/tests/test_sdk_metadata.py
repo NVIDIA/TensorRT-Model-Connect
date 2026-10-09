@@ -26,7 +26,7 @@ def test_bundle_metadata_preserves_class_order(tmp_path, monkeypatch, named):
     writer = SimpleNamespace(set_header=lambda **value: headers.append(value),
                              add_bytes=lambda key, value: sections.update({key: value}),
                              add_json=lambda key, value: sections.update({key: value}))
-    request = SimpleNamespace(dynamic_kv_cache=False, image_height=None, image_width=None,
+    request = SimpleNamespace(dynamic_kv_cache=False, mtp_seq_len=None, image_height=None, image_width=None,
                               video_num_frames=None, max_batch_size=1, tensor_parallel_size=1,
                               context_parallel_size=1, task="image_to_class_scores",
                               quantization=None, fp32_layers=(), max_sequence_length=1,

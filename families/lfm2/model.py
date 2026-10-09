@@ -1019,6 +1019,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("dense LFM2 does not support quantized builds")
     if request.fp32_layers:
         raise NotImplementedError("dense LFM2 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("dense LFM2 does not support MTP speculative decoding")
 
     weights = load_lfm2_weights(str(model_dir), config, precision=precision)
     plan = build_lfm2_engine(

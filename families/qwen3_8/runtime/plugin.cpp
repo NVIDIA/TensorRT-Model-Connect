@@ -5,6 +5,7 @@
 
 #include "families/qwen3_8/runtime/chat_templates.h"
 #include "families/qwen3_8/runtime/hybrid_state.h"
+#include "families/qwen3_8/runtime/mtp_scheduler.h"
 #include "families/qwen3_8/runtime/pipeline.h"
 #include "families/qwen3_8/runtime/plugin_helpers.h"
 #include "families/qwen3_8/runtime/recurrent_state.h"
@@ -43,6 +44,8 @@ struct RuntimeConfig {
     std::int32_t conv_dim;
     std::int32_t max_cache_length;
     std::string precision;
+    bool has_mtp;
+    std::int32_t mtp_num_draft_tokens;
 };
 
 template <typename T>
@@ -66,7 +69,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (!json.is_object())
         throw std::runtime_error("qwen3_8 runtime.json must be an object");
-    if (json.size() != 20)
+    if (json.size() != 22)
         throw std::runtime_error("qwen3_8 runtime.json has an unexpected field set");
     if (require_value<std::string>(json, "decoder_engine_layout") != "single")
         throw std::runtime_error("qwen3_8 requires decoder_engine_layout='single'");
@@ -90,6 +93,8 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::int32_t>(json, "conv_dim"),
         require_value<std::int32_t>(json, "max_cache_length"),
         require_value<std::string>(json, "precision"),
+        require_value<bool>(json, "has_mtp"),
+        require_value<std::int32_t>(json, "mtp_num_draft_tokens"),
     };
     const auto layer_types = require_value<std::vector<std::string>>(json, "layer_types");
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
@@ -102,8 +107,11 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         layer_types.size() != static_cast<std::size_t>(config.num_layers)) {
         throw std::runtime_error("qwen3_8 runtime.json contains invalid geometry");
     }
-    if (config.precision != "fp16" && config.precision != "fp32")
+    if (config.precision != "fp16" && config.precision != "fp32" && config.precision != "bf16")
         throw std::runtime_error("qwen3_8 runtime.json contains invalid precision");
+    if (config.has_mtp && config.mtp_num_draft_tokens < 1)
+        throw std::runtime_error(
+            "qwen3_8 runtime.json has has_mtp set but mtp_num_draft_tokens < 1");
     return config;
 }
 
@@ -156,6 +164,25 @@ ITask* create(const FamilyContext& context) {
     if (!state->ok())
         throw std::runtime_error("qwen3_8 failed to create hybrid state");
 
+    // Built BEFORE state is moved into RecurrentPipeline: Qwen38MtpScheduler
+    // stores a reference to the Qwen38HybridState object, not the
+    // unique_ptr -- moving a unique_ptr does not change the pointee's
+    // address, so the reference stays valid once ownership transfers below.
+    std::unique_ptr<Qwen38MtpScheduler> mtp_scheduler;
+    if (config.has_mtp) {
+        auto mtp_module = load_engine(
+            context.backend, require_section(context.reader, "mtp_engine.plan"), "qwen3_8 MTP");
+        auto draft_chain_module = load_engine(
+            context.backend, require_section(context.reader, "mtp_draft_chain_engine.plan"),
+            "qwen3_8 MTP draft chain");
+        auto multi_token_module =
+            load_engine(context.backend, require_section(context.reader, "multi_token_engine.plan"),
+                        "qwen3_8 multi-token verification");
+        mtp_scheduler = std::make_unique<Qwen38MtpScheduler>(
+            std::move(mtp_module), std::move(draft_chain_module), std::move(multi_token_module),
+            *state, config.hidden_size, config.vocab_size, config.mtp_num_draft_tokens, stream);
+    }
+
     RecurrentGenConfig generation;
     generation.vocab_size = config.vocab_size;
     generation.id_bos = config.bos_token_id;
@@ -165,8 +192,8 @@ ITask* create(const FamilyContext& context) {
         qwen3_8_detect_chat_template_format(chat_template(context.reader));
 
     return new RecurrentPipeline(std::move(decoder), std::move(state), std::move(generation),
-                                 stream, "Qwen3.8", create_tokenizer(context.reader),
-                                 std::string{});
+                                 stream, "Qwen3.8", create_tokenizer(context.reader), std::string{},
+                                 nullptr, std::move(mtp_scheduler));
 }
 
 } // namespace trtmc::qwen3_8

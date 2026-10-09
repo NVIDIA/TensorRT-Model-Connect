@@ -696,6 +696,8 @@ def _build_chronos_network(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Chronos-Bolt bundle without shared model orchestration."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Chronos-Bolt does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("chronos_bolt does not support dynamic_kv_cache")
 

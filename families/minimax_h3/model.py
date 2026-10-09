@@ -272,6 +272,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("MiniMax-H3 does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("MiniMax-H3 does not support fp32_layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("MiniMax-H3 does not support MTP speculative decoding")
     if int(request.image_height or 768) != 768 or int(request.image_width or 1344) != 1344:
         raise ValueError("MiniMax-H3 requires image_height=768 and image_width=1344")
     if int(request.video_num_frames or 124) != 124:

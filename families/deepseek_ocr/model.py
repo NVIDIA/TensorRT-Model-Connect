@@ -1991,6 +1991,8 @@ def _build_deepseek_ocr_vision_engine(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one DeepSeek-OCR vision-language bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("DeepSeek-OCR does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("deepseek_ocr does not support dynamic_kv_cache")
 

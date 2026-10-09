@@ -115,6 +115,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one dense SmolLM3 bundle through family-owned code only."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("SmolLM3 does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("smollm3 does not support dynamic_kv_cache")
 

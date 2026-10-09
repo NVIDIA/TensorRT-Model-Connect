@@ -442,6 +442,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_nfnet does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("timm_nfnet does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("timm_nfnet does not support MTP speculative decoding")
     if request.max_sequence_length not in {None, 1}:
         raise NotImplementedError("timm_nfnet supports only max_sequence_length=1")
     model_dir = Path(request.model_dir)

@@ -39,6 +39,18 @@ class Qwen38RecurrentState final : public Qwen38InferenceState {
 
     const std::vector<TensorSpec>& specs() const { return specs_; }
 
+    // Raw device pointers for external binding -- lets a second ITrtModule
+    // (e.g. a batched multi-token verification engine) read this state's
+    // current values and write its own present outputs directly into the
+    // same buffers this object owns, so a plain advance(n_tokens) after
+    // that module runs picks up its results with no extra copying.
+    void* state_ptr(std::size_t spec_idx, int32_t layer) {
+        return state_[spec_idx][static_cast<std::size_t>(layer)].data();
+    }
+    void* present_ptr(std::size_t spec_idx, int32_t layer) {
+        return present_[spec_idx][static_cast<std::size_t>(layer)].data();
+    }
+
   private:
     std::vector<TensorSpec> specs_;
     std::vector<std::vector<DeviceTensor>> state_;

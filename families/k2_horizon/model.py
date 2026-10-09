@@ -769,6 +769,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("K2-Horizon does not support quantized builds")
     if request.fp32_layers:
         raise NotImplementedError("K2-Horizon does not support mixed-FP32 layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("K2-Horizon does not support MTP speculative decoding")
 
     model_dir = Path(request.model_dir)
     source_config = _load_config(model_dir)

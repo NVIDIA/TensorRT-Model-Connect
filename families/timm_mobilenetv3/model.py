@@ -509,6 +509,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_mobilenetv3 does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("timm_mobilenetv3 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("timm_mobilenetv3 does not support MTP speculative decoding")
     if request.max_sequence_length not in {None, 1}:
         raise NotImplementedError("timm_mobilenetv3 supports only max_sequence_length=1")
 

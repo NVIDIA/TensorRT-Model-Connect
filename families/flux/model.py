@@ -1030,6 +1030,8 @@ def _load_flux2_fp8_scales() -> dict[str, dict[str, float]]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one FLUX image-generation bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("FLUX does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("flux does not support dynamic_kv_cache")
 

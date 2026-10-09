@@ -87,6 +87,8 @@ def build(request, writer) -> None:
         raise NotImplementedError("rt_detr_v2 does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("rt_detr_v2 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("rt_detr_v2 does not support MTP speculative decoding")
 
     precision = str(request.precision).lower()
     if precision not in {"fp16", "fp32"}:
