@@ -9,11 +9,14 @@ Checks that judge generated media as a whole (``tts_intelligibility``, ``geneval
 from __future__ import annotations
 
 import json
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Mapping
 
+from .aiperf_runner import AiperfRun
 from .config import Environment
 from .services import serving
+from .suites import request_sha
 
 # (request directory, the server's record of the request) per suite sample, in suite order.
 Outputs = list[tuple[Path, dict[str, Any]]]
@@ -41,13 +44,31 @@ def generate(environment: Environment, model: dict[str, Any], backend: str, out:
 
 
 def _answered(out: Path, suite: Any) -> Outputs | None:
-    # AIPerf sends the samples in order, one at a time: the last records are the suite's.
+    # Warmup advances AIPerf's dataset cursor. Join profiling requests to server
+    # artifacts, then put them in suite order; arrival order is not label order.
     path = out / "records.jsonl"
     records = [json.loads(line) for line in path.read_text().split("\n") if line.strip()] if path.is_file() else []
-    ordered = [record for record in records if record.get("route", "").startswith("/v1/tasks/")]
-    if len(ordered) < len(suite.samples):
+    records = [record for record in records if record.get("route", "").startswith("/v1/tasks/")]
+    by_id = {record["request_id"]: record for record in records}
+    raw = AiperfRun(out / "aiperf", 0, []).raw_records()
+    if len(by_id) != len(records) or len(raw) != len(suite.samples):
         return None
-    return [(out / "scratch" / str(record["request_id"]), record) for record in ordered[-len(suite.samples):]]
+    by_request = defaultdict(deque)
+    seen = set()
+    for row in raw:
+        identifier = row["metadata"].get("x_request_id")
+        if identifier not in by_id or identifier in seen or row.get("status") != 200 or row.get("error"):
+            return None
+        seen.add(identifier)
+        by_request[request_sha(row["payload"]["request"])].append(by_id[identifier])
+    ordered = []
+    for sample in suite.samples:
+        available = by_request[request_sha(sample["request"])]
+        if not available:
+            return None
+        record = available.popleft()
+        ordered.append((out / "scratch" / str(record["request_id"]), record))
+    return ordered
 
 
 def _earlier(out: Path, suite: Any) -> Outputs | None:

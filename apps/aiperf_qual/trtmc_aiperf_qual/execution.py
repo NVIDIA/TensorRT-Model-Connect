@@ -96,6 +96,11 @@ def prepare(arguments: Sequence[str]) -> tuple[list[str], dict[str, Any] | None]
     concurrency = int(args[args.index("--concurrency") + 1]) if "--concurrency" in args else 1
     identity["concurrency"] = concurrency
     busy = active.gpu_probe() if natural else None
+    if natural and not active.smoke and (busy is None or busy >= 20):
+        from .services import ServiceError
+
+        raise ServiceError(f"GPU idleness was not established before {descriptor['name']} "
+                           f"(utilization {busy}); no benchmark requests were sent")
     metadata = {**descriptor, "identity": identity, "gpu_busy_percent": busy,
                 "expected_requests": int(args[args.index("--request-count") + 1]) if "--request-count" in args else None,
                 "warmup": int(args[args.index("--warmup-request-count") + 1])
@@ -255,10 +260,12 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
     pairs = [(indexed[0][key], indexed[1][key]) for key in indexed[0].keys() & indexed[1].keys()
              if indexed[0][key]["valid"] and indexed[1][key]["valid"]]
     matched = sum(same_work(mine["work"], theirs["work"]) for mine, theirs in pairs)
+    unknown = sum(mine["work"] is None or theirs["work"] is None for mine, theirs in pairs)
     if pairs and matched != len(pairs):
         reasons.append(f"actual work differs or is unknown on {len(pairs) - matched} paired responses")
     result: dict[str, Any] = {"request": name, "reference_mode": "eager", "kind": "natural_dataset", "gate": False,
                               "timing_contract": TIMING_CONTRACT, "pairs": len(pairs), "matched_pairs": matched,
+                              "different_work_pairs": len(pairs) - matched - unknown, "unknown_work_pairs": unknown,
                               "complete": bool(complete and exported),
                               "comparable": bool(pairs and not reasons), "light": "informational",
                               "out_of_capacity": len(excluded),
@@ -274,6 +281,14 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
                         "total_ms": sum(times), "requests": len(values), "valid_requests": len(times),
                         "attempted_requests": len(original),
                         "precision": next(iter(precision)) if len(precision) == 1 else None}
+        for key, unit, scale in (("output_tokens", "output tokens", 1), ("audio_10ms", "audio seconds", 0.01)):
+            work = [dict(row["work"] or ()).get(key) for row in values if row["valid"]]
+            work = [value * scale for value in work if isinstance(value, (int, float)) and value >= 0]
+            if work:
+                result[side][key] = {"p50": statistics.median(work), "total": sum(work), "requests": len(work)}
+                result["notes"].append(f"{'TRTMC' if side == 'candidate' else 'Native'} {unit}: "
+                                       f"p50 {statistics.median(work):g}, total {sum(work):g}, "
+                                       f"recorded on {len(work)}/{len(times)} timed requests.")
     timed = all(result[side]["p50_ms"] is not None for side in ("candidate", "reference"))
     result["measurement_status"] = "unavailable" if not timed else "measured" if result["complete"] else "partial"
     if not pairs:

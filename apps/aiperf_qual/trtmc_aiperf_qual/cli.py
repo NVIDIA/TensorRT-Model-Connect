@@ -187,10 +187,19 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
             from .benchmark_perf import refresh
 
             result = refresh(out, result)
+            # Conversion comparison no longer rejects a low absolute native
+            # score. Preserve scores and statistical margins during replay.
+            changed = False
+            for entry in result.get("accuracy", []):
+                if entry.get("source") == "absolute" and (entry.get("metrics") or {}).get("test") and entry.get("status") != "error":
+                    status, reasons = absolute.status(entry)
+                    changed |= status != entry.get("status")
+                    changed |= (entry.get("gate") or {}).pop("min_native", None) is not None
+                    entry.update(status=status, reasons=reasons)
             result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)), expected_modes=0)
             preserve_original(out)
             result["rejudged"] = {"time": time.time(), "original": ORIGINAL_REPORT,
-                                  "benchmark_timings_refreshed": True, "accuracy_contract_preserved": True}
+                                  "benchmark_timings_refreshed": True, "accuracy_contract_preserved": not changed}
             write_report(out, result)
             print(json.dumps({"out": str(out), **result["verdict"]}))
             continue

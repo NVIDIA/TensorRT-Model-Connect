@@ -11,7 +11,7 @@
     {
       "name": "yolos-small",
       "premerge": true,
-      "test_image": "test_img.jpeg",
+      "test_image": "data/test_img.jpeg",
       "reference_precision": "fp32",
       "min_box_iou": 0.5,
       "max_score_abs_diff": 0.05

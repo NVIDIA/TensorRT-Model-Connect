@@ -240,7 +240,7 @@ def test_summary_merges_result_roots(tmp_path):
     assert counts == {"pass": 1, "build-failed": 1}
     assert "| Green | a | text_generation | gb300-1 | mmlu: 10/10 within tolerance | eager: TRTMC 4.0 ms · native 10.0 ms |" in text
     assert "| White | b | classification | gb300-2 |" in text and "checkpoint is gated" in text
-    assert "1 pass (Green + Yellow)" in text and "| White | 1 |" in text
+    assert "1 pass (Green + conclusive Yellow)" in text and "| White | 1 |" in text
 
 
 CATALOG = [selection.Profile("qwen3-0.6b-fp16", "text_generation", "Qwen/Qwen3-0.6B", None),
@@ -438,7 +438,7 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
     assert legend.count("<div><dt>") == 4  # one line per result
 
 
-def test_html_pass_rate_counts_green_and_yellow_of_every_model(tmp_path):
+def test_html_pass_rate_excludes_inconclusive_accuracy(tmp_path):
     from trtmc_aiperf_qual.report_html import render
 
     categories = {"g": "pass", "y": "acc-inconclusive", "r": "acc-issue", "w": "error"}
@@ -447,8 +447,8 @@ def test_html_pass_rate_counts_green_and_yellow_of_every_model(tmp_path):
     page = render(rows, {}, {}, tmp_path / "report.html").read_text()
     green, yellow = (f"<span class='signal signal-{result}' title='{result.title()}'><span class='light'></span></span>"
                      for result in ("green", "yellow"))
-    assert f"Pass {green}<span class='none'>+</span>{yellow}<strong>2</strong>" in page  # lights, not words
-    assert "Pass rate <strong>50.0%</strong>" in page and "Valid comparisons <strong>3 / 4</strong>" in page
+    assert f"Pass {green}<span class='none'>+</span>{yellow}<strong>1</strong>" in page  # lights, not words
+    assert "Pass rate <strong>25.0%</strong>" in page and "Valid comparisons <strong>3 / 4</strong>" in page
     assert "Pass rate <strong>—</strong>" in render({}, {}, {}, tmp_path / "empty.html").read_text()
 
 
@@ -601,6 +601,10 @@ def test_recheck_reuses_a_generation_only_for_the_same_requests(tmp_path):
     (out / "scratch" / "r1").mkdir(parents=True)
     (out / "aiperf.inputs.jsonl").write_text(json.dumps({"text": json.dumps({"request": suite.samples[0]["request"]})}) + "\n")
     (out / "records.jsonl").write_text(json.dumps({"route": "/v1/tasks/generate_image", "request_id": "r1"}) + "\n")
+    (out / "aiperf").mkdir()
+    (out / "aiperf/profile_export_raw.jsonl").write_text(json.dumps({
+        "metadata": {"benchmark_phase": "profiling", "x_request_id": "r1"}, "status": 200,
+        "payload": {"request": suite.samples[0]["request"]}}) + "\n")
     assert generation._earlier(out, suite) == [(out / "scratch" / "r1", {"route": "/v1/tasks/generate_image",
                                                                             "request_id": "r1"})]
     other = Suite("s", "k", [{"sample_id": "0", "request": {"prompt": "b"}}], {})
@@ -643,9 +647,22 @@ def test_gpu_busy_ignores_the_tail_of_our_own_request(monkeypatch):
 
     monkeypatch.setattr(runner.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(subprocess, "run", readings([71, 40, 0, 0, 0]))
-    assert runner.gpu_busy_percent() == 0  # our own request decayed
+    assert runner.gpu_busy_percent(samples=5) == 0  # our own request decayed
     monkeypatch.setattr(subprocess, "run", readings([62, 66, 60, 64, 61]))
-    assert runner.gpu_busy_percent() == 60  # another process keeps the GPU busy
+    assert runner.gpu_busy_percent(samples=5) == 60  # another process keeps the GPU busy
+
+
+def test_gpu_probe_selects_the_benchmark_device(monkeypatch):
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual import runner
+
+    calls = []
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-selected")
+    monkeypatch.setattr(runner.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(subprocess, "run", lambda args, **kwargs: calls.append(args) or SimpleNamespace(stdout="0\n"))
+    assert runner.gpu_busy_percent() == 0
+    assert calls[0][1:3] == ["-i", "GPU-selected"]
 
 
 def test_media_sweep_steps_decomposition_and_light(tmp_path):

@@ -496,7 +496,30 @@ def test_quantized_candidates_get_the_benchmarks_quantization_gate():
     fp8 = resolve_model("qwen3-0.6b-fp8", _environment())
     assert fp8["candidate"]["quantization"] == "fp8"
     assert [(item["suite"], item["gate"]) for item in fp8["absolute"]] == [
-        ("mmlu-0shot", {"margin": 2.0, "min_native": 30.0})]
+        ("mmlu-0shot", {"margin": 2.0})]
+
+
+def test_stable_diffusion_uses_explicit_controls_on_its_actual_request(tmp_path):
+    import sys
+
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+    from trtmc_aiperf_qual.suites import build_suite, unstated_defaults
+
+    environment = Environment({**_environment().values, "serve_python": sys.executable, "data_root": str(tmp_path)})
+    model = resolve_model("stable-diffusion-v1-5", environment)
+    suite = build_suite(model["performance"]["suite"], environment)
+    request = suite.samples[0]["request"]
+    assert request["num_steps"] == 10 and request["cfg_scale"] == request["guidance_scale"] == 7.5
+    assert not unstated_defaults(request)
+
+
+def test_rwkv_qualification_build_and_selection_use_the_same_capacity():
+    from trtmc_aiperf_qual.models import resolve_model
+
+    model = resolve_model("rwkv-169m", _environment())
+    assert model["candidate"]["build"]["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 256
+    assert model["candidate"]["bundle"].startswith("rwkv-169m-qual/")
 
 
 def test_timing_reference_precision_can_differ_from_the_candidate_precision():

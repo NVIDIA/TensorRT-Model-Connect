@@ -534,20 +534,17 @@ def _paired(problems: Sequence[Mapping[str, Any]], candidate: Mapping[int, Any],
 
 
 def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
-    """pass / fail / inconclusive / not-comparable / error of a scored entry (also when re-judging a
-    report): every expected problem answered on both sides, a native score above the suitability
-    floor, then the entry's non-inferiority outcome under its gate."""
+    """Compare the conversion's scored difference, regardless of native absolute capability.
+
+    Old reports may carry ``min_native``; it no longer overrides the difference
+    test. Missing answers and statistical uncertainty retain their own outcomes.
+    """
     metrics, gate = entry.get("metrics") or {}, entry.get("gate") or {}
     expected, paired = int(entry.get("expected_samples") or 0), int(entry.get("samples") or 0)
     if paired < expected:
         return "error", [f"{expected - paired} of {expected} problems lack a graded answer on one side"
                          + (f" ({metrics['failed']})" if metrics.get("failed") else "")]
     native = metrics.get("native_score")
-    if native is not None and gate.get("min_native") is not None and native < float(gate["min_native"]):
-        # Too few right answers from the native model (at or near chance): the benchmark does not
-        # discriminate for this model, so it says nothing about TRTMC.
-        return "not-comparable", [f"the native model scores {native:g} (< {gate['min_native']:g}): the benchmark "
-                                  "does not fit this model"]
     test = metrics.get("test") or {}
     if test.get("outcome") is None:
         return "error", ["no non-inferiority outcome"]

@@ -225,6 +225,9 @@ def _observations(environment: Environment, service: Mapping[str, Any], model: M
 def _collect_outputs(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
                   suite: Suite, out: Path) -> dict[str, Any]:
     """One observation per suite sample from a server (sequential, one request each)."""
+    for sample in suite.samples:
+        if missing := unstated_defaults(sample["request"]):
+            raise ValueError(f"{suite.name}: state {', '.join(missing)} explicitly before benchmarking")
     run = run_aiperf(environment, out, [*TASK_ENDPOINT, *_task_url(service, model["operation"]), "--concurrency", "1",
                                         "--input-file", str(suite.write_inputs(out.parent / f"{out.name}.inputs.jsonl")),
                                         "--custom-dataset-type", "single_turn", "--dataset-sampling-strategy",
@@ -444,26 +447,34 @@ def supplementary(environment: Environment, model: dict[str, Any], check: Mappin
     return result if isinstance(result, list) else [result]
 
 
-def gpu_busy_percent(samples: int = 5, interval_s: float = 0.2, settle_s: float = 1.0) -> float | None:
+def gpu_busy_percent(samples: int = 30, interval_s: float = 0.5, settle_s: float = 1.0) -> float | None:
     """Other processes' GPU load just before a timed run, while our servers are idle.
 
     nvidia-smi averages utilization over its last sample period, so a reading right after our own
     request (seconds long for diffusion) still shows that request. The lowest of a few readings taken
     after a short settle is what persists without us.
     """
+    import os
     import subprocess
+
+    from . import cancel
 
     time.sleep(settle_s)
     readings = []
+    selector = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
     for index in range(samples):
+        cancel.check()
         try:
-            completed = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                                       capture_output=True, text=True, timeout=30)
+            completed = subprocess.run(["nvidia-smi", *(["-i", selector] if selector else []),
+                                       "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                                       capture_output=True, text=True, timeout=5, check=True)
             values = [float(line) for line in completed.stdout.split() if line.strip().replace(".", "").isdigit()]
-        except (OSError, subprocess.TimeoutExpired, ValueError):
+        except (OSError, subprocess.SubprocessError, ValueError):
             return None
         if values:
             readings.append(max(values))
+            if readings[-1] < judge.GPU_BUSY_PERCENT:
+                return readings[-1]
         if index + 1 < samples:
             time.sleep(interval_s)
     return min(readings) if readings else None

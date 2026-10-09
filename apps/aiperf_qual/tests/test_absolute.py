@@ -518,7 +518,7 @@ def test_an_empty_answer_is_a_wrong_answer_not_a_failed_request():
     assert "rejected" in absolute.failed_reason([empty, {"status": 422, "error": {"message": "rejected"}}], 1)
 
 
-def test_a_native_score_below_the_suitability_floor_is_not_comparable():
+def test_native_absolute_score_does_not_override_conversion_difference():
     def entry(native, gate):
         value = {"samples": 10, "expected_samples": 10, "gate": gate, "counts": {},
                  "metrics": {"trtmc_score": native, "native_score": native}}
@@ -526,9 +526,14 @@ def test_a_native_score_below_the_suitability_floor_is_not_comparable():
         return value
 
     status, reasons = absolute.status(entry(0.53, {"margin": 1.0, "min_native": 30.0}))  # gpt-oss on MMLU
-    assert status == "not-comparable" and "does not fit" in reasons[0]
+    assert status == "inconclusive" and "regression" in reasons[0]
     assert absolute.status(entry(44.0, {"margin": 1.0, "min_native": 30.0}))[0] == "inconclusive"  # 10 problems
     assert absolute.status(entry(0.0, {"margin": 1.0}))[0] == "inconclusive"  # no floor declared
+
+    large = entry(0.0, {"margin": 5.0, "min_native": 10.0})
+    large.update(samples=200, expected_samples=200, counts={"both_wrong": 200})
+    large["metrics"]["test"] = absolute.binary_test(large)
+    assert absolute.status(large)[0] == "pass"
 
 
 def test_unmerged_raw_records_still_show_failed_requests(tmp_path):

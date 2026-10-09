@@ -36,6 +36,18 @@ def new_session(tmp_path):
                              lambda obs: judge.work_signature("generate", obs), same_work)
 
 
+@pytest.mark.parametrize("busy", [None, 20, 100])
+def test_formal_benchmark_never_starts_without_confirmed_gpu_idleness(tmp_path, busy):
+    from trtmc_aiperf_qual.services import ServiceError
+
+    evidence = new_session(tmp_path)
+    evidence.gpu_probe = lambda: busy
+    with execution.session(evidence), execution.workload("evaluation", "both"):
+        with pytest.raises(ServiceError, match="no benchmark requests were sent"):
+            execution.prepare(["--request-count", "1"])
+    assert not evidence.batches
+
+
 def test_same_inference_records_feed_accuracy_and_timing_without_replaying(tmp_path, monkeypatch):
     calls = []
     out = tmp_path / "aiperf"

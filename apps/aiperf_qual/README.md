@@ -34,8 +34,10 @@ RefCOCO, LibriSpeech WER, STS-B, SciFact retrieval / rerank, HumanEval + MBPP, I
 ADE20K mIoU, mask IoU, ETTh1 MSE, WMT / FLORES chrF++). Selections are seeded and stratified; prompts are
 filtered to the shipped bundle's length (rendered through the chat template on the chat route). A model
 whose catalog request samples answers once per seed on each side and is judged on per-problem seed means.
-Each benchmark's `margin`, `relative_margin`, `min_native` (suitability floor), and size are set in
-`config/tasks.yaml`, each with its reason.
+Each benchmark's `margin`, `relative_margin`, and size are set in `config/tasks.yaml`.
+Native absolute scores do not decide conversion acceptance: the paired difference does.
+A low score limits what this benchmark establishes about model capability, but does not
+prevent comparing conversion results. Historical `min_native` fields are ignored.
 
 Conversion-parity benchmarks (`gold_metrics.PARITY`) compare each output with the native one within a
 tolerance: raw encoders' vectors, MoGe geometry, ACT action chunks, stereo disparities, PersonaPlex speech.
@@ -69,7 +71,7 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
 - Every AIPerf run has a deadline: three times the profile's seconds in the run's ledger (`run-all --ledger`, at
   least ten minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.
 - `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
-  comparison: the native model below a benchmark's floor or a Task without an Acc check), Red (Acc worse than
+  comparison: a Task without an Acc check), Red (Acc worse than
   native beyond its margin), Yellow (an Acc difference not shown either way), Green (quality passes with available
   benchmark timings). Historical fixed-workload reports retain their original performance lights.
 
@@ -81,6 +83,10 @@ profiling responses and artifact references; image and video quality scoring doe
 just to obtain their task-call timings. Warmup is excluded, both backends run separately at concurrency 1,
 and GPU scorers run after their generation servers stop. This costs more wall time than the former
 multi-replica, overlapping Acc schedule.
+Generated artifacts are joined to profiling requests by request identity and payload, then ordered
+by the suite inputs. Warmup advances the dataset cursor; arrival order must never select the gold label.
+The GPU probe selects the configured device and waits briefly for startup activity to settle.
+A formal benchmark cannot start if utilization remains at least 20% or the probe fails.
 
 The report answers two independent questions: the task quality scores on each side and their difference;
 and the native/TRTMC task-call times, precision, and work comparability. Markdown and HTML omit speedup

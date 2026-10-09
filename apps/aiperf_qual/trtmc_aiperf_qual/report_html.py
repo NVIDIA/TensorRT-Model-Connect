@@ -20,14 +20,14 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import aiperf_metrics
-from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, ms, reported_perf, request_label, signal, signal_reason
+from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, is_pass, ms, reported_perf, request_label, signal, signal_reason
 from .report import _fmt, counted
 
 EVIDENCE = ("report.md", "report.json", "execution.jsonl", "build.json", "build/build.log", "error.json", "phase-errors.log",
             "candidate/server.log")
 LIGHT_COLORS = {"green": "#1e8e3e", "yellow": "#b06000", "red": "#c5221f", "white": "#5f6368", "n/a": "#5f6368"}
 LEGEND = (("green", "Quality meets its criteria and task timings are available; dataset timings have no performance gate."),
-          ("yellow", "Pass: performance within the margin of native, or an accuracy difference not shown either way."),
+          ("yellow", "Performance within the margin of native, or an inconclusive accuracy difference. Inconclusive Acc is not a pass."),
           ("red", "Accuracy or performance worse than native beyond the margin."),
           ("white", "No valid comparison: a build, run, or environment error, or results that cannot be compared."))
 STYLE = """
@@ -351,7 +351,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                     f"<td class='timing'>{_latency(profile, perf, 'candidate')}</td>"
                     f"{rerun}"
                     f"<td>{_evidence(profile, row, base)}</td></tr>")
-    passed = tally["green"] + tally["yellow"]
+    passed = sum(is_pass(row) for row in rows.values())
     rate = f"{100 * passed / len(rows):.1f}%" if rows else "—"  # of every model the report covers
     cards = ("<section class='strip'><div class='card'><span class='card-label'>Results</span>"
              + "".join(f"<span class='card-item'>{_signal(result)}<strong>{tally[result]}</strong></span>"

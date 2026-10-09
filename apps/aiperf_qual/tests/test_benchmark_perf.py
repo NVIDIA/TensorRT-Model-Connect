@@ -26,7 +26,8 @@ def rejected(index):
 def capture(out, candidate, native, accuracy=None):
     evidence = execution.Session(out, {}, lambda: 0,
         lambda obs: judge.work_signature("generate", obs),
-        lambda c, n: judge.work_check({"work": [c]}, {"work": [n]}) is None)
+        lambda c, n: judge.work_check({"work": [c] if c is not None else []},
+                                      {"work": [n] if n is not None else []}) is None)
     for side, records in (("candidate", candidate), ("reference", native)):
         directory = out / side
         directory.mkdir(parents=True)
@@ -50,6 +51,9 @@ def test_different_answer_lengths_are_descriptive_not_a_second_performance_gate(
     perf, = report["performance"]
     assert verdict(report) == {"acc": "pass", "perf": "measured", "category": "measured", "lights": {}}
     assert not perf["comparable"] and perf["matched_pairs"] == 0
+    assert perf["different_work_pairs"] == 1 and perf["unknown_work_pairs"] == 0
+    assert perf["candidate"]["output_tokens"] == {"p50": 4, "total": 4, "requests": 1}
+    assert perf["reference"]["output_tokens"] == {"p50": 2, "total": 2, "requests": 1}
     assert perf["candidate"]["p50_ms"] == 40 and perf["reference"]["p50_ms"] == 20
     assert not perf["gate"] and perf["measurement_status"] == "measured"
 
@@ -63,6 +67,31 @@ def test_capacity_exclusions_use_the_accuracy_scope_on_both_sides(tmp_path):
     assert perf["reference"]["p50_ms"] == 20
     assert all(perf[s]["requests"] == perf[s]["valid_requests"] == 1 for s in ("candidate", "reference"))
     assert all(perf[s]["attempted_requests"] == 2 for s in ("candidate", "reference"))
+
+
+def test_missing_work_is_distinguished_from_different_work(tmp_path):
+    report = capture(tmp_path, [row(0, 40, None, None)], [row(0, 20)])
+    perf, = report["performance"]
+    assert perf["unknown_work_pairs"] == 1 and perf["different_work_pairs"] == 0
+    assert perf["measurement_status"] == "measured" and not perf["comparable"]
+
+
+def test_offline_rejudge_removes_native_floor_without_changing_scores(tmp_path):
+    from trtmc_aiperf_qual.cli import rejudge_reports
+
+    metrics = {"native_score": 0.0, "trtmc_score": 0.0, "test": {"outcome": "pass"}}
+    quality = [{"suite": "mmlu-0shot", "source": "absolute", "status": "not-comparable",
+                "samples": 200, "expected_samples": 200, "metrics": metrics,
+                "gate": {"margin": 5.0, "min_native": 30.0}}]
+    report = {**capture(tmp_path, [row(0, 40)], [row(0, 20)], quality), "provenance": {}}
+    (tmp_path / "report.json").write_text(json.dumps(report))
+    (tmp_path / "model.json").write_text(json.dumps({"absolute": [{"suite": "mmlu-0shot"}], "supplementary": []}))
+    rejudge_reports([tmp_path])
+    updated = json.loads((tmp_path / "report.json").read_text())
+    assert updated["accuracy"][0]["metrics"] == metrics
+    assert updated["accuracy"][0]["gate"] == {"margin": 5.0}
+    assert updated["verdict"]["acc"] == "pass"
+    assert json.loads((tmp_path / "report.original.json").read_text())["accuracy"] == quality
 
 
 def test_partial_failed_workload_reports_coverage_and_available_timings(tmp_path):

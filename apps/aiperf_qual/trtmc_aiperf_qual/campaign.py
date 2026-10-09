@@ -353,7 +353,7 @@ def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
 
 
 # The owner's four results, worst first: White, no valid comparison (no verdict: an error or a failed build; or the
-# comparison does not apply: the native model below a benchmark's floor, a Task without an Acc check, timings that
+# comparison does not apply: a Task without an Acc check, historical fixed timings that
 # cannot be compared); Red, Acc or Perf worse than the native model beyond its margin; Yellow, Perf about equal
 # (counts as a pass) or an Acc difference not shown either way; Green, a pass.
 SIGNALS = ("white", "red", "yellow", "green")
@@ -395,6 +395,12 @@ def signal(row: Mapping[str, Any]) -> str:
     if category == "acc-inconclusive" or "yellow" in lights:
         return "yellow"
     return "green"
+
+
+def is_pass(row: Mapping[str, Any]) -> bool:
+    """An inconclusive accuracy test is a Yellow result, not an accepted conversion."""
+    return (signal(row) in ("green", "yellow") and row["category"] != "acc-inconclusive"
+            and not _judged(row, "inconclusive"))
 
 
 def signal_reason(profile: str, row: Mapping[str, Any]) -> str:
@@ -505,9 +511,9 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
         by_task[row["task"] or "-"][signal(row)] += 1
     names = [SIGNAL_NAMES[result] for result in SIGNALS]
     lines = ["# TRTMC vs native qualification", "", f"{len(rows)} models from {', '.join(r.name for r in roots)}: "
-             f"{results['green'] + results['yellow']} pass (Green + Yellow).", "",
+             f"{sum(is_pass(row) for row in rows.values())} pass (Green + conclusive Yellow).", "",
              "Green: pass. Yellow: Perf about equal to native (counts as a pass) or an Acc difference not shown either "
-             "way. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
+             "way; inconclusive Acc does not count as a pass. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
              "failed build, or the comparison does not apply).", "",
              "| result | models |", "|---|---|", *(f"| {SIGNAL_NAMES[r]} | {results[r]} |" for r in SIGNALS),
              "", "## By Task", "", "| Task | " + " | ".join(names) + " |", "|---|" + "---|" * len(names),
