@@ -185,6 +185,19 @@ command. `--smoke` runs one problem per benchmark and one timed request (`smoke-
 never a verdict; results go under `<out-root>/smoke`, or `<dir>/smoke/<profile>` for `run --out <dir>/<profile>`).
 `rejudge` and `recheck` keep the run's own report as `report.original.json`.
 
+AIPerf 0.13.0 restarts its session counter after warmup while continuing the dataset sampler.
+The startup hook installed by `doctor --fix` grades by `conversation_id` and preserves the
+original phase/session metadata. After upgrading the plugins, run `doctor --fix` again to
+update an existing hook. Qualification pairs answers and timings by the exported dataset identities.
+
+To recover earlier plugin benchmark scores without model inference, use
+`trtmc-aiperf-qual rejudge --selection-cache /path/to/hf-datasets/trtmc-accuracy-selections out/*/`.
+Recovery requires the original selection cache, `inputs.json`, accuracy exports, raw exports,
+and execution records. It verifies the complete ordered inputs and both sides' gold selections,
+uses the recorded graders and gates, and retains the original response exports and report.
+Corrected evidence is written to `accuracy_export.aligned.jsonl` and `execution.aligned.jsonl`.
+Missing or conflicting evidence fails recovery instead of producing an inferred score.
+
 `run-all` runs profiles one after another (profiles sharing a checkpoint back to back), appends one
 line per profile to `<out-root>/campaign.jsonl`, and skips profiles whose finished result has the same
 run key (configuration, harness, mode, and dependencies; `--rerun` keeps the old directory as

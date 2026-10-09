@@ -419,12 +419,17 @@ def test_trtmcs_failed_requests_are_wrong_answers_with_their_reason(tmp_path):
            {"metadata": {"session_num": 1}, "status": 422,
             "error": {"message": "TensorRT enqueue failed"}, "responses": []}]
     graded = [{"session_num": 0, "passed": True}, {"session_num": 1, "passed": False, "actual": ""}]
-    run = SimpleNamespace(raw_records=lambda: raw, accuracy_records=lambda: graded, exit_code=1)
+    for index, record in enumerate(raw):
+        record["metadata"]["conversation_id"] = f"question-{index}"
+    for index, record in enumerate(graded):
+        record.update(conversation_id=f"question-{index}", expected="A")
+    run = SimpleNamespace(raw_records=lambda: raw, accuracy_records=lambda: graded, exit_code=1,
+                          conversation_indices=lambda: {"question-0": 0, "question-1": 1})
     item = {**ITEM, "suite": "mmlu-0shot"}
     model = {"candidate": {"max_sequence_length": 4096, "checkpoint": "m"}, "reference": {}}
     with patch.object(absolute, "run_aiperf", return_value=run):
         side_result = absolute.run_side(Environment({"hf_datasets_cache": str(tmp_path)}), {"url": "u"}, model, item,
-                                        [{}, {}], tmp_path)
+                                        [{"gold": "A"}, {"gold": "A"}], tmp_path)
     assert list(side_result["records"]["greedy"]) == [0] and "enqueue failed" in side_result["failed"]["greedy"]
     native = {"records": {"greedy": {0: {"passed": True}, 1: {"passed": True}}}, "exit": {}}
     entry = absolute.judge(item, [{"task": "t", "gold": "A"}] * 2, side_result, native)
@@ -1409,12 +1414,17 @@ def test_a_problem_beyond_the_bundles_capacity_leaves_both_sides_and_is_reported
     raw = [{"metadata": {"session_num": index}, "status": 200, "responses": []} for index in range(3)]
     raw.append(_rejection(3, "Qwen3-Omni Thinker prompt exceeds its prefill profile"))
     graded = [{"session_num": index, "passed": True} for index in range(3)] + [{"session_num": 3, "passed": False}]
-    run = SimpleNamespace(raw_records=lambda: raw, accuracy_records=lambda: graded, exit_code=1)
+    for index, record in enumerate(raw):
+        record["metadata"]["conversation_id"] = f"question-{index}"
+    for index, record in enumerate(graded):
+        record.update(conversation_id=f"question-{index}", expected="A")
+    run = SimpleNamespace(raw_records=lambda: raw, accuracy_records=lambda: graded, exit_code=1,
+                          conversation_indices=lambda: {f"question-{index}": index for index in range(4)})
     model = {"candidate": {"max_sequence_length": 256, "checkpoint": "m"}, "reference": {}}
     environment = Environment({"hf_datasets_cache": str(tmp_path)})
     with patch.object(absolute, "run_aiperf", return_value=run):
-        trtmc = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{}] * 4, tmp_path, capacity=True)
-        native = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{}] * 4, tmp_path)
+        trtmc = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{"gold": "A"}] * 4, tmp_path, capacity=True)
+        native = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{"gold": "A"}] * 4, tmp_path)
     assert "rejected" not in native and "prefill profile" in native["failed"]["greedy"]  # only TRTMC's side
     assert "failed" not in trtmc and list(trtmc["records"]["greedy"]) == [0, 1, 2]
     assert trtmc["rejected"] == {"greedy": {3: "Qwen3-Omni Thinker prompt exceeds its prefill profile"}}

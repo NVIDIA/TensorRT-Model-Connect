@@ -62,11 +62,21 @@ class AiperfRun:
         return records
 
     def accuracy_records(self) -> list[dict[str, Any]]:
-        path = self.directory / "accuracy_export.jsonl"
+        path = self.directory / "accuracy_export.aligned.jsonl"
+        if not path.is_file():
+            path = self.directory / "accuracy_export.jsonl"
         if not path.is_file():
             return []
         return [item for item in map(json.loads, filter(str.strip, path.read_text().split("\n")))
                 if item.get("benchmark_phase") == "profiling"]
+
+    def conversation_indices(self) -> dict[str, int]:
+        """The dataset's identities in input order, independent of phase credits."""
+        data = self.json("inputs.json").get("data", [])
+        indices = {item["session_id"]: index for index, item in enumerate(data)}
+        if len(indices) != len(data):
+            raise ValueError("AIPerf inputs contain duplicate conversation IDs")
+        return indices
 
 
 def _run(command: Sequence[str], log: Any, env: Mapping[str, str], timeout_s: float, *, cwd: Path | None = None) -> int:

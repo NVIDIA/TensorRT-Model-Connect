@@ -142,13 +142,15 @@ class Session:
         identity = dict(metadata["identity"])
         units = metadata.get("units")
         rows = []
+        indices = run.conversation_indices() if hasattr(run, "conversation_indices") else {}
         for ordinal, raw in enumerate(run.raw_records()):
             body = response_body(raw)
             payload = raw.get("payload") or {}
             request_key = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            sample = (raw.get("metadata") or {}).get("session_num", ordinal)
+            record_metadata = raw.get("metadata") or {}
+            sample = record_metadata.get("conversation_id") or record_metadata.get("session_num", ordinal)
             try:
-                position = int(sample)
+                position = indices[sample] if sample in indices else int(sample)
             except (TypeError, ValueError):
                 position = ordinal
             unit = units[position] if units is not None and 0 <= position < len(units) else sample

@@ -26,14 +26,20 @@ def doctor(fix: bool) -> int:
     checks = {"aiperf": importlib.metadata.version("aiperf"),
               "trtmc-aiperf-plugins": importlib.metadata.version("trtmc-aiperf-plugins")}
     pth = Path(sysconfig.get_paths()["purelib"]) / trtmc_aiperf_plugins.PTH_NAME
-    if not pth.is_file() and fix:
+    if fix and (not pth.is_file() or pth.read_text() != trtmc_aiperf_plugins.PTH_LINE):
         pth.write_text(trtmc_aiperf_plugins.PTH_LINE)
     checks["metric_hook"] = str(pth) if pth.is_file() else "missing (run doctor --fix)"
     probe = subprocess.run([sys.executable, "-c", "from aiperf.metrics import MetricRegistry as R;"
                             "print('trtmc_model_call_time' in R.all_tags())"], capture_output=True, text=True)
     checks["metric_registered_in_fresh_process"] = probe.stdout.strip() or probe.stderr.strip()[-200:]
+    alignment = subprocess.run([sys.executable, "-c",
+        "from aiperf.accuracy.accuracy_record_processor import AccuracyRecordProcessor as P;"
+        "print(getattr(P, '_trtmc_conversation_alignment', False))"], capture_output=True, text=True)
+    checks["accuracy_alignment_in_fresh_process"] = alignment.stdout.strip() or alignment.stderr.strip()[-200:]
     print(json.dumps(checks, indent=2))
-    ok = checks["aiperf"] == "0.13.0" and pth.is_file() and checks["metric_registered_in_fresh_process"] == "True"
+    ok = (checks["aiperf"] == "0.13.0" and pth.is_file()
+          and checks["metric_registered_in_fresh_process"] == "True"
+          and checks["accuracy_alignment_in_fresh_process"] == "True")
     return 0 if ok else 1
 
 
@@ -154,7 +160,7 @@ def preserve_original(out: Path) -> None:
             shutil.copy2(out / name, out / original)
 
 
-def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
+def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: Path | None = None) -> int:
     """Re-apply the current judge to recorded statistics (no model is run); with an environment, also
     today's judging settings from the configuration. The run's own report is kept next to the result
     (``preserve_original``)."""
@@ -167,12 +173,19 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
                          missing_results, smoke_verdict)
 
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())
+    if selection_cache is not None:
+        from .accuracy_recovery import SelectionArchive, recover
+
+        archive = SelectionArchive(selection_cache)
     for out in outs:
         path = out / "report.json"
         if not path.is_file():
             continue
         result = compat.report(json.loads(path.read_text()))
         model = compat.configuration(json.loads((out / "model.json").read_text()))
+        if selection_cache is not None:
+            preserve_original(out)
+            result = recover(out, model, result, archive)
         if environment is not None:
             model = current_settings(model, environment)
         policy = dict(model.get("performance") or {})
@@ -316,6 +329,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     rejudge.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
     rejudge.add_argument("--environment", type=Path,
                          help="also apply today's judging settings (gates, informational checks, Perf output check)")
+    rejudge.add_argument("--selection-cache", type=Path,
+                         help="recompute plugin accuracy from saved responses and original cached input selections")
     recheck = commands.add_parser("recheck", help="run the Task's whole-output checks again on finished results "
                                                   "(GenEval, MagicBrush, latent replay parity, TTS intelligibility)")
     recheck.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
@@ -349,7 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                    arguments.regenerate)
         if arguments.command == "rejudge":
             return rejudge_reports(arguments.outs, load_environment(arguments.environment)
-                                   if arguments.environment else None)
+                                   if arguments.environment else None, selection_cache=arguments.selection_cache)
         if arguments.command == "merge-check":
             from .split import merge_check
 

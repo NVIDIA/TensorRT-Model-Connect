@@ -341,23 +341,48 @@ def _run_side(environment: Environment, service: Mapping[str, Any], model: Mappi
         name = "greedy" if seed is None else f"seed{seed}"
         run = run_aiperf(environment, out / f"{item['suite']}-{name}", _arguments(model, item, service, count, seed),
                          env=selection_environment(environment, model, item), timeout_s=run_timeout(environment, model))
-        raw = run.raw_records()
-        # A problem the bundle cannot hold leaves the comparison on both sides (``out_of_capacity``); AIPerf grades
-        # any other failed request as an empty (wrong) answer: it is a missing answer instead.
-        rejected = {int(record["metadata"]["session_num"]): reason for record in raw
-                    if capacity and (reason := capacity_rejection(record))}
-        failing = [record for record in raw
-                   if unanswered(record) and int(record["metadata"]["session_num"]) not in rejected]
-        failed = {int(record["metadata"]["session_num"]) for record in failing}
-        runs["records"][name] = {int(record["session_num"]): record for record in run.accuracy_records()
-                                 if int(record["session_num"]) not in failed | set(rejected)}
-        runs["exit"][name] = run.exit_code
-        runs["timings"][name] = timings(raw)
-        if rejected:
-            runs.setdefault("rejected", {})[name] = rejected
-        if failed:
-            runs.setdefault("failed", {})[name] = failed_reason(failing, len(failed))
+        side = plugin_side(run, problems, capacity=capacity)
+        for key in ("records", "exit", "timings", "rejected", "failed"):
+            if key in side:
+                runs.setdefault(key, {})[name] = side[key]
     return runs
+
+
+def plugin_side(run, problems: Sequence[Mapping[str, Any]], *, capacity: bool = False,
+                grades: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """Read one recorded benchmark pass, keyed by the actual dataset question."""
+    indices = run.conversation_indices()
+    if len(indices) != len(problems):
+        raise ValueError(f"accuracy inputs contain {len(indices)} questions, expected {len(problems)}")
+
+    def index(metadata):
+        identity = metadata.get("conversation_id")
+        if identity not in indices:
+            raise ValueError(f"accuracy conversation {identity!r} is absent from saved inputs")
+        return indices[identity]
+
+    raw = run.raw_records()
+    # Rejected capacity stays outside the comparison; other failed requests remain missing answers.
+    rejected = {index(record["metadata"]): reason for record in raw
+                if capacity and (reason := capacity_rejection(record))}
+    failing = [record for record in raw if unanswered(record) and index(record["metadata"]) not in rejected]
+    failed = {index(record["metadata"]) for record in failing}
+    records = {}
+    for record in run.accuracy_records() if grades is None else grades:
+        position = index(record)
+        if position in failed | set(rejected):
+            continue
+        if position in records:
+            raise ValueError(f"duplicate accuracy conversation {record['conversation_id']!r}")
+        if str(record.get("expected", "")).strip() != str(problems[position]["gold"]).strip():
+            raise ValueError(f"accuracy conversation {record['conversation_id']!r} has a mismatched gold answer")
+        records[position] = record
+    side = {"records": records, "exit": run.exit_code, "timings": timings(raw, indices)}
+    if rejected:
+        side["rejected"] = rejected
+    if failed:
+        side["failed"] = failed_reason(failing, len(failed))
+    return side
 
 
 def unanswered(record: Mapping[str, Any]) -> bool:
@@ -401,7 +426,7 @@ def failed_reason(raw_records: Sequence[Mapping[str, Any]], count: int) -> str:
     return f"{count} requests failed: {str(message)[:300]}"
 
 
-def timings(raw_records: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, float]]:
+def timings(raw_records: Sequence[Mapping[str, Any]], indices: Mapping[str, int] | None = None) -> dict[int, dict[str, float]]:
     """Per problem: the server's model-call time and token counts (from the OpenAI response body)."""
     found = {}
     for record in raw_records:
@@ -412,7 +437,9 @@ def timings(raw_records: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, flo
                 continue
             timing, usage = body.get("trtmc_timing") or {}, body.get("usage") or {}
             if timing.get("model_call_ms") is not None:
-                found[int(record["metadata"]["session_num"])] = {
+                metadata = record["metadata"]
+                position = indices[metadata["conversation_id"]] if indices is not None else int(metadata["session_num"])
+                found[position] = {
                     "model_call_ms": float(timing["model_call_ms"]), "prompt_tokens": usage.get("prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens")}
     return found
