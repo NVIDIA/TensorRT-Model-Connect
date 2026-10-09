@@ -38,11 +38,17 @@ if TYPE_CHECKING:
 # blocks themselves).
 # ---------------------------------------------------------------------------
 
-def make_matmul_fn(network, dtype):
-    """Create the GPT-2 projection matmul callable."""
+def make_matmul_fn(network, dtype, quant_ctx=None):
+    """Create the projection matmul callable.
+
+    With a ``quant_ctx``, projections it owns go through Q/DQ; all others (and
+    every projection when ``quant_ctx`` is None) stay unquantized.
+    """
 
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
-        del weight_name
+        if quant_ctx is not None:
+            return quant_ctx.maybe_quantized_matmul(
+                network, lhs, lhs_w, rhs_w, rhs_weights, weight_name, dtype=dtype)
         return graph_ops.add_matmul_rhs_constant(
             network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
 
@@ -133,6 +139,7 @@ def add_attention_block(
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
+    quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
@@ -145,7 +152,7 @@ def add_attention_block(
     ALiBi is represented as a per-head additive attention mask and still uses
     native IAttention.
     """
-    matmul = _make_matmul_fn(network, dtype)
+    matmul = _make_matmul_fn(network, dtype, quant_ctx)
     attention_window = max_cache_length + 1
     if num_kv_heads is None:
         num_kv_heads = num_heads
@@ -291,9 +298,10 @@ def add_swiglu_mlp(
     mlp_size: int,
     dtype: np.dtype = np.float32,
     layer_prefix: str = "",
+    quant_ctx=None,
 ) -> trt.ITensor:
     """Gate/up/down SwiGLU MLP. Returns output tensor."""
-    matmul = _make_matmul_fn(network, dtype)
+    matmul = _make_matmul_fn(network, dtype, quant_ctx)
     _lp = layer_prefix or prefix
 
     gate = matmul(inp, hidden_size, mlp_size,
@@ -323,9 +331,10 @@ def add_gelu_fc_mlp(
     activation: str = "gelu_new",
     dtype: np.dtype = np.float32,
     layer_prefix: str = "",
+    quant_ctx=None,
 ) -> trt.ITensor:
     """fc1 -> activation -> fc2 MLP. Returns output tensor."""
-    matmul = _make_matmul_fn(network, dtype)
+    matmul = _make_matmul_fn(network, dtype, quant_ctx)
     _lp = layer_prefix or prefix
 
     fc1 = matmul(inp, hidden_size, mlp_size,
