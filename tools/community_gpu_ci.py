@@ -323,7 +323,9 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
             )
         )
         if cached != snapshot:
-            raise CommunityGpuError(f"offline checkpoint differs from the staged revision: {repo_id}")
+            raise CommunityGpuError(
+                f"offline checkpoint differs from the staged revision: {repo_id}"
+            )
         print(f"Staged checkpoint {repo_id}@{resolved}")
 
 

@@ -52,9 +52,7 @@ def _offline_call(cache: Path, repo_id: str, revision: str):
     )
 
 
-def test_preparation_repairs_legacy_snapshot_for_unchanged_offline_call(
-    tmp_path, monkeypatch
-):
+def test_preparation_repairs_legacy_snapshot_for_unchanged_offline_call(tmp_path, monkeypatch):
     """Repair an offline API failure without changing the caller's arguments."""
     repo_id, revision = "example/checkpoint", "a" * 40
     cache = tmp_path / "hub"
@@ -79,7 +77,9 @@ def test_preparation_repairs_legacy_snapshot_for_unchanged_offline_call(
         if request.url.path == f"/api/models/{repo_id}/tree/{revision}":
             return httpx.Response(
                 200,
-                json=[{"type": "file", "path": "config.json", "size": len(content), "oid": blob_id}],
+                json=[
+                    {"type": "file", "path": "config.json", "size": len(content), "oid": blob_id}
+                ],
             )
         raise AssertionError(f"Unexpected preparation request: {request.url}")
 
@@ -110,4 +110,3 @@ def test_preparation_repairs_legacy_snapshot_for_unchanged_offline_call(
     (snapshot / "config.json").unlink()
     incomplete = _offline_call(cache, repo_id, revision)
     assert incomplete.returncode != 0
-

@@ -860,7 +860,9 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
             assert revision is None
             return SimpleNamespace(sha=revision_value)
 
-    def download(*, repo_id: str, revision: str | None, cache_dir: Path, local_files_only=False) -> str:
+    def download(
+        *, repo_id: str, revision: str | None, cache_dir: Path, local_files_only=False
+    ) -> str:
         calls.append(("snapshot", repo_id, revision, cache_dir, local_files_only))
         return str(snapshot)
 
@@ -872,7 +874,9 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download),
+        SimpleNamespace(
+            HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download
+        ),
     )
     plan = community_gpu_ci.FamilyPlan(
         "alpha",
@@ -920,7 +924,9 @@ def test_checkpoint_staging_rejects_unusable_offline_cache(tmp_path, monkeypatch
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download),
+        SimpleNamespace(
+            HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download
+        ),
     )
     plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), (("example/alpha", revision),))
     with pytest.raises((ValueError, CiError), match="missing|incomplete|differs"):
