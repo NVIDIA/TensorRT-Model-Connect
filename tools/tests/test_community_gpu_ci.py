@@ -110,6 +110,166 @@ def test_dependency_export_ignores_the_pr_lock_and_recipe(tmp_path):
     )
 
 
+def _trusted_dependency_inputs(repository):
+    entry = _dependency_entry(repository, "alpha")
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "trusted dependency inputs",
+        ],
+        check=True,
+    )
+    sha = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    return entry, sha
+
+
+def test_protected_catalog_stamps_ci_and_ignores_untrusted_recipe_hash(tmp_path):
+    entry, sha = _trusted_dependency_inputs(tmp_path)
+    prefix = "ghcr.io/test-owner/private-dependencies"
+    entry["lock"]["image"] = f"{prefix}/alpha@sha256:{'a' * 64}"
+    original_hash = entry["trusted_recipe_sha256"]
+    entry["trusted_recipe_sha256"] = "f" * 64
+    protected = tmp_path / "protected.json"
+    protected.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "ci_sha": "forged stamp",
+                "registry_prefix": prefix,
+                "families": {"alpha": entry},
+            }
+        )
+    )
+    # A recipe in the working tree cannot authorize a different cached image.
+    (tmp_path / "families/alpha/ci/Dockerfile.dependencies").write_text("PR replacement")
+    exported = tmp_path / "private-catalog.json"
+    community_gpu_ci.export_dependency_catalog(tmp_path, sha, exported, protected)
+    catalog = community_gpu_ci._dependency_catalog(exported)
+    assert catalog["ci_sha"] == sha and catalog["registry_prefix"] == prefix
+    assert catalog["families"]["alpha"]["trusted_recipe_sha256"] == original_hash
+    assert exported.stat().st_mode & 0o777 == 0o600
+    assert (
+        community_gpu_ci._dependency_reference(
+            tmp_path, "alpha", catalog["families"]["alpha"], prefix
+        )
+        == entry["lock"]["image"]
+    )
+    with pytest.raises(CiError):
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", catalog["families"]["alpha"])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"schema_version":1,"families":{},"families":{}}',
+        '{"schema_version":1,"families":[]}',
+        "null",
+        "not-json",
+        '{"schema_version":1,"families":{"alpha":{"lock":{"image":"fake:latest"}}}}',
+    ],
+)
+def test_malformed_protected_catalog_cannot_export_or_select_capacity(tmp_path, content, capsys):
+    _, sha = _trusted_dependency_inputs(tmp_path)
+    protected = tmp_path / "protected.json"
+    protected.write_text(content)
+    exported = tmp_path / "exported.json"
+    with pytest.raises(CiError):
+        community_gpu_ci.export_dependency_catalog(tmp_path, sha, exported, protected)
+    assert not exported.exists()
+    assert content not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "https://ghcr.io/test-owner",
+        "ghcr.io/test-owner?token=sensitive-token",
+        "ghcr.io/user:password@test-owner",
+        "ghcr.io:443/test-owner",
+        "ghcr.io/test-owner/../elsewhere",
+        "ghcrXio/test-owner",
+        "ghcr.io/TestOwner",
+        "ghcr.io/test-owner/",
+        "ghcr.io/test-owner%2fother",
+    ],
+)
+def test_protected_registry_prefix_cannot_redirect_credentials(tmp_path, prefix):
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "ci_sha": "a" * 40,
+                "registry_prefix": prefix,
+                "families": {},
+            }
+        )
+    )
+    with pytest.raises(CiError, match="Invalid trusted dependency registry prefix") as error:
+        community_gpu_ci._dependency_catalog(path)
+    assert prefix not in str(error.value) and "sensitive-token" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "dependency_constraints_sha256",
+        "dependency_build_helper_sha256",
+        "base_environment_lock_sha256",
+        "family_environment_lock_sha256",
+    ],
+)
+def test_public_dependency_lock_or_helper_changes_require_cold_install(tmp_path, field):
+    entry = _dependency_entry(tmp_path, "alpha")
+    path = tmp_path / community_gpu_ci._dependency_optional_inputs("alpha")[field]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("original public dependency input\n")
+    entry["lock"][field] = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
+    path.write_text("changed public dependency input\n")
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry) is None
+    entry["lock"][field] = "invalid hash"
+    with pytest.raises(CiError, match="invalid input hash"):
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
+
+
+def test_public_provenance_never_exports_private_coordinates_or_metadata(tmp_path):
+    entry = _dependency_entry(tmp_path, "alpha")
+    entry["lock"]["internal_note"] = "private-registry-location-sensitive-token"
+    entry["lock"]["abi"]["torch"] = "private-registry-location-sensitive-token"
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "ci_sha": "a" * 40,
+                "families": {"alpha": entry},
+            }
+        )
+    )
+    provenance = community_gpu_ci._dependency_provenance(path, "alpha")
+    assert provenance["source_sha"] == entry["lock"]["source_sha"]
+    assert provenance["base_dockerfile_sha256"] == entry["lock"]["base_dockerfile_sha256"]
+    assert "ghcr.io" not in json.dumps(provenance) and "sensitive-token" not in json.dumps(
+        provenance
+    )
+    assert "image" not in provenance and "abi" not in provenance
+
+
 @pytest.mark.parametrize(
     "mutation", ["mutable", "other_family", "other_registry", "profile", "unqualified"]
 )
@@ -395,6 +555,9 @@ def test_registry_failure_cleans_auth_and_never_reports_its_secret(tmp_path, mon
 
 
 def test_missing_registry_token_fails_cached_owner_but_runs_unlisted_owner(tmp_path, monkeypatch):
+    # The public repository token never substitutes for the protected reader.
+    monkeypatch.setenv("GITHUB_TOKEN", "public-repository-token")
+    monkeypatch.setenv("REGISTRY_TOKEN", "public-repository-token")
     _planned_owners(tmp_path, "alpha", "beta")
     entry = _dependency_entry(tmp_path, "alpha")
     catalog = tmp_path / "catalog.json"

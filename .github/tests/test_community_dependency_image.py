@@ -44,6 +44,7 @@ def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
         "dependency-image",
         "dependency-image-audit",
         "dependency-image-withdraw",
+        "dependency-image-access-check",
     ]
     jobs = caller["jobs"]
     producer = jobs["produce-dependency-image"]
@@ -102,13 +103,22 @@ def test_registered_audit_cannot_enter_test_or_producer_jobs() -> None:
     assert audit["runs-on"] == "ubuntu-24.04"
     assert audit["permissions"] == {"contents": "read", "packages": "read"}
     assert not audit.get("secrets")
-    for task in ("test", "dependency-image", "dependency-image-audit", "dependency-image-withdraw"):
+    for task in (
+        "test",
+        "dependency-image",
+        "dependency-image-audit",
+        "dependency-image-withdraw",
+        "dependency-image-access-check",
+    ):
         assert workflow_condition(jobs["withdraw-dependency-image"]["if"], task=task) == (
             task == "dependency-image-withdraw"
         )
         assert workflow_condition(audit["if"], task=task) == (task == "dependency-image-audit")
         assert workflow_condition(jobs["produce-dependency-image"]["if"], task=task) == (
             task == "dependency-image"
+        )
+        assert workflow_condition(jobs["check-dependency-image-access"]["if"], task=task) == (
+            task == "dependency-image-access-check"
         )
         for name, snapshot in (("snapshot", ""), ("authorize", "frozen"), ("required", "frozen")):
             assert workflow_condition(jobs[name]["if"], task=task, snapshot=snapshot) == (
@@ -1128,3 +1138,275 @@ def test_audit_cli_without_environment_token_fails_before_contact(tmp_path: Path
             MODULE.main()
     contact.assert_not_called()
     assert not (tmp_path / "dependency-image-audit.json").exists()
+
+
+class RegistryResponse(io.BytesIO):
+    status = 200
+
+
+@pytest.mark.parametrize(
+    "anonymous,repository,denied",
+    [
+        (401, 403, True),
+        (404, 404, True),
+        (200, 403, False),
+        (403, 200, False),
+        (500, 403, False),
+        (403, 503, False),
+        (0, 403, False),
+    ],
+)
+def test_registry_denial_requires_both_real_manifest_checks(anonymous, repository, denied, capsys):
+    requests = []
+    statuses = iter((anonymous, repository))
+
+    def transport(request, *, timeout):
+        requests.append(request)
+        assert timeout == 15 and request.full_url.startswith("https://ghcr.io/")
+        if "/token?" in request.full_url:
+            return RegistryResponse(b'{"token":"ephemeral-bearer-secret"}')
+        assert request.get_method() == "HEAD"
+        assert request.get_header("Authorization") == "Bearer ephemeral-bearer-secret"
+        status = next(statuses)
+        if status == 200:
+            return RegistryResponse(b"")
+        if status == 0:
+            raise TimeoutError("sensitive-token and private registry URL")
+        raise MODULE.urllib.error.HTTPError(
+            request.full_url, status, "sensitive-token", {}, io.BytesIO(b"private response")
+        )
+
+    with patch.object(MODULE.urllib.request.OpenerDirector, "open", side_effect=transport):
+        receipt = MODULE.check_registry_access(
+            "test_family",
+            AUDIT_DIGEST,
+            "ghcr.io/test-owner/private-dependencies",
+            "public-repo-token",
+            "test-actor",
+        )
+    assert receipt["denied"] is denied and len(requests) == 4
+    assert requests[0].get_header("Authorization") is None
+    encoded = requests[2].get_header("Authorization").removeprefix("Basic ")
+    assert MODULE.base64.b64decode(encoded).decode() == "test-actor:public-repo-token"
+    captured = capsys.readouterr()
+    output = captured.out + captured.err + json.dumps(receipt)
+    assert not any(
+        secret in output
+        for secret in (
+            "ghcr.io",
+            "private-dependencies",
+            "public-repo-token",
+            "ephemeral-bearer-secret",
+            "sensitive-token",
+        )
+    )
+    if anonymous in (0, 500):
+        assert receipt["anonymous"]["status"] == "unknown"
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 500, 302])
+def test_registry_token_endpoint_denial_is_distinct_from_unknown(status):
+    def transport(request, *, timeout):
+        assert "/token?" in request.full_url
+        raise MODULE.urllib.error.HTTPError(request.full_url, status, "secret", {}, None)
+
+    with patch.object(MODULE.urllib.request.OpenerDirector, "open", side_effect=transport) as calls:
+        receipt = MODULE.check_registry_access(
+            "alpha", AUDIT_DIGEST, "ghcr.io/test-owner/cache", "token", "test-actor"
+        )
+    assert calls.call_count == 2 and receipt["denied"] is (status in (401, 403, 404))
+
+
+@pytest.mark.parametrize(
+    "media_type",
+    [
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+    ],
+)
+def test_readable_manifest_formats_cannot_be_mistaken_for_denial(media_type):
+    def registry(request, *, timeout):
+        if "/token?" in request.full_url:
+            return RegistryResponse(b'{"token":"manifest-reader"}')
+        # This registry serves a known readable digest only when its format is
+        # negotiated. An incomplete Accept header would incorrectly get 404.
+        if media_type not in request.get_header("Accept", "").split(", "):
+            raise MODULE.urllib.error.HTTPError(request.full_url, 404, "not acceptable", {}, None)
+        return RegistryResponse(b"")
+
+    with patch.object(MODULE.urllib.request.OpenerDirector, "open", side_effect=registry):
+        receipt = MODULE.check_registry_access(
+            "alpha", AUDIT_DIGEST, "ghcr.io/test-owner/cache", "token", "test-actor"
+        )
+    assert not receipt["denied"] and all(
+        receipt[actor]["status"] == "accessible"
+        for actor in ("anonymous", "public_repository_token")
+    )
+
+
+@pytest.mark.parametrize("body", [b"{}", b"[]", b'{"token":null}', b"not-json", b"x" * 65537])
+def test_invalid_registry_exchange_is_unknown_without_response_disclosure(body):
+    with patch.object(
+        MODULE.urllib.request.OpenerDirector,
+        "open",
+        side_effect=lambda *a, **kw: RegistryResponse(body),
+    ) as calls:
+        receipt = MODULE.check_registry_access(
+            "alpha", AUDIT_DIGEST, "ghcr.io/test-owner/cache", "token", "test-actor"
+        )
+    assert calls.call_count == 2 and receipt["denied"] is False
+    assert all(
+        receipt[actor]["status"] == "unknown" for actor in ("anonymous", "public_repository_token")
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "https://ghcr.io/test-owner",
+        "ghcr.io/test-owner?secret=value",
+        "ghcr.io/credential@owner",
+        "foreign.example/test-owner",
+        "ghcr.io/test-owner/../other",
+    ],
+)
+def test_access_check_rejects_untrusted_registry_before_contact(prefix):
+    with patch.object(MODULE.urllib.request.OpenerDirector, "open") as contact:
+        with pytest.raises(RuntimeError) as failure:
+            MODULE.check_registry_access(
+                "alpha", AUDIT_DIGEST, prefix, "sensitive-token", "test-actor"
+            )
+    contact.assert_not_called()
+    assert prefix not in str(failure.value) and "sensitive-token" not in str(failure.value)
+
+
+@pytest.mark.parametrize("username", ["", "credential:token", "login\nheader"])
+def test_access_check_cannot_use_an_invalid_public_token_username(username):
+    with patch.object(MODULE.urllib.request.OpenerDirector, "open") as contact:
+        with pytest.raises(RuntimeError, match="username is unavailable"):
+            MODULE.check_registry_access(
+                "alpha", AUDIT_DIGEST, "ghcr.io/test-owner/cache", "token", username
+            )
+    contact.assert_not_called()
+
+
+def test_registry_exchange_redirect_cannot_forward_a_credential():
+    requested = []
+
+    class RedirectTransport(MODULE.urllib.request.HTTPSHandler):
+        def https_open(self, request):
+            requested.append(request.full_url)
+            headers = Message()
+            headers["Location"] = "https://foreign.example/steal"
+            response = urllib.response.addinfourl(
+                io.BytesIO(b""), headers, request.full_url, code=302
+            )
+            response.msg = "Found"
+            return response
+
+    opener = MODULE.urllib.request.build_opener
+    with patch.object(
+        MODULE.urllib.request,
+        "build_opener",
+        side_effect=lambda *handlers: opener(*handlers, RedirectTransport()),
+    ):
+        receipt = MODULE.check_registry_access(
+            "alpha", AUDIT_DIGEST, "ghcr.io/test-owner/cache", "sensitive-token", "test-actor"
+        )
+    assert len(requested) == 2 and all(
+        url.startswith("https://ghcr.io/token?") for url in requested
+    )
+    assert not receipt["denied"] and "sensitive-token" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("denied", [True, False])
+def test_access_check_cli_uses_only_public_token_and_preserves_safe_result(
+    tmp_path, denied, capsys
+):
+    receipt = {"family": "alpha", "digest": AUDIT_DIGEST, "denied": denied}
+    argv = [
+        str(SOURCE),
+        "access-check",
+        "--family",
+        "alpha",
+        "--digest",
+        AUDIT_DIGEST,
+        "--output",
+        str(tmp_path),
+    ]
+    with (
+        patch.object(sys, "argv", argv),
+        patch.dict(
+            os.environ,
+            {
+                "GH_TOKEN": "public-repo-token",
+                "GITHUB_ACTOR": "test-actor",
+                "TRTMC_COMMUNITY_REGISTRY": "ghcr.io/test-owner/cache",
+                "TRTMC_COMMUNITY_REGISTRY_READ_TOKEN": "must-not-be-used",
+            },
+        ),
+        patch.object(MODULE, "check_registry_access", return_value=receipt) as check,
+    ):
+        if denied:
+            MODULE.main()
+        else:
+            with pytest.raises(RuntimeError, match="denial was not established"):
+                MODULE.main()
+    check.assert_called_once_with(
+        "alpha", AUDIT_DIGEST, "ghcr.io/test-owner/cache", "public-repo-token", "test-actor"
+    )
+    assert json.loads((tmp_path / "dependency-image-access-check.json").read_text()) == receipt
+    assert "must-not-be-used" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "event,ref,role,allowed",
+    [
+        ("workflow_dispatch", "refs/heads/ci/developer", "maintain", True),
+        ("workflow_dispatch", "refs/heads/main", "admin", True),
+        ("workflow_dispatch", "refs/heads/main", "write", False),
+        ("workflow_dispatch", "refs/heads/topic", "maintain", False),
+        ("pull_request_target", "refs/heads/main", "maintain", False),
+    ],
+)
+def test_access_check_job_authorizes_current_actor_without_private_reader(
+    tmp_path, event, ref, role, allowed
+):
+    caller = yaml.load(
+        (ROOT / ".github/workflows/community-ci.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    job = caller["jobs"]["check-dependency-image-access"]
+    assert job["permissions"] == {"contents": "read", "packages": "read"}
+    assert job["environment"]["name"] == "gpu-ci-dispatch"
+    assert "BREV" not in json.dumps(job) and "REGISTRY_READ_TOKEN" not in json.dumps(job)
+    assert not job.get("needs")
+    step = job["steps"][0]
+    assert step["env"]["REQUEST_ACTOR"] == "${{ github.triggering_actor }}"
+    check = next(s for s in job["steps"] if "access-check \\" in s.get("run", ""))
+    assert check["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert check["env"]["TRTMC_COMMUNITY_REGISTRY"] == "${{ secrets.TRTMC_COMMUNITY_REGISTRY }}"
+    assert "collaborators/$REQUEST_ACTOR/permission" in check["run"]
+    trace = tmp_path / "authorization"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'gh() { printf "%s\\n" "$*" >> "$TRACE"; printf "%s" "$ROLE"; }\n' + step["run"],
+        ],
+        env={
+            **os.environ,
+            "GITHUB_REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
+            "GITHUB_EVENT_NAME": event,
+            "GITHUB_REF": ref,
+            "GITHUB_SHA": "a" * 40,
+            "REQUEST_ACTOR": "current-rerun-actor",
+            "ROLE": role,
+            "TRACE": str(trace),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert (result.returncode == 0) is allowed, result.stderr
+    if trace.exists():
+        assert "current-rerun-actor" in trace.read_text()

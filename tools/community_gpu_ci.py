@@ -56,10 +56,18 @@ def execution_budget_seconds(env: dict[str, str]) -> int:
     )
 
 
-def _save_json(path: Path, value: dict) -> None:
+def _save_json(path: Path, value: dict, *, private: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    if private:
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(value, sort_keys=True) + "\n")
+    else:
+        temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
 
 
@@ -655,7 +663,9 @@ def _dependency_json(content: bytes) -> dict:
     return value
 
 
-def export_dependency_catalog(repository: Path, ci_sha: str, destination: Path) -> None:
+def export_dependency_catalog(
+    repository: Path, ci_sha: str, destination: Path, protected_catalog: Path | None = None
+) -> None:
     """Export owner locks and recipe hashes from one trusted CI Git object."""
     if not re.fullmatch(r"[0-9a-f]{40}", ci_sha):
         raise CommunityGpuError("Dependency catalog requires an immutable CI commit")
@@ -676,20 +686,35 @@ def export_dependency_catalog(repository: Path, ci_sha: str, destination: Path) 
         return git("show", object_name)
 
     entries = {}
-    for path in git("ls-tree", "-r", "--name-only", ci_sha, "--", "families").decode().splitlines():
-        match = re.fullmatch(r"families/([a-z][a-z0-9_]*)/ci/dependency-image.json", path)
-        if match:
-            family = match[1]
-            entries[family] = {
-                "lock": _dependency_json(blob(path)),
-                "trusted_recipe_sha256": hashlib.sha256(
-                    blob(f"families/{family}/ci/Dockerfile.dependencies")
-                ).hexdigest(),
-            }
     catalog = {"schema_version": 1, "ci_sha": ci_sha, "families": entries}
+    if protected_catalog is not None:
+        # This file belongs to a protected environment, never the PR checkout.
+        # Its claimed CI stamp and recipe hashes cannot replace trusted Git blobs.
+        source = _dependency_json(_dependency_bytes(protected_catalog))
+        source["ci_sha"] = ci_sha
+        _validate_dependency_catalog(source)
+        if "registry_prefix" in source:
+            catalog["registry_prefix"] = source["registry_prefix"]
+        for family, entry in source["families"].items():
+            if not isinstance(entry, dict) or not isinstance(entry.get("lock"), dict):
+                raise CommunityGpuError("Invalid protected dependency entry")
+            entries[family] = {"lock": entry["lock"]}
+    else:
+        for path in (
+            git("ls-tree", "-r", "--name-only", ci_sha, "--", "families").decode().splitlines()
+        ):
+            match = re.fullmatch(r"families/([a-z][a-z0-9_]*)/ci/dependency-image.json", path)
+            if match:
+                entries[match[1]] = {"lock": _dependency_json(blob(path))}
+    for family, entry in entries.items():
+        entry["trusted_recipe_sha256"] = hashlib.sha256(
+            blob(f"families/{family}/ci/Dockerfile.dependencies")
+        ).hexdigest()
+        if protected_catalog is not None:
+            _dependency_reference(repository, family, entry, _dependency_registry(catalog))
     if len(json.dumps(catalog).encode()) > MAX_DEPENDENCY_CATALOG_BYTES:
         raise CommunityGpuError("Dependency catalog exceeds the size limit")
-    _save_json(destination, catalog)
+    _save_json(destination, catalog, private=True)
 
 
 def _dependency_host_ram_gib(lock: dict) -> int:
@@ -715,8 +740,16 @@ def _dependency_host_ram_gib(lock: dict) -> int:
     return ram
 
 
-def _dependency_catalog(path: Path) -> dict:
-    catalog = _dependency_json(_dependency_bytes(path))
+def _dependency_registry(catalog: dict) -> str:
+    prefix = catalog.get("registry_prefix", DEPENDENCY_REGISTRY)
+    if not isinstance(prefix, str) or not re.fullmatch(
+        r"ghcr\.io/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*", prefix
+    ):
+        raise CommunityGpuError("Invalid trusted dependency registry prefix")
+    return prefix
+
+
+def _validate_dependency_catalog(catalog: dict) -> None:
     families = catalog.get("families")
     if (
         type(catalog.get("schema_version")) is not int
@@ -730,6 +763,12 @@ def _dependency_catalog(path: Path) -> dict:
         raise CommunityGpuError("Dependency catalog has no immutable CI source")
     if not all(isinstance(name, str) and FAMILY_PATTERN.fullmatch(name) for name in families):
         raise CommunityGpuError("Invalid dependency catalog family")
+    _dependency_registry(catalog)
+
+
+def _dependency_catalog(path: Path) -> dict:
+    catalog = _dependency_json(_dependency_bytes(path))
+    _validate_dependency_catalog(catalog)
     return catalog
 
 
@@ -758,12 +797,43 @@ def required_host_ram_gib(
             # Dependency input changes can require a cold install; they cannot
             # reduce the host memory used for this owner's admitted qualification.
             if owner_ram == 128:
-                _dependency_reference(repository, family, entry)
+                _dependency_reference(repository, family, entry, _dependency_registry(catalog))
             ram = max(ram, owner_ram)
     return ram
 
 
-def _dependency_reference(repository: Path, family: str, entry: object) -> str | None:
+def _dependency_optional_inputs(family: str) -> dict[str, str]:
+    return {
+        "dependency_constraints_sha256": f"families/{family}/ci/constraints-linux-amd64.txt",
+        "dependency_build_helper_sha256": f"families/{family}/ci/build-dependencies.sh",
+        "base_environment_lock_sha256": "requirements/community-gpu-linux-amd64.lock",
+        "family_environment_lock_sha256": f"families/{family}/ci/environment-linux-amd64.lock",
+    }
+
+
+def _dependency_provenance(catalog_path: Path, family: str) -> dict:
+    """Expose reproducible public inputs, never registry references or arbitrary metadata."""
+    lock = _dependency_catalog(catalog_path)["families"][family]["lock"]
+    result = {}
+    for field in (
+        "source_sha",
+        "producer_source_sha",
+        "base_dockerfile_sha256",
+        "base_requirements_sha256",
+        "family_requirements_sha256",
+        "dependency_recipe_sha256",
+        "resolved_dependencies_sha256",
+        *_dependency_optional_inputs(family),
+    ):
+        value = lock.get(field)
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+            result[field] = value
+    return result
+
+
+def _dependency_reference(
+    repository: Path, family: str, entry: object, registry_prefix: str = DEPENDENCY_REGISTRY
+) -> str | None:
     """Require an admitted digest and the exact dependency inputs for this owner."""
     if not isinstance(entry, dict) or not isinstance(entry.get("lock"), dict):
         raise CommunityGpuError("Invalid family dependency lock")
@@ -779,7 +849,7 @@ def _dependency_reference(repository: Path, family: str, entry: object) -> str |
         or lock.get("family_e2e_passed") is not True
         or not isinstance(reference, str)
         or not re.fullmatch(
-            re.escape(f"{DEPENDENCY_REGISTRY}/{family}") + r"@sha256:[0-9a-f]{64}", reference
+            re.escape(f"{registry_prefix}/{family}") + r"@sha256:[0-9a-f]{64}", reference
         )
     ):
         raise CommunityGpuError("Family dependency image is not an immutable qualified image")
@@ -791,6 +861,11 @@ def _dependency_reference(repository: Path, family: str, entry: object) -> str |
         ("base_dockerfile_sha256", "Dockerfile.dev.x86-gpu"),
         ("base_requirements_sha256", "requirements/community-ci.txt"),
         ("family_requirements_sha256", f"families/{family}/requirements.txt"),
+        *(
+            (field, path)
+            for field, path in _dependency_optional_inputs(family).items()
+            if field in lock
+        ),
     ):
         expected = lock.get(field)
         if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
@@ -849,7 +924,9 @@ def _dependency_image_ids(
             if family not in families:
                 continue
             try:
-                reference = _dependency_reference(repository, family, families[family])
+                reference = _dependency_reference(
+                    repository, family, families[family], _dependency_registry(catalog)
+                )
                 if reference is None:
                     misses[family] = "Qualified image inputs mismatch; cold install"
                 else:
@@ -1203,6 +1280,10 @@ def run_containers(
                         if family in dependency_images
                         else "unlisted"
                     )
+                    if family in dependency_images:
+                        records[family]["dependency_provenance"] = _dependency_provenance(
+                            dependency_catalog, family
+                        )
                 _summary(records, env, started)
     finally:
         _summary(records, env, started)
@@ -1372,6 +1453,7 @@ def main() -> int:
     parser.add_argument("--checkpoint-token-file", type=Path)
     parser.add_argument("--summary-file", type=Path)
     parser.add_argument("--dependency-catalog", type=Path)
+    parser.add_argument("--protected-dependency-catalog", type=Path)
     parser.add_argument("--registry-token-file", type=Path)
     parser.add_argument("--registry-username", default="github-actions")
     parser.add_argument("--ci-sha")
@@ -1380,6 +1462,8 @@ def main() -> int:
     try:
         if args.checkpoint_token_file is not None and not args.containers:
             raise CommunityGpuError("--checkpoint-token-file requires --containers")
+        if args.protected_dependency_catalog is not None and args.export_dependency_catalog is None:
+            raise CommunityGpuError("Protected catalog input requires catalog export")
         if args.require_family_coverage and not args.containers:
             raise CommunityGpuError("--require-family-coverage requires --containers")
         if (
@@ -1389,7 +1473,10 @@ def main() -> int:
             raise CommunityGpuError("Dependency image inputs require --containers")
         if args.export_dependency_catalog is not None:
             export_dependency_catalog(
-                args.repository, args.ci_sha or "", args.export_dependency_catalog
+                args.repository,
+                args.ci_sha or "",
+                args.export_dependency_catalog,
+                args.protected_dependency_catalog,
             )
         elif args.required_host_ram_gib:
             if args.dependency_catalog is None:
