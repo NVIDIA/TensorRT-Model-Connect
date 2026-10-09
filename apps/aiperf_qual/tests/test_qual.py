@@ -264,6 +264,12 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
     random = resolve_model("qwen3-moe-tiny-random", environment)  # random weights: Perf only
     assert random["accuracy_source"] == "none" and not random["absolute"] and "random" in random["accuracy_note"]
     assert random["performance"]["suite"]["source"]["kind"] == "catalog_testcase"
+    tiny = resolve_model("deepseek-v2-tiny", environment)
+    assert tiny["accuracy_source"] == "absolute" and [item["suite"] for item in tiny["absolute"]] == ["mmlu-0shot"]
+    assert tiny["candidate"]["max_sequence_length"] == 512
+    fnet = resolve_model("fnet-base", environment)
+    assert fnet["reference"]["adapter"] == "families/fnet/reference/adapter.py"
+    assert fnet["reference"]["options"]["max_sequence_length"] == fnet["candidate"]["max_sequence_length"]
     world = resolve_model("sana-wm-bidirectional", environment)  # the family's own native adapter
     assert world["reference"]["backend"] == "reference" and world["reference"]["adapter"].startswith("families/sana_wm/")
     with tempfile.TemporaryDirectory() as directory:  # without it no generic adapter serves a world model
