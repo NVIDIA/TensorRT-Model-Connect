@@ -3,6 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#ifdef TRTMC_HAS_EDGE_LLM
+#include "families/phi4_multimodal/runtime/edge_llm/adapter.h"
+#endif
+
 #include "families/phi4_multimodal/runtime/cuda_stream.h"
 #include "families/phi4_multimodal/runtime/pipeline.h"
 #include "families/phi4_multimodal/runtime/plugin_helpers.h"
@@ -81,6 +85,13 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("phi4_multimodal does not support --kv-cache-size");
     using namespace trtmc;
+    if (context.reader.find_section("edge_llm.json")) {
+#ifdef TRTMC_HAS_EDGE_LLM
+        return phi4_multimodal::edge_llm::create(context.reader);
+#else
+        throw std::runtime_error("Phi4 Edge bundle requires the optional Edge CMake package");
+#endif
+    }
     const std::string runtime_text =
         phi4_multimodal_factory::section_text(context.reader, "runtime.json");
     const auto config = nlohmann::json::parse(runtime_text);

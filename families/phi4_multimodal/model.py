@@ -300,102 +300,108 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one Phi-4 Multimodal vision-language bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("phi4_multimodal does not support dynamic_kv_cache")
+    """Own native request handling and optional complete-network dispatch."""
+    def native(request: "BuildRequest", writer: "BundleWriter") -> None:
+        """Build one Phi-4 Multimodal vision-language bundle."""
+        if request.dynamic_kv_cache:
+            raise NotImplementedError("phi4_multimodal does not support dynamic_kv_cache")
 
-    if request.image_height is not None:
-        raise NotImplementedError("phi4_multimodal does not support image_height")
+        if request.image_height is not None:
+            raise NotImplementedError("phi4_multimodal does not support image_height")
 
-    if request.image_width is not None:
-        raise NotImplementedError("phi4_multimodal does not support image_width")
+        if request.image_width is not None:
+            raise NotImplementedError("phi4_multimodal does not support image_width")
 
-    if request.video_num_frames is not None:
-        raise NotImplementedError("phi4_multimodal does not support video_num_frames")
+        if request.video_num_frames is not None:
+            raise NotImplementedError("phi4_multimodal does not support video_num_frames")
 
-    if request.max_batch_size != 1:
-        raise NotImplementedError("phi4_multimodal does not support max_batch_size")
+        if request.max_batch_size != 1:
+            raise NotImplementedError("phi4_multimodal does not support max_batch_size")
 
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
+        if request.context_parallel_size != 1:
+            raise ValueError("this family does not support context parallelism")
 
-    if request.task != "vision_language_generation":
-        raise ValueError("phi4_multimodal supports only task=vision_language_generation")
-    if (
-        request.tensor_parallel_size != 1
-        or request.quantization not in {None, "none"}
-        or request.fp32_layers
-    ):
-        raise NotImplementedError(
-            "Phi-4 Multimodal supports only single-device non-quantized builds"
+        if request.task != "vision_language_generation":
+            raise ValueError("phi4_multimodal supports only task=vision_language_generation")
+        if (
+            request.tensor_parallel_size != 1
+            or request.quantization not in {None, "none"}
+            or request.fp32_layers
+        ):
+            raise NotImplementedError(
+                "Phi-4 Multimodal supports only single-device non-quantized builds"
+            )
+        model_dir = Path(request.model_dir)
+        config = ModelConfig.from_dir(model_dir)
+        if str(config.model_type).lower() not in {"phi4mm", "phi4_multimodal"}:
+            raise ValueError(f"Phi-4 Multimodal does not support model_type={config.model_type!r}")
+        precision = str(request.precision).lower()
+        max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
+        config.raw["_model_dir"] = str(model_dir)
+        model = _Phi4MultimodalModel()
+        weights = model.load_weights(str(model_dir), config)
+        config.raw["_decoder_engine_role"] = "prefill"
+        prefill = model.build_engine(
+            config,
+            weights,
+            max_length,
+            precision=precision,
+            quant_ctx=None,
+            verbose=request.verbose,
         )
-    model_dir = Path(request.model_dir)
-    config = ModelConfig.from_dir(model_dir)
-    if str(config.model_type).lower() not in {"phi4mm", "phi4_multimodal"}:
-        raise ValueError(f"Phi-4 Multimodal does not support model_type={config.model_type!r}")
-    precision = str(request.precision).lower()
-    max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
-    config.raw["_model_dir"] = str(model_dir)
-    model = _Phi4MultimodalModel()
-    weights = model.load_weights(str(model_dir), config)
-    config.raw["_decoder_engine_role"] = "prefill"
-    prefill = model.build_engine(
-        config,
-        weights,
-        max_length,
-        precision=precision,
-        quant_ctx=None,
-        verbose=request.verbose,
-    )
-    config.raw["_decoder_engine_role"] = "decode"
-    decode = model.build_engine(
-        config,
-        weights,
-        max_length,
-        precision=precision,
-        quant_ctx=None,
-        verbose=request.verbose,
-    )
-    config.raw.pop("_decoder_engine_role", None)
-    vision = model.build_vision_engine(
-        str(model_dir), config, weights, precision=precision, verbose=request.verbose
-    )
-    if vision is None:
-        raise RuntimeError("Phi-4 Multimodal vision build returned no engine")
-    vl = model.get_vl_config(config) or {}
-    runtime = {
-        "tensor_parallel_size": 1,
-        "num_layers": config.num_hidden_layers,
-        "max_cache_length": max_length,
-        "vocab_size": config.vocab_size,
-        "id_bos": config.bos_token_id,
-        "id_eos": config.eos_token_id,
-        "image_token_id": int(vl.get("image_token_id", -1)),
-        "vision_output_dim": int(vl.get("vision_output_dim", config.hidden_size)),
-        "prefill_max_length": int(vl.get("prefill_max_length", max_length)),
-        "io_map": {
-            "cache_k_pattern": "cache_k_{i}",
-            "cache_v_pattern": "cache_v_{i}",
-            "present_k_pattern": "present_k_{i}",
-            "present_v_pattern": "present_v_{i}",
-        },
-    }
-    runtime.update(vl)
-    writer.set_header(family="phi4_multimodal", task=request.task, backend=request.backend)
-    writer.add_bytes("engine.plan", decode)
-    writer.add_bytes("prefill.plan", prefill)
-    writer.add_bytes("vision.plan", vision)
-    runtime.update(_tokenizer_runtime_contract(model_dir))
-    writer.add_json("runtime.json", runtime)
-    for filename in (
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "chat_template.jinja",
-        "vocab.json",
-        "merges.txt",
-        "special_tokens_map.json",
-        "tokenizer.model",
-    ):
-        path = model_dir / filename
-        if path.is_file():
-            writer.add_bytes(filename, path.read_bytes())
+        config.raw["_decoder_engine_role"] = "decode"
+        decode = model.build_engine(
+            config,
+            weights,
+            max_length,
+            precision=precision,
+            quant_ctx=None,
+            verbose=request.verbose,
+        )
+        config.raw.pop("_decoder_engine_role", None)
+        vision = model.build_vision_engine(
+            str(model_dir), config, weights, precision=precision, verbose=request.verbose
+        )
+        if vision is None:
+            raise RuntimeError("Phi-4 Multimodal vision build returned no engine")
+        vl = model.get_vl_config(config) or {}
+        runtime = {
+            "tensor_parallel_size": 1,
+            "num_layers": config.num_hidden_layers,
+            "max_cache_length": max_length,
+            "vocab_size": config.vocab_size,
+            "id_bos": config.bos_token_id,
+            "id_eos": config.eos_token_id,
+            "image_token_id": int(vl.get("image_token_id", -1)),
+            "vision_output_dim": int(vl.get("vision_output_dim", config.hidden_size)),
+            "prefill_max_length": int(vl.get("prefill_max_length", max_length)),
+            "io_map": {
+                "cache_k_pattern": "cache_k_{i}",
+                "cache_v_pattern": "cache_v_{i}",
+                "present_k_pattern": "present_k_{i}",
+                "present_v_pattern": "present_v_{i}",
+            },
+        }
+        runtime.update(vl)
+        writer.set_header(family="phi4_multimodal", task=request.task, backend=request.backend)
+        writer.add_bytes("engine.plan", decode)
+        writer.add_bytes("prefill.plan", prefill)
+        writer.add_bytes("vision.plan", vision)
+        runtime.update(_tokenizer_runtime_contract(model_dir))
+        writer.add_json("runtime.json", runtime)
+        for filename in (
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "chat_template.jinja",
+            "vocab.json",
+            "merges.txt",
+            "special_tokens_map.json",
+            "tokenizer.model",
+        ):
+            path = model_dir / filename
+            if path.is_file():
+                writer.add_bytes(filename, path.read_bytes())
+
+    from .edge_llm.dispatch import build as dispatch_build
+
+    dispatch_build(request, writer, native)
