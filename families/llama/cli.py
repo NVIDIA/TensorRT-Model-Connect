@@ -40,6 +40,7 @@ def build(
     max_sequence_length: int | None = None, tensor_parallel_size: int = 1,
     verbose: bool = False,
     fp32_layers: list[int] | tuple[int, ...] = (),
+    quantization: str | None = None,
     dynamic_kv_cache: bool = False,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
 ) -> int:
@@ -55,6 +56,7 @@ def build(
         max_sequence_length=max_sequence_length, tensor_parallel_size=tensor_parallel_size,
         verbose=verbose,
         fp32_layers=tuple(fp32_layers),
+        quantization=quantization,
         dynamic_kv_cache=dynamic_kv_cache,
     )
     if execution is not None:

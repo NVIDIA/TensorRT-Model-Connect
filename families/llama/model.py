@@ -70,12 +70,13 @@ def _build_engine(
     *,
     precision: str,
     verbose: bool,
+    quant_ctx=None,
 ) -> bytes:
     capability = native_kv_build_capability(
         config,
         precision=precision,
         max_cache_length=max_sequence_length,
-        quantized=False,
+        quantized=quant_ctx is not None,
         debug_layer_outputs=False,
     )
     if capability.eligible:
@@ -104,6 +105,7 @@ def _build_engine(
         max_sequence_length,
         precision=precision,
         verbose=verbose,
+        quant_ctx=quant_ctx,
     )
 
 
@@ -211,18 +213,33 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             raise ValueError("Llama max_sequence_length exceeds checkpoint context capacity")
         if request.tensor_parallel_size != 1:
             raise NotImplementedError("Llama does not expose a tensor-parallel builder")
-        if request.quantization not in {None, "none"}:
-            raise NotImplementedError("Llama has no qualified family-owned quantized build")
+        if request.quantization not in {None, "none", "fp8", "nvfp4"}:
+            raise NotImplementedError(
+                f"Llama does not support quantization={request.quantization!r}"
+            )
+        quantized = request.quantization in {"fp8", "nvfp4"}
+        if quantized and (request.dynamic_kv_cache or request.fp32_layers):
+            raise NotImplementedError(
+                "quantized Llama builds do not support dynamic_kv_cache or fp32_layers"
+            )
 
         config.raw["_model_dir"] = str(model_dir)
         config.raw["_fp32_layers"] = list(request.fp32_layers)
         config.raw["_resolved_build_precision"] = precision
         config.raw["dynamic_kv_cache"] = request.dynamic_kv_cache
+        config.raw["_quantized_build_requested"] = quantized
+        quant_ctx = None
+        if quantized:
+            from . import graph_ops
+            from .quantization import calibrate_llama
+
+            quant_ctx = calibrate_llama(model_dir, config, graph_ops, request.quantization)
         weights = load_standard_weights(
             str(model_dir),
             config,
             precision=precision,
             fp32_layers=request.fp32_layers,
+            quant_ctx=quant_ctx,
         )
 
         writer.set_header(family="llama", task=request.task, backend=request.backend)
@@ -238,6 +255,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 max_sequence_length,
                 precision=precision,
                 verbose=bool(request.verbose),
+                quant_ctx=quant_ctx,
             )
             writer.add_bytes("engine.plan", plan)
             layout = "dual_profile"
@@ -249,6 +267,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 max_sequence_length,
                 precision=precision,
                 verbose=bool(request.verbose),
+                quant_ctx=quant_ctx,
             )
             writer.add_bytes("engine.plan", plan)
             layout = "dual_profile"
@@ -260,6 +279,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 max_sequence_length,
                 precision=precision,
                 verbose=bool(request.verbose),
+                quant_ctx=quant_ctx,
             )
             config.raw["_decoder_engine_role"] = "decode"
             decode = _build_engine(
@@ -268,6 +288,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 max_sequence_length,
                 precision=precision,
                 verbose=bool(request.verbose),
+                quant_ctx=quant_ctx,
             )
             writer.add_bytes("engine.plan", decode)
             writer.add_bytes("prefill.plan", prefill)

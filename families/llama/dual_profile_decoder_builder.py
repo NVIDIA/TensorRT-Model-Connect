@@ -89,11 +89,15 @@ def _const_in_work_dtype(
 def _make_matmul_fn(
     network: trt.INetworkDefinition,
     dtype: np.dtype,
+    quant_ctx=None,
 ):
     """Create the Llama projection matmul callable."""
 
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
-        del weight_name
+        if quant_ctx is not None:
+            return quant_ctx.maybe_quantized_matmul(
+                network, lhs, lhs_w, rhs_w, rhs_weights, weight_name, dtype=dtype
+            )
         return graph_ops.add_matmul_rhs_constant(
             network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype
         )
@@ -212,6 +216,7 @@ def build_dual_profile_decoder_engine(
     profile_mode: str = "dual_profile",
     native_kv_cache: bool = False,
     runtime_sized_kv_cache: bool = False,
+    quant_ctx=None,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -240,6 +245,8 @@ def build_dual_profile_decoder_engine(
     from one row through the bundle capacity.
     """
     _supports_config(config, weights)
+    if quant_ctx is not None and native_kv_cache:
+        raise NotImplementedError("native Llama KV cache does not support quantized builds")
     if profile_mode not in ("dual_profile", "prefill", "decode"):
         raise ValueError(
             f"profile_mode must be 'dual_profile', 'prefill', or 'decode', got {profile_mode!r}"
@@ -289,6 +296,8 @@ def build_dual_profile_decoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
+        trt_config.build_route = "-peep:match_dual_gemm=off"
     # Native full-context Llama builds can require substantial tactic workspace
     # while TensorRT compiles the primitive attention graph. This is build-time
     # scratch only (it is not serialized as runtime KV memory), and the limit
@@ -468,7 +477,7 @@ def build_dual_profile_decoder_engine(
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
 
-    matmul = _make_matmul_fn(network, work_np_dtype)
+    matmul = _make_matmul_fn(network, work_np_dtype, quant_ctx)
 
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)

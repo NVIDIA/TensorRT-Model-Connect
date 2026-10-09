@@ -66,6 +66,7 @@ def build_standard_decoder_engine(
     verbose: bool = False,
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = False,
+    quant_ctx=None,
 ) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
@@ -145,6 +146,7 @@ def build_standard_decoder_engine(
             verbose=verbose,
             profile_mode=decoder_engine_role,
             runtime_sized_kv_cache=dynamic_kv_cache,
+            quant_ctx=quant_ctx,
         )
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
@@ -171,6 +173,8 @@ def build_standard_decoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
+        trt_config.build_route = "-peep:match_dual_gemm=off"
 
     # Precision configuration
     if precision == "fp16":
@@ -411,6 +415,7 @@ def build_standard_decoder_engine(
             sin_half_tensor=_cast_layer_dtype(sin_half_tensor),
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
+            quant_ctx=quant_ctx,
         )
 
         hidden_state = _cast_work_dtype(result["hidden"])
@@ -548,6 +553,7 @@ def _add_decoder_layer(
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     eps: float | None = None,
+    quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -581,6 +587,7 @@ def _add_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
+        quant_ctx=quant_ctx,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]
@@ -629,6 +636,7 @@ def _add_decoder_layer(
             activation=activation,
             dtype=dtype,
             layer_prefix=prefix,
+            quant_ctx=quant_ctx,
         )
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
@@ -640,6 +648,7 @@ def _add_decoder_layer(
             mlp_size=mlp_size,
             dtype=dtype,
             layer_prefix=prefix,
+            quant_ctx=quant_ctx,
         )
 
     # Final residual connection
