@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libglib2.0-0t64 \
       ninja-build \
       nlohmann-json3-dev \
+      libicu-dev \
       openmpi-bin \
       patchelf \
       pkg-config \

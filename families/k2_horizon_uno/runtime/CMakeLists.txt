@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+find_package(ICU REQUIRED COMPONENTS uc i18n)
+
 add_library(trtmc_model_k2_horizon_uno SHARED
   algorithm.cpp
   bpe_tokenizer.cpp
@@ -20,6 +22,8 @@ target_include_directories(trtmc_model_k2_horizon_uno SYSTEM PRIVATE
 )
 target_link_libraries(trtmc_model_k2_horizon_uno PRIVATE
   trtmc_core
+  ICU::uc
+  ICU::i18n
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
 )
