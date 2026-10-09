@@ -130,6 +130,8 @@ def aligned_batches(recorded: list[dict]) -> list[dict]:
             if unit is None:
                 raise ValueError("original evaluation unit is missing from the saved execution batch")
             rows.append({**row, "sample_id": identity, "unit_id": unit})
+            if batch["identity"].get("side") == "candidate":
+                rows[-1]["capacity_rejection"] = absolute.capacity_rejection(source)
         aligned.append({**batch, "records": rows, "alignment": ALIGNMENT})
     return aligned
 
@@ -181,13 +183,14 @@ def recover(out: Path, model: dict, report: dict, archive: SelectionArchive) -> 
         {"work": [mine] if mine is not None else []}, {"work": [theirs] if theirs is not None else []}) is None
     session = execution.Session(out, {}, lambda: None, lambda value: value, same_work, batches=aligned)
     performance = [item for item in report.get("performance", []) if item.get("kind") != "natural_dataset"]
-    performance.extend(session.natural_performance())
+    accuracy = [updates.get(entry["suite"], entry) for entry in report.get("accuracy", [])]
+    performance.extend(session.natural_performance(accuracy))
     # Validate the whole report before publishing any corrected evidence.
     for path, grades in pending_exports:
         partial = path.with_suffix(".tmp")
         partial.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in grades))
         partial.replace(path)
-    result = {**report, "accuracy": [updates.get(entry["suite"], entry) for entry in report.get("accuracy", [])],
+    result = {**report, "accuracy": accuracy,
               "performance": performance}
     result["accuracy_alignment"] = {"version": ALIGNMENT, "suites": sorted(updates), "runs": evidence,
                                      "original_responses_reused": True}

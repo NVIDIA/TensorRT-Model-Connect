@@ -52,12 +52,14 @@ def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expect
         names = {item.get("request") for item in datasets}
         required = set(result.get("performance_expected", [item.get("suite") for item in accuracy
                                                            if item.get("source") == "absolute"]))
-        perf = ("error" if not datasets or not required <= names or any(not item.get("complete") for item in datasets)
-                else "measured" if all(item.get("comparable") for item in datasets) else "not-comparable")
+        unavailable = any(any((item.get(side) or {}).get("p50_ms") is None
+                              for side in ("candidate", "reference")) for item in datasets)
+        perf = ("error" if not datasets or not required <= names or unavailable else
+                "partial" if any(not item.get("complete") for item in datasets) else "measured")
         # A dataset measurement is not a repeated-run performance acceptance test.
         category = ("error" if "error" in (acc, perf) else "acc-issue" if acc == "fail" else
                     "acc-inconclusive" if acc == "inconclusive" else "not-comparable" if acc == "not-comparable" else
-                    "perf-inconclusive" if perf == "not-comparable" else "measured")
+                    "measured")
         return {"acc": acc, "perf": perf, "lights": {}, "category": category}
     qualifying = [item["light"] for item in result.get("performance", [])
                   if item.get("reference_mode") == QUALIFYING_MODE and item.get("gate", True)]

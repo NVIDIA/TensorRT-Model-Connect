@@ -157,10 +157,14 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
         cand, ref = item.get("candidate", {}), item.get("reference", {})
         if item.get("kind") == "natural_dataset":
             notes = "; ".join([*item.get("reasons", []), *item.get("notes", []), "informational; no gate"])
-            lines.append(f"| {item['request']} (shared quality outputs) | {item['light']} | "
+            coverage = "; ".join(f"{label} {side.get('valid_requests')}/{side.get('requests')} timed"
+                                 for label, side in (("Native", ref), ("TRTMC", cand)))
+            if item.get("out_of_capacity"):
+                coverage += f"; {item['out_of_capacity']} capacity rejections excluded on both sides"
+            lines.append(f"| {item['request']} (shared quality outputs) | {item.get('measurement_status', 'measured')} | "
                          f"{_fmt(cand.get('p50_ms'))} | — | {_fmt(ref.get('p50_ms'))} | — | {notes} |")
-            lines += ["", f"{item.get('matched_pairs')}/{item.get('pairs')} paired responses have matching work. "
-                      "Task-call timings reuse the quality outputs; differing work prevents an equal-work comparison.", ""]
+            lines += ["", f"{coverage}. {item.get('matched_pairs')}/{item.get('pairs')} paired responses have matching work. "
+                      "Task-call timings reuse the benchmark outputs; work differences are informational.", ""]
             continue
         unit = " per audio second" if cand.get("unit") or ref.get("unit") else ""
         lines.append(f"| {item['reference_mode']}{' ' + item['request'] if item.get('request') else ''} | {item['light']} | {_fmt(cand.get('p50_ms'))}{unit} | "
