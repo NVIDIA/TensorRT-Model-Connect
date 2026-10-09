@@ -622,6 +622,13 @@ void TrtModuleImpl::forward_async(const TensorMap& inputs) {
         auto copy_bytes = std::min(tensor.nbytes(), entry.nbytes);
         if (copy_bytes > 0 && tensor.data) {
             cudaMemcpyAsync(entry.d_ptr, tensor.data, copy_bytes, cudaMemcpyHostToDevice, stream_);
+            // A short upload must not inherit bytes from an earlier request.
+            // External state and dynamically shaped buffers retain their own
+            // lifetime and shape contracts.
+            if (!entry.is_external && !entry.is_dynamic && copy_bytes < entry.nbytes) {
+                cudaMemsetAsync(static_cast<char*>(entry.d_ptr) + copy_bytes, 0,
+                                entry.nbytes - copy_bytes, stream_);
+            }
         }
     }
 
