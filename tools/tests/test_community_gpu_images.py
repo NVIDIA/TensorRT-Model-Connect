@@ -109,9 +109,11 @@ def test_family_build_uses_one_frozen_shared_base_and_only_selected_declarations
     root = repository(tmp_path)
     calls, contexts = [], []
     prepared = image(CHILD, ["shared-layer", "family-layer"])
+    base = image()
+    base["Config"]["Entrypoint"] = prepared["Config"]["Entrypoint"] = ["/vendor-init"]
 
     def inspect(reference, **_):
-        return image() if reference == BASE else prepared
+        return base if reference == BASE else prepared
 
     def docker(args, **kwargs):
         calls.append((args, kwargs))
@@ -206,6 +208,28 @@ def test_generated_recipe_is_part_of_preparation_identity(tmp_path, monkeypatch)
     monkeypatch.setattr(images, "_default_recipe", lambda files: original(files) + b"RUN true\n")
     images.ensure_family_image(root, "first", BASE, time.monotonic() + 60)
     assert keys[0] != keys[1]
+
+
+def test_family_dependency_layer_cannot_intercept_the_test_command(tmp_path, monkeypatch):
+    root = repository(tmp_path)
+    base = image()
+    base["Config"]["Entrypoint"] = ["/opt/nvidia/nvidia_entrypoint.sh"]
+    prepared = image(CHILD)
+    prepared["Config"]["Entrypoint"] = ["python"]
+    monkeypatch.setattr(
+        images, "inspect", lambda reference, **_: base if reference == BASE else prepared
+    )
+
+    def docker(args, **kwargs):
+        if args[0] == "build":
+            name, value = args[args.index("--label") + 1].split("=", 1)
+            prepared["Config"]["Labels"][name] = value
+        assert args[0] != "run"
+        return ""
+
+    monkeypatch.setattr(images, "docker", docker)
+    with pytest.raises(images.ImagePreparationError, match="cannot replace the base entrypoint"):
+        images.ensure_family_image(root, "first", BASE, time.monotonic() + 60)
 
 
 def test_incomplete_dependency_declaration_fails_before_docker(tmp_path, monkeypatch):

@@ -498,6 +498,8 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
         or child_layers[: len(parent_layers)] != parent_layers
     ):
         raise ImagePreparationError("Family image does not extend the shared base layers")
+    if prepared.get("Config", {}).get("Entrypoint") != base.get("Config", {}).get("Entrypoint"):
+        raise ImagePreparationError("Family dependency layers cannot replace the base entrypoint")
     docker(
         [
             "run",
