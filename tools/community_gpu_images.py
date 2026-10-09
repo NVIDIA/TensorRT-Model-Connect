@@ -120,6 +120,8 @@ def validate_base(base: dict, prefix: str, expected_inputs: dict[str, str] | Non
         or not isinstance(base.get("environment_source_sha"), str)
         or not re.fullmatch(r"[0-9a-f]{40}", base["environment_source_sha"])
         or not isinstance(base.get("inputs"), dict)
+        or not isinstance(base.get("local_image_id"), str)
+        or not IMAGE_ID.fullmatch(base["local_image_id"])
     ):
         raise ImagePreparationError("Shared base is not a verified private immutable environment")
     if base.get("input_key") != base_key(base["inputs"]):
@@ -310,6 +312,7 @@ def pull_shared_base(catalog: dict, token_path: Path, username: str, tag: str) -
                 or labels.get(BASE_KIND_LABEL) != "community-base"
                 or object_json(labels.get(BASE_INPUTS_LABEL, "{}")) != base["inputs"]
                 or base["image"] not in image.get("RepoDigests", [])
+                or image["Id"] != base["local_image_id"]
             ):
                 raise ImagePreparationError(
                     "Pulled base does not match the public environment inputs"
@@ -324,13 +327,15 @@ def _family_inputs(repository: Path, family: str) -> dict[str, bytes]:
     if not FAMILY.fullmatch(family):
         raise ImagePreparationError("Invalid family name")
     owner = repository / "families" / family
-    if owner.is_symlink() or not owner.is_dir():
+    if (repository / "families").is_symlink() or owner.is_symlink() or not owner.is_dir():
         raise ImagePreparationError("Family dependency owner is unavailable")
     files = {}
     requirements = owner / "requirements.txt"
     if requirements.exists() or requirements.is_symlink():
         files["requirements.txt"] = regular_bytes(requirements, root=repository)
     ci = owner / "ci"
+    if ci.is_symlink():
+        raise ImagePreparationError("Family dependency contexts cannot contain symlinks")
     for name in (
         "constraints-linux-amd64.txt",
         "environment-linux-amd64.lock",
@@ -344,10 +349,39 @@ def _family_inputs(repository: Path, family: str) -> dict[str, bytes]:
             if path.is_symlink():
                 raise ImagePreparationError("Family dependency contexts cannot contain symlinks")
             if path.is_file():
-                files[str(path.relative_to(ci))] = regular_bytes(path, root=repository)
+                name = str(path.relative_to(ci))
+                content = regular_bytes(path, root=repository)
+                if name in files and files[name] != content:
+                    raise ImagePreparationError("Family dependency input paths overlap")
+                files[name] = content
     if sum(map(len, files.values())) > MAX_CONTEXT:
         raise ImagePreparationError("Family dependency context exceeds the size limit")
     return files
+
+
+def _default_recipe(files: dict[str, bytes]) -> bytes:
+    if "requirements.txt" not in files:
+        raise ImagePreparationError(
+            "Family dependency inputs require a requirements file or recipe"
+        )
+    arguments = ""
+    copies = ""
+    for name, option in (
+        ("constraints-linux-amd64.txt", "--constraint"),
+        ("environment-linux-amd64.lock", "--requirement"),
+    ):
+        if name in files:
+            copies += f"COPY {name} /opt/trtmc-ci/{name}\n"
+            arguments += f" {option} /opt/trtmc-ci/{name}"
+    return (
+        "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n"
+        "COPY requirements.txt /opt/trtmc-ci/family-requirements.txt\n"
+        + copies
+        + "RUN python -m pip install --disable-pip-version-check --no-cache-dir "
+        "--no-build-isolation -r /opt/trtmc-ci/family-requirements.txt "
+        + arguments
+        + " && python -m pip check\n"
+    ).encode()
 
 
 def ensure_family_image(repository: Path, family: str, base_image_id: str, deadline: float) -> str:
@@ -357,6 +391,8 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
     files = _family_inputs(repository, family)
     if not files:
         return base_image_id
+    if "Dockerfile.dependencies" not in files:
+        files["Dockerfile.dependencies"] = _default_recipe(files)
     base = inspect(base_image_id)
     if base["Id"] != base_image_id:
         raise ImagePreparationError("Local shared base identity changed")
@@ -384,25 +420,6 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         recipe = context / "Dockerfile.dependencies"
-        if not recipe.is_file():
-            arguments = ""
-            copies = ""
-            for name, option in (
-                ("constraints-linux-amd64.txt", "--constraint"),
-                ("environment-linux-amd64.lock", "--requirement"),
-            ):
-                if name in files:
-                    copies += f"COPY {name} /opt/trtmc-ci/{name}\n"
-                    arguments += f" {option} /opt/trtmc-ci/{name}"
-            recipe.write_text(
-                "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n"
-                "COPY requirements.txt /opt/trtmc-ci/family-requirements.txt\n"
-                + copies
-                + "RUN python -m pip install --disable-pip-version-check --no-cache-dir "
-                "--no-build-isolation -r /opt/trtmc-ci/family-requirements.txt "
-                + arguments
-                + " && python -m pip check\n"
-            )
         # The existing public family recipe consumes the public provenance file.
         # It contains no private image reference, token or OCI source override.
         revision = subprocess.run(
@@ -420,6 +437,8 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
             capture_output=True,
             timeout=30,
         ).stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ImagePreparationError("Family source revision is not immutable")
         base_labels = base.get("Config", {}).get("Labels", {}) or {}
         (context / "build-inputs.json").write_text(
             json.dumps(
@@ -472,6 +491,7 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
     child_layers = prepared.get("RootFS", {}).get("Layers")
     if (
         not isinstance(parent_layers, list)
+        or not parent_layers
         or not isinstance(child_layers, list)
         or child_layers[: len(parent_layers)] != parent_layers
     ):

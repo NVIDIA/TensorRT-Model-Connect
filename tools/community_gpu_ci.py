@@ -1259,6 +1259,16 @@ def run_containers(
                 failures.append(f"{family}: environment preparation failed")
                 _summary(records, env, started)
                 continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                row.update(
+                    status="failed",
+                    exit_code=124,
+                    evidence="coordinator deadline reached during environment preparation",
+                )
+                failures.append(f"{family}: environment preparation exhausted coordinator budget")
+                _summary(records, env, started)
+                continue
             name = f"trtmc-community-{run_id}-{family}"
             row = records[family]
             row.update(status="running", phase="checkpoints", failure_class="infra_failure")

@@ -31,6 +31,7 @@ def base_manifest():
         "inputs": INPUTS,
         "input_key": images.base_key(INPUTS),
         "cpu_environment_verified": True,
+        "local_image_id": BASE,
     }
 
 
@@ -82,6 +83,7 @@ def repository(tmp_path):
         ("image", PREFIX + "/base:latest"),
         ("input_key", "0" * 64),
         ("environment_source_sha", "main"),
+        ("local_image_id", "latest"),
     ],
 )
 def test_rejects_unverified_or_mutable_base(field, value):
@@ -157,6 +159,72 @@ def test_owner_without_extra_dependencies_uses_shared_image_directly(tmp_path, m
     monkeypatch.setattr(images, "inspect", lambda *_, **__: image())
     monkeypatch.setattr(images, "docker", lambda *_, **__: pytest.fail("unnecessary build"))
     assert images.ensure_family_image(tmp_path, "plain", BASE, time.monotonic() + 60) == BASE
+
+
+@pytest.mark.parametrize("parent,child", [([], []), (["shared"], ["other"]), (["shared"], [])])
+def test_family_recipe_cannot_replace_the_shared_base(tmp_path, monkeypatch, parent, child):
+    root = repository(tmp_path)
+    prepared = image(CHILD, child)
+    monkeypatch.setattr(
+        images,
+        "inspect",
+        lambda reference, **_: image(BASE, parent) if reference == BASE else prepared,
+    )
+
+    def docker(args, **kwargs):
+        if args[0] == "build":
+            name, value = args[args.index("--label") + 1].split("=", 1)
+            prepared["Config"]["Labels"][name] = value
+        assert args[0] != "run"
+        return ""
+
+    monkeypatch.setattr(images, "docker", docker)
+    with pytest.raises(images.ImagePreparationError, match="shared base layers"):
+        images.ensure_family_image(root, "first", BASE, time.monotonic() + 60)
+
+
+def test_generated_recipe_is_part_of_preparation_identity(tmp_path, monkeypatch):
+    root = repository(tmp_path)
+    prepared = image(CHILD)
+    keys = []
+    monkeypatch.setattr(
+        images, "inspect", lambda reference, **_: image() if reference == BASE else prepared
+    )
+
+    def docker(args, **kwargs):
+        if args[0] == "build":
+            receipt = json.loads((Path(args[-1]) / "build-inputs.json").read_text())
+            assert "Dockerfile.dependencies" in receipt["inputs"]
+            keys.append(receipt["input_key"])
+            name, value = args[args.index("--label") + 1].split("=", 1)
+            prepared["Config"]["Labels"][name] = value
+        return ""
+
+    monkeypatch.setattr(images, "docker", docker)
+    original = images._default_recipe
+    images.ensure_family_image(root, "first", BASE, time.monotonic() + 60)
+    monkeypatch.setattr(images, "_default_recipe", lambda files: original(files) + b"RUN true\n")
+    images.ensure_family_image(root, "first", BASE, time.monotonic() + 60)
+    assert keys[0] != keys[1]
+
+
+def test_incomplete_dependency_declaration_fails_before_docker(tmp_path, monkeypatch):
+    ci = tmp_path / "families" / "first" / "ci"
+    ci.mkdir(parents=True)
+    (ci / "constraints-linux-amd64.txt").write_text("example==1.0\n")
+    monkeypatch.setattr(images, "inspect", lambda *_, **__: pytest.fail("image inspection"))
+    with pytest.raises(images.ImagePreparationError, match="requirements file or recipe"):
+        images.ensure_family_image(tmp_path, "first", BASE, time.monotonic() + 60)
+
+
+def test_family_parent_symlink_is_rejected_even_without_requirements(tmp_path):
+    external = tmp_path / "external" / "first"
+    external.mkdir(parents=True)
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "families").symlink_to(external.parent, target_is_directory=True)
+    with pytest.raises(images.ImagePreparationError, match="owner is unavailable"):
+        images.ensure_family_image(root, "first", BASE, time.monotonic() + 60)
 
 
 def test_undeclared_owner_and_context_symlink_cannot_read_host_files(tmp_path):
