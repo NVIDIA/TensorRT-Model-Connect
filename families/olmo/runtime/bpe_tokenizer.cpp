@@ -1573,7 +1573,8 @@ std::vector<int32_t> olmo_encode_causal_prompt(const ITokenizer& tokenizer,
                               text.compare(text.size() - eos.size(), eos.size(), eos) == 0;
     // Continue the supplied text rather than the document after the tokenizer's
     // automatically appended terminator. An explicitly supplied EOS is kept.
-    if (eos_id >= 0 && ids.size() > 1 && ids.back() == eos_id && !explicit_eos)
+    if (eos_id >= 0 && ids.size() > 1 && ids.back() == eos_id &&
+        (!explicit_eos || ids[ids.size() - 2] == eos_id))
         ids.pop_back();
     return ids;
 }

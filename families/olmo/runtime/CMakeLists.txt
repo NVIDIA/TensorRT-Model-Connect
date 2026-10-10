@@ -40,7 +40,7 @@ if(TRTMC_BUILD_TESTS)
   add_executable(test_olmo_prompt_tokenization
     ${PROJECT_SOURCE_DIR}/families/olmo/tests/cpp/test_olmo_prompt_tokenization.cpp)
   target_include_directories(test_olmo_prompt_tokenization PRIVATE ${PROJECT_SOURCE_DIR})
-  target_link_libraries(test_olmo_prompt_tokenization PRIVATE trtmc_model_olmo)
+  target_link_libraries(test_olmo_prompt_tokenization PRIVATE trtmc_model_olmo nlohmann_json::nlohmann_json)
   add_test(NAME olmo_prompt_tokenization COMMAND test_olmo_prompt_tokenization)
   set_tests_properties(olmo_prompt_tokenization PROPERTIES LABELS "cpu")
 endif()
