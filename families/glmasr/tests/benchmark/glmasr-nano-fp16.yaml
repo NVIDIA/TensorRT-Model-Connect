@@ -11,7 +11,7 @@ candidate:
   precision: fp16
   bundle: glmasr-nano-fp16.bundle
   build:
-    max_sequence_length: 384
+    max_sequence_length: 1024
 
 reference_environment:
   requirements: ../../requirements.txt
