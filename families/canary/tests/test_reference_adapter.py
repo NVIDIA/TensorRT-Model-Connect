@@ -8,20 +8,11 @@ import pytest
 
 pytest.importorskip("soundfile")
 
-from families.nemotron_speech_streaming.reference.adapter import (  # noqa: E402
-    decoded_observation, without_language_tags,
-)
+from families.canary.reference.adapter import decoded_observation  # noqa: E402
 
 
-def test_the_native_transcript_leaves_out_the_prompted_models_language_tags():
-    text = "This was a formable array of advantages. <en-US> Slavery was playing with loaded dice. <en-US>"
-    assert without_language_tags(text) == "This was a formable array of advantages. Slavery was playing with loaded dice."
-    assert without_language_tags("Is it not Louise? <de-DE>") == "Is it not Louise?"
-    assert without_language_tags("a <b> c") == "a <b> c"  # only language tags
-
-
-def test_decode_work_preserves_tokens_removed_from_displayed_transcript():
-    value = SimpleNamespace(text="Hello. <en-US>", y_sequence=np.array([17, 42, 3], dtype=np.int64))
+def test_decoded_work_uses_returned_tokens_including_special_tokens():
+    value = SimpleNamespace(text="Hello.", y_sequence=np.array([17, 42, 3], dtype=np.int64))
     result = decoded_observation(value, 2.5)
     assert result == {"text": "Hello.", "input_audio_seconds": 2.5,
                       "token_ids": [17, 42, 3], "output_tokens": 3}
@@ -29,7 +20,7 @@ def test_decode_work_preserves_tokens_removed_from_displayed_transcript():
 
 def test_empty_decode_has_zero_work_and_missing_tokens_are_not_inferred():
     assert decoded_observation({"text": "", "y_sequence": []}, 1.0)["output_tokens"] == 0
-    assert decoded_observation("Two spoken words <en-US>", 1.0) == {
+    assert decoded_observation("Two spoken words", 1.0) == {
         "text": "Two spoken words", "input_audio_seconds": 1.0}
 
 

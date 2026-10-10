@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -27,6 +28,19 @@ OPTIONAL_CTC_KEYS = frozenset({"ctc_decoder.decoder_layers.0.bias", "ctc_decoder
 
 def without_language_tags(text: str) -> str:
     return LANGUAGE_TAG.sub("", text).strip()
+
+
+def decoded_observation(value: Any, seconds: float) -> dict[str, Any]:
+    text = getattr(value, "text", value) if not isinstance(value, Mapping) else value.get("text", "")
+    observation = {"text": without_language_tags(str(text)), "input_audio_seconds": seconds}
+    tokens = getattr(value, "y_sequence", None) if not isinstance(value, Mapping) else value.get("y_sequence")
+    if tokens is not None:
+        tokens = tokens.tolist() if hasattr(tokens, "tolist") else tokens
+        if not isinstance(tokens, (list, tuple)) or any(
+                not isinstance(token, Integral) or isinstance(token, bool) for token in tokens):
+            raise ValueError("Nemotron ASR work evidence requires a one-dimensional integer decoded sequence")
+        observation.update(token_ids=[int(token) for token in tokens], output_tokens=len(tokens))
+    return observation
 
 
 def _archive(spec: Any) -> Path:
@@ -104,8 +118,6 @@ class Adapter:
         values, model_ms = self.host.timed(run)
         value = values[0] if isinstance(values, tuple) else values
         value = value[0] if isinstance(value, list) and value else value
-        text = str(getattr(value, "text", value) if not isinstance(value, Mapping) else value.get("text", ""))
-        text = without_language_tags(text)
         seconds = len(audio) / SAMPLE_RATE
-        return self.host.invocation({"text": text, "input_audio_seconds": seconds}, model_ms,
+        return self.host.invocation(decoded_observation(value, seconds), model_ms,
                                     realtime_factor=seconds / (model_ms / 1000.0))
