@@ -192,7 +192,10 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
         except Exception as error:  # noqa: BLE001
             record.update(category="error", reason=_error(error))
             (out / "error.json").write_text(json.dumps({**record, "traceback": traceback.format_exc()}, indent=2))
-        if retention.should_delete_bundle(bundle_policy, record["category"], built=build.get("status") == "built"):
+        category = record["category"]
+        if category == "measured" and record.get("acc") == "pass" and record.get("perf") == "measured":
+            category = "pass"
+        if retention.should_delete_bundle(bundle_policy, category, built=build.get("status") == "built"):
             record["bundle_deleted"] = retention.delete_bundle(environment, model)
     record["seconds"] = round(time.time() - started)
     return record
@@ -346,10 +349,27 @@ def ms(value: Any) -> str:
     return f"{value:.0f} ms" if value >= 100 else f"{value:.1f} ms" if value >= 1 else f"{value:.3f} ms"
 
 
+def measurement_note(item: Mapping[str, Any]) -> str:
+    """Surface workload and coverage limits beside the summary's task-call timings."""
+    if item.get("kind") != "natural_dataset":
+        return ""
+    notes = []
+    pairs = item.get("pairs", 0)
+    unmatched = pairs - item.get("matched_pairs", 0)
+    if unmatched > 0:
+        notes.append(f"work differs or is unknown on {unmatched}/{pairs} pairs")
+    if item.get("measurement_status") in ("partial", "unavailable") or item.get("complete") is False:
+        notes.extend(f"{label} {side.get('valid_requests', 0)}/{side.get('requests', 0)} timed"
+                     for label, side in (("Native", item.get("reference") or {}),
+                                         ("TRTMC", item.get("candidate") or {})))
+    return "; ".join(notes)
+
+
 def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
     return "; ".join(f"{request_label(profile, item)}: TRTMC {ms((item.get('candidate') or {}).get('p50_ms'))} · "
                      f"native {ms((item.get('reference') or {}).get('p50_ms'))}"
-                     + (" per audio second" if (item.get("candidate") or {}).get("unit") else "") for item in items)
+                     + (" per audio second" if (item.get("candidate") or {}).get("unit") else "")
+                     + (f" ({note})" if (note := measurement_note(item)) else "") for item in items)
 
 
 # The owner's four results, worst first: White, no valid comparison (no verdict: an error or a failed build; or the
@@ -374,7 +394,14 @@ def reported_perf(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 def request_label(profile: str, item: Mapping[str, Any]) -> str:
     """A timed request named without its model (``catalog``, ``catalog-en``)."""
     name = str(item.get("request") or item.get("reference_mode") or "")
-    return name[len(profile) + 1:] if name.startswith(profile + "-") else name
+    name = name[len(profile) + 1:] if name.startswith(profile + "-") else name
+    stem, separator, preset_count = name.rpartition("-")
+    mine, theirs = item.get("candidate") or {}, item.get("reference") or {}
+    count = mine.get("requests")
+    if (item.get("kind") == "natural_dataset" and separator and preset_count.isdecimal()
+            and count is not None and count == theirs.get("requests") and count != int(preset_count)):
+        return f"{stem} ({count} requests)"
+    return name
 
 
 def _judged(row: Mapping[str, Any], status: str) -> list[Mapping[str, Any]]:

@@ -38,6 +38,8 @@ Each benchmark's `margin`, `relative_margin`, and size are set in `config/tasks.
 Native absolute scores do not decide conversion acceptance: the paired difference does.
 A low score limits what this benchmark establishes about model capability, but does not
 prevent comparing conversion results. Historical `min_native` fields are ignored.
+Equal zero task scores establish only the scored benchmark comparison, not identical outputs
+or intrinsic model capability. This applies to the random-weight DeepSeek V2 tiny fixture too.
 
 Conversion-parity benchmarks (`gold_metrics.PARITY`) compare each output with the native one within a
 tolerance: raw encoders' vectors, MoGe geometry, ACT action chunks, stereo disparities, PersonaPlex speech.
@@ -103,11 +105,14 @@ paired geometric speedup and total-time ratio are descriptive; the 90% interval 
 with seeds clustered by problem, not a repeated-run stability interval. The report shows each side's p50,
 effective precision, successful timing coverage, and observed work differences.
 Generation length and work comparability do not decide whether benchmark timings are measured.
+Summary rows flag unequal or unknown work and partial timing coverage beside the P50 values.
 Inputs excluded by Acc as exceeding bundle capacity are excluded from both timing sides too; their
 count and the original attempted request counts remain visible. Other failed or missing requests
 remain in coverage and produce a `partial` timing measurement when both sides have timings.
 A missing workload or a side without any valid timing is an error. `max_tokens` alone is not work evidence.
 No mandatory second, forced-length suite is added for variable-output families.
+GenEval now defaults to `geneval-full`, all 553 prompts at the pinned metadata hash;
+the old `geneval-200` preset remains available for an explicitly smaller selection.
 
 Models with quality benchmarks run **only their required quality workloads**. For example, Qwen uses
 `mmlu-0shot`, and image/video models use their configured quality datasets. Catalog, near-capacity,
@@ -251,6 +256,11 @@ batch advances (both default to `retain`):
 |---|---|---|
 | `bundle` | `retain`, `delete_on_pass`, `delete_unless_error`, `delete_built_unless_error` | delete `bundle_root/<name>/` after the model's run (`delete_built_unless_error`: only a bundle the run built itself); an `error` verdict always keeps it for the rerun |
 | `hf_cache` | `retain`, `delete_unused` | `run-all` deletes a checkpoint repository from `hf_hub_cache` once no remaining profile of the batch uses it |
+
+`delete_on_pass` also accepts a benchmark result with passing Acc and complete Perf (`measured`).
+Partial timings, inconclusive Acc, and failed Acc keep their bundles under that policy.
+Failed Native precision attempts remain in the execution evidence; their timings and client
+statistics are excluded when a fallback succeeds.
 
 Deletion never leaves those roots. Reference environments and reports are kept (`rejudge`
 needs only the reports). The peak is the largest single model (checkpoint plus bundle) plus the

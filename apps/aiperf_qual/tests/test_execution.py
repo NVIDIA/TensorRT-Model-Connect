@@ -96,6 +96,37 @@ def test_pair_work_per_sample_instead_of_demanding_every_problem_have_one_length
     assert not result["gate"] and result["matched_pairs"] == result["pairs"] == 2
 
 
+def test_media_precision_fallback_keeps_only_the_successful_attempt_in_measurements(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import aiperf_metrics, generation
+
+    evidence = new_session(tmp_path)
+    attempts = []
+
+    def generate(environment, model, backend, out, suite, python, precision, reuse):
+        attempts.append(precision)
+        if precision == "fp16":
+            collect(evidence, "reference", [raw(0, None, status=422, error={"type": "RequestError"})],
+                    precision=precision)
+            raise RuntimeError("native precision unsupported")
+        collect(evidence, "reference", [raw(0, 20)], precision=precision)
+        return []
+
+    monkeypatch.setattr(generation, "generate", generate)
+    model = {"reference": {"perf_precision": "fp16", "precision": "fp32"}}
+    with execution.session(evidence):
+        _, backend, precision = generation.generate_native(Environment({}), model, None, "/py", tmp_path, "media")
+        collect(evidence, "candidate", [raw(0, 10)])
+    measured, = evidence.natural_performance()
+    assert attempts == ["fp16", "fp32"] and (backend, precision) == ("reference", "fp32")
+    assert measured["complete"] and measured["measurement_status"] == "measured"
+    assert measured["reference"]["requests"] == 1 and measured["reference"]["p50_ms"] == 20
+    assert [entry["precision"] for entry in aiperf_metrics.entries(evidence.batches)
+            if entry["side"] == "reference"] == ["fp32"]
+    saved = [json.loads(line) for line in (tmp_path / "execution.jsonl").read_text().splitlines()]
+    assert saved[0]["records"][0]["output_valid"] is False  # retain the failed attempt for diagnosis
+    assert any(row.get("event") == "supersede_failed_attempt" and row["batch_ids"] == [0] for row in saved)
+
+
 def test_less_generation_is_not_claimed_as_equal_work_acceleration(tmp_path):
     evidence = new_session(tmp_path)
     collect(evidence, "candidate", [raw(0, 10, 80), raw(1, 10, 200)])

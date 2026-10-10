@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from . import aiperf_metrics
+from .judge import GPU_BUSY_PERCENT
 from .noninferiority import t_quantile
 
 SCHEMA = "trtmc.qualification/v2"
@@ -96,7 +97,7 @@ def prepare(arguments: Sequence[str]) -> tuple[list[str], dict[str, Any] | None]
     concurrency = int(args[args.index("--concurrency") + 1]) if "--concurrency" in args else 1
     identity["concurrency"] = concurrency
     busy = active.gpu_probe()
-    if not active.smoke and (busy is None or busy >= 20):
+    if not active.smoke and (busy is None or busy >= GPU_BUSY_PERCENT):
         from .services import ServiceError
 
         raise ServiceError(f"GPU idleness was not established before {descriptor['name']} "
@@ -253,7 +254,7 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
            for values in identities for item in values):
         reasons.append("natural workload was not executed by isolated single replicas")
     for batches in sides:
-        if any(batch.get("gpu_busy_percent") is None or batch["gpu_busy_percent"] >= 20 for batch in batches):
+        if any(batch.get("gpu_busy_percent") is None or batch["gpu_busy_percent"] >= GPU_BUSY_PERCENT for batch in batches):
             reasons.append("GPU idleness was not established before the natural workload")
         if any(not batch.get("warmup") for batch in batches):
             reasons.append("natural workload has no excluded warmup")

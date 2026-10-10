@@ -210,6 +210,29 @@ def test_run_one_builds_qualifies_and_applies_the_bundle_policy(tmp_path, monkey
     assert json.loads((tmp_path / "m/build.json").read_text())["status"] == "built"
 
 
+@pytest.mark.parametrize("acc, complete, timed, delete", [
+    ("pass", True, True, True),
+    ("pass", False, True, False),
+    ("pass", True, False, False),
+    ("inconclusive", True, True, False),
+    ("fail", True, True, False),
+])
+def test_delete_on_pass_uses_the_benchmark_verdict(tmp_path, monkeypatch, acc, complete, timed, delete):
+    from trtmc_aiperf_qual import judge
+
+    result = {"performance_source": "quality", "accuracy": [{"suite": "mmlu-0shot", "status": acc}],
+              "performance": [{"kind": "natural_dataset", "request": "mmlu-0shot", "gate": False,
+                               "complete": complete, "candidate": {"p50_ms": 10 if timed else None},
+                               "reference": {"p50_ms": 12}}]}
+    verdict = judge.verdict(result, expected_suites=["mmlu-0shot"], expected_modes=0)
+    deleted = _stub_phases(monkeypatch, qualify=lambda *args: {"verdict": verdict})
+    environment = Environment({"retention": {"bundle": "delete_on_pass"}})
+    record = campaign.run_one(environment, _model("m", "org/m"), tmp_path / "m")
+    assert deleted == (["m"] if delete else [])
+    assert record["category"] == verdict["category"]  # retention never rewrites the reported verdict
+    assert ("bundle_deleted" in record) is delete
+
+
 def test_run_one_records_build_failures_and_keeps_errored_bundles(tmp_path, monkeypatch):
     deleted = _stub_phases(monkeypatch, build="failed", qualify=lambda *a: pytest.fail("must not qualify"))
     environment = Environment({"retention": {"bundle": "delete_unless_error"}})
@@ -810,6 +833,55 @@ def test_results_follow_the_owners_four_colours_on_the_catalog_request():
     shown = campaign.reported_perf(row("pass", {"catalog": "green", "catalog-near-capacity": "red"}))
     assert [campaign.request_label("m", item) for item in shown] == ["catalog"]
     assert campaign.signal_reason("m", row("perf-issue", {"catalog": "yellow"})) == "catalog: TRTMC about equal to native"
+
+
+def test_image_qualification_defaults_to_the_pinned_full_geneval_selection():
+    from trtmc_aiperf_qual.models import model_suite, resolve_model
+    from trtmc_aiperf_qual.config import load_suite
+
+    environment = Environment({"repo": str(REPOSITORY), "bundle_root": "/bundles",
+                               "runtime_root": "/rt", "worker": "/rt/worker", "serve_python": "/py"})
+    model = resolve_model("qwen-image", environment)
+    check = next(item for item in model["supplementary"] if item["check"] == "geneval")
+    suite = model_suite(check["suite"], model)
+    assert suite["suite"] == "geneval-full" and suite["selection"]["count"] >= 553
+    assert suite["source"] == load_suite("geneval-200")["source"]  # same pinned corpus and labels
+    assert check["gate"] == {"margin": 5.0}
+
+
+@pytest.mark.parametrize("complete, matched, warning", [
+    (True, 10, ""),
+    (True, 8, "work differs or is unknown on 2/10 pairs"),
+    (False, 8, "Native 10/10 timed; TRTMC 8/10 timed"),
+])
+def test_summary_surfaces_work_and_coverage_without_changing_the_verdict(tmp_path, complete, matched, warning):
+    from trtmc_aiperf_qual import report, report_html
+
+    out = tmp_path / "model"
+    out.mkdir()
+    item = {"request": "evaluation", "reference_mode": "eager", "kind": "natural_dataset", "gate": False,
+            "complete": complete, "comparable": matched == 10, "pairs": 10, "matched_pairs": matched,
+            "measurement_status": "measured" if complete else "partial", "light": "informational",
+            "reference": {"p50_ms": 123, "requests": 10, "valid_requests": 10},
+            "candidate": {"p50_ms": 45, "requests": 10, "valid_requests": 10 if complete else 8}}
+    result = {"model": "model", "provenance": {}, "performance_source": "quality", "performance": [item],
+              "accuracy": [{"suite": "evaluation", "status": "pass"}],
+              "verdict": {"acc": "pass", "perf": item["measurement_status"], "category": "measured"}}
+    report.write_report(out, result)
+    text, _ = campaign.summary([tmp_path])
+    rows, counts, rank = campaign.collect([tmp_path])
+    page = report_html.render(rows, counts, rank, tmp_path / "summary.html").read_text()
+    assert warning in text and warning in page
+    assert "123 ms" in page and "45.0 ms" in page and "Speedup" not in page
+    assert campaign.signal(rows["model"]) == "green"  # observed work never adds a performance gate
+
+
+def test_historical_preset_labels_show_the_actual_request_count():
+    item = {"request": "geneval-200", "kind": "natural_dataset",
+            "candidate": {"requests": 553}, "reference": {"requests": 553}}
+    assert campaign.request_label("model", item) == "geneval (553 requests)"
+    assert campaign.request_label("model", {**item, "request": "mmlu-0shot"}) == "mmlu-0shot"
+    assert campaign.request_label("model", {**item, "kind": "fixed"}) == "geneval-200"
 
 
 def test_quality_dataset_timings_are_the_main_report_and_keep_their_benchmark_label(tmp_path):

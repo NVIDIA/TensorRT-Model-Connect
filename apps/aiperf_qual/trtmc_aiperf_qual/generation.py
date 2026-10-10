@@ -88,16 +88,19 @@ def generate_native(environment: Environment, model: dict[str, Any], suite: Any,
                     label: str, skip: tuple[str, str] | None = None, reuse: bool = False) -> tuple[Outputs, str, str]:
     """The native model's outputs and the (backend, precision) that produced them: the reference adapter
     at the Perf precisions in order (``skip`` excluded)."""
+    from . import execution
     from .runner import timing_precisions
 
     errors = []
     for precision in timing_precisions(model["reference"]):
         if ("reference", precision) == skip:
             continue
+        evidence_start = execution.checkpoint()
         try:
             return (generate(environment, model, "reference", out / f"{label}-native-reference-{precision}", suite,
                              python, precision, reuse), "reference", precision)
         except Exception as error:  # noqa: BLE001 - try the next precision
+            execution.supersede(evidence_start)
             errors.append(f"{precision}: {type(error).__name__}: {str(error)[-200:]}")
     raise RuntimeError("; ".join(errors)[-1500:] or "no other native precision")
 

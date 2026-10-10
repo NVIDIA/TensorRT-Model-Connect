@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import aiperf_metrics
-from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, is_pass, ms, reported_perf, request_label, signal, signal_reason
+from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, is_pass, measurement_note, ms, reported_perf, request_label, signal, signal_reason
 from .report import _fmt, counted
 
 EVIDENCE = ("report.md", "report.json", "execution.jsonl", "execution.timing-recovered.jsonl",
@@ -190,6 +190,8 @@ def _latency(profile: str, items: Sequence[Mapping[str, Any]], side: str) -> str
         unit = " / audio s" if timing.get("unit") or (item.get("candidate") or {}).get("unit") else ""
         label = f"<span class='detail'>{_e(request_label(profile, item))}</span> " if len(items) > 1 else ""
         lines.append(f"<div>{label}{_e(ms(timing.get('p50_ms')))}{unit}</div>")
+        if side == "candidate" and (note := measurement_note(item)):
+            lines.append(f"<span class='detail'>{_e(note)}</span>")
     return "".join(lines) or "<span class='none'>—</span>"
 
 
