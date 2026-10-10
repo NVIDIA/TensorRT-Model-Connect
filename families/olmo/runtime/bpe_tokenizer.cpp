@@ -668,6 +668,8 @@ class BpeTokenizer final : public ITokenizer {
         return "";
     }
 
+    int32_t eos_token_id() const override { return mEosId; }
+
   private:
     BpeTokenizer() = default;
 
@@ -1562,15 +1564,16 @@ std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
     return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
 }
 
-std::vector<int32_t> olmo_encode_causal_prompt(const ITokenizer& tokenizer, const std::string& text,
-                                               int32_t eos_id) {
+std::vector<int32_t> olmo_encode_causal_prompt(const ITokenizer& tokenizer,
+                                               const std::string& text) {
     auto ids = tokenizer.encode(text);
+    const auto eos_id = tokenizer.eos_token_id();
     const auto eos = tokenizer.token_for_id(eos_id);
     const bool explicit_eos = !eos.empty() && text.size() >= eos.size() &&
                               text.compare(text.size() - eos.size(), eos.size(), eos) == 0;
     // Continue the supplied text rather than the document after the tokenizer's
     // automatically appended terminator. An explicitly supplied EOS is kept.
-    if (ids.size() > 1 && ids.back() == eos_id && !explicit_eos)
+    if (eos_id >= 0 && ids.size() > 1 && ids.back() == eos_id && !explicit_eos)
         ids.pop_back();
     return ids;
 }
