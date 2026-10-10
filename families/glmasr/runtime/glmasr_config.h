@@ -52,10 +52,9 @@ struct GlmAsrConfig {
     bool is_eos_token(int32_t token) const {
         // Older bundles carry only the scalar field. New bundles preserve
         // all stopping tokens, including role markers ending a transcript.
-        return eos_token_ids.empty()
-                   ? token == eos_token_id
-                   : std::find(eos_token_ids.begin(), eos_token_ids.end(), token) !=
-                         eos_token_ids.end();
+        if (eos_token_ids.empty())
+            return token == eos_token_id;
+        return std::find(eos_token_ids.begin(), eos_token_ids.end(), token) != eos_token_ids.end();
     }
 
     std::string transcription_prompt{"Please transcribe this audio into text"};
