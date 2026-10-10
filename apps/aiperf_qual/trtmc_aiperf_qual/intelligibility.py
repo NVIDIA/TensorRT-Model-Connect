@@ -107,7 +107,12 @@ def validity(problems: list[dict[str, Any]], candidate: list[Mapping[str, Any] |
         reason = ("no audio" if not mine else "non-finite samples" if not mine["finite"]
                   else f"silent ({mine['dbfs']:.1f} dBFS)" if mine["dbfs"] < SILENCE_DBFS else None)
         if reason:
-            failures.append({"sample_id": problem["sample_id"], "explanation": reason})
+            failure = {"sample_id": problem["sample_id"], "explanation": reason}
+            if theirs:
+                failure["native_audio"] = {key: theirs.get(key) for key in ("finite", "dbfs", "seconds")}
+                if theirs.get("finite") and theirs.get("dbfs") is not None and theirs["dbfs"] < SILENCE_DBFS:
+                    failure["explanation"] += f"; native also silent ({theirs['dbfs']:.1f} dBFS)"
+            failures.append(failure)
         elif theirs and theirs.get("seconds"):
             ratios.append(mine["seconds"] / theirs["seconds"])
     count = len(problems)

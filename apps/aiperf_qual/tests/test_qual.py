@@ -818,6 +818,21 @@ def test_sampled_speech_is_valid_by_its_median_duration_not_each_utterance():
     assert validity([], [], [])["status"] == "error"
 
 
+def test_silent_speech_failure_reports_the_paired_native_baseline():
+    from trtmc_aiperf_qual.intelligibility import validity
+
+    problem = [{"sample_id": "same-request"}]
+    quiet = {"finite": True, "dbfs": -56.58, "seconds": 6.69}
+    native = {"finite": True, "dbfs": -56.52, "seconds": 6.69}
+    result = validity(problem, [quiet], [native])
+    assert result["status"] == "fail" and result["passed"] == 0
+    assert "native also silent (-56.5 dBFS)" in result["failures"][0]["explanation"]
+    assert result["failures"][0]["native_audio"] == native
+    # Native validity is evidence, not an additional absolute-quality floor.
+    good = {"finite": True, "dbfs": -20.0, "seconds": 6.69}
+    assert validity(problem, [good], [native])["status"] == "pass"
+
+
 def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     from trtmc_aiperf_qual import report_html
     from trtmc_aiperf_qual.report import write_report
