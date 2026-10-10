@@ -137,6 +137,10 @@ def test_refresh_old_exports_preserves_accuracy_and_raw_responses(tmp_path):
     assert updated["accuracy"] == quality
     assert updated["performance"][0]["reference"]["p50_ms"] == 20
     assert verdict(updated)["perf"] == "measured"
+    recovered_path = tmp_path / "execution.timing-recovered.jsonl"
+    assert updated["execution"]["records"] == str(recovered_path)
+    persisted = [json.loads(line) for line in recovered_path.read_text().splitlines()]
+    assert persisted[0]["records"][1]["capacity_rejection"] == "prompt exceeds the prefill profile"
     assert all(p.read_bytes() == data for p, data in before.items())
     assert benchmark_perf.refresh(tmp_path, updated) == updated
 

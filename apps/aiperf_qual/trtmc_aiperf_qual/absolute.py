@@ -428,7 +428,9 @@ def capacity_rejection(record: Mapping[str, Any]) -> str | None:
         body = json.loads(error.get("message") or "")["error"]
     except (TypeError, ValueError, KeyError):
         return None
-    message = str(body.get("message") or "") if isinstance(body, Mapping) else ""
+    if not isinstance(body, Mapping):
+        return None
+    message = str(body.get("message") or "")
     if body.get("code") != "backend_rejected_request" or not CAPACITY_LIMIT.search(message):
         return None
     return message[:300]

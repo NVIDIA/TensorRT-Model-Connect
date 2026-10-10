@@ -37,15 +37,26 @@ def new_session(tmp_path):
 
 
 @pytest.mark.parametrize("busy", [None, 20, 100])
-def test_formal_benchmark_never_starts_without_confirmed_gpu_idleness(tmp_path, busy):
+@pytest.mark.parametrize("role", ["both", "performance"])
+def test_formal_benchmark_never_starts_without_confirmed_gpu_idleness(tmp_path, busy, role):
     from trtmc_aiperf_qual.services import ServiceError
 
     evidence = new_session(tmp_path)
     evidence.gpu_probe = lambda: busy
-    with execution.session(evidence), execution.workload("evaluation", "both"):
+    with execution.session(evidence), execution.workload("evaluation", role):
         with pytest.raises(ServiceError, match="no benchmark requests were sent"):
             execution.prepare(["--request-count", "1"])
     assert not evidence.batches
+
+
+@pytest.mark.parametrize("role", ["both", "performance"])
+def test_smoke_does_not_require_formal_gpu_idleness(tmp_path, role):
+    evidence = new_session(tmp_path)
+    evidence.smoke = True
+    evidence.gpu_probe = lambda: None
+    with execution.session(evidence), execution.workload("evaluation", role):
+        _, metadata = execution.prepare(["--request-count", "1"])
+    assert metadata["gpu_busy_percent"] is None
 
 
 def test_same_inference_records_feed_accuracy_and_timing_without_replaying(tmp_path, monkeypatch):

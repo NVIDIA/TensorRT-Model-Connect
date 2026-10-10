@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import math
 from pathlib import Path
 
@@ -1496,6 +1497,12 @@ def test_any_other_rejection_stays_a_missing_answer():
     assert absolute.capacity_rejection({**_rejection(0, "exceeds"), "status": 200, "error": None}) is None
     plain = {"metadata": {"session_num": 0}, "status": 500, "error": {"message": "the context capacity is full"}}
     assert absolute.capacity_rejection(plain) is None  # not the backend's rejected-request code
+
+
+@pytest.mark.parametrize("body", [None, "failure", [], 42])
+def test_non_mapping_backend_error_is_not_a_capacity_rejection(body):
+    record = {"status": 422, "error": {"message": json.dumps({"error": body})}}
+    assert absolute.capacity_rejection(record) is None
 
 
 def test_gold_suite_outputs_beyond_capacity_are_dropped_from_the_corpus_on_both_sides():

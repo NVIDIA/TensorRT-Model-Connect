@@ -602,8 +602,10 @@ def test_recheck_reuses_a_generation_only_for_the_same_requests(tmp_path):
     (out / "aiperf.inputs.jsonl").write_text(json.dumps({"text": json.dumps({"request": suite.samples[0]["request"]})}) + "\n")
     (out / "records.jsonl").write_text(json.dumps({"route": "/v1/tasks/generate_image", "request_id": "r1"}) + "\n")
     (out / "aiperf").mkdir()
+    (out / "aiperf/inputs.json").write_text(json.dumps({"data": [{"session_id": "session_000000"}]}))
     (out / "aiperf/profile_export_raw.jsonl").write_text(json.dumps({
-        "metadata": {"benchmark_phase": "profiling", "x_request_id": "r1"}, "status": 200,
+        "metadata": {"benchmark_phase": "profiling", "x_request_id": "r1",
+                     "conversation_id": "session_000000"}, "status": 200,
         "payload": {"request": suite.samples[0]["request"]}}) + "\n")
     assert generation._earlier(out, suite) == [(out / "scratch" / "r1", {"route": "/v1/tasks/generate_image",
                                                                             "request_id": "r1"})]

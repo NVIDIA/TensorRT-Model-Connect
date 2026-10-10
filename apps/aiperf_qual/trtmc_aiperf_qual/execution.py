@@ -95,8 +95,8 @@ def prepare(arguments: Sequence[str]) -> tuple[list[str], dict[str, Any] | None]
     identity = dict(_SERVICE.get())
     concurrency = int(args[args.index("--concurrency") + 1]) if "--concurrency" in args else 1
     identity["concurrency"] = concurrency
-    busy = active.gpu_probe() if natural else None
-    if natural and not active.smoke and (busy is None or busy >= 20):
+    busy = active.gpu_probe()
+    if not active.smoke and (busy is None or busy >= 20):
         from .services import ServiceError
 
         raise ServiceError(f"GPU idleness was not established before {descriptor['name']} "

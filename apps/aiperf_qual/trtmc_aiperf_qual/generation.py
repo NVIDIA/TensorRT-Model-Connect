@@ -9,7 +9,6 @@ Checks that judge generated media as a whole (``tts_intelligibility``, ``geneval
 from __future__ import annotations
 
 import json
-from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -50,23 +49,28 @@ def _answered(out: Path, suite: Any) -> Outputs | None:
     records = [json.loads(line) for line in path.read_text().split("\n") if line.strip()] if path.is_file() else []
     records = [record for record in records if record.get("route", "").startswith("/v1/tasks/")]
     by_id = {record["request_id"]: record for record in records}
-    raw = AiperfRun(out / "aiperf", 0, []).raw_records()
-    if len(by_id) != len(records) or len(raw) != len(suite.samples):
+    run = AiperfRun(out / "aiperf", 0, [])
+    raw, indices = run.raw_records(), run.conversation_indices()
+    if len(by_id) != len(records) or len(raw) != len(suite.samples) or len(indices) != len(suite.samples):
         return None
-    by_request = defaultdict(deque)
+    by_sample = {}
     seen = set()
     for row in raw:
         identifier = row["metadata"].get("x_request_id")
         if identifier not in by_id or identifier in seen or row.get("status") != 200 or row.get("error"):
             return None
-        seen.add(identifier)
-        by_request[request_sha(row["payload"]["request"])].append(by_id[identifier])
-    ordered = []
-    for sample in suite.samples:
-        available = by_request[request_sha(sample["request"])]
-        if not available:
+        index = indices.get(row["metadata"].get("conversation_id"))
+        if index is None or index in by_sample:
             return None
-        record = available.popleft()
+        if request_sha(row["payload"]["request"]) != request_sha(suite.samples[index]["request"]):
+            return None
+        seen.add(identifier)
+        by_sample[index] = by_id[identifier]
+    ordered = []
+    for index in range(len(suite.samples)):
+        if index not in by_sample:
+            return None
+        record = by_sample[index]
         ordered.append((out / "scratch" / str(record["request_id"]), record))
     return ordered
 

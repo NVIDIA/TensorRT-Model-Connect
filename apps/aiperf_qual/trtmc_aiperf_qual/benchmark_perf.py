@@ -39,7 +39,7 @@ def refresh(out: Path, report: dict) -> dict:
                 if item.get("out_of_capacity") and item.get("status") != "error"}
     # Recover older classifications only from the matching original response.
     # Empty HTTP 200 answers remain wrong for accuracy, but have valid timings.
-    raw, recovered = {}, 0
+    raw, recovered, classified = {}, 0, 0
     for batch in batches:
         for row in batch["records"]:
             capacity = (batch["workload"] in excluded and batch["identity"].get("side") == "candidate"
@@ -60,6 +60,7 @@ def refresh(out: Path, report: dict) -> dict:
                 raise ValueError("saved response does not match its execution identity")
             if capacity:
                 row["capacity_rejection"] = absolute.capacity_rejection(source)
+                classified += 1
             if (timed and (source.get("error") or {}).get("type") == "InvalidInferenceResultError"
                     and not absolute.unanswered(source) and not metadata.get("was_cancelled")):
                 body = execution.response_body(source)
@@ -76,7 +77,7 @@ def refresh(out: Path, report: dict) -> dict:
     evidence = execution.Session(out, {}, lambda: None, lambda value: value, same_work, batches=batches)
     performance = [item for item in report.get("performance", []) if item.get("kind") != "natural_dataset"]
     updated = {**report, "performance": [*performance, *evidence.natural_performance(report.get("accuracy", []))]}
-    if recovered:
+    if recovered or classified:
         path = out / "execution.timing-recovered.jsonl"
         path.write_text("".join(json.dumps(batch) + "\n" for batch in batches))
         updated["execution"] = {**report["execution"], "records": str(path),
