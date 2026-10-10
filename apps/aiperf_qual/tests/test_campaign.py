@@ -678,6 +678,41 @@ def test_recheck_after_cleanup_requires_a_bundle_without_replacing_valid_scores(
     assert (out / "report.json").read_text() == report
 
 
+@pytest.mark.parametrize("missing", ["bundle", "environment"])
+def test_batch_recheck_checks_all_prerequisites_before_changing_any_report(tmp_path, monkeypatch, missing):
+    from trtmc_aiperf_qual import cli, models, runner, services
+
+    outs = [tmp_path / name for name in ("a", "b")]
+    report = '{"accuracy": [{"suite": "geneval", "status": "pass"}]}'
+    for out in outs:
+        out.mkdir()
+        (out / "report.json").write_text(report)
+        (out / "model.json").write_text(json.dumps({"catalog_profile": out.name, "supplementary": [],
+            "candidate": {"bundle": f"{out.name}/{out.name}.bundle"}}))
+        (out / "retention.json").write_text(json.dumps({"temporary_files": {"media_recheck": "regenerate"}}))
+    bundle = tmp_path / "bundles/a/a.bundle"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_bytes(b"available")
+    if missing == "environment":
+        other = tmp_path / "bundles/b/b.bundle"
+        other.parent.mkdir(parents=True)
+        other.write_bytes(b"available")
+    monkeypatch.setattr(models, "resolve_model", lambda *args: {
+        "supplementary": [{"check": "geneval"}], "reference": {"backend": "reference"}})
+    def native_python(environment, model):
+        if missing == "environment" and model["catalog_profile"] == "b":
+            raise ConfigError("reference environment unavailable")
+        return "/ref/python"
+    monkeypatch.setattr(services, "reference_python", native_python)
+    ran = []
+    monkeypatch.setattr(runner, "supplementary", lambda *args: ran.append(args[-1]) or [
+        {"suite": "geneval", "status": "fail"}])
+    with pytest.raises(ConfigError, match="missing|unavailable"):
+        cli.recheck_reports(outs, Environment({"bundle_root": str(tmp_path / "bundles")}))
+    assert not ran
+    assert all((out / "report.json").read_text() == report for out in outs)
+
+
 def test_recheck_reuses_a_generation_only_for_the_same_requests(tmp_path):
     import json
 

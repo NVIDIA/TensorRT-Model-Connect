@@ -118,6 +118,7 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
     from .artifacts import work_directory
     from .services import reference_python
 
+    pending = []
     for out in outs:
         path = out / "report.json"
         if not path.is_file():
@@ -140,6 +141,9 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
                 raise ConfigError(f"{out}: generated files were removed or regeneration was requested, but the "
                                   "candidate bundle is missing; run the model again before recheck")
         python = reference_python(environment, model)
+        pending.append((out, path, model, checks, python))
+    # A later missing prerequisite must not leave earlier reports updated but unjudged.
+    for out, path, model, checks, python in pending:
         entries, suites = [], set()
         for check in checks:
             suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
