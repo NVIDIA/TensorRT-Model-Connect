@@ -130,6 +130,15 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
                   if (not only or check["check"] in only) and applies(check, model)]
         if not checks:
             continue
+        retention = out / "retention.json"
+        cleaned = (json.loads(retention.read_text()).get("temporary_files") or {}) if retention.is_file() else {}
+        if regenerate or cleaned.get("media_recheck") == "regenerate":
+            from .bundles import bundle_path
+            from .config import ConfigError
+
+            if not bundle_path(environment, model).is_file():
+                raise ConfigError(f"{out}: generated files were removed or regeneration was requested, but the "
+                                  "candidate bundle is missing; run the model again before recheck")
         python = reference_python(environment, model)
         entries, suites = [], set()
         for check in checks:

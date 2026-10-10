@@ -63,7 +63,10 @@ def _size(path: Path) -> int:
 def delete_bundle(environment: Environment, model: Mapping[str, Any]) -> dict[str, Any]:
     """Remove the model's directory under bundle_root (the bundle and its build receipt)."""
     root = environment.path("bundle_root").resolve()
-    directory = (root / model["candidate"]["bundle"]).parent.resolve()
+    directory = (root / model["candidate"]["bundle"]).parent
+    if directory.is_symlink():
+        raise ConfigError(f"bundle directory must not be a symlink: {directory}")
+    directory = directory.resolve()
     if directory == root or not directory.is_relative_to(root):
         raise ConfigError(f"bundle {model['candidate']['bundle']!r} is not a model directory under {root}")
     if not directory.is_dir():
@@ -110,9 +113,13 @@ def cleanup_temporary(environment: Environment, out: Path, category: str) -> dic
         if not path.is_dir():
             continue
         # The worker also writes startup diagnostics beside its per-request files.
-        for log in path.glob("*.log"):
+        for log in path.rglob("*.log"):
             if log.is_file() and not log.is_symlink():
-                shutil.copy2(log, path.parent / log.name)
+                target = path.parent / log.relative_to(path)
+                if not target.resolve().is_relative_to(root):
+                    raise ConfigError(f"unsafe diagnostic log path: {target}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(log, target)
         receipt["bytes"] += _size(path)
         shutil.rmtree(path)
         receipt["paths"].append(str(path.relative_to(out)))

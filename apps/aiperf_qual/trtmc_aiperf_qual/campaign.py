@@ -247,6 +247,7 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
     _, hf_policy = retention.policies(environment)
     ordered = list(models) if keep_order else order(models)
     remaining = collections.Counter(repo for model in ordered for repo in checkpoints(model))
+    failed_checkpoints: set[str] = set()
     out_root.mkdir(parents=True, exist_ok=True)
     records = []
     with ThreadPoolExecutor(max_workers=1) as downloads, open(out_root / "campaign.jsonl", "a") as log:
@@ -261,9 +262,11 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
             else:
                 set_aside(out)
                 record = run_one(environment, model, out)
+            if record["category"] in ("error", "build-failed", "smoke-fail"):
+                failed_checkpoints.update(checkpoints(model))
             for repo in sorted(checkpoints(model)):
                 remaining[repo] -= 1
-                if remaining[repo] == 0 and hf_policy == "delete_unused":
+                if remaining[repo] == 0 and hf_policy == "delete_unused" and repo not in failed_checkpoints:
                     record.setdefault("checkpoints_deleted", []).append(
                         retention.delete_checkpoint(Path(environment["hf_hub_cache"]), repo))
             record = {**record, "host": socket.gethostname(), "position": index + 1, "started_at": started_at}
@@ -574,7 +577,8 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
 
 
 REMOTE_ROOT = re.compile(r"^(?:(?P<name>[\w.-]+)=)?(?P<host>[\w.@-]+):(?P<path>/.*)$")
-RESULT_FILES = ("report.json", "model.json", "build.json", "error.json", EXCLUSIONS, PLAN)  # model: its precision
+RESULT_FILES = ("report.json", "model.json", "build.json", "retention.json", "execution.jsonl",
+                "execution.timing-recovered.jsonl", "execution.aligned.jsonl", "error.json", EXCLUSIONS, PLAN)
 EVIDENCE_FILES = ("report.md", "phase-errors.log", "build.log", "error.log", "server.log", "result.json")
 MAX_EVIDENCE_BYTES = "5M"
 

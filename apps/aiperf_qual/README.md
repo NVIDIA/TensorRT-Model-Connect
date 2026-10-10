@@ -266,6 +266,7 @@ statistics are excluded when a fallback succeeds.
 Use a cache and bundle root dedicated to this campaign when enabling deletion: `delete_unused`
 means unused by the selected batch, not by unrelated processes or campaigns sharing that cache.
 HF cache deletion removes raw checkpoint weights, so it is opt-in; the default keeps them.
+Even with `delete_unused`, a checkpoint needed by any profile with a framework/build error is kept.
 Build and framework errors keep bundles and temporary files. `retention.json` records the policies,
 removed paths and recovered bytes; checkpoint deletion is also recorded in `campaign.jsonl`.
 
@@ -304,7 +305,8 @@ in new execution records are relative to the model result, so the entire result 
 and raw-response timing recovery still works with the same request hash and sample checks.
 Accuracy regrading also needs its original selection cache. Reading reports and rejudging stored
 scores/timings do not require bundles or HF weights. After temporary cleanup, media rescoring
-requires generation again; text raw responses remain available. Cleanup does not promise
+requires generation again; text raw responses remain available. If the bundle is also gone,
+`recheck` fails before replacing valid scores: run the model again to rebuild and regenerate. Cleanup does not promise
 bit-for-bit model replay without the checkpoint, bundle and generated artifacts.
 
 ## Extending

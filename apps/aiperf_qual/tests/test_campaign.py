@@ -99,6 +99,8 @@ def test_temporary_cleanup_preserves_evidence_and_error_diagnostics(tmp_path):
     scratch.mkdir(parents=True)
     (scratch / "output.npy").write_bytes(b"large output")
     (scratch / "worker.stderr.log").write_text("diagnostic")
+    (scratch / "_worker").mkdir()
+    (scratch / "_worker/worker.stderr.log").write_text("real worker diagnostic")
     (scratch.parent / "records.jsonl").write_text("original responses")
     (out / "report.json").write_text("scores")
     env = Environment({"retention": {"temporary_files": "delete_unless_error"}})
@@ -108,6 +110,7 @@ def test_temporary_cleanup_preserves_evidence_and_error_diagnostics(tmp_path):
     assert receipt["status"] == "deleted" and receipt["bytes"] > 0
     assert not scratch.exists()
     assert (scratch.parent / "worker.stderr.log").read_text() == "diagnostic"
+    assert (scratch.parent / "_worker/worker.stderr.log").read_text() == "real worker diagnostic"
     assert (scratch.parent / "records.jsonl").read_text() == "original responses"
     assert (out / "report.json").read_text() == "scores"
 
@@ -178,7 +181,7 @@ def _record_runs(monkeypatch, events, category="pass"):
 
 def test_run_all_deletes_a_checkpoint_after_the_last_profile_using_it(tmp_path, monkeypatch):
     events = []
-    _record_runs(monkeypatch, events, category="error")  # checkpoints are reference-counted whatever the verdict
+    _record_runs(monkeypatch, events, category="pass")
     environment = Environment({"hf_hub_cache": str(tmp_path / "hub"), "retention": {"hf_cache": "delete_unused"}})
     models = [_model("a-fp16", "org/a"), _model("b", "org/b"), _model("a-fp8", "org/a")]
     records = campaign.run_all(environment, models, tmp_path / "out", prefetch_next=False)
@@ -186,6 +189,19 @@ def test_run_all_deletes_a_checkpoint_after_the_last_profile_using_it(tmp_path, 
     assert [record["profile"] for record in records] == ["a-fp16", "a-fp8", "b"]
     logged = [json.loads(line) for line in (tmp_path / "out/campaign.jsonl").read_text().splitlines()]
     assert logged[1]["checkpoints_deleted"] == [{"status": "deleted"}]
+
+
+def test_run_all_keeps_shared_checkpoint_when_any_profile_had_a_framework_error(tmp_path, monkeypatch):
+    events = []
+    _record_runs(monkeypatch, events, category="error")
+    def run_one(environment, model, out):
+        events.append(("run", model["model"]))
+        return {"category": "error" if model["model"] == "a-fp16" else "pass"}
+    monkeypatch.setattr(campaign, "run_one", run_one)
+    env = Environment({"hf_hub_cache": str(tmp_path / "hub"), "retention": {"hf_cache": "delete_unused"}})
+    campaign.run_all(env, [_model("a-fp16", "org/a"), _model("a-fp8", "org/a")],
+                     tmp_path / "out", prefetch_next=False)
+    assert events == [("run", "a-fp16"), ("run", "a-fp8")]
 
 
 def test_run_all_keeps_checkpoints_by_default(tmp_path, monkeypatch):
@@ -643,6 +659,23 @@ def test_recheck_replaces_only_the_rechecked_entries(tmp_path, monkeypatch):
     suites = {item["suite"]: item["status"] for item in json.loads((out / "report.json").read_text())["accuracy"]}
     assert suites == {"family-case": "pass", "geneval": "pass", "replay-parity": "fail"}
     assert json.loads((out / "model.json").read_text())["supplementary"] == [check]
+
+
+def test_recheck_after_cleanup_requires_a_bundle_without_replacing_valid_scores(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import cli, models
+
+    out = tmp_path / "m"
+    out.mkdir()
+    report = '{"accuracy": [{"suite": "geneval", "status": "pass"}]}'
+    (out / "report.json").write_text(report)
+    (out / "model.json").write_text(json.dumps({"catalog_profile": "m", "supplementary": [],
+                                               "candidate": {"bundle": "m/m.bundle"}}))
+    (out / "retention.json").write_text(json.dumps({"temporary_files": {"media_recheck": "regenerate"}}))
+    monkeypatch.setattr(models, "resolve_model", lambda *args: {
+        "supplementary": [{"check": "geneval"}], "reference": {"backend": "reference"}})
+    with pytest.raises(ConfigError, match="bundle is missing"):
+        cli.recheck_reports([out], Environment({"bundle_root": str(tmp_path / "bundles")}))
+    assert (out / "report.json").read_text() == report
 
 
 def test_recheck_reuses_a_generation_only_for_the_same_requests(tmp_path):

@@ -14,8 +14,8 @@
 namespace trtmc {
 
 // Runtime shape and token contract for a GLM-ASR bundle. Every field is read
-// from the bundle's runtime.json; the defaults describe GLM-ASR-Nano-2512 so a
-// bundle that predates a field still loads.
+// from the bundle's runtime.json; shape defaults describe GLM-ASR-Nano-2512.
+// The complete stop-token list is required, including for an older bundle.
 struct GlmAsrConfig {
     // Mel front-end, which follows the Whisper feature extractor.
     int32_t mel_num_bins{128};
