@@ -7,8 +7,8 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace trtmc {
@@ -51,10 +51,12 @@ struct GlmAsrConfig {
 
     void validate_stop_tokens() const {
         if (eos_token_ids.empty())
-            throw std::invalid_argument("glmasr bundle requires nonempty eot_token_ids; rebuild the bundle");
+            throw std::invalid_argument(
+                "glmasr bundle requires nonempty eot_token_ids; rebuild the bundle");
         for (int32_t token : eos_token_ids)
             if (token < 0 || token >= vocab_size)
-                throw std::invalid_argument("glmasr eot_token_ids contains a token outside the vocabulary");
+                throw std::invalid_argument(
+                    "glmasr eot_token_ids contains a token outside the vocabulary");
     }
 
     bool is_eos_token(int32_t token) const {
