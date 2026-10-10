@@ -35,3 +35,12 @@ set_target_properties(trtmc_model_phi_moe PROPERTIES
 install(TARGETS trtmc_model_phi_moe
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_phi_moe_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/phi_moe/tests/cpp/test_phi_moe_tokenizer.cpp)
+  target_include_directories(test_phi_moe_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_phi_moe_tokenizer PRIVATE trtmc_model_phi_moe)
+  add_test(NAME phi_moe_tokenizer COMMAND test_phi_moe_tokenizer)
+  set_tests_properties(phi_moe_tokenizer PROPERTIES LABELS "cpu")
+endif()
