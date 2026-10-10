@@ -1,13 +1,13 @@
 {
-  "name": "albert-base",
+  "name": "albert-base-token-features",
   "hf_id": "albert/albert-base-v2",
-  "bundle": "albert-base.bundle",
+  "bundle": "albert-base-token-features.bundle",
   "family": "albert",
-  "task": "text_to_pooled_features",
+  "task": "text_to_token_features",
   "precision": "fp16",
   "testcases": [
     {
-      "name": "albert-base",
+      "name": "albert-base-token-features",
       "premerge": true,
       "reference_precision": "fp32",
       "prompt": "The capital of France is Paris."
