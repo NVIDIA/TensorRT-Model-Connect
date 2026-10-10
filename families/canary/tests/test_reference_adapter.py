@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("soundfile")
 
-from families.canary.reference.adapter import decoded_observation  # noqa: E402
+from families.canary.reference.adapter import decoded_observation, generated_sequence  # noqa: E402
 
 
 def test_decoded_work_uses_returned_tokens_including_special_tokens():
@@ -28,3 +28,28 @@ def test_empty_decode_has_zero_work_and_missing_tokens_are_not_inferred():
 def test_logits_or_invalid_tokens_cannot_be_reported_as_decode_work(sequence):
     with pytest.raises(ValueError, match="integer decoded sequence"):
         decoded_observation({"text": "hello", "y_sequence": sequence}, 1.0)
+
+
+def test_generated_sequence_keeps_eos_without_prompt_or_finished_batch_padding():
+    def format_hypotheses(hypotheses, decoder_input_ids):
+        hypotheses[0].y_sequence = np.array([42], dtype=np.int64)
+
+    decoder = SimpleNamespace(format_hypotheses=format_hypotheses, eos=3)
+    hypothesis = SimpleNamespace(text="Hello.", y_sequence=np.array([11, 12, 42, 3, 0]))
+    with generated_sequence(decoder) as sequences:
+        decoder.format_hypotheses([hypothesis], np.array([[11, 12]]))
+    assert decoder.format_hypotheses is format_hypotheses
+    assert hypothesis.y_sequence.tolist() == [42]
+    assert decoded_observation(hypothesis, 1.0, sequences[0])["token_ids"] == [42, 3]
+
+
+def test_generated_sequence_does_not_invent_eos_at_generation_limit_and_restores_on_error():
+    def fail(hypotheses, decoder_input_ids):
+        raise RuntimeError("decoder failure")
+
+    decoder = SimpleNamespace(format_hypotheses=fail, eos=3)
+    hypothesis = SimpleNamespace(y_sequence=np.array([42, 43]))
+    with pytest.raises(RuntimeError, match="decoder failure"), generated_sequence(decoder) as sequences:
+        decoder.format_hypotheses([hypothesis], None)
+    assert sequences == [[42, 43]]
+    assert decoder.format_hypotheses is fail
