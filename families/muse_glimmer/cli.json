@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one Muse-Glimmer NVFP4 TensorRT Edge-LLM bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "task",
+          "flags": [
+            "--task"
+          ],
+          "type": "string",
+          "choices": [
+            "text_generation"
+          ],
+          "default": "text_generation"
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "fp16"
+          ],
+          "default": "fp16"
+        },
+        {
+          "name": "backend",
+          "flags": [
+            "--backend"
+          ],
+          "type": "string",
+          "choices": [
+            "trt"
+          ],
+          "default": "trt"
+        },
+        {
+          "name": "max_sequence_length",
+          "flags": [
+            "--max-sequence-length"
+          ],
+          "type": "int"
+        },
+        {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "nvfp4"
+          ],
+          "default": "nvfp4"
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        },
+        {
+          "name": "execution_variant",
+          "flags": [
+            "--execution-variant"
+          ],
+          "type": "string",
+          "choices": [
+            "autoregressive",
+            "dflash"
+          ],
+          "default": "autoregressive"
+        },
+        {
+          "name": "companion",
+          "flags": [
+            "--companion"
+          ],
+          "type": "string",
+          "help": "Matched Muse assistant or DFlash2 checkpoint"
+        }
+      ]
+    }
+  ]
+}

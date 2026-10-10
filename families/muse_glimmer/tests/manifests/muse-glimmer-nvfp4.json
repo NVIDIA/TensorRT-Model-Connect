@@ -1,0 +1,27 @@
+{
+  "name": "muse-glimmer-nvfp4",
+  "hf_id": "RadixArk/Muse-Glimmer-NVFP4",
+  "hf_revision": "1416629950afdfb276618fd4810103681dd10f4a",
+  "bundle": "muse-glimmer-nvfp4.bundle",
+  "family": "muse_glimmer",
+  "task": "text_generation",
+  "precision": "fp16",
+  "quantization": "nvfp4",
+  "max_sequence_length": 1024,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "muse-glimmer-nvfp4",
+      "premerge": true,
+      "prompt": "Explain in one concise sentence why water freezes at 0 degrees Celsius under standard atmospheric pressure.",
+      "system_prompt": "You are a concise factual assistant.\n\nReasoning strength: low.",
+      "max_new_tokens": 512,
+      "temperature": 0.0,
+      "top_k": 1,
+      "top_p": 1.0,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "expected_terms": [["free energy", "gibbs"], ["ice", "crystal"]]
+    }
+  ]
+}
