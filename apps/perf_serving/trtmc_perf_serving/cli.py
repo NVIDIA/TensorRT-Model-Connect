@@ -63,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--revision", help="the profile checkpoint's revision when the catalog does not pin one")
     serve.add_argument("--reference-options", default="{}", help="adapter options JSON")
     serve.add_argument("--reference-adapter", help="a family's native pipeline file (defines Adapter)")
+    serve.add_argument("--latent-replay-adapter", help="a family file whose Adapter defines latent_shape(snapshot, request)")
     serve.add_argument("--trust-remote-code", action="store_true")
     serve.add_argument("--deterministic", action="store_true",
                        help="reference only: disable TF32 and use deterministic kernels (golden generation)")
@@ -166,7 +167,13 @@ def serve(arguments: argparse.Namespace) -> int:
 
         source = ((arguments.reference_model, arguments.reference_revision)
                   if arguments.backend == "reference" and arguments.reference_model else (profile.model.hf_id, revision))
-        latent_replay = Replay(lambda: read_checkpoint(snapshot(*source)))
+        if arguments.latent_replay_adapter:
+            from .backends.reference import _family_adapter
+
+            adapter = _family_adapter(arguments.latent_replay_adapter)
+            latent_replay = Replay(shape=lambda request: adapter.latent_shape(snapshot(*source), request))
+        else:
+            latent_replay = Replay(lambda: read_checkpoint(snapshot(*source)))
     chat_renderer = None
     if profile.operation == "generate":
         try:

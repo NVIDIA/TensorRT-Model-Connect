@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shutil
@@ -143,6 +144,9 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             observation = add_media_digests(invocation.observation, operation, workdir)
             if replayed is not None:
                 observation["latent_replay"] = replayed
+                if replayed:
+                    observation["initial_latents_sha256"] = hashlib.sha256(
+                        Path(resolved["initial_latents_path"]).read_bytes()).hexdigest()
             invocation = Invocation(observation, invocation.model_call_ms, invocation.extra)
         except BackendUnavailable:
             state["available"] = False

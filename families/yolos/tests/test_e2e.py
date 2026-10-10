@@ -122,7 +122,7 @@ def _runtime() -> tuple[Path, Path]:
 
 
 def _asset(name: str) -> Path:
-    path = TEST_ROOT / "data" / str(name)
+    path = TEST_ROOT / str(name)
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
     return path
 

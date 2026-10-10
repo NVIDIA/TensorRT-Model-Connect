@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -68,6 +69,23 @@ def test_recovery_regrades_both_sides_and_pairs_by_question_with_original_gate(t
     before = raw_path.read_bytes()
     again = recover(tmp_path, model, result, SelectionArchive(cache))
     assert again["accuracy"] == result["accuracy"] and raw_path.read_bytes() == before
+
+
+def test_accuracy_recovery_after_moving_results_keeps_original_identities(tmp_path):
+    original = tmp_path / "original"
+    original.mkdir()
+    cache, model, report = fixture(original)
+    path = original / "execution.jsonl"
+    batches = [json.loads(line) for line in path.read_text().splitlines()]
+    for batch in batches:
+        for row in batch["records"]:
+            row["output_ref"]["aiperf_run"] = str(Path(row["output_ref"]["aiperf_run"]).relative_to(original))
+    path.write_text("".join(json.dumps(batch) + "\n" for batch in batches))
+    moved = tmp_path / "moved"
+    original.rename(moved)
+    result = recover(moved, model, report, SelectionArchive(moved / cache.name))
+    assert result["accuracy"][0]["metrics"]["trtmc_score"] == 75.0
+    assert result["performance"][0]["candidate"]["p50_ms"] == 11.5
 
 
 def test_recovery_rejects_conflicting_original_selections_without_publishing(tmp_path):

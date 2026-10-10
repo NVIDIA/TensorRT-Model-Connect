@@ -12,8 +12,10 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from .aiperf_runner import AiperfRun
 from .config import Environment
 from .services import serving
+from .suites import request_sha
 
 # (request directory, the server's record of the request) per suite sample, in suite order.
 Outputs = list[tuple[Path, dict[str, Any]]]
@@ -41,13 +43,36 @@ def generate(environment: Environment, model: dict[str, Any], backend: str, out:
 
 
 def _answered(out: Path, suite: Any) -> Outputs | None:
-    # AIPerf sends the samples in order, one at a time: the last records are the suite's.
+    # Warmup advances AIPerf's dataset cursor. Join profiling requests to server
+    # artifacts, then put them in suite order; arrival order is not label order.
     path = out / "records.jsonl"
     records = [json.loads(line) for line in path.read_text().split("\n") if line.strip()] if path.is_file() else []
-    ordered = [record for record in records if record.get("route", "").startswith("/v1/tasks/")]
-    if len(ordered) < len(suite.samples):
+    records = [record for record in records if record.get("route", "").startswith("/v1/tasks/")]
+    by_id = {record["request_id"]: record for record in records}
+    run = AiperfRun(out / "aiperf", 0, [])
+    raw, indices = run.raw_records(), run.conversation_indices()
+    if len(by_id) != len(records) or len(raw) != len(suite.samples) or len(indices) != len(suite.samples):
         return None
-    return [(out / "scratch" / str(record["request_id"]), record) for record in ordered[-len(suite.samples):]]
+    by_sample = {}
+    seen = set()
+    for row in raw:
+        identifier = row["metadata"].get("x_request_id")
+        if identifier not in by_id or identifier in seen or row.get("status") != 200 or row.get("error"):
+            return None
+        index = indices.get(row["metadata"].get("conversation_id"))
+        if index is None or index in by_sample:
+            return None
+        if request_sha(row["payload"]["request"]) != request_sha(suite.samples[index]["request"]):
+            return None
+        seen.add(identifier)
+        by_sample[index] = by_id[identifier]
+    ordered = []
+    for index in range(len(suite.samples)):
+        if index not in by_sample:
+            return None
+        record = by_sample[index]
+        ordered.append((out / "scratch" / str(record["request_id"]), record))
+    return ordered
 
 
 def _earlier(out: Path, suite: Any) -> Outputs | None:
@@ -63,16 +88,19 @@ def generate_native(environment: Environment, model: dict[str, Any], suite: Any,
                     label: str, skip: tuple[str, str] | None = None, reuse: bool = False) -> tuple[Outputs, str, str]:
     """The native model's outputs and the (backend, precision) that produced them: the reference adapter
     at the Perf precisions in order (``skip`` excluded)."""
+    from . import execution
     from .runner import timing_precisions
 
     errors = []
     for precision in timing_precisions(model["reference"]):
         if ("reference", precision) == skip:
             continue
+        evidence_start = execution.checkpoint()
         try:
             return (generate(environment, model, "reference", out / f"{label}-native-reference-{precision}", suite,
                              python, precision, reuse), "reference", precision)
         except Exception as error:  # noqa: BLE001 - try the next precision
+            execution.supersede(evidence_start)
             errors.append(f"{precision}: {type(error).__name__}: {str(error)[-200:]}")
     raise RuntimeError("; ".join(errors)[-1500:] or "no other native precision")
 

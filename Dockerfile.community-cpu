@@ -27,6 +27,7 @@ RUN apt-get update && \
       jq \
       ninja-build \
       nlohmann-json3-dev \
+      libicu-dev \
       pkg-config \
       python3.12 \
       python3.12-dev \

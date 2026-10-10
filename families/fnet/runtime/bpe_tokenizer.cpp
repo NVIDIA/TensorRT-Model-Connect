@@ -674,7 +674,7 @@ class BpeTokenizer final : public ITokenizer {
     enum class DecoderType { kByteLevel, kMetaspace, kSequence };
 
     std::string normalize_text(const std::string& text) const {
-        if (!mNormalizeLowercase && !mNormalizeWhitespace) {
+        if (!mNormalizeLowercase && !mNormalizeWhitespace && !mNormalizeSpaces) {
             return text;
         }
 
@@ -686,7 +686,8 @@ class BpeTokenizer final : public ITokenizer {
         while (cursor < end) {
             const char* char_start = cursor;
             const char32_t cp = read_utf8(cursor, end);
-            if (mNormalizeWhitespace && pretok::is_whitespace(cp)) {
+            if ((mNormalizeWhitespace && pretok::is_whitespace(cp)) ||
+                (mNormalizeSpaces && cp == ' ')) {
                 if (!previous_was_whitespace) {
                     normalized.push_back(' ');
                 }
@@ -1423,10 +1424,10 @@ class BpeTokenizer final : public ITokenizer {
             return;
         }
         if (type == "Replace" && normalizer.contains("pattern") &&
-            normalizer["pattern"].contains("Regex") &&
-            normalizer["pattern"]["Regex"].get<std::string>() == "\\s+" &&
-            normalizer.value("content", "") == " ") {
-            mNormalizeWhitespace = true;
+            normalizer["pattern"].contains("Regex") && normalizer.value("content", "") == " ") {
+            const auto regex = normalizer["pattern"]["Regex"].get<std::string>();
+            mNormalizeWhitespace = mNormalizeWhitespace || regex == "\\s+";
+            mNormalizeSpaces = mNormalizeSpaces || regex == " {2,}";
         }
     }
 
@@ -1533,6 +1534,7 @@ class BpeTokenizer final : public ITokenizer {
     bool mByteFallback = false;
     bool mNormalizeLowercase = false;
     bool mNormalizeWhitespace = false;
+    bool mNormalizeSpaces = false;
     std::string mEndOfWordSuffix;
 
     // Post-processor: BOS/EOS token IDs to add when add_special_tokens=true

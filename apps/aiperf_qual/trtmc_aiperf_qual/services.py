@@ -138,6 +138,8 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
                "--backend", backend, "--port", str(port), "--full-observations",
                "--records", str(out / "records.jsonl"), "--scratch", str(out / "scratch")]
     reference = model["reference"]
+    if reference.get("latent_adapter"):
+        command += ["--latent-replay-adapter", str(repo / reference["latent_adapter"])]
     if model["candidate"].get("revision"):  # the pinned checkpoint (tokenizer, latent replay, reference)
         command += ["--revision", str(model["candidate"]["revision"])]
     if backend == "trtmc":

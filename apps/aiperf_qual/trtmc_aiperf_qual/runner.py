@@ -22,6 +22,7 @@ from . import absolute, aiperf_metrics, compat, edits, execution, geneval, intel
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
 from .report import write_report
+from .artifacts import recorded_path
 from .services import gpu_exclusive, gpu_identity, platform_fingerprint, platform_id, reference_python, serving
 from .suites import Suite, build_suite, request_sha, single_request_suite, unstated_defaults
 
@@ -225,6 +226,9 @@ def _observations(environment: Environment, service: Mapping[str, Any], model: M
 def _collect_outputs(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
                   suite: Suite, out: Path) -> dict[str, Any]:
     """One observation per suite sample from a server (sequential, one request each)."""
+    for sample in suite.samples:
+        if missing := unstated_defaults(sample["request"], model["operation"]):
+            raise ValueError(f"{suite.name}: state {', '.join(missing)} explicitly before benchmarking")
     run = run_aiperf(environment, out, [*TASK_ENDPOINT, *_task_url(service, model["operation"]), "--concurrency", "1",
                                         "--input-file", str(suite.write_inputs(out.parent / f"{out.name}.inputs.jsonl")),
                                         "--custom-dataset-type", "single_turn", "--dataset-sampling-strategy",
@@ -444,26 +448,34 @@ def supplementary(environment: Environment, model: dict[str, Any], check: Mappin
     return result if isinstance(result, list) else [result]
 
 
-def gpu_busy_percent(samples: int = 5, interval_s: float = 0.2, settle_s: float = 1.0) -> float | None:
+def gpu_busy_percent(samples: int = 30, interval_s: float = 0.5, settle_s: float = 1.0) -> float | None:
     """Other processes' GPU load just before a timed run, while our servers are idle.
 
     nvidia-smi averages utilization over its last sample period, so a reading right after our own
     request (seconds long for diffusion) still shows that request. The lowest of a few readings taken
     after a short settle is what persists without us.
     """
+    import os
     import subprocess
+
+    from . import cancel
 
     time.sleep(settle_s)
     readings = []
+    selector = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
     for index in range(samples):
+        cancel.check()
         try:
-            completed = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                                       capture_output=True, text=True, timeout=30)
+            completed = subprocess.run(["nvidia-smi", *(["-i", selector] if selector else []),
+                                       "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                                       capture_output=True, text=True, timeout=5, check=True)
             values = [float(line) for line in completed.stdout.split() if line.strip().replace(".", "").isdigit()]
-        except (OSError, subprocess.TimeoutExpired, ValueError):
+        except (OSError, subprocess.SubprocessError, ValueError):
             return None
         if values:
             readings.append(max(values))
+            if readings[-1] < judge.GPU_BUSY_PERCENT:
+                return readings[-1]
         if index + 1 < samples:
             time.sleep(interval_s)
     return min(readings) if readings else None
@@ -752,11 +764,11 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
         lambda mine, theirs: judge.work_check({"work": [mine] if mine is not None else []},
                                              {"work": [theirs] if theirs is not None else []}) is None,
         smoke=bool(environment.values.get("smoke")),
-        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}))
+        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}, model["operation"]))
     with execution.session(evidence):
         result = _qualify(model, environment, out)
     result["schema_version"] = execution.SCHEMA
-    result["performance"].extend(evidence.natural_performance())
+    result["performance"].extend(evidence.natural_performance(result["accuracy"]))
     if quality_only(model):
         result["performance_source"] = "quality"
         result["performance_expected"] = [item["suite"] for item in model.get("absolute", [])]
@@ -766,7 +778,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     result["aiperf_metrics"] = aiperf_metrics.entries(evidence.batches)
     for item in result["accuracy"]:
         item.pop("workload_perf", None)
-    result["execution"] = {"records": str(out / "execution.jsonl"), "timing_contract": execution.TIMING_CONTRACT,
+    result["execution"] = {"records": recorded_path(out, out / "execution.jsonl"), "timing_contract": execution.TIMING_CONTRACT,
                            "device_layout": "single-serial", "replicas": 1, "concurrency": 1,
                            "quality_outputs_reused": True, "workloads": [
                                {"name": batch["workload"], "role": batch["role"]} for batch in evidence.batches]}
@@ -777,7 +789,10 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
 def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[str, Any]:
     started = time.time()
     out.mkdir(parents=True, exist_ok=True)
-    phases = _Phases(out)
+    root = out
+    out = root / "artifacts"
+    out.mkdir(exist_ok=True)
+    phases = _Phases(root)
     smoke = bool(environment.values.get("smoke"))
     if smoke:
         model = smoke_model(model)
@@ -787,7 +802,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
     (out / "suites").mkdir(exist_ok=True)
     if perf_suite:
         (out / "suites" / f"{perf_suite.name}.manifest.json").write_text(json.dumps(perf_suite.manifest, indent=2))
-    (out / "model.json").write_text(json.dumps(model, indent=2, default=str))
+    (root / "model.json").write_text(json.dumps(model, indent=2, default=str))
 
     reference = model["reference"]
     if reference["backend"] == "unsupported":  # no native path: nothing to compare against
@@ -811,7 +826,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
         "bundle_root", "hf_hub_cache", "hf_datasets_cache", "data_root", "reference_env_root", "runtime_root"))])
     accuracy: list[dict[str, Any]] = []
     performance: list[dict[str, Any]] = []
-    unstated = unstated_defaults(perf_suite.samples[0]["request"]) if perf_suite else []
+    unstated = unstated_defaults(perf_suite.samples[0]["request"], model["operation"]) if perf_suite else []
     if unstated:  # each side would apply its own default: different work
         phases.errors["perf_request"] = (f"the timed request leaves {', '.join(unstated)} to each side's default; "
                                          "state them in config/models performance")
@@ -877,11 +892,11 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
 
     result = {"model": model["model"], "operation": model["operation"], "task": model.get("task"),
               "repro": f"trtmc-aiperf-qual run --profile {model['catalog_profile']} --environment "
-                       f"{environment.values.get('environment_file', '<environment.yaml>')} --out {out}",
+                       f"{environment.values.get('environment_file', '<environment.yaml>')} --out {root}",
               "family": model.get("family"), "started": started,
               "platform": {"id": platform_id(fingerprint), **fingerprint},
               "host": {**gpu_identity(environment), "trtmc_libraries": _loaded(out)},
-              "bundle": _bundle_identity(out),
+              "bundle": _bundle_identity(root),
               "accuracy_source": model.get("accuracy_source"),
               "performance_source": "quality" if dataset_only else "fixed",
               **({"accuracy_note": model["accuracy_note"]} if model.get("accuracy_note") else {}),

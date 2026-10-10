@@ -12,8 +12,8 @@ problems, and each side is scored against the gold answers:
 
 Each entry is a paired non-inferiority decision (``noninferiority``): pass when
 TRTMC's regression against the native model is shown to be below the benchmark's margin, fail when it
-is shown to exceed it, inconclusive otherwise; ``not-comparable`` when the native score is below the
-benchmark's suitability floor ``min_native``. A sampled model answers once per seed on each side and
+is shown to exceed it, inconclusive otherwise. Native absolute capability does not veto the comparison.
+A sampled model answers once per seed on each side and
 is judged on the per-problem seed means.
 """
 
@@ -428,7 +428,9 @@ def capacity_rejection(record: Mapping[str, Any]) -> str | None:
         body = json.loads(error.get("message") or "")["error"]
     except (TypeError, ValueError, KeyError):
         return None
-    message = str(body.get("message") or "") if isinstance(body, Mapping) else ""
+    if not isinstance(body, Mapping):
+        return None
+    message = str(body.get("message") or "")
     if body.get("code") != "backend_rejected_request" or not CAPACITY_LIMIT.search(message):
         return None
     return message[:300]
@@ -534,20 +536,17 @@ def _paired(problems: Sequence[Mapping[str, Any]], candidate: Mapping[int, Any],
 
 
 def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
-    """pass / fail / inconclusive / not-comparable / error of a scored entry (also when re-judging a
-    report): every expected problem answered on both sides, a native score above the suitability
-    floor, then the entry's non-inferiority outcome under its gate."""
+    """Compare the conversion's scored difference, regardless of native absolute capability.
+
+    Old reports may carry ``min_native``; it no longer overrides the difference
+    test. Missing answers and statistical uncertainty retain their own outcomes.
+    """
     metrics, gate = entry.get("metrics") or {}, entry.get("gate") or {}
     expected, paired = int(entry.get("expected_samples") or 0), int(entry.get("samples") or 0)
     if paired < expected:
         return "error", [f"{expected - paired} of {expected} problems lack a graded answer on one side"
                          + (f" ({metrics['failed']})" if metrics.get("failed") else "")]
     native = metrics.get("native_score")
-    if native is not None and gate.get("min_native") is not None and native < float(gate["min_native"]):
-        # Too few right answers from the native model (at or near chance): the benchmark does not
-        # discriminate for this model, so it says nothing about TRTMC.
-        return "not-comparable", [f"the native model scores {native:g} (< {gate['min_native']:g}): the benchmark "
-                                  "does not fit this model"]
     test = metrics.get("test") or {}
     if test.get("outcome") is None:
         return "error", ["no non-inferiority outcome"]
@@ -824,6 +823,11 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
                     runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
                                                     out / f"absolute-native-{precision}")
                             for item in model["absolute"]}
+                    for name, side in runs.items():
+                        answers = side.get("observations") or side.get("records") or {}
+                        if side.get("failed") and not any(answers.values()):
+                            raise RuntimeError(f"{name}: no successful native responses "
+                                               f"({next(iter(side['failed'].values()))})")
                 finally:  # sharing an MPS daemon, no copy leaves while the other side's copies still answer
                     if finished is not None:
                         finished.set()

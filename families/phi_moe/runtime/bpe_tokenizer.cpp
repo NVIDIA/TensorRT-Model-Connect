@@ -209,9 +209,8 @@ inline bool is_digit(char32_t cp) {
 
 inline bool is_whitespace(char32_t cp) {
     return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
+           || cp == 0x85 || cp == 0xA0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) ||
+           cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000;
 }
 
 // BLOOM punctuation set: .,!?...
@@ -710,17 +709,22 @@ class BpeTokenizer final : public ITokenizer {
         int32_t added_id; /* -1 = normal */
     };
 
-    std::pair<int32_t, size_t> find_longest_added_token(const std::string& text, size_t pos) const {
-        int32_t best_id = -1;
-        size_t best_len = 0;
-        for (const auto& [content, id] : mAddedTokenPatterns) {
-            if (pos + content.size() <= text.size() && content.size() > best_len &&
-                text.compare(pos, content.size(), content) == 0) {
-                best_id = id;
-                best_len = content.size();
+    struct AddedToken {
+        std::string content;
+        int32_t id;
+        bool lstrip;
+        bool rstrip;
+    };
+
+    const AddedToken* find_longest_added_token(const std::string& text, size_t pos) const {
+        for (const auto& token : mAddedTokenPatterns) {
+            if (token.id >= 0 && !token.content.empty() &&
+                pos + token.content.size() <= text.size() &&
+                text.compare(pos, token.content.size(), token.content) == 0) {
+                return &token; // Patterns are sorted longest first.
             }
         }
-        return {best_id, best_len};
+        return nullptr;
     }
 
     std::vector<Segment> split_added_tokens(const std::string& text) const {
@@ -731,10 +735,31 @@ class BpeTokenizer final : public ITokenizer {
         }
         size_t pos = 0;
         while (pos < text.size()) {
-            auto [best_id, best_len] = find_longest_added_token(text, pos);
-            if (best_id >= 0) {
-                segments.push_back({text.substr(pos, best_len), best_id});
-                pos += best_len;
+            const auto* token = find_longest_added_token(text, pos);
+            if (token) {
+                if (token->lstrip && !segments.empty() && segments.back().added_id < 0) {
+                    auto& prefix = segments.back().text;
+                    const char* cursor = prefix.data();
+                    const char* end = cursor + prefix.size();
+                    size_t keep = 0;
+                    while (cursor < end) {
+                        if (!pretok::is_whitespace(read_utf8(cursor, end)))
+                            keep = static_cast<size_t>(cursor - prefix.data());
+                    }
+                    prefix.resize(keep);
+                    if (prefix.empty())
+                        segments.pop_back();
+                }
+                segments.push_back({token->content, token->id});
+                pos += token->content.size();
+                if (token->rstrip) {
+                    while (pos < text.size()) {
+                        const char* cursor = text.data() + pos;
+                        if (!pretok::is_whitespace(read_utf8(cursor, text.data() + text.size())))
+                            break;
+                        pos = static_cast<size_t>(cursor - text.data());
+                    }
+                }
             } else {
                 if (segments.empty() || segments.back().added_id >= 0) {
                     segments.push_back({"", -1});
@@ -1153,11 +1178,12 @@ class BpeTokenizer final : public ITokenizer {
             // matching during encode, matching HuggingFace's AddedToken behavior.
             // The special flag only controls decode filtering (mSpecialIds) and
             // post_processor BOS/EOS insertion.
-            mAddedTokenPatterns.push_back({content, id});
+            mAddedTokenPatterns.push_back(
+                {content, id, tok.value("lstrip", false), tok.value("rstrip", false)});
         }
         // Sort by length descending for longest-match-first
         std::sort(mAddedTokenPatterns.begin(), mAddedTokenPatterns.end(),
-                  [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+                  [](const auto& a, const auto& b) { return a.content.size() > b.content.size(); });
     }
 
     // Parse digit group size from regex pattern like \p{N}{1,3} → 3.
@@ -1520,8 +1546,8 @@ class BpeTokenizer final : public ITokenizer {
     std::unordered_set<int32_t> mSpecialIds; // O(1) lookup in decode()
     int32_t mEosId = -1;
 
-    // Non-special added tokens: matched before pre-tokenization (longest first)
-    std::vector<std::pair<std::string, int32_t>> mAddedTokenPatterns;
+    // Added tokens: matched before pre-tokenization, with checkpoint whitespace flags.
+    std::vector<AddedToken> mAddedTokenPatterns;
 
     bool mAddSpecialTokens = false;
     bool mUsePreTokenizer = true;

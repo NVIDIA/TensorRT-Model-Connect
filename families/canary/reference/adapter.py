@@ -8,6 +8,7 @@ the family's benchmark reference does."""
 from __future__ import annotations
 
 import contextlib
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,6 +16,43 @@ import soundfile
 
 
 SAMPLE_RATE = 16_000
+
+
+def decoded_observation(value: Any, seconds: float, generated_tokens: list[int] | None = None) -> dict[str, Any]:
+    text = getattr(value, "text", value) if not isinstance(value, Mapping) else value.get("text", "")
+    observation = {"text": str(text), "input_audio_seconds": seconds}
+    tokens = (generated_tokens if generated_tokens is not None else
+              getattr(value, "y_sequence", None) if not isinstance(value, Mapping) else value.get("y_sequence"))
+    if tokens is not None:
+        tokens = tokens.tolist() if hasattr(tokens, "tolist") else tokens
+        if not isinstance(tokens, (list, tuple)) or any(
+                not isinstance(token, Integral) or isinstance(token, bool) for token in tokens):
+            raise ValueError("Canary work evidence requires a one-dimensional integer decoded sequence")
+        observation.update(token_ids=[int(token) for token in tokens], output_tokens=len(tokens))
+    return observation
+
+
+@contextlib.contextmanager
+def generated_sequence(decoder: Any) -> Any:
+    """Observe NeMo's output before it removes EOS; exclude the input prompt and batch padding."""
+    original = decoder.format_hypotheses
+    captured: list[list[int]] = []
+
+    def observe(hypotheses: Any, decoder_input_ids: Any) -> Any:
+        for index, hypothesis in enumerate(hypotheses):
+            sequence = hypothesis.y_sequence
+            prefix = decoder_input_ids[index].shape[0] if decoder_input_ids is not None else 0
+            tokens = sequence[prefix:].tolist()
+            if decoder.eos in tokens:
+                tokens = tokens[:tokens.index(decoder.eos) + 1]
+            captured.append(tokens)
+        return original(hypotheses, decoder_input_ids)
+
+    decoder.format_hypotheses = observe
+    try:
+        yield captured
+    finally:
+        decoder.format_hypotheses = original
 
 
 class Adapter:
@@ -43,10 +81,12 @@ class Adapter:
             with precision:
                 return self.model.transcribe([str(wav)], batch_size=1)
 
-        values, model_ms = self.host.timed(run)
+        with generated_sequence(self.model.decoding.decoding) as sequences:
+            values, model_ms = self.host.timed(run)
+        if len(sequences) != 1:
+            raise ValueError("Canary work evidence requires exactly one decoded hypothesis")
         value = values[0] if isinstance(values, tuple) else values
         value = value[0] if isinstance(value, list) and value else value
-        text = str(getattr(value, "text", value) if not isinstance(value, Mapping) else value.get("text", ""))
         seconds = len(audio) / SAMPLE_RATE
-        return self.host.invocation({"text": text, "input_audio_seconds": seconds}, model_ms,
+        return self.host.invocation(decoded_observation(value, seconds, sequences[0]), model_ms,
                                     realtime_factor=seconds / (model_ms / 1000.0))

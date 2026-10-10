@@ -115,8 +115,10 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
     same requests are reused unless ``regenerate``."""
     from . import compat, models
     from .runner import SUPPLEMENTARY_SUITES, applies, supplementary
+    from .artifacts import work_directory
     from .services import reference_python
 
+    pending = []
     for out in outs:
         path = out / "report.json"
         if not path.is_file():
@@ -129,12 +131,24 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
                   if (not only or check["check"] in only) and applies(check, model)]
         if not checks:
             continue
+        retention = out / "retention.json"
+        cleaned = (json.loads(retention.read_text()).get("temporary_files") or {}) if retention.is_file() else {}
+        if regenerate or cleaned.get("media_recheck") == "regenerate":
+            from .bundles import bundle_path
+            from .config import ConfigError
+
+            if not bundle_path(environment, model).is_file():
+                raise ConfigError(f"{out}: generated files were removed or regeneration was requested, but the "
+                                  "candidate bundle is missing; run the model again before recheck")
         python = reference_python(environment, model)
+        pending.append((out, path, model, checks, python))
+    # A later missing prerequisite must not leave earlier reports updated but unjudged.
+    for out, path, model, checks, python in pending:
         entries, suites = [], set()
         for check in checks:
             suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
             try:
-                entries += supplementary(environment, model, check, python, out)
+                entries += supplementary(environment, model, check, python, work_directory(out))
             except Exception as error:  # noqa: BLE001 - recorded like a run's phase error
                 entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
                                 "samples": 0, "passed": None, "required_passes": None,
@@ -183,6 +197,28 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
             continue
         result = compat.report(json.loads(path.read_text()))
         model = compat.configuration(json.loads((out / "model.json").read_text()))
+        if selection_cache is None and environment is None and result.get("performance_source") == "quality":
+            from .benchmark_perf import refresh
+
+            result = refresh(out, result)
+            # Conversion comparison no longer rejects a low absolute native
+            # score. Preserve scores and statistical margins during replay.
+            changed = False
+            for entry in result.get("accuracy", []):
+                removed_floor = (entry.get("gate") or {}).pop("min_native", None) is not None
+                changed |= removed_floor
+                if ((entry.get("source") == "absolute" or removed_floor)
+                        and (entry.get("metrics") or {}).get("test") and entry.get("status") != "error"):
+                    status, reasons = absolute.status(entry)
+                    changed |= status != entry.get("status")
+                    entry.update(status=status, reasons=reasons)
+            result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)), expected_modes=0)
+            preserve_original(out)
+            result["rejudged"] = {"time": time.time(), "original": ORIGINAL_REPORT,
+                                  "benchmark_timings_refreshed": True, "accuracy_contract_preserved": not changed}
+            write_report(out, result)
+            print(json.dumps({"out": str(out), **result["verdict"]}))
+            continue
         if selection_cache is not None:
             preserve_original(out)
             result = recover(out, model, result, archive)
