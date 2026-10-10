@@ -348,9 +348,10 @@ def test_reference_wav_reader_uses_pcm_without_ffmpeg() -> None:
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     # The prompt carries one audio placeholder per post-merge encoder frame,
     # so its length grows with the clip: the 23.3 s librispeech sample needs
-    # 291 placeholders and a 306 token prompt. Its 72-token generation budget
-    # fits the compiled cache; the 1024-token profile also covers longer
-    # benchmark clips and their full generation budgets.
+    # 291 placeholders and a 306 token prompt. max_sequence_length is 384
+    # because the decoder engine fails to build at 512 with a TensorRT Myelin
+    # internal error, and max_new_tokens is 72 so the case stays inside that
+    # cache (306 + 72 = 378) instead of relying on an early end-of-sequence.
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime(manifest)
