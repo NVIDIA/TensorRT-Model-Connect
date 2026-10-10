@@ -93,6 +93,38 @@ def test_retention_policies_are_validated():
         retention.policies(Environment({"retention": {"hf_cache": "delete_unused"}}))
 
 
+def test_temporary_cleanup_preserves_evidence_and_error_diagnostics(tmp_path):
+    out = tmp_path / "result"
+    scratch = out / "artifacts/geneval-candidate/scratch"
+    scratch.mkdir(parents=True)
+    (scratch / "output.npy").write_bytes(b"large output")
+    (scratch / "worker.stderr.log").write_text("diagnostic")
+    (scratch.parent / "records.jsonl").write_text("original responses")
+    (out / "report.json").write_text("scores")
+    env = Environment({"retention": {"temporary_files": "delete_unless_error"}})
+    assert retention.cleanup_temporary(env, out, "error")["status"] == "retained"
+    assert scratch.is_dir()
+    receipt = retention.cleanup_temporary(env, out, "acc-issue")
+    assert receipt["status"] == "deleted" and receipt["bytes"] > 0
+    assert not scratch.exists()
+    assert (scratch.parent / "worker.stderr.log").read_text() == "diagnostic"
+    assert (scratch.parent / "records.jsonl").read_text() == "original responses"
+    assert (out / "report.json").read_text() == "scores"
+
+
+def test_temporary_cleanup_rejects_external_symlinks(tmp_path):
+    outside = tmp_path / "weights"
+    outside.mkdir()
+    (outside / "checkpoint").write_text("raw weights")
+    out = tmp_path / "result"
+    (out / "artifacts/native").mkdir(parents=True)
+    (out / "artifacts/native/scratch").symlink_to(outside, target_is_directory=True)
+    env = Environment({"retention": {"temporary_files": "delete_unless_error"}})
+    with pytest.raises(ConfigError, match="scratch"):
+        retention.cleanup_temporary(env, out, "pass")
+    assert (outside / "checkpoint").is_file()
+
+
 def test_delete_bundle_removes_only_the_model_directory_under_the_bundle_root(tmp_path):
     root = tmp_path / "engines"
     (root / "m").mkdir(parents=True)

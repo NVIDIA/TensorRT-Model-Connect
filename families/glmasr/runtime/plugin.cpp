@@ -26,6 +26,12 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::invalid_argument("glmasr does not support --kv-cache-size");
     const auto runtime_data = required(context.reader, "runtime.json");
     const auto json = nlohmann::json::parse(runtime_data.begin(), runtime_data.end());
+    GlmAsrConfig config;
+    config.vocab_size = json.value("vocab_size", config.vocab_size);
+    if (!json.contains("eot_token_ids"))
+        throw std::invalid_argument("glmasr bundle requires eot_token_ids; rebuild the bundle");
+    config.eos_token_ids = json.at("eot_token_ids").get<std::vector<int32_t>>();
+    config.validate_stop_tokens();
     ModuleCreateOptions options;
     const auto decoder_plan = required(context.reader, "engine.plan");
     auto decoder =
@@ -33,7 +39,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto encoder_plan = required(context.reader, "encoder.plan");
     auto encoder =
         load_trt_module_from_plan(&context.backend, &encoder_plan, "encoder.plan", options);
-    GlmAsrConfig config;
     config.max_cache_length = json.value("max_cache_length", 384);
     config.vocab_size = json.value("vocab_size", config.vocab_size);
     config.audio_embedding_size = json.value("hidden_size", config.audio_embedding_size);
@@ -42,8 +47,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     config.mel_hop_length = json.value("mel_hop_length", config.mel_hop_length);
     config.mel_sampling_rate = json.value("mel_sampling_rate", config.mel_sampling_rate);
     config.mel_chunk_length = json.value("mel_chunk_length", config.mel_chunk_length);
-    config.eos_token_id = json.value("eot_token_id", config.eos_token_id);
-    config.eos_token_ids = json.value("eot_token_ids", std::vector<int32_t>{});
     config.transcription_prompt = json.value("transcription_prompt", config.transcription_prompt);
     const auto cache_shape = decoder.module->tensor_shape("cache_k_0");
     const auto kv_dim = cache_shape.empty() ? 0 : static_cast<int32_t>(cache_shape.back());

@@ -24,8 +24,8 @@ from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, is_pass, measurement_no
 from .report import _fmt, counted
 
 EVIDENCE = ("report.md", "report.json", "execution.jsonl", "execution.timing-recovered.jsonl",
-            "build.json", "build/build.log", "error.json", "phase-errors.log",
-            "candidate/server.log")
+            "retention.json", "build.json", "artifacts/build/build.log", "build/build.log", "error.json", "phase-errors.log",
+            "artifacts/candidate/server.log", "candidate/server.log")
 LIGHT_COLORS = {"green": "#1e8e3e", "yellow": "#b06000", "red": "#c5221f", "white": "#5f6368", "n/a": "#5f6368"}
 LEGEND = (("green", "Quality meets its criteria and task timings are available; dataset timings have no performance gate."),
           ("yellow", "Performance within the margin of native, or an inconclusive accuracy difference. Inconclusive Acc is not a pass."),

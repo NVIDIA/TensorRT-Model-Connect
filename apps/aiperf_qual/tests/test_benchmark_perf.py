@@ -43,6 +43,26 @@ def capture(out, candidate, native, accuracy=None):
             "execution": {"records": str(out / "execution.jsonl")}}
 
 
+def test_saved_response_recovery_survives_moving_the_result_directory(tmp_path):
+    original = tmp_path / "original"
+    original.mkdir()
+    report = old_empty_answer_report(original)
+    moved = tmp_path / "moved"
+    original.rename(moved)
+    refreshed = benchmark_perf.refresh(moved, report)
+    assert refreshed["execution"]["timing_recovered_records"] == 1
+    assert refreshed["performance"][0]["candidate"]["p50_ms"] == 40
+    assert refreshed["performance"][0]["complete"]
+    assert not original.exists()
+
+
+def test_relative_artifact_reference_cannot_escape_the_result(tmp_path):
+    from trtmc_aiperf_qual.artifacts import resolve_path
+
+    with pytest.raises(ValueError, match="escapes"):
+        resolve_path(tmp_path, "../other-model/raw")
+
+
 def verdict(report):
     return judge.verdict(report, expected_suites=["mmlu-0shot"], expected_modes=0)
 
@@ -138,7 +158,7 @@ def test_refresh_old_exports_preserves_accuracy_and_raw_responses(tmp_path):
     assert updated["performance"][0]["reference"]["p50_ms"] == 20
     assert verdict(updated)["perf"] == "measured"
     recovered_path = tmp_path / "execution.timing-recovered.jsonl"
-    assert updated["execution"]["records"] == str(recovered_path)
+    assert updated["execution"]["records"] == recovered_path.name
     persisted = [json.loads(line) for line in recovered_path.read_text().splitlines()]
     assert persisted[0]["records"][1]["capacity_rejection"] == "prompt exceeds the prefill profile"
     assert all(p.read_bytes() == data for p, data in before.items())

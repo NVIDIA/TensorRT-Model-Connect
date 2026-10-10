@@ -205,7 +205,7 @@ tasks:
                     # Text-to-image with caller latents when supported: GenEval-style (all 553 prompts over its six
                     # tags, OWLv2 detections and CLIP colors, exact counts), paired right/wrong per prompt, margin 5 points.
                     {check: geneval, suite: geneval-full, only_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
-                     latent_replay_families: [flux, pixart, qwen_image, z_image],
+                     latent_replay_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,

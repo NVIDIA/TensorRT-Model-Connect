@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import absolute, execution
 from .aiperf_runner import AiperfRun
+from .artifacts import resolve_path, recorded_path
 
 ALIGNMENT = "conversation-id/v1"
 
@@ -102,7 +103,7 @@ def batches(out: Path) -> list[dict]:
     return [item for item in values if not item.get("superseded") and item["batch_id"] not in superseded]
 
 
-def aligned_batches(recorded: list[dict]) -> list[dict]:
+def aligned_batches(recorded: list[dict], out: Path | None = None) -> list[dict]:
     """Reassociate saved timing rows with their actual inputs without changing timings or work."""
     aligned = []
     for batch in recorded:
@@ -112,7 +113,7 @@ def aligned_batches(recorded: list[dict]) -> list[dict]:
         roots = {row["output_ref"]["aiperf_run"] for row in batch["records"]}
         if len(roots) != 1:
             raise ValueError("execution batch contains multiple run directories")
-        run = AiperfRun(Path(next(iter(roots))), batch["aiperf_exit"], [])
+        run = AiperfRun(resolve_path(out, next(iter(roots))) if out is not None else Path(next(iter(roots))), batch["aiperf_exit"], [])
         raw = run.raw_records()
         indices = run.conversation_indices()
         units = {str(row["sample_id"]): row["unit_id"] for row in batch["records"]}
@@ -153,7 +154,7 @@ def recover(out: Path, model: dict, report: dict, archive: SelectionArchive) -> 
                 roots = {row["output_ref"]["aiperf_run"] for row in batch["records"]}
                 if len(roots) != 1:
                     raise ValueError(f"{out}: accuracy batch has {len(roots)} run directories")
-                run = AiperfRun(Path(next(iter(roots))), batch["aiperf_exit"], [])
+                run = AiperfRun(resolve_path(out, next(iter(roots))) if out is not None else Path(next(iter(roots))), batch["aiperf_exit"], [])
                 problems = archive.selection(run)
                 if plans is not None and plans != problems:
                     raise ValueError(f"{out}: native and TRTMC original question/gold selections differ")
@@ -176,7 +177,7 @@ def recover(out: Path, model: dict, report: dict, archive: SelectionArchive) -> 
         kept = {key: value for key, value in entry.items()
                 if key in ("native", "candidate_replicas", "candidate_mps", "sides_concurrent", "informational")}
         updates[entry["suite"]] = {**judged, **kept, "alignment": ALIGNMENT}
-    aligned = aligned_batches(recorded)
+    aligned = aligned_batches(recorded, out)
     from . import judge
 
     same_work = lambda mine, theirs: judge.work_check(  # noqa: E731
@@ -196,5 +197,5 @@ def recover(out: Path, model: dict, report: dict, archive: SelectionArchive) -> 
                                      "original_responses_reused": True}
     aligned_path = out / "execution.aligned.jsonl"
     aligned_path.write_text("".join(json.dumps(batch, ensure_ascii=False) + "\n" for batch in aligned))
-    result["execution"] = {**report.get("execution", {}), "records": str(aligned_path), "alignment": ALIGNMENT}
+    result["execution"] = {**report.get("execution", {}), "records": recorded_path(out, aligned_path), "alignment": ALIGNMENT}
     return result

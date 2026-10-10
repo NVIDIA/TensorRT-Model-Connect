@@ -250,11 +250,12 @@ with their reason, unless another result root holds a result for them.
 ### Disk retention
 
 Checkpoints and bundles dominate disk use. `retention` in the environment file frees them as the
-batch advances (both default to `retain`):
+batch advances (all default to `retain`):
 
 | key | values | effect |
 |---|---|---|
 | `bundle` | `retain`, `delete_on_pass`, `delete_unless_error`, `delete_built_unless_error` | delete `bundle_root/<name>/` after the model's run (`delete_built_unless_error`: only a bundle the run built itself); an `error` verdict always keeps it for the rerun |
+| `temporary_files` | `retain`, `delete_on_pass`, `delete_unless_error` | after scoring and server shutdown, remove generated request `scratch/` directories (images, videos, audio, arrays, uploaded inputs and initial noise); keep raw exports, scores, timings and logs |
 | `hf_cache` | `retain`, `delete_unused` | `run-all` deletes a checkpoint repository from `hf_hub_cache` once no remaining profile of the batch uses it |
 
 `delete_on_pass` also accepts a benchmark result with passing Acc and complete Perf (`measured`).
@@ -262,10 +263,49 @@ Partial timings, inconclusive Acc, and failed Acc keep their bundles under that 
 Failed Native precision attempts remain in the execution evidence; their timings and client
 statistics are excluded when a fallback succeeds.
 
-Deletion never leaves those roots. Reference environments and reports are kept (`rejudge`
-needs only the reports). The peak is the largest single model (checkpoint plus bundle) plus the
-next profile's checkpoint, which `run-all` downloads during the current run (`--no-prefetch` avoids
-it).
+Use a cache and bundle root dedicated to this campaign when enabling deletion: `delete_unused`
+means unused by the selected batch, not by unrelated processes or campaigns sharing that cache.
+HF cache deletion removes raw checkpoint weights, so it is opt-in; the default keeps them.
+Build and framework errors keep bundles and temporary files. `retention.json` records the policies,
+removed paths and recovered bytes; checkpoint deletion is also recorded in `campaign.jsonl`.
+
+For disk-constrained runs that keep raw weights:
+
+```yaml
+retention:
+  bundle: delete_built_unless_error
+  hf_cache: retain
+  temporary_files: delete_unless_error
+```
+
+Only set `hf_cache: delete_unused` for a cache this batch exclusively owns. Deletion never leaves
+the configured roots. Reference environments, datasets, runtime binaries and reports are kept.
+The peak includes the current checkpoint, bundle and generated media, plus the next checkpoint
+if prefetch is enabled (`--no-prefetch` avoids that overlap). Temporary cleanup happens per model,
+so there must still be enough space for one model's complete scoring workload.
+
+Each new model result has one working directory:
+
+```text
+<profile>/
+  report.md / report.json       # Acc and Perf together
+  model.json                   # resolved configuration
+  execution.jsonl              # requests, identities, timings and work evidence
+  build.json / retention.json  # build identity and cleanup receipt
+  run-key.txt                  # resume identity
+  artifacts/                   # build logs, AIPerf exports, server logs and score details
+    build/
+    <workload-and-side>/        # scratch/ exists only when retained
+```
+
+An error may additionally write `error.json` or `phase-errors.log`. Older output layouts stay
+readable; reruns use the new layout and preserve prior results separately. Raw AIPerf references
+in new execution records are relative to the model result, so the entire result can be moved
+and raw-response timing recovery still works with the same request hash and sample checks.
+Accuracy regrading also needs its original selection cache. Reading reports and rejudging stored
+scores/timings do not require bundles or HF weights. After temporary cleanup, media rescoring
+requires generation again; text raw responses remain available. Cleanup does not promise
+bit-for-bit model replay without the checkpoint, bundle and generated artifacts.
 
 ## Extending
 

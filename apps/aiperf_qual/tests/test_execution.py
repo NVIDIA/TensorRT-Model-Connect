@@ -81,7 +81,7 @@ def test_same_inference_records_feed_accuracy_and_timing_without_replaying(tmp_p
     assert "--warmup-request-count" in calls[0]
     records = evidence.batches[0]["records"]
     assert len(records) == 1 and records[0]["model_call_ms"] == 10
-    assert records[0]["output_ref"]["aiperf_run"] == str(out)
+    assert records[0]["output_ref"]["aiperf_run"] == "aiperf"
     assert len((tmp_path / "execution.jsonl").read_text().splitlines()) == 1
 
 
@@ -284,16 +284,19 @@ def test_qualification_runs_only_quality_workloads_for_absolute_and_media_models
 
     def native(*args, **kwargs):
         assert args[-1] is None  # no catalog request as a native serviceability probe
+        assert args[-2] == tmp_path / "artifacts"
         answer("reference")
         return {"runs": {}}
 
     def candidate(*args):
         assert args[2] is None and not args[3]  # no separate performance policy or suites
+        assert args[7] == tmp_path / "artifacts"
         answer("candidate")
         args[5].append({"suite": name, "source": "absolute", "status": "pass"})
 
     def media(*args):
         assert args[2]["check"] == "geneval"  # informational replay never runs
+        assert args[-1] == tmp_path / "artifacts"
         answer("reference")
         answer("candidate")
         return [{"suite": "geneval", "source": "absolute", "status": "pass"}]
@@ -320,6 +323,8 @@ def test_qualification_runs_only_quality_workloads_for_absolute_and_media_models
     assert result["verdict"]["acc"] == "pass" and result["verdict"]["perf"] != "error"
     assert result["performance_source"] == "quality" and not result["performance"][0]["gate"]
     assert result["provenance"]["timed_requests"] == []
+    assert (tmp_path / "model.json").is_file() and not (tmp_path / "artifacts/model.json").exists()
+    assert (tmp_path / "report.json").is_file() and (tmp_path / "execution.jsonl").is_file()
 
 
 def test_quality_measurement_verdict_does_not_claim_repeated_performance_gate(tmp_path):

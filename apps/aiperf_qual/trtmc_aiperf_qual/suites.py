@@ -485,9 +485,21 @@ MODEL_DEFAULT_FIELDS = ("num_steps", "num_inference_steps", "num_sampling_steps"
                         "num_frames", "video_num_frames")
 
 
-def unstated_defaults(request: Mapping[str, Any]) -> list[str]:
-    """The generation controls ``request`` leaves to each side's default (-1)."""
-    return [field for field in MODEL_DEFAULT_FIELDS if request.get(field) in (-1, -1.0)]
+def unstated_defaults(request: Mapping[str, Any], operation: str | None = None) -> list[str]:
+    """Unresolved controls and fields required by the image/video request contract.
+
+    Text, speech and tensor operations do not inherit image-generation requirements.
+    """
+    problems = [field for field in MODEL_DEFAULT_FIELDS if request.get(field) in (-1, -1.0)]
+    if operation == "generate_image":
+        required = ["num_steps", "guidance_scale", "height", "width"]
+        if request.get("media_type") == "video":
+            required.append("num_frames")
+        problems += [field for field in required if request.get(field) in (None, "") and field not in problems]
+        problems += [field for field in ("num_steps", "height", "width", "num_frames")
+                     if field in request and (not isinstance(request[field], (int, float))
+                                              or request[field] <= 0) and field not in problems]
+    return problems
 
 
 def _catalog_testcase_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:

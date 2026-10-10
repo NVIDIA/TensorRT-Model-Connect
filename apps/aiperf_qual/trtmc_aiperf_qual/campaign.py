@@ -172,7 +172,7 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
     set_aside(out)
     out.mkdir(parents=True, exist_ok=True)
     (out / RUN_KEY).write_text(run_key(environment, model) + "\n")
-    bundle_policy, _ = retention.policies(environment)
+    bundle_policy, hf_policy = retention.policies(environment)
     record: dict[str, Any] = {"profile": model["model"], "task": model.get("task")}
     with ThreadPoolExecutor(max_workers=1) as warm:
         warm.submit(warm_selections, environment, model)  # CPU work while the GPU builds
@@ -197,6 +197,15 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
             category = "pass"
         if retention.should_delete_bundle(bundle_policy, category, built=build.get("status") == "built"):
             record["bundle_deleted"] = retention.delete_bundle(environment, model)
+    category = record["category"]
+    if category == "measured" and record.get("acc") == "pass" and record.get("perf") == "measured":
+        category = "pass"
+    cleanup = {"bundle_policy": bundle_policy, "hf_cache_policy": hf_policy,
+               "temporary_files": retention.cleanup_temporary(environment, out, category)}
+    if "bundle_deleted" in record:
+        cleanup["bundle"] = record["bundle_deleted"]
+    (out / "retention.json").write_text(json.dumps(cleanup, indent=2))
+    record["temporary_files"] = cleanup["temporary_files"]
     record["seconds"] = round(time.time() - started)
     return record
 

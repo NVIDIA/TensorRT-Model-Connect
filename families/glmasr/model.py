@@ -382,7 +382,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "tensor_parallel_size": parallel.tp_size,
         "hidden_size": config.hidden_size,
         "max_cache_length": max_length,
-        "eot_token_id": config.eos_token_ids[0],
         "eot_token_ids": config.eos_token_ids,
         "mel_frontend": "whisper",
         "mel_n_fft": _MEL_DEFAULTS["n_fft"],

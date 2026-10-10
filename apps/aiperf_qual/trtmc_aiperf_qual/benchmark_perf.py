@@ -11,13 +11,14 @@ from pathlib import Path
 
 from . import absolute, execution, judge
 from .aiperf_runner import AiperfRun
+from .artifacts import resolve_path, recorded_path
 
 
 def refresh(out: Path, report: dict) -> dict:
     if report.get("performance_source") != "quality":
         return report
-    recorded_path = Path((report.get("execution") or {}).get("records", "execution.jsonl"))
-    path = out / recorded_path.name
+    recorded_execution = Path((report.get("execution") or {}).get("records", "execution.jsonl"))
+    path = out / recorded_execution.name
     if not path.is_file():
         if not report.get("execution") and not any(item.get("out_of_capacity") for item in report.get("accuracy", [])):
             # Older aggregate-only reports can reapply the measurement verdict,
@@ -50,7 +51,7 @@ def refresh(out: Path, report: dict) -> dict:
             ref = row["output_ref"]
             directory = ref["aiperf_run"]
             if directory not in raw:
-                raw[directory] = AiperfRun(Path(directory), batch["aiperf_exit"], []).raw_records()
+                raw[directory] = AiperfRun(resolve_path(out, directory), batch["aiperf_exit"], []).raw_records()
             source = raw[directory][ref["record_index"]]
             payload = source.get("payload") or {}
             sha = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -80,6 +81,6 @@ def refresh(out: Path, report: dict) -> dict:
     if recovered or classified:
         path = out / "execution.timing-recovered.jsonl"
         path.write_text("".join(json.dumps(batch) + "\n" for batch in batches))
-        updated["execution"] = {**report["execution"], "records": str(path),
+        updated["execution"] = {**report["execution"], "records": recorded_path(out, path),
                                 "timing_recovered_records": recovered}
     return updated

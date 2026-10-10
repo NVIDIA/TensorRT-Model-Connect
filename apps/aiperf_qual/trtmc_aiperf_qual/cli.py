@@ -115,6 +115,7 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
     same requests are reused unless ``regenerate``."""
     from . import compat, models
     from .runner import SUPPLEMENTARY_SUITES, applies, supplementary
+    from .artifacts import work_directory
     from .services import reference_python
 
     for out in outs:
@@ -134,7 +135,7 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
         for check in checks:
             suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
             try:
-                entries += supplementary(environment, model, check, python, out)
+                entries += supplementary(environment, model, check, python, work_directory(out))
             except Exception as error:  # noqa: BLE001 - recorded like a run's phase error
                 entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
                                 "samples": 0, "passed": None, "required_passes": None,

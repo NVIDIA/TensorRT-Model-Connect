@@ -112,24 +112,30 @@ def snapshot(model: str, revision: str | None) -> Path:
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(model, revision=revision, local_files_only=True,
-                                  allow_patterns=["model_index.json", "transformer/config.json", "vae/config.json"]))
+                                  allow_patterns=["model_index.json", "transformer/config.json", "unet/config.json",
+                                                  "vae/config.json"]))
 
 
 class Replay:
     """Turns ``latent_seed`` into an ``initial_latents_path`` file (per server, for one checkpoint)."""
 
-    def __init__(self, load: Callable[[], Checkpoint]) -> None:
+    def __init__(self, load: Callable[[], Checkpoint] | None = None,
+                 shape: Callable[[Mapping[str, Any]], tuple[int, ...]] | None = None) -> None:
         self._load = load
+        self._shape = shape
         self._checkpoint: Checkpoint | None = None
 
     def __call__(self, request: Mapping[str, Any], directory: Path) -> tuple[dict[str, Any], bool]:
         """The request with the noise file and whether the noise is replayed (False: the seed is
         dropped because the pipeline has no known layout)."""
         rest = {key: value for key, value in request.items() if key != "latent_seed"}
-        if self._checkpoint is None:
-            self._checkpoint = self._load()
-        shape = canonical_shape(self._checkpoint.pipeline, self._checkpoint.transformer, self._checkpoint.vae,
-                                request)
+        if self._shape is not None:
+            shape = self._shape(request)
+        else:
+            if self._checkpoint is None:
+                self._checkpoint = self._load()
+            shape = canonical_shape(self._checkpoint.pipeline, self._checkpoint.transformer, self._checkpoint.vae,
+                                    request)
         if shape is None:
             return rest, False
         directory.mkdir(parents=True, exist_ok=True)

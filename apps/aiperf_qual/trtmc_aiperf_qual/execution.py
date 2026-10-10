@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from .artifacts import recorded_path
 from . import aiperf_metrics
 from .judge import GPU_BUSY_PERCENT
 from .noninferiority import t_quantile
@@ -179,7 +180,7 @@ class Session:
                          "output_valid": bool(valid), "work": work,
                          "capacity_rejection": capacity_rejection(raw) if identity.get("side") == "candidate" else None,
                          "request_problems": list(self.request_problems(payload)),
-                         "output_ref": {"aiperf_run": str(run.directory), "record_index": ordinal,
+                         "output_ref": {"aiperf_run": recorded_path(self.out, run.directory), "record_index": ordinal,
                                         "request_id": body.get("request_id") or body.get("id")}})
         batch = {"schema_version": SCHEMA, "timing_contract": TIMING_CONTRACT, "batch_id": len(self.batches),
                  "workload": metadata["name"], "role": metadata["role"],

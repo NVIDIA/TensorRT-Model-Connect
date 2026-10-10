@@ -12,7 +12,8 @@ models:                                   # this machine's model list (see trtmc
   include: all                            # 288 GB per GPU: every ready catalog model fits
   exclude: []                             # [{profile: <name or glob>, reason: <why>}]
 retention:                                # see trtmc_aiperf_qual/retention.py
-  bundle: retain                          # retain | delete_on_pass | delete_unless_error
+  bundle: retain                          # retain | delete_on_pass | delete_unless_error | delete_built_unless_error
+  temporary_files: retain                 # retain | delete_on_pass | delete_unless_error (generated request files)
   hf_cache: retain                        # retain | delete_unused (run-all)
 runtime_root: /runs/tmp/build
 worker: /runs/tmp/build/trtmc_benchmark_worker

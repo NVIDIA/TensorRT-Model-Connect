@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 namespace trtmc {
@@ -46,14 +47,17 @@ struct GlmAsrConfig {
 
     // Decoder vocabulary and stopping condition.
     int32_t vocab_size{59264};
-    int32_t eos_token_id{59246};
     std::vector<int32_t> eos_token_ids;
 
-    bool is_eos_token(int32_t token) const {
-        // Older bundles carry only the scalar field. New bundles preserve
-        // all stopping tokens, including role markers ending a transcript.
+    void validate_stop_tokens() const {
         if (eos_token_ids.empty())
-            return token == eos_token_id;
+            throw std::invalid_argument("glmasr bundle requires nonempty eot_token_ids; rebuild the bundle");
+        for (int32_t token : eos_token_ids)
+            if (token < 0 || token >= vocab_size)
+                throw std::invalid_argument("glmasr eot_token_ids contains a token outside the vocabulary");
+    }
+
+    bool is_eos_token(int32_t token) const {
         return std::find(eos_token_ids.begin(), eos_token_ids.end(), token) != eos_token_ids.end();
     }
 
