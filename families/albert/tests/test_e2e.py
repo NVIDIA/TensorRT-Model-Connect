@@ -322,8 +322,7 @@ def _assert_sdk_consumers(
 ) -> None:
     del tmp_path
     native_build_str = os.environ.get("TRTMC_NATIVE_BUILD_DIR")
-    if not native_build_str:
-        return
+    assert native_build_str, "selected ALBERT SDK E2E requires TRTMC_NATIVE_BUILD_DIR"
     native_build = Path(native_build_str)
     assert native_build.is_dir(), f"TRTMC_NATIVE_BUILD_DIR not found: {native_build}"
 
