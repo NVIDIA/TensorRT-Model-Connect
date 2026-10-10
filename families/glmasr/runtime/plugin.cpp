@@ -43,6 +43,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     config.mel_sampling_rate = json.value("mel_sampling_rate", config.mel_sampling_rate);
     config.mel_chunk_length = json.value("mel_chunk_length", config.mel_chunk_length);
     config.eos_token_id = json.value("eot_token_id", config.eos_token_id);
+    config.eos_token_ids = json.value("eot_token_ids", std::vector<int32_t>{});
     config.transcription_prompt = json.value("transcription_prompt", config.transcription_prompt);
     const auto cache_shape = decoder.module->tensor_shape("cache_k_0");
     const auto kv_dim = cache_shape.empty() ? 0 : static_cast<int32_t>(cache_shape.back());

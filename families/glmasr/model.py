@@ -326,24 +326,6 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
     }
 
 
-def _eot_token_id(config: ModelConfig) -> int:
-    """Resolve the decoder's EOS id.
-
-    The checkpoint keeps it under ``text_config`` (config.raw is the
-    unmerged JSON), and it can be a list of alternates rather than a single
-    id. The runtime only supports one stop id, so this picks the first.
-    """
-    text_config = config.raw.get("text_config")
-    sources = [text_config, config.raw] if isinstance(text_config, dict) else [config.raw]
-    for source in sources:
-        value = source.get("eos_token_id")
-        if isinstance(value, (list, tuple)) and value:
-            return int(value[0])
-        if value is not None:
-            return int(value)
-    raise ValueError("glmasr checkpoint declares no eos_token_id")
-
-
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build a GLM-ASR bundle using the family-owned encoder and decoder."""
     if request.task != "transcription":
@@ -400,7 +382,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "tensor_parallel_size": parallel.tp_size,
         "hidden_size": config.hidden_size,
         "max_cache_length": max_length,
-        "eot_token_id": _eot_token_id(config),
+        "eot_token_id": config.eos_token_ids[0],
+        "eot_token_ids": config.eos_token_ids,
         "mel_frontend": "whisper",
         "mel_n_fft": _MEL_DEFAULTS["n_fft"],
         "mel_hop_length": _MEL_DEFAULTS["hop_length"],

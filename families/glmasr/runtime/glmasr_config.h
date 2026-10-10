@@ -5,13 +5,15 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace trtmc {
 
 // Runtime shape and token contract for a GLM-ASR bundle. Every field is read
-// from the bundle's config.json; the defaults describe GLM-ASR-Nano-2512 so a
+// from the bundle's runtime.json; the defaults describe GLM-ASR-Nano-2512 so a
 // bundle that predates a field still loads.
 struct GlmAsrConfig {
     // Mel front-end, which follows the Whisper feature extractor.
@@ -45,6 +47,16 @@ struct GlmAsrConfig {
     // Decoder vocabulary and stopping condition.
     int32_t vocab_size{59264};
     int32_t eos_token_id{59246};
+    std::vector<int32_t> eos_token_ids;
+
+    bool is_eos_token(int32_t token) const {
+        // Older bundles carry only the scalar field. New bundles preserve
+        // all stopping tokens, including role markers ending a transcript.
+        return eos_token_ids.empty()
+                   ? token == eos_token_id
+                   : std::find(eos_token_ids.begin(), eos_token_ids.end(), token) !=
+                         eos_token_ids.end();
+    }
 
     std::string transcription_prompt{"Please transcribe this audio into text"};
 };

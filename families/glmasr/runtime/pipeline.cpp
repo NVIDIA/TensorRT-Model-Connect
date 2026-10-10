@@ -183,7 +183,7 @@ std::vector<int32_t> GlmAsrPipeline::run_decoder(const std::vector<int32_t>& inp
     std::vector<int32_t> generated;
     generated.reserve(static_cast<std::size_t>(max_new_tokens));
     for (int32_t step = 0; step < max_new_tokens; ++step) {
-        if (next_token < 0 || next_token == config_.eos_token_id)
+        if (next_token < 0 || config_.is_eos_token(next_token))
             break;
         generated.push_back(next_token);
         next_token = run_decode_step(next_token);
