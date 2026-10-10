@@ -6,6 +6,7 @@
 #include "families/bark/runtime/distributed_runtime.h"
 #include "families/bark/runtime/pipeline.h"
 #include "families/bark/runtime/plugin_helpers.h"
+#include "trtmc/internal/audio.h"
 #include "trtmc/runtime/family_factory.h"
 
 #include <nlohmann/json.hpp>
@@ -68,11 +69,20 @@ BarkConfig parse_config(const nlohmann::json& json) {
 }
 
 } // namespace
+
+std::string require_task(const BundleInfo& info) {
+    using trtmc::internal::ITextToAudio;
+    if (info.task == std::string(ITextToAudio::kTask))
+        return info.task;
+    throw std::runtime_error("Bark does not implement task: " + info.task);
+}
+
 } // namespace trtmc::bark_factory
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("bark does not support --kv-cache-size");
+    trtmc::bark_factory::require_task(context.reader.info());
     using namespace trtmc;
     const auto& runtime_data = bark_factory::require_section(context.reader, "runtime.json");
     const auto document = nlohmann::json::parse(runtime_data.begin(), runtime_data.end());

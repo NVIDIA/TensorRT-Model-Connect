@@ -102,4 +102,17 @@ if(TRTMC_BUILD_TESTS)
     -Wall -Wextra -Wpedantic
   )
   add_test(NAME bark_multinomial_policy COMMAND test_bark_multinomial_policy)
+
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_bark_sdk_${_language}
+      ${PROJECT_SOURCE_DIR}/families/bark/tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_bark_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_bark_sdk_${_language} PRIVATE
+      -Wall -Wextra -Wpedantic -Werror
+    )
+    set_target_properties(test_bark_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
 endif()

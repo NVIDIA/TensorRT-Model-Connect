@@ -9,6 +9,7 @@
 #include "families/bark/runtime/decode_runtime.h"
 #include "families/bark/runtime/sampler.h"
 #include "families/bark/runtime/tokenizer.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -17,6 +18,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace trtmc {
@@ -188,6 +190,25 @@ BarkPipeline::BarkPipeline(std::unique_ptr<ITrtModule> semantic, std::unique_ptr
 
 BarkPipeline::~BarkPipeline() = default;
 
+const char* BarkPipeline::task() const noexcept {
+    return trtmc::internal::ITextToAudio::kTask.data();
+}
+
+namespace {
+static const trtmc::internal::ConfigField bark_config_fields[] = {
+    {"max_new_tokens", trtmc::internal::ConfigKind::I64,
+     trtmc::internal::ConfigValue{std::int64_t{768}}, "Maximum semantic generation tokens"},
+    {"seed", trtmc::internal::ConfigKind::I64, trtmc::internal::ConfigValue{std::int64_t{-1}},
+     "Generation seed override"},
+};
+} // namespace
+
+std::vector<trtmc::internal::TaskInstance> BarkPipeline::task_bindings() {
+    return {
+        trtmc::internal::bind<trtmc::internal::ITextToAudio>(*this, bark_config_fields),
+    };
+}
+
 void BarkPipeline::set_codec_module(std::unique_ptr<ITrtModule> codec) {
     codec_ = std::move(codec);
 }
@@ -207,20 +228,38 @@ void BarkPipeline::set_prefill_modules(std::unique_ptr<ITrtModule> semantic_pref
     coarse_prefill_ = std::move(coarse_prefill);
 }
 
-AudioResult BarkPipeline::generate_audio(const std::string& prompt,
-                                         const AudioGenerationConfig& cfg) {
-    if (cfg.talker_max_new_tokens != 0)
-        throw std::invalid_argument("Bark does not accept a talker token limit");
+trtmc::internal::AudioResult BarkPipeline::run(const trtmc::internal::TextToAudioRequest& request,
+                                               trtmc::internal::ConfigView config) {
+    const std::string prompt(request.prompt);
+
+    int32_t max_tokens = 768;
+    const auto max_new =
+        trtmc::internal::config_get<std::int64_t>(config, bark_config_fields, "max_new_tokens");
+    if (max_new) {
+        if (*max_new <= 0 || *max_new > std::numeric_limits<int32_t>::max()) {
+            throw trtmc::internal::ConfigError(
+                "Bark: max_new_tokens must be positive and fit in int32_t");
+        }
+        max_tokens = static_cast<int32_t>(*max_new);
+    }
+
+    int64_t request_seed = -1;
+    const auto req_seed =
+        trtmc::internal::config_get<std::int64_t>(config, bark_config_fields, "seed");
+    if (req_seed) {
+        if (*req_seed < -1) {
+            throw trtmc::internal::ConfigError(
+                "Bark: seed must be non-negative or -1 to use default seed");
+        }
+        request_seed = *req_seed;
+    }
+
     // Tokenize the prompt
     std::vector<int32_t> input_ids;
     if (tokenizer_)
         input_ids = tokenizer_->encode(prompt);
 
-    int32_t max_tokens = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : 768;
-
-    // A public request seed takes precedence over the session-level
-    // audio_bark.seed default is populated by the family factory.
-    const int64_t sampler_seed = resolve_bark_seed(config_.seed, cfg.seed);
+    const int64_t sampler_seed = resolve_bark_seed(config_.seed, request_seed);
     sampler_->reset(sampler_seed);
     if (sampler_seed >= 0)
         std::cerr << "[trtmc] Bark: sampler seed=" << sampler_seed << std::endl;
@@ -233,8 +272,9 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt,
     auto semantic_tokens = run_semantic(input_ids, max_tokens);
     if (semantic_tokens.empty()) {
         std::cerr << "[trtmc] Bark: semantic stage produced no tokens" << std::endl;
-        AudioResult out;
-        out.sample_rate = config_.sample_rate;
+        trtmc::internal::AudioResult out;
+        out.sample_rate = static_cast<std::uint32_t>(config_.sample_rate);
+        out.channels = 1;
         return out;
     }
 
@@ -242,8 +282,9 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt,
     auto coarse_tokens = run_coarse(semantic_tokens);
     if (coarse_tokens.empty()) {
         std::cerr << "[trtmc] Bark: coarse stage produced no tokens" << std::endl;
-        AudioResult out;
-        out.sample_rate = config_.sample_rate;
+        trtmc::internal::AudioResult out;
+        out.sample_rate = static_cast<std::uint32_t>(config_.sample_rate);
+        out.channels = 1;
         return out;
     }
 
@@ -257,18 +298,19 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt,
                                       : run_codec(coarse_tokens);
     if (waveform.empty()) {
         std::cerr << "[trtmc] Bark: codec produced no audio" << std::endl;
-        AudioResult out;
-        out.sample_rate = config_.sample_rate;
+        trtmc::internal::AudioResult out;
+        out.sample_rate = static_cast<std::uint32_t>(config_.sample_rate);
+        out.channels = 1;
         return out;
     }
 
-    AudioResult out;
+    trtmc::internal::AudioResult out;
+    out.sample_rate = static_cast<std::uint32_t>(config_.sample_rate);
+    out.channels = 1;
     out.samples = std::move(waveform);
-    out.num_samples = static_cast<int32_t>(out.samples.size());
-    out.sample_rate = config_.sample_rate;
-    std::cerr << "[trtmc] Bark: generated " << out.num_samples << " samples ("
-              << static_cast<float>(out.num_samples) / out.sample_rate << "s @ " << out.sample_rate
-              << " Hz)" << std::endl;
+    std::cerr << "[trtmc] Bark: generated " << out.samples.size() << " samples ("
+              << static_cast<float>(out.samples.size()) / out.sample_rate << "s @ "
+              << out.sample_rate << " Hz)" << std::endl;
     return out;
 }
 
