@@ -32,14 +32,5 @@ int main() {
     check(!config.is_eos_token(10), "ordinary newline continues decoding");
     check(!config.is_eos_token(14215), "ordinary transcription token continues decoding");
 
-    const std::vector<int32_t> decoder_tokens{14215, 1700, 59253, 10, 14215};
-    std::vector<int32_t> transcript;
-    for (int32_t token : decoder_tokens) {
-        if (config.is_eos_token(token))
-            break;
-        transcript.push_back(token);
-    }
-    check(transcript == std::vector<int32_t>({14215, 1700}),
-          "alternate EOS terminates before repeated transcription");
     return failures == 0 ? 0 : 1;
 }

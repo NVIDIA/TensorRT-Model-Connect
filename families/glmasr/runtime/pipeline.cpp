@@ -183,9 +183,13 @@ std::vector<int32_t> GlmAsrPipeline::run_decoder(const std::vector<int32_t>& inp
     std::vector<int32_t> generated;
     generated.reserve(static_cast<std::size_t>(max_new_tokens));
     for (int32_t step = 0; step < max_new_tokens; ++step) {
-        if (next_token < 0 || config_.is_eos_token(next_token))
+        if (next_token < 0)
             break;
         generated.push_back(next_token);
+        // Keep the generated stop token in the result, as Native does. The
+        // tokenizer hides special tokens from text; work counts include EOS.
+        if (config_.is_eos_token(next_token))
+            break;
         next_token = run_decode_step(next_token);
     }
     return generated;
