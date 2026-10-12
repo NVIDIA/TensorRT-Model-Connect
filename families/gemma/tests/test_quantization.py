@@ -18,6 +18,7 @@ torch = pytest.importorskip("torch")
 safetensors_torch = pytest.importorskip("safetensors.torch")
 
 from .. import graph_ops, quantization  # noqa: E402
+from .. import calibrate_fp8_scales  # noqa: E402
 from ..build_request import BuildRequest, coerce_request  # noqa: E402
 from ..checkpoint_mapper import WeightDict, load_standard_weights  # noqa: E402
 from ..config import ModelConfig  # noqa: E402
@@ -243,9 +244,7 @@ def test_engine_builds_with_fp8_weights(tmp_path: Path, monkeypatch) -> None:
 
     kwargs = {"precision": "bf16", "activation": "gelu_pytorch_tanh"}
     plain = build_standard_decoder_engine(config, _fake_weights(), 4, **kwargs)
-    quantized = build_standard_decoder_engine(
-        config, _fake_weights(), 4, quant_ctx=ctx, **kwargs
-    )
+    quantized = build_standard_decoder_engine(config, _fake_weights(), 4, quant_ctx=ctx, **kwargs)
 
     engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(quantized)
     assert engine is not None
@@ -253,3 +252,28 @@ def test_engine_builds_with_fp8_weights(tmp_path: Path, monkeypatch) -> None:
     assert {"token_id", "logits", "present_k_0"} <= names
     # 7 projections x 2 layers: FP8 halves the bf16 projection bytes.
     assert len(quantized) < len(plain)
+
+
+def test_calibration_tool_maps_module_names_to_weight_stems() -> None:
+    match = calibrate_fp8_scales._PROJECTION_NAME.search("model.layers.3.mlp.down_proj")
+    assert match is not None and match.group(1) == "3"
+    assert calibrate_fp8_scales._WEIGHT_STEM[match.group(2)] == "w_down"
+    assert calibrate_fp8_scales._PROJECTION_NAME.search("model.layers.3.mlp.down_proj.base") is None
+
+
+def test_calibration_tool_cli_parses_both_commands(monkeypatch, tmp_path: Path) -> None:
+    seen = {}
+    monkeypatch.setattr(
+        calibrate_fp8_scales, "fetch_prompts", lambda out, n: seen.update(fetch=(out, n))
+    )
+    monkeypatch.setattr(
+        calibrate_fp8_scales, "calibrate", lambda d, p, n: seen.update(calibrate=(d, p, n))
+    )
+    monkeypatch.setattr("sys.argv", ["x", "fetch", "--out", str(tmp_path / "p.jsonl")])
+    calibrate_fp8_scales.main()
+    monkeypatch.setattr(
+        "sys.argv", ["x", "calibrate", "--model-dir", str(tmp_path), "--prompts", "p.jsonl"]
+    )
+    calibrate_fp8_scales.main()
+    assert seen["fetch"] == (tmp_path / "p.jsonl", 64)
+    assert seen["calibrate"] == (tmp_path, Path("p.jsonl"), 512)
