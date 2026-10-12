@@ -11,6 +11,21 @@ from pathlib import Path
 # diffusers supplies these when a component config stays silent.
 _CLIP_LAYER_NORM_EPS = 1e-5
 _VAE_SCALING_FACTOR = 0.18215
+# (original_h, original_w, crop_top, crop_left, target_h, target_w)
+_ADDITION_TIME_IDS = 6
+
+
+def _heads(unet: dict):
+    """Head counts per level.
+
+    The field is named ``attention_head_dim`` but diffusers reads it as the
+    number of heads, falling back to it when ``num_attention_heads`` is unset.
+    SD 1.5 states one number, SDXL states one per level.
+    """
+    value = unet.get("num_attention_heads") or unet["attention_head_dim"]
+    if isinstance(value, (list, tuple)):
+        return [int(v) for v in value]
+    return int(value)
 
 
 def _read(model_dir: Path, component: str) -> dict:
@@ -30,6 +45,10 @@ def resolve(model_dir: str | Path, *, latent_size: int) -> dict:
     unet = _read(model_dir, "unet")
     vae = _read(model_dir, "vae")
     text = _read(model_dir, "text_encoder")
+    # SDXL adds a second, larger text encoder and keeps the first one's
+    # tokenizer length, so the context length still comes from text_encoder.
+    second_dir = model_dir / "text_encoder_2"
+    text_2 = _read(model_dir, "text_encoder_2") if second_dir.is_dir() else None
 
     if int(unet["in_channels"]) != int(vae["latent_channels"]):
         raise ValueError("Stable Diffusion unet and vae disagree on the latent width")
@@ -45,10 +64,17 @@ def resolve(model_dir: str | Path, *, latent_size: int) -> dict:
             "sample_size": int(latent_size),
             "block_out_channels": [int(v) for v in unet["block_out_channels"]],
             "layers_per_block": int(unet["layers_per_block"]),
-            "attention_head_dim": int(unet["attention_head_dim"]),
+            "attention_head_dim": _heads(unet),
             "cross_attention_dim": int(unet["cross_attention_dim"]),
             "norm_num_groups": int(unet.get("norm_num_groups", 32)),
             "context_length": int(text["max_position_embeddings"]),
+            "use_linear_projection": bool(unet.get("use_linear_projection", False)),
+            "addition_embed_type": unet.get("addition_embed_type"),
+            "addition_time_embed_dim": int(unet.get("addition_time_embed_dim") or 0),
+            "addition_time_ids": _ADDITION_TIME_IDS,
+            "pooled_projection_dim": int(text_2["projection_dim"]) if text_2 else 0,
+            "projection_class_embeddings_input_dim":
+                int(unet.get("projection_class_embeddings_input_dim") or 0),
         },
         "vae": {
             "block_out_channels": [int(v) for v in vae["block_out_channels"]],
@@ -63,6 +89,17 @@ def resolve(model_dir: str | Path, *, latent_size: int) -> dict:
             "max_position_embeddings": int(text["max_position_embeddings"]),
             "layer_norm_eps": float(text.get("layer_norm_eps") or _CLIP_LAYER_NORM_EPS),
         },
+        "text_encoder_2": {
+            "hidden_size": int(text_2["hidden_size"]),
+            "num_hidden_layers": int(text_2["num_hidden_layers"]),
+            "num_attention_heads": int(text_2["num_attention_heads"]),
+            "max_position_embeddings": int(text_2["max_position_embeddings"]),
+            "projection_dim": int(text_2["projection_dim"]),
+            "hidden_act": str(text_2.get("hidden_act", "gelu")),
+            "layer_norm_eps": float(text_2.get("layer_norm_eps") or _CLIP_LAYER_NORM_EPS),
+        } if text_2 else None,
+        # SDXL's VAE overflows in fp16, which is what force_upcast records.
+        "vae_force_upcast": bool(vae.get("force_upcast", False)),
         "scaling_factor": float(vae.get("scaling_factor") or _VAE_SCALING_FACTOR),
         "num_train_timesteps": int(scheduler.get("num_train_timesteps", 1000)),
         "beta_start": float(scheduler.get("beta_start", 0.00085)),

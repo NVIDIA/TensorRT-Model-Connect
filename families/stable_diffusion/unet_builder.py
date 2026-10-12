@@ -42,6 +42,37 @@ def _timestep_embedding(network, timestep, channels: int, max_period: float = 10
     return g.concat(network, [cos, sin], axis=1)
 
 
+def _added_conditioning(network, pooled, time_ids, weights, cfg, dtype):
+    """SDXL's "text_time" embedding, added to the timestep embedding.
+
+    The six micro-conditioning values are (original_h, original_w, crop_top,
+    crop_left, target_h, target_w). Each is embedded with the same sinusoid the
+    timestep uses, the six are flattened, and the pooled text vector goes in
+    front: 1280 + 6 * 256 = 2816, exactly
+    ``projection_class_embeddings_input_dim``.
+    """
+    width = cfg["addition_time_embed_dim"]
+    count = cfg["addition_time_ids"]
+    flat = network.add_shuffle(time_ids)
+    flat.reshape_dims = (count, 1)
+    embedded = _timestep_embedding(network, flat.get_output(0), width, dtype=dtype)
+    merged = network.add_shuffle(embedded)
+    merged.reshape_dims = (1, count * width)
+    combined = g.concat(network, [pooled, merged.get_output(0)], axis=1)
+
+    expected = cfg["projection_class_embeddings_input_dim"]
+    actual = int(np.asarray(weights["add_embedding.linear_1.weight"]).shape[1])
+    if actual != expected:
+        raise ValueError(
+            f"add_embedding expects {actual} inputs but the config says {expected}")
+
+    out = g.add_linear(network, combined, weights["add_embedding.linear_1.weight"],
+                       weights["add_embedding.linear_1.bias"], dtype=dtype)
+    out = g.add_silu(network, out)
+    return g.add_linear(network, out, weights["add_embedding.linear_2.weight"],
+                        weights["add_embedding.linear_2.bias"], dtype=dtype)
+
+
 def _resnet(network, x, temb, weights, prefix, groups, eps, dtype):
     """ResnetBlock2D, including the timestep term a VAE resnet does not have."""
     residual = x
@@ -72,17 +103,28 @@ def _resnet(network, x, temb, weights, prefix, groups, eps, dtype):
     return g.add_sum(network, h, residual)
 
 
-def _attention(network, x, context, weights, prefix, heads, groups, eps, dtype):
-    """Transformer2DModel: GroupNorm, 1x1 in, transformer blocks, 1x1 out, residual."""
+def _attention(network, x, context, weights, prefix, heads, groups, eps, dtype,
+               linear_projection=False):
+    """Transformer2DModel: GroupNorm, in-projection, blocks, out-projection, residual.
+
+    ``linear_projection`` swaps the 1x1 convolutions for linear layers, which
+    also moves them to the other side of the reshape: SD 1.5 projects while
+    still spatial, SDXL projects after the tokens are laid out.
+    """
     residual = x
     shape = tuple(int(v) for v in x.shape)
     height, width = shape[2], shape[3]
 
     h = g.add_group_norm(network, x, weights[f"{prefix}.norm.weight"],
                          weights[f"{prefix}.norm.bias"], groups, eps, dtype=dtype)
-    h = g.add_conv2d(network, h, weights[f"{prefix}.proj_in.weight"],
-                     weights[f"{prefix}.proj_in.bias"], dtype=dtype)
-    h = g.spatial_to_tokens(network, h)
+    if linear_projection:
+        h = g.spatial_to_tokens(network, h)
+        h = g.add_linear(network, h, weights[f"{prefix}.proj_in.weight"],
+                         weights[f"{prefix}.proj_in.bias"], dtype=dtype)
+    else:
+        h = g.add_conv2d(network, h, weights[f"{prefix}.proj_in.weight"],
+                         weights[f"{prefix}.proj_in.bias"], dtype=dtype)
+        h = g.spatial_to_tokens(network, h)
 
     index = 0
     while f"{prefix}.transformer_blocks.{index}.norm1.weight" in weights:
@@ -113,9 +155,14 @@ def _attention(network, x, context, weights, prefix, heads, groups, eps, dtype):
             weights[f"{block}.ff.net.2.bias"], dtype=dtype), h)
         index += 1
 
-    h = g.tokens_to_spatial(network, h, height, width)
-    h = g.add_conv2d(network, h, weights[f"{prefix}.proj_out.weight"],
-                     weights[f"{prefix}.proj_out.bias"], dtype=dtype)
+    if linear_projection:
+        h = g.add_linear(network, h, weights[f"{prefix}.proj_out.weight"],
+                         weights[f"{prefix}.proj_out.bias"], dtype=dtype)
+        h = g.tokens_to_spatial(network, h, height, width)
+    else:
+        h = g.tokens_to_spatial(network, h, height, width)
+        h = g.add_conv2d(network, h, weights[f"{prefix}.proj_out.weight"],
+                         weights[f"{prefix}.proj_out.bias"], dtype=dtype)
     return g.add_sum(network, h, residual)
 
 
@@ -146,8 +193,15 @@ def build_unet(network, weights, cfg, dtype, work_trt):
     """Assemble the denoiser and return its output tensor."""
     groups = cfg["norm_num_groups"]
     eps = 1e-5
-    heads = cfg["attention_head_dim"]
     channels = cfg["block_out_channels"]
+    linear_projection = bool(cfg.get("use_linear_projection", False))
+    # SD 1.5 states one head count for the whole model; SDXL states one per
+    # level and mirrors the list on the way up, the way diffusers does.
+    head_counts = cfg["attention_head_dim"]
+    if not isinstance(head_counts, (list, tuple)):
+        head_counts = [head_counts] * len(channels)
+    head_counts = list(head_counts)
+    up_head_counts = list(reversed(head_counts))
     layers = cfg["layers_per_block"]
     latent = cfg["sample_size"]
 
@@ -155,8 +209,12 @@ def build_unet(network, weights, cfg, dtype, work_trt):
     timestep = network.add_input("timestep", trt.float32, (1, 1))
     context = network.add_input(
         "encoder_hidden_states", trt.float32, (1, cfg["context_length"], cfg["cross_attention_dim"]))
-    for tensor in (sample, timestep, context):
-        pass
+    pooled = time_ids = None
+    if cfg.get("addition_embed_type") == "text_time":
+        pooled = network.add_input(
+            "text_embeds", trt.float32, (1, cfg["pooled_projection_dim"]))
+        time_ids = network.add_input(
+            "time_ids", trt.float32, (1, cfg["addition_time_ids"]))
     x = sample if sample.dtype == work_trt else network.add_cast(sample, work_trt).get_output(0)
     ctx = context if context.dtype == work_trt else network.add_cast(
         context, work_trt).get_output(0)
@@ -169,6 +227,13 @@ def build_unet(network, weights, cfg, dtype, work_trt):
     temb = g.add_silu(network, temb)
     temb = g.add_linear(network, temb, weights["time_embedding.linear_2.weight"],
                         weights["time_embedding.linear_2.bias"], dtype=dtype)
+    if pooled is not None:
+        pooled_w = pooled if pooled.dtype == work_trt else network.add_cast(
+            pooled, work_trt).get_output(0)
+        ids_w = time_ids if time_ids.dtype == work_trt else network.add_cast(
+            time_ids, work_trt).get_output(0)
+        temb = g.add_sum(network, temb, _added_conditioning(
+            network, pooled_w, ids_w, weights, cfg, dtype))
 
     h = g.add_conv2d(network, x, weights["conv_in.weight"], weights["conv_in.bias"],
                      padding=(1, 1), dtype=dtype)
@@ -181,7 +246,9 @@ def build_unet(network, weights, cfg, dtype, work_trt):
                         groups, eps, dtype)
             if _has(weights, f"down_blocks.{block}.attentions.{layer}."):
                 h = _attention(network, h, ctx, weights,
-                               f"down_blocks.{block}.attentions.{layer}", heads, groups, eps, dtype)
+                               f"down_blocks.{block}.attentions.{layer}",
+                               head_counts[block], groups, eps, dtype,
+                               linear_projection=linear_projection)
             skips.append(h)
         if _has(weights, f"down_blocks.{block}.downsamplers.0."):
             h = g.add_conv2d(network, h, weights[f"down_blocks.{block}.downsamplers.0.conv.weight"],
@@ -190,7 +257,9 @@ def build_unet(network, weights, cfg, dtype, work_trt):
             skips.append(h)
 
     h = _resnet(network, h, temb, weights, "mid_block.resnets.0", groups, eps, dtype)
-    h = _attention(network, h, ctx, weights, "mid_block.attentions.0", heads, groups, eps, dtype)
+    h = _attention(network, h, ctx, weights, "mid_block.attentions.0",
+                   head_counts[-1], groups, eps, dtype,
+                   linear_projection=linear_projection)
     h = _resnet(network, h, temb, weights, "mid_block.resnets.1", groups, eps, dtype)
 
     pushed = len(skips)
@@ -207,7 +276,9 @@ def build_unet(network, weights, cfg, dtype, work_trt):
                         groups, eps, dtype)
             if _has(weights, f"up_blocks.{block}.attentions.{layer}."):
                 h = _attention(network, h, ctx, weights,
-                               f"up_blocks.{block}.attentions.{layer}", heads, groups, eps, dtype)
+                               f"up_blocks.{block}.attentions.{layer}",
+                               up_head_counts[block], groups, eps, dtype,
+                               linear_projection=linear_projection)
         if _has(weights, f"up_blocks.{block}.upsamplers.0."):
             shape = tuple(int(v) for v in h.shape)
             # diffusers upsamples nearest, not bilinear.

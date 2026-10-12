@@ -16,12 +16,25 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import tensorrt as trt
 
 from . import graph as g
 
 
-def build_text_encoder(network, token_ids, weights, cfg, dtype):
-    """Token ids in, the final hidden states the UNet cross-attends to out."""
+def build_text_encoder(network, token_ids, weights, cfg, dtype, *,
+                       penultimate=False, eos_index=None):
+    """Token ids in, the hidden states the UNet cross-attends to out.
+
+    SDXL conditions on the **penultimate** hidden state and does *not* apply
+    the final layer norm to it: measured standard deviation 4.95 against 1.01
+    for the normalised one. Its second encoder is a
+    ``CLIPTextModelWithProjection`` whose pooled vector comes from the fully
+    normalised last hidden state at the end-of-text position, so that encoder
+    runs all its layers even though the tap stops one short.
+
+    Returns ``(hidden_states, pooled)``; ``pooled`` is ``None`` unless
+    ``eos_index`` is supplied.
+    """
     hidden = cfg["hidden_size"]
     heads = cfg["num_attention_heads"]
     head_dim = hidden // heads
@@ -38,8 +51,11 @@ def build_text_encoder(network, token_ids, weights, cfg, dtype):
     h = g.add_sum(network, embedded,
                   g.add_constant(network, (1, tokens, hidden), position, dtype=dtype))
 
+    activation = g.add_gelu if cfg.get("hidden_act") == "gelu" else g.add_quick_gelu
     scale = 1.0 / math.sqrt(head_dim)
-    for layer in range(cfg["num_hidden_layers"]):
+    tapped = None
+    total = cfg["num_hidden_layers"]
+    for layer in range(total):
         prefix = f"text_model.encoder.layers.{layer}"
         residual = h
         normed = g.add_layer_norm(network, h, weights[f"{prefix}.layer_norm1.weight"],
@@ -64,12 +80,25 @@ def build_text_encoder(network, token_ids, weights, cfg, dtype):
         residual = h
         normed = g.add_layer_norm(network, h, weights[f"{prefix}.layer_norm2.weight"],
                                   weights[f"{prefix}.layer_norm2.bias"], eps, dtype=dtype)
-        inner = g.add_quick_gelu(network, g.add_linear(
+        inner = activation(network, g.add_linear(
             network, normed, weights[f"{prefix}.mlp.fc1.weight"],
             weights[f"{prefix}.mlp.fc1.bias"], dtype=dtype))
         h = g.add_sum(network, g.add_linear(
             network, inner, weights[f"{prefix}.mlp.fc2.weight"],
             weights[f"{prefix}.mlp.fc2.bias"], dtype=dtype), residual)
 
-    return g.add_layer_norm(network, h, weights["text_model.final_layer_norm.weight"],
-                            weights["text_model.final_layer_norm.bias"], eps, dtype=dtype)
+        if penultimate and layer == total - 2:
+            # The tap is the raw hidden state, with no final layer norm.
+            tapped = h
+
+    normed = g.add_layer_norm(network, h, weights["text_model.final_layer_norm.weight"],
+                              weights["text_model.final_layer_norm.bias"], eps, dtype=dtype)
+
+    pooled = None
+    if eos_index is not None:
+        gathered = network.add_gather_v2(normed, eos_index, trt.GatherMode.DEFAULT)
+        gathered.axis = 1
+        pooled = g.add_linear(network, gathered.get_output(0),
+                              weights["text_projection.weight"], None, dtype=dtype)
+
+    return (tapped if penultimate else normed), pooled
