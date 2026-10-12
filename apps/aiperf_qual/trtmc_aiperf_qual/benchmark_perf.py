@@ -25,17 +25,7 @@ def refresh(out: Path, report: dict) -> dict:
             # but cannot reconstruct a different sample selection.
             return report
         raise ValueError(f"{out}: recorded benchmark execution is unavailable")
-    batches, superseded = [], set()
-    for line in path.read_text().split("\n"):
-        if not line.strip():
-            continue
-        batch = json.loads(line)
-        if batch.get("event") == "supersede_failed_attempt":
-            superseded.update(batch["batch_ids"])
-        elif "records" in batch:
-            batches.append(batch)
-    batches = [batch for batch in batches
-               if not batch.get("superseded") and batch["batch_id"] not in superseded]
+    batches = [batch for batch in execution.read_batches(path) if not batch.get("superseded")]
     excluded = {item["suite"] for item in report.get("accuracy", [])
                 if item.get("out_of_capacity") and item.get("status") != "error"}
     # Recover older classifications only from the matching original response.

@@ -309,6 +309,12 @@ requires generation again; text raw responses remain available. If the bundle is
 `recheck` fails before replacing valid scores: run the model again to rebuild and regenerate. Cleanup does not promise
 bit-for-bit model replay without the checkpoint, bundle and generated artifacts.
 
+Media rechecks preserve the original exports. A regenerated side writes under its existing workload
+directory's `rerun-<timestamp>/`; its responses replace that side's Acc, task timings and informational
+AIPerf metrics together. `execution.rechecked.jsonl` keeps the active measurements and superseded history.
+Outputs are reused only with their matching execution evidence; a failed regeneration cannot retain an
+older passing timing. Workloads outside the recheck keep their original measurements.
+
 ## Extending
 
 - New model of a known Task: nothing to add.

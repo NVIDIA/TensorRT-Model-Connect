@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import ConfigError, load_environment
+from .config import ConfigError, Environment, load_environment
 
 
 def doctor(fix: bool) -> int:
@@ -113,11 +113,13 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
     """Run the Task's whole-output checks (``supplementary``) again on finished results and replace
     their report entries, then rejudge; the rest of the result is kept. Generations that sent the
     same requests are reused unless ``regenerate``."""
-    from . import compat, models
-    from .runner import SUPPLEMENTARY_SUITES, applies, supplementary
-    from .artifacts import work_directory
-    from .services import reference_python
+    from . import aiperf_metrics, compat, execution, models
+    from .runner import SUPPLEMENTARY_SUITES, applies, execution_session, supplementary
+    from .artifacts import recorded_path, work_directory
+    from .services import gpu_exclusive, reference_python
 
+    environment = Environment({**environment.values, "native_replicas": 1, "candidate_replicas": 1,
+                               "acc_mps": False, "acc_overlap": False})
     pending = []
     for out in outs:
         path = out / "report.json"
@@ -144,18 +146,51 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
         pending.append((out, path, model, checks, python))
     # A later missing prerequisite must not leave earlier reports updated but unjudged.
     for out, path, model, checks, python in pending:
-        entries, suites = [], set()
-        for check in checks:
-            suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
-            try:
-                entries += supplementary(environment, model, check, python, work_directory(out))
-            except Exception as error:  # noqa: BLE001 - recorded like a run's phase error
-                entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
-                                "samples": 0, "passed": None, "required_passes": None,
-                                "error": f"{type(error).__name__}: {str(error)[-800:]}"})
         result = compat.report(json.loads(path.read_text()))
+        recorded = out / Path((result.get("execution") or {}).get("records", "execution.jsonl")).name
+        batches = execution.read_batches(recorded) if recorded.is_file() else []
+        for index, batch in enumerate(batches):
+            batch["batch_id"] = index
+        temporary = out / "execution.recheck.tmp.jsonl"
+        temporary.unlink(missing_ok=True)
+        evidence = execution_session(model, environment, out, batches=batches, records_name=temporary.name)
+        previous_count = len(batches)
+        entries, suites = [], set()
+        informational_attempts = set()
+        with execution.session(evidence), gpu_exclusive(environment):
+            for check in checks:
+                start = len(evidence.batches)
+                attempts = set(evidence.attempts)
+                suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
+                try:
+                    entries += supplementary(environment, model, check, python, work_directory(out))
+                except Exception as error:  # noqa: BLE001 - recorded like a run's phase error
+                    entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
+                                    "samples": 0, "passed": None, "required_passes": None,
+                                    "error": f"{type(error).__name__}: {str(error)[-800:]}"})
+                if check.get("informational"):
+                    informational_attempts.update(evidence.attempts - attempts)
+                    evidence.attempts = attempts
+                    for batch in evidence.batches[start:]:
+                        batch.update(informational=True, role="quality")
+        for batch in evidence.batches[:previous_count]:
+            replaced = informational_attempts if batch.get("informational") else evidence.attempts
+            if (batch["workload"], batch["identity"].get("side")) in replaced:
+                batch["superseded"] = True
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("suite") not in suites] + entries
+        measured = evidence.natural_performance(result["accuracy"])
+        names = {item["request"] for item in measured}
+        result["performance"] = [item for item in result.get("performance", [])
+                                 if item.get("kind") != "natural_dataset" or item.get("request") not in names] + measured
+        result["aiperf_metrics"] = aiperf_metrics.entries(evidence.batches)
+        temporary.write_text("".join(json.dumps(batch, default=str) + "\n" for batch in evidence.batches))
         preserve_original(out)
+        recorded = out / "execution.rechecked.jsonl"
+        temporary.replace(recorded)
+        result["execution"] = {**result.get("execution", {}), "records": recorded_path(out, recorded),
+                               "timing_contract": execution.TIMING_CONTRACT, "quality_outputs_reused": True,
+                               "workloads": [{"name": batch["workload"], "role": batch["role"]}
+                                             for batch in evidence.batches if not batch.get("superseded")]}
         path.write_text(json.dumps(result, indent=2, default=str))
         (out / "model.json").write_text(json.dumps(model, indent=2, default=str))
     return rejudge_reports(outs, environment)

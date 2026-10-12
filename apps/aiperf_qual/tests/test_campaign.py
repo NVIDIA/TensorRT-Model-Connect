@@ -655,7 +655,7 @@ def test_recheck_replaces_only_the_rechecked_entries(tmp_path, monkeypatch):
         {"suite": "geneval", "status": "pass"}])
     judged = []
     monkeypatch.setattr(cli, "rejudge_reports", lambda outs, environment: judged.append(outs) or 0)
-    assert cli.recheck_reports([out], environment=object()) == 0 and judged == [[out]]
+    assert cli.recheck_reports([out], environment=Environment({})) == 0 and judged == [[out]]
     suites = {item["suite"]: item["status"] for item in json.loads((out / "report.json").read_text())["accuracy"]}
     assert suites == {"family-case": "pass", "geneval": "pass", "replay-parity": "fail"}
     assert json.loads((out / "model.json").read_text())["supplementary"] == [check]
@@ -734,6 +734,192 @@ def test_recheck_reuses_a_generation_only_for_the_same_requests(tmp_path):
                                                                             "request_id": "r1"})]
     other = Suite("s", "k", [{"sample_id": "0", "request": {"prompt": "b"}}], {})
     assert generation._earlier(out, other) is None
+
+
+@pytest.fixture
+def media_recheck(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual import aiperf_metrics, aiperf_runner, cli, execution, generation, models, runner, services
+    from trtmc_aiperf_qual.suites import single_request_suite
+
+    out = tmp_path / "result"
+    out.mkdir()
+    check = {"check": "geneval", "suite": "geneval"}
+    model = {**_model("m", "org/m", "image_generation"), "operation": "generate_image", "absolute": [],
+             "supplementary": [check], "accuracy_source": "task", "reference": {"backend": "reference"},
+             "performance": {"measurement": {"warmup": 1}}}
+    environment = Environment({"aiperf": "aiperf", "hf_datasets_cache": str(tmp_path),
+                               "bundle_root": str(tmp_path / "bundles")})
+    bundle = bundles.bundle_path(environment, model)
+    bundle.parent.mkdir(parents=True)
+    bundle.write_bytes(b"bundle")
+    suite = single_request_suite("geneval", {"prompt": "cat", "height": 8, "width": 8,
+                                             "num_steps": 2, "guidance_scale": 1.0}, {})
+    state = {"side": None, "calls": [], "times": {"candidate": 40, "reference": 20},
+             "passed": {"candidate": False, "reference": True}, "model": model, "suite": suite}
+
+    @contextmanager
+    def serving(environment, model, backend, directory, **kwargs):
+        directory.mkdir(parents=True, exist_ok=True)
+        state["side"] = "candidate" if backend == "trtmc" else "reference"
+        if state.get("startup_failure") == state["side"]:
+            raise RuntimeError("backend startup failed")
+        with execution.service({"side": state["side"], "operation": "generate_image", "mode": "eager",
+                                "precision": "fp16", "replicas": 1, "timing_scope": "task-call-wall"}):
+            yield {"url": "http://unused"}
+
+    def send(command, log, env, timeout):
+        directory = Path(command[command.index("--artifact-dir") + 1])
+        side = state["side"]
+        if state.get("client_failure") == side:
+            raise RuntimeError("client failed before exporting responses")
+        state["calls"].append(side)
+        request_id = f"r{len(state['calls'])}"
+        work = directory.parent / "scratch" / request_id
+        work.mkdir(parents=True)
+        ms = state["times"][side]
+        observation = {"passed": state["passed"][side], "media_digest": {"frames": 1, "height": 8, "width": 8}}
+        record = {"request_id": request_id, "route": "/v1/tasks/generate_image", "observation": observation}
+        (directory.parent / "records.jsonl").write_text(json.dumps(record) + "\n")
+        raw = {"metadata": {"benchmark_phase": "profiling", "conversation_id": "session_000000",
+                            "x_request_id": request_id}, "status": 200, "payload": {"request": suite.samples[0]["request"]},
+               "responses": [{"text": json.dumps({"id": request_id, "trtmc_timing": {"model_call_ms": ms},
+                                                   "trtmc_observation": observation})}]}
+        (directory / "inputs.json").write_text(json.dumps({"data": [{"session_id": "session_000000"}]}))
+        (directory / aiperf_runner.RAW_EXPORT).write_text(json.dumps(raw) + "\n")
+        (directory / "profile_export_aiperf.json").write_text(json.dumps({"request_latency": {"p50": ms}}))
+        return 0
+
+    def score(environment, model, check, python, work):
+        native = generation.generate(environment, model, "reference", work / "geneval-native", suite,
+                                     reuse=check.get("reuse_outputs", False))
+        candidate = generation.generate(environment, model, "trtmc", work / "geneval-candidate", suite,
+                                        reuse=check.get("reuse_outputs", False))
+        if state.get("score_failure"):
+            raise ValueError("scorer failed")
+        passed = native[0][1]["observation"]["passed"] and candidate[0][1]["observation"]["passed"]
+        return [{"suite": "geneval", "source": "task", "status": "pass" if passed else "fail"}]
+
+    monkeypatch.setattr(generation, "serving", serving)
+    monkeypatch.setattr(aiperf_runner, "_run", send)
+    monkeypatch.setattr(aiperf_runner, "_wait_ready", lambda out: None)
+    monkeypatch.setattr(runner, "gpu_busy_percent", lambda: 0)
+    monkeypatch.setattr(runner, "supplementary", score)
+    monkeypatch.setattr(models, "resolve_model", lambda *args: model)
+    monkeypatch.setattr(services, "reference_python", lambda *args: "/unused/python")
+    evidence = execution.Session(out, {"warmup": 1}, lambda: 0, lambda observation: (), lambda a, b: True)
+    with execution.session(evidence):
+        accuracy = score(environment, model, {**check, "reuse_outputs": False}, "/unused/python", out / "artifacts")
+        other = single_request_suite("untouched", suite.samples[0]["request"], {})
+        state["times"] = {"candidate": 7, "reference": 9}
+        for backend in ("reference", "trtmc"):
+            generation.generate(environment, model, backend, out / "artifacts" / f"untouched-{backend}", other)
+    report = {"model": "m", "operation": "generate_image", "provenance": {}, "performance_source": "quality",
+              "accuracy": accuracy, "performance": evidence.natural_performance(accuracy),
+              "aiperf_metrics": aiperf_metrics.entries(evidence.batches),
+              "execution": {"records": "execution.jsonl"}}
+    (out / "report.json").write_text(json.dumps(report))
+    (out / "model.json").write_text(json.dumps(model))
+    return out, environment, state, cli
+
+
+@pytest.mark.parametrize("mode, calls, native_ms", [("cleanup", 2, 100), ("regenerate", 2, 100), ("candidate", 1, 20)])
+def test_recheck_keeps_accuracy_timings_and_raw_evidence_aligned(media_recheck, mode, calls, native_ms):
+    import shutil
+
+    from trtmc_aiperf_qual import benchmark_perf
+
+    out, environment, state, cli = media_recheck
+    originals = {p: p.read_bytes() for p in out.rglob("profile_export_raw.jsonl")}
+    execution_before = (out / "execution.jsonl").read_bytes()
+    if mode == "cleanup":
+        cleanup = retention.cleanup_temporary(Environment({"retention": {"temporary_files": "delete_unless_error"}}),
+                                               out, "pass")
+        (out / "retention.json").write_text(json.dumps({"temporary_files": cleanup}))
+    elif mode == "candidate":
+        shutil.rmtree(out / "artifacts/geneval-candidate/scratch")
+    state["times"] = {"candidate": 50, "reference": 100}
+    state["passed"]["candidate"] = True
+    before = len(state["calls"])
+    assert cli.recheck_reports([out], environment, regenerate=mode == "regenerate") == 0
+    updated = json.loads((out / "report.json").read_text())
+    measured = next(item for item in updated["performance"] if item["request"] == "geneval")
+    assert measured["candidate"]["p50_ms"] == 50 and measured["reference"]["p50_ms"] == native_ms
+    assert len(state["calls"]) - before == calls
+    assert updated["accuracy"][0]["status"] == "pass" and updated["verdict"]["perf"] == "measured"
+    assert next(item for item in updated["performance"] if item["request"] == "untouched")["candidate"]["p50_ms"] == 7
+    assert (out / "execution.jsonl").read_bytes() == execution_before
+    assert all(p.read_bytes() == contents for p, contents in originals.items())
+    clients = {item["side"]: item["metrics"]["request_latency"]["p50"] for item in updated["aiperf_metrics"]
+               if item["workload"] == "geneval"}
+    assert clients == {"candidate": 50, "reference": native_ms}
+    assert benchmark_perf.refresh(out, updated)["performance"] == updated["performance"]
+    before = len(state["calls"])
+    assert cli.recheck_reports([out], environment) == 0
+    assert len(state["calls"]) == before  # rescore the latest saved outputs, without inference
+
+
+@pytest.mark.parametrize("failure", ["startup_failure", "client_failure", "score_failure"])
+def test_recheck_failures_keep_original_evidence_and_only_report_actual_timings(media_recheck, failure):
+    from trtmc_aiperf_qual import benchmark_perf
+
+    out, environment, state, cli = media_recheck
+    original = {p: p.read_bytes() for p in out.rglob("profile_export_raw.jsonl")}
+    state["times"] = {"candidate": 50, "reference": 100}
+    state[failure] = True if failure == "score_failure" else "candidate"
+    cli.recheck_reports([out], environment, regenerate=True)
+    result = json.loads((out / "report.json").read_text())
+    measured = next(item for item in result["performance"] if item["request"] == "geneval")
+    assert result["verdict"]["acc"] == "error"
+    assert measured["reference"]["p50_ms"] == 100
+    assert measured["candidate"]["p50_ms"] == (50 if failure == "score_failure" else None)
+    assert result["verdict"]["perf"] == ("measured" if failure == "score_failure" else "error")
+    assert all(p.read_bytes() == contents for p, contents in original.items())
+    assert benchmark_perf.refresh(out, result)["performance"] == result["performance"]
+
+
+def test_rechecked_measurements_survive_moving_the_model_result(media_recheck):
+    from trtmc_aiperf_qual import benchmark_perf
+    from trtmc_aiperf_qual.artifacts import resolve_path
+
+    out, environment, state, cli = media_recheck
+    cli.recheck_reports([out], environment, regenerate=True)
+    moved = out.with_name("moved")
+    out.rename(moved)
+    result = json.loads((moved / "report.json").read_text())
+    execution = moved / result["execution"]["records"]
+    for batch in map(json.loads, execution.read_text().splitlines()):
+        for row in batch["records"]:
+            assert resolve_path(moved, row["output_ref"]["aiperf_run"]).is_dir()
+    assert benchmark_perf.refresh(moved, result)["performance"] == result["performance"]
+
+
+def test_informational_recheck_keeps_the_selected_benchmark_measurements(media_recheck, monkeypatch):
+    from trtmc_aiperf_qual import generation, runner
+    from trtmc_aiperf_qual.suites import single_request_suite
+
+    out, environment, state, cli = media_recheck
+    state["model"]["supplementary"].append({"check": "replay_parity", "informational": True})
+    diagnostic = single_request_suite("diagnostic", state["suite"].samples[0]["request"], {})
+
+    def score(environment, model, check, python, work):
+        for backend in ("reference", "trtmc"):
+            generation.generate(environment, model, backend, work / f"diagnostic-{backend}", diagnostic,
+                                reuse=check["reuse_outputs"])
+        return [{"suite": "replay-parity", "source": "task", "status": "fail"}]
+
+    monkeypatch.setattr(runner, "supplementary", score)
+    state["times"] = {"candidate": 50, "reference": 100}
+    for _ in range(2):
+        cli.recheck_reports([out], environment, only=["replay_parity"], regenerate=True)
+        result = json.loads((out / "report.json").read_text())
+        selected = next(item for item in result["performance"] if item["request"] == "geneval")
+        assert selected["candidate"]["p50_ms"] == 40 and selected["reference"]["p50_ms"] == 20
+        assert result["verdict"]["perf"] == "measured"
+        assert not any(item["request"] == "diagnostic" for item in result["performance"])
+        assert next(item for item in result["accuracy"] if item["suite"] == "replay-parity")["informational"]
+        assert len([item for item in result["aiperf_metrics"] if item["workload"] == "diagnostic"]) == 2
 
 
 def test_replay_parity_runs_only_for_families_that_take_caller_latents(tmp_path):

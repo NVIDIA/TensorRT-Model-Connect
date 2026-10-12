@@ -9,6 +9,7 @@ Checks that judge generated media as a whole (``tts_intelligibility``, ``geneval
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -30,9 +31,16 @@ def generate(environment: Environment, model: dict[str, Any], backend: str, out:
     """``reuse``: return an earlier generation in ``out`` when it sent exactly these requests and its
     outputs are still there (rechecking finished results)."""
     from .runner import _observations
+    from . import execution
 
-    if reuse and (earlier := _earlier(out, suite)) is not None:
-        return earlier
+    if reuse:
+        for previous in [*sorted(out.glob("rerun-*"), reverse=True), out]:
+            if (earlier := _earlier(previous, suite)) is not None and execution.can_reuse(previous / "aiperf"):
+                return earlier
+    execution.attempt(suite.name, "candidate" if backend == "trtmc" else "reference")
+    if out.is_dir() and any(out.iterdir()):
+        # Keep original exports and request files readable when a recheck regenerates outputs.
+        out = out / f"rerun-{time.time_ns()}"
     kwargs = {"precision": precision, "python": python} if backend != "trtmc" else {}
     with serving(environment, model, backend, out, keep_artifacts=True, **kwargs) as service:
         _observations(environment, service, model, suite, out / "aiperf")

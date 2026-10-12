@@ -751,6 +751,17 @@ def quality_only(model: Mapping[str, Any]) -> bool:
         for check in model.get("supplementary", [])))
 
 
+def execution_session(model: Mapping[str, Any], environment: Environment, out: Path, **kwargs: Any) -> execution.Session:
+    """The same request/timing contract for initial qualification and media rechecks."""
+    return execution.Session(
+        out, model.get("performance", {}).get("measurement", {}), gpu_busy_percent,
+        lambda observation: judge.work_signature(model["operation"], observation),
+        lambda mine, theirs: judge.work_check({"work": [mine] if mine is not None else []},
+                                             {"work": [theirs] if theirs is not None else []}) is None,
+        smoke=bool(environment.values.get("smoke")),
+        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}, model["operation"]), **kwargs)
+
+
 def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[str, Any]:
     """Run quality workloads once per side and reuse their outputs for performance."""
     model = compat.configuration(model)
@@ -758,13 +769,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
                                "acc_mps": False, "acc_overlap": False})
     out.mkdir(parents=True, exist_ok=True)
     (out / "execution.jsonl").write_text("")
-    evidence = execution.Session(
-        out, model.get("performance", {}).get("measurement", {}), gpu_busy_percent,
-        lambda observation: judge.work_signature(model["operation"], observation),
-        lambda mine, theirs: judge.work_check({"work": [mine] if mine is not None else []},
-                                             {"work": [theirs] if theirs is not None else []}) is None,
-        smoke=bool(environment.values.get("smoke")),
-        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}, model["operation"]))
+    evidence = execution_session(model, environment, out)
     with execution.session(evidence):
         result = _qualify(model, environment, out)
     result["schema_version"] = execution.SCHEMA

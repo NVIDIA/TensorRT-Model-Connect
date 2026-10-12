@@ -578,7 +578,8 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
 
 REMOTE_ROOT = re.compile(r"^(?:(?P<name>[\w.-]+)=)?(?P<host>[\w.@-]+):(?P<path>/.*)$")
 RESULT_FILES = ("report.json", "model.json", "build.json", "retention.json", "execution.jsonl",
-                "execution.timing-recovered.jsonl", "execution.aligned.jsonl", "error.json", EXCLUSIONS, PLAN)
+                "execution.timing-recovered.jsonl", "execution.aligned.jsonl", "execution.rechecked.jsonl",
+                "error.json", EXCLUSIONS, PLAN)
 EVIDENCE_FILES = ("report.md", "phase-errors.log", "build.log", "error.log", "server.log", "result.json")
 MAX_EVIDENCE_BYTES = "5M"
 

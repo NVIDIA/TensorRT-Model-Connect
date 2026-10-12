@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from .artifacts import recorded_path
+from .artifacts import recorded_path, resolve_path
 from . import aiperf_metrics
 from .judge import GPU_BUSY_PERCENT
 from .noninferiority import t_quantile
@@ -116,6 +116,36 @@ def record(run: Any, metadata: Mapping[str, Any] | None) -> None:
         active.record(run, metadata)
 
 
+def attempt(name: str, side: str) -> None:
+    """A fresh generation replaces the side's previous measurement, even if startup fails."""
+    if (active := _SESSION.get()) is not None:
+        active.attempts.add((name, side))
+
+
+def can_reuse(directory: Path) -> bool:
+    """Rechecking a saved output also needs the execution that measured it."""
+    active = _SESSION.get()
+    return active is None or any(
+        resolve_path(active.out, row["output_ref"]["aiperf_run"]) == directory.resolve()
+        for batch in active.batches if not batch.get("superseded") for row in batch["records"])
+
+
+def read_batches(path: Path) -> list[dict[str, Any]]:
+    batches, superseded = [], set()
+    for line in path.read_text().split("\n"):
+        if not line.strip():
+            continue
+        batch = json.loads(line)
+        if batch.get("event") == "supersede_failed_attempt":
+            superseded.update(batch["batch_ids"])
+        elif "records" in batch:
+            batches.append(batch)
+    for batch in batches:
+        if batch["batch_id"] in superseded:
+            batch["superseded"] = True
+    return batches
+
+
 def checkpoint() -> int:
     active = _SESSION.get()
     return len(active.batches) if active is not None else 0
@@ -129,7 +159,7 @@ def supersede(start: int) -> None:
         for batch in batches:
             batch["superseded"] = True
         if batches:
-            with (active.out / "execution.jsonl").open("a") as handle:
+            with (active.out / active.records_name).open("a") as handle:
                 handle.write(json.dumps({"event": "supersede_failed_attempt", "batch_ids":
                                          [batch["batch_id"] for batch in batches]}) + "\n")
 
@@ -144,6 +174,8 @@ class Session:
     smoke: bool = False
     request_problems: Callable[[Mapping[str, Any]], Sequence[str]] = lambda payload: ()
     batches: list[dict[str, Any]] = field(default_factory=list)
+    records_name: str = "execution.jsonl"
+    attempts: set[tuple[str, str]] = field(default_factory=set)
 
     def record(self, run: Any, metadata: Mapping[str, Any]) -> None:
         from .absolute import capacity_rejection, unanswered
@@ -189,14 +221,16 @@ class Session:
                  "aiperf_exit": run.exit_code, "aiperf_metrics": aiperf_metrics.capture(run), "records": rows}
         self.batches.append(batch)
         self.out.mkdir(parents=True, exist_ok=True)
-        with (self.out / "execution.jsonl").open("a") as handle:
+        with (self.out / self.records_name).open("a") as handle:
             handle.write(json.dumps(batch, default=str) + "\n")
 
     def natural_performance(self, accuracy: Sequence[Mapping[str, Any]] = ()) -> list[dict[str, Any]]:
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
         for batch in self.batches:
-            if batch["role"] in ("quality", "both") and not batch.get("superseded"):
+            if batch["role"] in ("quality", "both") and not batch.get("superseded") and not batch.get("informational"):
                 grouped[batch["workload"]][batch["identity"].get("side", "unknown")].append(batch)
+        for name, _ in self.attempts:
+            grouped[name]  # a failed fresh attempt must not leave the previous timing visible
         excluded = {item["suite"]: int(item["out_of_capacity"]) for item in accuracy
                     if item.get("out_of_capacity") and item.get("status") != "error"}
         return [paired_dataset(name, sides.get("candidate", []), sides.get("reference", []), self.same_work,
