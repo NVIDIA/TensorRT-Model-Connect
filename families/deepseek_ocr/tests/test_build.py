@@ -75,7 +75,7 @@ def test_tp_build_writes_rank_plans_and_builds_vision_once(monkeypatch, tmp_path
         def build_vision_engine(self, model_dir, loaded_config, weights, **options):
             assert model_dir == str(tmp_path)
             assert loaded_config is config
-            assert weights == {"weights": True}
+            assert weights == {}
             assert options == {"precision": "fp32", "verbose": False}
             writer.events.append("build:vision")
             vision_calls.append((model_dir, loaded_config, weights, options))
@@ -136,4 +136,79 @@ def test_tp_build_writes_rank_plans_and_builds_vision_once(monkeypatch, tmp_path
         "write:vision.plan",
     ]
     assert writer.json["runtime.json"]["tensor_parallel_size"] == 2
+    assert "_decoder_engine_role" not in config.raw
+
+
+def test_single_device_build_streams_each_decoder_plan_before_the_next_build(
+    monkeypatch, tmp_path
+) -> None:
+    config = SimpleNamespace(
+        model_type="deepseek_vl_v2",
+        max_position_embeddings=4096,
+        num_hidden_layers=2,
+        vocab_size=32,
+        bos_token_id=1,
+        eos_token_id=2,
+        hidden_size=8,
+        raw={},
+    )
+    writer = _Writer()
+
+    class FakeModel:
+        def load_weights(self, *_args, **_kwargs):
+            return {"decoder": object()}
+
+        def build_engine(self, _config, weights, _max_length, **_options):
+            role = config.raw["_decoder_engine_role"]
+            assert weights
+            writer.events.append(f"build:{role}")
+            if role == "decode":
+                assert "write:prefill.plan" in writer.events
+            return role.encode()
+
+        def build_vision_engine(self, _model_dir, _config, weights, **_options):
+            assert weights == {}
+            writer.events.append("build:vision")
+            return b"vision"
+
+        def get_vl_config(self, _config):
+            return {
+                "image_token_id": 7,
+                "vision_output_dim": 8,
+                "prefill_max_length": 64,
+            }
+
+    monkeypatch.setattr(
+        model_module, "ModelConfig", SimpleNamespace(from_dir=lambda _model_dir: config)
+    )
+    monkeypatch.setattr(model_module, "_DeepseekOcrModel", FakeModel)
+    request = SimpleNamespace(
+        model_dir=tmp_path,
+        backend="trt",
+        dynamic_kv_cache=False,
+        task="vision_language_generation",
+        precision="fp16",
+        max_sequence_length=4096,
+        tensor_parallel_size=1,
+        context_parallel_size=1,
+        quantization=None,
+        fp32_layers=(1, 2),
+        image_height=None,
+        image_width=None,
+        video_num_frames=None,
+        max_batch_size=1,
+        verbose=False,
+    )
+
+    model_module.build(request, writer)
+
+    assert writer.events == [
+        "write:header",
+        "build:prefill",
+        "write:prefill.plan",
+        "build:decode",
+        "write:engine.plan",
+        "build:vision",
+        "write:vision.plan",
+    ]
     assert "_decoder_engine_role" not in config.raw

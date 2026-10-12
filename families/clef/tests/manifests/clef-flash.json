@@ -1,0 +1,74 @@
+{
+  "name": "clef-flash",
+  "hf_id": "Cloudflare/clef-flash",
+  "hf_revision": "fde727a287004204b7518dcc983fe64379776712",
+  "family": "clef",
+  "task": "structured_decision",
+  "bundle": "clef-flash.bundle",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512,
+  "testcases": [
+    {
+      "name": "clef-flash-invoice",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/invoice.json"
+      }
+    },
+    {
+      "name": "clef-flash-outage",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/clef-flash-outage.json"
+      }
+    },
+    {
+      "name": "clef-flash-paid-invoice",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/paid-invoice.json"
+      }
+    },
+    {
+      "name": "clef-flash-healthy-service",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/healthy-service.json"
+      }
+    },
+    {
+      "name": "clef-flash-multilingual",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/multilingual.json"
+      }
+    },
+    {
+      "name": "clef-flash-receipt",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/receipt.json",
+        "image_paths": [
+          "fixtures/media/receipt.png"
+        ]
+      }
+    },
+    {
+      "name": "clef-flash-video",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/video.json",
+        "video_frame_paths": [
+          [
+            "fixtures/media/frame-0.png",
+            "fixtures/media/frame-1.png",
+            "fixtures/media/frame-2.png",
+            "fixtures/media/frame-3.png",
+            "fixtures/media/frame-4.png"
+          ]
+        ]
+      }
+    }
+  ]
+}

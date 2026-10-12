@@ -1,0 +1,22 @@
+{
+  "name": "depth-anything-v2-small",
+  "hf_id": "depth-anything/Depth-Anything-V2-Small-hf",
+  "hf_revision": "5426e4f0f36572d16453bbda7a8389317b1bef99",
+  "bundle": "depth-anything-v2-small.bundle",
+  "family": "depth_anything",
+  "task": "monocular_depth",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "depth-anything-v2-small",
+      "premerge": true,
+      "test_image": "test_img.jpeg",
+      "reference_precision": "fp32",
+      "min_depth_correlation": 0.998,
+      "max_depth_relative_error": 0.01
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

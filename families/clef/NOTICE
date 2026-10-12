@@ -1,0 +1,13 @@
+Clef reference model and record format:
+https://huggingface.co/Cloudflare/clef
+Revision 2f3de3dd85f379784083b0814d997ab627200f0c
+Licensed under Apache License 2.0 by Cloudflare.
+
+Clef-Flash checkpoint and the same released joint schema implementation:
+https://huggingface.co/Cloudflare/clef-flash
+Revision fde727a287004204b7518dcc983fe64379776712
+Licensed under Apache License 2.0 by Cloudflare.
+
+Qwen3.5 reference implementation in Hugging Face Transformers 5.10.2:
+Copyright 2026 The Qwen Team and the HuggingFace Inc. team.
+Licensed under Apache License 2.0.

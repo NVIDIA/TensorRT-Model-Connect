@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: mobilenetv4-conv-medium
+candidate:
+  family: timm_mobilenetv4
+  checkpoint: timm/mobilenetv4_conv_medium.e500_r256_in1k
+  revision: ad66898c045c1b5223ea3f2c0830b74cf2e75bac
+  task: image_to_class_scores
+  precision: fp16
+  bundle: mobilenetv4-conv-medium.bundle
+  build:
+    max_sequence_length: 1
+
+accuracy:
+  - name: imagenette-parity
+    benchmark: imagenette_classification
+    samples: 100
+    reference:
+      precision: fp32
+      batch_size: 16
+    gate:
+      max_top1_accuracy_drop_from_hf: 0.01
+      min_top1_agreement: 0.98
+
+performance:
+  - name: classify
+    benchmark: image_classification_performance
+    operation: classify
+    request:
+      image_path: ../data/test_img.jpeg
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      adapter: timm-classification
+      mode: hf-eager
+      reference_backend: timm
+      precision: fp32
+      output_contract: classification-top-class

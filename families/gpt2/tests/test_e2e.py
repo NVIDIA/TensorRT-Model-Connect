@@ -97,13 +97,44 @@ def _required_environment(tp_size: int):
     return binary, runtime_root, torch
 
 
+def _validation_revision(manifest: dict) -> str | None:
+    if not os.environ.get("TRTMC_E2E_BUNDLE"):
+        return manifest.get("hf_revision")
+    assert os.environ.get("TRTMC_E2E_PROFILE") == manifest["name"], (
+        "prebuilt validation must select the matching manifest profile"
+    )
+    revision = os.environ.get("TRTMC_E2E_CHECKPOINT_REVISION", "")
+    assert re.fullmatch(r"[0-9a-f]{40}", revision), "prebuilt validation requires an exact checkpoint revision"
+    if manifest.get("hf_revision"):
+        assert revision == manifest["hf_revision"], "prebuilt checkpoint differs from the family manifest"
+    return revision
+
+
+def _validation_bundle(manifest: dict, model_dir: Path, default: Path) -> Path:
+    value = os.environ.get("TRTMC_E2E_BUNDLE")
+    if value is None:
+        with evidence_stage("build"):
+            _build_bundle(manifest, model_dir, default)
+        return default
+    _validation_revision(manifest)
+    assert manifest["task"] == "text_generation", "prebuilt validation supports text generation only"
+    bundle = Path(value)
+    assert bundle.is_file() and bundle.stat().st_size > 0, bundle
+    from ..bundle_provenance import validate_prebuilt_bundle
+
+    provenance = validate_prebuilt_bundle(bundle, model_dir, manifest, _validation_revision(manifest))
+    record_evidence("inputs", {"prebuilt_bundle": str(bundle.resolve()),
+                               "bundle_build_provenance": provenance})
+    return bundle
+
+
 def _checkpoint(manifest: dict) -> Path:
     from huggingface_hub import snapshot_download
 
     path = Path(
         snapshot_download(
             repo_id=manifest["hf_id"],
-            revision=manifest.get("hf_revision"),
+            revision=_validation_revision(manifest),
         )
     )
     assert (path / "config.json").is_file(), path
@@ -489,13 +520,10 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     tp_size = manifest["tensor_parallel_size"]
     binary, runtime_root, torch = _required_environment(tp_size)
     model_dir = _checkpoint(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": _validation_revision(manifest)})
     prompt = _prompt(case)
     record_evidence("inputs", {"prompt": prompt})
-    bundle = tmp_path / manifest["bundle"]
-
-    with evidence_stage("build"):
-        _build_bundle(manifest, model_dir, bundle)
+    bundle = _validation_bundle(manifest, model_dir, tmp_path / manifest["bundle"])
     with evidence_stage("compare"):
         _assert_rank_sections(binary, bundle, tp_size)
     with evidence_stage("native"):

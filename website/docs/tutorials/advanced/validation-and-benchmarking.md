@@ -51,13 +51,13 @@ trtmc-bench run \
 For release comparisons, validate and run the checked-in matrix:
 
 ```bash
-python3 tools/perf_matrix.py check \
-  apps/benchmark/performance/release.yaml \
-  --environment apps/benchmark/performance/environments/gb300.yaml
+python3 -m qualification_tests.benchmark_qualification.performance check \
+  qualification_tests/benchmark_qualification/performance/config/release.yaml \
+  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml
 
-python3 tools/perf_matrix.py run \
-  apps/benchmark/performance/release.yaml \
-  --environment apps/benchmark/performance/environments/gb300.yaml \
+python3 -m qualification_tests.benchmark_qualification.performance run \
+  qualification_tests/benchmark_qualification/performance/config/release.yaml \
+  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml \
   --entry gpt2.generate
 ```
 

@@ -14,7 +14,7 @@ pytest_plugins = ("tools.e2e_evidence",)
 
 if os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") != "1":
     repository = Path(__file__).resolve().parent
-    for source in (repository / "core/builder", repository / "apps/benchmark"):
+    for source in (repository / "core/builder", repository / "apps/benchmark", repository / "apps/perf_serving"):
         sys.path.insert(0, str(source))
 
 

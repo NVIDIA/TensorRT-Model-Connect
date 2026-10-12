@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: wmt14-en-de-t5
+  version: pre1093-wmt14-en-de-t5-json
+  sha256: 7851c9e2ed3627bbc8b0420415eeb2360422418a8e31e8dd5726b666c450479a
+  source:
+    mode: manual
+    path: WMT14_de_en/wmt14_en_de_t5_task_eval.json
+    instructions: https://www.statmt.org/wmt14/translation-task.html
+  license: dataset-specific
+selection:
+  method: first
+input:
+  adapter: text_generation_json
+metric:
+  name: exact_token_ids

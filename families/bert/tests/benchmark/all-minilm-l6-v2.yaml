@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: all-minilm-l6-v2
+candidate:
+  family: bert
+  checkpoint: sentence-transformers/all-MiniLM-L6-v2
+  revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+  task: embedding
+  precision: fp16
+  bundle: all-minilm-l6-v2.bundle
+  build:
+    max_sequence_length: 512
+
+accuracy:
+  - name: stsbenchmark-parity
+    benchmark: stsbenchmark_embedding_parity
+    samples: 50
+    reference:
+      precision: fp32
+    gate:
+      min_vector_cosine: 0.999
+      min_vector_pass_rate: 1.0
+      max_pair_cosine_abs_delta: 0.02
+
+performance:
+  - name: embed
+    benchmark: embedding_performance
+    operation: embed
+    request:
+      prompt: The capital of France is Paris.
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      adapter: hf-transformers-embedding
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      reference_backend: hf_transformers
+      precision: fp32
+      output_contract: embedding-shape

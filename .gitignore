@@ -111,6 +111,7 @@ models/hf/*/.cache/
 !plugins/trtmc-agent-skills/.codex-plugin/
 !plugins/trtmc-agent-skills/.codex-plugin/**
 config
+!apps/aiperf_qual/config/
 HEAD
 hooks
 objects

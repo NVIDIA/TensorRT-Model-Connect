@@ -9,6 +9,10 @@ The [Contributor Quickstart](website/docs/extend/contributing.md) and
 [architecture guide](website/docs/architecture/ai-native-horizontal-scaling.md)
 provide project-specific design, testing, and ownership guidance.
 
+Maintainers can optionally request an
+[advisory documentation review](.github/documentation-check.md). It is manually
+triggered, keeps reports private, and does not replace the existing merge gates.
+
 ## Development workflow
 
 ### 1. Fork and clone the repository

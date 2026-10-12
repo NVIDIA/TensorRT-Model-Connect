@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: whisper-small-fp16
+candidate:
+  family: whisper
+  checkpoint: openai/whisper-small
+  revision: 973afd24965f72e36ca33b3055d56a652f456b4d
+  task: transcription
+  precision: fp16
+  bundle: whisper-small-fp16.bundle
+  build:
+    max_sequence_length: 128
+    fp32_layers: [0]
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: librispeech-wer
+    benchmark: librispeech_transcription
+    samples: 10
+    request: &request
+      max_new_tokens: 120
+      language: en
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      max_wer_to_reference: 0.1
+      max_wer_increase_from_reference: 0.02
+
+performance:
+  - name: transcribe
+    benchmark: speech_transformer_performance
+    operation: transcribe
+    request:
+      <<: *request
+      audio_path: ../data/Recording.wav
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      adapter: hf-transformers-asr
+      mode: hf-eager
+      reference_backend: hf_transformers
+      precision: fp32
+      output_contract: transcription-text

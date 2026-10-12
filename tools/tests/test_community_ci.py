@@ -29,6 +29,22 @@ def _workflow_step_script(workflow_name: str, job_name: str, step_name: str) -> 
     )
 
 
+def test_documentation_review_is_a_manual_metadata_only_bridge() -> None:
+    source = (REPO_ROOT / ".github/workflows/doc-check.yml").read_text()
+    workflow = yaml.safe_load(source)
+    assert set(workflow.get("on", workflow.get(True))) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {}
+    job = workflow["jobs"]["dispatch"]
+    assert "github.ref == 'refs/heads/main'" in job["if"]
+    assert job["environment"]["name"] == "ci-dispatch"
+    assert "actions/checkout" not in source
+    assert "NVIDIA_INFERENCE_API_KEY" not in source
+    assert "maintain|admin)" in source
+    assert "SOURCE_SHA: ${{ github.sha }}" in source
+    assert "statuses: write" not in source
+    assert "deploy-pages" not in source
+
+
 def test_pre_commit_config_installs_only_lightweight_commit_hooks() -> None:
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     assert "default_install_hook_types" not in config

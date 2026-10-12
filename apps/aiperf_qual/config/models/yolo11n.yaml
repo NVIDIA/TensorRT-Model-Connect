@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/yolo11/reference/adapter.py  # the Ultralytics archive (no generic adapter)
+  prepare: families/yolo11/reference/prepare.py
+  requirements: families/yolo11/requirements.txt  # the family's dependencies, layered on the serving interpreter

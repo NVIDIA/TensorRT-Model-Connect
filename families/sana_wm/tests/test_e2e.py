@@ -141,8 +141,14 @@ def _prepared_model_dir(model_dir: Path, manifest: dict, tmp_path: Path) -> Path
     stage1_text_encoder = Path(
         snapshot_download(
             repo_id=stage1_repo,
+            revision=dependencies[0].get("revision"),
             local_files_only=True,
-            allow_patterns=["config.json"],
+            allow_patterns=[
+                "config.json",
+                "model*.safetensors*",
+                "special_tokens_map.json",
+                "tokenizer*",
+            ],
         )
     )
     prepared = tmp_path / "prepared-model"
@@ -327,12 +333,18 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     model_dir = model_dir.resolve()
     entrypoint = source_root / "inference_video_scripts/wm/inference_sana_wm.py"
     assert entrypoint.is_file(), f"declared Sana reference entrypoint is missing: {entrypoint}"
+    launcher = TEST_ROOT / "official_reference.py"
+    assert launcher.is_file(), f"Sana family reference launcher is missing: {launcher}"
     config = model_dir / "config.yaml"
     model_path = model_dir / "dit/sana_wm_1600m_720p.safetensors"
+    stage1_text_encoder = model_dir / "stage1_text_encoder"
     refiner_root = model_dir / "refiner"
     refiner_gemma_root = refiner_root / "text_encoder"
     assert config.is_file(), f"Sana reference config is missing: {config}"
     assert model_path.is_file(), f"Sana reference weights are missing: {model_path}"
+    assert stage1_text_encoder.is_dir(), (
+        f"Sana reference stage-1 text encoder is missing: {stage1_text_encoder}"
+    )
     assert refiner_root.is_dir(), f"Sana reference refiner is missing: {refiner_root}"
     assert refiner_gemma_root.is_dir(), (
         f"Sana reference refiner text encoder is missing: {refiner_gemma_root}"
@@ -343,7 +355,11 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     environment["PYTHONPATH"] = str(source_root)
     command = [
         sys.executable,
-        str(entrypoint),
+        str(launcher),
+        "--reference-repo",
+        str(source_root),
+        "--stage1-text-encoder",
+        str(stage1_text_encoder),
         "--image",
         str(_asset(case["test_image"], report_key="image")),
         "--prompt",
@@ -538,13 +554,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
+    prepared_model_dir = _prepared_model_dir(model_dir, manifest, tmp_path)
     with evidence_stage("build"):
-        _build(_prepared_model_dir(model_dir, manifest, tmp_path), bundle, manifest)
+        _build(prepared_model_dir, bundle, manifest)
     with evidence_stage("native"):
         actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
     record_evidence("native", native_snapshot(actual))
     with evidence_stage("reference"):
-        expected = _official_reference(model_dir, manifest, case, tmp_path)
+        expected = _official_reference(prepared_model_dir, manifest, case, tmp_path)
     record_report_views(actual, expected, tmp_path / "paired-report-views")
     record_evidence("reference", reference_snapshot(expected))
     with evidence_stage("compare"):

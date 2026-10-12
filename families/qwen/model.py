@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .bundle_provenance import checkpoint_identity
 from .config import ModelConfig
 from .parallel import ParallelConfig
 from .checkpoint_mapper import WeightDict, load_standard_weights
@@ -230,6 +231,11 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _QwenModel, **u
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen bundle through family-owned code."""
+    if request.task == "embedding":
+        from .embedding import build_embedding
+
+        return build_embedding(request, writer)
+
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen does not support dynamic_kv_cache")
 
@@ -382,6 +388,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
         ),
     )
+    writer.add_json("checkpoint_provenance.json", {
+        "version": 1, "checkpoint": checkpoint_identity(model_dir),
+        "build": {"precision": precision, "max_sequence_length": max_sequence_length,
+                  "tensor_parallel_size": parallel.tp_size,
+                  "quantization": request.quantization or "none",
+                  "fp32_layers": list(request.fp32_layers)},
+    })
     for filename in _BUNDLE_FILES:
         path = model_dir / filename
         if path.is_file():

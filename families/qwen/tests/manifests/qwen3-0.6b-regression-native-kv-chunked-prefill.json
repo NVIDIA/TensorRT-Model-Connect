@@ -20,6 +20,7 @@
       "expected_kv_cache_rows": 40960,
       "expected_prefill_chunks": 513,
       "expected_prefill_chunk_limit": 64,
+      "reference_mode": "contract_only",
       "max_new_tokens": 2,
       "temperature": 0.0,
       "top_k": 1
@@ -28,9 +29,15 @@
       "name": "qwen3-0.6b-bf16-native-kv-two-chunk-parity",
       "premerge": true,
       "reference_precision": "bf16",
-      "prompt": "Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. Context filler. What is the capital of France? Answer in one word.",
+      "prompt_repeat": {
+        "text": "Context filler.",
+        "separator": " ",
+        "count": 40,
+        "suffix": " What is the capital of France? Answer in one word."
+      },
+      "expected_prompt_tokens": 144,
       "expected_kv_cache_rows": 40960,
-      "expected_prefill_chunks": 2,
+      "expected_prefill_chunks": 3,
       "expected_prefill_chunk_limit": 64,
       "max_new_tokens": 2,
       "temperature": 0.0,

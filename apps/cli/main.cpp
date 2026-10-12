@@ -8,5 +8,12 @@
 #include <iostream>
 
 int main(int argc, char** argv) {
-    return trtmc::cli::run(argc, argv, std::cout, std::cerr);
+    // The executable owns the console: keep result output machine-readable even
+    // when loaded libraries write C++ diagnostics to std::cout. Do not change
+    // library logger levels or the output behavior of embedded runtime APIs.
+    std::ostream result(std::cout.rdbuf());
+    std::cout.rdbuf(std::cerr.rdbuf());
+    const int status = trtmc::cli::run(argc, argv, result, std::cerr);
+    result.flush();
+    return status;
 }

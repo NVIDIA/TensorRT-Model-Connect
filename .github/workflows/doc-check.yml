@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Documentation Check
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  dispatch:
+    name: Request advisory documentation review
+    if: github.repository == 'NVIDIA/TensorRT-Model-Connect' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment:
+      name: ci-dispatch
+      deployment: false
+    permissions:
+      contents: read
+    steps:
+      # Metadata only: this job never checks out or executes contributor code.
+      - name: Authorize the maintainer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          role="$(gh api "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq '.role_name')"
+          case "$role" in
+            maintain|admin) ;;
+            *) echo "::error::Only maintainers or administrators may request a review."; exit 1 ;;
+          esac
+
+      - name: Dispatch the immutable source revision
+        env:
+          GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
+          PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          [[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9_.-]+$ ]]
+          [[ "$PRIVATE_CI_REPOSITORY" =~ ^[A-Za-z0-9_.-]+$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          jq -n --arg sha "$SOURCE_SHA" \
+            '{ref: "main", inputs: {source_sha: $sha}}' |
+            gh api --method POST \
+              "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/doc-check.yml/dispatches" \
+              --input -
+          echo "Documentation review requested for $SOURCE_SHA. Results remain in private CI." >> "$GITHUB_STEP_SUMMARY"

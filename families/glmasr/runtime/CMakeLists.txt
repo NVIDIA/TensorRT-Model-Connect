@@ -36,3 +36,11 @@ set_target_properties(trtmc_model_glmasr PROPERTIES
 install(TARGETS trtmc_model_glmasr
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_glmasr_stop_tokens
+    ${PROJECT_SOURCE_DIR}/families/glmasr/tests/cpp/test_glmasr_stop_tokens.cpp)
+  target_include_directories(test_glmasr_stop_tokens PRIVATE ${PROJECT_SOURCE_DIR})
+  add_test(NAME glmasr_stop_tokens COMMAND test_glmasr_stop_tokens)
+  set_tests_properties(glmasr_stop_tokens PROPERTIES LABELS "cpu")
+endif()

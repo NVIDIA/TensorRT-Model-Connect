@@ -49,7 +49,7 @@ def test_release_performance_policy_does_not_expand_family_scope(tmp_path: Path)
     impact = test_impact.classify(
         repo,
         [
-            "apps/benchmark/performance/release.yaml",
+            "qualification_tests/benchmark_qualification/performance/config/release.yaml",
             "families/alpha/model.py",
         ],
     )

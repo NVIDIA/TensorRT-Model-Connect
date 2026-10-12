@@ -7,6 +7,7 @@ model: gpt2-125m
 candidate:
   family: gpt2
   checkpoint: openai-community/gpt2
+  revision: 607a30d783dfa663caf39e06633721c8d4cfcd7e
   task: text_generation
   precision: fp32
   bundle: gpt2-125m.bundle

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: trtmc.qualification/v1
+model: minimax-h3-768p
+candidate:
+  family: minimax_h3
+  checkpoint: MiniMaxAI/MiniMax-H3
+  revision: 48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc
+  task: image_generation
+  precision: bf16
+  bundle: minimax-h3-768p.bundle
+  build: {image_height: 768, image_width: 1344, video_num_frames: 124}
+reference_environment: {requirements: ../../requirements.txt}
+accuracy:
+  - name: generated-media-parity
+    benchmark: task_output_parity
+    operation: generate_image
+    request: &request {prompt_path: ../prompts/t2va-example-1.json, media_type: video, seed: 0, num_steps: 50, height: 768, width: 1344, video_num_frames: 124}
+    reference: &reference {adapter: hf-diffusers-modular, mode: hf-eager, precision: bf16, output_contract: media-artifact-parity, adapter_options: {workflow: t2va, output: videos}}
+    gate: {min_psnr: 5.0, min_ssim: 0.1}
+performance:
+  - {name: generate-video, benchmark: media_generation_performance, operation: generate_image, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: hf_diffusers, output_contract: media-shape}}

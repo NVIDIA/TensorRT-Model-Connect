@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: canary-1b-v2
+candidate:
+  family: canary
+  checkpoint: nvidia/canary-1b-v2
+  revision: d455706339a6b32e1aa40f82c713a482a0c938e2
+  task: transcription
+  precision: fp16
+  bundle: canary-1b-v2.bundle
+  build:
+    max_sequence_length: 128
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: librispeech-wer
+    benchmark: librispeech_transcription
+    samples: 10
+    request: &request
+      language: en
+      max_new_tokens: 50
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      max_wer_to_reference: 0.3
+      max_wer_increase_from_reference: 0.02
+
+performance:
+  - name: transcribe
+    benchmark: speech_nemo_performance
+    operation: transcribe
+    request:
+      <<: *request
+      audio_path: ../data/Recording.wav
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: pytorch-eager
+      reference_backend: nemo_reference
+      precision: fp32
+      output_contract: transcription-text

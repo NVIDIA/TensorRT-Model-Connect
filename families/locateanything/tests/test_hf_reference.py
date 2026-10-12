@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import inspect
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+from families.locateanything import model
 from families.locateanything.tests import hf_reference, vision_oracle
 
 
@@ -45,3 +48,30 @@ def test_hf_reference_is_local_manual_and_slow() -> None:
     assert 'generation_mode="slow"' in source
     assert "preprocess_image_inputs_for_trt(" in source
     assert "local_files_only=True" in source
+
+
+def test_builder_uses_tokenizer_json_for_native_framing(monkeypatch, tmp_path) -> None:
+    calls: list[str] = []
+
+    class Encoding:
+        def __init__(self, ids: list[int]) -> None:
+            self.ids = ids
+
+    class LocalTokenizer:
+        def encode(self, _text: str, add_special_tokens: bool = True) -> Encoding:
+            return Encoding([1, 7, 2] if add_special_tokens else [7])
+
+    class Tokenizer:
+        @staticmethod
+        def from_file(path: str) -> LocalTokenizer:
+            calls.append(path)
+            return LocalTokenizer()
+
+    monkeypatch.setitem(sys.modules, "tokenizers", SimpleNamespace(Tokenizer=Tokenizer))
+
+    assert model._tokenizer_runtime_contract(tmp_path) == {
+        "tokenizer_add_special_tokens": False,
+        "tokenizer_prefix_ids": [1],
+        "tokenizer_suffix_ids": [2],
+    }
+    assert calls == [str(tmp_path / "tokenizer.json")]

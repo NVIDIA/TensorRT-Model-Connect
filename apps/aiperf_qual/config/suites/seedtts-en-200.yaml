@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SeedTTS-eval English: 200 of its 1,088 sentences, evenly spaced; the spoken text is the gold the ASR
+# round trip scores both sides against.
+suite: seedtts-en-200
+version: 1
+base: catalog
+source:
+  kind: json_manifest
+  path: SeedTTS_en_meta/seedtts_en_meta.json
+  sha256: 0a18775d14389109cd91df379daa2c90e431fd90566d002af875a541e60e4ba3
+  records: requests
+selection: {method: stride, count: 200}
+fields: {reference: prompt}

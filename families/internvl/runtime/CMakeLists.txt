@@ -46,3 +46,5 @@ set_target_properties(trtmc_model_internvl PROPERTIES
 install(TARGETS trtmc_model_internvl
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+include(edge_llm/Adapter.cmake)

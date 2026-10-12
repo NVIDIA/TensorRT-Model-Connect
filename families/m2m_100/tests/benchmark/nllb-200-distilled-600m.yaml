@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: nllb-200-distilled-600m
+candidate:
+  family: m2m_100
+  checkpoint: facebook/nllb-200-distilled-600M
+  revision: f8d333a098d19b4fd9a8b18f94170487ad3f821d
+  task: text_generation
+  precision: fp16
+  bundle: nllb-200-distilled-600m.bundle
+  build:
+    max_sequence_length: 256
+
+accuracy:
+  - name: flores200-en-fr
+    benchmark: flores200_en_fr_seq2seq
+    samples: 10
+    prompt_token_limit: 96
+    truncation_side: right
+    reference:
+      precision: fp16
+      task: seq2seq-lm
+      output_token_policy: strip-start-and-eos
+      source_language_placement: replace-final-unk
+    request: &greedy-translation
+      max_new_tokens: 128
+      temperature: 0.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      repetition_penalty: 1.0
+      use_chat_template: false
+      enable_thinking: false
+      do_sample: false
+      source_language: eng_Latn
+      source_language_token_id: 256047
+      target_language: fra_Latn
+      forced_bos_token_id: 256057
+    gate:
+      min_pass_rate: 1.0
+      allowed_failures: 0
+
+performance:
+  - name: generate-20
+    benchmark: text_generation_performance
+    operation: generate
+    request:
+      <<: *greedy-translation
+      prompt: The house is wonderful.
+      max_new_tokens: 20
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: hf-transformers
+      task: seq2seq-lm
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      output_token_policy: strip-start-and-eos
+      source_language_placement: replace-final-unk
+      precision: fp16
+      output_contract: exact-token-ids

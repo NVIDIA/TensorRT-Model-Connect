@@ -192,6 +192,16 @@ def _family_local_imports(
     return imports
 
 
+# A family's code that only validates it and never builds or runs it: its tests, and the unconverted model's
+# pipeline that the AIPerf qualification loads by path (reference/: adapter.py, prepare.py, inputs.py).
+VALIDATION_DIRECTORIES = ("tests", "reference")
+
+
+def _is_family_validation(family: Path, path: Path) -> bool:
+    parts = path.relative_to(family).parts
+    return "tests" in parts or (len(parts) > 1 and parts[0] in VALIDATION_DIRECTORIES)
+
+
 def _reachable_family_python(family: Path) -> set[Path]:
     modules = {
         _family_module_name(family, path): path
@@ -206,7 +216,7 @@ def _reachable_family_python(family: Path) -> set[Path]:
     root_paths = [
         family / "model.py",
         family / "support.py",
-        *(family / "tests").rglob("*.py"),
+        *(path for directory in VALIDATION_DIRECTORIES for path in (family / directory).rglob("*.py")),
     ]
     pending = [_family_module_name(family, path) for path in root_paths if path.is_file()]
     declaration = family / "cli.json"
@@ -508,7 +518,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/legal_headers.py",
         "tools/model_ci.py",
         "tools/model_benchmark.py",
-        "tools/perf_matrix.py",
         "tools/perf_matrix/__init__.py",
         "tools/perf_matrix/__main__.py",
         "tools/perf_matrix/cli.py",
@@ -516,17 +525,61 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/perf_matrix/types.py",
         "tools/pr_metadata.py",
         "tools/test_impact.py",
-        "tools/benchmark_qualification/__init__.py",
-        "tools/benchmark_qualification/accuracy.py",
-        "tools/benchmark_qualification/benchmarks/etth1_forecast_parity.yaml",
-        "tools/benchmark_qualification/benchmarks/mmlu_continuation.yaml",
-        "tools/benchmark_qualification/benchmarks/text_generation_performance.yaml",
-        "tools/benchmark_qualification/benchmarks/time_series_performance.yaml",
-        "tools/benchmark_qualification/catalog.py",
-        "tools/benchmark_qualification/datasets.py",
-        "tools/benchmark_qualification/performance.py",
-        "tools/benchmark_qualification/references/hf_text_generation.py",
-        "tools/benchmark_qualification/runtime.py",
+        "qualification_tests/benchmark_qualification/__init__.py",
+        "qualification_tests/benchmark_qualification/accuracy.py",
+        "qualification_tests/benchmark_qualification/benchmarks/audio_generation_model_performance.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/audio_generation_pipeline_performance.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/beans_image_feature_knn.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/embedding_performance.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/encoder_performance.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/etth1_forecast_parity.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/flores200_en_fr_seq2seq.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/flores200_en_fr_translation.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/humaneval_continuation.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/image_classification_performance.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/image_features_performance.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/imagenette_classification.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/coco2017_object_detection.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/imagenette_localization_parity.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/imagenette_prompted_segmentation_parity.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/imagenette_segmentation_parity.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/imagenette_text_prompted_instance_parity.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/imagenette_vision_language_parity.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/librispeech_transcription.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/media_generation_performance.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/metric_geometry_parity.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/metric_geometry_performance.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/mmlu_continuation.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/object_detection_performance.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/ocrbench_v2_parity.yaml",
+                    "qualification_tests/benchmark_qualification/benchmarks/reranking_performance.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/robot_action_parity.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/robot_action_performance.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/newstest2019_en_ru_translation.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/stsbenchmark_embedding_parity.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/stsbenchmark_reranking_parity.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/task_output_parity.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/speech_nemo_performance.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/speech_transformer_performance.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/stereo_disparity_parity.yaml",
+                "qualification_tests/benchmark_qualification/benchmarks/stereo_disparity_performance.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/text_generation_performance.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/text_prompted_segmentation_performance.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/vision_language_pipeline_performance.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/vision_language_performance.yaml",
+            "qualification_tests/benchmark_qualification/benchmarks/semantic_segmentation_performance.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/time_series_performance.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/wikitext103_continuation.yaml",
+        "qualification_tests/benchmark_qualification/benchmarks/wmt14_en_de_translation.yaml",
+        "qualification_tests/benchmark_qualification/catalog.py",
+        "qualification_tests/benchmark_qualification/datasets.py",
+        "qualification_tests/benchmark_qualification/performance/qualification.py",
+            "qualification_tests/benchmark_qualification/references/hf_encoder.py",
+            "qualification_tests/benchmark_qualification/references/hf_text_generation.py",
+            "qualification_tests/benchmark_qualification/references/speech_io.py",
+            "qualification_tests/benchmark_qualification/references/timm_image_classification.py",
+        "qualification_tests/benchmark_qualification/runtime.py",
+        "tools/prepare_coco_detection_dataset.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",
         "tools/ci/container.py",
@@ -540,6 +593,10 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/ci/quality.py",
         "tools/ci/stage.py",
     }
+    migrated_qualification = {
+        path for path in expected_tools if path.startswith("qualification_tests/")
+    }
+    expected_tools -= migrated_qualification
     expected_tool_tests = {
         "tools/tests/__init__.py",
         "tools/tests/test_architecture.py",
@@ -556,7 +613,48 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_pr_metadata.py",
         "tools/tests/test_public_source_hygiene.py",
     }
-    expected_cmake = {"cmake/trtmcConfig.cmake.in"}
+    expected_qualification = migrated_qualification | {
+        "qualification_tests/__init__.py",
+        "qualification_tests/benchmark_qualification/__init__.py",
+        "qualification_tests/benchmark_qualification/performance/__init__.py",
+        "qualification_tests/benchmark_qualification/performance/__main__.py",
+        "qualification_tests/benchmark_qualification/performance/README.md",
+        "qualification_tests/benchmark_qualification/performance/config/environments/auto-thor.yaml",
+        "qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml",
+        "qualification_tests/benchmark_qualification/performance/config/environments/l4t-thor.yaml",
+        "qualification_tests/benchmark_qualification/performance/config/release.yaml",
+        "qualification_tests/benchmark_qualification/performance/config/requirements.txt",
+        "qualification_tests/benchmark_qualification/performance/matrix.py",
+        "qualification_tests/benchmark_qualification/performance/reference_harness.py",
+        "qualification_tests/benchmark_qualification/performance/reference_protocol.py",
+        "qualification_tests/benchmark_qualification/performance/reporting.py",
+        "qualification_tests/benchmark_qualification/performance/references/__init__.py",
+        "qualification_tests/benchmark_qualification/performance/references/audio_reference.py",
+        "qualification_tests/benchmark_qualification/performance/references/hf_transformers.py",
+        "qualification_tests/benchmark_qualification/performance/references/generic_reference.py",
+        "qualification_tests/benchmark_qualification/performance/references/timing_contracts.py",
+        "qualification_tests/benchmark_qualification/performance/runner.py",
+        "qualification_tests/benchmark_qualification/performance/stability.py",
+        "qualification_tests/benchmark_qualification/performance/types.py",
+        "qualification_tests/benchmark_qualification/performance/tests/__init__.py",
+        "qualification_tests/benchmark_qualification/performance/tests/test_diffusers_semantic_reference.py",
+        "qualification_tests/benchmark_qualification/performance/tests/test_family_performance.py",
+        "qualification_tests/benchmark_qualification/performance/tests/test_offline_speech_contract.py",
+        "qualification_tests/benchmark_qualification/performance/tests/test_perf_matrix.py",
+        "qualification_tests/benchmark_qualification/performance/tests/test_reference_protocol.py",
+        "qualification_tests/benchmark_qualification/performance/tests/test_reporting.py",
+        "qualification_tests/benchmark_qualification/performance/tests/test_structured_output_contracts.py",
+        "qualification_tests/benchmark_qualification/performance/tests/test_timing_contracts.py",
+    }
+    expected_cmake = {
+        "cmake/trtmcConfig.cmake.in",
+        "cmake/edge_llm/EdgeLLM.cmake",
+        "cmake/edge_llm/CheckNative.cmake",
+        "cmake/edge_llm/EdgeLLMConfig.cmake.in",
+        "cmake/edge_llm/Install.cmake.in",
+        "cmake/edge_llm/Prepare.cmake.in",
+        "cmake/edge_llm/README.md",
+    }
     expected_third_party = {
         "third_party/stb/stb_image.h",
         "third_party/stb/stb_image_resize2.h",
@@ -577,6 +675,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     tool_tests = {path for path in tool_files if path.startswith("tools/tests/")}
     assert tool_files - tool_tests == expected_tools
     assert tool_tests == expected_tool_tests
+    assert files("qualification_tests") == expected_qualification
     assert files("cmake") == expected_cmake
     assert files("third_party") == expected_third_party
 
@@ -628,7 +727,7 @@ def test_applications_depend_only_on_public_model_connect_surfaces() -> None:
         REPO / "examples",
     )
     application_files = [path for root in application_roots for path in root.rglob("*")] + [
-        REPO / "tools/perf_matrix.py"
+        REPO / "qualification_tests/benchmark_qualification/performance/matrix.py"
     ]
     for path in application_files:
         if not path.is_file() or "__pycache__" in path.parts:
@@ -1017,7 +1116,7 @@ def test_reachable_family_python_has_no_environment_or_profile_side_channel() ->
         if profile_requirements.is_dir() and any(profile_requirements.iterdir()):
             violations.append(f"{family.name}:python_profile_requirements")
         for path in family.rglob("*.py"):
-            if "tests" in path.relative_to(family).parts:
+            if _is_family_validation(family, path):
                 continue
             source = path.read_text(encoding="utf-8")
             for token in forbidden_source:
@@ -1670,6 +1769,14 @@ def _implemented_task_ids(source: str, interfaces: dict[str, str]) -> set[str]:
     }
 
 
+def _family_runtime_source(family: Path) -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8", errors="ignore")
+        for path in (family / "runtime").rglob("*")
+        if path.is_file() and path.suffix in {".h", ".hpp", ".cpp", ".cu"}
+    )
+
+
 def test_task_contract_inventory_recognizes_implemented_interfaces_not_mentions() -> None:
     declarations = _declared_task_interfaces(
         '''
@@ -1764,6 +1871,167 @@ def test_every_manifest_task_has_a_concrete_family_implementation() -> None:
             if task not in implemented:
                 violations.append(f"{manifest.relative_to(REPO)}:{task}")
     assert violations == []
+
+
+def _semantic_task_interfaces() -> dict[str, str]:
+    interfaces: dict[str, str] = {}
+    for header in sorted((REPO / "core/runtime/include/trtmc/internal").glob("*.h")):
+        interfaces.update(_declared_task_interfaces(header.read_text(encoding="utf-8")))
+    return interfaces
+
+
+def _imported_resolvers(tree: ast.AST, family: str) -> tuple[set[str], set[str]]:
+    names: set[str] = set()
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == f"families.{family}.support":
+                names.update(alias.asname or alias.name for alias in node.names)
+            elif module == "tensorrt_model_connect.model_support":
+                names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "resolve_family"
+                )
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == f"families.{family}.support":
+                    modules.add(alias.asname or alias.name.split(".", 1)[0])
+    return names, modules
+
+
+def _bound_names(target: ast.expr) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: set[str] = set()
+        for element in target.elts:
+            names.update(_bound_names(element))
+        return names
+    return set()
+
+
+def _is_resolver_call(node: ast.AST, resolvers: set[str], modules: set[str]) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id in resolvers
+    return (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in modules
+    )
+
+
+def _support_test_covers_identity(source: str, family: str, filename: str) -> bool:
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError:
+        return False
+
+    resolvers, modules = _imported_resolvers(tree, family)
+    if not resolvers and not modules:
+        return False
+
+    resolved: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _is_resolver_call(node.value, resolvers, modules):
+            for target in node.targets:
+                resolved.update(_bound_names(target))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert):
+            continue
+        for compare in ast.walk(node.test):
+            if not isinstance(compare, ast.Compare):
+                continue
+            for operand in [compare.left, *compare.comparators]:
+                if not (isinstance(operand, ast.Attribute) and operand.attr == "default_task"):
+                    continue
+                value = operand.value
+                if isinstance(value, ast.Name) and value.id in resolved:
+                    return True
+                if _is_resolver_call(value, resolvers, modules):
+                    return True
+    return False
+
+
+def test_support_test_content_check_rejects_placeholders() -> None:
+    assert not _support_test_covers_identity("", "owner", "empty.py")
+    assert not _support_test_covers_identity(
+        "def test_nothing():\n    assert True\n", "owner", "unrelated.py"
+    )
+    # A text-only placeholder must not satisfy the guard.
+    assert not _support_test_covers_identity(
+        'def test_placeholder():\n    assert result.default_task == "task"\n',
+        "owner",
+        "placeholder.py",
+    )
+    # Importing the resolver is not enough when the assertion is not tied to it.
+    assert not _support_test_covers_identity(
+        "from families.owner.support import describe\n\n"
+        "def test_placeholder():\n"
+        "    describe(None)\n"
+        '    assert result.default_task == "task"\n',
+        "owner",
+        "unbound.py",
+    )
+    # Binding an unrelated object must not satisfy the guard either.
+    assert not _support_test_covers_identity(
+        "from families.owner.support import describe\n\n"
+        "def test_placeholder():\n"
+        "    describe(None)\n"
+        "    result = object()\n"
+        '    assert result.default_task == "task"\n',
+        "owner",
+        "wrong-object.py",
+    )
+    # A resolver result asserted directly is valid.
+    assert _support_test_covers_identity(
+        "from families.owner.support import describe\n\n"
+        "def test_default():\n"
+        '    assert describe(None).default_task == "task"\n',
+        "owner",
+        "direct.py",
+    )
+    # A resolver result bound to a local name and asserted through it is valid.
+    assert _support_test_covers_identity(
+        "from families.owner.support import describe\n\n"
+        "def test_default():\n"
+        "    support = describe(None)\n"
+        '    assert support.default_task == "task"\n',
+        "owner",
+        "bound.py",
+    )
+
+
+def test_migrated_families_own_dependency_free_support_tests() -> None:
+    """A semantic Task family keeps CPU-visible identity and default-task tests.
+
+    ``add-model-family.md`` requires checkpoint identity and default-task
+    assertions in a dependency-free ``tests/test_support.py``. The public CPU
+    gate discovers every family that ships that file, so a family migrated to
+    the Task SDK must not keep those assertions only in a TensorRT-gated
+    ``tests/test_model.py`` module. The file must resolve its own identity and
+    assert its default task; an empty or unrelated placeholder is not enough.
+    """
+    interfaces = _semantic_task_interfaces()
+    violations = []
+    for family in family_dirs():
+        if not _implemented_task_ids(_family_runtime_source(family), interfaces):
+            continue
+        support_test = family / "tests/test_support.py"
+        if not support_test.is_file():
+            violations.append(f"families/{family.name}/tests/test_support.py: missing")
+        elif not _support_test_covers_identity(
+            support_test.read_text(encoding="utf-8"), family.name, str(support_test)
+        ):
+            violations.append(
+                f"families/{family.name}/tests/test_support.py: "
+                "needs an identity lookup and a default_task assertion"
+            )
+    assert violations == [], "invalid semantic Task support tests: " + "; ".join(violations)
 
 
 def test_manifests_contain_only_family_test_inputs_not_central_orchestration() -> None:

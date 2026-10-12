@@ -1,0 +1,19 @@
+{
+  "name": "rtdetr-v2-r18",
+  "hf_id": "PekingU/rtdetr_v2_r18vd",
+  "bundle": "rtdetr-v2-r18.bundle",
+  "family": "rt_detr_v2",
+  "task": "object_detection",
+  "precision": "fp16",
+  "image_height": 640,
+  "image_width": 640,
+  "testcases": [
+    {
+      "name": "rtdetr-v2-r18",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "score_threshold": 0.3
+    }
+  ],
+  "tensor_parallel_size": 1
+}

@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: trtmc.qualification/v1
+model: magpie-tts-357m
+candidate: {family: magpie_tts, checkpoint: nvidia/magpie_tts_multilingual_357m, revision: 34d7e40da85cabc97f92198889b65cea27bc7fd1, task: audio_generation, precision: fp32, bundle: magpie-tts-357m.bundle, build: {max_sequence_length: 512}}
+reference_environment: {requirements: ../../requirements.txt}
+accuracy:
+  - name: generated-audio-parity
+    benchmark: task_output_parity
+    operation: generate_audio
+    request: &request {prompt: Please say this sentence clearly., max_new_tokens: 260, seed: 42}
+    reference: &reference {script: tests/benchmark/reference.py, mode: pytorch-eager, precision: fp32, output_contract: audio-artifact-parity, adapter_options: {speaker_encoder_revision: e9124b5364a2c3e9b4f78da429a33cbca8f8c22b}}
+    gate: {min_duration_ratio: 0.8, max_duration_ratio: 1.2, min_rms_ratio: 0.5, max_rms_ratio: 2.0, max_log_spectral_distance: 3.0}
+performance:
+  - {name: generate-audio, benchmark: audio_generation_pipeline_performance, operation: generate_audio, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: nemo_reference, output_contract: audio-shape}}

@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: nemotron-embed-vl-1b-v2
+candidate:
+  family: eagle_vlm
+  checkpoint: nvidia/llama-nemotron-embed-vl-1b-v2
+  revision: 582e3bf72aee355e3c59ed89de53543c5b0657ee
+  task: embedding
+  precision: fp16
+  trust_remote_code: true
+  bundle: nemotron-embed-vl-1b-v2.bundle
+  build:
+    max_sequence_length: 512
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: stsbenchmark-parity
+    benchmark: stsbenchmark_embedding_parity
+    samples: 50
+    reference:
+      precision: fp32
+    gate:
+      min_vector_cosine: 0.995
+      min_vector_pass_rate: 0.98
+      max_pair_cosine_abs_delta: 0.02
+
+performance:
+  - name: embed
+    benchmark: embedding_performance
+    operation: embed
+    request:
+      prompt: What is artificial intelligence?
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      adapter: hf-transformers-embedding
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      reference_backend: hf_transformers
+      precision: fp32
+      output_contract: embedding-shape

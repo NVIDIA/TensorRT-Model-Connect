@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: qwen3-0.6b-topp
+candidate:
+  family: qwen
+  checkpoint: Qwen/Qwen3-0.6B
+  revision: c1899de289a04d12100db370d81485cdf75e47ca
+  task: text_generation
+  precision: fp16
+  bundle: qwen3-0.6b-topp-fp16.bundle
+  build: {max_sequence_length: 257}
+accuracy:
+  - name: mmlu-sampling
+    benchmark: mmlu_continuation
+    samples: 10
+    prompt_token_limit: 192
+    truncation_side: left
+    reference: {precision: fp32}
+    request: &sampling
+      {max_new_tokens: 20, temperature: 0.7, top_k: 50, top_p: 0.9, min_p: 0.0, seed: 42, repetition_penalty: 1.0, use_chat_template: false, enable_thinking: false, do_sample: true}
+    gate: {min_pass_rate: 0.9, allowed_failures: 1}
+performance:
+  - name: generate-20
+    benchmark: text_generation_performance
+    operation: generate
+    request:
+      <<: *sampling
+      prompt: What is the capital of France? Answer in one word.
+      use_chat_template: true
+    measurement: {warmup: 5, iterations: 10}
+    reference: {runner: hf-transformers, mode: torch-compile, fallback: hf-eager, compile_scope: model.forward, precision: fp32, output_contract: exact-token-ids}

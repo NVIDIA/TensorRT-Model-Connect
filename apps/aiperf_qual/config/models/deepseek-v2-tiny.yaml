@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The catalog's 64-token bundle is too small for MMLU prompts; keep the benchmark build separate.
+candidate:
+  build: {name: deepseek-v2-tiny-qual, max_sequence_length: 512}
+absolute: [mmlu]

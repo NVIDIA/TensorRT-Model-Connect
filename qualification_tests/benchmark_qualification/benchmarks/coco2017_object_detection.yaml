@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: coco2017-object-detection
+  version: val2017-category-balanced-100
+  sha256: 5fca4f7e831e99cc721fc9340bf76dc48086548d4fb4a7c84512a18b91edae20
+  source:
+    mode: manual
+    path: COCO2017_object_detection/coco2017_object_detection.json
+    instructions: tools/prepare_coco_detection_dataset.py
+  license: COCO images retain their source licenses; annotations are CC BY 4.0
+selection:
+  method: fixed-manifest-order
+input:
+  adapter: image_path
+metric:
+  name: coco_object_detection_accuracy

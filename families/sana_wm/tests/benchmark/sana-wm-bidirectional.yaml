@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: trtmc.qualification/v1
+model: sana-wm-bidirectional
+candidate: {family: sana_wm, checkpoint: Efficient-Large-Model/SANA-WM_bidirectional, revision: e96271d77398def8ebb9fc595e7c0056dc625ab7, model_directory: trtmc-reference/SANA-model, task: world_model_generation, precision: bf16, bundle: sana-wm-bidirectional.bundle, build: {max_sequence_length: 256, image_height: 704, image_width: 1280, video_num_frames: 321}}
+reference_environment:
+  requirements: ../../requirements.txt
+  paths: {reference_repo: trtmc-reference/Sana, model_dir: trtmc-reference/SANA-model}
+accuracy:
+  - name: generated-media-parity
+    benchmark: task_output_parity
+    operation: generate_image
+    request: &request
+      prompt_path: ../assets/demo_0.txt
+      image_path: ../assets/demo_0.png
+      action: w-80,jw-40,w-40,lw-60,w-100
+      camera_intrinsics: [797.87866, 830.0503, 844.2675, 463.7225]
+      media_type: video
+      seed: 42
+      num_steps: 60
+      cfg_scale: 5.0
+      height: 704
+      width: 1280
+      video_num_frames: 321
+      translation_speed: 0.055
+      rotation_speed_deg: 1.2
+      fps: 16
+      flow_shift: 9.8
+      no_action_overlay: true
+    reference: &reference {script: tests/benchmark/reference.py, mode: pytorch-eager, precision: bf16, output_contract: media-artifact-parity, adapter_options: {intrinsics_path: ../assets/demo_0_intrinsics.npy}}
+    gate: {min_psnr: 5.0, min_ssim: 0.1}
+performance:
+  - {name: generate-video, benchmark: media_generation_performance, operation: generate_image, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: official_sana, output_contract: media-shape}}

@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: riva-translate-4b
+candidate:
+  family: mistral
+  checkpoint: nvidia/Riva-Translate-4B-Instruct-v1.1
+  revision: 1eb944ce9f2717d7be6b7b7c2310f7c58b35d10b
+  task: text_generation
+  precision: fp16
+  bundle: riva-translate-4b.bundle
+  build:
+    max_sequence_length: 257
+
+accuracy:
+  - name: flores200-en-fr
+    benchmark: flores200_en_fr_translation
+    samples: 10
+    prompt_token_limit: 128
+    truncation_side: right
+    reference:
+      precision: fp32
+    request: &greedy-translation
+      max_new_tokens: 128
+      temperature: 0.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      repetition_penalty: 1.0
+      use_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    gate:
+      min_pass_rate: 0.9
+      allowed_failures: 1
+
+performance:
+  - name: generate-20
+    benchmark: text_generation_performance
+    operation: generate
+    request:
+      <<: *greedy-translation
+      prompt: "<s>System\nYou are an expert at translating text from English to French.</s>\n<s>User\nWhat is the French translation of the sentence: Hello, how are you?</s>\n<s>Assistant\n"
+      max_new_tokens: 20
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: hf-transformers
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      precision: fp32
+      output_contract: exact-token-ids

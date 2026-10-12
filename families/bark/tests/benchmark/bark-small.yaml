@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: trtmc.qualification/v1
+model: bark-small
+candidate: {family: bark, checkpoint: suno/bark-small, revision: 1dbd7a128513b8ae4a4e2130fed57b7ac9da5bcd, task: audio_generation, precision: fp16, bundle: bark-small.bundle, build: {max_sequence_length: 1024}}
+reference_environment: {requirements: ../../requirements.txt}
+accuracy:
+  - name: generated-audio-parity
+    benchmark: task_output_parity
+    operation: generate_audio
+    request: &request {prompt: "Hello, this is a test of the audio generation system.", max_new_tokens: 768, seed: 0}
+    reference: &reference {adapter: hf-transformers-tts, mode: hf-eager, precision: fp16, output_contract: audio-artifact-parity}
+    gate: &gate {min_duration_ratio: 0.8, max_duration_ratio: 1.2, min_rms_ratio: 0.5, max_rms_ratio: 2.0, max_log_spectral_distance: 3.0}
+performance:
+  - {name: generate-audio, benchmark: audio_generation_model_performance, operation: generate_audio, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: hf_transformers, output_contract: audio-shape}}

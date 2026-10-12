@@ -14,10 +14,14 @@
 #include "families/qwen/runtime/inference_state.h"
 #include "families/qwen/runtime/sampler.h"
 #include "families/qwen/runtime/tokenizer.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/stream.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,7 +45,10 @@ struct QwenTextGenConfig {
     int32_t num_layers{0};
 };
 
-class QwenTextGenerationPipeline final : public ITextGeneration {
+class QwenTextGenerationPipeline final : public ITextGeneration,
+                                         public internal::IModel,
+                                         public internal::ITextContinuation,
+                                         public internal::IStreamingTextContinuation {
   public:
     QwenTextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
                                std::unique_ptr<QwenInferenceState> state, QwenTextGenConfig config,
@@ -52,6 +59,10 @@ class QwenTextGenerationPipeline final : public ITextGeneration {
     // Public API: takes raw text, returns typed result.
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }
+    std::vector<internal::TaskInstance> task_bindings() override;
+    TextResult run(const internal::TextContinuationRequest&, internal::ConfigView) override;
+    std::unique_ptr<internal::ITextStream> start(const internal::TextContinuationRequest&,
+                                                 internal::ConfigView) override;
 
     // Token-ID-based generation (for unit tests and internal callers).
     struct GenerationResult {
@@ -77,6 +88,13 @@ class QwenTextGenerationPipeline final : public ITextGeneration {
     std::string logits_output_name_;
     bool state_bound_{false};
     double last_setup_ms_{0.0};
+    std::atomic<bool> generation_active_{false};
+    using TokenCallback = std::function<bool(const std::vector<int32_t>&)>;
+    TextResult generate_incremental(const std::string&, const TextGenerationConfig&,
+                                    const TokenCallback&);
+
+    TextResult generate_from_tokens(const std::vector<int32_t>&, const TextGenerationConfig&,
+                                    const TokenCallback&);
 
     // Internal: generate from token IDs with sampling parameters and timing.
     struct TimedGenResult {
@@ -86,7 +104,8 @@ class QwenTextGenerationPipeline final : public ITextGeneration {
     };
     TimedGenResult generate_from_ids(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
                                      const QwenSamplingParams& params,
-                                     const TextGenerationConfig& cfg);
+                                     const TextGenerationConfig& cfg,
+                                     const TokenCallback& on_tokens = {});
     std::string resolve_generation_mode(const TextGenerationConfig& cfg) const;
     void reset_generation_context();
 
@@ -97,7 +116,7 @@ class QwenTextGenerationPipeline final : public ITextGeneration {
     int32_t run_decode_loop(QwenISampler* sampler, const QwenSamplingParams& params,
                             std::vector<int32_t>& output, std::vector<float>& logits,
                             int32_t max_new_tokens, const TextGenerationConfig& cfg,
-                            int32_t prompt_token_count);
+                            int32_t prompt_token_count, const TokenCallback& on_tokens);
     ITrtModule& bind_decoder_for_step();
     void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
                      bool prime_decoder);

@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# LibriSpeech test-clean (AIPerf `librispeech`, pinned): 500 utterances, 12 or 13 from each of the 40 speakers in
+# seeded random order; the speaker is the bootstrap cluster. Gold is the transcript. (1,000 until October 2026: the
+# pilots' WER intervals showed 150-360 utterances suffice for the margin.)
+suite: librispeech-test-clean-500
+version: 1
+source:
+  kind: aiperf_public
+  dataset: librispeech
+  label_column: text
+  cluster_column: speaker_id
+selection: {method: seeded, field: speaker_id, count: 500}
+fields: {audio: audio_path}
+request:
+  max_new_tokens: 200
+  language: en

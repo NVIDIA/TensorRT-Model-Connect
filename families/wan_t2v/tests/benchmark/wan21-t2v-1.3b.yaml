@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: trtmc.qualification/v1
+model: wan21-t2v-1.3b
+candidate: {family: wan_t2v, checkpoint: Wan-AI/Wan2.1-T2V-1.3B-Diffusers, revision: 0fad780a534b6463e45facd96134c9f345acfa5b, task: image_generation, precision: fp16, bundle: wan21-t2v-1.3b.bundle, build: {context_parallel_size: 1, fp32_layers: [24], image_height: 480, image_width: 832, video_num_frames: 17}}
+reference_environment: {requirements: ../../requirements.txt}
+accuracy:
+  - name: generated-media-parity
+    benchmark: task_output_parity
+    operation: generate_image
+    request: &request {prompt: A cat sitting on a beach watching the sunset, media_type: video, seed: 42, num_steps: 30, height: 480, width: 832, video_num_frames: 17}
+    reference: &reference {adapter: hf-diffusers, mode: hf-eager, precision: fp32, output_contract: media-artifact-parity}
+    gate: {min_psnr: 5.0, min_ssim: 0.1}
+performance:
+  - {name: generate-video, benchmark: media_generation_performance, operation: generate_image, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: hf_diffusers, output_contract: media-shape}}

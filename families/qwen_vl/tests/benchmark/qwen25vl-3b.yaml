@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: qwen25vl-3b
+candidate:
+  family: qwen_vl
+  checkpoint: Qwen/Qwen2.5-VL-3B-Instruct
+  revision: 66285546d2b821cf421d4f5eb2576359d3770cd3
+  task: vision_language_generation
+  precision: fp32
+  bundle: qwen25vl-3b-vl.bundle
+  build:
+    max_sequence_length: 384
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: imagenette-vlm-parity
+    benchmark: imagenette_vision_language_parity
+    samples: 10
+    request: &vlm-request
+      prompt: What is the main object in this image? Answer in one word.
+      max_new_tokens: 10
+      temperature: 1.0
+      top_k: 1
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      max_normalized_edit_distance: 0.15
+      min_sample_pass_rate: 0.9
+
+performance:
+  - name: generate
+    benchmark: vision_language_performance
+    operation: generate
+    request:
+      <<: *vlm-request
+      image_path: ../data/test_img.jpeg
+      prompt: What color is the vehicle in this image? Answer in one word.
+    measurement:
+      warmup: 3
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: pytorch-eager
+      reference_backend: transformers
+      precision: fp32
+      output_contract: vision-language-text
+      max_normalized_edit_distance: 0.15

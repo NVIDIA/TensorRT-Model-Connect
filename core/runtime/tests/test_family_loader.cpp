@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
     check(load_throws(unsafe_bundle, runtime_root.string()), "unsafe family id rejected");
 
     const auto mismatch_bundle = runtime_root / "mismatch.bundle";
-    write_bundle(mismatch_bundle, "fake", "embedding");
+    write_bundle(mismatch_bundle, "fake", "text_generation");
     check(load_throws(mismatch_bundle, runtime_root.string()),
           "factory task must exactly match bundle task");
 

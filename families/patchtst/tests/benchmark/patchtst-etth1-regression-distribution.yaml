@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: patchtst-etth1-regression-distribution
+candidate:
+  family: patchtst
+  checkpoint: ibm-research/patchtst-etth1-regression-distribution
+  revision: d5ef731ed80ffcd2f0a3262138b1009bbcedb2c4
+  task: time_series_forecast
+  precision: fp16
+  bundle: patchtst-etth1-regression-distribution.bundle
+  build:
+    fp32_layers: [5]
+
+accuracy:
+  - name: etth1-parity
+    benchmark: etth1_forecast_parity
+    samples: 10
+    reference:
+      command: reference.py
+      precision: fp32
+    window:
+      columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL]
+      context_length: 512
+      prediction_length: 1
+      stride: 24
+      test_target_start: 11520
+      test_end: 14400
+      frequency: 0
+    gate:
+      max_relative_l2: 1.0e-3
+      max_absolute_error: 1.0e-3
+
+performance:
+  - name: regress
+    benchmark: time_series_performance
+    operation: solve
+    request:
+      past_values:
+        [0.1, -0.2, 0.05, 0.3, -0.15, 0.25, 0.4, 0.2, -0.1, 0.1,
+         0.35, -0.05, 0.2, 0.5, 0.3, 0.0, 0.15, 0.4, 0.05, 0.15,
+         0.6, 0.4, 0.1, 0.2, 0.45, 0.1, 0.1, 0.7, 0.55, 0.05]
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      adapter: pytorch-timeseries
+      adapter_options: {reference_type: patchtst}
+      mode: pytorch-eager
+      precision: fp32
+      output_contract: forecast-parity
+      max_relative_l2: 1.0e-3
+      max_absolute_error: 1.0e-3

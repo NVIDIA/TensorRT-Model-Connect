@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: trtmc.qualification/v1
+model: wan22-ti2v-5b
+candidate: {family: wan2_2_ti2v, checkpoint: Wan-AI/Wan2.2-TI2V-5B, revision: 921dbaf3f1674a56f47e83fb80a34bac8a8f203e, task: image_generation, precision: bf16, bundle: wan22-ti2v-5b.bundle, build: {image_height: 704, image_width: 1280, video_num_frames: 121}}
+reference_environment: {requirements: ../../requirements.txt}
+accuracy:
+  - name: generated-media-parity
+    benchmark: task_output_parity
+    operation: generate_image
+    request: &request {prompt: Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage, media_type: video, seed: 42, num_steps: 50, guidance_scale: 5.0, height: 704, width: 1280, video_num_frames: 121}
+    reference: &reference {adapter: hf-diffusers, mode: hf-eager, precision: bf16, output_contract: media-artifact-parity, adapter_options: {model_id: Wan-AI/Wan2.2-TI2V-5B-Diffusers, model_revision: b8fff7315c768468a5333511427288870b2e9635, vae_class: AutoencoderKLWan, vae_precision: fp32}}
+    gate: {min_psnr: 5.0, min_ssim: 0.1}
+performance:
+  - {name: generate-video, benchmark: media_generation_performance, operation: generate_image, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: hf_diffusers, output_contract: media-shape}}

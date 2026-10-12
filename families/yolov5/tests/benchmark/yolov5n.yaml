@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: yolov5n
+candidate:
+  family: yolov5
+  checkpoint: Ultralytics/YOLOv5
+  revision: 5bca797074771ecdfd6267d6e9be32ee201d937b
+  task: object_detection
+  precision: fp16
+  bundle: yolov5n.bundle
+  build:
+    max_sequence_length: 1
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: coco2017-object-detection
+    benchmark: coco2017_object_detection
+    samples: 100
+    label_space: coco-contiguous-80
+    request: &detection-request
+      score_threshold: 0.25
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      max_map_50_95_drop: 0.02
+      max_map_50_drop: 0.02
+
+performance:
+  - name: detect
+    benchmark: object_detection_performance
+    operation: detect
+    request:
+      <<: *detection-request
+      image_path: ../data/test_img.jpeg
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: pytorch-eager
+      reference_backend: ultralytics
+      precision: fp32
+      output_contract: detection-parity
+      min_box_iou: 0.9
+      max_score_abs_error: 0.005

@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: lerobot-act-recorded-observation
+  version: episode-0-frame-0-v1
+  sha256: 33eb2456e87abbe65566c186b21fade3a410a3d230fe0fee96009077ca70181a
+  source:
+    mode: family
+    path: ../data/benchmark_robot_control.json
+  license: Apache-2.0
+selection:
+  method: first
+input:
+  adapter: image_state_paths
+metric:
+  name: robot_action_parity

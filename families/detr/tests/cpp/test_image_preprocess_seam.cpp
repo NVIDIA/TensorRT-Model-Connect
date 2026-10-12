@@ -86,6 +86,19 @@ void test_detr_preprocess_fits_half_tie_engine_dimensions() {
     check(portrait.size() == 3U * 1333U * 666U, "detr portrait fits reference dimensions");
 }
 
+void test_detr_resize_shapes_for_square_engine() {
+    trtmc::DetrPreprocessConfig config;
+    config.input_image_h = 1333;
+    config.input_image_w = 1333;
+
+    const auto landscape = trtmc::compute_detr_resize_shape(382, 640, config);
+    const auto portrait = trtmc::compute_detr_resize_shape(640, 382, config);
+    check(landscape.height == 796 && landscape.width == 1333,
+          "detr square engine landscape resize shape");
+    check(portrait.height == 1333 && portrait.width == 796,
+          "detr square engine portrait resize shape");
+}
+
 void test_detr_preprocess_applies_normalization() {
     const std::vector<float> pixels(3U * 2U * 2U, 0.75F);
     trtmc::DetrPreprocessConfig config;
@@ -121,20 +134,22 @@ void test_detr_preprocess_rejects_resize_larger_than_engine_input() {
     check(threw, "detr rejects a resize larger than the engine input");
 }
 
-void test_detr_preprocess_keeps_padding_zero() {
-    const std::vector<float> pixels(3U * 2U * 2U, 0.75F);
-    trtmc::DetrPreprocessConfig config;
-    config.input_image_h = 4;
-    config.input_image_w = 4;
-    config.shortest_edge = 2;
-    config.longest_edge = 2;
-    config.image_mean = {0.0F, 0.0F, 0.0F};
-    config.image_std = {1.0F, 1.0F, 1.0F};
-
-    const auto pixel_values = trtmc::preprocess_detr_image(pixels.data(), 2, 2, config);
-    check_close(pixel_values[0], 0.75F, 1e-6F, "detr valid pixel remains normalized");
-    check_close(pixel_values[2], 0.0F, 1e-6F, "detr horizontal padding stays zero");
-    check_close(pixel_values[8], 0.0F, 1e-6F, "detr vertical padding stays zero");
+void test_detr_preprocess_rejects_padding_without_pixel_mask() {
+    bool threw = false;
+    try {
+        const std::vector<float> pixels(3U * 2U * 2U, 0.75F);
+        trtmc::DetrPreprocessConfig config;
+        config.input_image_h = 4;
+        config.input_image_w = 4;
+        config.shortest_edge = 2;
+        config.longest_edge = 2;
+        config.image_mean = {0.0F, 0.0F, 0.0F};
+        config.image_std = {1.0F, 1.0F, 1.0F};
+        (void)trtmc::preprocess_detr_image(pixels.data(), 2, 2, config);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "detr rejects padding when pixel_mask is unavailable");
 }
 
 void test_detr_preprocess_rejects_invalid_config() {
@@ -160,10 +175,11 @@ int main() {
     test_detr_resize_rounds_half_ties_to_even();
     test_detr_resize_rounds_non_ties_to_nearest();
     test_detr_preprocess_fits_half_tie_engine_dimensions();
+    test_detr_resize_shapes_for_square_engine();
     test_detr_preprocess_applies_normalization();
     test_detr_preprocess_rejects_invalid_config();
     test_detr_preprocess_rejects_resize_larger_than_engine_input();
-    test_detr_preprocess_keeps_padding_zero();
+    test_detr_preprocess_rejects_padding_without_pixel_mask();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " detr preprocess test(s) failed\n";

@@ -13,7 +13,8 @@ Identify the first boundary that fails in the [Quick Start](quick-start.md).
 | Hugging Face 401/403/not found | Exact ID/revision, network, authentication | Verify the checkpoint/cache; never substitute a nearby model silently. |
 | CMake cannot find CUDA/TensorRT | Development image and explicit SDK paths | Return to the documented container/toolchain cohort. |
 | Build OOM or disk failure | Requested checkpoint, shape, precision, and cache capacity | Use the exact family manifest/profile or free capacity; retain the first error. |
-| No family or multiple families match | Root checkpoint identity metadata | Use a supported exact checkpoint; do not add prefix/fallback matching. |
+| No family matches | Root checkpoint identity metadata | Use a supported exact checkpoint; do not add prefix/fallback matching. |
+| Multiple families match | Shared checkpoint architecture | Choose one of the reported compatible families with `trtmc build MODEL --family FAMILY -o model.bundle`. |
 | Bundle inspection fails | Partial/corrupt bundle | Rebuild; failed builds must not publish a partial output. |
 | Family/backend DSO missing | `--runtime-root` contents | Confirm `libtrtmc_core.so`, `libtrtmc_runtime.so`, selected backend, and exact family DSO are together. |
 | Task mismatch | Bundle `task` versus CLI command | Use the Task command named by the family manifest/header. |

@@ -287,3 +287,164 @@ def test_build_aborts_if_finish_fails(monkeypatch, tmp_path: Path) -> None:
     with pytest.raises(OSError, match="publish failed"):
         build_core.build(_request(tmp_path))
     assert events == ["finish", "abort"]
+
+
+@pytest.mark.parametrize("value", ["", "/one", "/one:/two", ":/one::/two:"])
+def test_cmake_prefixes_preserve_standard_search_order(monkeypatch, value):
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", value)
+    monkeypatch.setattr(build_core.sys, "prefix", "/python")
+    expected = [Path(item) for item in value.split(build_core.os.pathsep) if item]
+    assert build_core.cmake_prefixes() == [*expected, Path("/python")]
+
+
+def test_cmake_prefixes_without_environment_use_python_prefix(monkeypatch):
+    monkeypatch.delenv("CMAKE_PREFIX_PATH", raising=False)
+    monkeypatch.setattr(build_core.sys, "prefix", "/python")
+    assert build_core.cmake_prefixes() == [Path("/python")]
+    # Constructing explicit child-tool settings must not change the caller's
+    # package search order or mutate an inherited search path.
+    monkeypatch.setenv("TEST_TOOL_SEARCH_PATH", "/original")
+    monkeypatch.delenv("TEST_TOOL_NEW_PATH", raising=False)
+    child = build_core.subprocess_environment(
+        {"CMAKE_PREFIX_PATH": "/child"},
+        prepend_paths={"TEST_TOOL_SEARCH_PATH": "/first", "TEST_TOOL_NEW_PATH": "/new"},
+    )
+    assert child["CMAKE_PREFIX_PATH"] == "/child"
+    assert child["TEST_TOOL_SEARCH_PATH"] == "/first" + build_core.os.pathsep + "/original"
+    assert child["TEST_TOOL_NEW_PATH"] == "/new"
+    assert build_core.cmake_prefixes() == [Path("/python")]
+    assert build_core.os.environ["TEST_TOOL_SEARCH_PATH"] == "/original"
+    assert "TEST_TOOL_NEW_PATH" not in build_core.os.environ
+
+
+@pytest.fixture
+def native_platform_bindings(monkeypatch):
+    from unittest.mock import Mock
+
+    runtime = SimpleNamespace(
+        cudaGetDevice=Mock(return_value=(0, 3)),
+        cudaGetDeviceProperties=Mock(return_value=(0, SimpleNamespace(major=8, minor=6))),
+        cudaRuntimeGetVersion=Mock(return_value=(0, 13000)),
+    )
+    monkeypatch.setitem(sys.modules, "tensorrt", SimpleNamespace(__version__="11.1.0.106"))
+    monkeypatch.setitem(sys.modules, "cuda.bindings", SimpleNamespace(runtime=runtime))
+    monkeypatch.setattr(build_core.sys, "platform", "linux")
+    monkeypatch.setattr(build_core.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        build_core.platform, "freedesktop_os_release", lambda: {"VERSION_ID": "24.04"}
+    )
+    monkeypatch.setattr(build_core.platform, "release", lambda: "fallback-release")
+    monkeypatch.setattr(build_core, "_cuda_toolkit_version", lambda: "13.3")
+    return runtime
+
+
+@pytest.mark.parametrize("release_available", [True, False])
+def test_native_platform_uses_executing_cuda_device_and_full_sdk(
+    native_platform_bindings, monkeypatch, release_available
+):
+    if not release_available:
+        from unittest.mock import Mock
+
+        monkeypatch.setattr(
+            build_core.platform, "freedesktop_os_release", Mock(side_effect=OSError("missing"))
+        )
+    assert build_core.detect_local_platform() == {
+        "os": "linux",
+        "os_version": "24.04" if release_available else "fallback-release",
+        "arch": "x86_64",
+        "sm": 86,
+        "cuda_version": "13.3",
+        "tensorrt_version": "11.1.0.106",
+    }
+    native_platform_bindings.cudaGetDevice.assert_called_once_with()
+    native_platform_bindings.cudaGetDeviceProperties.assert_called_once_with(3)
+    native_platform_bindings.cudaRuntimeGetVersion.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failing", ["cudaGetDevice", "cudaGetDeviceProperties"]
+)
+def test_native_platform_propagates_cuda_discovery_failure(native_platform_bindings, failing):
+    getattr(native_platform_bindings, failing).return_value = (35,)
+    with pytest.raises(RuntimeError, match="CUDA device discovery failed: 35"):
+        build_core.detect_local_platform()
+
+
+def test_native_platform_retains_nonlinux_identity(native_platform_bindings, monkeypatch):
+    monkeypatch.setattr(build_core.sys, "platform", "win32")
+    result = build_core.detect_local_platform()
+    assert result["os"] == "win32"
+    assert result["os_version"] == "fallback-release"
+
+@pytest.mark.parametrize("source", ["CUDACXX", "CUDAToolkit_ROOT", "CUDA_HOME", "CUDA_PATH", "PATH"])
+def test_cuda_toolkit_version_uses_selected_compiler(monkeypatch, source):
+    from unittest.mock import Mock
+
+    for name in ("CUDACXX", "CUDAToolkit_ROOT", "CUDA_HOME", "CUDA_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    compiler = "/selected/bin/nvcc"
+    monkeypatch.setattr(build_core.shutil, "which", lambda _: compiler)
+    if source != "PATH":
+        monkeypatch.setenv(source, compiler if source == "CUDACXX" else "/selected")
+    run = Mock(return_value=SimpleNamespace(stdout="Cuda compilation tools, release 13.3, V13.3.1"))
+    monkeypatch.setattr(build_core.subprocess, "run", run)
+    assert build_core._cuda_toolkit_version() == "13.3"
+    run.assert_called_once_with(
+        [compiler, "--version"], check=True, capture_output=True, text=True, timeout=10,
+    )
+
+
+def test_cuda_toolkit_version_does_not_guess_when_missing(monkeypatch):
+    for name in ("CUDACXX", "CUDAToolkit_ROOT", "CUDA_HOME", "CUDA_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(build_core.shutil, "which", lambda _: None)
+    with pytest.raises(RuntimeError, match="CUDA toolkit not found"):
+        build_core._cuda_toolkit_version()
+
+
+def test_cuda_toolkit_version_rejects_unrecognized_output(monkeypatch):
+    monkeypatch.setenv("CUDACXX", "/selected/nvcc")
+    monkeypatch.setattr(build_core.subprocess, "run", lambda *_, **__: SimpleNamespace(stdout=""))
+    with pytest.raises(RuntimeError, match="Cannot identify CUDA toolkit"):
+        build_core._cuda_toolkit_version()
+
+@pytest.mark.parametrize("source, value, expected", [
+    ("CUDACXX", '"/tool kit/nvcc" --allow-unsupported-compiler',
+     ["/tool kit/nvcc", "--allow-unsupported-compiler"]),
+    ("CUDAToolkit_ROOT", "/tool kit", ["/tool kit/bin/nvcc"]),
+])
+def test_cuda_toolkit_compiler_arguments_and_spaces(monkeypatch, source, value, expected):
+    from unittest.mock import Mock
+
+    for name in ("CUDACXX", "CUDAToolkit_ROOT", "CUDA_HOME", "CUDA_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(source, value)
+    run = Mock(return_value=SimpleNamespace(stdout="release 13.3, V13.3.1"))
+    monkeypatch.setattr(build_core.subprocess, "run", run)
+    assert build_core._cuda_toolkit_version() == "13.3"
+    run.assert_called_once_with(
+        [*expected, "--version"], check=True, capture_output=True, text=True, timeout=10,
+    )
+
+
+@pytest.mark.parametrize("failure", [
+    FileNotFoundError("compiler missing"),
+    build_core.subprocess.CalledProcessError(1, ["nvcc", "--version"]),
+    build_core.subprocess.TimeoutExpired(["nvcc", "--version"], 10),
+])
+def test_cuda_toolkit_compiler_failures_preserve_cause(monkeypatch, failure):
+    from unittest.mock import Mock
+
+    monkeypatch.setenv("CUDACXX", "/selected/nvcc")
+    monkeypatch.setattr(build_core.subprocess, "run", Mock(side_effect=failure))
+    with pytest.raises(RuntimeError, match="Cannot query CUDA toolkit") as caught:
+        build_core._cuda_toolkit_version()
+    assert caught.value.__cause__ is failure
+
+
+def test_cuda_toolkit_malformed_compiler_command_preserves_cause(monkeypatch):
+    monkeypatch.setenv("CUDACXX", '"unclosed compiler path')
+    monkeypatch.setattr(build_core.subprocess, "run", lambda *_a, **_k: pytest.fail("compiler ran"))
+    with pytest.raises(RuntimeError, match="Invalid CUDACXX command") as caught:
+        build_core._cuda_toolkit_version()
+    assert isinstance(caught.value.__cause__, ValueError)

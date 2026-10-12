@@ -58,6 +58,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "image_text_to_instance_masks": ("segment_prompted", 10, 100),
     "stereo_images_to_disparity": ("disparity", 3, 100),
     "image_to_metric_geometry": ("geometry", 3, 100),
+    "monocular_geometry": ("geometry", 3, 100),
     "text_to_pooled_features": ("encode", 50, 500),
     "text_to_head_scores": ("head_scores", 50, 500),
     "text_to_token_features": ("encode", 50, 500),
@@ -115,6 +116,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "embedding": ("embed", 50, 500),
     "encoding": ("encode", 50, 500),
     "reranking": ("rerank", 10, 100),
+    "structured_decision": ("decide", 5, 30),
     "segmentation": ("segment", 50, 500),
     "prompted_segmentation": ("segment_prompted", 10, 100),
     "text_prompted_segmentation": ("segment_prompted", 10, 100),
@@ -223,6 +225,31 @@ def resolve_task_case(
 
 
 def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    if task == "structured_decision":
+        inputs = _inputs(case)
+        document = inputs.get("document")
+        document_path = inputs.get("document_path")
+        if document is not None and document_path is not None:
+            raise BenchmarkError("provide document or document_path, not both")
+        if document_path is not None:
+            document = _asset(str(document_path), root).read_text(encoding="utf-8")
+        if not isinstance(document, str) or not document:
+            raise BenchmarkError("structured_decision requires a JSON document string or document_path")
+        result = {"document": document, "max_state_tokens": inputs.get("max_state_tokens", -1)}
+        for name in ("image_paths", "video_frame_paths"):
+            paths = inputs.get(name, [])
+            if not isinstance(paths, list):
+                raise BenchmarkError(f"{name} must be an array")
+            if name == "image_paths":
+                if not all(isinstance(p, str) and p for p in paths):
+                    raise BenchmarkError("image_paths must contain nonempty paths")
+                result[name] = [str(_asset(p, root)) for p in paths]
+            else:
+                if not all(isinstance(frames, list) and frames and
+                           all(isinstance(p, str) and p for p in frames) for frames in paths):
+                    raise BenchmarkError("video_frame_paths must contain nonempty arrays of frame paths")
+                result[name] = [[str(_asset(p, root)) for p in frames] for frames in paths]
+        return result
     if task in _TRACKING:
         frames = _explicit(case, "frame_paths", "frames")
         if not isinstance(frames, list) or not frames or not all(isinstance(path, str) and path for path in frames):
@@ -312,7 +339,7 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return _text_controls(case, include_defaults=False)
     if task in _LATENT_TEXT | _LATENT_STEPS:
         return _latent_request(task, case, root)
-    if task == "image_to_metric_geometry":
+    if task in {"image_to_metric_geometry", "monocular_geometry"}:
         request = {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
         _copy_explicit(request, case, "fov_x")
         return request
@@ -408,8 +435,11 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return {"prompt": _prompt(case, root), "batch_size": 1}
     if task == "reranking":
         inputs = _inputs(case)
-        query = inputs.get("query", inputs.get("prompt", case.get("prompt")))
-        documents = inputs.get("documents")
+        query = inputs.get(
+            "query",
+            inputs.get("prompt", case.get("query", case.get("prompt"))),
+        )
+        documents = inputs.get("documents", case.get("documents"))
         if not isinstance(query, str) or not query:
             raise BenchmarkError("reranking testcase requires inputs.prompt or inputs.query")
         if not isinstance(documents, list) or not documents:
@@ -988,7 +1018,7 @@ def _prompt(case: Mapping[str, Any], root: Path) -> str:
 
 
 def _image_path(case: Mapping[str, Any], root: Path) -> str:
-    return _required_asset(case, ("test_image", "image"), root, "image")
+    return _required_asset(case, ("image_path", "test_image", "image"), root, "image")
 
 
 def _audio_path(case: Mapping[str, Any], root: Path) -> str:

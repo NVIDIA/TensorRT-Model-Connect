@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# trtmc-perf-serve on top of the TRTMC runtime environment (which provides torch and transformers).
+fastapi
+numpy
+pillow
+python-multipart
+soundfile
+uvicorn

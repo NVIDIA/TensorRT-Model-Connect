@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: fast-foundation-stereo
+candidate:
+  family: fast_foundation_stereo
+  checkpoint: nvidia/c-fast-foundationstereo
+  revision: 9b446878c81ddb27593036767b29b2859d46103e
+  model_directory: trtmc-reference/Fast-FoundationStereo
+  task: stereo_disparity
+  precision: fp16
+  bundle: fast-foundation-stereo.bundle
+  build:
+    tensor_parallel_size: 1
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: office-disparity-parity
+    benchmark: stereo_disparity_parity
+    samples: 1
+    request: &disparity-request
+      height: 700
+      width: 700
+      max_disp: 192
+      valid_iters: 8
+    reference:
+      command: reference.py
+      precision: fp16
+    gate:
+      min_cosine: 0.999
+      max_mean_abs_error: 0.5
+      max_bad_2px_fraction: 0.03
+      min_sample_pass_rate: 1.0
+
+performance:
+  - name: disparity
+    benchmark: stereo_disparity_performance
+    operation: disparity
+    request:
+      <<: *disparity-request
+      left_image_path: ../data/office_left.png
+      right_image_path: ../data/office_right.png
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: pytorch-eager
+      reference_backend: official_pytorch
+      precision: fp16
+      output_contract: disparity-parity
+      min_disparity_cosine: 0.999
+      max_disparity_mean_abs_error: 0.5
+      max_disparity_bad_2px_fraction: 0.03

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: segformer-b0-ade
+candidate:
+  family: segformer
+  checkpoint: nvidia/segformer-b0-finetuned-ade-512-512
+  revision: 489d5cd81a0b59fab9b7ea758d3548ebe99677da
+  task: segmentation
+  precision: fp16
+  bundle: segformer-b0-ade.bundle
+  build:
+    max_sequence_length: 1
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: imagenette-segmentation-parity
+    benchmark: imagenette_segmentation_parity
+    samples: 10
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      min_pixel_accuracy: 0.99
+      min_mean_iou: 0.94
+      min_sample_pass_rate: 0.9
+
+performance:
+  - name: segment
+    benchmark: semantic_segmentation_performance
+    operation: segment
+    request:
+      image_path: ../data/test_img.jpeg
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      precision: fp32
+      output_contract: segmentation-shape

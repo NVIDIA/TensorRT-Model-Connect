@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: dinov3-beans-knn-v1
+  version: AI-Lab-Makerere/beans@27aa014ce09b193e1a6f58112d4a66e0eddb69c5
+  sha256: 77ea4c7f6204e212d92f4b01b8c47a8d1f2db59b7448f266c5b3a9ebc418b0f3
+  source:
+    mode: manual
+    path: dinov3-beans-knn-v1/dataset.json
+    instructions: https://huggingface.co/datasets/AI-Lab-Makerere/beans
+  license: MIT
+selection:
+  method: first-per-class
+input:
+  adapter: image_path
+metric:
+  name: image_feature_knn_parity

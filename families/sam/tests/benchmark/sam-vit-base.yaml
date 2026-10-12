@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: sam-vit-base
+candidate:
+  family: sam
+  checkpoint: facebook/sam-vit-base
+  revision: 70c1a07f894ebb5b307fd9eaaee97b9dfc16068f
+  task: prompted_segmentation
+  precision: fp16
+  bundle: sam-vit-base.bundle
+  build: {}
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: imagenette-prompted-mask-parity
+    benchmark: imagenette_prompted_segmentation_parity
+    samples: 10
+    request: &prompted-request
+      point_x: 0.5
+      point_y: 0.5
+      is_foreground: true
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      min_mask_iou: 0.7
+      min_mask_match_rate: 1.0
+      min_sample_pass_rate: 0.9
+
+performance:
+  - name: segment-prompted
+    benchmark: semantic_segmentation_performance
+    operation: segment_prompted
+    request:
+      <<: *prompted-request
+      image_path: ../data/test_img.jpeg
+    measurement:
+      warmup: 3
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: pytorch-eager
+      reference_backend: transformers
+      precision: fp32
+      output_contract: prompted-mask-parity
+      min_mask_iou: 0.7

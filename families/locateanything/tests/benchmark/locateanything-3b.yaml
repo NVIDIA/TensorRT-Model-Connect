@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: locateanything-3b
+candidate:
+  family: locateanything
+  checkpoint: nvidia/LocateAnything-3B
+  revision: c32291ca5e996f5a7a485845b4f57a233936bba0
+  task: vision_language_generation
+  precision: fp16
+  trust_remote_code: true
+  bundle: locateanything-3b.bundle
+  build:
+    max_sequence_length: 384
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: imagenette-localization-parity
+    benchmark: imagenette_localization_parity
+    samples: 10
+    request:
+      prompt_template: "Locate a single instance that matches the following description: {label}."
+      max_new_tokens: 32
+      temperature: 1.0
+      top_k: 1
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      min_localization_box_iou: 0.9
+      max_localization_point_distance: 10.0
+      max_normalized_edit_distance: 0.5
+      min_sample_pass_rate: 0.9
+
+performance:
+  - name: generate
+    benchmark: vision_language_performance
+    operation: generate
+    request:
+      image_path: ../data/test_img.jpeg
+      prompt: "Locate a single instance that matches the following description: white vehicle."
+      max_new_tokens: 32
+      temperature: 1.0
+      top_k: 1
+    measurement:
+      warmup: 3
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      precision: fp32
+      output_contract: localization
+      min_localization_box_iou: 0.9
+      max_localization_point_distance: 10.0
+      max_normalized_edit_distance: 0.5

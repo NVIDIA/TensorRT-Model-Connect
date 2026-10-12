@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: qwen3-0.6b-fp8
+candidate:
+  family: qwen
+  checkpoint: Qwen/Qwen3-0.6B
+  revision: c1899de289a04d12100db370d81485cdf75e47ca
+  task: text_generation
+  precision: fp16
+  bundle: qwen3-0.6b-fp8-fp16base.bundle
+  build:
+    max_sequence_length: 257
+    quantization: fp8
+
+accuracy:
+  - name: mmlu-continuation
+    benchmark: mmlu_continuation
+    samples: 10
+    prompt_token_limit: 192
+    truncation_side: left
+    reference:
+      precision: fp16
+    request: &greedy-generation
+      max_new_tokens: 64
+      temperature: 0.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      repetition_penalty: 1.0
+      use_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    gate:
+      min_pass_rate: 0.9
+      allowed_failures: 1
+
+performance:
+  - name: generate-1
+    benchmark: text_generation_performance
+    operation: generate
+    request:
+      <<: *greedy-generation
+      prompt: "What place is named in the title of the 1979 live album by rock legends Cheap Trick? Answer:"
+      max_new_tokens: 1
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: hf-transformers
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      precision: fp16
+      output_contract: exact-token-ids

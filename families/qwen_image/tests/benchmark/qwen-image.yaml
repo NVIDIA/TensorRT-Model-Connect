@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: trtmc.qualification/v1
+model: qwen-image
+candidate: {family: qwen_image, checkpoint: Qwen/Qwen-Image, revision: 75e0b4be04f60ec59a75f475837eced720f823b6, task: image_generation, precision: bf16, bundle: qwen-image.bundle, build: {image_height: 1024, image_width: 1024}}
+reference_environment: {requirements: ../../requirements.txt}
+accuracy:
+  - name: generated-media-parity
+    benchmark: task_output_parity
+    operation: generate_image
+    request: &request {prompt: A cat holding a sign that says hello world, negative_prompt: ' ', seed: 42, num_steps: 20, cfg_scale: 4.0, height: 1024, width: 1024}
+    reference: &reference {adapter: hf-diffusers, mode: hf-eager, precision: bf16, output_contract: media-artifact-parity, adapter_options: {cpu_offload: true, always_negative_prompt: true, guidance_parameter: true_cfg_scale}}
+    gate: {min_psnr: 5.0, min_ssim: 0.1}
+performance:
+  - {name: generate-image, benchmark: media_generation_performance, operation: generate_image, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: hf_diffusers, output_contract: media-shape}}

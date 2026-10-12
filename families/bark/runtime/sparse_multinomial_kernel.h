@@ -10,6 +10,10 @@
 
 namespace trtmc {
 
+// The kernel strides the curand offset by this and the policy sizes its offset
+// with it, so both sides read one value.
+inline constexpr uint64_t kGeneratorOffsetsPerCurandCall = 4;
+
 struct BarkTorchMultinomialExecutionPolicy {
     int32_t total_threads{0};
     uint64_t counter_offset{0};

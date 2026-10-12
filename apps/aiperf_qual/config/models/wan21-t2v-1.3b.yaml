@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The native pipeline does not produce a valid output in fp16 (its fp16 outputs are blank): time it in bf16.
+reference:
+  requirements: families/wan_t2v/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  timing_precision: bf16
+
+# The catalog request leaves guidance (guidance_scale and cfg_scale) at -1: TRTMC's Wan T2V default and the Diffusers
+# WanPipeline's are both 5.0, stated here for every request built on it (timing, VBench, replay parity).
+request: {guidance_scale: 5.0, cfg_scale: 5.0}

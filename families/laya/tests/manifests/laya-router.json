@@ -1,0 +1,41 @@
+{
+  "name": "laya-router",
+  "hf_id": "convaiinnovations/laya",
+  "hf_revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+  "family": "laya",
+  "task": "structured_decision",
+  "bundle": "laya-router.bundle",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "variant": "router",
+  "testcases": [
+    {
+      "name": "laya-router-english",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/email.json"
+      }
+    },
+    {
+      "name": "laya-router-hindi",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/hindi.json"
+      }
+    },
+    {
+      "name": "laya-router-spanish",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/spanish.json"
+      }
+    },
+    {
+      "name": "laya-router-typed",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/typed-email.json"
+      }
+    }
+  ]
+}

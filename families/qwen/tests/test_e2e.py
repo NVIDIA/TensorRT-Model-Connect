@@ -36,7 +36,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
-        assert manifest["task"] == "text_generation", path
+        assert manifest["task"] in {"text_generation", "embedding"}, path
         assert isinstance(manifest["precision"], str), path
         assert isinstance(manifest["max_sequence_length"], int), path
         assert isinstance(manifest["tensor_parallel_size"], int), path
@@ -103,13 +103,45 @@ def _required_environment(tp_size: int):
     return binary, runtime_root, torch
 
 
+def _validation_revision(manifest: dict) -> str | None:
+    if manifest.get("task") == "embedding" or not os.environ.get("TRTMC_E2E_BUNDLE"):
+        return manifest.get("hf_revision")
+    assert os.environ.get("TRTMC_E2E_PROFILE") == manifest["name"], (
+        "prebuilt validation must select the matching manifest profile"
+    )
+    revision = os.environ.get("TRTMC_E2E_CHECKPOINT_REVISION", "")
+    assert re.fullmatch(r"[0-9a-f]{40}", revision), "prebuilt validation requires an exact checkpoint revision"
+    if manifest.get("hf_revision"):
+        assert revision == manifest["hf_revision"], "prebuilt checkpoint differs from the family manifest"
+    return revision
+
+
+def _validation_bundle(manifest: dict, model_dir: Path, default: Path) -> Path:
+    value = os.environ.get("TRTMC_E2E_BUNDLE")
+    if value is None:
+        with evidence_stage("build"):
+            _build_bundle(manifest, model_dir, default)
+        return default
+    _validation_revision(manifest)
+    assert manifest["task"] == "text_generation", "prebuilt validation supports text generation only"
+    bundle = Path(value)
+    assert bundle.is_file() and bundle.stat().st_size > 0, bundle
+    from ..bundle_provenance import validate_prebuilt_bundle
+
+    provenance = validate_prebuilt_bundle(bundle, model_dir, manifest, _validation_revision(manifest))
+    record_evidence("inputs", {"prebuilt_bundle": str(bundle.resolve()),
+                               "bundle_build_provenance": provenance})
+    return bundle
+
+
 def _checkpoint(manifest: dict) -> Path:
     from huggingface_hub import snapshot_download
 
     path = Path(
         snapshot_download(
             repo_id=manifest["hf_id"],
-            revision=manifest.get("hf_revision"),
+            revision=_validation_revision(manifest),
+            local_files_only=True,
         )
     )
     assert (path / "config.json").is_file(), path
@@ -137,6 +169,12 @@ def _thresholds(case_name: str) -> dict[str, float]:
     thresholds = payload["threshold_overrides"]
     assert isinstance(thresholds, dict) and thresholds, path
     return thresholds
+
+
+def _reference_mode(case: dict) -> str:
+    mode = str(case.get("reference_mode", "hf"))
+    assert mode in {"hf", "contract_only"}, mode
+    return mode
 
 
 def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
@@ -168,7 +206,13 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
         timeout=30,
     )
     record_evidence("commands", {"argv": getattr(inspected, "args", None)})
-    record_evidence("native", {"stdout": getattr(inspected, "stdout", None), "stderr": getattr(inspected, "stderr", None)})
+    record_evidence(
+        "native",
+        {
+            "stdout": getattr(inspected, "stdout", None),
+            "stderr": getattr(inspected, "stderr", None),
+        },
+    )
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
     assert payload["task"] == "text_generation"
@@ -240,7 +284,13 @@ def _run_native(
         env=environment,
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native",
+        {
+            "stdout": getattr(completed, "stdout", None),
+            "stderr": getattr(completed, "stderr", None),
+        },
+    )
     if tp_size == 1:
         payload = json.loads(completed.stdout)
         payload["runtime_stderr"] = completed.stderr
@@ -355,18 +405,27 @@ def _is_sampling(case: dict) -> bool:
 
 def _record_text_diagnostics(native_ids: list[int], reference_ids: list[int]) -> None:
     common = min(len(native_ids), len(reference_ids))
-    prefix = next((index for index in range(common) if native_ids[index] != reference_ids[index]), common)
+    prefix = next(
+        (index for index in range(common) if native_ids[index] != reference_ids[index]), common
+    )
     identical = prefix == len(native_ids) == len(reference_ids)
-    record_evidence("diagnostics", {
-        "matching_prefix_tokens": prefix,
-        "native_token_count": len(native_ids),
-        "reference_token_count": len(reference_ids),
-        "first_difference": None if identical else {
-            "index": prefix,
-            "native_token_id": native_ids[prefix] if prefix < len(native_ids) else None,
-            "reference_token_id": reference_ids[prefix] if prefix < len(reference_ids) else None,
+    record_evidence(
+        "diagnostics",
+        {
+            "matching_prefix_tokens": prefix,
+            "native_token_count": len(native_ids),
+            "reference_token_count": len(reference_ids),
+            "first_difference": None
+            if identical
+            else {
+                "index": prefix,
+                "native_token_id": native_ids[prefix] if prefix < len(native_ids) else None,
+                "reference_token_id": reference_ids[prefix]
+                if prefix < len(reference_ids)
+                else None,
+            },
         },
-    })
+    )
 
 
 def _hf_reference(
@@ -557,10 +616,13 @@ def _contains_expected_answer(text: str, answer: str) -> bool:
     if not normalized_text or not normalized_answer:
         return False
     if normalized_answer.isalnum():
-        return re.search(
-            rf"(?<![a-z0-9]){re.escape(normalized_answer)}(?![a-z0-9])",
-            normalized_text,
-        ) is not None
+        return (
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(normalized_answer)}(?![a-z0-9])",
+                normalized_text,
+            )
+            is not None
+        )
     return normalized_answer in normalized_text
 
 
@@ -705,6 +767,17 @@ def test_fp8_text_gate_uses_prefix_fallback_and_expected_answer_or() -> None:
         )
 
 
+def test_native_kv_semantic_case_reaches_the_third_prefill_chunk() -> None:
+    _, case = _CASES["qwen3-0.6b-bf16-native-kv-two-chunk-parity"]
+    prompt_tokens = int(case["expected_prompt_tokens"])
+    chunk_limit = int(case["expected_prefill_chunk_limit"])
+
+    assert _reference_mode(case) == "hf"
+    assert int(case["expected_prefill_chunks"]) == 3
+    assert 2 * chunk_limit < prompt_tokens <= 3 * chunk_limit
+    assert _thresholds(case["name"])["contract_ned_threshold"] == 0.0
+
+
 @pytest.mark.parametrize("case_name", sorted(_CASES))
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
@@ -713,13 +786,19 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     tp_size = manifest["tensor_parallel_size"]
     binary, runtime_root, torch = _required_environment(tp_size)
     model_dir = _checkpoint(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": _validation_revision(manifest),
+        },
+    )
+    if manifest["task"] == "embedding":
+        return _embedding_e2e(manifest, case, model_dir, runtime_root, torch, tmp_path)
     prompt = _prompt(case)
     record_evidence("inputs", {"prompt": prompt})
-    bundle = tmp_path / manifest["bundle"]
-
-    with evidence_stage("build"):
-        _build_bundle(manifest, model_dir, bundle)
+    bundle = _validation_bundle(manifest, model_dir, tmp_path / manifest["bundle"])
     with evidence_stage("compare"):
         _assert_rank_sections(binary, bundle, tp_size)
     with evidence_stage("native"):
@@ -762,9 +841,10 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         record_evidence("thresholds", {"case_contract": case})
         return
 
-    if "expected_prompt_tokens" in case:
+    if _reference_mode(case) == "contract_only":
         from families.qwen.tests.runtime_receipt import assert_native_kv_receipt
 
+        assert "expected_prompt_tokens" in case
         prompt_tokens = _raw_prompt_token_count(model_dir, manifest, prompt)
         with evidence_stage("compare"):
             assert_native_kv_receipt(payload, case, prompt_tokens)
@@ -781,7 +861,17 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             payload["token_ids"],
             torch,
         )
-    record_evidence("reference", {"reference_ids": reference[0], "reference_text": reference[1], "sampling_support": reference[2], "actual_decoded": reference[3], "reference_logits": reference[4], "prompt_token_count": reference[5]})
+    record_evidence(
+        "reference",
+        {
+            "reference_ids": reference[0],
+            "reference_text": reference[1],
+            "sampling_support": reference[2],
+            "actual_decoded": reference[3],
+            "reference_logits": reference[4],
+            "prompt_token_count": reference[5],
+        },
+    )
     if not _is_sampling(case):
         _record_text_diagnostics(payload["token_ids"], reference[0])
     if _NATIVE_KV_FIELDS <= case.keys():
@@ -793,3 +883,110 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     record_evidence("thresholds", thresholds)
     with evidence_stage("compare"):
         _assert_correctness(payload, case, thresholds, *reference[:-1])
+
+
+def _embedding_consumer_binary() -> Path:
+    value = os.environ.get("TRTMC_NATIVE_BUILD_DIR")
+    assert value, "selected embedding E2E requires TRTMC_NATIVE_BUILD_DIR"
+    build_dir = Path(value)
+    assert build_dir.is_dir(), "selected embedding E2E requires a configured native build"
+    subprocess.run(
+        [
+            "cmake",
+            "--build",
+            str(build_dir),
+            "--parallel",
+            "8",
+            "--target",
+            "qwen_embedding_consumer",
+        ],
+        check=True,
+        timeout=600,
+    )
+    binary = build_dir / "families" / _FAMILY / "qwen_embedding_consumer"
+    assert binary.is_file(), "native build did not produce qwen_embedding_consumer"
+    return binary
+
+
+def _embedding_e2e(manifest, case, model_dir, runtime_root, torch, tmp_path):
+    from transformers import AutoModel, AutoTokenizer
+
+    prompt = case["prompt"]
+    bundle = tmp_path / manifest["bundle"]
+    with evidence_stage("build"):
+        build(
+            BuildRequest(
+                model_dir=model_dir,
+                output_path=bundle,
+                family="qwen",
+                task="embedding",
+                precision=manifest["precision"],
+                max_sequence_length=manifest["max_sequence_length"],
+            )
+        )
+    consumer = _embedding_consumer_binary()
+    with evidence_stage("native"):
+        completed = subprocess.run(
+            [str(consumer), str(bundle), str(runtime_root), prompt],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=True,
+        )
+        actual = np.asarray(json.loads(completed.stdout), dtype=np.float32)
+    record_evidence("native", {"embedding": actual.tolist(), "interface": "text_to_embedding"})
+    with evidence_stage("reference"):
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir, local_files_only=True, trust_remote_code=False
+        )
+        model = (
+            AutoModel.from_pretrained(
+                model_dir,
+                local_files_only=True,
+                trust_remote_code=False,
+                torch_dtype=torch.bfloat16,
+            )
+            .to("cuda")
+            .eval()
+        )
+        inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=False)
+        eos = int(model.config.eos_token_id)
+        if int(inputs["input_ids"][0, -1]) != eos:
+            inputs["input_ids"] = torch.cat([inputs["input_ids"], torch.tensor([[eos]])], dim=1)
+            inputs["attention_mask"] = torch.cat(
+                [
+                    inputs["attention_mask"],
+                    torch.ones((1, 1), dtype=inputs["attention_mask"].dtype),
+                ],
+                dim=1,
+            )
+        assert inputs["input_ids"].shape[1] <= manifest["max_sequence_length"]
+        inputs = {key: value.to("cuda") for key, value in inputs.items()}
+        with torch.inference_mode():
+            hidden = model(**inputs).last_hidden_state
+            expected = (
+                torch.nn.functional.normalize(hidden[:, -1, :], p=2, dim=-1)[0]
+                .float()
+                .cpu()
+                .numpy()
+            )
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+    record_evidence(
+        "reference", {"embedding": expected.tolist(), "hf_revision": manifest["hf_revision"]}
+    )
+    record_evidence(
+        "thresholds",
+        {"cosine_similarity": 0.99, "l2_distance": 0.1, "embedding_norm_tolerance": 0.001},
+    )
+    with evidence_stage("compare"):
+        assert actual.shape == expected.shape == (1024,)
+        assert np.isfinite(actual).all() and np.isfinite(expected).all()
+        assert abs(float(np.linalg.norm(actual)) - 1) <= 0.001
+        assert abs(float(np.linalg.norm(expected)) - 1) <= 0.001
+        assert (
+            float(np.dot(actual, expected) / (np.linalg.norm(actual) * np.linalg.norm(expected)))
+            >= 0.99
+        )
+        assert float(np.linalg.norm(actual - expected)) <= 0.1

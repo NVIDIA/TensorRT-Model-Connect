@@ -27,7 +27,7 @@ from .standard_decoder_builder import build_standard_decoder_engine
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
+    from .build_request import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -359,8 +359,54 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
     return runtime
 
 
+# The split layout stores the weights twice: a prefill engine with a dynamic
+# sequence axis plus a decode engine with a static Sq=1 graph. That duplication
+# buys decode throughput - measured with apps/benchmark at about 6% on
+# gemma-3-4b over 200 tokens - and it is worth paying while the pair fits.
+#
+# It stops being a trade when the pair cannot be loaded. The qualification
+# target is an L40S, which reports 46068 MiB, so about 45 GiB total and roughly
+# 44 GiB once the driver and CUDA context are accounted for.
+#
+# 19 GiB per engine puts a pair at 38 GiB and leaves about 6 GiB for the KV
+# cache, activations and TensorRT scratch. Measured with the estimator below:
+# gemma-2-2b 4.9 GiB, gemma-3-270m 0.5 GiB, gemma-3-1b 2.0 GiB, gemma-3-4b
+# 8.9 GiB, gemma-3-12b 25.0 GiB, gemma-3-27b 55.6 GiB. So everything up to 4b
+# keeps the split pair, while 12b and 27b build a single plan - 12b's pair is
+# 50 GiB and would not load on the target device at all.
+#
+# Erring low is safe and erring high is not: falling back unnecessarily costs
+# about 6% of decode, while staying on split when the pair does not fit cannot
+# be loaded.
+_MAX_SPLIT_ENGINE_BYTES = 19 * 1024**3
+
+# A serialized plan runs a little over the raw weights. Checked against two
+# measured points: gemma-3-4b's engines are 8.5 GiB each and this returns
+# 8.9 GiB; TensorRT asked 52.9 GiB for gemma-3-27b and this returns 55.6 GiB.
+_PLAN_OVERHEAD = 1.05
+
+
+def _decoder_engine_bytes(weights: "WeightDict", precision: str) -> int:
+    """Roughly what one decoder engine will occupy on the device."""
+    element = 2 if str(precision).lower() in {"fp16", "bf16"} else 4
+    parameters = sum(int(getattr(value, "size", 0)) for value in weights.values())
+    return int(parameters * element * _PLAN_OVERHEAD)
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Gemma bundle through family-owned code only."""
+    from .build_request import coerce_request
+
+    request = coerce_request(request)
+    from .edge_llm.config import GemmaBuildRequest
+
+    if isinstance(request, GemmaBuildRequest) and request.execution is not None:
+        from .edge_llm.builder import build as build_pair
+
+        request.execution.validate_local()
+        build_pair(request, writer, request.execution)
+        return
+
     if request.dynamic_kv_cache:
         raise NotImplementedError("gemma does not support dynamic_kv_cache")
 
@@ -440,6 +486,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 parallel_config=parallel.for_rank(rank),
             )
             writer.add_bytes(f"engine.rank{rank}.plan", plan)
+        layout = "dual_profile"
+    elif _decoder_engine_bytes(weights, precision) > _MAX_SPLIT_ENGINE_BYTES:
+        # One plan carrying both profiles, so the weights are stored once.
+        config.raw["_decoder_engine_role"] = "dual_profile"
+        plan = model.build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            quant_ctx=None,
+            verbose=bool(request.verbose),
+            parallel_config=parallel,
+        )
+        config.raw.pop("_decoder_engine_role", None)
+        writer.add_bytes("engine.plan", plan)
         layout = "dual_profile"
     else:
         config.raw["_decoder_engine_role"] = "prefill"

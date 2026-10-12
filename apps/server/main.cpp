@@ -4,11 +4,15 @@
  */
 
 #include "server/native_worker.h"
-#include "trtmc/runtime/family_loader.h"
+#include "trtmc/core.hpp"
 
 #include <array>
 #include <cerrno>
+#include <csignal>
 #include <cstdint>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -43,6 +47,16 @@ std::uint64_t positive_integer(const std::string& value, const std::string& opti
 }
 
 int worker_main(int argc, char** argv) {
+#ifdef __linux__
+    // Workers use separate process groups. Ensure a frontend crash/forced
+    // shutdown also ends native generation instead of leaving an orphan lane.
+    const auto parent = getppid();
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0)
+        throw std::system_error(errno, std::generic_category(),
+                                "cannot set worker parent-death signal");
+    if (getppid() != parent)
+        return 1;
+#endif
     if (argc < 3)
         throw std::invalid_argument("_serve-worker requires a bundle path");
     const std::string bundle = argv[2];
@@ -63,8 +77,8 @@ int worker_main(int argc, char** argv) {
         else
             throw std::invalid_argument("unknown _serve-worker option: " + option);
     }
-    auto task = trtmc::load_task(bundle, runtime_root, kv_cache_size, runtime_cache, cuda_graphs);
-    return trtmc::server::run_text_worker(*task, std::cin, std::cout);
+    const trtmc::LoadOptions options{runtime_root, kv_cache_size, runtime_cache, cuda_graphs};
+    return trtmc::server::run_bundle_worker(bundle, options, std::cin, std::cout);
 }
 
 std::filesystem::path executable_path() {

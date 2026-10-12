@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: deepseek-ocr
+candidate:
+  family: deepseek_ocr
+  checkpoint: deepseek-ai/DeepSeek-OCR-2
+  revision: aaa02f3811945a91062062994c5c4a3f4c0af2b0
+  task: vision_language_generation
+  precision: fp16
+  trust_remote_code: true
+  bundle: deepseek-ocr.bundle
+  build:
+    max_sequence_length: 4096
+    fp32_layers: [6, 7, 8, 9, 10, 11, 12]
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: ocrbench-v2-parity
+    benchmark: ocrbench_v2_parity
+    samples: 10
+    request:
+      max_new_tokens: 300
+      temperature: 1.0
+      top_k: 1
+    reference:
+      command: reference.py
+      precision: bf16
+    gate:
+      max_normalized_edit_distance: 0.5
+      min_sample_pass_rate: 0.9
+
+performance:
+  - name: generate
+    benchmark: vision_language_pipeline_performance
+    operation: generate
+    request:
+      image_path: ../data/orc_test_img.jpeg
+      prompt: Extract the text from this image.
+      max_new_tokens: 300
+      temperature: 1.0
+      top_k: 1
+    measurement:
+      warmup: 3
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      precision: bf16
+      output_contract: ocr-text
+      max_normalized_edit_distance: 0.5
+      required_substrings:
+        - Architecture
+        - "Attention:Standard Q/K/V/O"
+        - "RoPE:Standard rotary position embeddings"
+        - "Layer 0:Dense SwiGLU MLP"
+        - "Layers 1-11:MoE"
+        - "Vision: SAM ViT-B + Qwen2 encoder"

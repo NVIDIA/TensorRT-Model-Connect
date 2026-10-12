@@ -166,7 +166,7 @@ def _apply_block_scales(values: np.ndarray, scale_inv: np.ndarray) -> np.ndarray
 
 
 
-# ModelOpt MIXED_PRECISION checkpoints (RadixArk/Qwen3.8-27B-NVFP4) carry two
+# ModelOpt MIXED_PRECISION checkpoints (nvidia/Qwen3.8-27B-NVFP4) carry two
 # schemes side by side, described by quantization_config.config_groups:
 #
 #   FP8   attention and DeltaNet projections: float8_e4m3 weights with a single

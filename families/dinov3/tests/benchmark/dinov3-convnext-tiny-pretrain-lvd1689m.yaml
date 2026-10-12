@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: dinov3-convnext-tiny-pretrain-lvd1689m
+candidate:
+  family: dinov3
+  checkpoint: facebook/dinov3-convnext-tiny-pretrain-lvd1689m
+  revision: 10d30274b4d445111e2d5bf75ac93bbd94db274b
+  task: image_features
+  precision: fp16
+  bundle: dinov3-convnext-tiny-pretrain-lvd1689m.bundle
+  build:
+    max_sequence_length: 1
+
+accuracy:
+  - name: beans-knn-parity
+    benchmark: beans_image_feature_knn
+    bank_samples_per_class: 24
+    query_samples_per_class: 16
+    knn_k: 10
+    knn_temperature: 0.07
+    reference:
+      command: reference.py
+      precision: fp32
+      batch_size: 16
+    gate:
+      min_pooler_cosine: 0.999
+      min_vector_pass_rate: 1.0
+      min_knn_top1_agreement: 0.98
+      max_knn_accuracy_drop_from_hf: 0.02
+
+performance:
+  - name: extract-features
+    benchmark: image_features_performance
+    operation: extract_features
+    request:
+      image_path: ../data/test_img.jpeg
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      precision: fp32
+      output_contract: image-features-shape

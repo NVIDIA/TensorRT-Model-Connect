@@ -10,6 +10,7 @@ add_library(trtmc_model_bark SHARED
   plugin.cpp
   plugin_helpers.cpp
   sampler.cpp
+  sparse_multinomial_policy.cpp
   sparse_multinomial_kernel.cu
 )
 
@@ -83,4 +84,22 @@ if(TRTMC_BUILD_TESTS)
     -Wall -Wextra -Wpedantic
   )
   add_test(NAME bark_sampler_alloc COMMAND test_bark_sampler_alloc)
+
+  # Compiles the host multinomial policy against CPU CUDA stubs defined in the
+  # test, so a failed device query can be injected without a GPU or cudart.
+  add_executable(test_bark_multinomial_policy
+    ${PROJECT_SOURCE_DIR}/families/bark/tests/cpp/test_bark_multinomial_policy.cpp
+    sparse_multinomial_policy.cpp
+  )
+  target_include_directories(test_bark_multinomial_policy PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_bark_multinomial_policy SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_compile_options(test_bark_multinomial_policy PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME bark_multinomial_policy COMMAND test_bark_multinomial_policy)
 endif()

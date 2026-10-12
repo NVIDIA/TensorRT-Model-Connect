@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -50,6 +51,36 @@ bool read_throws(const std::filesystem::path& path) {
     } catch (const std::runtime_error&) {
         return true;
     }
+}
+
+/// Verify bounded-chunk section boundaries, empty sections and late I/O failures.
+void test_copy_section(const std::filesystem::path& directory) {
+    const auto path = directory / "stream.bundle";
+    const std::string payload(2 * 64 * 1024 + 17, 'x');
+    const std::string header =
+        R"({"format":1,"family":"fake","task":"text","backend":"fake","sections":{"data":{"offset":3,"length":)" +
+        std::to_string(payload.size()) + R"(},"empty":{"offset":0,"length":0}}})";
+    write_bundle(path, header, "PRE" + payload + "POST");
+    const trtmc::BundleReader reader(path.string());
+    std::ostringstream output;
+    reader.copy_section("data", output);
+    check(output.str() == payload, "stream copy preserves boundaries across chunks");
+    reader.copy_section("empty", output);
+    check(output.str() == payload, "empty section appends nothing");
+    auto fails = [&](const char* section, std::ostream& destination) {
+        try {
+            reader.copy_section(section, destination);
+            return false;
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+    };
+    check(fails("missing", output), "stream copy rejects missing sections");
+    std::ostringstream broken;
+    broken.setstate(std::ios::badbit);
+    check(fails("data", broken), "stream copy reports output failure");
+    std::filesystem::resize_file(path, 16 + header.size() + 3 + payload.size() - 1);
+    check(fails("data", output), "stream copy detects truncation after validation");
 }
 
 } // namespace
@@ -103,6 +134,7 @@ int main() {
         "PLAN");
     check(read_throws(out_of_bounds), "out of bounds section rejected");
 
+    test_copy_section(directory);
     std::filesystem::remove_all(directory);
     std::cerr << (failures == 0 ? "ALL PASSED\n" : "SOME FAILED\n");
     return failures;

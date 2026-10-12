@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: sam3
+candidate:
+  family: sam3
+  checkpoint: facebook/sam3
+  revision: 3c879f39826c281e95690f02c7821c4de09afae7
+  task: text_prompted_segmentation
+  precision: fp32
+  bundle: sam3.bundle
+  build: {}
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: imagenette-text-instance-parity
+    benchmark: imagenette_text_prompted_instance_parity
+    samples: 10
+    request: {}
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      min_mask_iou: 0.7
+      min_mask_match_rate: 1.0
+      min_box_iou: 0.95
+      max_score_abs_error: 0.05
+      min_sample_pass_rate: 0.9
+
+performance:
+  - name: segment-prompted
+    benchmark: text_prompted_segmentation_performance
+    operation: segment_prompted
+    request:
+      image_path: ../data/test_img.jpeg
+      prompt: car
+    measurement:
+      warmup: 3
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: pytorch-eager
+      reference_backend: transformers
+      precision: fp32
+      output_contract: instance-mask-parity
+      min_mask_iou: 0.7
+      min_box_iou: 0.95
+      max_score_abs_error: 0.05

@@ -6,23 +6,36 @@
 #pragma once
 
 #include "families/timm_mobilevit/runtime/image_preprocess_seam.h"
+#include "trtmc/internal/features.h"
+#include "trtmc/internal/model.h"
 #include "trtmc/runtime/trt_module.h"
-#include "trtmc/task.h"
 
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace trtmc {
 
-class TimmMobileViTImageClassificationPipeline final : public IImageClassification {
+class TimmMobileViTImageClassificationPipeline final : public internal::IModel,
+                                                       public internal::IImageToClassScores {
   public:
     explicit TimmMobileViTImageClassificationPipeline(
-        std::unique_ptr<ITrtModule> model, TimmMobileViTPreprocessConfig preprocess_config = {});
+        std::unique_ptr<ITrtModule> model, TimmMobileViTPreprocessConfig preprocess_config,
+        std::int32_t num_classes, std::string vocabulary_id, std::vector<std::string> labels);
 
-    ClassificationResult classify(const float* pixels, int32_t height, int32_t width) override;
+    const char* task() const noexcept override { return IImageToClassScores::kTask.data(); }
+    std::vector<internal::TaskInstance> task_bindings() override {
+        return {internal::bind<internal::IImageToClassScores>(*this)};
+    }
+    internal::LabelScoresResult run(const internal::ImageToClassScoresRequest& request,
+                                    internal::ConfigView config) override;
 
   private:
     std::unique_ptr<ITrtModule> model_;
     TimmMobileViTPreprocessConfig preprocess_config_;
+    std::int32_t num_classes_;
+    std::string vocabulary_id_;
+    std::vector<std::string> labels_;
 };
 
 } // namespace trtmc

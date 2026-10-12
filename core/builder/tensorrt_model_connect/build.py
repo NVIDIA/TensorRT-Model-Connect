@@ -7,8 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import os
+import platform
 import re
+import shlex
 import sys
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -70,6 +75,93 @@ class BuildRequest:
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
             raise ValueError("graph_transform must be callable when provided")
+
+
+def subprocess_environment(
+    overrides: dict[str, str], *, prepend_paths: dict[str, str] | None = None
+) -> dict[str, str]:
+    """Copy the parent environment for one child without mutating process state.
+
+    Callers own explicit tool settings; this helper only merges values and
+    prepends search paths using the executing platform's path separator.
+    """
+    environment = os.environ.copy()
+    environment.update(overrides)
+    for name, value in (prepend_paths or {}).items():
+        previous = environment.get(name)
+        environment[name] = value + (os.pathsep + previous if previous else "")
+    return environment
+
+
+def cmake_prefixes() -> list[Path]:
+    """Return explicit standard CMake prefixes followed by the Python prefix."""
+    prefixes = [
+        Path(value) for value in os.environ.get("CMAKE_PREFIX_PATH", "").split(os.pathsep) if value
+    ]
+    return [*prefixes, Path(sys.prefix)]
+
+
+def _cuda_toolkit_version() -> str:
+    """Identify the selected native compiler, not cuda-python's build toolkit."""
+    compiler = os.environ.get("CUDACXX")
+    try:
+        command = shlex.split(compiler) if compiler else []
+    except ValueError as error:
+        raise RuntimeError(f"Invalid CUDACXX command: {error}") from error
+    if not compiler:
+        root = next(
+            (os.environ[key] for key in ("CUDAToolkit_ROOT", "CUDA_HOME", "CUDA_PATH")
+             if os.environ.get(key)), None
+        )
+        compiler = str(Path(root) / "bin" / "nvcc") if root else shutil.which("nvcc")
+        command = [compiler] if compiler else []
+    if not command:
+        raise RuntimeError("CUDA toolkit not found; set CUDAToolkit_ROOT or CUDACXX")
+    try:
+        result = subprocess.run(
+            [*command, "--version"], check=True, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"Cannot query CUDA toolkit from {compiler}: {error}") from error
+    version = re.search(r"release\s+(\d+\.\d+)", result.stdout)
+    if version is None:
+        raise RuntimeError(f"Cannot identify CUDA toolkit from {compiler} --version")
+    return version.group(1)
+
+
+def detect_local_platform() -> dict:
+    """Return executing GPU and native SDK identity without selecting a model.
+
+    Returns:
+        OS/release, CPU architecture, GPU SM, CUDA and TensorRT versions.
+
+    Raises:
+        ImportError: Native SDK Python bindings are unavailable.
+        RuntimeError: CUDA cannot identify the executing device.
+    """
+    import tensorrt as trt
+    from cuda.bindings import runtime
+
+    def checked(result):
+        if int(result[0]) != 0:
+            raise RuntimeError(f"CUDA device discovery failed: {result[0]}")
+        return result[1]
+
+    device = checked(runtime.cudaGetDevice())
+    gpu = checked(runtime.cudaGetDeviceProperties(device))
+    cuda_version = _cuda_toolkit_version()
+    try:
+        release = platform.freedesktop_os_release() if sys.platform == "linux" else {}
+    except OSError:
+        release = {}
+    return {
+        "os": sys.platform,
+        "os_version": release.get("VERSION_ID", platform.release()),
+        "arch": platform.machine(),
+        "sm": gpu.major * 10 + gpu.minor,
+        "cuda_version": cuda_version,
+        "tensorrt_version": trt.__version__,
+    }
 
 
 def _validate_id(field: str, value: object) -> str:

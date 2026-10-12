@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: trtmc.qualification/v1
+model: lance-3b-x2t-image
+candidate: {family: lance, checkpoint: bytedance-research/Lance, revision: 7395315758865e6f56ab87ad06a88c7ac172f056, task: vision_language_generation, precision: bf16, bundle: lance-3b-x2t-image.bundle, build: {max_sequence_length: 384}}
+reference_environment:
+  requirements: ../../requirements.txt
+  build_isolation: false
+  paths: {reference_repo: trtmc-reference/Lance}
+accuracy:
+  - name: generated-text-parity
+    benchmark: task_output_parity
+    operation: generate
+    request: &request {prompt: "What color is the vehicle in this image? Answer in one word.", image_path: ../data/test_img.jpeg, max_new_tokens: 10}
+    reference: &reference {script: tests/benchmark/reference.py, mode: pytorch-eager, precision: bf16, output_contract: normalized-text, adapter_options: {model_subdir: Lance_3B, vit_subdir: Qwen2.5-VL-ViT, resolution: image_768res}}
+    gate: {max_normalized_edit_distance: 0.15}
+performance:
+  - {name: generate, benchmark: vision_language_pipeline_performance, operation: generate, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: upstream_lance, output_contract: exact-text}}

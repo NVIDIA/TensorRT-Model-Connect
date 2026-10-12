@@ -1,0 +1,8 @@
+{
+  "model": "clef",
+  "state": "The checkout is working normally. All orders are completing, and no service is down.",
+  "questions": {
+    "outage": {"type": "noul", "instructions": "Is a service down?"},
+    "urgency": {"type": "score", "criteria": ["Can wait", "This week", "Today"]}
+  }
+}

@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: dpr-ctx-encoder
+candidate:
+  family: dpr
+  checkpoint: facebook/dpr-ctx_encoder-single-nq-base
+  revision: bb21a3c2b1656d60c6a8e920283bc40dabddadb8
+  task: encoding
+  precision: fp16
+  bundle: dpr-ctx-encoder.bundle
+  build:
+    max_sequence_length: 256
+
+accuracy:
+  - name: stsbenchmark-parity
+    benchmark: stsbenchmark_embedding_parity
+    samples: 50
+    reference:
+      precision: fp32
+      model_class: transformers.DPRContextEncoder
+      tokenizer_class: transformers.DPRContextEncoderTokenizerFast
+    gate:
+      min_vector_cosine: 0.99
+      min_vector_pass_rate: 1.0
+      max_pair_cosine_abs_delta: 0.02
+
+performance:
+  - name: encode
+    benchmark: encoder_performance
+    operation: encode
+    request:
+      prompt: The capital of France is Paris.
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: hf-transformers
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      precision: fp32
+      output_contract: embedding-shape

@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime_api.h>
@@ -39,6 +40,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -52,6 +54,7 @@ using Clock = std::chrono::steady_clock;
 struct Arguments {
     std::string request_path;
     std::string output_path;
+    bool serve{false};
 };
 
 struct Timing {
@@ -69,14 +72,25 @@ Arguments parse_arguments(int argc, char** argv) {
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--help" || argument == "-h") {
-            std::cout << "trtmc_benchmark_worker --request REQUEST.json --output RESULT.json\n";
+            std::cout << "trtmc_benchmark_worker --request REQUEST.json --output RESULT.json\n"
+                         "trtmc_benchmark_worker --serve SESSION.json   (JSONL on stdin/stdout)\n";
             std::exit(0);
         }
-        if (argument != "--request" && argument != "--output")
+        if (argument != "--request" && argument != "--output" && argument != "--serve")
             throw std::invalid_argument("unknown argument: " + argument);
         if (++index >= argc)
             throw std::invalid_argument(argument + " requires a path");
-        (argument == "--request" ? result.request_path : result.output_path) = argv[index];
+        if (argument == "--serve") {
+            result.serve = true;
+            result.request_path = argv[index];
+        } else {
+            (argument == "--request" ? result.request_path : result.output_path) = argv[index];
+        }
+    }
+    if (result.serve) {
+        if (!result.output_path.empty())
+            throw std::invalid_argument("--serve cannot be combined with --output");
+        return result;
     }
     if (result.request_path.empty() || result.output_path.empty())
         throw std::invalid_argument("--request and --output are required");
@@ -96,7 +110,8 @@ void write_json(const std::string& path, const Json& value) {
     std::ofstream output(path);
     if (!output)
         throw std::runtime_error("cannot write " + path);
-    output << value.dump(2) << '\n';
+    // Text cut inside a multi-byte character is invalid UTF-8: replace, do not throw.
+    output << value.dump(2, ' ', false, Json::error_handler_t::replace) << '\n';
     output.close();
     if (!output)
         throw std::runtime_error("failed to write " + path);
@@ -187,6 +202,14 @@ trtmc::ImageGenerationConfig image_config(const Json& request) {
     config.negative_prompt = optional_value<std::string>(request, "negative_prompt", "");
     config.height = optional_value<std::int32_t>(request, "height", 0);
     config.width = optional_value<std::int32_t>(request, "width", 0);
+    // Latent replay, as the CLI's --initial-latents-raw: raw float32 in the loaded family's latent
+    // layout; without it the family draws its own noise.
+    if (request.contains("initial_latents_path")) {
+        const auto path = request.at("initial_latents_path").get<std::string>();
+        if (path.empty())
+            throw std::invalid_argument("initial_latents_path must name a raw float32 file");
+        config.initial_latents = read_float32(path);
+    }
     return config;
 }
 
@@ -265,6 +288,7 @@ Json image_observation(const std::vector<trtmc::ImageResult>& results) {
     Json value = {{"generated_images", results.size()},
                   {"batch_size", results.size()},
                   {"generated_frames", frames},
+                  {"media_count", frames},
                   {"output_elements", pixels}};
     if (!results.empty()) {
         value["height"] = results.front().height;
@@ -276,39 +300,77 @@ Json image_observation(const std::vector<trtmc::ImageResult>& results) {
     return value;
 }
 
+auto legacy_image_artifact_writer(std::string prefix) {
+    return [prefix = std::move(prefix),
+            iteration = std::uint64_t{0}](const std::vector<trtmc::ImageResult>& results) mutable {
+        ++iteration;
+        Json paths = Json::array();
+        std::size_t artifact_index = 0;
+        for (const auto& result : results) {
+            if (result.height <= 0 || result.width <= 0 || result.channels <= 0 ||
+                result.num_frames <= 0)
+                throw std::runtime_error("generated media has invalid dimensions");
+            const auto frame_elements =
+                static_cast<std::uint64_t>(result.height) * result.width * result.channels;
+            const auto expected = frame_elements * static_cast<std::uint64_t>(result.num_frames);
+            if (expected != result.pixels.size())
+                throw std::runtime_error("generated media has inconsistent pixel storage");
+            for (int frame = 0; frame < result.num_frames; ++frame) {
+                const auto path = prefix + "." + std::to_string(iteration) + "." +
+                                  std::to_string(artifact_index++) + ".png";
+                const auto offset = static_cast<std::size_t>(frame_elements) * frame;
+                trtmc::cli::io::save_png(
+                    path, {result.pixels.data() + offset, static_cast<std::size_t>(frame_elements)},
+                    result.width, result.height, result.channels);
+                paths.push_back(std::filesystem::path(path).filename().string());
+            }
+        }
+        return paths;
+    };
+}
+
 Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& timing) {
     const auto config = image_config(request);
-    const std::string prompt =
-        request.at("prompt").is_array() ? "" : request.at("prompt").get<std::string>();
+    const bool batch_request = request.at("prompt").is_array();
+    const std::string prompt = batch_request ? "" : request.at("prompt").get<std::string>();
     std::function<std::vector<trtmc::ImageResult>()> invoke;
     std::optional<Image> cached;
 
-    if (auto* batch = dynamic_cast<trtmc::IImageBatchGeneration*>(&task)) {
+    if (batch_request) {
+        if (request.contains("initial_latents_path"))
+            throw std::invalid_argument("a scalar replay path does not define batch replay inputs");
+        auto& batch =
+            require_interface<trtmc::IImageBatchGeneration>(task, "IImageBatchGeneration");
         const auto prompts = request.at("prompt").get<std::vector<std::string>>();
         auto seeds = optional_value<std::vector<std::uint32_t>>(request, "seeds", {});
         if (seeds.empty())
             seeds.assign(prompts.size(), static_cast<std::uint32_t>(std::max(config.seed, 0)));
-        invoke = [batch, prompts, seeds, config]() {
-            return batch->generate_image_batch(prompts, seeds, config);
+        invoke = [&batch, prompts, seeds, config]() {
+            return batch.generate_image_batch(prompts, seeds, config);
         };
-    } else if (auto* edit = dynamic_cast<trtmc::IImageEditing*>(&task)) {
+    } else if (request.contains("image_path") &&
+               dynamic_cast<trtmc::IImageEditing*>(&task) != nullptr) {
+        auto& edit = require_interface<trtmc::IImageEditing>(task, "IImageEditing");
         const std::string path = request.at("image_path").get<std::string>();
         if (!timing.asset_loading_included)
             cached = read_image(path);
-        invoke = [edit, prompt, path, config, &cached]() {
+        invoke = [&edit, prompt, path, config, &cached]() {
             if (cached) {
-                return std::vector<trtmc::ImageResult>{edit->generate_image(
+                return std::vector<trtmc::ImageResult>{edit.generate_image(
                     prompt, cached->pixels.data(), cached->height, cached->width, config)};
             }
             const Image image = read_image(path);
-            return std::vector<trtmc::ImageResult>{edit->generate_image(
+            return std::vector<trtmc::ImageResult>{edit.generate_image(
                 prompt, image.pixels.data(), image.height, image.width, config)};
         };
-    } else if (auto* world = dynamic_cast<trtmc::IWorldModelGeneration*>(&task)) {
+    } else if (request.contains("image_path") &&
+               dynamic_cast<trtmc::IWorldModelGeneration*>(&task) != nullptr) {
+        auto& world =
+            require_interface<trtmc::IWorldModelGeneration>(task, "IWorldModelGeneration");
         const std::string path = request.at("image_path").get<std::string>();
         if (!timing.asset_loading_included)
             cached = read_image(path);
-        invoke = [world, prompt, path, config, request, &cached]() {
+        invoke = [&world, prompt, path, config, request, &cached]() {
             std::optional<Image> loaded;
             if (!cached)
                 loaded = read_image(path);
@@ -323,7 +385,7 @@ Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& t
                 optional_value<std::vector<float>>(request, "camera_intrinsics", {});
             value.num_frames = optional_value<std::int32_t>(request, "num_frames", 0);
             value.generation = config;
-            return std::vector<trtmc::ImageResult>{world->generate_world(value)};
+            return std::vector<trtmc::ImageResult>{world.generate_world(value)};
         };
     } else {
         auto& image = require_interface<trtmc::IImageGeneration>(task, "IImageGeneration");
@@ -331,7 +393,15 @@ Json run_generate_image(trtmc::ITask& task, const Json& request, const Timing& t
             return std::vector<trtmc::ImageResult>{image.generate_image(prompt, config)};
         };
     }
-    return measure(timing, invoke, image_observation);
+    auto write_images =
+        legacy_image_artifact_writer(request.at("_artifact_prefix").get<std::string>());
+    return measure(timing, invoke, [&](const auto& results) {
+        auto output = image_observation(results);
+        output[output.value("media_type", "image") == "video" ? "frame_artifacts"
+                                                              : "image_artifacts"] =
+            write_images(results);
+        return output;
+    });
 }
 
 Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& timing) {
@@ -342,9 +412,15 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
         optional_value<std::int32_t>(request, "talker_max_new_tokens", 0);
     config.seed = optional_value<std::int32_t>(request, "seed", -1);
     const std::string prompt = request.at("prompt").get<std::string>();
+    auto write_audio = [prefix = request.at("_artifact_prefix").get<std::string>(),
+                        iteration = std::uint64_t{0}](const trtmc::AudioResult& result) mutable {
+        const auto path = prefix + "." + std::to_string(++iteration) + ".wav";
+        trtmc::cli::io::write_wav(result, path);
+        return std::filesystem::path(path).filename().string();
+    };
     return measure(
         timing, [&]() { return interface.generate_audio(prompt, config); },
-        [](const trtmc::AudioResult& result) {
+        [&](const trtmc::AudioResult& result) {
             const double seconds =
                 result.sample_rate > 0
                     ? static_cast<double>(result.samples.size()) / result.sample_rate
@@ -352,7 +428,8 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
             return Json{{"output_samples", result.samples.size()},
                         {"num_samples", result.samples.size()},
                         {"output_audio_seconds", seconds},
-                        {"sample_rate", result.sample_rate}};
+                        {"sample_rate", result.sample_rate},
+                        {"audio_artifact", write_audio(result)}};
         });
 }
 
@@ -366,6 +443,12 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
     config.max_new_tokens = optional_value<std::int32_t>(request, "max_new_tokens", 50);
     config.seed = optional_value<std::int32_t>(request, "seed", -1);
     config.tail_frames = optional_value<std::int32_t>(request, "tail_frames", 0);
+    auto write_audio = [prefix = request.at("_artifact_prefix").get<std::string>(),
+                        iteration = std::uint64_t{0}](const trtmc::AudioResult& result) mutable {
+        const auto path = prefix + "." + std::to_string(++iteration) + ".wav";
+        trtmc::cli::io::write_wav(result, path);
+        return std::filesystem::path(path).filename().string();
+    };
     return measure(
         timing,
         [&]() {
@@ -379,7 +462,7 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
                                 audio.sample_rate),
                 static_cast<double>(audio.samples.size()) / audio.sample_rate};
         },
-        [](const auto& value) {
+        [&](const auto& value) {
             const auto& result = value.first;
             return Json{{"input_audio_seconds", value.second},
                         {"output_audio_seconds",
@@ -388,7 +471,8 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
                              : 0.0},
                         {"output_samples", result.samples.size()},
                         {"num_samples", result.samples.size()},
-                        {"sample_rate", result.sample_rate}};
+                        {"sample_rate", result.sample_rate},
+                        {"audio_artifact", write_audio(result)}};
         });
 }
 
@@ -465,6 +549,75 @@ Json run_transcribe(trtmc::ITask& task, const Json& request, const Timing& timin
         });
 }
 
+template <class T>
+void write_binary_artifact(const std::string& path, const T* values, std::uint64_t count) {
+    if (count > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) / sizeof(T))
+        throw std::runtime_error("binary artifact is too large");
+    std::ofstream output(path, std::ios::binary);
+    output.exceptions(std::ios::badbit | std::ios::failbit);
+    output.write(reinterpret_cast<const char*>(values),
+                 static_cast<std::streamsize>(count * sizeof(T)));
+    output.close();
+}
+
+Json run_geometry(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& interface = require_interface<trtmc::IMonocularGeometry>(task, "IMonocularGeometry");
+    const auto path = request.at("image_path").get<std::string>();
+    std::optional<Image> cached;
+    if (!timing.asset_loading_included)
+        cached = read_image(path);
+    auto invoke = [&]() {
+        std::optional<Image> loaded;
+        if (!cached)
+            loaded = read_image(path);
+        const auto& image = cached ? *cached : *loaded;
+        return interface.estimate_geometry(image.pixels.data(), image.height, image.width);
+    };
+    std::optional<trtmc::GeometryResult> last;
+    for (int index = 0; index < timing.warmup; ++index)
+        last = invoke();
+    Json observations = Json::array();
+    for (int index = 0; index < timing.iterations; ++index) {
+        last.reset();
+        const auto started = Clock::now();
+        auto result = invoke();
+        const auto wall_ms = elapsed_ms(started);
+        last.emplace(std::move(result));
+        observations.push_back({{"runtime_e2e_wall_ms", wall_ms},
+                                {"geometry_images", 1},
+                                {"geometry_pixels", last->depth.size()}});
+    }
+    if (last->height <= 0 || last->width <= 0)
+        throw std::runtime_error("monocular geometry returned invalid dimensions");
+    const auto pixels = static_cast<std::size_t>(last->height) * last->width;
+    if (last->points.size() != pixels * 3 || last->depth.size() != pixels ||
+        last->mask.size() != pixels)
+        throw std::runtime_error("monocular geometry returned inconsistent output shapes");
+    const auto prefix = request.at("_artifact_prefix").get<std::string>();
+    write_binary_artifact(prefix + ".points.f32", last->points.data(), last->points.size());
+    write_binary_artifact(prefix + ".depth.f32", last->depth.data(), last->depth.size());
+    write_binary_artifact(prefix + ".mask.u8", last->mask.data(), last->mask.size());
+    Json intrinsics = Json::array();
+    for (int row = 0; row < 3; ++row)
+        intrinsics.push_back({last->intrinsics[row * 3], last->intrinsics[row * 3 + 1],
+                              last->intrinsics[row * 3 + 2]});
+    return {{"observations", std::move(observations)},
+            {"output_summary",
+             {{"geometry_images", 1},
+              {"geometry_pixels", pixels},
+              {"height", last->height},
+              {"width", last->width},
+              {"point_shape", {last->height, last->width, 3}},
+              {"valid_pixels", std::count(last->mask.begin(), last->mask.end(), std::uint8_t{1})},
+              {"normalized_intrinsics", std::move(intrinsics)},
+              {"units", "meters"},
+              {"camera_axes", {"right", "down", "forward"}},
+              {"intrinsics_coordinates", "normalized_uv"},
+              {"points_artifact", prefix + ".points.f32"},
+              {"depth_artifact", prefix + ".depth.f32"},
+              {"valid_mask_artifact", prefix + ".mask.u8"}}}};
+}
+
 Json run_segment(trtmc::ITask& task, const Json& request, const Timing& timing) {
     auto& interface = require_interface<trtmc::ISegmentation>(task, "ISegmentation");
     const Image image = read_image(request.at("image_path").get<std::string>());
@@ -475,7 +628,8 @@ Json run_segment(trtmc::ITask& task, const Json& request, const Timing& timing) 
                         {"num_masks", 1},
                         {"height", result.height},
                         {"width", result.width},
-                        {"mask_pixels", result.mask.size()}};
+                        {"mask_pixels", result.mask.size()},
+                        {"mask", result.mask}};
         });
 }
 
@@ -502,9 +656,19 @@ Json run_segment_prompted(trtmc::ITask& task, const Json& request, const Timing&
         };
     }
     return measure(timing, invoke, [](const trtmc::PromptedSegmentationResult& result) {
-        return Json{{"segmented_images", 1},         {"generated_masks", result.num_masks},
-                    {"num_masks", result.num_masks}, {"height", result.height},
-                    {"width", result.width},         {"mask_pixels", result.masks.size()}};
+        if (result.boxes.size() % 4U != 0U)
+            throw std::runtime_error("prompted segmentation returned incomplete boxes");
+        Json boxes = Json::array();
+        for (std::size_t offset = 0; offset < result.boxes.size(); offset += 4U) {
+            boxes.push_back({result.boxes[offset], result.boxes[offset + 1U],
+                             result.boxes[offset + 2U], result.boxes[offset + 3U]});
+        }
+        return Json{
+            {"segmented_images", 1},         {"generated_masks", result.num_masks},
+            {"num_masks", result.num_masks}, {"height", result.height},
+            {"width", result.width},         {"mask_pixels", result.masks.size()},
+            {"masks", result.masks},         {"iou_scores", result.iou_scores},
+            {"boxes", std::move(boxes)},     {"box_coordinates", "original_image_pixels_xyxy"}};
     });
 }
 
@@ -526,10 +690,23 @@ Json run_detect(trtmc::ITask& task, const Json& request, const Timing& timing) {
     return measure(
         timing, [&]() { return interface.detect(image.pixels.data(), image.height, image.width); },
         [](const trtmc::ObjectDetectionResult& result) {
+            Json boxes = Json::array(), scores = Json::array(), classes = Json::array();
+            for (const auto& detection : result.boxes) {
+                boxes.insert(boxes.end(),
+                             {detection.x_min, detection.y_min, detection.x_max, detection.y_max});
+                scores.push_back(detection.score);
+                classes.push_back(detection.class_id);
+            }
             return Json{{"detected_images", 1},
                         {"detections", result.boxes.size()},
                         {"image_height", result.image_height},
-                        {"image_width", result.image_width}};
+                        {"image_width", result.image_width},
+                        {"boxes", std::move(boxes)},
+                        {"scores", std::move(scores)},
+                        {"class_ids", std::move(classes)},
+                        {"shape", {result.boxes.size(), 4}},
+                        {"coordinates", "xyxy"},
+                        {"units", "pixels"}};
         });
 }
 
@@ -545,6 +722,7 @@ Json run_extract_features(trtmc::ITask& task, const Json& request, const Timing&
         [](const trtmc::ImageFeaturesResult& result) {
             return Json{{"processed_images", 1},
                         {"last_hidden_state_shape", result.last_hidden_state_shape},
+                        {"pooler_output", result.pooler_output},
                         {"pooler_output_shape", result.pooler_output_shape},
                         {"feature_elements",
                          result.last_hidden_state.size() + result.pooler_output.size()}};
@@ -603,6 +781,73 @@ Json run_rerank(trtmc::ITask& task, const Json& request, const Timing& timing) {
         });
 }
 
+Json run_decide(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& interface = require_interface<trtmc::IStructuredDecision>(task, "IStructuredDecision");
+    auto prepare = [&]() {
+        trtmc::StructuredDecisionRequest value;
+        value.document = request.at("document").get<std::string>();
+        value.max_state_tokens = request.value("max_state_tokens", -1);
+        auto load = [](const std::string& path) {
+            const auto image = read_image(path);
+            trtmc::ImageResult result;
+            result.height = image.height;
+            result.width = image.width;
+            result.pixels.reserve(image.pixels.size());
+            for (float pixel : image.pixels)
+                result.pixels.push_back(std::nearbyint(pixel * 255.0F));
+            return result;
+        };
+        for (const auto& path : request.value("image_paths", std::vector<std::string>{}))
+            value.images.push_back(load(path));
+        for (const auto& paths :
+             request.value("video_frame_paths", std::vector<std::vector<std::string>>{})) {
+            if (paths.empty())
+                throw std::invalid_argument("video frames must not be empty");
+            trtmc::ImageResult video;
+            video.num_frames = 0;
+            for (const auto& path : paths) {
+                const auto frame = load(path);
+                if (video.num_frames &&
+                    (video.height != frame.height || video.width != frame.width))
+                    throw std::invalid_argument("video frame dimensions must match");
+                video.height = frame.height;
+                video.width = frame.width;
+                video.pixels.insert(video.pixels.end(), frame.pixels.begin(), frame.pixels.end());
+                ++video.num_frames;
+            }
+            value.videos.push_back(std::move(video));
+        }
+        return value;
+    };
+    std::optional<trtmc::StructuredDecisionRequest> cached;
+    if (!timing.asset_loading_included)
+        cached = prepare();
+    return measure(
+        timing,
+        [&]() {
+            if (cached)
+                return interface.decide(*cached);
+            const auto value = prepare();
+            return interface.decide(value);
+        },
+        [](const trtmc::StructuredDecisionResult& result) {
+            Json scores = Json::array();
+            std::size_t options = 0;
+            for (const auto& score : result.scores) {
+                options += score.option_ids.size();
+                scores.push_back({{"question_id", score.question_id},
+                                  {"option_ids", score.option_ids},
+                                  {"logits", score.logits},
+                                  {"probabilities", score.probabilities}});
+            }
+            return Json{{"questions", result.scores.size()},
+                        {"options", options},
+                        {"input_tokens", result.input_tokens},
+                        {"scores", scores},
+                        {"response", Json::parse(result.document)}};
+        });
+}
+
 Json run_embedding(trtmc::ITask& task, const Json& request, const Timing& timing, bool pooled) {
     const std::string prompt = request.at("prompt").get<std::string>();
     std::function<trtmc::EmbeddingResult()> invoke;
@@ -613,10 +858,12 @@ Json run_embedding(trtmc::ITask& task, const Json& request, const Timing& timing
         auto& interface = require_interface<trtmc::IEncoding>(task, "IEncoding");
         invoke = [&interface, prompt]() { return interface.encode(prompt); };
     }
-    return measure(timing, invoke, [](const trtmc::EmbeddingResult& result) {
+    return measure(timing, invoke, [pooled](const trtmc::EmbeddingResult& result) {
         return Json{{"embedding_vectors", 1},
                     {"embedding_elements", result.data.size()},
-                    {"dim", result.dim}};
+                    {"dim", result.dim},
+                    {"values", result.data},
+                    {"feature_kind", pooled ? "pooled" : "token"}};
     });
 }
 
@@ -683,6 +930,7 @@ Json run_control(trtmc::ITask& task, const Json& request, const Timing& timing) 
             return Json{{"action_steps", result.num_actions},
                         {"action_dim", result.action_dim},
                         {"action_values", result.actions.size()},
+                        {"actions", result.actions},
                         {"within_training_bounds", result.within_training_bounds},
                         {"inference_ms", result.inference_ms}};
         });
@@ -2867,17 +3115,6 @@ Json run_track_pose(const trtmc::Model& model, const Json& request, const Timing
         });
 }
 
-template <class T>
-void write_binary_artifact(const std::string& path, const T* values, std::uint64_t count) {
-    if (count > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) / sizeof(T))
-        throw std::runtime_error("binary artifact is too large");
-    std::ofstream output(path, std::ios::binary);
-    output.exceptions(std::ios::badbit | std::ios::failbit);
-    output.write(reinterpret_cast<const char*>(values),
-                 static_cast<std::streamsize>(count * sizeof(T)));
-    output.close();
-}
-
 Json run_geometry(const trtmc::Model& model, const Json& request, const Timing& timing,
                   const std::string& task_id) {
     const auto task = task_for_operation<trtmc::ImageToMetricGeometry>(model, task_id);
@@ -3590,13 +3827,8 @@ Json run_solve(const trtmc::Model& model, const Json& request, const Timing& tim
                                 primary + "'");
 }
 
-Json execute(const Json& request, const std::string& output_path) {
-    if (request.at("schema_version").get<int>() != 2)
-        throw std::invalid_argument("unsupported worker request schema");
-    const std::string bundle = request.at("bundle").get<std::string>();
-    const std::string runtime_root = request.value("runtime_root", std::string{});
-    const std::string operation = request.at("operation").get<std::string>();
-    Json operation_request = request.at("request");
+void inject_artifact_paths(const std::string& operation, Json& operation_request,
+                           const std::string& output_path) {
     if (operation == "generate_audio" || operation == "speak" || operation == "generate_image" ||
         operation == "speech_dialogue") {
         std::filesystem::path artifact(output_path);
@@ -3618,7 +3850,27 @@ Json execute(const Json& request, const std::string& output_path) {
         artifact.replace_extension(".structure");
         operation_request["_artifact_prefix"] = artifact.string();
     }
-    const Timing timing = parse_timing(request.at("measurement"));
+}
+
+// A loaded bundle bound to one operation. The one-shot path measures a single
+// request; serve mode keeps the session and dispatches every received request.
+struct Session {
+    std::string operation;
+    std::string primary;
+    std::string selected;
+    std::string runtime_root;
+    double load_ms{0};
+    std::optional<trtmc::Model> model;
+    std::unique_ptr<trtmc::ITask> task;
+};
+
+Session open_session(const Json& request) {
+    if (request.at("schema_version").get<int>() != 2)
+        throw std::invalid_argument("unsupported worker request schema");
+    const std::string bundle = request.at("bundle").get<std::string>();
+    const std::string runtime_root = request.value("runtime_root", std::string{});
+    const std::string operation = request.at("operation").get<std::string>();
+    const Json& operation_request = request.at("request");
 
     const auto info = trtmc::Bundle::open(bundle).info();
     if (request.contains("expected_family") != request.contains("expected_task"))
@@ -3642,14 +3894,16 @@ Json execute(const Json& request, const std::string& output_path) {
             throw std::invalid_argument("selected_task must be a nonempty Task ID");
         selected = request.at("selected_task").get<std::string>();
     }
-    double load_ms = 0;
-    Json measured;
+    Session session;
+    session.operation = operation;
+    session.primary = primary;
+    session.runtime_root = runtime_root;
     if (!trtmc::app::uses_existing_task_runtime(primary)) {
         trtmc::LoadOptions options;
         options.runtime_root = runtime_root;
         const auto load_started = Clock::now();
-        const auto model = trtmc::Model::load(bundle, options);
-        load_ms = elapsed_ms(load_started);
+        const auto& model = session.model.emplace(trtmc::Model::load(bundle, options));
+        session.load_ms = elapsed_ms(load_started);
         if (!explicit_task) {
             // Preserve the established implicit choices once, before dispatch.
             // Explicit selectors never enter this default-selection branch.
@@ -3689,6 +3943,25 @@ Json execute(const Json& request, const std::string& output_path) {
         if (std::none_of(tasks.begin(), tasks.end(),
                          [&](const auto& task) { return task.id == selected; }))
             throw std::invalid_argument("selected Task is not bound by this model: " + selected);
+    } else {
+        if (explicit_task)
+            throw std::invalid_argument("selected_task requires a family migrated to the Task SDK");
+        if (runtime_root.empty())
+            throw std::invalid_argument("runtime_root is required for an existing bundle mode");
+        const auto load_started = Clock::now();
+        session.task = trtmc::load_task(bundle, runtime_root);
+        session.load_ms = elapsed_ms(load_started);
+    }
+    session.selected = selected;
+    return session;
+}
+
+Json dispatch(const Session& session, const Json& operation_request, const Timing& timing) {
+    const std::string& operation = session.operation;
+    const std::string& selected = session.selected;
+    Json measured;
+    if (session.model) {
+        const trtmc::Model& model = *session.model;
         if (operation == "generate")
             measured = run_generate(model, operation_request, timing, selected);
         else if (operation == "translate")
@@ -3747,15 +4020,8 @@ Json execute(const Json& request, const std::string& output_path) {
             throw std::invalid_argument("semantic benchmark operation is not implemented: " +
                                         operation);
     } else {
-        if (explicit_task)
-            throw std::invalid_argument("selected_task requires a family migrated to the Task SDK");
         if (operation_request.contains("token_ids"))
             throw std::invalid_argument("token_ids requires a semantic TextSource Task");
-        if (runtime_root.empty())
-            throw std::invalid_argument("runtime_root is required for an existing bundle mode");
-        const auto load_started = Clock::now();
-        auto task = trtmc::load_task(bundle, runtime_root);
-        load_ms = elapsed_ms(load_started);
 
         using Runner = Json (*)(trtmc::ITask&, const Json&, const Timing&);
         static const std::unordered_map<std::string, Runner> runners = {
@@ -3769,8 +4035,10 @@ Json execute(const Json& request, const std::string& output_path) {
             {"classify", run_classify},
             {"detect", run_detect},
             {"extract_features", run_extract_features},
+            {"geometry", run_geometry},
             {"disparity", run_disparity},
             {"rerank", run_rerank},
+            {"decide", run_decide},
             {"encode", run_encode},
             {"embed", run_embed},
             {"solve", run_solve},
@@ -3779,24 +4047,138 @@ Json execute(const Json& request, const std::string& output_path) {
         const auto runner = runners.find(operation);
         if (runner == runners.end())
             throw std::invalid_argument("unsupported operation: " + operation);
-        measured = runner->second(*task, operation_request, timing);
+        measured = runner->second(*session.task, operation_request, timing);
     }
+    return measured;
+}
+
+Json execute(const Json& request, const std::string& output_path) {
+    const Session session = open_session(request);
+    Json operation_request = request.at("request");
+    inject_artifact_paths(session.operation, operation_request, output_path);
+    const Timing timing = parse_timing(request.at("measurement"));
+    Json measured = dispatch(session, operation_request, timing);
     return {
         {"schema_version", "trtmc.benchmark-worker-result/v2"},
         {"status", "completed"},
         {"case_name", request.at("case_name")},
-        {"operation", operation},
-        {"task", primary},
-        {"selected_task", selected},
+        {"operation", session.operation},
+        {"task", session.primary},
+        {"selected_task", session.selected},
         {"timing_scope", "public_task_call_wall"},
         {"observation_serialization_included", false},
         {"asset_loading_included", timing.asset_loading_included},
-        {"load_ms", load_ms},
+        {"load_ms", session.load_ms},
         {"warmup", timing.warmup},
         {"iterations", timing.iterations},
         {"observations", std::move(measured.at("observations"))},
         {"output_summary", std::move(measured.at("output_summary"))},
     };
+}
+
+constexpr std::size_t kServeInlineArrayLimit = 64;
+
+// Replace arrays longer than kServeInlineArrayLimit by their length. Whole masks
+// or feature maps would otherwise dominate per-request serialization cost.
+Json compact_observation(const Json& value) {
+    if (value.is_array()) {
+        if (value.size() > kServeInlineArrayLimit)
+            return Json{{"$array_length", value.size()}};
+        Json result = Json::array();
+        for (const auto& item : value)
+            result.push_back(compact_observation(item));
+        return result;
+    }
+    if (value.is_object()) {
+        Json result = Json::object();
+        for (auto item = value.begin(); item != value.end(); ++item)
+            result[item.key()] = compact_observation(item.value());
+        return result;
+    }
+    return value;
+}
+
+// Persistent serving: load once from SESSION.json (the one-shot request schema;
+// `measurement` is optional), then answer one JSONL request per stdin line:
+//   {"id": "...", "request": {...operation request...}, "artifact_base": "/dir/name",
+//    "full_observation": false}
+//   {"id": "...", "type": "shutdown"}
+// Observations are compacted unless full_observation is true.
+// Every request runs exactly one call (no warmup) through the same dispatch and
+// public_task_call_wall timing as the one-shot benchmark path.
+int serve(const Arguments& arguments) {
+    std::fflush(stdout);
+    const int protocol_fd = ::dup(STDOUT_FILENO);
+    if (protocol_fd < 0 || ::dup2(STDERR_FILENO, STDOUT_FILENO) < 0)
+        throw std::runtime_error("cannot reserve the serve protocol stream");
+    FILE* protocol = ::fdopen(protocol_fd, "w");
+    if (protocol == nullptr)
+        throw std::runtime_error("cannot open the serve protocol stream");
+    const auto emit = [protocol](const Json& value) {
+        // Text cut inside a multi-byte character is invalid UTF-8: replace, do not throw.
+        const std::string line = value.dump(-1, ' ', false, Json::error_handler_t::replace) + "\n";
+        std::fwrite(line.data(), 1, line.size(), protocol);
+        std::fflush(protocol);
+    };
+
+    const Json startup = read_json(arguments.request_path);
+    std::optional<Session> loaded;
+    try {
+        loaded.emplace(open_session(startup));
+    } catch (const std::exception& error) {
+        emit({{"event", "failed"}, {"error", error.what()}});
+        return 1;
+    }
+    const Session& session = *loaded;
+    Timing timing;
+    if (startup.contains("measurement"))
+        timing.asset_loading_included =
+            optional_value<bool>(startup.at("measurement"), "asset_loading_included", false);
+    emit({{"event", "ready"},
+          {"schema_version", "trtmc.benchmark-worker-serve/v1"},
+          {"operation", session.operation},
+          {"task", session.primary},
+          {"selected_task", session.selected},
+          {"timing_scope", "public_task_call_wall"},
+          {"asset_loading_included", timing.asset_loading_included},
+          {"load_ms", session.load_ms}});
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty())
+            continue;
+        std::string id;
+        try {
+            const Json message = Json::parse(line);
+            id = message.at("id").get<std::string>();
+            if (message.value("type", std::string{"infer"}) == "shutdown") {
+                emit({{"id", id}, {"ok", true}, {"event", "shutdown"}});
+                break;
+            }
+            Json operation_request = message.at("request");
+            if (message.contains("artifact_base"))
+                inject_artifact_paths(session.operation, operation_request,
+                                      message.at("artifact_base").get<std::string>());
+            Json measured = dispatch(session, operation_request, timing);
+            Json& observation = measured.at("observations").at(0);
+            // The request's full output summary (shapes, artifacts, metadata) completes the
+            // per-iteration observation, as the one-shot result carries both.
+            if (measured.contains("output_summary") && measured.at("output_summary").is_object()) {
+                for (const auto& [key, value] : measured.at("output_summary").items()) {
+                    if (!observation.contains(key))
+                        observation[key] = value;
+                }
+            }
+            emit({{"id", id},
+                  {"ok", true},
+                  {"observation", message.value("full_observation", false)
+                                      ? std::move(observation)
+                                      : compact_observation(observation)}});
+        } catch (const std::exception& error) {
+            emit({{"id", id}, {"ok", false}, {"error", error.what()}});
+        }
+    }
+    return 0;
 }
 
 } // namespace
@@ -3805,6 +4187,8 @@ int main(int argc, char** argv) {
     std::string output_path;
     try {
         const Arguments arguments = parse_arguments(argc, argv);
+        if (arguments.serve)
+            return serve(arguments);
         output_path = arguments.output_path;
         write_json(output_path, execute(read_json(arguments.request_path), output_path));
         return 0;

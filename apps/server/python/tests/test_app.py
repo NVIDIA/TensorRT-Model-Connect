@@ -84,6 +84,9 @@ class FakeRegistry:
             }
         ]
 
+    def supports_streaming(self, model: str) -> bool:
+        return False
+
     def max_tokens(self, model: str, hard_cap: int) -> int:
         if model != "test/model":
             raise ModelNotFoundError(model)

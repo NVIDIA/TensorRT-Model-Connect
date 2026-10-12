@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: trtmc.qualification/v1
+model: qwen3-omni-30b-a3b-instruct
+candidate: {family: qwen3_omni, checkpoint: Qwen/Qwen3-Omni-30B-A3B-Instruct, revision: 26291f793822fb6be9555850f06dfe95f2d7e695, task: text_generation, precision: bf16, bundle: qwen3-omni-30b-a3b-instruct.bundle, build: {max_sequence_length: 256}}
+reference_environment: {requirements: ../../requirements.txt}
+accuracy:
+  - name: generated-text-parity
+    benchmark: task_output_parity
+    operation: generate
+    request: &request {prompt: Please say hello from Qwen3 Omni in one short sentence., max_new_tokens: 16}
+    reference: &reference {script: tests/benchmark/reference.py, mode: hf-eager, precision: bf16, output_contract: normalized-text}
+    gate: {max_normalized_edit_distance: 0.15}
+performance:
+  - {name: generate, benchmark: vision_language_performance, operation: generate, request: *request, measurement: {warmup: 5, iterations: 10}, reference: {<<: *reference, runner: task-reference, reference_backend: hf_transformers, output_contract: exact-text}}

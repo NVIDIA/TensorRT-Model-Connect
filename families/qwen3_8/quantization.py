@@ -3,7 +3,7 @@
 
 """Qwen3.8-owned NVFP4 + FP8 TensorRT Q/DQ graph context.
 
-RadixArk/Qwen3.8-27B-NVFP4 is a ModelOpt MIXED_PRECISION export that carries
+nvidia/Qwen3.8-27B-NVFP4 is a ModelOpt MIXED_PRECISION export that carries
 two quantization schemes side by side:
 
   NVFP4  MLP projections (gate/up/down) and lm_head: E2M1 values packed two
@@ -49,10 +49,22 @@ The activation side uses two different mechanisms depending on format:
     requirement), matching families/qwen's proven FP8 pattern.
 Both use the checkpoint's calibrated "<name>.input_scale" as a build-time
 constant, since activations are only known at runtime.
+
+``calibrate_qwen3_8_fp8`` below is a separate scheme for the *original*
+(unquantized) ``Qwen/Qwen3.8-27B`` BF16 checkpoint: it self-quantizes MLP
+(gate/up/down), attention (q/k/v/o), and DeltaNet (in_proj_qkv/in_proj_z/
+out_proj) to FP8 on the fly at build time (bit-exact-style scalar scale,
+same mechanism as ``_FP8Format`` above, just computed here instead of read
+from a checkpoint), using a small one-time-calibrated activation-scale file
+bundled with this family instead of a checkpoint-shipped ``input_scale``. See
+that function's docstring for why (two other published FP8 checkpoint
+formats were tried first and found architecturally unable to reach a real
+fused FP8 GEMM kernel).
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -92,6 +104,26 @@ _FP8_ATTENTION_SIMPLE_PROJECTIONS = (
     ("self_attn.v_proj", "w_v"),
     ("self_attn.o_proj", "w_o"),
 )
+
+# Self-quantized FP8 (families/qwen3_8/quantization.py::calibrate_qwen3_8_fp8):
+# weight scale is computed on the fly from the original checkpoint's own
+# BF16 weights (single scalar per tensor, matching the scheme proven to fuse
+# into a real FP8 tensor-core GEMM), and the activation scale is read from a
+# one-time-calibrated scales file bundled with this family (see
+# calibrate_qwen3_8_fp8's docstring).
+_FP8_SELF_QUANTIZED_MLP_PROJECTIONS = (
+    ("mlp.gate_proj", "w_gate"),
+    ("mlp.up_proj", "w_up"),
+    ("mlp.down_proj", "w_down"),
+)
+_FP8_ACTIVATION_SCALES_FILENAME = "fp8_activation_scales.json"
+
+# Passed as IBuilderConfig.build_route by engine_builder.py when
+# Qwen38QuantContext.disable_dual_gemm_fusion is set, to work around the
+# TRT dual-GEMM fusion bug described above. "-peep:match_dual_gemm" is a
+# whitelisted TRT compiler knob (confirmed via
+# IBuilderConfig.all_build_routes on the public TensorRT 11.1 wheel).
+_DISABLE_DUAL_GEMM_BUILD_ROUTE = "-peep:match_dual_gemm=off"
 
 
 @dataclass(frozen=True)
@@ -258,6 +290,7 @@ class Qwen38QuantContext:
     profile: _Profile
     graph_ops: Any
     keep_alive: list = None  # type: ignore[assignment]
+    disable_dual_gemm_fusion: bool = False
 
     def __post_init__(self):
         if self.keep_alive is None:
@@ -381,6 +414,162 @@ def _read_fp8_weight_split_q(readers, hf_prefix: str, num_heads: int, head_dim: 
     return q_w, gate_w
 
 
+def _quantize_fp8_weight(weight_fp32: np.ndarray) -> tuple[np.ndarray, float]:
+    """Quantize one (already-upcast-to-fp32) weight tensor to FP8 e4m3 with a
+    single scalar scale.
+
+    scale = max(abs(weight)) / 448 (448 is e4m3's largest finite magnitude),
+    matching the exact formula families/qwen/quantization.py::_scalar() uses.
+    Operates on one already-loaded (small) tensor at a time -- the caller is
+    responsible for reading/discarding one projection's weight at a time so
+    peak memory stays bounded (see calibrate_qwen3_8_fp8's docstring).
+    """
+    amax = float(np.abs(weight_fp32).max())
+    if not np.isfinite(amax) or amax <= 0:
+        raise ValueError("weight tensor has no finite positive amax to scale from")
+    scale = amax / 448.0
+    fp8_tensor = torch.from_numpy(weight_fp32 / scale).to(torch.float8_e4m3fn)
+    packed = np.ascontiguousarray(fp8_tensor.view(torch.uint8).numpy())
+    return packed, scale
+
+
+def _quantize_fp8_weight_split_q(
+    weight_fp32: np.ndarray, num_heads: int, head_dim: int,
+) -> tuple[_FP8Weight, _FP8Weight]:
+    """Quantize a raw BF16 q_proj weight ([2*attn_size, hidden]) to FP8 with a
+    single scalar scale shared by both halves, then split it into (w_q,
+    w_gate_attn) -- mirroring `_read_fp8_weight_split_q`'s per-head interleave
+    split of an already-quantized checkpoint tensor, just computing the FP8
+    bytes here instead of reading them.
+    """
+    attn_size = num_heads * head_dim
+    hidden = weight_fp32.shape[1]
+    packed, weight_scale = _quantize_fp8_weight(weight_fp32)
+    reshaped = packed.reshape(num_heads, 2 * head_dim, hidden)
+    q_part = np.ascontiguousarray(reshaped[:, :head_dim, :].reshape(attn_size, hidden))
+    gate_part = np.ascontiguousarray(reshaped[:, head_dim:, :].reshape(attn_size, hidden))
+    q_w = _FP8Weight(packed=q_part, weight_scale=weight_scale,
+                      out_features=attn_size, in_features=hidden)
+    gate_w = _FP8Weight(packed=gate_part, weight_scale=weight_scale,
+                         out_features=attn_size, in_features=hidden)
+    return q_w, gate_w
+
+
+def calibrate_qwen3_8_fp8(
+    model_dir: Path, config, graph_ops, *, readers=None,
+) -> Qwen38QuantContext:
+    """Build the Q/DQ context for the real, original `Qwen/Qwen3.8-27B` BF16
+    checkpoint, self-quantizing MLP (gate/up/down), attention (q/k/v/o), and
+    DeltaNet (in_proj_qkv/in_proj_z/out_proj) projections to the same
+    scalar-scale FP8 scheme already proven to fuse into a real Blackwell
+    tensor-core GEMM (confirmed via RadixArk/Qwen3.8-27B-NVFP4's FP8
+    attention/DeltaNet layers -- see this module's history/PR discussion).
+    This mirrors the official `Qwen/Qwen3.8-27B-FP8` checkpoint's own choice
+    of which layers to quantize (same `modules_to_not_convert` scope: norms,
+    lm_head, embeddings, and DeltaNet's decay/beta/gate parameters all stay
+    unquantized) -- only the numeric scheme differs, since that checkpoint's
+    2D block-scale format is the one that cannot reach a real fused GEMM in
+    this stack.
+
+    Two published Qwen3.8-27B-FP8-style checkpoints were evaluated and found
+    architecturally unable to reach a real fused FP8 tensor-core GEMM: the
+    official checkpoint's 2D 128x128 block-scale format has no matching
+    kernel path in TensorRT's public API and dense-GEMM fusion, or
+    tensorrt-edge-llm's CUTLASS plugin; a per-channel-weight +
+    dynamic-per-token-activation checkpoint builds and runs correctly but
+    TRT's dense-FC fusion pass does not recognize that scale scheme and
+    silently falls back to dequantize-to-FP16 + plain FP16 GEMM.
+
+    Weight quantization needs no calibration -- `scale = max(abs(weight)) /
+    448` is a pure function of the weight tensor itself -- so it happens here
+    on the fly, one projection at a time (bounded peak memory: `readers`
+    already does lazy per-tensor reads via safetensors, and each BF16
+    projection tensor is a few hundred MB, not the whole ~54GB model).
+
+    Activation `input_scale`, by contrast, genuinely requires observing real
+    activation values from a forward pass -- that was calibrated once,
+    offline, against this same checkpoint (real bfloat16 execution via plain
+    `transformers.AutoModelForCausalLM`, forward hooks on gate/up/down,
+    amax over a representative prompt set) and is read here from the small
+    JSON file bundled with this family (`_FP8_ACTIVATION_SCALES_FILENAME`),
+    not recomputed -- that is the one part of this whole scheme that is not
+    cheap to redo on every build.
+
+    Sets `disable_dual_gemm_fusion=True` on the returned context so
+    `engine_builder.py` disables TRT's dual-GEMM auto-fusion at build
+    time (see `_FP8_SELF_QUANTIZED_MLP_PROJECTIONS`'s comment above for why).
+    """
+    if readers is None:
+        readers = _open_safetensors(Path(model_dir))
+    num_layers = int(config.num_hidden_layers)
+    num_heads = int(config.num_attention_heads)
+    head_dim = int(config.head_dim)
+
+    scales_path = Path(__file__).parent / _FP8_ACTIVATION_SCALES_FILENAME
+    try:
+        activation_scales = json.loads(scales_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"Qwen3.8 FP8 self-quantization requires {scales_path} (one-time "
+            "calibrated activation scales); it was not found next to "
+            "quantization.py"
+        ) from error
+
+    scales: dict[str, _LayerScales] = {}
+
+    def self_quantize_simple(layer: int, hf_stem: str, weight_stem: str) -> None:
+        name = f"layer.{layer}.{weight_stem}"
+        input_scale = activation_scales.get(name)
+        if input_scale is None:
+            return
+        hf_prefix = f"model.language_model.layers.{layer}.{hf_stem}"
+        weight_key = f"{hf_prefix}.weight"
+        if not _has_tensor(readers, weight_key):
+            return
+        raw = _to_numpy_fp32(_get_raw_tensor(readers, weight_key))
+        out_features, in_features = raw.shape
+        packed, weight_scale = _quantize_fp8_weight(raw)
+        weight = _FP8Weight(
+            packed=packed, weight_scale=weight_scale,
+            out_features=out_features, in_features=in_features)
+        scales[name] = _LayerScales(input_scale=float(input_scale), weight=weight)
+
+    for layer in range(num_layers):
+        for hf_stem, weight_stem in _FP8_SELF_QUANTIZED_MLP_PROJECTIONS:
+            self_quantize_simple(layer, hf_stem, weight_stem)
+
+        for hf_stem, weight_stem in _FP8_ATTENTION_SIMPLE_PROJECTIONS:
+            self_quantize_simple(layer, hf_stem, weight_stem)
+
+        for hf_stem, weight_stem in _FP8_DELTANET_PROJECTIONS:
+            self_quantize_simple(layer, hf_stem, weight_stem)
+
+        # --- attention q_proj: split into (w_q, w_gate_attn), sharing one
+        # calibrated input_scale and one self-quantized weight_scale ---
+        q_input_scale = activation_scales.get(f"layer.{layer}.w_q")
+        q_hf_prefix = f"model.language_model.layers.{layer}.self_attn.q_proj"
+        q_weight_key = f"{q_hf_prefix}.weight"
+        if q_input_scale is not None and _has_tensor(readers, q_weight_key):
+            raw = _to_numpy_fp32(_get_raw_tensor(readers, q_weight_key))
+            q_weight, gate_weight = _quantize_fp8_weight_split_q(raw, num_heads, head_dim)
+            scales[f"layer.{layer}.w_q"] = _LayerScales(
+                input_scale=float(q_input_scale), weight=q_weight)
+            scales[f"layer.{layer}.w_gate_attn"] = _LayerScales(
+                input_scale=float(q_input_scale), weight=gate_weight)
+
+    if not scales:
+        raise RuntimeError(
+            "Qwen3.8 FP8 self-quantization found no matching MLP tensors in "
+            "the checkpoint; is this the original Qwen/Qwen3.8-27B checkpoint?"
+        )
+
+    return Qwen38QuantContext(
+        profile=_Profile(scales),
+        graph_ops=graph_ops,
+        disable_dual_gemm_fusion=True,
+    )
+
+
 def calibrate_qwen3_8_nvfp4(
     model_dir: Path, config, graph_ops, *, readers=None,
 ) -> Qwen38QuantContext:
@@ -474,7 +663,7 @@ def calibrate_qwen3_8_nvfp4(
     if not scales:
         raise RuntimeError(
             "Qwen3.8 quantization calibration found no quantized tensors in "
-            "the checkpoint; is this a RadixArk/Qwen3.8-27B-NVFP4-style "
+            "the checkpoint; is this an nvidia/Qwen3.8-27B-NVFP4-style "
             "checkpoint?"
         )
 

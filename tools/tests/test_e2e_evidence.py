@@ -1554,7 +1554,7 @@ def test_demo_shared_chart_keeps_scope_and_rejects_invalid_values() -> None:
         "ocr",
     ],
 )
-def test_text_task_references_are_visible_without_opening_details(
+def test_text_generic_references_are_visible_without_opening_details(
     tmp_path: Path, task: str
 ) -> None:
     data = _case()

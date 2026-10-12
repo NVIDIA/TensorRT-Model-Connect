@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Translation: newstest2019 en->ru chrF++ on all 1,997 sentences.
+absolute: [wmt19_en_ru]

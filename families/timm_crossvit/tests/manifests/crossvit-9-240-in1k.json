@@ -4,7 +4,7 @@
   "hf_revision": "df3051d20d8addd16d03c4230046128c17e32826",
   "bundle": "crossvit-9-240-in1k.bundle",
   "family": "timm_crossvit",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: camembert-base
+candidate:
+  family: roberta
+  checkpoint: almanach/camembert-base
+  revision: a75967561c78f2aa81cc41045378d3b4ee25af9e
+  task: encoding
+  precision: fp16
+  bundle: camembert-base.bundle
+  build:
+    max_sequence_length: 256
+
+accuracy:
+  - name: stsbenchmark-parity
+    benchmark: stsbenchmark_embedding_parity
+    samples: 50
+    reference:
+      precision: fp32
+    gate:
+      min_vector_cosine: 0.999
+      min_vector_pass_rate: 1.0
+      max_pair_cosine_abs_delta: 0.02
+
+performance:
+  - name: encode
+    benchmark: encoder_performance
+    operation: encode
+    request:
+      prompt: Bonjour le monde.
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: hf-transformers
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      precision: fp32
+      output_contract: embedding-shape

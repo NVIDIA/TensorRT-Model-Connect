@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: ocrbench-v2
+  version: unified-task-eval-v1
+  sha256: e62c2fbdfe5d02f11d6e48d37ae548c854a19dcb3985eaa7ba3ba51492d10a94
+  source:
+    mode: manual
+    path: OCRBench_v2/unified/dataset.json
+    instructions: https://huggingface.co/datasets/ling99/OCRBench_v2
+  license: MIT
+selection:
+  # Ten task types keep the existing runtime while covering recognition,
+  # parsing, extraction, reasoning, tables, charts, formulas, and translation.
+  method: fixed-indices
+  indices:
+    - 150 # APP agent en / rico
+    - 2100 # chart parsing en / OneChart
+    - 3950 # document parsing cn / CDLA
+    - 7100 # fine-grained text recognition en / spotting_cocotext
+    - 4900 # formula recognition en / HME100K
+    - 5700 # full-page OCR cn / CDLA
+    - 1100 # key information extraction en / POIE
+    - 6300 # reasoning VQA en / mmsi
+    - 8000 # table parsing en / table_to_html
+    - 9800 # text translation cn / memes
+input:
+  adapter: ocrbench_v2
+metric:
+  name: ocr_text_parity

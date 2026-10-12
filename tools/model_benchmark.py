@@ -21,15 +21,15 @@ if str(BENCHMARK_SOURCE) not in sys.path:
 if str(REPOSITORY) not in sys.path:
     sys.path.insert(0, str(REPOSITORY))
 
-from tools.benchmark_qualification.accuracy import run_accuracy  # noqa: E402
-from tools.benchmark_qualification.catalog import (  # noqa: E402
+from qualification_tests.benchmark_qualification.accuracy import run_accuracy  # noqa: E402
+from qualification_tests.benchmark_qualification.catalog import (  # noqa: E402
     QualificationCase,
     QualificationError,
     discover,
     select,
 )
-from tools.benchmark_qualification.performance import run_performance  # noqa: E402
-from tools.benchmark_qualification.runtime import context_from_args, write_result  # noqa: E402
+from qualification_tests.benchmark_qualification.performance.qualification import run_performance  # noqa: E402
+from qualification_tests.benchmark_qualification.runtime import context_from_args, write_result  # noqa: E402
 
 
 def parser() -> argparse.ArgumentParser:
@@ -62,11 +62,43 @@ def parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--no-build", action="store_true")
     run.add_argument("--verbose", action="store_true")
+
+    aiperf = commands.add_parser(
+        "aiperf", help="Run the AIPerf-based TRTMC vs native qualification (apps/aiperf_qual run-all)"
+    )
+    aiperf.add_argument("--environment", type=Path, required=True, help="machine environment file")
+    aiperf.add_argument(
+        "--aiperf-python", type=Path, required=True, help="interpreter of the AIPerf environment (setup.sh)"
+    )
+    aiperf.add_argument("--out-root", type=Path, required=True)
+    aiperf.add_argument("--model", action="append", default=[], help="profiles (default: the machine's list)")
+    aiperf.add_argument("--shard", help="INDEX/COUNT")
+    aiperf.add_argument("--rerun", action="store_true")
     return value
+
+
+def aiperf_command(arguments: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
+    """The ``trtmc-aiperf-qual run-all`` invocation and its PYTHONPATH for this checkout."""
+    command = [str(arguments.aiperf_python), "-m", "trtmc_aiperf_qual", "run-all",
+               "--environment", str(arguments.environment), "--out-root", str(arguments.out_root)]
+    for model in arguments.model:
+        command += ["--profile", model]
+    if arguments.shard:
+        command += ["--shard", arguments.shard]
+    if arguments.rerun:
+        command.append("--rerun")
+    roots = ("apps/aiperf_qual", "apps/perf_serving", "core/builder", "apps/benchmark", ".")
+    return command, {"PYTHONPATH": ":".join(str(REPOSITORY / root) for root in roots)}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser().parse_args(argv)
+    if arguments.command == "aiperf":
+        import os
+        import subprocess
+
+        command, env = aiperf_command(arguments)
+        return subprocess.run(command, env={**os.environ, **env}, cwd=REPOSITORY / "apps/aiperf_qual").returncode
     try:
         cases = _selected(arguments)
         if arguments.command == "list":
@@ -126,13 +158,13 @@ def _run(cases: Sequence[QualificationCase], arguments: argparse.Namespace) -> i
         "cases": results,
     }
     _write_summary(context.artifacts, summary)
-    print(f"JSON: {context.artifacts / 'summary.json'}")
+    print(f"JSON: {context.artifacts / 'report.json'}")
     print(f"HTML: {context.artifacts / 'report.html'}")
     return 0 if summary["status"] == "passed" else 1
 
 
 def _write_summary(output: Path, summary: Mapping[str, Any]) -> None:
-    (output / "summary.json").write_text(
+    (output / "report.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     rows = []
@@ -148,7 +180,7 @@ def _write_summary(output: Path, summary: Mapping[str, Any]) -> None:
     document = """<!doctype html><meta charset=\"utf-8\"><title>TRTMC model benchmark</title>
 <h1>Internal model benchmark</h1><p>Status: <strong>{status}</strong></p>
 <table><thead><tr><th>Model</th><th>Kind</th><th>Case</th><th>Status</th></tr></thead>
-<tbody>{rows}</tbody></table><p><a href=\"summary.json\">summary.json</a></p>
+<tbody>{rows}</tbody></table><p><a href=\"report.json\">report.json</a></p>
 """.format(status=html.escape(str(summary["status"])), rows="".join(rows))
     (output / "report.html").write_text(document, encoding="utf-8")
 

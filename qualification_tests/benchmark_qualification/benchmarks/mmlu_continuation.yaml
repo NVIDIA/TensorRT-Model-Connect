@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: mmlu-five-shot
+  version: pre1093-mmlu-five-shot-json
+  sha256: f4f8c39761c86510888a860915e9ecbb73f418dc226c1368319630538859a470
+  source:
+    mode: manual
+    path: MMLU_five_shot/mmlu_dataset.json
+    instructions: https://github.com/hendrycks/test
+  license: MIT
+selection:
+  # Ten subjects keep the existing runtime while covering STEM, medicine,
+  # humanities, social science, and professional knowledge.
+  method: fixed-indices
+  indices:
+    - 50 # abstract_algebra
+    - 167 # anatomy
+    - 437 # business_ethics
+    - 1046 # college_computer_science
+    - 1863 # econometrics
+    - 5970 # high_school_world_history
+    - 6891 # machine_learning
+    - 11398 # professional_law
+    - 13504 # sociology
+    - 13956 # world_religions
+input:
+  adapter: mmlu_continuation
+metric:
+  name: exact_token_ids

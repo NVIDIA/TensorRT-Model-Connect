@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: nemotron-speech-streaming-en-0.6b
+candidate:
+  family: nemotron_speech_streaming
+  checkpoint: nvidia/nemotron-speech-streaming-en-0.6b
+  revision: ebe59e5a817142986528bbbee5dba8db7b38ed50
+  task: transcription_streaming
+  precision: fp16
+  bundle: nemotron-speech-streaming-en-0.6b.bundle
+  build:
+    max_sequence_length: 128
+
+reference_environment:
+  requirements: ../../requirements.txt
+
+accuracy:
+  - name: librispeech-wer
+    benchmark: librispeech_transcription
+    samples: 10
+    request: &request
+      max_new_tokens: 80
+      streaming: true
+      chunk_ms: 1120
+    reference:
+      command: reference.py
+      precision: fp32
+    gate:
+      max_wer_to_reference: 0.35
+      max_wer_increase_from_reference: 0.02
+
+performance:
+  - name: transcribe-streaming
+    benchmark: speech_nemo_performance
+    operation: transcribe
+    request:
+      <<: *request
+      audio_path: ../data/Recording.wav
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: pytorch-eager
+      reference_backend: nemo_reference
+      precision: fp32
+      output_contract: transcription-text

@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: xcit-nano-12-p16-224-fb-in1k
+candidate:
+  family: timm_xcit
+  checkpoint: timm/xcit_nano_12_p16_224.fb_in1k
+  revision: b181b4623913d78fd0927601c36e40b9d8bc74ce
+  task: image_to_class_scores
+  precision: fp16
+  bundle: xcit-nano-12-p16-224-fb-in1k.bundle
+  build:
+    max_sequence_length: 1
+
+accuracy:
+  - name: imagenette-parity
+    benchmark: imagenette_classification
+    samples: 100
+    reference:
+      precision: fp32
+      batch_size: 16
+    gate:
+      max_top1_accuracy_drop_from_hf: 0.01
+      min_top1_agreement: 0.98
+
+performance:
+  - name: classify
+    benchmark: image_classification_performance
+    operation: classify
+    request:
+      image_path: ../data/test_img.jpeg
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: task-reference
+      adapter: timm-classification
+      mode: hf-eager
+      reference_backend: timm
+      precision: fp32
+      output_contract: classification-top-class

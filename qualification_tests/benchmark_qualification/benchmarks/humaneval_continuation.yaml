@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: humaneval-continuation
+  version: pre1093-humaneval-json
+  sha256: 68eece17bfa17f4513fcd13b0919fd1a672bf58178224ed3cada1c26f6b97cc9
+  source:
+    mode: manual
+    path: HumanEval/humaneval_task_eval.json
+    instructions: https://github.com/openai/human-eval
+  license: MIT
+selection:
+  method: first
+input:
+  adapter: text_generation_json
+metric:
+  name: exact_token_ids

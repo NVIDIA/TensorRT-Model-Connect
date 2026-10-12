@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import gc
 import sys
 from pathlib import Path
 
@@ -1343,6 +1344,8 @@ def _build_sam_attention(
 
 def _load_vision_weights(
     model_dir: str,
+    *,
+    precision: str,
 ) -> dict[str, np.ndarray]:
     """Load all vision pipeline weights from safetensors."""
     readers = _open_safetensors(Path(model_dir))
@@ -1474,7 +1477,13 @@ def _load_vision_weights(
     # --- View separator ---
     vw["view_sep"] = _load_tensor(readers, "model.view_seperator").astype(np.float32)
 
-    return vw
+    if precision == "fp16":
+        return {name: np.ascontiguousarray(value, dtype=np.float16) for name, value in vw.items()}
+    if precision == "fp32":
+        return vw
+    raise ValueError(
+        f"Unsupported DeepSeek-OCR vision precision {precision!r}; expected fp32 or fp16"
+    )
 
 
 def _build_deepseek_ocr_vision_engine(
@@ -1493,7 +1502,6 @@ def _build_deepseek_ocr_vision_engine(
     """
     print("[trtmc build] Building DeepSeek-OCR-2 vision engine (native TRT) ...", file=sys.stderr)
 
-    vw = _load_vision_weights(model_dir)
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
     elif precision == "fp32":
@@ -1502,6 +1510,7 @@ def _build_deepseek_ocr_vision_engine(
         raise ValueError(
             f"Unsupported DeepSeek-OCR vision precision {precision!r}; expected fp32 or fp16"
         )
+    vw = _load_vision_weights(model_dir, precision=precision)
 
     # SAM config
     sam_hidden = 768
@@ -2042,6 +2051,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             verbose=request.verbose,
             parallel_config=parallel,
         )
+        writer.add_bytes("prefill.plan", prefill)
+        del prefill
+        gc.collect()
         config.raw["_decoder_engine_role"] = "decode"
         decode = model.build_engine(
             config,
@@ -2052,9 +2064,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             verbose=request.verbose,
             parallel_config=parallel,
         )
-        config.raw.pop("_decoder_engine_role", None)
         writer.add_bytes("engine.plan", decode)
-        writer.add_bytes("prefill.plan", prefill)
+        del decode
+        gc.collect()
+        config.raw.pop("_decoder_engine_role", None)
+    # Vision weights are an independent checkpoint subset. Release the decoder
+    # arrays before loading it so three full model representations do not
+    # overlap during a single-device bundle build.
+    weights.clear()
+    gc.collect()
     vision = model.build_vision_engine(
         str(model_dir), config, weights, precision=precision, verbose=request.verbose
     )

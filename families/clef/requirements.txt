@@ -1,0 +1,4 @@
+transformers==5.10.2
+accelerate==1.14.0
+safetensors>=0.4
+Pillow>=10.1

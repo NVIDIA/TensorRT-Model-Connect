@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Internal reusable benchmark definition; it does not register a model.
+kind: accuracy
+dataset:
+  id: stsbenchmark-test
+  version: pre1093-mteb-stsbenchmark-test-jsonl
+  sha256: 7c8927eef1ac4e256cae9768afc76232f79c39d19cb05d16bef92e11cecbe5bb
+  source:
+    mode: manual
+    path: STSBenchmark/stsbenchmark_test.jsonl
+    instructions: https://huggingface.co/datasets/mteb/stsbenchmark-sts
+  license: CC BY-SA 4.0
+selection:
+  method: first
+input:
+  adapter: sts_pair_jsonl
+metric:
+  name: embedding_vector_parity

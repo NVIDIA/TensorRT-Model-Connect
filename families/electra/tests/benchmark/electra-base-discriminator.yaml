@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.qualification/v1
+model: electra-base-discriminator
+candidate:
+  family: electra
+  checkpoint: google/electra-base-discriminator
+  revision: 1ae76a97c7e84a4e640876a07453fccd636f0667
+  task: encoding
+  precision: fp16
+  bundle: electra-base-discriminator.bundle
+  build:
+    max_sequence_length: 256
+
+accuracy:
+  - name: stsbenchmark-parity
+    benchmark: stsbenchmark_embedding_parity
+    samples: 50
+    reference:
+      precision: fp32
+    gate:
+      min_vector_cosine: 0.999
+      min_vector_pass_rate: 1.0
+      max_pair_cosine_abs_delta: 0.02
+
+performance:
+  - name: encode
+    benchmark: encoder_performance
+    operation: encode
+    request:
+      prompt: The capital of France is Paris.
+    measurement:
+      warmup: 5
+      iterations: 10
+    reference:
+      runner: hf-transformers
+      mode: torch-compile
+      fallback: hf-eager
+      compile_scope: model.forward
+      precision: fp32
+      output_contract: embedding-shape

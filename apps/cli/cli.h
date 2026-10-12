@@ -34,6 +34,7 @@ enum class CommandKind {
     kExtractFeatures,
     kPredictStructure,
     kDisparity,
+    kDepth,
     kGeometry,
     kSegment,
     kSegmentPrompted,

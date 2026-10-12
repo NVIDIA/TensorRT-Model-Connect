@@ -10,7 +10,7 @@ description: >-
 Choose the evidence level before running:
 
 - For one model or testcase, use `trtmc-bench`.
-- For a checked-in release comparison, use `tools/perf_matrix.py`.
+- For a checked-in release comparison, use `python3 -m qualification_tests.benchmark_qualification.performance`.
 
 The public benchmark boundary is `public_task_call_wall`. It excludes bundle
 building, process startup, warmup, report generation, and bundle loading.
@@ -39,12 +39,34 @@ confounder instead of one causal speedup percentage.
 For release evidence, first check and then run the exact entry:
 
 ```bash
-python3 tools/perf_matrix.py check <suite> \
+python3 -m qualification_tests.benchmark_qualification.performance check <suite> \
   --environment <environment> --entry <entry>
-python3 tools/perf_matrix.py run <suite> \
+python3 -m qualification_tests.benchmark_qualification.performance run <suite> \
   --environment <environment> --entry <entry>
 ```
 
 Lead the report with correctness and evidence level. Include exact commands,
 p50 and other suite-owned statistics, measurement scope, limitations, and any
 target not run.
+
+
+## HTTP text load evidence
+
+For text serving measurements, reuse the persistent `trtmc-server` through
+`python3 -m trtmc_aiperf_qual text-profile --environment <environment> --config
+<text-config> --out <result-dir>` with `PYTHONPATH=apps/aiperf_qual`. Consult
+`website/docs/user-guides/profile-text-with-aiperf.md` and the checked-in
+`apps/aiperf_qual/config/text/` examples. Keep the owning family's exact-bundle
+correctness checks before timing; HTTP success does not replace them.
+
+Require incremental capability before interpreting TTFT or inter-token
+latency. Nonstreaming native records use `public_task_call_wall`; streaming
+records include relay/backpressure and have a different scope. Preserve warmup
+and failures when joining AIPerf exports to server records with `X-Request-ID`.
+Native prompt counts are unavailable; client tokenizer counts are estimates.
+AIPerf request latency ends at the last content response. Inspect the client
+request lifecycle and server handler timing as well: terminal delivery or
+cleanup can delay the next request without appearing in content latency.
+The optional sequential reference comparison requires matching payloads,
+outputs, token counts, precision and Task boundaries. It does not change the
+qualification criteria or establish speedup from HTTP latency alone.
