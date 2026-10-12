@@ -48,6 +48,27 @@ def image(identity=BASE, layers=None, labels=None):
     }
 
 
+def registry_manifest(config=BASE, *, oci=True):
+    return {
+        "schemaVersion": 2,
+        "mediaType": (
+            "application/vnd.oci.image.manifest.v1+json"
+            if oci
+            else "application/vnd.docker.distribution.manifest.v2+json"
+        ),
+        "config": {
+            "mediaType": (
+                "application/vnd.oci.image.config.v1+json"
+                if oci
+                else "application/vnd.docker.container.image.v1+json"
+            ),
+            "digest": config,
+            "size": 1234,
+        },
+        "layers": [],
+    }
+
+
 def repository(tmp_path):
     root = tmp_path / "repository"
     root.mkdir()
@@ -294,6 +315,9 @@ def test_pull_erases_auth_before_any_image_execution(tmp_path, monkeypatch):
         if args[0] == "tag":
             assert all(not path.exists() for path in auth_paths)
         assert args[0] not in {"run", "build"}
+        if args[0] == "manifest":
+            assert kwargs["capture"] is True and kwargs["private"] is True
+            return json.dumps(registry_manifest())
         return ""
 
     monkeypatch.setattr(images, "docker", docker)
@@ -303,8 +327,180 @@ def test_pull_erases_auth_before_any_image_execution(tmp_path, monkeypatch):
         )
         == BASE
     )
-    assert events == ["private-check", "login", "pull", "tag"]
+    assert events == ["private-check", "login", "pull", "manifest", "tag"]
     assert not token.exists()
+
+
+def _pull_fixture(tmp_path, monkeypatch, *, index=False, oci=True, identity=BASE):
+    base = base_manifest()
+    token = tmp_path / "token"
+    token.write_text("read-secret")
+    pulled = image(
+        identity,
+        labels={
+            images.BASE_KEY_LABEL: base["input_key"],
+            images.BASE_KIND_LABEL: "community-base",
+            images.BASE_INPUTS_LABEL: json.dumps(INPUTS),
+        },
+    )
+    pulled["RepoDigests"] = [base["image"]]
+    manifest = registry_manifest(oci=oci)
+    documents = {base["image"]: manifest}
+    if index:
+        documents[PREFIX + "/base@" + CHILD] = manifest
+        documents[base["image"]] = {
+            "schemaVersion": 2,
+            "mediaType": (
+                "application/vnd.oci.image.index.v1+json"
+                if oci
+                else "application/vnd.docker.distribution.manifest.list.v2+json"
+            ),
+            "manifests": [
+                {
+                    "mediaType": manifest["mediaType"],
+                    "digest": CHILD,
+                    "size": 2345,
+                    "platform": {"os": "linux", "architecture": "amd64"},
+                },
+                {
+                    "mediaType": manifest["mediaType"],
+                    "digest": "sha256:" + "f" * 64,
+                    "size": 3456,
+                    "platform": {"os": "unknown", "architecture": "unknown"},
+                },
+            ],
+        }
+    calls, auth_paths = [], []
+    monkeypatch.setattr(images, "require_private_package", lambda *_: None)
+
+    def docker(args, **kwargs):
+        calls.append(args)
+        if kwargs.get("config"):
+            auth_paths.append(Path(kwargs["config"]))
+            assert auth_paths[-1].exists() and kwargs["private"] is True
+        if args[:2] == ["manifest", "inspect"]:
+            assert kwargs["capture"] is True
+            return json.dumps(documents[args[2]])
+        if args[:2] == ["image", "inspect"]:
+            return json.dumps([pulled])
+        if args[0] == "tag":
+            assert all(not path.exists() for path in auth_paths)
+        assert args[0] not in {"run", "build"}
+        return ""
+
+    monkeypatch.setattr(images, "docker", docker)
+    return SimpleNamespace(
+        base=base,
+        token=token,
+        image=pulled,
+        documents=documents,
+        calls=calls,
+        auth_paths=auth_paths,
+        pull=lambda: images.pull_shared_base(
+            {"base": base, "registry_prefix": PREFIX}, token, "reader", "local-base"
+        ),
+    )
+
+
+@pytest.mark.parametrize("oci", [False, True])
+@pytest.mark.parametrize(
+    "index,identity",
+    [
+        (False, BASE),
+        (False, "sha256:" + "c" * 64),
+        (True, BASE),
+        (True, CHILD),
+        (True, "sha256:" + "c" * 64),
+    ],
+)
+def test_pull_binds_classic_and_containerd_ids_to_the_pinned_config(
+    tmp_path, monkeypatch, oci, index, identity
+):
+    fixture = _pull_fixture(tmp_path, monkeypatch, index=index, oci=oci, identity=identity)
+    assert fixture.pull() == identity
+    assert fixture.calls[-1] == ["tag", identity, "local-base"]
+    manifests = [args[2] for args in fixture.calls if args[:2] == ["manifest", "inspect"]]
+    assert manifests == [fixture.base["image"]] + ([PREFIX + "/base@" + CHILD] if index else [])
+    assert not fixture.token.exists()
+    assert all(not path.exists() for path in fixture.auth_paths)
+
+
+@pytest.mark.parametrize("index", [False, True])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "config_digest",
+        "local_image_id",
+        "input_key",
+        "base_kind",
+        "input_hashes",
+        "repository_digest",
+        "platform",
+    ],
+)
+def test_pull_rejects_wrong_identity_or_inputs_and_erases_auth(tmp_path, monkeypatch, index, fault):
+    fixture = _pull_fixture(tmp_path, monkeypatch, index=index)
+    manifest = fixture.documents[PREFIX + "/base@" + CHILD if index else fixture.base["image"]]
+    if fault == "config_digest":
+        manifest["config"]["digest"] = "sha256:" + "f" * 64
+    elif fault == "local_image_id":
+        fixture.image["Id"] = "sha256:" + "e" * 64
+    elif fault == "repository_digest":
+        fixture.image["RepoDigests"] = [PREFIX + "/base@sha256:" + "e" * 64]
+    elif fault == "platform":
+        fixture.image["Architecture"] = "arm64"
+    else:
+        label = {
+            "input_key": images.BASE_KEY_LABEL,
+            "base_kind": images.BASE_KIND_LABEL,
+            "input_hashes": images.BASE_INPUTS_LABEL,
+        }[fault]
+        fixture.image["Config"]["Labels"][label] = "must-not-leak-private-value"
+    with pytest.raises(images.ImagePreparationError) as caught:
+        fixture.pull()
+    assert (fault if fault != "platform" else "Linux x86") in str(caught.value)
+    assert PREFIX not in str(caught.value) and "must-not-leak" not in str(caught.value)
+    assert not fixture.token.exists()
+    assert all(not path.exists() for path in fixture.auth_paths)
+    assert not any(args[0] == "tag" for args in fixture.calls)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "ambiguous",
+        "no_amd64",
+        "digest",
+        "media_type",
+        "size",
+        "child_media_type",
+        "config_descriptor",
+    ],
+)
+def test_pull_rejects_an_unusable_index_descriptor(tmp_path, monkeypatch, fault):
+    fixture = _pull_fixture(tmp_path, monkeypatch, index=True)
+    index = fixture.documents[fixture.base["image"]]
+    selected = index["manifests"][0]
+    manifest = fixture.documents[PREFIX + "/base@" + CHILD]
+    if fault == "ambiguous":
+        index["manifests"].append(copy.deepcopy(selected))
+    elif fault == "no_amd64":
+        selected["platform"]["architecture"] = "arm64"
+    elif fault == "digest":
+        selected["digest"] = "latest"
+    elif fault == "media_type":
+        selected["mediaType"] = "application/vnd.oci.image.index.v1+json"
+    elif fault == "size":
+        selected["size"] = True
+    elif fault == "child_media_type":
+        manifest["mediaType"] = "application/vnd.docker.distribution.manifest.v2+json"
+    elif fault == "config_descriptor":
+        manifest["config"]["mediaType"] = "application/vnd.oci.image.index.v1+json"
+    with pytest.raises(images.ImagePreparationError, match="identity check failed"):
+        fixture.pull()
+    assert not fixture.token.exists()
+    assert all(not path.exists() for path in fixture.auth_paths)
+    assert not any(args[0] == "tag" for args in fixture.calls)
 
 
 def test_auth_failure_removes_token_and_does_not_execute_image(tmp_path, monkeypatch):

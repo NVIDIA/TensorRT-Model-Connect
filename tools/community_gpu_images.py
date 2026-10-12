@@ -41,6 +41,18 @@ FAMILY_PREPARATION_SECONDS = 7200
 BASE_KEY_LABEL = "org.trtmc.community.base.input-key"
 BASE_INPUTS_LABEL = "org.trtmc.community.base.inputs"
 BASE_KIND_LABEL = "org.trtmc.community.base.kind"
+MANIFEST_TYPES = {
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+}
+INDEX_TYPES = {
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.index.v1+json",
+}
+CONFIG_TYPES = {
+    "application/vnd.docker.container.image.v1+json",
+    "application/vnd.oci.image.config.v1+json",
+}
 
 
 class ImagePreparationError(RuntimeError):
@@ -343,6 +355,78 @@ def inspect(image: str, *, config: str | None = None, private: bool = False) -> 
         raise ImagePreparationError("Prepared image is not one immutable Linux x86 image") from None
 
 
+def _base_identity_error(check: str) -> ImagePreparationError:
+    return ImagePreparationError("Shared base identity check failed: " + check)
+
+
+def _verified_base_ids(base: dict, auth: str) -> set[str]:
+    """Bind engine-specific local IDs to the pinned registry manifest and config."""
+    reference, pinned_digest = base["image"].rsplit("@", 1)
+
+    def manifest(digest: str) -> dict:
+        raw = docker(
+            ["manifest", "inspect", reference + "@" + digest],
+            capture=True,
+            config=auth,
+            private=True,
+            timeout=60,
+        )
+        try:
+            value = object_json(raw)
+        except ImagePreparationError:
+            raise _base_identity_error("registry_manifest") from None
+        if (
+            type(value.get("schemaVersion")) is not int
+            or value["schemaVersion"] != 2
+            or not isinstance(value.get("mediaType"), str)
+        ):
+            raise _base_identity_error("registry_manifest")
+        return value
+
+    def descriptor(value: object, media_types: set[str]) -> bool:
+        return (
+            isinstance(value, dict)
+            and isinstance(value.get("mediaType"), str)
+            and value.get("mediaType") in media_types
+            and isinstance(value.get("digest"), str)
+            and IMAGE_ID.fullmatch(value["digest"]) is not None
+            and type(value.get("size")) is int
+            and value["size"] > 0
+        )
+
+    identities = {pinned_digest}
+    value = manifest(pinned_digest)
+    if value.get("mediaType") in INDEX_TYPES:
+        entries = value.get("manifests")
+        if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+            raise _base_identity_error("registry_platform")
+        matching = [
+            item
+            for item in entries
+            if isinstance(item.get("platform"), dict)
+            and item["platform"].get("os") == "linux"
+            and item["platform"].get("architecture") == "amd64"
+        ]
+        if len(matching) != 1:
+            raise _base_identity_error("registry_platform")
+        selected = matching[0]
+        if not descriptor(selected, MANIFEST_TYPES):
+            raise _base_identity_error("registry_descriptor")
+        identities.add(selected["digest"])
+        value = manifest(selected["digest"])
+        if value.get("mediaType") != selected["mediaType"]:
+            raise _base_identity_error("registry_descriptor")
+    if value.get("mediaType") not in MANIFEST_TYPES:
+        raise _base_identity_error("registry_manifest")
+    config = value.get("config")
+    if not descriptor(config, CONFIG_TYPES):
+        raise _base_identity_error("config_descriptor")
+    if config["digest"] != base["local_image_id"]:
+        raise _base_identity_error("config_digest")
+    identities.add(config["digest"])
+    return identities
+
+
 def pull_shared_base(catalog: dict, token_path: Path, username: str, tag: str) -> str:
     """Pull with protected credentials, then erase authentication before any image execution."""
     try:
@@ -369,17 +453,26 @@ def pull_shared_base(catalog: dict, token_path: Path, username: str, tag: str) -
                 timeout=900,
             )
             image = inspect(base["image"], config=auth, private=True)
-            labels = image.get("Config", {}).get("Labels", {}) or {}
-            if (
-                labels.get(BASE_KEY_LABEL) != base["input_key"]
-                or labels.get(BASE_KIND_LABEL) != "community-base"
-                or object_json(labels.get(BASE_INPUTS_LABEL, "{}")) != base["inputs"]
-                or base["image"] not in image.get("RepoDigests", [])
-                or image["Id"] != base["local_image_id"]
-            ):
-                raise ImagePreparationError(
-                    "Pulled base does not match the public environment inputs"
-                )
+            identities = _verified_base_ids(base, auth)
+            config = image.get("Config")
+            labels = config.get("Labels") if isinstance(config, dict) else None
+            if not isinstance(labels, dict):
+                raise _base_identity_error("input_labels")
+            if labels.get(BASE_KEY_LABEL) != base["input_key"]:
+                raise _base_identity_error("input_key")
+            if labels.get(BASE_KIND_LABEL) != "community-base":
+                raise _base_identity_error("base_kind")
+            try:
+                inputs = object_json(labels.get(BASE_INPUTS_LABEL, "{}"))
+            except (ImagePreparationError, TypeError):
+                raise _base_identity_error("input_hashes") from None
+            if inputs != base["inputs"]:
+                raise _base_identity_error("input_hashes")
+            digests = image.get("RepoDigests")
+            if not isinstance(digests, list) or base["image"] not in digests:
+                raise _base_identity_error("repository_digest")
+            if image["Id"] not in identities:
+                raise _base_identity_error("local_image_id")
         docker(["tag", image["Id"], tag])
         return image["Id"]
     finally:

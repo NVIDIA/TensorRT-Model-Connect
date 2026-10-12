@@ -1217,8 +1217,19 @@ def _planned_owners(repository: Path, *families: str) -> None:
 def test_wrong_shared_base_cannot_reach_preparation_or_pr(tmp_path, monkeypatch):
     _planned_owners(tmp_path, "alpha")
     expected, wrong = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    reference = "ghcr.io/example/private-ci/base@" + expected
     monkeypatch.setattr(
-        community_gpu_ci, "_dependency_catalog", lambda _: {"base": {"local_image_id": expected}}
+        community_gpu_ci,
+        "_dependency_catalog",
+        lambda _: {"base": {"local_image_id": expected, "image": reference}},
+    )
+
+    def pinned_image(value, *, private):
+        assert value == reference and private
+        return {"Id": expected}
+
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(inspect=pinned_image)
     )
 
     def inspect_only(command, **kwargs):
@@ -1233,16 +1244,36 @@ def test_wrong_shared_base_cannot_reach_preparation_or_pr(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("failed_family", [None, "alpha"])
+@pytest.mark.parametrize("shared_store", [None, "classic", "containerd"])
 def test_containers_are_sequential_and_failures_do_not_skip_families(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failed_family: str | None,
+    shared_store: str | None,
 ) -> None:
     """Each execution is removed before the next family starts, including failures."""
     events = []
     staged = []
     _planned_owners(tmp_path, "alpha", "beta", "gamma")
     image = "sha256:" + "a" * 64
+    catalog = None
+    if shared_store is not None:
+        catalog = tmp_path / "catalog"
+        reference = "ghcr.io/example/private-ci/base@sha256:" + "c" * 64
+        config_id = image if shared_store == "classic" else "sha256:" + "b" * 64
+        monkeypatch.setattr(
+            community_gpu_ci,
+            "_dependency_catalog",
+            lambda _: {"base": {"image": reference, "local_image_id": config_id}},
+        )
+        preparation = community_gpu_ci._image_preparation()
+
+        def pinned_image(value, *, private):
+            assert value == reference and private
+            return {"Id": image}
+
+        monkeypatch.setattr(preparation, "inspect", pinned_image)
+        monkeypatch.setattr(community_gpu_ci, "_image_preparation", lambda: preparation)
 
     def docker(command, **kwargs):
         if command[0] == "git":
@@ -1296,9 +1327,9 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
     }
     if failed_family:
         with pytest.raises(CiError, match="alpha: container exited 17"):
-            community_gpu_ci.run_containers(tmp_path, env, "test-image")
+            community_gpu_ci.run_containers(tmp_path, env, "test-image", dependency_catalog=catalog)
     else:
-        community_gpu_ci.run_containers(tmp_path, env, "test-image")
+        community_gpu_ci.run_containers(tmp_path, env, "test-image", dependency_catalog=catalog)
     assert [(kind, family) for kind, family, _ in events] == [
         (kind, family) for family in ("alpha", "beta", "gamma") for kind in ("start", "remove")
     ]
