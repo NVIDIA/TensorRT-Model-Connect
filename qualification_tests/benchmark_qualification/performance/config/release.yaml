@@ -930,6 +930,19 @@ entries:
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+  - id: deformable_detr.detect
+    family: deformable_detr
+    operation: detect
+    model: deformable-detr-r50
+    workload:
+      testcase: deformable-detr-r50
+    baseline:
+      runner: task-reference
+      script: tests/benchmark/reference.py
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-model-call-wall
+      input_preparation_included: false
   - id: birefnet.segment
     family: birefnet
     operation: segment
