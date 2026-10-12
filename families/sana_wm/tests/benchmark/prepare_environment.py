@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare pinned SANA source and a local HF-compatible model directory."""
+"""Prepare pinned SANA source and a local model view linking to the shared HF cache.
+
+Keep that cache mounted when reusing the environment; rebuilding an environment never copies weights.
+"""
 
 from pathlib import Path
-import os
 import shutil
 import subprocess
 import sys
@@ -56,10 +58,7 @@ def _materialize_snapshot(snapshot: Path, destination: Path) -> None:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             resolved = source.resolve(strict=True)
-            try:
-                os.link(resolved, target)
-            except OSError:
-                shutil.copy2(resolved, target)
+            target.symlink_to(resolved)
         temporary.rename(destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)

@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare the pinned official reference implementation inside this family environment."""
+"""Prepare the pinned official source and link its checkpoint from the shared HF cache.
+
+Keep that cache mounted when reusing the environment.
+"""
 
 from __future__ import annotations
 
@@ -69,7 +72,7 @@ def main() -> int:
         )
         target = temporary / "weights/23-36-37/model_best_bp2_serialize.pth"
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(checkpoint, target)
+        target.symlink_to(checkpoint.resolve(strict=True))
         temporary.rename(destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)

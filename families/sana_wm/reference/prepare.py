@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare the native reference environment: headless OpenCV, the pinned official SANA source under
-``<environment>/trtmc-reference/Sana``, and the model snapshot with its stage-1 text encoder materialized under
-``<environment>/trtmc-reference/SANA-model`` (also the directory the family's build reads)."""
+"""Prepare the native reference environment and a local model view of the pinned HF cache.
+
+The official source lives under ``<environment>/trtmc-reference/Sana``. The family's build and reference
+read ``<environment>/trtmc-reference/SANA-model``, whose files link to the shared cache, including the
+stage-1 text encoder. Keep that cache mounted when reusing the environment.
+"""
 
 
 from pathlib import Path
-import os
 import shutil
 import subprocess
 import sys
@@ -59,10 +61,7 @@ def _materialize_snapshot(snapshot: Path, destination: Path) -> None:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             resolved = source.resolve(strict=True)
-            try:
-                os.link(resolved, target)
-            except OSError:
-                shutil.copy2(resolved, target)
+            target.symlink_to(resolved)
         temporary.rename(destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
