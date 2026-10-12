@@ -44,5 +44,5 @@ class Adapter:
         text = self.processor.tokenizer.decode(token_ids, skip_special_tokens=True).strip()
         seconds = len(audio) / SAMPLE_RATE
         return self.host.invocation({"text": text, "token_ids": token_ids, "output_tokens": len(token_ids),
-                                     "input_audio_seconds": seconds}, model_ms,
+                                     "prompt_tokens": prompt_tokens, "input_audio_seconds": seconds}, model_ms,
                                     realtime_factor=seconds / (model_ms / 1000.0))

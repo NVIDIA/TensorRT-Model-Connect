@@ -1,8 +1,14 @@
 # Clef structured decisions
 
-This family implements [Cloudflare/clef](https://huggingface.co/Cloudflare/clef),
-revision `2f3de3dd85f379784083b0814d997ab627200f0c`. It uses the released 27B
-backbone, vision encoder, output embeddings, and joint schema head. It evaluates
+This family implements the released Clef and Clef-Flash checkpoints:
+
+| Checkpoint | Revision |
+| --- | --- |
+| [Cloudflare/clef](https://huggingface.co/Cloudflare/clef) | `2f3de3dd85f379784083b0814d997ab627200f0c` |
+| [Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash) | `fde727a287004204b7518dcc983fe64379776712` |
+
+Each bundle uses its checkpoint's complete backbone, vision encoder, output
+embeddings, and joint schema head. The family evaluates
 the complete schema in one forward pass and returns per-option probabilities;
 there is no autoregressive answer generation.
 
@@ -29,6 +35,13 @@ build/trtmc clef decide clef.bundle \
 
 build/trtmc clef decide clef.bundle \
   --runtime-root build --record families/clef/tests/fixtures/outage.json
+
+build/trtmc clef build Cloudflare/clef-flash \
+  --revision fde727a287004204b7518dcc983fe64379776712 \
+  --max-sequence-length 512 -o clef-flash.bundle
+
+build/trtmc clef decide clef-flash.bundle \
+  --runtime-root build --record families/clef/tests/fixtures/clef-flash-outage.json
 ```
 
 The fixtures reproduce the two complete text examples on the model card. The
@@ -89,6 +102,10 @@ implementation, requires matching selected options and repeated outputs, and
 checks that the native process does not load Python, Torch, or c10. Separate
 tests compare token IDs, spans, media patches, and recurrent attention.
 
+Select `--e2e-model clef-flash` for Flash only. Local Flash artifacts can be
+provided through `TRTMC_CLEF_FLASH_CHECKPOINT` and `TRTMC_CLEF_FLASH_BUNDLE`.
+`--e2e-model clef` selects both checkpoints in this family.
+
 The standard benchmark operation is `decide`:
 
 ```bash
@@ -104,8 +121,33 @@ encoding and response construction. Model loading, compilation, warmup, and
 image-file decoding are excluded. `tests/benchmark_compile.py` measures the
 same boundary with `torch.compile(mode="max-autotune")` and checks compiled
 accuracy before timing.
+Pass `--model clef-flash` to select Flash's pinned checkpoint metadata and fixtures.
+For fixed-workload comparisons, `--dynamic static` avoids recompiling symbolic
+sequence shapes. `--emulate-precision-casts` preserves the original BF16
+rounding boundaries. If compiler lowering fails accuracy, `--aten-layer-norm`
+retains the original normalization kernel. Each receipt records these settings
+and any ATen fallbacks; failed accuracy runs do not produce timing results.
+The comparison tools report the selected manifest separately from supplied
+local artifact paths. They do not authenticate local checkpoint or bundle
+contents against the Hub revision; a passing comparison alone is not proof
+of that identity.
 
-On GB300 with TensorRT 11.1.0.106, all seven E2E cases pass against the pinned
+To check changing text and media requests through one loaded Task, run:
+
+```bash
+PYTHONPATH=core/builder:apps/benchmark:. \
+python -m families.clef.tests.compare_sequence \
+  --checkpoint /path/to/pinned/checkpoint --model clef-flash \
+  --bundle clef-flash.bundle --runtime-root build \
+  --probe build/clef_task_probe --output clef-flash-sequence
+```
+
+This checks every manifest case twice, with the same per-option accuracy gates
+as E2E, and requires exact repeatability after the intervening requests.
+
+The following historical measurements describe the 27B qualification in
+[PR #1598](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1598).
+On GB300 with TensorRT 11.1.0.106, all seven E2E cases passed against the pinned
 original implementation. This includes the two model-card text examples,
 alternative answers, multilingual input, a receipt image, and video frames.
 The largest absolute option-probability difference is 0.002188; the BF16 gate

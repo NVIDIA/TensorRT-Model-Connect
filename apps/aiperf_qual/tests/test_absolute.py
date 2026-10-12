@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import math
 from pathlib import Path
 
@@ -419,17 +420,52 @@ def test_trtmcs_failed_requests_are_wrong_answers_with_their_reason(tmp_path):
            {"metadata": {"session_num": 1}, "status": 422,
             "error": {"message": "TensorRT enqueue failed"}, "responses": []}]
     graded = [{"session_num": 0, "passed": True}, {"session_num": 1, "passed": False, "actual": ""}]
-    run = SimpleNamespace(raw_records=lambda: raw, accuracy_records=lambda: graded, exit_code=1)
+    for index, record in enumerate(raw):
+        record["metadata"]["conversation_id"] = f"question-{index}"
+    for index, record in enumerate(graded):
+        record.update(conversation_id=f"question-{index}", expected="A")
+    run = SimpleNamespace(raw_records=lambda: raw, accuracy_records=lambda: graded, exit_code=1,
+                          conversation_indices=lambda: {"question-0": 0, "question-1": 1})
     item = {**ITEM, "suite": "mmlu-0shot"}
     model = {"candidate": {"max_sequence_length": 4096, "checkpoint": "m"}, "reference": {}}
     with patch.object(absolute, "run_aiperf", return_value=run):
         side_result = absolute.run_side(Environment({"hf_datasets_cache": str(tmp_path)}), {"url": "u"}, model, item,
-                                        [{}, {}], tmp_path)
+                                        [{"gold": "A"}, {"gold": "A"}], tmp_path)
     assert list(side_result["records"]["greedy"]) == [0] and "enqueue failed" in side_result["failed"]["greedy"]
     native = {"records": {"greedy": {0: {"passed": True}, 1: {"passed": True}}}, "exit": {}}
     entry = absolute.judge(item, [{"task": "t", "gold": "A"}] * 2, side_result, native)
     assert entry["samples"] == 2 and entry["counts"]["native_only"] == 1 and "enqueue failed" in entry["notes"][0]
     assert entry["failures"][0]["actual"] == absolute.NO_ANSWER
+
+
+@pytest.mark.parametrize("failed, expected_precision", [(True, "fp32"), (False, "fp16")])
+def test_native_precision_fallback_on_failed_requests_but_not_wrong_answers(tmp_path, monkeypatch, failed, expected_precision):
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual.config import Environment
+
+    calls, superseded = [], []
+
+    @contextmanager
+    def serving(*args, precision, **kwargs):
+        calls.append(precision)
+        yield {"precision": precision, "replicas": 1}
+
+    def run_side(environment, service, *args):
+        if service["precision"] == "fp16" and failed:
+            return {"observations": {"greedy": {}}, "failed": {"greedy": "expected Float, found Half"}}
+        return {"records": {"greedy": {0: {"passed": False}}}, "failed": {}}
+
+    monkeypatch.setattr(absolute, "serving_replicas", serving)
+    monkeypatch.setattr(absolute, "run_side", run_side)
+    monkeypatch.setattr(absolute.execution, "supersede", lambda start: superseded.append(start))
+    model = {"absolute": [{"suite": "s"}], "reference": {"perf_precision": "fp16", "precision": "fp32"}}
+    native = absolute.run_native(Environment({"native_replicas": 1}), model, "python", {"s": [{}]}, tmp_path)
+    assert native["precision"] == expected_precision
+    assert calls == (["fp16", "fp32"] if failed else ["fp16"])
+    assert bool(superseded) == failed
+    if failed:
+        assert "expected Float, found Half" in native["fallback_from"]
 
 
 def test_the_native_side_tries_the_next_precision(tmp_path):
@@ -513,7 +549,7 @@ def test_an_empty_answer_is_a_wrong_answer_not_a_failed_request():
     assert "rejected" in absolute.failed_reason([empty, {"status": 422, "error": {"message": "rejected"}}], 1)
 
 
-def test_a_native_score_below_the_suitability_floor_is_not_comparable():
+def test_native_absolute_score_does_not_override_conversion_difference():
     def entry(native, gate):
         value = {"samples": 10, "expected_samples": 10, "gate": gate, "counts": {},
                  "metrics": {"trtmc_score": native, "native_score": native}}
@@ -521,9 +557,14 @@ def test_a_native_score_below_the_suitability_floor_is_not_comparable():
         return value
 
     status, reasons = absolute.status(entry(0.53, {"margin": 1.0, "min_native": 30.0}))  # gpt-oss on MMLU
-    assert status == "not-comparable" and "does not fit" in reasons[0]
+    assert status == "inconclusive" and "regression" in reasons[0]
     assert absolute.status(entry(44.0, {"margin": 1.0, "min_native": 30.0}))[0] == "inconclusive"  # 10 problems
     assert absolute.status(entry(0.0, {"margin": 1.0}))[0] == "inconclusive"  # no floor declared
+
+    large = entry(0.0, {"margin": 5.0, "min_native": 10.0})
+    large.update(samples=200, expected_samples=200, counts={"both_wrong": 200})
+    large["metrics"]["test"] = absolute.binary_test(large)
+    assert absolute.status(large)[0] == "pass"
 
 
 def test_unmerged_raw_records_still_show_failed_requests(tmp_path):
@@ -1409,12 +1450,17 @@ def test_a_problem_beyond_the_bundles_capacity_leaves_both_sides_and_is_reported
     raw = [{"metadata": {"session_num": index}, "status": 200, "responses": []} for index in range(3)]
     raw.append(_rejection(3, "Qwen3-Omni Thinker prompt exceeds its prefill profile"))
     graded = [{"session_num": index, "passed": True} for index in range(3)] + [{"session_num": 3, "passed": False}]
-    run = SimpleNamespace(raw_records=lambda: raw, accuracy_records=lambda: graded, exit_code=1)
+    for index, record in enumerate(raw):
+        record["metadata"]["conversation_id"] = f"question-{index}"
+    for index, record in enumerate(graded):
+        record.update(conversation_id=f"question-{index}", expected="A")
+    run = SimpleNamespace(raw_records=lambda: raw, accuracy_records=lambda: graded, exit_code=1,
+                          conversation_indices=lambda: {f"question-{index}": index for index in range(4)})
     model = {"candidate": {"max_sequence_length": 256, "checkpoint": "m"}, "reference": {}}
     environment = Environment({"hf_datasets_cache": str(tmp_path)})
     with patch.object(absolute, "run_aiperf", return_value=run):
-        trtmc = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{}] * 4, tmp_path, capacity=True)
-        native = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{}] * 4, tmp_path)
+        trtmc = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{"gold": "A"}] * 4, tmp_path, capacity=True)
+        native = absolute.run_side(environment, {"url": "u"}, model, ITEM, [{"gold": "A"}] * 4, tmp_path)
     assert "rejected" not in native and "prefill profile" in native["failed"]["greedy"]  # only TRTMC's side
     assert "failed" not in trtmc and list(trtmc["records"]["greedy"]) == [0, 1, 2]
     assert trtmc["rejected"] == {"greedy": {3: "Qwen3-Omni Thinker prompt exceeds its prefill profile"}}
@@ -1451,6 +1497,12 @@ def test_any_other_rejection_stays_a_missing_answer():
     assert absolute.capacity_rejection({**_rejection(0, "exceeds"), "status": 200, "error": None}) is None
     plain = {"metadata": {"session_num": 0}, "status": 500, "error": {"message": "the context capacity is full"}}
     assert absolute.capacity_rejection(plain) is None  # not the backend's rejected-request code
+
+
+@pytest.mark.parametrize("body", [None, "failure", [], 42])
+def test_non_mapping_backend_error_is_not_a_capacity_rejection(body):
+    record = {"status": 422, "error": {"message": json.dumps({"error": body})}}
+    assert absolute.capacity_rejection(record) is None
 
 
 def test_gold_suite_outputs_beyond_capacity_are_dropped_from_the_corpus_on_both_sides():

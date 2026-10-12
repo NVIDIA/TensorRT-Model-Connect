@@ -9,9 +9,9 @@ It does not use `qualification_tests/benchmark_qualification`.
   (`noninferiority.py`): `pass` when TRTMC's regression is shown to be below the benchmark's margin, `fail`
   when it is shown to exceed it, `inconclusive` otherwise. Tasks without a gold set compare outputs with
   the native model (conversion parity). Random-weight test models are Perf only (`accuracy_source: none`).
-- **Perf**: TRTMC must be faster than the native model (eager) at the candidate's precision: the speedup's
-  90% interval lies above 1.05 x (1 + guard) (the 5% margin widened by the largest server-instance and order effect
-  the order check measured, `guard_percent`), on every timed request, with the same work on both sides.
+- **Perf**: report Native and TRTMC task-call p50 from the same benchmark responses used for Acc,
+  at the recorded effective precision. Timing is a measurement, not an additional acceptance gate.
+  Output-length differences, execution conditions, and partial coverage remain explicit observations.
 
 ## Design
 
@@ -34,8 +34,12 @@ RefCOCO, LibriSpeech WER, STS-B, SciFact retrieval / rerank, HumanEval + MBPP, I
 ADE20K mIoU, mask IoU, ETTh1 MSE, WMT / FLORES chrF++). Selections are seeded and stratified; prompts are
 filtered to the shipped bundle's length (rendered through the chat template on the chat route). A model
 whose catalog request samples answers once per seed on each side and is judged on per-problem seed means.
-Each benchmark's `margin`, `relative_margin`, `min_native` (suitability floor), and size are set in
-`config/tasks.yaml`, each with its reason.
+Each benchmark's `margin`, `relative_margin`, and size are set in `config/tasks.yaml`.
+Native absolute scores do not decide conversion acceptance: the paired difference does.
+A low score limits what this benchmark establishes about model capability, but does not
+prevent comparing conversion results. Historical `min_native` fields are ignored.
+Equal zero task scores establish only the scored benchmark comparison, not identical outputs
+or intrinsic model capability. This applies to the random-weight DeepSeek V2 tiny fixture too.
 
 Conversion-parity benchmarks (`gold_metrics.PARITY`) compare each output with the native one within a
 tolerance: raw encoders' vectors, MoGe geometry, ACT action chunks, stereo disparities, PersonaPlex speech.
@@ -64,14 +68,16 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
   missing, an `error`, as does a problem the native model did not answer.
 - A parity benchmark against a native model that ran at another precision than TRTMC (the candidate's failed
   natively) uses its `mismatched_precision_gate`.
+- A native precision whose requests all fail tries the configured fallback precision and preserves the failed
+  attempt. Low scores from successfully returned answers do not trigger precision fallback.
 - Both sides run separately with one server and concurrency 1. Legacy Acc replica, MPS, and overlap settings
   are ignored by qualification; their contended timings cannot serve as speed evidence.
 - Every AIPerf run has a deadline: three times the profile's seconds in the run's ledger (`run-all --ledger`, at
   least ten minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.
 - `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
-  comparison: the native model below a benchmark's floor, a Task without an Acc check, timings that cannot be
-  compared), Red (Acc or Perf worse than native beyond its margin), Yellow (Perf about equal to native, which counts
-  as a pass, or an Acc difference not shown either way), Green (quality passes with valid comparable timings). Perf is reported on the quality dataset.
+  comparison: a Task without an Acc check), Red (Acc worse than
+  native beyond its margin), Yellow (an Acc difference not shown either way), Green (quality passes with available
+  benchmark timings). Historical fixed-workload reports retain their original performance lights.
 
 ### Performance
 
@@ -81,6 +87,10 @@ profiling responses and artifact references; image and video quality scoring doe
 just to obtain their task-call timings. Warmup is excluded, both backends run separately at concurrency 1,
 and GPU scorers run after their generation servers stop. This costs more wall time than the former
 multi-replica, overlapping Acc schedule.
+Generated artifacts are joined to profiling requests by request identity and payload, then ordered
+by the suite inputs. Warmup advances the dataset cursor; arrival order must never select the gold label.
+The GPU probe selects the configured device and waits briefly for startup activity to settle.
+A formal benchmark cannot start if utilization remains at least 20% or the probe fails.
 
 The report answers two independent questions: the task quality scores on each side and their difference;
 and the native/TRTMC task-call times, precision, and work comparability. Markdown and HTML omit speedup
@@ -92,20 +102,25 @@ conversion parity only. The family's checks keep their documented coverage and t
 
 Natural evaluation workloads (`both`) provide timings from the **same outputs used for quality**. Their
 paired geometric speedup and total-time ratio are descriptive; the 90% interval is across dataset units,
-with seeds clustered by problem, not a repeated-run stability interval. Every requested response must be
-present, valid, paired, warmed, and at matching effective precision and declared task-call boundaries.
-Actual work is compared per sample, so different samples may have different lengths. An unmatched
-workload reports its natural-task time ratio and the reason equal-work acceleration is unavailable;
-matched subsets never hide failures or shorter outputs. `max_tokens` alone is not work evidence. No
-mandatory second, forced-length suite is added for variable-output families.
+with seeds clustered by problem, not a repeated-run stability interval. The report shows each side's p50,
+effective precision, successful timing coverage, and observed work differences.
+Generation length and work comparability do not decide whether benchmark timings are measured.
+Summary rows flag unequal or unknown work and partial timing coverage beside the P50 values.
+Inputs excluded by Acc as exceeding bundle capacity are excluded from both timing sides too; their
+count and the original attempted request counts remain visible. Other failed or missing requests
+remain in coverage and produce a `partial` timing measurement when both sides have timings.
+A missing workload or a side without any valid timing is an error. `max_tokens` alone is not work evidence.
+No mandatory second, forced-length suite is added for variable-output families.
+GenEval now defaults to `geneval-full`, all 553 prompts at the pinned metadata hash;
+the old `geneval-200` preset remains available for an explicitly smaller selection.
 
 Models with quality benchmarks run **only their required quality workloads**. For example, Qwen uses
 `mmlu-0shot`, and image/video models use their configured quality datasets. Catalog, near-capacity,
 and informational replay checks are not extra default workloads. Each side answers each selected
 problem once, with excluded warmup. The same profiling responses supply Acc, Native/TRTMC task-call
 p50, and AIPerf client metrics. Multiple required benchmarks remain separate, labelled datasets.
-Dataset timing completeness and work comparability are checked; timing results are measurements,
-not repeated-run performance acceptance gates. Quality thresholds remain unchanged. Failed or
+Dataset timing completeness and work comparability are recorded as observations; timing results
+are measurements, not repeated-run performance acceptance gates. Quality thresholds remain unchanged. Failed or
 unpaired responses remain visible in each side's timing coverage rather than disappearing into a
 matched subset. Models explicitly lacking a quality benchmark retain one configured performance
 workload and conversion-parity evidence. The explicit `order-check` diagnostic and historical
@@ -113,8 +128,10 @@ fixed-workload reports keep their original statistics. Timing and generation pha
 
 Configuration now uses a flat `performance` policy and opt-in `service_metrics`; reports use `performance`
 and `service_metrics` under schema `trtmc.qualification/v2`. Earlier tiered configurations and reports
-are normalized on read, including rejudge, without maintaining another execution path. Rejudge never
-promotes descriptive dataset results to an acceptance gate. `torch.compile` remains an optional labelled
+are normalized on read, including rejudge, without maintaining another execution path. Rejudge without an
+environment refreshes benchmark timings from saved execution records while
+preserving the recorded Acc entries and gates. It never promotes descriptive dataset results to
+an acceptance gate. `torch.compile` remains an optional labelled
 reference. Service metrics (client latency, throughput, load sweeps) are opt-in and do not affect the
 verdict; the prototype's single execution lane and buffered SSE do not measure token TTFT/ITL.
 
@@ -185,6 +202,19 @@ command. `--smoke` runs one problem per benchmark and one timed request (`smoke-
 never a verdict; results go under `<out-root>/smoke`, or `<dir>/smoke/<profile>` for `run --out <dir>/<profile>`).
 `rejudge` and `recheck` keep the run's own report as `report.original.json`.
 
+AIPerf 0.13.0 restarts its session counter after warmup while continuing the dataset sampler.
+The startup hook installed by `doctor --fix` grades by `conversation_id` and preserves the
+original phase/session metadata. After upgrading the plugins, run `doctor --fix` again to
+update an existing hook. Qualification pairs answers and timings by the exported dataset identities.
+
+To recover earlier plugin benchmark scores without model inference, use
+`trtmc-aiperf-qual rejudge --selection-cache /path/to/hf-datasets/trtmc-accuracy-selections out/*/`.
+Recovery requires the original selection cache, `inputs.json`, accuracy exports, raw exports,
+and execution records. It verifies the complete ordered inputs and both sides' gold selections,
+uses the recorded graders and gates, and retains the original response exports and report.
+Corrected evidence is written to `accuracy_export.aligned.jsonl` and `execution.aligned.jsonl`.
+Missing or conflicting evidence fails recovery instead of producing an inferred score.
+
 `run-all` runs profiles one after another (profiles sharing a checkpoint back to back), appends one
 line per profile to `<out-root>/campaign.jsonl`, and skips profiles whose finished result has the same
 run key (configuration, harness, mode, and dependencies; `--rerun` keeps the old directory as
@@ -220,17 +250,70 @@ with their reason, unless another result root holds a result for them.
 ### Disk retention
 
 Checkpoints and bundles dominate disk use. `retention` in the environment file frees them as the
-batch advances (both default to `retain`):
+batch advances (all default to `retain`):
 
 | key | values | effect |
 |---|---|---|
 | `bundle` | `retain`, `delete_on_pass`, `delete_unless_error`, `delete_built_unless_error` | delete `bundle_root/<name>/` after the model's run (`delete_built_unless_error`: only a bundle the run built itself); an `error` verdict always keeps it for the rerun |
+| `temporary_files` | `retain`, `delete_on_pass`, `delete_unless_error` | after scoring and server shutdown, remove generated request `scratch/` directories (images, videos, audio, arrays, uploaded inputs and initial noise); keep raw exports, scores, timings and logs |
 | `hf_cache` | `retain`, `delete_unused` | `run-all` deletes a checkpoint repository from `hf_hub_cache` once no remaining profile of the batch uses it |
 
-Deletion never leaves those roots. Reference environments and reports are kept (`rejudge`
-needs only the reports). The peak is the largest single model (checkpoint plus bundle) plus the
-next profile's checkpoint, which `run-all` downloads during the current run (`--no-prefetch` avoids
-it).
+`delete_on_pass` also accepts a benchmark result with passing Acc and complete Perf (`measured`).
+Partial timings, inconclusive Acc, and failed Acc keep their bundles under that policy.
+Failed Native precision attempts remain in the execution evidence; their timings and client
+statistics are excluded when a fallback succeeds.
+
+Use a cache and bundle root dedicated to this campaign when enabling deletion: `delete_unused`
+means unused by the selected batch, not by unrelated processes or campaigns sharing that cache.
+HF cache deletion removes raw checkpoint weights, so it is opt-in; the default keeps them.
+Even with `delete_unused`, a checkpoint needed by any profile with a framework/build error is kept.
+Build and framework errors keep bundles and temporary files. `retention.json` records the policies,
+removed paths and recovered bytes; checkpoint deletion is also recorded in `campaign.jsonl`.
+
+For disk-constrained runs that keep raw weights:
+
+```yaml
+retention:
+  bundle: delete_built_unless_error
+  hf_cache: retain
+  temporary_files: delete_unless_error
+```
+
+Only set `hf_cache: delete_unused` for a cache this batch exclusively owns. Deletion never leaves
+the configured roots. Reference environments, datasets, runtime binaries and reports are kept.
+The peak includes the current checkpoint, bundle and generated media, plus the next checkpoint
+if prefetch is enabled (`--no-prefetch` avoids that overlap). Temporary cleanup happens per model,
+so there must still be enough space for one model's complete scoring workload.
+
+Each new model result has one working directory:
+
+```text
+<profile>/
+  report.md / report.json       # Acc and Perf together
+  model.json                   # resolved configuration
+  execution.jsonl              # requests, identities, timings and work evidence
+  build.json / retention.json  # build identity and cleanup receipt
+  run-key.txt                  # resume identity
+  artifacts/                   # build logs, AIPerf exports, server logs and score details
+    build/
+    <workload-and-side>/        # scratch/ exists only when retained
+```
+
+An error may additionally write `error.json` or `phase-errors.log`. Older output layouts stay
+readable; reruns use the new layout and preserve prior results separately. Raw AIPerf references
+in new execution records are relative to the model result, so the entire result can be moved
+and raw-response timing recovery still works with the same request hash and sample checks.
+Accuracy regrading also needs its original selection cache. Reading reports and rejudging stored
+scores/timings do not require bundles or HF weights. After temporary cleanup, media rescoring
+requires generation again; text raw responses remain available. If the bundle is also gone,
+`recheck` fails before replacing valid scores: run the model again to rebuild and regenerate. Cleanup does not promise
+bit-for-bit model replay without the checkpoint, bundle and generated artifacts.
+
+Media rechecks preserve the original exports. A regenerated side writes under its existing workload
+directory's `rerun-<timestamp>/`; its responses replace that side's Acc, task timings and informational
+AIPerf metrics together. `execution.rechecked.jsonl` keeps the active measurements and superseded history.
+Outputs are reused only with their matching execution evidence; a failed regeneration cannot retain an
+older passing timing. Workloads outside the recheck keep their original measurements.
 
 ## Extending
 
@@ -247,3 +330,91 @@ it).
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
   retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
+
+
+## Text profiling with the persistent server
+
+`text-profile` reuses `trtmc-server` with AIPerf's built-in `completions` and
+`chat` endpoints. It adds server readiness/model checks, AIPerf release
+version checks and installed-package provenance, family validation commands,
+length/load sweeps, request-ID timing joins and an optional sequential
+native-reference comparison. It produces
+benchmark evidence independently of the qualification verdicts above.
+
+Qwen and GPT-2 prebuilt validation checks the builder-recorded immutable Hugging Face
+checkpoint identity and build settings against the selected pinned snapshot and family manifest.
+Bundles created before this metadata was added must be rebuilt for automated
+exact-bundle validation. Declaring a profile or revision in YAML is insufficient.
+
+
+```bash
+PYTHONPATH=apps/aiperf_qual python3 -m trtmc_aiperf_qual text-profile \
+  --environment /path/text-environment.yaml \
+  --config /path/qwen-text-profile.yaml --out /path/results/qwen-baseline
+```
+
+For a short guide using an already-built Qwen bundle and the pip-installed
+AIPerf client directly, see
+[Profile Text with AIPerf](../../website/docs/user-guides/profile-text-with-aiperf.md).
+The automated runner also uses `pip install aiperf==0.13.0`; no AIPerf source
+checkout is required. Keep the client in a separate Python environment.
+
+For automatic validation and timing joins, generate the configuration from
+the checked-in Qwen example, then run `text-profile`. Replace the three paths
+below with your native build, already-built FP16 bundle, and client interpreter.
+The Qwen example expects checkpoint revision
+`c1899de289a04d12100db370d81485cdf75e47ca` and a context limit of 256.
+Use your CUDA-enabled TRTMC Python interpreter for both commands; the runtime
+build must also include `qwen_text_stream_consumer` for the family stream check.
+
+```bash
+python apps/aiperf_qual/examples/prepare_text_profile.py \
+  --build-dir /absolute/path/build \
+  --bundle /absolute/path/qwen3-0.6b.bundle \
+  --aiperf-python /absolute/path/client-venv/bin/python \
+  --out artifacts/qwen-config
+
+PYTHONPATH=apps/aiperf_qual python -m trtmc_aiperf_qual text-profile \
+  --environment artifacts/qwen-config/environment.yaml \
+  --config artifacts/qwen-config/model.yaml --out artifacts/qwen-profile
+```
+
+Run in the same GPU environment as the build, with the reference checkpoint
+available in its Hugging Face cache. The runner validates the exact served
+bundle before timing. `report.json` contains success counts, p50/p95 latency,
+throughput and native Task wall time; `run-NNN/joined.jsonl` joins client
+measurements to server records. Use new configuration and result directories
+for subsequent runs. Add `--include-streaming` to generate Qwen's raw/chat
+streaming cases. Larger bundles can need a higher `server.startup_timeout`.
+
+To profile another built model with this runner, supply a model template with
+its checkpoint/tokenizer revisions, server settings and family-owned
+`validation_commands`. These checks must validate the exact served bundle.
+Do not reuse Qwen's correctness commands for another family. Optional legacy
+`aiperf.source` and `aiperf.commit` fields retain exact clean-checkout checks
+for source installations, but the shipped templates use `aiperf.version` only.
+
+In Docker, make the checkout, build, bundle, client environment and cache
+available inside the GPU container. For a Git worktree, mount the original
+checkout's entire `.git` directory at the same absolute path too:
+`git rev-parse --path-format=absolute --git-common-dir` identifies it. The
+automated runner reads Git metadata to record provenance.
+
+Client token counts are tokenizer estimates; do not enable
+`--use-server-token-count`, because the server does not expose measured prompt
+token counts. Nonstreaming native `model_call_ms` measures the public Task
+call; streaming measures the Task stream including relay/backpressure.
+AIPerf `client_request_latency_ms` ends at the last content chunk;
+`client_request_lifecycle_ms` also includes terminal delivery and cleanup.
+These serving measurements exclude model loading, validation and warmup and
+do not represent GPU kernel time or release qualification verdicts.
+
+An optional `reference` block (`profile`, GPU `python`, `mode: eager`) runs
+the existing native reference sequentially under the same GPU lock. Only
+nonstreaming, closed-loop, concurrency-one cases with matching inputs, text,
+actual output counts and Task timing scopes receive a descriptive native Task
+wall ratio. Mismatched work is reported as noncomparable.
+
+The normal qualification commands keep the existing perf-serving service and
+its raw Task/observation protocol. `services.serving(service="trtmc-server")`
+is an explicit text candidate option; callers must use the public text endpoints.

@@ -20,7 +20,12 @@ import yaml
 from tools.ci.context import CiContext
 from tools.ci.container import CiContainer
 from tools.ci.docker_image import DockerImageManager
-from tools.ci.e2e import E2ERunner, _require_e2e_junit, _require_passing_junit
+from tools.ci.e2e import (
+    E2ERunner,
+    _require_e2e_junit,
+    _require_e2e_process_result,
+    _require_passing_junit,
+)
 from tools.ci.package import (
     SourceArchiveValidator,
     WheelArchiveValidator,
@@ -396,6 +401,22 @@ def test_e2e_junit_fails_closed_for_invalid_result_cardinality_or_skip(
 
     with pytest.raises(CiError, match=message):
         _require_e2e_junit(report, "family", requested)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "message"),
+    ((-9, "terminated by SIGKILL"), (137, r"exit code 137 \(SIGKILL\)")),
+)
+def test_e2e_process_failure_preserves_signal_when_junit_is_missing(
+    tmp_path: Path, returncode: int, message: str
+) -> None:
+    with pytest.raises(CiError, match=message):
+        _require_e2e_process_result(
+            tmp_path / "missing.xml",
+            "family",
+            ("family-case",),
+            returncode,
+        )
 
 
 def test_e2e_rejects_multiple_family_environments(tmp_path: Path) -> None:

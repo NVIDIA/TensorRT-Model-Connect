@@ -20,14 +20,15 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import aiperf_metrics
-from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, ms, reported_perf, request_label, signal, signal_reason
+from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, is_pass, measurement_note, ms, reported_perf, request_label, signal, signal_reason
 from .report import _fmt, counted
 
-EVIDENCE = ("report.md", "report.json", "execution.jsonl", "build.json", "build/build.log", "error.json", "phase-errors.log",
-            "candidate/server.log")
+EVIDENCE = ("report.md", "report.json", "execution.jsonl", "execution.timing-recovered.jsonl",
+            "retention.json", "build.json", "artifacts/build/build.log", "build/build.log", "error.json", "phase-errors.log",
+            "artifacts/candidate/server.log", "candidate/server.log")
 LIGHT_COLORS = {"green": "#1e8e3e", "yellow": "#b06000", "red": "#c5221f", "white": "#5f6368", "n/a": "#5f6368"}
 LEGEND = (("green", "Quality meets its criteria and task timings are available; dataset timings have no performance gate."),
-          ("yellow", "Pass: performance within the margin of native, or an accuracy difference not shown either way."),
+          ("yellow", "Performance within the margin of native, or an inconclusive accuracy difference. Inconclusive Acc is not a pass."),
           ("red", "Accuracy or performance worse than native beyond the margin."),
           ("white", "No valid comparison: a build, run, or environment error, or results that cannot be compared."))
 STYLE = """
@@ -189,6 +190,8 @@ def _latency(profile: str, items: Sequence[Mapping[str, Any]], side: str) -> str
         unit = " / audio s" if timing.get("unit") or (item.get("candidate") or {}).get("unit") else ""
         label = f"<span class='detail'>{_e(request_label(profile, item))}</span> " if len(items) > 1 else ""
         lines.append(f"<div>{label}{_e(ms(timing.get('p50_ms')))}{unit}</div>")
+        if side == "candidate" and (note := measurement_note(item)):
+            lines.append(f"<span class='detail'>{_e(note)}</span>")
     return "".join(lines) or "<span class='none'>—</span>"
 
 
@@ -231,12 +234,18 @@ def _performance(items: Sequence[Mapping[str, Any]]) -> str:
     for item in items:
         candidate, reference = item.get("candidate", {}), item.get("reference", {})
         light = item.get("light", "")
+        if item.get("kind") == "natural_dataset":
+            light = item.get("measurement_status", "measured")
         color = LIGHT_COLORS.get(light, "#6e7781")
         reasons = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
         unit = " per audio second" if candidate.get("unit") or reference.get("unit") else ""
         if item.get("kind") == "natural_dataset":
             reasons += (f" · shared quality outputs; {item.get('matched_pairs')}/{item.get('pairs')} "
-                        "paired responses have matching work; informational, no gate")
+                        "paired responses have matching work; informational, no gate"
+                        f" · Native {reference.get('valid_requests')}/{reference.get('requests')} timed"
+                        f" · TRTMC {candidate.get('valid_requests')}/{candidate.get('requests')} timed")
+            if item.get("out_of_capacity"):
+                reasons += f" · {item['out_of_capacity']} capacity rejections excluded on both sides"
         else:
             reasons += " · repeated fixed-workload gate"
         rows.append(f"<tr><td>{_e(item.get('request') or item.get('reference_mode'))}</td><td><span class='badge' "
@@ -345,7 +354,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                     f"<td class='timing'>{_latency(profile, perf, 'candidate')}</td>"
                     f"{rerun}"
                     f"<td>{_evidence(profile, row, base)}</td></tr>")
-    passed = tally["green"] + tally["yellow"]
+    passed = sum(is_pass(row) for row in rows.values())
     rate = f"{100 * passed / len(rows):.1f}%" if rows else "—"  # of every model the report covers
     cards = ("<section class='strip'><div class='card'><span class='card-label'>Results</span>"
              + "".join(f"<span class='card-item'>{_signal(result)}<strong>{tally[result]}</strong></span>"

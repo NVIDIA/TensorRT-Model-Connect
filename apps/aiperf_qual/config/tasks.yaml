@@ -33,20 +33,20 @@ defaults:
 
 # Benchmarks. gate: `margin` (points of the metric) and optionally `relative_margin` (a fraction of the native
 # score, when larger); `quantized_gate` / `sampled_gate` replace it for quantized or sampling candidates.
-# `min_native`: below it the benchmark does not discriminate for the model (not comparable). Selection is
+# Native absolute capability is reported, not gated. Selection is
 # seeded and stratified (per subject / class); prompts are filtered to the bundle's length as rendered.
 benchmarks:
   # MMLU 0-shot (AIPerf mmlu, pinned): 40 per subject (<= 2,280); margin 1 point.
-  mmlu: {plugin: trtmc_mmlu, suite: mmlu-0shot, n_shots: 0, per_task: 40, min_native: 30.0,
+  mmlu: {plugin: trtmc_mmlu, suite: mmlu-0shot, n_shots: 0, per_task: 40,
          gate: {margin: 1.0}, quantized_gate: {margin: 2.0}, sampled_gate: {margin: 2.0}}
   # GSM8K (AIPerf gsm8k, pinned; the number after #### or the last number): for math models only, as their
   # answers (up to 256 tokens) dominate the run time; at most 500 problems; margin 2 points.
-  gsm8k: {plugin: trtmc_gsm8k, suite: gsm8k, limit: 500, min_native: 10.0,
+  gsm8k: {plugin: trtmc_gsm8k, suite: gsm8k, limit: 500,
           gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
   # LAMBADA (OpenAI, all 5,153 passages): base LMs too small for MMLU to discriminate.
-  lambada: {plugin: trtmc_lambada, suite: lambada, endpoint: completions, min_native: 10.0,
+  lambada: {plugin: trtmc_lambada, suite: lambada, endpoint: completions,
             gate: {margin: 0.5}, quantized_gate: {margin: 1.0}, sampled_gate: {margin: 1.0}}
-  tinystories: {plugin: trtmc_tinystories, suite: tinystories, endpoint: completions, limit: 2000, min_native: 10.0,
+  tinystories: {plugin: trtmc_tinystories, suite: tinystories, endpoint: completions, limit: 2000,
                 gate: {margin: 1.0}}
   # BART's denoising pre-training task scored as corpus chrF++ of the reconstructed sentences (exact-sentence
   # accuracy is 5% on the native model: too coarse to discriminate).
@@ -55,9 +55,9 @@ benchmarks:
   # Gold suites sent through AIPerf's trtmc_task endpoint and scored here (gold_metrics): `choice` /
   # `contains` / `box_iou50` / `top1` / `code_pass` grade each sample (paired score test); the others are
   # corpus statistics (paired bootstrap over the suite's clusters).
-  mmstar: {suite: mmstar, suite_definition: mmstar-val-1500, metric: choice, min_native: 30.0,
+  mmstar: {suite: mmstar, suite_definition: mmstar-val-1500, metric: choice,
            gate: {margin: 1.5}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
-  ocrbench: {suite: ocrbench, suite_definition: ocrbench-1000, metric: contains, min_native: 10.0,
+  ocrbench: {suite: ocrbench, suite_definition: ocrbench-1000, metric: contains,
              gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
   librispeech: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-500, metric: wer,
                 gate: {margin: 0.3, relative_margin: 0.05}}
@@ -101,7 +101,7 @@ benchmarks:
   flores_nllb: {suite: flores200-en-fr, suite_definition: flores200-en-fr-nllb-1012, metric: chrf, fit_prompt: true, min_new_tokens: 16,
           gate: {margin: 1.0}}
   # RefCOCO grounding: the first box of the answer against the gold box (IoU >= 0.5).
-  refcoco: {suite: refcoco, suite_definition: refcoco-val-1500, metric: box_iou50, min_native: 20.0,
+  refcoco: {suite: refcoco, suite_definition: refcoco-val-1500, metric: box_iou50,
             gate: {margin: 1.5}}
   # ADE20K SceneParse150: dataset-level class mIoU of the 150-class maps against the annotations.
   ade20k: {suite: ade20k-miou, suite_definition: ade20k-val-500, metric: miou, gate: {margin: 1.0}}
@@ -125,7 +125,7 @@ benchmarks:
   # HumanEval and MBPP completions run against their unit tests (as nobody, with CPU, memory, and time limits);
   # prompts that leave fewer than 64 tokens to generate on the bundle are dropped for both sides.
   code: {suite: code, suite_definition: code-humaneval-mbpp-664, metric: code_pass, fit_prompt: true,
-         min_new_tokens: 64, min_native: 5.0, gate: {margin: 2.0}}
+         min_new_tokens: 64, gate: {margin: 2.0}}
 
 tasks:
   text_generation:
@@ -202,14 +202,14 @@ tasks:
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
                      quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
-                    # Text-to-image with the same initial noise on both sides: GenEval-style (200 prompts over its six
+                    # Text-to-image with caller latents when supported: GenEval-style (all 553 prompts over its six
                     # tags, OWLv2 detections and CLIP colors, exact counts), paired right/wrong per prompt, margin 5 points.
-                    {check: geneval, suite: geneval-200, only_families: [flux, pixart, qwen_image, z_image],
-                     latent_replay_families: [flux, pixart, qwen_image, z_image],
+                    {check: geneval, suite: geneval-full, only_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
+                     latent_replay_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
-                     detector_threshold: 0.2, gate: {margin: 5.0, min_native: 10}},
+                     detector_threshold: 0.2, gate: {margin: 5.0}},
                     # Videos (and families without caller latents): VBench's object prompts (20), CLIP-T of the middle
                     # frame against the prompt, paired per prompt, margin 1 point; every video must keep the native
                     # frame count and move (video validity). Motion quality and temporal order are not covered.

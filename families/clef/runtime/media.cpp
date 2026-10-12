@@ -425,7 +425,7 @@ std::vector<std::array<int, 3>> media_positions(const Record& record, const Medi
 
 void vision_positions(const VisionFrame& frame, const std::vector<char>& embedding, int width,
                       int heads, int side, std::vector<float>& positions, std::vector<float>& cos,
-                      std::vector<float>& sin) {
+                      std::vector<float>& sin, bool round_products) {
     const int h = frame.grid_height, w = frame.grid_width, dim = width / heads;
     if (embedding.size() != static_cast<std::size_t>(side) * side * width * 2 || dim % 4)
         throw std::invalid_argument("invalid visual position embedding geometry");
@@ -441,8 +441,12 @@ void vision_positions(const VisionFrame& frame, const std::vector<char>& embeddi
     positions.resize(static_cast<std::size_t>(h) * w * width);
     cos.resize(static_cast<std::size_t>(h) * w * dim);
     sin.resize(cos.size());
-    auto linspace = [side](int i, int count) {
+    auto linspace = [side, round_products](int i, int count) {
         const float step = static_cast<float>(side - 1) / (count - 1);
+        if (round_products && i >= count / 2) {
+            const volatile float offset = (count - i - 1) * step;
+            return (side - 1) - offset;
+        }
         return i < count / 2 ? i * step : (side - 1) - (count - i - 1) * step;
     };
     int token = 0;
@@ -461,8 +465,17 @@ void vision_positions(const VisionFrame& frame, const std::vector<char>& embeddi
                                                           fy * (1 - fx), fy * fx};
                     for (int c = 0; c < width; ++c) {
                         float sum = 0;
-                        for (int corner = 0; corner < 4; ++corner)
-                            sum += scalar(indices[corner], c) * weights[corner];
+                        for (int corner = 0; corner < 4; ++corner) {
+                            if (round_products) {
+                                // Flash's qualified path rounds each product before
+                                // summing, as the original tensor interpolation does.
+                                const volatile float product =
+                                    scalar(indices[corner], c) * weights[corner];
+                                sum += product;
+                            } else {
+                                sum += scalar(indices[corner], c) * weights[corner];
+                            }
+                        }
                         positions[static_cast<std::size_t>(token) * width + c] = sum;
                     }
                     for (int i = 0; i < dim / 2; ++i) {

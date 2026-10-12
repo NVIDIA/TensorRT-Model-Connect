@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import hashlib
 import json
 import threading
 from pathlib import Path
@@ -231,6 +232,7 @@ def test_latent_seed_becomes_a_noise_file_or_is_dropped_and_reported(tmp_path):
     client, _ = client_for(tmp_path / "with", backend, latent_replay=replay)
     body = client.post("/v1/tasks/generate_image", json={"request": {"prompt": "cat", "latent_seed": 3}}).json()
     assert body["trtmc_observation"]["latent_replay"] is True
+    assert body["trtmc_observation"]["initial_latents_sha256"] == hashlib.sha256(b"\0" * 8).hexdigest()
     assert "latent_seed" not in backend.requests[0] and backend.requests[0]["initial_latents_path"].endswith("noise.f32")
     plain = Generator(operation="generate_image")
     client, _ = client_for(tmp_path / "without", plain)

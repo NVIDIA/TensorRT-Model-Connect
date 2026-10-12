@@ -19,6 +19,7 @@ RUN apt-get update && \
       git \
       ninja-build \
       nlohmann-json3-dev \
+      libicu-dev \
       patchelf \
       pkg-config \
       python3.12-dev \

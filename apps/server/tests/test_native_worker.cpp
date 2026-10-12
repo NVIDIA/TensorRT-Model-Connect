@@ -81,11 +81,15 @@ int main() {
     if (messages.size() != 6)
         return 1;
     check(messages.at(0)["event"] == "ready", "worker advertises readiness");
-    check(messages.at(0)["protocol_version"] == 1, "worker protocol is versioned");
+    check(messages.at(0)["protocol_version"] == 2, "worker protocol is versioned");
     check(messages.at(1)["id"] == "one" && messages.at(1)["ok"] == true,
           "generate response preserves id");
     check(messages.at(1)["result"]["text"] == "reply:hello", "generate returns text");
     check(messages.at(1)["result"]["completion_tokens"] == 3, "generate returns token count");
+    check(messages.at(1)["result"]["model_call_ms"].get<double>() >= 0.0,
+          "Task wall timing is recorded");
+    check(messages.at(1)["result"]["timing_scope"] == "public_task_call_wall",
+          "Task timing scope is explicit");
     check(task.prompt_ == "hello", "worker forwards prompt");
     check(task.config_.max_new_tokens == 9, "worker forwards token limit");
     check(task.config_.top_k == 0 && task.config_.seed == 7, "worker forwards sampling");

@@ -9,13 +9,16 @@
 #include "task_runtime.h"
 #include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
+#include "trtmc/stream.hpp"
 #include "trtmc/task.h"
 #include "trtmc/text.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -174,13 +177,19 @@ std::int64_t default_token_limit(const std::vector<ConfigField>& fields) {
     return 128;
 }
 
+using StreamGenerate =
+    std::function<Json(const std::string&, const Json&, const Json&, std::ostream&)>;
+
 template <class Generate>
 int run_protocol(std::int64_t default_tokens, Generate&& generate, std::istream& input,
-                 std::ostream& output) {
+                 std::ostream& output, StreamGenerate stream_generate = {}) {
+    Json capabilities = Json::array({"text_generation"});
+    if (stream_generate)
+        capabilities.push_back("streaming_text_continuation");
     if (!write_json(output, {{"event", "ready"},
-                             {"protocol_version", 1},
+                             {"protocol_version", 2},
                              // This names the private protocol operation, not a Task ABI.
-                             {"capabilities", Json::array({"text_generation"})},
+                             {"capabilities", capabilities},
                              {"default_max_new_tokens", default_tokens}}))
         return 2;
 
@@ -222,6 +231,14 @@ int run_protocol(std::int64_t default_tokens, Generate&& generate, std::istream&
             } else if (operation == "generate") {
                 const auto prompt = string_field(request, "prompt", true);
                 response = {{"id", id}, {"ok", true}, {"result", generate(prompt, request)}};
+            } else if (operation == "generate_stream") {
+                if (!stream_generate)
+                    throw ProtocolError("incremental streaming is unsupported by this model");
+                const auto prompt = string_field(request, "prompt", true);
+                response = {{"id", id},
+                            {"ok", true},
+                            {"event", "complete"},
+                            {"result", stream_generate(prompt, request, id, output)}};
             } else {
                 throw ProtocolError("unknown operation: " + operation);
             }
@@ -248,19 +265,76 @@ int run_protocol(std::int64_t default_tokens, Generate&& generate, std::istream&
 
 template <class Task, class Request>
 int run_sdk_worker(const Task& task, Request&& make_request, std::istream& input,
-                   std::ostream& output) {
+                   std::ostream& output, const Model* model = nullptr) {
     const auto fields = task.config_fields();
+    StreamGenerate streaming;
+    if (model != nullptr && model->supports<StreamingTextContinuation>()) {
+        const auto stream_task = model->task<StreamingTextContinuation>();
+        const auto stream_fields = stream_task.config_fields();
+        streaming = [stream_task, stream_fields](const std::string& prompt, const Json& request,
+                                                 const Json& id, std::ostream& out) {
+            const auto config = parse_sdk_config(request, stream_fields);
+            try {
+                const TextContinuationRequest input{prompt};
+                const auto started = std::chrono::steady_clock::now();
+                auto stream = stream_task.start(input, config);
+                while (auto event = stream.next()) {
+                    if (event->kind() == StreamEventKind::Delta) {
+                        if (!write_json(out, {{"id", id},
+                                              {"ok", true},
+                                              {"event", "delta"},
+                                              {"result",
+                                               {{"text_delta", std::string(event->text_delta())},
+                                                {"token_count", event->token_ids().size()}}}})) {
+                            stream.cancel();
+                            throw std::runtime_error("stream output pipe closed");
+                        }
+                    } else if (event->kind() == StreamEventKind::Complete) {
+                        const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                                 std::chrono::steady_clock::now() - started)
+                                                 .count();
+                        const auto final = event->final_result();
+                        if (!final)
+                            throw std::runtime_error("stream completion has no result");
+                        const auto result = *final;
+                        return Json{
+                            {"text", std::string(result.text)},
+                            {"completion_tokens", result.token_ids.size()},
+                            {"setup_ms", result.setup_ms},
+                            {"prefill_ms", result.prefill_ms},
+                            {"decode_ms", result.decode_ms},
+                            {"model_call_ms", wall_ms},
+                            {"timing_scope", "public_task_stream_wall_including_backpressure"}};
+                    } else {
+                        throw std::runtime_error("native stream was cancelled");
+                    }
+                }
+                throw std::runtime_error("native stream ended without a terminal result");
+            } catch (const Error& error) {
+                if (error.code() == TRTMC_INVALID_ARGUMENT || error.code() == TRTMC_INVALID_CONFIG)
+                    throw ProtocolError("generation request is invalid for this model");
+                throw;
+            }
+        };
+    }
     return run_protocol(
         default_token_limit(fields),
         [&](const std::string& prompt, const Json& request) {
             const auto config = parse_sdk_config(request, fields);
             try {
-                const auto result = task.run(make_request(prompt), config);
+                const auto input = make_request(prompt);
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = task.run(input, config);
+                const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
                 return Json{{"text", std::string(result.text())},
                             {"completion_tokens", result.token_ids().size()},
                             {"setup_ms", result.setup_ms()},
                             {"prefill_ms", result.prefill_ms()},
-                            {"decode_ms", result.decode_ms()}};
+                            {"decode_ms", result.decode_ms()},
+                            {"model_call_ms", wall_ms},
+                            {"timing_scope", "public_task_call_wall"}};
             } catch (const Error& error) {
                 if (error.code() == TRTMC_INVALID_ARGUMENT ||
                     error.code() == TRTMC_INVALID_CONFIG) {
@@ -271,7 +345,7 @@ int run_sdk_worker(const Task& task, Request&& make_request, std::istream& input
                 throw;
             }
         },
-        input, output);
+        input, output, std::move(streaming));
 }
 
 } // namespace
@@ -283,13 +357,19 @@ int run_text_worker(ITask& task, std::istream& input, std::ostream& output) {
     return run_protocol(
         text->default_max_new_tokens(),
         [&](const std::string& prompt, const Json& request) {
-            const auto result =
-                text->generate(prompt, parse_config(request, text->default_max_new_tokens()));
+            const auto config = parse_config(request, text->default_max_new_tokens());
+            const auto started = std::chrono::steady_clock::now();
+            const auto result = text->generate(prompt, config);
+            const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - started)
+                                     .count();
             return Json{{"text", result.text},
                         {"completion_tokens", result.token_ids.size()},
                         {"setup_ms", result.setup_ms},
                         {"prefill_ms", result.prefill_ms},
-                        {"decode_ms", result.decode_ms}};
+                        {"decode_ms", result.decode_ms},
+                        {"model_call_ms", wall_ms},
+                        {"timing_scope", "public_task_call_wall"}};
         },
         input, output);
 }
@@ -308,13 +388,26 @@ int run_text_worker(const Model& model, std::istream& input, std::ostream& outpu
             output);
     return run_sdk_worker(
         model.task<TextContinuation>(),
-        [](const std::string& prompt) { return TextContinuationRequest{prompt}; }, input, output);
+        [](const std::string& prompt) { return TextContinuationRequest{prompt}; }, input, output,
+        &model);
 }
 
 int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std::istream& input,
                       std::ostream& output) {
     const auto primary = Bundle::open(bundle).info().task;
     if (app::uses_existing_task_runtime(primary)) {
+        try {
+            const auto model = Model::load(bundle, options);
+            return run_text_worker(model, input, output);
+        } catch (const Error& error) {
+            // Only pre-SDK families may take this compatibility path. Never
+            // retry a malformed SDK binding or a failed Task operation.
+            if (error.code() != TRTMC_UNSUPPORTED ||
+                std::string(error.what())
+                        .find("family has not implemented the Task SDK model interface") ==
+                    std::string::npos)
+                throw;
+        }
         auto task = load_task(bundle, options.runtime_root, options.kv_cache_size_bytes,
                               options.runtime_cache_path, options.cuda_graphs);
         return run_text_worker(*task, input, output);

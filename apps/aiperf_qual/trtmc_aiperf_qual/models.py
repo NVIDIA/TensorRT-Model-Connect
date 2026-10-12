@@ -130,8 +130,6 @@ def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mappin
             suite = load_suite(suite) if isinstance(suite, str) else dict(suite)
             window = {**dict(suite["source"].get("window") or {}), **item.pop("window")}
             item["suite_definition"] = {**suite, "source": {**suite["source"], "window": window}}
-        if "min_native" in item:  # below it the native score is no baseline (half of chance)
-            item["gate"] = {**item["gate"], "min_native": item.pop("min_native")}
         item.setdefault("endpoint", "chat" if testcase.get("use_chat_template") else "completions")
         items.append(item)
     return items

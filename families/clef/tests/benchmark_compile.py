@@ -14,28 +14,76 @@ import statistics
 import sys
 import time
 
-import numpy as np
-import torch
+
+def select_fixtures(root, manifest, fixture_dir, requested):
+    candidates = (
+        [(path.stem, path) for path in sorted(fixture_dir.glob("*.json"))]
+        if fixture_dir is not None
+        else [
+            (case["name"], root / case["inputs"]["document_path"]) for case in manifest["testcases"]
+        ]
+    )
+    unmatched = set(requested) - {name for case, path in candidates for name in (case, path.stem)}
+    if unmatched:
+        raise ValueError("unknown benchmark cases: " + ", ".join(sorted(unmatched)))
+    selected = [
+        (case, path)
+        for case, path in candidates
+        if not requested or case in requested or path.stem in requested
+    ]
+    if not selected:
+        raise ValueError("no benchmark fixtures selected")
+    return selected
 
 
 def main():
+    root = Path(__file__).resolve().parent
+    manifests = {
+        value["name"]: value
+        for path in (root / "manifests").glob("*.json")
+        for value in [json.loads(path.read_text())]
+    }
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=30)
-    parser.add_argument("--fixtures", type=Path, default=Path(__file__).parent / "fixtures")
+    parser.add_argument("--model", choices=sorted(manifests), default="clef")
+    parser.add_argument("--fixtures", type=Path)
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--dynamic", choices=("auto", "static", "dynamic"), default="auto")
+    parser.add_argument(
+        "--emulate-precision-casts",
+        action="store_true",
+        help="Preserve the original BF16 rounding boundaries when validating compiled accuracy",
+    )
     parser.add_argument(
         "--aten-masked-scatter",
         action="store_true",
         help="Use ATen for masked_scatter if the compiler's scan kernel fails; record this fallback",
     )
+    parser.add_argument(
+        "--aten-layer-norm",
+        action="store_true",
+        help="Retain the original ATen LayerNorm when compiler lowering fails accuracy",
+    )
     args = parser.parse_args()
     if args.warmup < 1 or args.iterations < 1:
         parser.error("warmup and iterations must be positive")
-    if args.aten_masked_scatter:
+    manifest = manifests[args.model]
+    try:
+        fixtures = select_fixtures(root, manifest, args.fixtures, args.case)
+    except ValueError as error:
+        parser.error(str(error))
+    import numpy as np
+    import torch
+
+    if args.emulate_precision_casts:
+        import torch._inductor.config as inductor_config
+
+        inductor_config.emulate_precision_casts = True
+    aten_fallbacks = []
+    if args.aten_masked_scatter or args.aten_layer_norm:
         # Keep the original operation and inputs. Only its compiler lowering
         # changes; the rest of the model still uses max-autotune compilation.
         from torch._inductor.decomposition import decompositions
@@ -43,9 +91,14 @@ def main():
         import torch._inductor.config as inductor_config
         import torch._functorch.config as autograd_config
 
-        operation = torch.ops.aten.masked_scatter.default
-        decompositions.pop(operation, None)
-        make_fallback(operation, warn=False)
+        for enabled, name, operation in (
+            (args.aten_masked_scatter, "masked_scatter", torch.ops.aten.masked_scatter.default),
+            (args.aten_layer_norm, "native_layer_norm", torch.ops.aten.native_layer_norm.default),
+        ):
+            if enabled:
+                decompositions.pop(operation, None)
+                make_fallback(operation, warn=False)
+                aten_fallbacks.append(name)
         # Graph cache keys do not include this decomposition-table override.
         # Keep kernel autotune caches, but regenerate the affected graph IR.
         inductor_config.fx_graph_cache = False
@@ -84,9 +137,7 @@ def main():
 
     receipts = []
     with torch.inference_mode():
-        for fixture in sorted(args.fixtures.glob("*.json")):
-            if args.case and fixture.stem not in args.case:
-                continue
+        for case, fixture in fixtures:
             from families.clef.tests.media_fixtures import fixture_record
 
             record = fixture_record(fixture)
@@ -106,11 +157,12 @@ def main():
                 torch.cuda.synchronize()
                 samples.append((time.perf_counter() - started) * 1000)
             receipt = {
+                "case": case,
                 "fixture": fixture.stem,
                 "mode": "max-autotune",
                 "fullgraph": False,
                 "dynamic": dynamic,
-                "aten_fallbacks": ["masked_scatter"] if args.aten_masked_scatter else [],
+                "aten_fallbacks": aten_fallbacks,
                 "scope": "public_task_call_wall",
                 "warmup": args.warmup,
                 "iterations": args.iterations,
@@ -127,7 +179,18 @@ def main():
                     {
                         "torch": torch.__version__,
                         "device": torch.cuda.get_device_name(),
-                        "checkpoint_revision": "2f3de3dd85f379784083b0814d997ab627200f0c",
+                        "selected_manifest": {
+                            "name": manifest["name"],
+                            "hf_id": manifest["hf_id"],
+                            "hf_revision": manifest["hf_revision"],
+                        },
+                        "supplied_artifacts": {
+                            "checkpoint_path": str(args.checkpoint.resolve()),
+                            "identity_verified": False,
+                        },
+                        "emulate_precision_casts": bool(
+                            torch._inductor.config.emulate_precision_casts
+                        ),
                         "results": receipts,
                     },
                     indent=2,

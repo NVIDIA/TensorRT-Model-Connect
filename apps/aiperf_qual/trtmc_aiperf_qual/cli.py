@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import ConfigError, load_environment
+from .config import ConfigError, Environment, load_environment
 
 
 def doctor(fix: bool) -> int:
@@ -26,14 +26,20 @@ def doctor(fix: bool) -> int:
     checks = {"aiperf": importlib.metadata.version("aiperf"),
               "trtmc-aiperf-plugins": importlib.metadata.version("trtmc-aiperf-plugins")}
     pth = Path(sysconfig.get_paths()["purelib"]) / trtmc_aiperf_plugins.PTH_NAME
-    if not pth.is_file() and fix:
+    if fix and (not pth.is_file() or pth.read_text() != trtmc_aiperf_plugins.PTH_LINE):
         pth.write_text(trtmc_aiperf_plugins.PTH_LINE)
     checks["metric_hook"] = str(pth) if pth.is_file() else "missing (run doctor --fix)"
     probe = subprocess.run([sys.executable, "-c", "from aiperf.metrics import MetricRegistry as R;"
                             "print('trtmc_model_call_time' in R.all_tags())"], capture_output=True, text=True)
     checks["metric_registered_in_fresh_process"] = probe.stdout.strip() or probe.stderr.strip()[-200:]
+    alignment = subprocess.run([sys.executable, "-c",
+        "from aiperf.accuracy.accuracy_record_processor import AccuracyRecordProcessor as P;"
+        "print(getattr(P, '_trtmc_conversation_alignment', False))"], capture_output=True, text=True)
+    checks["accuracy_alignment_in_fresh_process"] = alignment.stdout.strip() or alignment.stderr.strip()[-200:]
     print(json.dumps(checks, indent=2))
-    ok = checks["aiperf"] == "0.13.0" and pth.is_file() and checks["metric_registered_in_fresh_process"] == "True"
+    ok = (checks["aiperf"] == "0.13.0" and pth.is_file()
+          and checks["metric_registered_in_fresh_process"] == "True"
+          and checks["accuracy_alignment_in_fresh_process"] == "True")
     return 0 if ok else 1
 
 
@@ -107,10 +113,14 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
     """Run the Task's whole-output checks (``supplementary``) again on finished results and replace
     their report entries, then rejudge; the rest of the result is kept. Generations that sent the
     same requests are reused unless ``regenerate``."""
-    from . import compat, models
-    from .runner import SUPPLEMENTARY_SUITES, applies, supplementary
-    from .services import reference_python
+    from . import aiperf_metrics, compat, execution, models
+    from .runner import SUPPLEMENTARY_SUITES, applies, execution_session, supplementary
+    from .artifacts import recorded_path, work_directory
+    from .services import gpu_exclusive, reference_python
 
+    environment = Environment({**environment.values, "native_replicas": 1, "candidate_replicas": 1,
+                               "acc_mps": False, "acc_overlap": False})
+    pending = []
     for out in outs:
         path = out / "report.json"
         if not path.is_file():
@@ -123,19 +133,64 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
                   if (not only or check["check"] in only) and applies(check, model)]
         if not checks:
             continue
+        retention = out / "retention.json"
+        cleaned = (json.loads(retention.read_text()).get("temporary_files") or {}) if retention.is_file() else {}
+        if regenerate or cleaned.get("media_recheck") == "regenerate":
+            from .bundles import bundle_path
+            from .config import ConfigError
+
+            if not bundle_path(environment, model).is_file():
+                raise ConfigError(f"{out}: generated files were removed or regeneration was requested, but the "
+                                  "candidate bundle is missing; run the model again before recheck")
         python = reference_python(environment, model)
-        entries, suites = [], set()
-        for check in checks:
-            suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
-            try:
-                entries += supplementary(environment, model, check, python, out)
-            except Exception as error:  # noqa: BLE001 - recorded like a run's phase error
-                entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
-                                "samples": 0, "passed": None, "required_passes": None,
-                                "error": f"{type(error).__name__}: {str(error)[-800:]}"})
+        pending.append((out, path, model, checks, python))
+    # A later missing prerequisite must not leave earlier reports updated but unjudged.
+    for out, path, model, checks, python in pending:
         result = compat.report(json.loads(path.read_text()))
+        recorded = out / Path((result.get("execution") or {}).get("records", "execution.jsonl")).name
+        batches = execution.read_batches(recorded) if recorded.is_file() else []
+        for index, batch in enumerate(batches):
+            batch["batch_id"] = index
+        temporary = out / "execution.recheck.tmp.jsonl"
+        temporary.unlink(missing_ok=True)
+        evidence = execution_session(model, environment, out, batches=batches, records_name=temporary.name)
+        previous_count = len(batches)
+        entries, suites = [], set()
+        informational_attempts = set()
+        with execution.session(evidence), gpu_exclusive(environment):
+            for check in checks:
+                start = len(evidence.batches)
+                attempts = set(evidence.attempts)
+                suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
+                try:
+                    entries += supplementary(environment, model, check, python, work_directory(out))
+                except Exception as error:  # noqa: BLE001 - recorded like a run's phase error
+                    entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
+                                    "samples": 0, "passed": None, "required_passes": None,
+                                    "error": f"{type(error).__name__}: {str(error)[-800:]}"})
+                if check.get("informational"):
+                    informational_attempts.update(evidence.attempts - attempts)
+                    evidence.attempts = attempts
+                    for batch in evidence.batches[start:]:
+                        batch.update(informational=True, role="quality")
+        for batch in evidence.batches[:previous_count]:
+            replaced = informational_attempts if batch.get("informational") else evidence.attempts
+            if (batch["workload"], batch["identity"].get("side")) in replaced:
+                batch["superseded"] = True
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("suite") not in suites] + entries
+        measured = evidence.natural_performance(result["accuracy"])
+        names = {item["request"] for item in measured}
+        result["performance"] = [item for item in result.get("performance", [])
+                                 if item.get("kind") != "natural_dataset" or item.get("request") not in names] + measured
+        result["aiperf_metrics"] = aiperf_metrics.entries(evidence.batches)
+        temporary.write_text("".join(json.dumps(batch, default=str) + "\n" for batch in evidence.batches))
         preserve_original(out)
+        recorded = out / "execution.rechecked.jsonl"
+        temporary.replace(recorded)
+        result["execution"] = {**result.get("execution", {}), "records": recorded_path(out, recorded),
+                               "timing_contract": execution.TIMING_CONTRACT, "quality_outputs_reused": True,
+                               "workloads": [{"name": batch["workload"], "role": batch["role"]}
+                                             for batch in evidence.batches if not batch.get("superseded")]}
         path.write_text(json.dumps(result, indent=2, default=str))
         (out / "model.json").write_text(json.dumps(model, indent=2, default=str))
     return rejudge_reports(outs, environment)
@@ -154,7 +209,7 @@ def preserve_original(out: Path) -> None:
             shutil.copy2(out / name, out / original)
 
 
-def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
+def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: Path | None = None) -> int:
     """Re-apply the current judge to recorded statistics (no model is run); with an environment, also
     today's judging settings from the configuration. The run's own report is kept next to the result
     (``preserve_original``)."""
@@ -167,12 +222,52 @@ def rejudge_reports(outs: Sequence[Path], environment=None) -> int:
                          missing_results, smoke_verdict)
 
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())
+    if selection_cache is not None:
+        from .accuracy_recovery import SelectionArchive, recover
+
+        archive = SelectionArchive(selection_cache)
     for out in outs:
         path = out / "report.json"
         if not path.is_file():
             continue
         result = compat.report(json.loads(path.read_text()))
         model = compat.configuration(json.loads((out / "model.json").read_text()))
+        if selection_cache is None and environment is None and result.get("performance_source") == "quality":
+            from .benchmark_perf import refresh
+
+            result = refresh(out, result)
+            # Conversion comparison no longer rejects a low absolute native
+            # score. Preserve scores and statistical margins during replay.
+            changed = False
+            for entry in result.get("accuracy", []):
+                removed_floor = (entry.get("gate") or {}).pop("min_native", None) is not None
+                changed |= removed_floor
+                if ((entry.get("source") == "absolute" or removed_floor)
+                        and (entry.get("metrics") or {}).get("test") and entry.get("status") != "error"):
+                    status, reasons = absolute.status(entry)
+                    changed |= status != entry.get("status")
+                    entry.update(status=status, reasons=reasons)
+            result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)), expected_modes=0)
+            preserve_original(out)
+            result["rejudged"] = {"time": time.time(), "original": ORIGINAL_REPORT,
+                                  "benchmark_timings_refreshed": True, "accuracy_contract_preserved": not changed}
+            write_report(out, result)
+            print(json.dumps({"out": str(out), **result["verdict"]}))
+            continue
+        if selection_cache is not None:
+            preserve_original(out)
+            result = recover(out, model, result, archive)
+            if environment is None:
+                # Accuracy recovery reuses the recorded contract. General rejudge
+                # also derives missing/parity entries from today's configuration;
+                # that must not change an unrelated result during recovery.
+                fixed = {item.get("request") for item in result.get("performance", []) if item.get("gate", True)}
+                result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)),
+                    expected_modes=0 if result.get("performance_source") == "quality" else len(fixed))
+                result["rejudged"] = {"time": time.time(), "original": ORIGINAL_REPORT}
+                write_report(out, result)
+                print(json.dumps({"out": str(out), **result["verdict"]}))
+                continue
         if environment is not None:
             model = current_settings(model, environment)
         policy = dict(model.get("performance") or {})
@@ -316,6 +411,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     rejudge.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
     rejudge.add_argument("--environment", type=Path,
                          help="also apply today's judging settings (gates, informational checks, Perf output check)")
+    rejudge.add_argument("--selection-cache", type=Path,
+                         help="recompute plugin accuracy from saved responses and original cached input selections")
     recheck = commands.add_parser("recheck", help="run the Task's whole-output checks again on finished results "
                                                   "(GenEval, MagicBrush, latent replay parity, TTS intelligibility)")
     recheck.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
@@ -327,8 +424,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                                                "this machine's environment file")
     check.add_argument("--fix", action="store_true")
     check.add_argument("--environment", type=Path, help="also check paths, interpreters, GPU, and model list")
+    text = commands.add_parser("text-profile", help="profile text through trtmc-server without qualification verdicts")
+    text.add_argument("--environment", type=Path, required=True)
+    text.add_argument("--config", type=Path, required=True)
+    text.add_argument("--out", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
+        if arguments.command == "text-profile":
+            from .text_profile import profile
+
+            result = profile(load_environment(arguments.environment), arguments.config, arguments.out)
+            print(json.dumps({"out": str(arguments.out), "runs": len(result["runs"])}))
+            return int(any(run["exit_code"] for run in [*result["runs"], *result.get("reference_runs", [])]))
         if arguments.command == "doctor":
             code = doctor(arguments.fix)
             if arguments.environment:
@@ -339,7 +446,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                    arguments.regenerate)
         if arguments.command == "rejudge":
             return rejudge_reports(arguments.outs, load_environment(arguments.environment)
-                                   if arguments.environment else None)
+                                   if arguments.environment else None, selection_cache=arguments.selection_cache)
         if arguments.command == "merge-check":
             from .split import merge_check
 

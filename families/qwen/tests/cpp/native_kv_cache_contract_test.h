@@ -360,6 +360,29 @@ int run_native_kv_contract_tests(const char* model) {
         check(overflow && prefill_trace->calls.empty() && decode_trace->calls.empty() &&
                   cache_ptr->position() == 0,
               "request over capacity is rejected before any runtime progression");
+
+        const internal::TextContinuationRequest sdk_request{
+            Span<const std::int32_t>{prompt.data(), prompt.size()}};
+        const internal::ConfigEntry sdk_config[] = {{"max_new_tokens", std::int64_t{2}}};
+        bool sdk_run_overflow = false;
+        try {
+            (void)pipeline.run(sdk_request, sdk_config);
+        } catch (const std::invalid_argument&) {
+            sdk_run_overflow = true;
+        }
+        bool sdk_stream_overflow = false;
+        try {
+            (void)pipeline.start(sdk_request, sdk_config);
+        } catch (const std::invalid_argument&) {
+            sdk_stream_overflow = true;
+        }
+        check(sdk_run_overflow && sdk_stream_overflow && prefill_trace->calls.empty() &&
+                  decode_trace->calls.empty() && cache_ptr->position() == 0,
+              "Task SDK overflow is an invalid request without runtime progression");
+        const auto valid_result = pipeline.generate_ids(prompt, make_request(1));
+        check(valid_result.token_ids.size() == 11 && valid_result.token_ids.back() == 9 &&
+                  cache_ptr->position() == 10,
+              "rejected SDK requests release generation ownership for the next request");
     }
 
     cudaStreamDestroy(stream);

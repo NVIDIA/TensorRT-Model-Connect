@@ -110,12 +110,14 @@ requires `n=1`. It rejects unknown fields, prompt arrays, non-text content
 blocks, multi-turn chat, stop sequences, tools, and log probabilities instead
 of silently ignoring them.
 
-Streaming responses use the OpenAI-compatible server-sent event framing and
-terminate with `data: [DONE]`. The native text task currently returns a complete
-generation, so the MVP buffers inference before emitting the content chunk;
-streaming provides client compatibility but does not yet reduce time to first
-token. Incremental token delivery requires a future extension to the family and
-runtime text-generation contract.
+Streaming responses use OpenAI-compatible SSE and end with `data: [DONE]`.
+Single-process Qwen bundles implement the existing `StreamingTextContinuation`
+Task and deliver UTF-8 text deltas during decoding. A delta may cover several
+tokens when a codepoint spans token boundaries. Families without that Task
+retain buffered SSE. `/v1/models` declares `trtmc.streaming` as `incremental`
+or `buffered`, and streamed responses carry `X-TRTMC-Streaming`.
+Only incremental models support meaningful client TTFT/inter-token measurements.
+See [Profile Text with AIPerf](./profile-text-with-aiperf.md).
 
 For example, a Pi custom provider can use the local endpoint without an
 authentication header:
@@ -141,7 +143,7 @@ authentication header:
 }
 ```
 
-Pi sends text-only content blocks and consumes the buffered SSE response. Run
+Pi sends text-only content blocks and consumes the SSE response. Run
 Pi with `--no-tools`; tool definitions and tool-result messages remain outside
 the MVP protocol.
 
@@ -166,11 +168,24 @@ An HTTP parameter being recognized does not mean every family supports it:
 chat templates, system prompts and sampling options must be supported by the
 selected Task.
 
-Not-yet-migrated bundle modes keep their existing `ITextGeneration` call path.
-The worker reuses the application's bundle-mode selector before loading; a
-failed SDK load or invocation never retries an older interface. This selection
-is removed with the existing application paths after all families migrate.
-Neither path changes the private readiness or JSONL response protocol.
+Legacy bundle modes first probe the public Model interface, so a family can
+add semantic and streaming Tasks while retaining its existing bundle identity.
+Only a family explicitly reporting that it has no SDK Model interface takes
+the `ITextGeneration` compatibility path. That legacy case may load twice during
+startup; loading is outside request timing. Other SDK load/invocation errors
+never retry an older interface. The private protocol is version 2 for native
+stream events; the Python frontend also accepts existing version-1 buffered
+workers.
+
+Use `--records /path/requests.jsonl` for optional terminal request timing records.
+Valid incoming `X-Request-ID` values are preserved; omitted IDs are generated,
+and invalid or repeated ID headers return 400. Records include success, error,
+timeout, saturation and disconnect outcomes without prompt or generated text.
+Nonstreaming native `model_call_ms` measures the public Task call separately
+from HTTP and worker transport time. Streaming measures the public Task stream
+including relay/backpressure. The optional
+[AIPerf text-profile runner](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#text-profiling-with-the-persistent-server)
+joins these timings with client measurements.
 
 Responses report completion token counts supplied by the family result. Prompt
 token counts remain zero because the generic Task result does not expose them.
@@ -182,7 +197,11 @@ distinguish stop causes.
 The MVP uses zero queued requests. Saturated replicas return `429` with a
 `Retry-After` header. Worker request timeouts terminate that worker rather
 than risking protocol desynchronization. A failed lane makes its model
-degraded or unavailable; the MVP does not automatically restart workers.
+degraded or unavailable. When a client disconnects from an incremental stream,
+the server confirms that the cancelled worker has exited and automatically loads
+a replacement with the same settings. That replica remains unavailable during
+model loading; other healthy replicas can continue serving. A failed replacement
+load leaves the replica unavailable without repeatedly retrying startup.
 
 Uvicorn stops new HTTP admission during shutdown and lets active requests
 finish before application lifespan cleanup closes each worker. The worker first

@@ -20,7 +20,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from .artifacts import recorded_path, resolve_path
 from . import aiperf_metrics
+from .judge import GPU_BUSY_PERCENT
 from .noninferiority import t_quantile
 
 SCHEMA = "trtmc.qualification/v2"
@@ -95,7 +97,12 @@ def prepare(arguments: Sequence[str]) -> tuple[list[str], dict[str, Any] | None]
     identity = dict(_SERVICE.get())
     concurrency = int(args[args.index("--concurrency") + 1]) if "--concurrency" in args else 1
     identity["concurrency"] = concurrency
-    busy = active.gpu_probe() if natural else None
+    busy = active.gpu_probe()
+    if not active.smoke and (busy is None or busy >= GPU_BUSY_PERCENT):
+        from .services import ServiceError
+
+        raise ServiceError(f"GPU idleness was not established before {descriptor['name']} "
+                           f"(utilization {busy}); no benchmark requests were sent")
     metadata = {**descriptor, "identity": identity, "gpu_busy_percent": busy,
                 "expected_requests": int(args[args.index("--request-count") + 1]) if "--request-count" in args else None,
                 "warmup": int(args[args.index("--warmup-request-count") + 1])
@@ -107,6 +114,36 @@ def record(run: Any, metadata: Mapping[str, Any] | None) -> None:
     active = _SESSION.get()
     if active is not None and metadata is not None:
         active.record(run, metadata)
+
+
+def attempt(name: str, side: str) -> None:
+    """A fresh generation replaces the side's previous measurement, even if startup fails."""
+    if (active := _SESSION.get()) is not None:
+        active.attempts.add((name, side))
+
+
+def can_reuse(directory: Path) -> bool:
+    """Rechecking a saved output also needs the execution that measured it."""
+    active = _SESSION.get()
+    return active is None or any(
+        resolve_path(active.out, row["output_ref"]["aiperf_run"]) == directory.resolve()
+        for batch in active.batches if not batch.get("superseded") for row in batch["records"])
+
+
+def read_batches(path: Path) -> list[dict[str, Any]]:
+    batches, superseded = [], set()
+    for line in path.read_text().split("\n"):
+        if not line.strip():
+            continue
+        batch = json.loads(line)
+        if batch.get("event") == "supersede_failed_attempt":
+            superseded.update(batch["batch_ids"])
+        elif "records" in batch:
+            batches.append(batch)
+    for batch in batches:
+        if batch["batch_id"] in superseded:
+            batch["superseded"] = True
+    return batches
 
 
 def checkpoint() -> int:
@@ -122,7 +159,7 @@ def supersede(start: int) -> None:
         for batch in batches:
             batch["superseded"] = True
         if batches:
-            with (active.out / "execution.jsonl").open("a") as handle:
+            with (active.out / active.records_name).open("a") as handle:
                 handle.write(json.dumps({"event": "supersede_failed_attempt", "batch_ids":
                                          [batch["batch_id"] for batch in batches]}) + "\n")
 
@@ -137,18 +174,24 @@ class Session:
     smoke: bool = False
     request_problems: Callable[[Mapping[str, Any]], Sequence[str]] = lambda payload: ()
     batches: list[dict[str, Any]] = field(default_factory=list)
+    records_name: str = "execution.jsonl"
+    attempts: set[tuple[str, str]] = field(default_factory=set)
 
     def record(self, run: Any, metadata: Mapping[str, Any]) -> None:
+        from .absolute import capacity_rejection, unanswered
+
         identity = dict(metadata["identity"])
         units = metadata.get("units")
         rows = []
+        indices = run.conversation_indices() if hasattr(run, "conversation_indices") else {}
         for ordinal, raw in enumerate(run.raw_records()):
             body = response_body(raw)
             payload = raw.get("payload") or {}
             request_key = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            sample = (raw.get("metadata") or {}).get("session_num", ordinal)
+            record_metadata = raw.get("metadata") or {}
+            sample = record_metadata.get("conversation_id") or record_metadata.get("session_num", ordinal)
             try:
-                position = int(sample)
+                position = indices[sample] if sample in indices else int(sample)
             except (TypeError, ValueError):
                 position = ordinal
             unit = units[position] if units is not None and 0 <= position < len(units) else sample
@@ -158,7 +201,7 @@ class Session:
             except (TypeError, ValueError):
                 ms = None
             valid_time = ms is not None and math.isfinite(ms) and ms > 0
-            valid = raw.get("status") == 200 and not raw.get("error") and not (
+            valid = not unanswered(raw) and not (
                 raw.get("metadata") or {}).get("was_cancelled")
             try:
                 work = self.work_evidence(observation(body)) if valid else None
@@ -167,8 +210,9 @@ class Session:
             rows.append({"sample_id": sample, "unit_id": str(unit), "request_sha": request_key,
                          "model_call_ms": ms if valid_time else None, "valid": bool(valid and valid_time),
                          "output_valid": bool(valid), "work": work,
+                         "capacity_rejection": capacity_rejection(raw) if identity.get("side") == "candidate" else None,
                          "request_problems": list(self.request_problems(payload)),
-                         "output_ref": {"aiperf_run": str(run.directory), "record_index": ordinal,
+                         "output_ref": {"aiperf_run": recorded_path(self.out, run.directory), "record_index": ordinal,
                                         "request_id": body.get("request_id") or body.get("id")}})
         batch = {"schema_version": SCHEMA, "timing_contract": TIMING_CONTRACT, "batch_id": len(self.batches),
                  "workload": metadata["name"], "role": metadata["role"],
@@ -177,15 +221,20 @@ class Session:
                  "aiperf_exit": run.exit_code, "aiperf_metrics": aiperf_metrics.capture(run), "records": rows}
         self.batches.append(batch)
         self.out.mkdir(parents=True, exist_ok=True)
-        with (self.out / "execution.jsonl").open("a") as handle:
+        with (self.out / self.records_name).open("a") as handle:
             handle.write(json.dumps(batch, default=str) + "\n")
 
-    def natural_performance(self) -> list[dict[str, Any]]:
+    def natural_performance(self, accuracy: Sequence[Mapping[str, Any]] = ()) -> list[dict[str, Any]]:
         grouped: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
         for batch in self.batches:
-            if batch["role"] in ("quality", "both") and not batch.get("superseded"):
+            if batch["role"] in ("quality", "both") and not batch.get("superseded") and not batch.get("informational"):
                 grouped[batch["workload"]][batch["identity"].get("side", "unknown")].append(batch)
-        return [paired_dataset(name, sides.get("candidate", []), sides.get("reference", []), self.same_work)
+        for name, _ in self.attempts:
+            grouped[name]  # a failed fresh attempt must not leave the previous timing visible
+        excluded = {item["suite"]: int(item["out_of_capacity"]) for item in accuracy
+                    if item.get("out_of_capacity") and item.get("status") != "error"}
+        return [paired_dataset(name, sides.get("candidate", []), sides.get("reference", []), self.same_work,
+                               excluded.get(name, 0))
                 for name, sides in grouped.items()]
 
 
@@ -199,7 +248,7 @@ def session(value: Session) -> Iterator[Session]:
 
 
 def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference: Sequence[Mapping[str, Any]],
-                   same_work: Callable[[Any, Any], bool]) -> dict[str, Any]:
+                   same_work: Callable[[Any, Any], bool], capacity_exclusions: int = 0) -> dict[str, Any]:
     """Describe the complete natural workload; never promote a matched subset to a gate.
 
     The interval describes variation across paired evaluation units, not repeated
@@ -207,7 +256,13 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
     Formal fixed-workload gates retain their existing repeated-run statistic.
     """
     sides = (candidate, reference)
-    rows = [[row for batch in batches for row in batch["records"]] for batches in sides]
+    all_rows = [[row for batch in batches for row in batch["records"]] for batches in sides]
+    excluded = {str(row["sample_id"]) for row in all_rows[0]
+                if row.get("capacity_rejection")} if capacity_exclusions else set()
+    if len(excluded) != capacity_exclusions:
+        raise ValueError(f"{name}: recorded capacity rejections do not match the accuracy exclusions")
+    rows = [[row for row in values if str(row["sample_id"]) not in excluded]
+            for values in all_rows]
     indexed = [{(str(row["sample_id"]), row["request_sha"]): row for row in values} for values in rows]
     reasons = []
     complete = all(rows) and all(len(index) == len(values) for index, values in zip(indexed, rows))
@@ -234,30 +289,52 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
            for values in identities for item in values):
         reasons.append("natural workload was not executed by isolated single replicas")
     for batches in sides:
-        if any(batch.get("gpu_busy_percent") is None or batch["gpu_busy_percent"] >= 20 for batch in batches):
+        if any(batch.get("gpu_busy_percent") is None or batch["gpu_busy_percent"] >= GPU_BUSY_PERCENT for batch in batches):
             reasons.append("GPU idleness was not established before the natural workload")
         if any(not batch.get("warmup") for batch in batches):
             reasons.append("natural workload has no excluded warmup")
     pairs = [(indexed[0][key], indexed[1][key]) for key in indexed[0].keys() & indexed[1].keys()
              if indexed[0][key]["valid"] and indexed[1][key]["valid"]]
-    matched = sum(same_work(mine["work"], theirs["work"]) for mine, theirs in pairs)
+    def known_work(row: Mapping[str, Any]) -> bool:
+        if row["work"] is None:
+            return False
+        signature = dict(row["work"])
+        return (signature["output_tokens"] is not None if "output_tokens" in signature else
+                all(value is not None for value in signature.values()))
+
+    matches = [same_work(mine["work"], theirs["work"]) for mine, theirs in pairs]
+    matched = sum(matches)
+    unknown = sum(not equal and any(not known_work(row) for row in pair) for pair, equal in zip(pairs, matches))
     if pairs and matched != len(pairs):
         reasons.append(f"actual work differs or is unknown on {len(pairs) - matched} paired responses")
     result: dict[str, Any] = {"request": name, "reference_mode": "eager", "kind": "natural_dataset", "gate": False,
                               "timing_contract": TIMING_CONTRACT, "pairs": len(pairs), "matched_pairs": matched,
+                              "different_work_pairs": len(pairs) - matched - unknown, "unknown_work_pairs": unknown,
                               "complete": bool(complete and exported),
-                              "comparable": bool(pairs and not reasons), "light": "white" if reasons else "informational",
+                              "comparable": bool(pairs and not reasons), "light": "informational",
+                              "out_of_capacity": len(excluded),
                               "reasons": list(dict.fromkeys(reasons)), "notes": [
                                   "Shared quality outputs; not an additional performance gate.",
                                   "Interval across evaluation units, not repeated-run timing stability."],
                               "candidate": {}, "reference": {}}
     # Report each side's entire valid workload, including unpaired responses.
     # Pair filtering is only for comparability, never for the displayed timings.
-    for side, values, precision in zip(("candidate", "reference"), rows, precisions):
+    for side, values, original, precision in zip(("candidate", "reference"), rows, all_rows, precisions):
         times = [row["model_call_ms"] for row in values if row["valid"]]
         result[side] = {"p50_ms": statistics.median(times) if times else None,
                         "total_ms": sum(times), "requests": len(values), "valid_requests": len(times),
+                        "attempted_requests": len(original),
                         "precision": next(iter(precision)) if len(precision) == 1 else None}
+        for key, unit, scale in (("output_tokens", "output tokens", 1), ("audio_10ms", "audio seconds", 0.01)):
+            work = [dict(row["work"] or ()).get(key) for row in values if row["valid"]]
+            work = [value * scale for value in work if isinstance(value, (int, float)) and value >= 0]
+            if work:
+                result[side][key] = {"p50": statistics.median(work), "total": sum(work), "requests": len(work)}
+                result["notes"].append(f"{'TRTMC' if side == 'candidate' else 'Native'} {unit}: "
+                                       f"p50 {statistics.median(work):g}, total {sum(work):g}, "
+                                       f"recorded on {len(work)}/{len(times)} timed requests.")
+    timed = all(result[side]["p50_ms"] is not None for side in ("candidate", "reference"))
+    result["measurement_status"] = "unavailable" if not timed else "measured" if result["complete"] else "partial"
     if not pairs:
         return result
     mine = [row["model_call_ms"] for row, _ in pairs]

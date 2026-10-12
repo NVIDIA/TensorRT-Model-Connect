@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from pathlib import Path
 
 import numpy as np
 
@@ -41,6 +42,22 @@ def test_replay_writes_the_same_seeded_noise_and_drops_unknown_layouts(tmp_path)
     unknown = Replay(lambda: Checkpoint("StableDiffusionPipeline", {"in_channels": 4}, SD_VAE))
     assert unknown(request, tmp_path / "c") == ({key: value for key, value in request.items() if key != "latent_seed"},
                                                 False)
+
+
+def test_native_and_candidate_receive_identical_noise_from_a_shape_provider(tmp_path):
+    calls = []
+
+    def shape(request):
+        calls.append(request)
+        return (1, 2, request["height"] // 4, request["width"] // 4)
+
+    replay = Replay(shape=shape)
+    request = {"height": 32, "width": 16, "latent_seed": 1000}
+    native, used_native = replay(request, tmp_path / "native")
+    candidate, used_candidate = replay(request, tmp_path / "candidate")
+    assert used_native and used_candidate and calls == [request, request]
+    assert Path(native["initial_latents_path"]).read_bytes() == Path(candidate["initial_latents_path"]).read_bytes()
+    assert np.fromfile(native["initial_latents_path"], dtype=np.float32).size == 2 * 8 * 4
 
 
 def test_the_diffusers_adapter_passes_an_explicit_zero_guidance(tmp_path):

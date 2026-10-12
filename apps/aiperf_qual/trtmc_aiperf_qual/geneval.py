@@ -211,7 +211,7 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
                                                 for index, row in enumerate(rows) if not row.get("missing")}},
                          "exit": {"greedy": 0}, "timings": {"greedy": {}}} for side, rows in scored.items()}
         item = {"suite": name, "plugin": f"GenEval-style ({check['detector']} + CLIP colors)",
-                "endpoint": "image_generation", "gate": dict(check.get("gate") or {"margin": 5.0, "min_native": 10.0})}
+                "endpoint": "image_generation", "gate": dict(check.get("gate") or {"margin": 5.0})}
         entry = absolute.judge(item, problems, graded["candidate"], graded["native"])
     entry["native"] = {"backend": native_backend, "precision": native_precision}
     entries = [entry]

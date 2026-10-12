@@ -7,10 +7,11 @@ import tensorrt as trt
 
 
 class Graph:
-    def __init__(self, network, weights):
+    def __init__(self, network, weights, *, fp32_sigmoid=True):
         self.n = network
         self.weights = weights
         self.keep = []
+        self.fp32_sigmoid = fp32_sigmoid
 
     def cast(self, x, dtype):
         return x if x.dtype == dtype else self.n.add_cast(x, dtype).get_output(0)
@@ -142,6 +143,14 @@ class Graph:
     def silu(self, x):
         f = self.cast(x, trt.float32)
         return self.cast(self.mul(f, self.activation(f, trt.ActivationType.SIGMOID)), x.dtype)
+
+    def sigmoid(self, x):
+        if not self.fp32_sigmoid:
+            return self.activation(x, trt.ActivationType.SIGMOID)
+        # Torch's BF16 sigmoid evaluates in FP32 and rounds only its result.
+        return self.cast(
+            self.activation(self.cast(x, trt.float32), trt.ActivationType.SIGMOID), x.dtype
+        )
 
     def gelu(self, x):
         return self.cast(

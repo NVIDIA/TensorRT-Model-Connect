@@ -3,4 +3,6 @@
 
 # MMLU is near chance at this size: LAMBADA last-word prediction discriminates. Its passages need a
 # 256-token bundle (the catalog's is 32), which is built as rwkv-169m-qual.
+candidate:
+  build: {name: rwkv-169m-qual, max_sequence_length: 256}
 absolute: [lambada]

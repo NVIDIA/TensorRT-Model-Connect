@@ -36,6 +36,29 @@ def new_session(tmp_path):
                              lambda obs: judge.work_signature("generate", obs), same_work)
 
 
+@pytest.mark.parametrize("busy", [None, 20, 100])
+@pytest.mark.parametrize("role", ["both", "performance"])
+def test_formal_benchmark_never_starts_without_confirmed_gpu_idleness(tmp_path, busy, role):
+    from trtmc_aiperf_qual.services import ServiceError
+
+    evidence = new_session(tmp_path)
+    evidence.gpu_probe = lambda: busy
+    with execution.session(evidence), execution.workload("evaluation", role):
+        with pytest.raises(ServiceError, match="no benchmark requests were sent"):
+            execution.prepare(["--request-count", "1"])
+    assert not evidence.batches
+
+
+@pytest.mark.parametrize("role", ["both", "performance"])
+def test_smoke_does_not_require_formal_gpu_idleness(tmp_path, role):
+    evidence = new_session(tmp_path)
+    evidence.smoke = True
+    evidence.gpu_probe = lambda: None
+    with execution.session(evidence), execution.workload("evaluation", role):
+        _, metadata = execution.prepare(["--request-count", "1"])
+    assert metadata["gpu_busy_percent"] is None
+
+
 def test_same_inference_records_feed_accuracy_and_timing_without_replaying(tmp_path, monkeypatch):
     calls = []
     out = tmp_path / "aiperf"
@@ -58,7 +81,7 @@ def test_same_inference_records_feed_accuracy_and_timing_without_replaying(tmp_p
     assert "--warmup-request-count" in calls[0]
     records = evidence.batches[0]["records"]
     assert len(records) == 1 and records[0]["model_call_ms"] == 10
-    assert records[0]["output_ref"]["aiperf_run"] == str(out)
+    assert records[0]["output_ref"]["aiperf_run"] == "aiperf"
     assert len((tmp_path / "execution.jsonl").read_text().splitlines()) == 1
 
 
@@ -71,6 +94,37 @@ def test_pair_work_per_sample_instead_of_demanding_every_problem_have_one_length
     assert result["total_time_speedup"] == pytest.approx(2)
     assert result["speedup_interval90"] == pytest.approx([2, 2])
     assert not result["gate"] and result["matched_pairs"] == result["pairs"] == 2
+
+
+def test_media_precision_fallback_keeps_only_the_successful_attempt_in_measurements(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import aiperf_metrics, generation
+
+    evidence = new_session(tmp_path)
+    attempts = []
+
+    def generate(environment, model, backend, out, suite, python, precision, reuse):
+        attempts.append(precision)
+        if precision == "fp16":
+            collect(evidence, "reference", [raw(0, None, status=422, error={"type": "RequestError"})],
+                    precision=precision)
+            raise RuntimeError("native precision unsupported")
+        collect(evidence, "reference", [raw(0, 20)], precision=precision)
+        return []
+
+    monkeypatch.setattr(generation, "generate", generate)
+    model = {"reference": {"perf_precision": "fp16", "precision": "fp32"}}
+    with execution.session(evidence):
+        _, backend, precision = generation.generate_native(Environment({}), model, None, "/py", tmp_path, "media")
+        collect(evidence, "candidate", [raw(0, 10)])
+    measured, = evidence.natural_performance()
+    assert attempts == ["fp16", "fp32"] and (backend, precision) == ("reference", "fp32")
+    assert measured["complete"] and measured["measurement_status"] == "measured"
+    assert measured["reference"]["requests"] == 1 and measured["reference"]["p50_ms"] == 20
+    assert [entry["precision"] for entry in aiperf_metrics.entries(evidence.batches)
+            if entry["side"] == "reference"] == ["fp32"]
+    saved = [json.loads(line) for line in (tmp_path / "execution.jsonl").read_text().splitlines()]
+    assert saved[0]["records"][0]["output_valid"] is False  # retain the failed attempt for diagnosis
+    assert any(row.get("event") == "supersede_failed_attempt" and row["batch_ids"] == [0] for row in saved)
 
 
 def test_less_generation_is_not_claimed_as_equal_work_acceleration(tmp_path):
@@ -100,6 +154,16 @@ def test_failed_or_missing_responses_cannot_disappear_into_a_fast_subset(tmp_pat
     result, = evidence.natural_performance()
     assert not result["comparable"] and result["pairs"] == 1 and "speedup" not in result
     assert "unpaired" in " ".join(result["reasons"])
+
+
+def test_empty_benchmark_answer_still_has_a_valid_task_timing(tmp_path):
+    evidence = new_session(tmp_path)
+    empty = {"type": "InvalidInferenceResultError", "message": "empty text response"}
+    collect(evidence, "candidate", [raw(0, 10, 0, error=empty)])
+    collect(evidence, "reference", [raw(0, 20, 0, error=empty)])
+    result, = evidence.natural_performance()
+    assert result["complete"] and result["measurement_status"] == "measured"
+    assert result["candidate"]["valid_requests"] == result["reference"]["valid_requests"] == 1
 
 
 def test_matching_export_gaps_on_both_sides_do_not_prove_complete_work(tmp_path):
@@ -220,16 +284,19 @@ def test_qualification_runs_only_quality_workloads_for_absolute_and_media_models
 
     def native(*args, **kwargs):
         assert args[-1] is None  # no catalog request as a native serviceability probe
+        assert args[-2] == tmp_path / "artifacts"
         answer("reference")
         return {"runs": {}}
 
     def candidate(*args):
         assert args[2] is None and not args[3]  # no separate performance policy or suites
+        assert args[7] == tmp_path / "artifacts"
         answer("candidate")
         args[5].append({"suite": name, "source": "absolute", "status": "pass"})
 
     def media(*args):
         assert args[2]["check"] == "geneval"  # informational replay never runs
+        assert args[-1] == tmp_path / "artifacts"
         answer("reference")
         answer("candidate")
         return [{"suite": "geneval", "source": "absolute", "status": "pass"}]
@@ -256,6 +323,8 @@ def test_qualification_runs_only_quality_workloads_for_absolute_and_media_models
     assert result["verdict"]["acc"] == "pass" and result["verdict"]["perf"] != "error"
     assert result["performance_source"] == "quality" and not result["performance"][0]["gate"]
     assert result["provenance"]["timed_requests"] == []
+    assert (tmp_path / "model.json").is_file() and not (tmp_path / "artifacts/model.json").exists()
+    assert (tmp_path / "report.json").is_file() and (tmp_path / "execution.jsonl").is_file()
 
 
 def test_quality_measurement_verdict_does_not_claim_repeated_performance_gate(tmp_path):
@@ -268,7 +337,8 @@ def test_quality_measurement_verdict_does_not_claim_repeated_performance_gate(tm
     result = judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)
     assert result == {"acc": "pass", "perf": "measured", "lights": {}, "category": "measured"}
     item["complete"] = False
-    assert judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)["category"] == "error"
+    partial = judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)
+    assert partial["perf"] == "partial" and partial["category"] == "measured"
     item["complete"] = True
     base["accuracy"].append({"suite": "another-required-dataset", "source": "absolute", "status": "pass"})
     assert judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)["perf"] == "error"

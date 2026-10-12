@@ -10,6 +10,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -151,6 +152,19 @@ class WorkerSession:
             self.request, op, payload, timeout=timeout
         )
 
+    @property
+    def replica_name(self) -> str:
+        return self._worker.name
+
+    def stream(self, payload: Mapping[str, Any]) -> "WorkerStream":
+        if self._closed:
+            raise WorkerCrashedError("worker session is closed")
+        return WorkerStream(self._worker, payload)
+
+    def retire(self, error: WorkerError) -> Future[Any]:
+        self._worker._mark_failed(error)  # noqa: SLF001
+        return self._worker._executor.submit(self._worker._retire_io)  # noqa: SLF001
+
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -163,6 +177,68 @@ class WorkerSession:
 
     def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
         self.close()
+
+
+class WorkerStream:
+    """Bounded delta relay. A cancelled HTTP request replaces its native lane."""
+    def __init__(self, worker: "WorkerProcess", payload: Mapping[str, Any]) -> None:
+        self.worker = worker
+        self.events: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=8)
+        self.cancelled = threading.Event()
+        self.expires = time.monotonic() + worker.request_timeout
+        self.future = worker._executor.submit(  # noqa: SLF001
+            worker._request_locked, "generate_stream", payload, timeout=None, on_delta=self._emit
+        )
+        self.future.add_done_callback(self._notify_done)
+
+    def _notify_done(self, _future: Future[Any]) -> None:
+        # Wake a consumer waiting after the last delta immediately. Polling
+        # future.done() only after Queue.get times out adds a tail to every SSE.
+        while not self.cancelled.is_set():
+            try:
+                self.events.put(None, timeout=0.1)
+                return
+            except queue.Full:
+                if time.monotonic() >= self.expires:
+                    return
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        while not self.cancelled.is_set():
+            if time.monotonic() >= self.expires:
+                raise WorkerTimeoutError("stream exceeded the request deadline")
+            try:
+                self.events.put(event, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+        raise WorkerCrashedError("stream consumer disconnected")
+
+    def next(self) -> dict[str, Any] | None:
+        while True:
+            try:
+                event = self.events.get(timeout=0.1)
+                if event is None:
+                    self.future.result()  # terminal errors follow queued deltas
+                return event
+            except queue.Empty:
+                if self.future.done():
+                    self.future.result()  # propagate terminal worker errors
+                    return None
+
+    def abort(self) -> None:
+        self.cancelled.set()
+        self.worker._replace_on_release = True  # noqa: SLF001
+        self.worker._mark_failed(WorkerCrashedError("stream consumer disconnected"))  # noqa: SLF001
+
+    def cancel(self) -> None:
+        self.abort()
+        # Process exit confirms no family producer can still own the GPU lane.
+        # No cancelled replica is returned to the healthy pool.
+        self.worker._terminate_process()  # noqa: SLF001
+        try:
+            self.future.result(timeout=self.worker.request_timeout + 1)
+        except Exception:
+            pass
 
 
 class WorkerProcess:
@@ -205,7 +281,9 @@ class WorkerProcess:
         self._state_lock = threading.RLock()
         self._operation_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"trtmc-{name}")
-        self._response: queue.Queue[_Response] = queue.Queue(maxsize=1)
+        self._response: queue.Queue[_Response] = queue.Queue(maxsize=8)
+        self._streaming = False
+        self._terminal_received = False
         self._expected_request_id: str | None = None
         self._process: subprocess.Popen[str] | None = None
         self._stdout_thread: threading.Thread | None = None
@@ -214,6 +292,16 @@ class WorkerProcess:
         self._ready_payload: dict[str, Any] = {}
         self._last_error: WorkerError | None = None
         self._stderr_tail: deque[str] = deque(maxlen=stderr_lines)
+        self._replace_on_release = False
+
+    def replacement(self) -> "WorkerProcess":
+        """Create an unloaded lane with the same transport and load settings."""
+        return WorkerProcess(
+            name=self.name, bundle=self.bundle, trtmc_binary=self.trtmc_binary,
+            startup_timeout=self.startup_timeout, request_timeout=self.request_timeout,
+            stderr_lines=self._stderr_tail.maxlen or 100,
+            max_request_line_bytes=self.max_request_line_bytes, load_options=self.load_options,
+        )
 
     @property
     def state(self) -> str:
@@ -370,6 +458,7 @@ class WorkerProcess:
         *,
         timeout: float | None,
         allow_closing: bool = False,
+        on_delta: Callable[[dict[str, Any]], None] | None = None,
     ) -> Any:
         deadline = self.request_timeout if timeout is None else float(timeout)
         if not op or not isinstance(op, str):
@@ -388,6 +477,8 @@ class WorkerProcess:
             if self._expected_request_id is not None:
                 raise WorkerProtocolError(f"worker {self.name!r} already has an active request")
             self._expected_request_id = request_id
+            self._streaming = on_delta is not None
+            self._terminal_received = False
 
         message: dict[str, Any] = {"id": request_id, "op": op}
         if payload:
@@ -420,7 +511,14 @@ class WorkerProcess:
             raise error from exc
 
         try:
-            response = self._response.get(timeout=deadline)
+            expires = time.monotonic() + deadline
+            while True:
+                response = self._response.get(timeout=max(0, expires - time.monotonic()))
+                if isinstance(response, dict) and response.get("event") == "delta":
+                    assert on_delta is not None
+                    on_delta(response["result"])
+                    continue
+                break
         except queue.Empty as exc:
             error = WorkerTimeoutError(
                 f"worker {self.name!r} timed out after {deadline:g}s during {op!r}"
@@ -429,6 +527,10 @@ class WorkerProcess:
             self._terminate_process()
             self._finalize_io()
             raise error from exc
+        except BaseException:
+            self._mark_failed(WorkerCrashedError(f"worker {self.name!r} stream consumer stopped"))
+            self._terminate_process()
+            raise
         finally:
             with self._state_lock:
                 self._expected_request_id = None
@@ -552,11 +654,32 @@ class WorkerProcess:
                         f"worker {self.name!r} failure response is missing an error object"
                     )
                     return
-                try:
-                    self._response.put_nowait(message)
-                except queue.Full:
-                    self._fail_protocol(f"worker {self.name!r} emitted more than one response")
+                with self._state_lock:
+                    streaming = self._streaming
+                    duplicate = self._terminal_received
+                    if message.get("event") != "delta":
+                        self._terminal_received = True
+                if duplicate:
+                    self._fail_protocol(f"worker {self.name!r} emitted more than one terminal response")
                     return
+                if message.get("event") == "delta":
+                    result = message.get("result")
+                    if (not streaming or self.ready_payload.get("protocol_version") != 2 or not ok
+                            or not isinstance(result, dict)
+                            or not isinstance(result.get("text_delta"), str)
+                            or type(result.get("token_count")) is not int or result["token_count"] < 0):
+                        self._fail_protocol(f"worker {self.name!r} emitted an invalid stream delta")
+                        return
+                elif streaming and ok and message.get("event") != "complete":
+                    self._fail_protocol(f"worker {self.name!r} stream is missing a terminal event")
+                    return
+                while True:
+                    try:
+                        self._response.put(message, timeout=0.1)
+                        break
+                    except queue.Full:
+                        if self.state in {"failed", "closing", "closed"}:
+                            return
         except (OSError, ValueError):
             self._mark_failed(WorkerCrashedError(f"worker {self.name!r} stdout failed"))
             return
@@ -647,6 +770,10 @@ class WorkerProcess:
         except OSError:
             pass
 
+    def _retire_io(self) -> None:
+        self._terminate_process()
+        self._finalize_io()
+
     def _finalize_io(self) -> None:
         with self._state_lock:
             process = self._process
@@ -676,7 +803,7 @@ class WorkerGroup:
 
     def __init__(self, name: str, workers: Iterable[WorkerProcess]) -> None:
         self.name = name
-        self._workers = tuple(workers)
+        self._workers = list(workers)
         if not self._workers:
             raise ValueError("worker group must contain at least one replica")
         self._idle: queue.Queue[WorkerProcess] = queue.Queue(maxsize=len(self._workers))
@@ -686,6 +813,9 @@ class WorkerGroup:
             self._idle.put_nowait(worker)
         self._closed = False
         self._lock = threading.Lock()
+        self._recovery = ThreadPoolExecutor(
+            max_workers=len(self._workers), thread_name_prefix=f"trtmc-{name}-recovery"
+        )
 
     @property
     def replicas(self) -> int:
@@ -727,14 +857,18 @@ class WorkerGroup:
             if self._closed:
                 return
             self._closed = True
+        # A replacement may be loading. Join it before closing the final set,
+        # so server shutdown cannot leave a newly started worker behind.
+        self._recovery.shutdown(wait=True, cancel_futures=True)
         for worker in reversed(self._workers):
             worker.close()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             closed = self._closed
-        ready_replicas = sum(worker.ready for worker in self._workers)
-        idle_replicas = sum(worker.ready and not worker.busy for worker in self._workers)
+            workers = tuple(self._workers)
+        ready_replicas = sum(worker.ready for worker in workers)
+        idle_replicas = sum(worker.ready and not worker.busy for worker in workers)
         ready = not closed and ready_replicas > 0
         return {
             "state": "closed" if closed else "ready" if ready else "failed",
@@ -748,6 +882,31 @@ class WorkerGroup:
 
     def _release(self, worker: WorkerProcess) -> None:
         with self._lock:
-            if self._closed or not worker.ready:
+            if self._closed:
                 return
-            self._idle.put_nowait(worker)
+            if worker.ready:
+                self._idle.put_nowait(worker)
+            elif worker._replace_on_release:  # noqa: SLF001
+                self._recovery.submit(self._replace, worker)
+
+    def _replace(self, worker: WorkerProcess) -> None:
+        # Closing joins the old operation executor and confirms process exit
+        # before loading another model into this replica's GPU lane.
+        worker.close(grace_period=0)
+        with self._lock:
+            if self._closed:
+                return
+        replacement = worker.replacement()
+        try:
+            replacement.start()
+            if replacement.ready_payload != worker.ready_payload:
+                raise WorkerProtocolError("replacement worker changed model metadata")
+        except WorkerError:
+            replacement.close(grace_period=0)
+        with self._lock:
+            self._workers[self._workers.index(worker)] = replacement
+            closed = self._closed
+            if not closed and replacement.ready:
+                self._idle.put_nowait(replacement)
+        if closed:
+            replacement.close(grace_period=0)

@@ -10,6 +10,13 @@ import pytest
 from families.yolos import config as config_module
 
 
+def test_manifest_test_images_resolve_to_committed_assets():
+    from families.yolos.tests.test_e2e import CASES, _asset
+
+    for _, _, case in CASES.values():
+        assert _asset(case["test_image"]).is_file()
+
+
 def _raw(**overrides) -> dict:
     raw = {
         "model_type": "yolos",

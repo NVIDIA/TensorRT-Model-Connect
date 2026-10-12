@@ -94,7 +94,7 @@ def ensure_bundle(environment: Environment, model: Mapping[str, Any], out: Path,
     {"status": reused | built | failed, ...}."""
     path = bundle_path(environment, model)
     before = _state(path)
-    work = out / "build"
+    work = out / "artifacts" / "build"
     work.mkdir(parents=True, exist_ok=True)
     log = work / "build.log"
     started = time.time()

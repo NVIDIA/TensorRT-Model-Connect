@@ -15,6 +15,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "Cloudflare/clef-flash",
+      "revision": "fde727a287004204b7518dcc983fe64379776712",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "qwen3_5",
+      "architectures": [
+        "Qwen3_5ForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
       "revision": "e96271d77398def8ebb9fc595e7c0056dc625ab7",
       "revision_source": "resolved",
@@ -561,6 +572,17 @@
         "Lance"
       ],
       "architecture_source": "config.model_name"
+    },
+    {
+      "hf_id": "convaiinnovations/laya",
+      "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "laya",
+      "architectures": [
+        "LayaTypedDecisions"
+      ],
+      "architecture_source": "config.architectures"
     },
     {
       "hf_id": "deepseek-ai/DeepSeek-OCR-2",

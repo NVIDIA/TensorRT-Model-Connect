@@ -12,8 +12,8 @@ problems, and each side is scored against the gold answers:
 
 Each entry is a paired non-inferiority decision (``noninferiority``): pass when
 TRTMC's regression against the native model is shown to be below the benchmark's margin, fail when it
-is shown to exceed it, inconclusive otherwise; ``not-comparable`` when the native score is below the
-benchmark's suitability floor ``min_native``. A sampled model answers once per seed on each side and
+is shown to exceed it, inconclusive otherwise. Native absolute capability does not veto the comparison.
+A sampled model answers once per seed on each side and
 is judged on the per-problem seed means.
 """
 
@@ -341,23 +341,63 @@ def _run_side(environment: Environment, service: Mapping[str, Any], model: Mappi
         name = "greedy" if seed is None else f"seed{seed}"
         run = run_aiperf(environment, out / f"{item['suite']}-{name}", _arguments(model, item, service, count, seed),
                          env=selection_environment(environment, model, item), timeout_s=run_timeout(environment, model))
-        raw = run.raw_records()
-        # A problem the bundle cannot hold leaves the comparison on both sides (``out_of_capacity``); AIPerf grades
-        # any other failed request as an empty (wrong) answer: it is a missing answer instead.
-        rejected = {int(record["metadata"]["session_num"]): reason for record in raw
-                    if capacity and (reason := capacity_rejection(record))}
-        failing = [record for record in raw
-                   if unanswered(record) and int(record["metadata"]["session_num"]) not in rejected]
-        failed = {int(record["metadata"]["session_num"]) for record in failing}
-        runs["records"][name] = {int(record["session_num"]): record for record in run.accuracy_records()
-                                 if int(record["session_num"]) not in failed | set(rejected)}
-        runs["exit"][name] = run.exit_code
-        runs["timings"][name] = timings(raw)
-        if rejected:
-            runs.setdefault("rejected", {})[name] = rejected
-        if failed:
-            runs.setdefault("failed", {})[name] = failed_reason(failing, len(failed))
+        side = plugin_side(run, problems, capacity=capacity)
+        for key in ("records", "exit", "timings", "rejected", "failed"):
+            if key in side:
+                runs.setdefault(key, {})[name] = side[key]
     return runs
+
+
+def plugin_side(run, problems: Sequence[Mapping[str, Any]], *, capacity: bool = False,
+                grades: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """Read one recorded benchmark pass, keyed by the actual dataset question."""
+    indices = run.conversation_indices()
+    if len(indices) != len(problems):
+        raise ValueError(f"accuracy inputs contain {len(indices)} questions, expected {len(problems)}")
+
+    def index(metadata):
+        identity = metadata.get("conversation_id")
+        if identity not in indices:
+            raise ValueError(f"accuracy conversation {identity!r} is absent from saved inputs")
+        return indices[identity]
+
+    raw = run.raw_records()
+    # Rejected capacity stays outside the comparison; other failed requests remain missing answers.
+    rejected = {index(record["metadata"]): reason for record in raw
+                if capacity and (reason := capacity_rejection(record))}
+    failing = [record for record in raw if unanswered(record) and index(record["metadata"]) not in rejected]
+    failed = {index(record["metadata"]) for record in failing}
+    records = {}
+    for record in run.accuracy_records() if grades is None else grades:
+        position = index(record)
+        if position in failed | set(rejected):
+            continue
+        if position in records:
+            raise ValueError(f"duplicate accuracy conversation {record['conversation_id']!r}")
+        expected = str(record.get("expected", "")).strip()
+        gold = str(problems[position]["gold"]).strip()
+        if expected != gold and record.get("grader_name"):
+            # Some graders export a canonical gold (for example normalized
+            # sentence punctuation). Validate with that same grader, not a new rule.
+            import asyncio
+
+            from aiperf.plugin import plugins
+            from aiperf.plugin.enums import PluginType
+
+            grader = plugins.get_class(PluginType.ACCURACY_GRADER, record["grader_name"])(run=None)
+            try:
+                gold = asyncio.run(grader.grade("", problems[position]["gold"])).ground_truth.strip()
+            finally:
+                asyncio.run(grader.aclose())
+        if expected != gold:
+            raise ValueError(f"accuracy conversation {record['conversation_id']!r} has a mismatched gold answer")
+        records[position] = record
+    side = {"records": records, "exit": run.exit_code, "timings": timings(raw, indices)}
+    if rejected:
+        side["rejected"] = rejected
+    if failed:
+        side["failed"] = failed_reason(failing, len(failed))
+    return side
 
 
 def unanswered(record: Mapping[str, Any]) -> bool:
@@ -388,7 +428,9 @@ def capacity_rejection(record: Mapping[str, Any]) -> str | None:
         body = json.loads(error.get("message") or "")["error"]
     except (TypeError, ValueError, KeyError):
         return None
-    message = str(body.get("message") or "") if isinstance(body, Mapping) else ""
+    if not isinstance(body, Mapping):
+        return None
+    message = str(body.get("message") or "")
     if body.get("code") != "backend_rejected_request" or not CAPACITY_LIMIT.search(message):
         return None
     return message[:300]
@@ -401,7 +443,7 @@ def failed_reason(raw_records: Sequence[Mapping[str, Any]], count: int) -> str:
     return f"{count} requests failed: {str(message)[:300]}"
 
 
-def timings(raw_records: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, float]]:
+def timings(raw_records: Sequence[Mapping[str, Any]], indices: Mapping[str, int] | None = None) -> dict[int, dict[str, float]]:
     """Per problem: the server's model-call time and token counts (from the OpenAI response body)."""
     found = {}
     for record in raw_records:
@@ -412,7 +454,9 @@ def timings(raw_records: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, flo
                 continue
             timing, usage = body.get("trtmc_timing") or {}, body.get("usage") or {}
             if timing.get("model_call_ms") is not None:
-                found[int(record["metadata"]["session_num"])] = {
+                metadata = record["metadata"]
+                position = indices[metadata["conversation_id"]] if indices is not None else int(metadata["session_num"])
+                found[position] = {
                     "model_call_ms": float(timing["model_call_ms"]), "prompt_tokens": usage.get("prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens")}
     return found
@@ -492,20 +536,17 @@ def _paired(problems: Sequence[Mapping[str, Any]], candidate: Mapping[int, Any],
 
 
 def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
-    """pass / fail / inconclusive / not-comparable / error of a scored entry (also when re-judging a
-    report): every expected problem answered on both sides, a native score above the suitability
-    floor, then the entry's non-inferiority outcome under its gate."""
+    """Compare the conversion's scored difference, regardless of native absolute capability.
+
+    Old reports may carry ``min_native``; it no longer overrides the difference
+    test. Missing answers and statistical uncertainty retain their own outcomes.
+    """
     metrics, gate = entry.get("metrics") or {}, entry.get("gate") or {}
     expected, paired = int(entry.get("expected_samples") or 0), int(entry.get("samples") or 0)
     if paired < expected:
         return "error", [f"{expected - paired} of {expected} problems lack a graded answer on one side"
                          + (f" ({metrics['failed']})" if metrics.get("failed") else "")]
     native = metrics.get("native_score")
-    if native is not None and gate.get("min_native") is not None and native < float(gate["min_native"]):
-        # Too few right answers from the native model (at or near chance): the benchmark does not
-        # discriminate for this model, so it says nothing about TRTMC.
-        return "not-comparable", [f"the native model scores {native:g} (< {gate['min_native']:g}): the benchmark "
-                                  "does not fit this model"]
     test = metrics.get("test") or {}
     if test.get("outcome") is None:
         return "error", ["no non-inferiority outcome"]
@@ -782,6 +823,11 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
                     runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
                                                     out / f"absolute-native-{precision}")
                             for item in model["absolute"]}
+                    for name, side in runs.items():
+                        answers = side.get("observations") or side.get("records") or {}
+                        if side.get("failed") and not any(answers.values()):
+                            raise RuntimeError(f"{name}: no successful native responses "
+                                               f"({next(iter(side['failed'].values()))})")
                 finally:  # sharing an MPS daemon, no copy leaves while the other side's copies still answer
                     if finished is not None:
                         finished.set()
