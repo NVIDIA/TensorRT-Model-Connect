@@ -1411,8 +1411,13 @@ def run_containers(
         if dependency_catalog is not None
         else None
     )
+    preparation = _image_preparation()
     if shared_base is not None:
-        if image_id != shared_base["local_image_id"]:
+        # The authenticated pull verified the pinned content and config digest.
+        # Resolve both references on this daemon: classic and containerd stores
+        # give the same image different kinds of local ID.
+        pinned_base = preparation.inspect(shared_base["image"], private=True)
+        if image_id != pinned_base["Id"]:
             raise CommunityGpuError("The selected image does not match the verified shared base")
         # The workflow has pulled and verified the common base once. Family
         # declarations are materialized only as their turn is reached below.
@@ -1423,7 +1428,6 @@ def run_containers(
         dependency_images, dependency_errors, dependency_misses = _dependency_image_ids(
             repository, active, dependency_catalog, registry_token_file, registry_username, deadline
         )
-    preparation = _image_preparation()
     runner = Path(__file__).resolve()
     run_id = uuid.uuid4().hex
     failures = []
