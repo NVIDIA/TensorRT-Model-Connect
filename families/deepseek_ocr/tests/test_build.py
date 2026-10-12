@@ -187,6 +187,7 @@ def test_single_device_build_streams_each_decoder_plan_before_the_next_build(
         model_dir=tmp_path,
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         task="vision_language_generation",
         precision="fp16",
         max_sequence_length=4096,
