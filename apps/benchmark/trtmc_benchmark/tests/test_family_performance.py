@@ -129,8 +129,14 @@ def repository(tmp_path, monkeypatch):
     _write_suite(canonical, [_entry("other", "other-model")])
     owned_suite = families / "sample/tests/performance.yaml"
     _write_suite(owned_suite, [_entry("sample", "sample-model", script=True)])
+    monkeypatch.setattr(perf.types, "REPOSITORY", root)
+    monkeypatch.setattr(perf.types, "MANIFEST_ROOT", families)
     monkeypatch.setattr(perf.core, "REPOSITORY", root)
     monkeypatch.setattr(perf.core, "MANIFEST_ROOT", families)
+    monkeypatch.setattr(perf.cli, "REPOSITORY", root)
+    monkeypatch.setattr(perf.cli, "MANIFEST_ROOT", families)
+    monkeypatch.setattr(perf, "REPOSITORY", root)
+    monkeypatch.setattr(perf, "MANIFEST_ROOT", families)
     environment = SimpleNamespace(
         bundle_cache=tmp_path / "bundles", runtime_root=tmp_path / "runtime",
         hf_runner=tmp_path / "hf.py", task_runner=tmp_path / "task.py",
@@ -777,8 +783,9 @@ def test_execute_entry_validates_actual_script_process(repository, tmp_path, mon
         'output = Path(sys.argv[1])\noutput.mkdir(parents=True, exist_ok=True)\n'
         f'(output / "result.json").write_text({json.dumps(payload)!r})\n'
     )
-    monkeypatch.setattr(perf, "candidate_command", lambda _entry, _env, output, **_kwargs:
-                        [sys.executable, str(candidate), str(output)])
+    for target in (perf, perf.core):
+        monkeypatch.setattr(target, "candidate_command", lambda _entry, _env, output, **_kwargs:
+                            [sys.executable, str(candidate), str(output)])
     if failure == "process":
         repository.script.write_text('raise RuntimeError("fixture failure")\n')
     elif failure == "identity":
@@ -820,10 +827,11 @@ def test_check_prepare_run_and_resume_share_family_suite_discovery(repository, t
         preparations.append([entry.spec["id"] for entry in entries])
         return 0
 
-    monkeypatch.setattr(perf, "load_environment", lambda _path: environment)
-    monkeypatch.setattr(perf, "preflight", preflight)
-    monkeypatch.setattr(perf, "_run_rows", run_rows)
-    monkeypatch.setattr(perf, "prepare_entries", prepare)
+    for target in (perf, perf.core, perf.cli):
+        monkeypatch.setattr(target, "load_environment", lambda _path: environment)
+        monkeypatch.setattr(target, "preflight", preflight)
+        monkeypatch.setattr(target, "_run_rows", run_rows)
+        monkeypatch.setattr(target, "prepare_entries", prepare)
     common = [str(repository.canonical), "--environment", str(environment_path)]
     assert perf.main(["check", *common]) == 0
     assert perf.main(["prepare", *common, "--output", str(tmp_path / "prepared.json")]) == 0

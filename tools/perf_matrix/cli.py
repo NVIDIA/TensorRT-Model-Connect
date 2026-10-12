@@ -8,10 +8,7 @@ from pathlib import Path
 from typing import Sequence
 import yaml
 
-REPOSITORY = Path(__file__).resolve().parents[2]
-BUILDER_SOURCE = REPOSITORY / 'core/builder'
-BENCHMARK_SOURCE = REPOSITORY / 'apps/benchmark'
-MANIFEST_ROOT = REPOSITORY / 'families'
+from .types import REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE
 
 for source in (REPOSITORY, BUILDER_SOURCE, BENCHMARK_SOURCE):
     if str(source) not in sys.path:

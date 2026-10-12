@@ -510,6 +510,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/model_benchmark.py",
         "tools/perf_matrix.py",
         "tools/perf_matrix/__init__.py",
+        "tools/perf_matrix/__main__.py",
         "tools/perf_matrix/cli.py",
         "tools/perf_matrix/core.py",
         "tools/perf_matrix/types.py",
