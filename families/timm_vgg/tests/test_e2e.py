@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 import pytest
 import numpy as np
-from tensorrt_model_connect import BuildRequest, build
+from families.timm_vgg.cli import BuildRequest, build_bundle
 
 FAMILY = "timm_vgg"
 TASKS = frozenset({"classification"})
@@ -114,6 +114,8 @@ def _runtime() -> tuple[Path, Path]:
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
     assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
+    if not (runtime_root / f"libtrtmc_cli_{FAMILY}.so").is_file():
+        raise AssertionError(f"selected {FAMILY} E2E requires its native CLI adapter")
     import torch
 
     assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
@@ -122,22 +124,15 @@ def _runtime() -> tuple[Path, Path]:
 
 
 def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
-    build(
+    if int(manifest["tensor_parallel_size"]) != 1:
+        raise NotImplementedError(f"{FAMILY} does not support tensor parallelism")
+    build_bundle(
         BuildRequest(
             model_dir=model_dir,
-            output_path=bundle,
-            family=FAMILY,
             task=manifest["task"],
             precision=manifest["precision"],
-            max_sequence_length=manifest.get("max_sequence_length"),
-            image_height=manifest.get("image_height"),
-            image_width=manifest.get("image_width"),
-            video_num_frames=manifest.get("video_num_frames"),
-            max_batch_size=int(manifest.get("max_batch_size", 1)),
-            tensor_parallel_size=int(manifest["tensor_parallel_size"]),
-            quantization=manifest.get("quantization"),
-            fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
-        )
+        ),
+        bundle,
     )
 
 
@@ -151,6 +146,7 @@ def _run_json(
 ) -> dict:
     invocation = [
         str(binary),
+        FAMILY,
         command,
         str(bundle),
         "--runtime-root",

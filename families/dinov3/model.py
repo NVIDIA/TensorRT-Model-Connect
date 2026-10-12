@@ -523,7 +523,7 @@ def build_vit_engine(
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
+    from .cli import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -637,37 +637,12 @@ class _Dinov3Model:
         }
 
 
-def _positive_int(value: object, name: str) -> int:
-    if isinstance(value, bool):
-        raise ValueError(f"{name} must be a positive integer")
-    result = int(value)
-    if result < 1:
-        raise ValueError(f"{name} must be a positive integer")
-    return result
-
-
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one DINOv3 bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("dinov3 does not support dynamic_kv_cache")
+    from .cli import coerce_request
 
-    if request.image_height is not None:
-        raise NotImplementedError("dinov3 does not support image_height")
+    request = coerce_request(request)
 
-    if request.image_width is not None:
-        raise NotImplementedError("dinov3 does not support image_width")
-
-    if request.video_num_frames is not None:
-        raise NotImplementedError("dinov3 does not support video_num_frames")
-
-    if request.max_batch_size != 1:
-        raise NotImplementedError("dinov3 does not support max_batch_size")
-
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
-
-    if request.task != "image_features":
-        raise ValueError("dinov3 supports only task=image_features")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() not in {
@@ -677,20 +652,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     }:
         raise ValueError(f"DINOv3 does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
-    max_sequence_length = _positive_int(request.max_sequence_length or 1, "max_sequence_length")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("DINOv3 does not support quantization")
-    if request.fp32_layers:
-        raise NotImplementedError("DINOv3 does not support mixed-precision layers")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("DINOv3 does not support tensor parallelism")
     model = _Dinov3Model()
     weights = model.load_weights(str(model_dir), config, precision=precision)
     writer.set_header(family="dinov3", task=request.task, backend=request.backend)
     plan = model.build_engine(
         config,
         weights,
-        max_sequence_length,
+        1,
         precision=precision,
         quant_ctx=None,
         verbose=bool(request.verbose),

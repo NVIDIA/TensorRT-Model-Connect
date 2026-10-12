@@ -36,8 +36,10 @@ from .weights import (
 from .config import ModelConfig
 
 
+from .cli import BuildRequest, coerce_request
+
+
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 # timm's ResNet BatchNorm2d layers use the PyTorch default epsilon; it is not
@@ -375,27 +377,7 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm ResNet image-classification bundle."""
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("timm_resnet does not support dynamic_kv_cache")
-
-    if request.image_height is not None:
-        raise NotImplementedError("timm_resnet does not support image_height")
-    if request.image_width is not None:
-        raise NotImplementedError("timm_resnet does not support image_width")
-    if request.video_num_frames is not None:
-        raise NotImplementedError("timm_resnet does not support video_num_frames")
-    if request.max_batch_size != 1:
-        raise NotImplementedError("timm_resnet does not support max_batch_size")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("timm_resnet does not support tensor parallelism")
-    if request.context_parallel_size != 1:
-        raise NotImplementedError("timm_resnet does not support context parallelism")
-    if request.task != "image_to_class_scores":
-        raise ValueError("timm_resnet supports only task=image_to_class_scores")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_resnet does not support quantization")
-    if request.fp32_layers:
-        raise NotImplementedError("timm_resnet does not support mixed-precision layers")
+    request = coerce_request(request)
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
@@ -403,7 +385,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if not model_type.startswith(("resnet", "resnext", "wide_resnet")):
         raise ValueError(f"timm ResNet does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
-    max_sequence_length = _positive_int(request.max_sequence_length or 1, "max_sequence_length")
+    max_sequence_length = 1
     model = _TimmResnetModel()
     weights = model.load_weights(str(model_dir), config, precision=precision)
     plan = model.build_engine(

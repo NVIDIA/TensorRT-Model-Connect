@@ -440,26 +440,9 @@ class _DetrModel:
 
 def build(request, writer) -> None:
     """Build one DETR object-detection bundle."""
-    if request.task != "object_detection":
-        raise ValueError("detr supports only task=object_detection")
-    if request.backend not in {"trt", "trt_rtx"}:
-        raise ValueError("detr supports only backend=trt")
-    if request.dynamic_kv_cache:
-        raise NotImplementedError("detr does not support dynamic_kv_cache")
-    if request.max_sequence_length not in {None, 1}:
-        raise NotImplementedError("detr supports only max_sequence_length=1")
-    if request.max_batch_size != 1:
-        raise NotImplementedError("detr does not support max_batch_size")
-    if request.tensor_parallel_size != 1:
-        raise NotImplementedError("detr does not support tensor parallelism")
-    if request.context_parallel_size != 1:
-        raise NotImplementedError("detr does not support context parallelism")
-    if request.video_num_frames is not None:
-        raise NotImplementedError("detr does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("detr does not support quantization")
-    if request.fp32_layers:
-        raise NotImplementedError("detr does not support mixed-precision layers")
+    from .cli import coerce_request
+
+    request = coerce_request(request)
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
