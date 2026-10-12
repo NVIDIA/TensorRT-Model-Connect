@@ -1033,6 +1033,10 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     )
 
     assert any(command[:2] == ["cmake", "-S"] for command in commands)
+    icu_probe = ["pkg-config", "--exists", "icu-uc", "icu-i18n"]
+    assert commands.index(icu_probe) < next(
+        index for index, command in enumerate(commands) if command[:2] == ["cmake", "-S"]
+    )
     native_builds = [command for command in commands if command[:2] == ["cmake", "--build"]]
     assert "trtmc" in native_builds[0]
     assert "trtmc_backend_trt" in native_builds[0]
@@ -1054,7 +1058,7 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     assert runtime["HF_HUB_OFFLINE"] == "1"
 
 
-@pytest.mark.parametrize("failure", ["probe", "configure", "test", ""])
+@pytest.mark.parametrize("failure", ["probe", "icu", "configure", "test", ""])
 def test_actual_pr_cli_starts_only_after_preparation(tmp_path, monkeypatch, failure):
     """Execute fake native tools and the repository's real Python CLI process."""
     _family(
@@ -1100,6 +1104,18 @@ def test_actual_pr_cli_starts_only_after_preparation(tmp_path, monkeypatch, fail
         " (build/name).touch()\n"
     )
     cmake.chmod(0o755)
+    pkg_config = tools / "pkg-config"
+    pkg_config.write_text(
+        f"#!{sys.executable}\nimport json,os,sys\nfrom pathlib import Path\n"
+        "p=Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "assert not Path(str(p)+'.entrypoint').exists()\n"
+        "assert sys.argv[1:]==['--exists','icu-uc','icu-i18n']\n"
+        "report=json.loads(p.read_text())\n"
+        "assert report['phase']=='environment' and report['failure_class']=='infra_failure'\n"
+        "with Path(os.environ['BOUNDARY_EVENTS']).open('a') as s: s.write('icu-probe\\n')\n"
+        "if os.environ['BOUNDARY_FAILURE']=='icu': raise SystemExit(1)\n"
+    )
+    pkg_config.chmod(0o755)
     destination = tmp_path / "result.json"
     events = tmp_path / "events"
     env = {
@@ -1129,19 +1145,28 @@ def test_actual_pr_cli_starts_only_after_preparation(tmp_path, monkeypatch, fail
     else:
         community_gpu_ci.run(tmp_path, env, "alpha")
     result = json.loads(destination.read_text())
-    entered = failure != "probe"
+    entered = failure not in {"probe", "icu"}
     assert result["entrypoint_started"] is entered
+    assert Path(str(destination) + ".entrypoint").exists() is entered
     if failure:
         assert result["failure_class"] == ("pr_failure" if entered else "infra_failure")
+        if failure == "icu":
+            assert result["phase"] == "environment"
+            assert result["cases"] == {"alpha-smoke": "not_run"}
+            assert "icu-uc" in result["evidence"] and "icu-i18n" in result["evidence"]
+        elif failure == "configure":
+            assert result["phase"] == "configure"
     else:
         assert result["status"] == "passed" and result["cases"] == {"alpha-smoke": "passed"}
     observed = events.read_text().splitlines() if events.exists() else []
     assert observed == (
         []
         if failure == "probe"
-        else ["cmake"]
+        else ["icu-probe"]
+        if failure == "icu"
+        else ["icu-probe", "cmake"]
         if failure == "configure"
-        else ["cmake", "cmake", "cmake", "pr-cli"]
+        else ["icu-probe", "cmake", "cmake", "cmake", "pr-cli"]
     )
 
 

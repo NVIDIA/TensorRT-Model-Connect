@@ -702,6 +702,12 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
             "print(f'GPU count: {torch.cuda.device_count()}')",
         ],
     )
+    _phase(report, env, "environment", "infra_failure")
+    _family_command(
+        repository,
+        build_env,
+        ["pkg-config", "--exists", "icu-uc", "icu-i18n"],
+    )
     if env.get("TRTMC_CHECKPOINTS_PRESTAGED") != "1":
         raise CommunityGpuError("Family checkpoints were not prepared before the PR entrypoint")
     impact = _dependency_json(_dependency_bytes(repository / "impact.json", root=repository))
