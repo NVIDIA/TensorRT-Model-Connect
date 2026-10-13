@@ -817,6 +817,7 @@ def test_gpu_step_conclusion_requires_completed_success(
         "TEST_RESULT",
         "GPU_FAILURE_CLASS",
         "CLEANUP_RESULT",
+        "BACKSTOP_RELEASE_CONFIRMED",
     ],
 )
 @pytest.mark.parametrize("bad_result", ["failure", "cancelled", "skipped", ""])
@@ -833,6 +834,7 @@ def test_complete_pipeline_requires_every_cpu_and_gpu_stage(failed, bad_result):
         "success",
     )
     states["GPU_FAILURE_CLASS"] = "none"
+    states["BACKSTOP_RELEASE_CONFIRMED"] = "true"
     if failed:
         states[failed] = bad_result
     result = subprocess.run(
@@ -1408,7 +1410,7 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     step = next(step for step in dispatch["steps"] if step.get("id") == "execution")
     assert (
         step["env"]["CI_REF"]
-        == "${{ matrix.lane == 'stable' && 'main' || github.ref_name != 'main' && github.ref_name || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}"
+        == "${{ matrix.lane == 'stable' && 'main' || github.ref == 'refs/heads/ci/developer' && 'ci/developer' || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}"
     )
     assert "sleep" not in step["run"]
     gpu = executor["jobs"]["provision-and-test"]
@@ -1477,7 +1479,14 @@ def test_community_dual_run_switch_controls_job_allocation(tmp_path, dual_run, e
     output = tmp_path / "output"
     result = subprocess.run(
         ["bash", "-c", selector["run"]],
-        env={**os.environ, "DUAL_RUN": dual_run, "CI_BRANCH": "main", "GITHUB_OUTPUT": str(output)},
+        env={
+            **os.environ,
+            "DUAL_RUN": dual_run,
+            "CI_ENTRY_REF": "refs/heads/main",
+            "EVENT_NAME": "pull_request_target",
+            "REQUESTED_LANE": "stable",
+            "GITHUB_OUTPUT": str(output),
+        },
         capture_output=True,
         text=True,
     )
@@ -1640,7 +1649,7 @@ else:
     ],
 )
 @pytest.mark.parametrize("queued_first", [False, True])
-def test_only_complete_pipeline_publishes_stable_and_dev_results(
+def test_dispatched_pipeline_observer_never_overwrites_stable_or_dev_results(
     tmp_path, lane, branch, conclusion, expected, wrong_title, queued_first
 ):
     fake = tmp_path / "gh"
@@ -1707,19 +1716,17 @@ def test_only_complete_pipeline_publishes_stable_and_dev_results(
         text=True,
     )
     assert (result.returncode == 0) is (expected == "success"), result.stderr
-    if expected is None or lane == "dev":
-        assert not (tmp_path / "calls").exists()
+    assert not (tmp_path / "calls").exists()
     if expected is not None:
         assert (tmp_path / "output").read_text() == "reported=true\n"
         assert int((tmp_path / "counter").read_text()) == (2 if queued_first else 1)
-    if expected is not None and lane == "stable":
-        calls = (tmp_path / "calls").read_text().splitlines()
-        assert f"state={expected}" in calls
-        assert f"context={lane.title()} Community CI" in calls
 
 
 @pytest.mark.parametrize("api_unavailable", [False, True])
-def test_dev_observer_timeout_never_finalizes_the_resource_owner(tmp_path, api_unavailable):
+@pytest.mark.parametrize("lane,branch", [("stable", "main"), ("dev", "ci/developer")])
+def test_observer_timeout_never_finalizes_the_resource_owner(
+    tmp_path, api_unavailable, lane, branch
+):
     script = r"""
 gh() {
   if [[ "$*" == *"/actions/runs/"* ]]; then
@@ -1738,8 +1745,8 @@ sleep() { SECONDS=$((SECONDS + 18001)); }
         env={
             **os.environ,
             "PIPELINE_RUN_ID": "42",
-            "CI_BRANCH": "ci/developer",
-            "LANE": "dev",
+            "CI_BRANCH": branch,
+            "LANE": lane,
             "PR_NUMBER": "17",
             "HEAD_SHA": "a" * 40,
             "SOURCE_SNAPSHOT": json.dumps({"merge_sha": "b" * 40}),
@@ -1759,7 +1766,7 @@ sleep() { SECONDS=$((SECONDS + 18001)); }
     fallback = _workflow_step_script("community-ci.yml", "dispatch", "Report a failed CI request")
     result = subprocess.run(
         ["bash", "-c", 'gh() { printf "%s\\n" "$*" >> "$STATUS_WRITES"; }\n' + fallback],
-        env={**os.environ, "LANE": "dev", "STATUS_WRITES": str(tmp_path / "writes")},
+        env={**os.environ, "LANE": lane, "STATUS_WRITES": str(tmp_path / "writes")},
         capture_output=True,
         text=True,
         timeout=5,
@@ -1781,17 +1788,17 @@ sleep() { SECONDS=$((SECONDS + 18001)); }
     ],
 )
 def test_trusted_inner_status_requires_release_before_a_gpu_verdict(
-    tmp_path, owner, backstop, gpu, complete, expected
+    tmp_path, owner, backstop, gpu, complete, expected, execution_publisher
 ):
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     publisher = workflow["jobs"]["publish"]
     assert {"provision-and-test", "cleanup"} <= set(publisher["needs"])
     assert publisher["permissions"] == {"statuses": "write"}
     step = next(
-        s for s in publisher["steps"] if s["name"] == "Publish the released Dev workflow conclusion"
+        s for s in publisher["steps"] if s["name"] == "Publish the released workflow conclusion"
     )
     assert "always()" in step["if"] and "workflow_dispatch" in step["if"]
-    assert "inputs.ci_lane == 'dev'" in step["if"]
+    assert "inputs.ci_lane" not in step["if"]
     assert step["env"]["HEAD_SHA"] == "${{ needs.authorize.outputs.head_sha }}"
     assert step["env"]["CPU_RESULT"] == "${{ needs.required.result }}"
     assert step["env"]["RUN_GPU"] == "${{ needs.gpu-authorize.outputs.run_gpu }}"
@@ -1802,6 +1809,7 @@ def test_trusted_inner_status_requires_release_before_a_gpu_verdict(
     result = subprocess.run(
         ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + step["run"]],
         env={
+            **execution_publisher,
             **os.environ,
             "HEAD_SHA": "a" * 40,
             "CPU_RESULT": "success" if gpu != "skipped" else "failure",
@@ -1824,7 +1832,7 @@ def test_trusted_inner_status_requires_release_before_a_gpu_verdict(
     assert result.returncode == 0, result.stderr
     arguments = writes.read_text().splitlines()
     assert f"state={expected}" in arguments
-    assert "context=Dev Community CI" in arguments
+    assert f"context={execution_publisher['CI_LANE'].title()} Community CI" in arguments
     assert "target_url=https://github.com/example/source/actions/runs/42" in arguments
     if expected == "pending":
         assert "description=Community CI release remains unconfirmed" in arguments
@@ -1861,7 +1869,9 @@ def test_backstop_requires_explicit_trusted_no_allocation_proof(tmp_path, outcom
     assert "needs.provision-and-test.outputs" not in str(harness.steps["release"])
 
 
-def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
+def test_preparation_failure_finalizes_infra_without_brev_credentials(
+    tmp_path, execution_publisher
+):
     owner = _workflow_step_script(
         "community-ci.yml", "provision-and-test", "Confirm that reservation was skipped"
     )
@@ -1885,6 +1895,7 @@ def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
     result = subprocess.run(
         ["bash", "-c", conclusion],
         env={
+            **execution_publisher,
             "PATH": os.environ["PATH"],
             "GITHUB_OUTPUT": str(tmp_path / "conclusion"),
             "JOB_STATUS": "failure",
@@ -1899,12 +1910,13 @@ def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
     assert result.returncode == 0
     assert (tmp_path / "conclusion").read_text() == "conclusion=failure\n"
     publish = _workflow_step_script(
-        "community-ci.yml", "publish", "Publish the released Dev workflow conclusion"
+        "community-ci.yml", "publish", "Publish the released workflow conclusion"
     )
     writes = tmp_path / "writes"
     result = subprocess.run(
         ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + publish],
         env={
+            **execution_publisher,
             "PATH": os.environ["PATH"],
             "HEAD_SHA": "a" * 40,
             "CPU_RESULT": "success",
@@ -1950,7 +1962,7 @@ def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
 )
 @pytest.mark.parametrize("released", [False, True])
 def test_gpu_receipt_classification_reaches_only_a_released_final_status(
-    tmp_path, receipt, expected_class, released
+    tmp_path, receipt, expected_class, released, execution_publisher
 ):
     """Run the real workflow scripts, including missing pre-coordinator output."""
     row = {
@@ -2012,13 +2024,14 @@ def test_gpu_receipt_classification_reaches_only_a_released_final_status(
     assert output.read_text() == f"failure_class={expected_class}\n"
 
     publish = _workflow_step_script(
-        "community-ci.yml", "publish", "Publish the released Dev workflow conclusion"
+        "community-ci.yml", "publish", "Publish the released workflow conclusion"
     )
     writes = tmp_path / "writes"
     success = receipt in {"success", "false-success"}
     result = subprocess.run(
         ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + publish],
         env={
+            **execution_publisher,
             **os.environ,
             "HEAD_SHA": "a" * 40,
             "CPU_RESULT": "success",
@@ -2056,16 +2069,17 @@ def test_gpu_receipt_classification_reaches_only_a_released_final_status(
 @pytest.mark.parametrize("category", ["", "unrecognized", "infra_failure"])
 @pytest.mark.parametrize("cpu", ["success", "failure"])
 def test_absent_classification_output_defaults_to_infra_only_after_cpu_passes(
-    tmp_path, category, cpu
+    tmp_path, category, cpu, execution_publisher
 ):
     """A skipped/failed classifier cannot blame the PR or relabel CPU failures."""
     publish = _workflow_step_script(
-        "community-ci.yml", "publish", "Publish the released Dev workflow conclusion"
+        "community-ci.yml", "publish", "Publish the released workflow conclusion"
     )
     writes = tmp_path / "writes"
     result = subprocess.run(
         ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + publish],
         env={
+            **execution_publisher,
             **os.environ,
             "HEAD_SHA": "a" * 40,
             "CPU_RESULT": cpu,
@@ -2319,31 +2333,6 @@ def test_failed_snapshot_reports_only_a_validated_head(tmp_path, head):
         assert not calls.exists()
 
 
-@pytest.mark.parametrize("dual_run", ["", "false", "true"])
-def test_manual_dev_branch_obeys_the_comparison_switch(tmp_path, dual_run):
-    output = tmp_path / "output"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            _workflow_step_script(
-                "community-ci.yml", "snapshot", "Select the Community CI branches"
-            ),
-        ],
-        env={
-            **os.environ,
-            "DUAL_RUN": dual_run,
-            "CI_BRANCH": "ci/developer",
-            "GITHUB_OUTPUT": str(output),
-        },
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    expected = '["stable","dev"]' if dual_run == "true" else '["dev"]'
-    assert output.read_text() == f"lanes={expected}\n"
-
-
 @pytest.mark.parametrize("available", [True, False])
 def test_pairing_selects_only_the_existing_stable_pr_run(tmp_path, available):
     head, merge = "a" * 40, "b" * 40
@@ -2416,6 +2405,7 @@ def test_stable_pairing_does_not_dispatch_or_repeat_the_existing_pipeline(tmp_pa
             **os.environ,
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "LANE": "stable",
+            "CI_REF": "main",
             "STABLE_RUN_ID": "42",
             "GITHUB_OUTPUT": str(tmp_path / "output"),
         },
@@ -3295,11 +3285,17 @@ def test_interrupted_gpu_evidence_survives_blocked_cleanup_and_reruns(tmp_path, 
     """Execute diagnostics and retain each attempt while deletion is unconfirmed."""
     report = {
         "schema_version": 1,
-        "families": [{
-            "family": "example", "status": "running", "phase": "environment",
-            "failure_class": "infra_failure", "entrypoint_started": False,
-            "requested_cases": ["one"], "cases": {"one": "not_run"},
-        }],
+        "families": [
+            {
+                "family": "example",
+                "status": "running",
+                "phase": "environment",
+                "failure_class": "infra_failure",
+                "entrypoint_started": False,
+                "requested_cases": ["one"],
+                "cases": {"one": "not_run"},
+            }
+        ],
     }
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -3312,12 +3308,17 @@ def test_interrupted_gpu_evidence_survives_blocked_cleanup_and_reruns(tmp_path, 
         summary = directory / "trtmc-community-gpu-summary.json"
         summarize = harness.steps["Summarize every selected GPU family"]
         result = subprocess.run(
-            ["bash", "-e", "-c", summarize["run"].replace(
-                "/tmp/gpu-ci-output.log", shlex.quote(str(log))
-            )],
+            [
+                "bash",
+                "-e",
+                "-c",
+                summarize["run"].replace("/tmp/gpu-ci-output.log", shlex.quote(str(log))),
+            ],
             cwd=REPO_ROOT,
             env={**harness.environment, "GITHUB_STEP_SUMMARY": str(directory / "rendered")},
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0, result.stderr
         result = harness.run("classification", SUMMARY_FILE=str(summary))
@@ -3327,15 +3328,19 @@ def test_interrupted_gpu_evidence_survives_blocked_cleanup_and_reruns(tmp_path, 
         # Replace only the artifact service with an immutable local store. A
         # rerun must not collide with or replace the earlier attempt's output.
         upload = harness.steps["Upload the smoke-test log"]
-        name = upload["with"]["name"].replace("${{ github.run_id }}", "123").replace(
-            "${{ github.run_attempt }}", str(attempt)
+        name = (
+            upload["with"]["name"]
+            .replace("${{ github.run_id }}", "123")
+            .replace("${{ github.run_attempt }}", str(attempt))
         )
         destination = artifacts / name
         destination.mkdir()
         for path in upload["with"]["path"].splitlines():
-            source = Path(path.replace("/tmp/gpu-ci-output.log", str(log)).replace(
-                "${{ runner.temp }}", str(directory)
-            ))
+            source = Path(
+                path.replace("/tmp/gpu-ci-output.log", str(log)).replace(
+                    "${{ runner.temp }}", str(directory)
+                )
+            )
             shutil.copyfile(source, destination / source.name)
         released = harness.run("release", VM_CLEANUP_EXIT="75")
         assert released.returncode == 75
@@ -3362,9 +3367,15 @@ def test_gpu_diagnostic_failure_still_releases_and_cannot_report_success(
     result = subprocess.run(
         ["bash", "-e", "-c", step["run"]],
         cwd=REPO_ROOT,
-        env={**harness.environment, "GITHUB_STEP_SUMMARY": str(tmp_path),
-             "GITHUB_OUTPUT": str(tmp_path), "SUMMARY_FILE": str(tmp_path / "missing")},
-        capture_output=True, text=True, timeout=10,
+        env={
+            **harness.environment,
+            "GITHUB_STEP_SUMMARY": str(tmp_path),
+            "GITHUB_OUTPUT": str(tmp_path),
+            "SUMMARY_FILE": str(tmp_path / "missing"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     assert result.returncode != 0
     assert "always()" in harness.steps["release"]["if"]
@@ -3372,7 +3383,10 @@ def test_gpu_diagnostic_failure_still_releases_and_cannot_report_success(
     released = harness.run("release")
     assert released.returncode == 0, released.stderr
     result = harness.run(
-        "result", JOB_STATUS="failure", TEST_OUTCOME="success", TEST_CONCLUSION="success",
+        "result",
+        JOB_STATUS="failure",
+        TEST_OUTCOME="success",
+        TEST_CONCLUSION="success",
         CLEANUP_CONFIRMED="true",
     )
     assert result.returncode == 0, result.stderr
@@ -3807,15 +3821,16 @@ def test_cleanup_job_admits_trusted_reruns_after_current_cpu_failure(tmp_path, u
 @pytest.mark.parametrize("cpu", ["success", "failure", "cancelled"])
 @pytest.mark.parametrize("confirmed", [False, True])
 def test_rerun_without_current_gpu_result_remains_pending_until_old_allocations_released(
-    tmp_path, run_gpu, cpu, confirmed
+    tmp_path, run_gpu, cpu, confirmed, execution_publisher
 ):
     script = _workflow_step_script(
-        "community-ci.yml", "publish", "Publish the released Dev workflow conclusion"
+        "community-ci.yml", "publish", "Publish the released workflow conclusion"
     )
     writes = tmp_path / "writes"
     result = subprocess.run(
         ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + script],
         env={
+            **execution_publisher,
             **os.environ,
             "HEAD_SHA": "a" * 40,
             "CPU_RESULT": cpu,
@@ -3885,3 +3900,811 @@ def test_empty_current_gpu_plan_requires_historical_release_on_rerun(
         timeout=5,
     )
     assert result.returncode == expected, result.stderr
+
+
+@pytest.mark.parametrize("dual_run", ["", "false", "true"])
+@pytest.mark.parametrize("entry_ref", ["refs/heads/main", "refs/heads/ci/developer"])
+def test_manual_dev_request_never_allocates_a_stable_publisher(tmp_path, dual_run, entry_ref):
+    output = tmp_path / "output"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "snapshot", "Select the Community CI branches"
+            ),
+        ],
+        env={
+            **os.environ,
+            "DUAL_RUN": dual_run,
+            "CI_ENTRY_REF": entry_ref,
+            "EVENT_NAME": "workflow_dispatch",
+            "REQUESTED_LANE": "dev",
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text() == 'lanes=["dev"]\n'
+
+
+@pytest.mark.parametrize("stable_state", ["failure", "pending"])
+@pytest.mark.parametrize("entry_ref", ["refs/heads/main", "refs/heads/ci/developer"])
+def test_manual_dev_preserves_stable_gpu_verdict_despite_successful_cpu(
+    tmp_path, stable_state, entry_ref
+):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    steps = {step["name"]: step for step in workflow["jobs"]["dispatch"]["steps"]}
+    head, merge = "a" * 40, "c" * 40
+    states = tmp_path / "states.json"
+    states.write_text(json.dumps({"Stable Community CI": stable_state}))
+    calls = tmp_path / "calls.jsonl"
+    fake = tmp_path / "gh"
+    fake.write_text(
+        """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with Path(os.environ['CALLS']).open('a') as record:
+    record.write(json.dumps(args) + '\\n')
+if '--input' in args:
+    payload = json.loads(Path(args[args.index('--input') + 1]).read_text())
+    assert payload['inputs']['ci_lane'] == 'dev'
+    print(json.dumps({'workflow_run_id': 43}))
+elif any(a.startswith('/repos/') and '/actions/runs/' in a for a in args):
+    path = next(a for a in args if a.startswith('/repos/'))
+    print(json.dumps(json.loads(os.environ['RUNS'])[path.rsplit('/', 1)[1]]))
+else:
+    assert any('/statuses/' in a for a in args)
+    fields = dict(a.split('=', 1) for a in args if '=' in a)
+    path = Path(os.environ['STATES'])
+    states = json.loads(path.read_text())
+    states[fields['context']] = fields['state']
+    path.write_text(json.dumps(states))
+"""
+    )
+    fake.chmod(0o755)
+    common = {
+        "path": ".github/workflows/community-ci.yml",
+        "head_sha": head,
+        "status": "completed",
+        "conclusion": "success",
+    }
+    # After promotion, a successful legacy PR run proves CPU only. The full
+    # Stable GPU run is failed or pending and must retain ownership of its verdict.
+    runs = {
+        "42": {
+            **common,
+            "event": "pull_request",
+            "display_title": f"PR #17 · community CI · head {head} · merge {merge}",
+        },
+        "43": {
+            **common,
+            "event": "workflow_dispatch",
+            "head_branch": "ci/developer",
+            "display_title": f"Dev Community CI · PR #17 · head {head} · merge {merge}",
+        },
+        "53": {
+            **common,
+            "event": "workflow_dispatch",
+            "head_branch": "main",
+            "display_title": f"Stable Community CI · PR #17 · head {head} · merge {merge}",
+            "status": "in_progress" if stable_state == "pending" else "completed",
+            "conclusion": None if stable_state == "pending" else "failure",
+        },
+    }
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "CI_BRANCH": "ci/developer",
+        "CI_ENTRY_BRANCH": "ci/developer",
+        "CI_ENTRY_REF": entry_ref,
+        "EVENT_NAME": "workflow_dispatch",
+        "REQUESTED_LANE": "dev",
+        "DUAL_RUN": "true",
+        "AUTOMATIC_GPU": "true",
+        "STABLE_RUN_ID": "42",
+        "PR_NUMBER": "17",
+        "HEAD_SHA": head,
+        "SOURCE_SNAPSHOT": json.dumps({"merge_sha": merge}),
+        "GITHUB_REPOSITORY": "example/source",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_RUN_ID": "100",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(tmp_path / "selection"),
+        "RUNS": json.dumps(runs),
+        "STATES": str(states),
+        "CALLS": str(calls),
+    }
+
+    def execute(script, environment):
+        result = subprocess.run(
+            ["bash", "-c", script], env=environment, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    execute(
+        _workflow_step_script("community-ci.yml", "snapshot", "Select the Community CI branches"),
+        env,
+    )
+    lanes = json.loads((tmp_path / "selection").read_text().strip().split("=", 1)[1])
+    for lane in lanes:
+        output = tmp_path / f"{lane}-output"
+        lane_env = {
+            **env,
+            "LANE": lane,
+            "CI_REF": "main" if lane == "stable" else "ci/developer",
+            "STATUS_CONTEXT": f"{lane.title()} Community CI",
+            "GITHUB_OUTPUT": str(output),
+        }
+        # Also execute against the pre-fix workflow to reproduce the original
+        # bad status write rather than merely checking for a new guard's text.
+        if "Authorize the result publisher" in steps:
+            execute(steps["Authorize the result publisher"]["run"], lane_env)
+        execute(steps["Dispatch the selected Community CI implementation"]["run"], lane_env)
+        outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        if outputs.get("existing_stable") == "true":
+            execute(steps["Mark the selected CI pending"]["run"], lane_env)
+        execute(
+            steps["Publish the complete workflow conclusion"]["run"],
+            {
+                **lane_env,
+                "PIPELINE_RUN_ID": outputs["run_id"],
+                "CI_BRANCH": outputs["ci_ref"],
+                "EXISTING_STABLE": outputs.get("existing_stable", ""),
+            },
+        )
+    assert json.loads(states.read_text()) == {"Stable Community CI": stable_state}
+    assert all(
+        not any("/statuses/" in arg for arg in args)
+        for args in map(json.loads, calls.read_text().splitlines())
+    )
+    for arguments in map(json.loads, calls.read_text().splitlines()):
+        assert "context=Stable Community CI" not in arguments
+
+
+@pytest.mark.parametrize(
+    "lane,entry_ref,context,allowed",
+    [
+        ("stable", "refs/heads/main", "Stable Community CI", True),
+        ("dev", "refs/heads/main", "Dev Community CI", True),
+        ("dev", "refs/heads/ci/developer", "Dev Community CI", True),
+        ("stable", "refs/heads/ci/developer", "Stable Community CI", False),
+        ("stable", "refs/tags/main", "Stable Community CI", False),
+        ("stable", "refs/pull/17/merge", "Stable Community CI", False),
+        ("stable", "refs/heads/main", "Dev Community CI", False),
+        ("dev", "refs/heads/ci/developer", "Stable Community CI", False),
+        ("unknown", "refs/heads/main", "Dev Community CI", False),
+    ],
+)
+def test_publisher_authorization_precedes_all_status_writes(
+    tmp_path, lane, entry_ref, context, allowed
+):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    steps = workflow["jobs"]["dispatch"]["steps"]
+    assert steps[0]["id"] == "publisher"
+    assert steps[0]["env"]["CI_ENTRY_REF"] == "${{ github.ref }}"
+    result = subprocess.run(
+        ["bash", "-c", steps[0]["run"]],
+        env={
+            **os.environ,
+            "LANE": lane,
+            "CI_ENTRY_REF": entry_ref,
+            "EVENT_NAME": "workflow_dispatch",
+            "REQUESTED_LANE": "dev",
+            "STATUS_CONTEXT": context,
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is allowed, result.stderr
+    if allowed:
+        assert (tmp_path / "output").read_text() == "authorized=true\n"
+    else:
+        assert not (tmp_path / "output").exists()
+    # Ordinary steps require prior success. The failure callback needs its
+    # own authorization check so denying a publisher cannot turn Stable red.
+    for step in steps[1:-1]:
+        if step["name"] == "Mark the selected CI pending":
+            assert step["if"] == "${{ steps.execution.outputs.existing_stable == 'true' }}"
+        else:
+            assert "if" not in step
+    assert "failure()" in steps[-1]["if"]
+    assert "steps.publisher.outputs.authorized == 'true'" in steps[-1]["if"]
+    reporter = workflow["jobs"]["snapshot"]["steps"][-1]
+    assert reporter["env"]["STATUS_CONTEXT"] == (
+        "${{ steps.lanes.outputs.lanes == '[\"dev\"]' && 'Dev Community CI' || 'Stable Community CI' }}"
+    )
+
+
+@pytest.mark.parametrize(
+    "entry_ref", ["refs/heads/contributor", "refs/tags/main", "refs/tags/ci/developer"]
+)
+def test_unapproved_coordinator_is_rejected_before_selecting_lanes(tmp_path, entry_ref):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    for name in ("snapshot", "dispatch"):
+        assert "github.ref == 'refs/heads/main'" in workflow["jobs"][name]["if"]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "snapshot", "Select the Community CI branches"
+            ),
+        ],
+        env={
+            **os.environ,
+            "CI_ENTRY_REF": entry_ref,
+            "EVENT_NAME": "workflow_dispatch",
+            "REQUESTED_LANE": "dev",
+            "DUAL_RUN": "true",
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "output").exists()
+    assert "inputs.ci_lane == 'dev'" in workflow["concurrency"]["group"]
+
+
+@pytest.mark.parametrize(
+    "lane,ref", [("dev", "unprotected"), ("dev", "refs/tags/main"), ("stable", "ci/developer")]
+)
+def test_dispatch_rejects_unapproved_implementation_refs(tmp_path, lane, ref):
+    gh = tmp_path / "gh"
+    gh.write_text('#!/bin/sh\ntouch "$CALLS"\nexit 99\n')
+    gh.chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "dispatch", "Dispatch the selected Community CI implementation"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "LANE": lane,
+            "CI_REF": ref,
+            "STABLE_RUN_ID": "42",
+            "CALLS": str(tmp_path / "calls"),
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "approved" in result.stdout
+    assert not (tmp_path / "calls").exists()
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.fixture(params=[("stable", "main"), ("dev", "ci/developer"), ("dev", "main")])
+def execution_publisher(request):
+    lane, branch = request.param
+    return {"CI_LANE": lane, "CI_REF": f"refs/heads/{branch}"}
+
+
+@pytest.mark.parametrize(
+    "step_name", ["Mark the trusted execution pending", "Publish the released workflow conclusion"]
+)
+@pytest.mark.parametrize(
+    "event,lane,ref,allowed",
+    [
+        ("workflow_dispatch", "stable", "refs/heads/main", True),
+        ("workflow_dispatch", "dev", "refs/heads/ci/developer", True),
+        ("workflow_dispatch", "dev", "refs/heads/main", True),
+        ("workflow_dispatch", "stable", "refs/heads/ci/developer", False),
+        ("workflow_dispatch", "stable", "refs/tags/main", False),
+        ("workflow_dispatch", "dev", "refs/heads/contributor", False),
+        ("workflow_dispatch", "dev", "refs/pull/17/merge", False),
+        ("workflow_dispatch", "unknown", "refs/heads/main", False),
+        ("pull_request", "stable", "refs/heads/main", False),
+        ("pull_request_target", "stable", "refs/heads/main", False),
+    ],
+)
+def test_execution_pending_and_final_publishers_reject_untrusted_contexts(
+    tmp_path, step_name, event, lane, ref, allowed
+):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    job = workflow["jobs"]["authorize" if step_name.startswith("Mark") else "publish"]
+    step = next(step for step in job["steps"] if step["name"] == step_name)
+    assert step["env"]["CI_LANE"] == "${{ inputs.ci_lane }}"
+    assert step["env"]["CI_REF"] == "${{ github.ref }}"
+    # Exercise the checked-in event admission before its independent shell guard.
+    condition = step["if"].removeprefix("${{ ").removesuffix(" }}")
+    condition = condition.replace("github.event_name", repr(event)).replace("always()", "True")
+    admitted = eval(condition.replace("&&", " and "), {"__builtins__": {}})
+    writes = tmp_path / "writes"
+    if not admitted:
+        assert not allowed
+        assert not writes.exists()
+        return
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + step["run"]],
+        env={
+            **os.environ,
+            "CI_LANE": lane,
+            "CI_REF": ref,
+            "HEAD_SHA": "a" * 40,
+            "CPU_RESULT": "success",
+            "RUN_GPU": "false",
+            "GPU_RESULT": "skipped",
+            "GPU_FAILURE_CLASS": "",
+            "ORIGINAL_RUN_ATTEMPT": "1",
+            "COMPLETE_RESULT": "success",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "123",
+            "STATUS_WRITES": str(writes),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert (result.returncode == 0) is allowed, result.stderr
+    assert writes.exists() is allowed
+    if allowed:
+        arguments = writes.read_text().splitlines()
+        assert f"context={lane.title()} Community CI" in arguments
+        assert f"state={'pending' if step_name.startswith('Mark') else 'success'}" in arguments
+
+
+@pytest.mark.parametrize(
+    "updates,expected",
+    [
+        ({}, "success"),
+        ({"RUN_GPU": "false", "GPU_RESULT": "skipped", "CLEANUP_RESULT": "skipped"}, "success"),
+        ({"CPU_RESULT": "failure", "RUN_GPU": "false", "GPU_RESULT": "skipped"}, "failure"),
+        (
+            {"GPU_RESULT": "failure", "TEST_RESULT": "failure", "GPU_FAILURE_CLASS": "pr_failure"},
+            "failure",
+        ),
+        (
+            {
+                "GPU_RESULT": "failure",
+                "TEST_RESULT": "failure",
+                "GPU_FAILURE_CLASS": "infra_failure",
+            },
+            "error",
+        ),
+        ({"GPU_RESULT": "cancelled", "TEST_RESULT": "", "GPU_FAILURE_CLASS": ""}, "error"),
+        ({"GPU_RESULT": "success", "TEST_RESULT": "failure"}, "error"),
+        ({"GPU_RESULT": "failure", "TEST_RESULT": "success"}, "error"),
+        ({"CLEANUP_RESULT": "failure", "BACKSTOP_RELEASE_CONFIRMED": ""}, "pending"),
+        ({"CLEANUP_RESULT": "success", "BACKSTOP_RELEASE_CONFIRMED": ""}, "pending"),
+        (
+            {
+                "GPU_RESULT": "failure",
+                "GPU_FAILURE_CLASS": "infra_failure",
+                "BACKSTOP_RELEASE_CONFIRMED": "",
+            },
+            "pending",
+        ),
+        (
+            {
+                "ORIGINAL_RUN_ATTEMPT": "2",
+                "RUN_GPU": "false",
+                "GPU_RESULT": "skipped",
+                "BACKSTOP_RELEASE_CONFIRMED": "",
+            },
+            "pending",
+        ),
+        ({"ORIGINAL_RUN_ATTEMPT": "2", "RUN_GPU": "false", "GPU_RESULT": "skipped"}, "success"),
+    ],
+)
+def test_complete_gate_and_status_share_the_same_release_contract(
+    tmp_path, execution_publisher, updates, expected
+):
+    """A green job alone cannot replace test evidence or confirmed resource release."""
+    environment = {
+        **os.environ,
+        **execution_publisher,
+        "EVENT_NAME": "workflow_dispatch",
+        "AUTHORIZED_RESULT": "success",
+        "CPU_RESULT": "success",
+        "GPU_AUTHORIZED": "success",
+        "RUN_GPU": "true",
+        "GPU_RESULT": "success",
+        "TEST_RESULT": "success",
+        "GPU_FAILURE_CLASS": "none",
+        "CLEANUP_RESULT": "success",
+        "BACKSTOP_RELEASE_CONFIRMED": "true",
+        "ORIGINAL_RUN_ATTEMPT": "1",
+        "NO_ALLOCATION_CONFIRMED": "",
+        "HEAD_SHA": "a" * 40,
+        "GITHUB_REPOSITORY": "example/source",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_RUN_ID": "123",
+        "STATUS_WRITES": str(tmp_path / "writes"),
+        **updates,
+    }
+    gate = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "publish", "Require the complete Community CI result"
+            ),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert (gate.returncode == 0) is (expected == "success"), gate.stderr
+    publish = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n'
+            + _workflow_step_script(
+                "community-ci.yml", "publish", "Publish the released workflow conclusion"
+            ),
+        ],
+        env={**environment, "COMPLETE_RESULT": "success" if gate.returncode == 0 else "failure"},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert publish.returncode == 0, publish.stderr
+    arguments = (tmp_path / "writes").read_text().splitlines()
+    assert f"state={expected}" in arguments
+    assert f"context={execution_publisher['CI_LANE'].title()} Community CI" in arguments
+
+
+@pytest.mark.parametrize("event", ["pull_request", "pull_request_target", "workflow_dispatch"])
+@pytest.mark.parametrize("cpu", ["success", "failure", "cancelled", "skipped"])
+def test_gpu_admission_requires_trusted_dispatch_and_passing_cpu(event, cpu):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    expression = workflow["jobs"]["gpu-authorize"]["if"].removeprefix("${{ ").removesuffix(" }}")
+    for key, value in {
+        "github.event_name": event,
+        "needs.authorize.result": "success",
+        "needs.required.result": cpu,
+    }.items():
+        expression = expression.replace(key, repr(value))
+    expression = expression.replace("always()", "True").replace("&&", " and ")
+    assert eval(expression, {"__builtins__": {}}) is (
+        event == "workflow_dispatch" and cpu == "success"
+    )
+
+
+@pytest.mark.parametrize(
+    "fault,queued_reads,running_reads,clock_step,conclusion,expected_rc",
+    [
+        ("discovery-once", 0, 0, 30, "success", 0),
+        ("job-once", 0, 0, 30, "success", 0),
+        ("none", 116, 0, 30, "success", 0),
+        ("none", 30, 4, 600, "success", 0),
+        ("job-once", 2, 1, 30, "failure", 1),
+        ("none", -1, 0, 3600, "success", 75),
+        ("job-always", 0, 0, 3600, "success", 75),
+        ("discovery-always", 0, 0, 3600, "success", 75),
+    ],
+)
+def test_promoted_cpu_observer_retains_the_same_child_through_queueing_and_read_failures(
+    tmp_path, fault, queued_reads, running_reads, clock_step, conclusion, expected_rc
+):
+    """A read outage or long queue is not evidence that the actual CPU gate failed."""
+    fake = tmp_path / "gh"
+    fake.write_text(
+        """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[0] == 'api'
+assert '--method' not in args and '--input' not in args
+assert not any('/statuses/' in arg or '/dispatches' in arg or '/cancel' in arg or '/rerun' in arg for arg in args)
+path = next(arg for arg in args if arg.startswith('/repos/'))
+record = Path(os.environ['OBSERVER_CALLS'])
+with record.open('a') as stream:
+    stream.write(json.dumps(args) + '\\n')
+counter = Path(os.environ['OBSERVER_STATE'])
+state = json.loads(counter.read_text()) if counter.exists() else {'discovery': 0, 'jobs': 0}
+kind = 'discovery' if '/workflows/' in path else 'jobs'
+state[kind] += 1
+counter.write_text(json.dumps(state))
+fault = os.environ['OBSERVER_FAULT']
+if (fault == 'discovery-always' and kind == 'discovery'
+    or fault == 'discovery-once' and kind == 'discovery' and state[kind] == 1
+    or fault == 'job-always' and kind == 'jobs'
+    or fault == 'job-once' and kind == 'jobs' and state[kind] == 1):
+    print('gh: Bad Gateway (HTTP 502)', file=sys.stderr)
+    sys.exit(1)
+if kind == 'discovery':
+    # A newer request exists on a later inventory response. After first
+    # discovery the observer must keep run 42 instead of switching children.
+    first_valid = 2 if fault == 'discovery-once' else 1
+    run_id = 42 if state[kind] == first_valid else 99
+    print(json.dumps({'workflow_runs': [{
+        'id': run_id, 'event': 'workflow_dispatch', 'head_branch': 'main',
+        'path': '.github/workflows/community-ci.yml', 'display_title': os.environ['EXPECTED_TITLE'],
+        'status': 'queued', 'conclusion': None,
+    }]}))
+else:
+    assert path == '/repos/example/source/actions/runs/42/jobs?filter=latest&per_page=100'
+    count = state[kind] - (1 if fault == 'job-once' else 0)
+    queued = int(os.environ['QUEUED_READS'])
+    running = int(os.environ['RUNNING_READS'])
+    if queued == -1 or count <= queued:
+        print('{}')
+    elif count <= queued + running:
+        print(json.dumps({'status': 'in_progress', 'conclusion': None}))
+    else:
+        print(json.dumps({'status': 'completed', 'conclusion': os.environ['CPU_CONCLUSION']}))
+"""
+    )
+    fake.chmod(0o755)
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    gate = workflow["jobs"]["required"]
+    step = next(
+        step for step in gate["steps"] if step["name"] == "Read the promoted Stable CPU result"
+    )
+    assert 60 < step["timeout-minutes"] < gate["timeout-minutes"] <= 360
+    assert gate["timeout-minutes"] > workflow["jobs"]["unit"]["timeout-minutes"]
+    head, merge = "a" * 40, "b" * 40
+    result = subprocess.run(
+        ["bash", "-c", "sleep() { SECONDS=$((SECONDS + CLOCK_STEP)); }\n" + step["run"]],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "CLOCK_STEP": str(clock_step),
+            "OBSERVER_FAULT": fault,
+            "OBSERVER_CALLS": str(tmp_path / "calls"),
+            "OBSERVER_STATE": str(tmp_path / "state"),
+            "QUEUED_READS": str(queued_reads),
+            "RUNNING_READS": str(running_reads),
+            "CPU_CONCLUSION": conclusion,
+            "EXPECTED_TITLE": f"Stable Community CI · PR #17 · head {head} · merge {merge}",
+            "PR_NUMBER": "17",
+            "HEAD_SHA": head,
+            "MERGE_SHA": merge,
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == expected_rc, result.stdout + result.stderr
+    counts = json.loads((tmp_path / "state").read_text())
+    calls = [json.loads(line) for line in (tmp_path / "calls").read_text().splitlines()]
+    assert all(arguments[0] == "api" and "--method" not in arguments for arguments in calls)
+    if fault != "discovery-always":
+        assert counts["discovery"] == (2 if fault == "discovery-once" else 1)
+        assert "Observing promoted Stable CPU run 42" in result.stdout
+    if queued_reads == 116:
+        assert counts["jobs"] == 117  # More reads than the old 55-minute observer permitted.
+    if expected_rc == 0:
+        assert (
+            "Stable CPU result: https://github.com/example/source/actions/runs/42" in result.stdout
+        )
+        assert "budget exhausted" not in result.stdout
+    elif expected_rc == 1:
+        assert "CPU gate completed with failure" in result.stdout
+    else:
+        assert "Infrastructure observation budget exhausted" in result.stdout
+        assert "existing execution remains authoritative" in result.stdout
+        assert "Stable CPU result:" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "ref,event,lane,snapshot,repository,allowed",
+    [
+        ("refs/heads/main", "pull_request_target", "", "", "NVIDIA/TensorRT-Model-Connect", True),
+        (
+            "refs/heads/main",
+            "workflow_dispatch",
+            "stable",
+            "",
+            "NVIDIA/TensorRT-Model-Connect",
+            True,
+        ),
+        ("refs/heads/main", "workflow_dispatch", "dev", "", "NVIDIA/TensorRT-Model-Connect", True),
+        (
+            "refs/heads/ci/developer",
+            "workflow_dispatch",
+            "dev",
+            "",
+            "NVIDIA/TensorRT-Model-Connect",
+            True,
+        ),
+        (
+            "refs/heads/ci/developer",
+            "workflow_dispatch",
+            "stable",
+            "",
+            "NVIDIA/TensorRT-Model-Connect",
+            False,
+        ),
+        (
+            "refs/heads/ci/developer",
+            "workflow_dispatch",
+            "",
+            "",
+            "NVIDIA/TensorRT-Model-Connect",
+            False,
+        ),
+        (
+            "refs/heads/ci/developer",
+            "workflow_dispatch",
+            "dev",
+            "frozen",
+            "NVIDIA/TensorRT-Model-Connect",
+            False,
+        ),
+        (
+            "refs/heads/ci/developer",
+            "pull_request_target",
+            "dev",
+            "",
+            "NVIDIA/TensorRT-Model-Connect",
+            False,
+        ),
+        (
+            "refs/heads/ci/developer",
+            "pull_request",
+            "dev",
+            "",
+            "NVIDIA/TensorRT-Model-Connect",
+            False,
+        ),
+        ("refs/heads/main", "pull_request", "stable", "", "NVIDIA/TensorRT-Model-Connect", False),
+        (
+            "refs/tags/ci/developer",
+            "workflow_dispatch",
+            "dev",
+            "",
+            "NVIDIA/TensorRT-Model-Connect",
+            False,
+        ),
+        (
+            "refs/heads/contributor",
+            "workflow_dispatch",
+            "dev",
+            "",
+            "NVIDIA/TensorRT-Model-Connect",
+            False,
+        ),
+        ("refs/heads/ci/developer", "workflow_dispatch", "dev", "", "example/fork", False),
+    ],
+)
+def test_dev_manual_coordinator_admission_is_exact_and_cannot_select_stable(
+    ref, event, lane, snapshot, repository, allowed
+):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    context = {
+        "github.ref": ref,
+        "github.event_name": event,
+        "github.repository": repository,
+        "inputs.ci_lane": lane,
+        "inputs.source_snapshot": snapshot,
+        "inputs.task": "premerge",
+    }
+
+    def admission(name, extra=None):
+        expression = workflow["jobs"][name]["if"].strip().removeprefix("${{ ").removesuffix(" }}")
+        for key, value in {**context, **(extra or {})}.items():
+            expression = expression.replace(key, repr(value))
+        return eval(
+            "(" + expression.replace("&&", " and ").replace("||", " or ") + ")",
+            {"__builtins__": {}},
+        )
+
+    assert admission("snapshot") is allowed
+    assert (
+        admission("dispatch", {"needs.snapshot.result": "success" if allowed else "skipped"})
+        is allowed
+    )
+
+
+@pytest.mark.parametrize(
+    "event,lane",
+    [
+        ("workflow_dispatch", "stable"),
+        ("workflow_dispatch", ""),
+        ("pull_request_target", "dev"),
+        ("pull_request", "dev"),
+    ],
+)
+def test_dev_entry_shell_rejects_default_stable_and_automatic_events(tmp_path, event, lane):
+    selector = _workflow_step_script(
+        "community-ci.yml", "snapshot", "Select the Community CI branches"
+    )
+    publisher = _workflow_step_script(
+        "community-ci.yml", "dispatch", "Authorize the result publisher"
+    )
+    for index, script in enumerate((selector, publisher)):
+        output = tmp_path / f"output-{index}"
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                **os.environ,
+                "CI_ENTRY_REF": "refs/heads/ci/developer",
+                "EVENT_NAME": event,
+                "REQUESTED_LANE": lane,
+                "LANE": lane or "stable",
+                "STATUS_CONTEXT": "Dev Community CI" if lane == "dev" else "Stable Community CI",
+                "DUAL_RUN": "true",
+                "GITHUB_OUTPUT": str(output),
+            },
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode != 0
+        assert not output.exists()
+
+
+@pytest.mark.parametrize("role", ["maintain", "admin", "write", "read", "none", "api-error"])
+def test_dev_manual_entry_requires_maintainer_before_any_dispatch_or_status(tmp_path, role):
+    selector = _workflow_step_script(
+        "community-ci.yml", "snapshot", "Select the Community CI branches"
+    )
+    authorization = _workflow_step_script(
+        "community-ci.yml", "snapshot", "Authorize a manual request"
+    )
+    calls, admitted = tmp_path / "calls", tmp_path / "admitted"
+    script = (
+        r"""
+gh() {
+  printf '%s\n' "$*" >> "$CALLS"
+  test "$*" = 'api /repos/example/source/collaborators/example-user/permission --jq .role_name' || return 99
+  if [ "$ROLE" = api-error ]; then return 1; fi
+  printf '%s\n' "$ROLE"
+}
+"""
+        + selector
+        + "\n"
+        + authorization
+        + '\ntouch "$ADMITTED"\n'
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "CI_ENTRY_REF": "refs/heads/ci/developer",
+            "EVENT_NAME": "workflow_dispatch",
+            "REQUESTED_LANE": "dev",
+            "DUAL_RUN": "true",
+            "ACTOR": "example-user",
+            "ROLE": role,
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "CALLS": str(calls),
+            "ADMITTED": str(admitted),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert (result.returncode == 0) is (role in {"maintain", "admin"})
+    assert admitted.exists() is (role in {"maintain", "admin"})
+    assert (tmp_path / "output").read_text() == 'lanes=["dev"]\n'
+    assert calls.read_text().splitlines() == [
+        "api /repos/example/source/collaborators/example-user/permission --jq .role_name"
+    ]
+
+
+@pytest.mark.parametrize("configured_ref", ["", "main", "ci/developer", "unapproved"])
+def test_dev_manual_coordinator_selects_its_own_implementation(configured_ref):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    step = next(
+        step for step in workflow["jobs"]["dispatch"]["steps"] if step.get("id") == "execution"
+    )
+    expression = step["env"]["CI_REF"].removeprefix("${{ ").removesuffix(" }}")
+    for key, value in {
+        "matrix.lane": "dev",
+        "github.ref": "refs/heads/ci/developer",
+        "vars.TRTMC_COMMUNITY_CI_DEV_REF": configured_ref,
+    }.items():
+        expression = expression.replace(key, repr(value))
+    assert (
+        eval(expression.replace("&&", " and ").replace("||", " or "), {"__builtins__": {}})
+        == "ci/developer"
+    )

@@ -8,8 +8,8 @@ name: Community CI
 run-name: >-
   ${{ inputs.task == 'dependency-image-access-check' && 'Community dependency image access check' || inputs.task == 'dependency-image-withdraw' && 'Community dependency image withdrawal' || inputs.task == 'dependency-image-audit' && 'Community dependency image metadata audit' || inputs.task == 'dependency-image' && 'Community private image GPU qualification' || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
 
-# Stable keeps the existing pull_request pipeline. Trusted metadata jobs pair
-# its immutable snapshot with the optional Dev execution of this same workflow.
+# Keep the legacy pull_request CPU check compatible with existing consumers.
+# Trusted metadata pins one source snapshot for protected execution lanes.
 on:
   pull_request_target:
     branches: [main]
@@ -50,7 +50,7 @@ on:
         type: choice
         options: [auto, aws, nebius]
       ci_lane:
-        description: CI implementation role (filled automatically)
+        description: Select dev for a manual Dev-only run; stable follows the dual-run switch
         required: false
         type: choice
         default: stable
@@ -66,12 +66,12 @@ on:
 
 permissions: {}
 
-# Experimental branch policy; Stable main keeps automatic GPU disabled.
+# Promote GPU policy through a reviewed commit; legacy CPU remains until that promotion.
 env:
   COMMUNITY_GPU_EXECUTION_ENABLED: "true"
 
 concurrency:
-  group: community-ci-${{ startsWith(inputs.task, 'dependency-image') && inputs.task || inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || github.ref_name == 'main' && 'start-main' || 'start-dev' }}-${{ github.event.pull_request.number || inputs.pr_number }}
+  group: community-ci-${{ startsWith(inputs.task, 'dependency-image') && inputs.task || inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || (github.event_name == 'workflow_dispatch' && inputs.ci_lane == 'dev') && 'start-dev' || 'start-main' }}-${{ github.event.pull_request.number || inputs.pr_number }}
   # A newer push must not terminate a run that still owns a cloud instance.
   cancel-in-progress: false
 
@@ -309,6 +309,8 @@ jobs:
     name: Capture the Community CI snapshot
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      (github.ref == 'refs/heads/main' ||
+       (github.ref == 'refs/heads/ci/developer' && github.event_name == 'workflow_dispatch' && inputs.ci_lane == 'dev')) &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'workflow_dispatch' && inputs.task != 'dependency-image' && inputs.task != 'dependency-image-audit' && inputs.task != 'dependency-image-withdraw' && inputs.task != 'dependency-image-access-check' && inputs.source_snapshot == ''))
     runs-on: ubuntu-24.04
@@ -329,15 +331,26 @@ jobs:
         id: lanes
         env:
           DUAL_RUN: ${{ vars.TRTMC_COMMUNITY_CI_DUAL_RUN }}
-          CI_BRANCH: ${{ github.ref_name }}
+          CI_ENTRY_REF: ${{ github.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_LANE: ${{ inputs.ci_lane }}
         run: |
           set -euo pipefail
-          lanes='["stable"]'
-          if [ "$DUAL_RUN" = true ]; then
-            lanes='["stable","dev"]'
-          elif [ "$CI_BRANCH" != main ]; then
-            lanes='["dev"]'
-          fi
+          case "$CI_ENTRY_REF:$EVENT_NAME" in
+            refs/heads/main:pull_request_target|refs/heads/main:workflow_dispatch)
+              lanes='["stable"]'
+              if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$REQUESTED_LANE" = dev ]; then
+                lanes='["dev"]'
+              elif [ "$DUAL_RUN" = true ]; then
+                lanes='["stable","dev"]'
+              fi ;;
+            refs/heads/ci/developer:workflow_dispatch)
+              test "$REQUESTED_LANE" = dev
+              # The protected Dev entry qualifies its own observer only.
+              # It cannot select Stable, even when dual running is enabled.
+              lanes='["dev"]' ;;
+            *) echo "::error::Unapproved Community CI coordinator"; exit 1 ;;
+          esac
           echo "lanes=$lanes" >> "$GITHUB_OUTPUT"
 
       - name: Authorize a manual request
@@ -355,7 +368,7 @@ jobs:
 
       - name: Find the existing Stable PR snapshot
         id: stable
-        if: ${{ github.event_name == 'pull_request_target' || github.ref_name != 'main' }}
+        if: ${{ github.event_name == 'pull_request_target' || inputs.ci_lane == 'dev' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
@@ -444,7 +457,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
-          STATUS_CONTEXT: ${{ github.ref_name == 'main' && 'Stable Community CI' || 'Dev Community CI' }}
+          STATUS_CONTEXT: ${{ steps.lanes.outputs.lanes == '["dev"]' && 'Dev Community CI' || 'Stable Community CI' }}
         run: |
           set -euo pipefail
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 0
@@ -457,7 +470,7 @@ jobs:
   dispatch:
     name: Start ${{ matrix.lane }} Community CI
     needs: snapshot
-    if: ${{ needs.snapshot.result == 'success' }}
+    if: ${{ needs.snapshot.result == 'success' && (github.ref == 'refs/heads/main' || (github.ref == 'refs/heads/ci/developer' && github.event_name == 'workflow_dispatch' && inputs.ci_lane == 'dev')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -475,24 +488,37 @@ jobs:
     env:
       STATUS_CONTEXT: ${{ matrix.lane == 'stable' && 'Stable Community CI' || 'Dev Community CI' }}
     steps:
-      - name: Mark the selected CI pending
+      - name: Authorize the result publisher
+        id: publisher
         env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
+          LANE: ${{ matrix.lane }}
+          CI_ENTRY_REF: ${{ github.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_LANE: ${{ inputs.ci_lane }}
         run: |
           set -euo pipefail
-          gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state=pending -f context="$STATUS_CONTEXT" \
-            -f description="Community CI is starting" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          case "$CI_ENTRY_REF:$LANE" in
+            refs/heads/main:stable|refs/heads/main:dev) ;;
+            refs/heads/ci/developer:dev)
+              test "$EVENT_NAME" = workflow_dispatch
+              test "$REQUESTED_LANE" = dev ;;
+            *) echo "::error::Unapproved Community CI publisher"; exit 1 ;;
+          esac
+          case "$LANE" in
+            stable)
+              test "$STATUS_CONTEXT" = 'Stable Community CI'
+              ;;
+            dev) test "$STATUS_CONTEXT" = 'Dev Community CI' ;;
+            *) echo "::error::Unknown Community CI publisher."; exit 1 ;;
+          esac
+          echo "authorized=true" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch the selected Community CI implementation
         id: execution
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.snapshot.outputs.pr_number }}
-          CI_REF: ${{ matrix.lane == 'stable' && 'main' || github.ref_name != 'main' && github.ref_name || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}
+          CI_REF: ${{ matrix.lane == 'stable' && 'main' || github.ref == 'refs/heads/ci/developer' && 'ci/developer' || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}
           LANE: ${{ matrix.lane }}
           SOURCE_SNAPSHOT: ${{ needs.snapshot.outputs.source_snapshot }}
           HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
@@ -503,6 +529,10 @@ jobs:
           GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
         run: |
           set -euo pipefail
+          case "$LANE:$CI_REF" in
+            stable:main|dev:main|dev:ci/developer) ;;
+            *) echo "::error::The CI implementation must use an approved main or ci/developer branch."; exit 1 ;;
+          esac
           if [ "$LANE" = stable ] && [ -n "${STABLE_RUN_ID:-}" ] \
             && { [ "${CI_ENTRY_BRANCH:-}" != main ] || [ "${AUTOMATIC_GPU:-false}" != true ]; }; then
             [[ "$STABLE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -545,15 +575,21 @@ jobs:
           [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "ci_ref=$CI_REF" >> "$GITHUB_OUTPUT"
-          # Dev's trusted inner run owns every update after dispatch; a delayed
-          # response must not overwrite an already finalized child result.
-          if [ "$LANE" = stable ]; then
-            gh api --silent --method POST \
-              "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-              -f state=pending -f context="$STATUS_CONTEXT" \
-              -f description="Community CI is running" \
-              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
-          fi
+          # Each trusted execution owns all status updates after dispatch.
+
+      - name: Mark the selected CI pending
+        if: ${{ steps.execution.outputs.existing_stable == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=pending -f context="$STATUS_CONTEXT" \
+            -f description="Community CI is starting" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
 
       # Follow the exact run returned by GitHub, so every stage in that CI
       # branch contributes to the verdict, including newly added Dev stages.
@@ -601,7 +637,7 @@ jobs:
               fi
               state=failure
               if [ "$(jq -r '.conclusion' <<< "$run")" = success ]; then state=success; fi
-              if [ "$LANE" = stable ]; then
+              if [ "${EXISTING_STABLE:-}" = true ]; then
                 gh api --silent --method POST \
                   "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
                   -f state="$state" -f context="$STATUS_CONTEXT" \
@@ -614,7 +650,7 @@ jobs:
             fi
             sleep 30
           done
-          if [ "$LANE" = dev ]; then
+          if [ "${EXISTING_STABLE:-}" != true ]; then
             echo "::warning::Observation ended after five hours; the inner run will publish after release."
             echo "reported=true" >> "$GITHUB_OUTPUT"
             exit 1
@@ -623,15 +659,15 @@ jobs:
           exit 1
 
       - name: Report a failed CI request
-        if: ${{ failure() && steps.verdict.outputs.reported != 'true' }}
+        if: ${{ failure() && steps.publisher.outputs.authorized == 'true' && steps.verdict.outputs.reported != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
-          LANE: ${{ matrix.lane }}
+          EXISTING_STABLE: ${{ steps.execution.outputs.existing_stable }}
         run: |
           set -euo pipefail
-          if [ "$LANE" = dev ]; then
-            echo "::warning::The Dev observer failed; final status remains owned by the inner release gate."
+          if [ "${EXISTING_STABLE:-}" != true ]; then
+            echo "::warning::The request or observer failed; no legacy CPU result is owned here."
             exit 0
           fi
           gh api --silent --method POST \
@@ -651,6 +687,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      statuses: write
     outputs:
       pr_number: ${{ steps.snapshot.outputs.pr_number }}
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
@@ -690,7 +727,10 @@ jobs:
             fi
             case "$CI_LANE" in
               stable) test "$CI_REF" = refs/heads/main ;;
-              dev) ;;
+              dev)
+                case "$CI_REF" in refs/heads/main|refs/heads/ci/developer) ;;
+                  *) echo "::error::Unknown Community CI implementation ref"; exit 1 ;;
+                esac ;;
               *) echo "::error::Unknown Community CI lane"; exit 1 ;;
             esac
           fi
@@ -755,6 +795,27 @@ jobs:
             echo "base_sha=$base_sha"
             echo "merge_sha=$merge_sha"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Mark the trusted execution pending
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
+          CI_LANE: ${{ inputs.ci_lane }}
+          CI_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          case "$CI_LANE:$CI_REF" in
+            stable:refs/heads/main) context='Stable Community CI' ;;
+            dev:refs/heads/main|dev:refs/heads/ci/developer) context='Dev Community CI' ;;
+            *) echo "::error::Invalid trusted Community CI publisher"; exit 1 ;;
+          esac
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=pending -f context="$context" \
+            -f description="Community CI is running" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   # These jobs intentionally execute untrusted PR code. Each receives only a
   # read-only token and no repository/environment secret, and every job runs on
@@ -911,11 +972,14 @@ jobs:
       - ownership-impact
       - unit
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 360
     permissions:
       actions: read
     steps:
       - name: Read the promoted Stable CPU result
+        # A same-PR execution can queue behind its previous allocation owner.
+        # Leave time to report an observation error before the hosted job cap.
+        timeout-minutes: 358
         if: ${{ needs.authorize.outputs.reuse_stable_cpu == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -925,28 +989,57 @@ jobs:
         run: |
           set -euo pipefail
           expected_title="Stable Community CI · PR #$PR_NUMBER · head $HEAD_SHA · merge $MERGE_SHA"
-          # Preserve the legacy PR check consumed by Internal CI, using the
-          # actual CPU result from the trusted main pipeline. No tests repeat.
-          for attempt in $(seq 1 110); do
-            runs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=workflow_dispatch&branch=main&per_page=100")"
-            run_id="$(jq -r --arg title "$expected_title" '
-              [.workflow_runs[]
-               | select(.event == "workflow_dispatch" and .head_branch == "main")
-               | select(.path == ".github/workflows/community-ci.yml" and .display_title == $title)]
-              | max_by(.id) | .id // empty' <<< "$runs")"
-            if [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
-              job="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100" \
-                --jq '[.jobs[] | select(.name == "Community CPU / Required")] | last // {}')"
-              if [ "$(jq -r '.status // empty' <<< "$job")" = completed ]; then
-                test "$(jq -r '.conclusion // empty' <<< "$job")" = success
-                echo "Stable CPU result: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
-                exit 0
+          # Observe one trusted execution without repeating CPU tests. The
+          # 355-minute wall-clock budget includes queueing as well as the
+          # 45-minute CPU job; two bounded reads and a sleep fit before the
+          # step's 358-minute limit and the hosted job's six-hour cap.
+          deadline=$((SECONDS + 21300))
+          run_id=""
+          observation="no matching trusted execution was observed"
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if [ -z "$run_id" ]; then
+              if runs="$(timeout 45s gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=workflow_dispatch&branch=main&per_page=100")"; then
+                candidate="$(jq -r --arg title "$expected_title" '
+                  [.workflow_runs[]
+                   | select(.event == "workflow_dispatch" and .head_branch == "main")
+                   | select(.path == ".github/workflows/community-ci.yml" and .display_title == $title)]
+                  | max_by(.id) | .id // empty' <<< "$runs")" || candidate=""
+                if [[ "$candidate" =~ ^[1-9][0-9]*$ ]]; then
+                  # Pin the first identified child. A later request for this
+                  # same source cannot replace the execution being observed.
+                  run_id="$candidate"
+                  echo "Observing promoted Stable CPU run $run_id"
+                fi
+              else
+                observation="GitHub execution discovery is unavailable"
+                echo "::warning::$observation; waiting for the existing request."
               fi
             fi
-            if [ "$attempt" -lt 110 ]; then sleep 30; fi
+            if [ -n "$run_id" ]; then
+              if job="$(timeout 45s gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100" \
+                --jq '[.jobs[] | select(.name == "Community CPU / Required")] | last // {}')"; then
+                status="$(jq -r '.status // empty' <<< "$job")" || status=""
+                if [ "$status" = completed ]; then
+                  conclusion="$(jq -r '.conclusion // empty' <<< "$job")" || conclusion=""
+                  case "$conclusion" in
+                    success)
+                      echo "Stable CPU result: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+                      exit 0 ;;
+                    failure|cancelled|timed_out|action_required|neutral|skipped|stale)
+                      echo "::error::The promoted Stable CPU gate completed with $conclusion (run $run_id)."
+                      exit 1 ;;
+                  esac
+                fi
+                observation="the CPU gate has no terminal result (status: ${status:-not available})"
+              else
+                observation="GitHub CPU job observation is unavailable"
+                echo "::warning::$observation; continuing to observe run $run_id."
+              fi
+            fi
+            sleep 30
           done
-          echo "::error::The promoted Stable CPU result did not arrive."
-          exit 1
+          echo "::error::Infrastructure observation budget exhausted before a promoted Stable CPU result was confirmed (run ${run_id:-unresolved}): $observation. The existing execution remains authoritative and was not restarted or cancelled."
+          exit 75
 
       - name: Require every public CPU stage
         if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
@@ -1776,13 +1869,16 @@ jobs:
             test "$TEST_RESULT" = success
             test "$GPU_FAILURE_CLASS" = none
             test "$CLEANUP_RESULT" = success
+            test "$BACKSTOP_RELEASE_CONFIRMED" = true
           fi
 
-      - name: Publish the released Dev workflow conclusion
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.ci_lane == 'dev' }}
+      - name: Publish the released workflow conclusion
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          CI_LANE: ${{ inputs.ci_lane }}
+          CI_REF: ${{ github.ref }}
           CPU_RESULT: ${{ needs.required.result }}
           RUN_GPU: ${{ needs.gpu-authorize.outputs.run_gpu }}
           GPU_RESULT: ${{ needs.provision-and-test.result }}
@@ -1794,6 +1890,11 @@ jobs:
           COMPLETE_RESULT: ${{ steps.complete.outcome }}
         run: |
           set -euo pipefail
+          case "$CI_LANE:$CI_REF" in
+            stable:refs/heads/main) context='Stable Community CI' ;;
+            dev:refs/heads/main|dev:refs/heads/ci/developer) context='Dev Community CI' ;;
+            *) echo "::error::Invalid trusted Community CI publisher"; exit 1 ;;
+          esac
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           state=failure
           description="Complete Community CI: failure"
@@ -1820,6 +1921,6 @@ jobs:
           fi
           gh api --silent --method POST \
             "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state="$state" -f context="Dev Community CI" \
+            -f state="$state" -f context="$context" \
             -f description="$description" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
