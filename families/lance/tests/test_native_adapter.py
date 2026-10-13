@@ -47,11 +47,15 @@ def upstream_fixture(monkeypatch, *, fail=False):
         def __iter__(self):
             return iter([self.dataset[0]])
 
-    def validate(*, val_data_cpu, inference_args):
+    tokenizer = SimpleNamespace(decode=lambda ids: "A<|im_end|>")
+    original_decode = tokenizer.decode
+
+    def validate(*, val_data_cpu, inference_args, tokenizer):
         prompt = val_data_cpu["data"]["interleave_array"][1][1]
         generations.append((prompt, upstream.MAX_GENERATION_LENGTH))
         if fail:
             raise ValueError("upstream generation failed")
+        assert tokenizer.decode(np.asarray([32, 151645])) == "A<|im_end|>"
         inference_args.prompt_data_dict["0"] = prompt
 
     def main():
@@ -64,7 +68,8 @@ def upstream_fixture(monkeypatch, *, fail=False):
                 data = next(iterator)
             except StopIteration:
                 break
-            upstream.validate_on_fixed_batch(val_data_cpu=data, inference_args=inference)
+            upstream.validate_on_fixed_batch(val_data_cpu=data, inference_args=inference, tokenizer=tokenizer)
+            assert tokenizer.decode is original_decode
 
     upstream = SimpleNamespace(DataLoader=Loader, validate_on_fixed_batch=validate, main=main,
                                simple_custom_collate=lambda values: values[0],
@@ -87,6 +92,8 @@ def test_native_reuses_one_model_and_keeps_each_prompt_and_generation_length(mon
         for prompt, length in [("first", 7), ("second", 11)]:
             result = native.invoke({"prompt": prompt, "image_path": "/image.png", "max_new_tokens": length}, tmp_path)
             assert result.observation["text"] == prompt and result.model_call_ms == 2.5
+            assert result.observation["token_ids"] == [32, 151645]
+            assert result.observation["output_tokens"] == 2
             assert result.observation["input_image_height"] == result.observation["input_image_width"] == 448
         assert loads == ["load"] and generations == [("first", 7), ("second", 11)]
     finally:

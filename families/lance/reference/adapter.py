@@ -105,9 +105,22 @@ class Adapter:
         def validate(*args: Any, **kwargs: Any) -> Any:
             inference = kwargs["inference_args"]
             inference.prompt_data_dict = {}
-            value, elapsed = self.host.timed(lambda: original_validate(*args, **kwargs))
+            tokenizer = kwargs["tokenizer"]
+            original_decode, token_ids = tokenizer.decode, []
+
+            def decode(ids: Any, *arguments: Any, **options: Any) -> Any:
+                # Official generated IDs, including EOS; do not retokenize normalized answers.
+                token_ids.extend(int(value) for value in ids.tolist())
+                return original_decode(ids, *arguments, **options)
+
+            tokenizer.decode = decode
+            try:
+                value, elapsed = self.host.timed(lambda: original_validate(*args, **kwargs))
+            finally:
+                tokenizer.decode = original_decode
             text = upstream.normalize_understanding_answer(str(next(iter(inference.prompt_data_dict.values()), "")))
-            self.responses.put(({"text": text, "input_image_height": IMAGE_SIZE,
+            self.responses.put(({"text": text, "token_ids": token_ids, "output_tokens": len(token_ids),
+                                 "input_image_height": IMAGE_SIZE,
                                  "input_image_width": IMAGE_SIZE}, elapsed))
             return value
 
