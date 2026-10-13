@@ -419,11 +419,11 @@ def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_
     monkeypatch.setattr(absolute, "_candidate_tokenizer", lambda model: Tokenizer())
     command = bundles.build_command(environment, model, tmp_path / "build")
     descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
-    assert descriptor["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 257
+    assert descriptor["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 261
     assert model["candidate"]["bundle"].startswith("qwen3-embedding-0.6b-benchmark/")
     assert plans["scifact-retrieval"][0]["request"]["prompt"] == "x" * 256
     evidence = json.loads((tmp_path / "build/benchmark-capacity.json").read_text())
-    assert evidence["required_sequence_length"] == 257 and evidence["extra_tokens"] == 1
+    assert evidence["required_sequence_length"] == 261 and evidence["extra_tokens"] == 5
 
 
 def test_benchmark_capacity_planning_failure_prevents_a_catalog_fallback(tmp_path, monkeypatch):

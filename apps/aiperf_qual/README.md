@@ -55,7 +55,8 @@ world-model video parity. The pixel parity under latent replay is reported only 
 A suite with `base: catalog` overrides the profile's catalog request with its dataset fields.
 For a profile with `candidate.benchmark_sequence_length`, the build counts the prepared
 gold-suite prompts with its pinned tokenizer and uses their maximum length plus the configured
-`extra_tokens`. Qwen3-Embedding reserves one token for its runtime EOS. The evidence is written to
+`extra_tokens`. Qwen3-Embedding reserves one token for EOS and four for runtime tokenizer count differences.
+The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
 Lance uses the `Lance_3B` tokenizer subfolder and reserves its image, template, and generation tokens.
