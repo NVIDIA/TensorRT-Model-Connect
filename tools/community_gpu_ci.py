@@ -741,6 +741,7 @@ def _run_family(repository: Path, env: dict[str, str], family: str, report: dict
             "-G",
             "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
+            f"-DTRTMC_FAMILIES={plan.family}",
             "-DTRTMC_BUILD_TESTS=ON",
             "-DTRTMC_BUILD_EXAMPLES=OFF",
         ],

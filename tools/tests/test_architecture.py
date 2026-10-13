@@ -414,6 +414,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/community_ci.py",
         "tools/community_gpu_ci.py",
         "tools/community_gpu_images.py",
+        "tools/community_gpu_lease.py",
         "tools/e2e_evidence.py",
         "tools/e2e_report.py",
         "tools/legal_header_exceptions.toml",
@@ -450,10 +451,12 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     expected_tool_tests = {
         "tools/tests/__init__.py",
         "tools/tests/test_architecture.py",
+        "tools/tests/test_cmake_family_selection.py",
         "tools/tests/test_coderabbit_config.py",
         "tools/tests/test_community_ci.py",
         "tools/tests/test_community_gpu_ci.py",
         "tools/tests/test_community_gpu_images.py",
+        "tools/tests/test_community_gpu_lease.py",
         "tools/tests/test_community_gpu_plan.py",
         "tools/tests/test_community_hf_cache.py",
         "tools/tests/test_devtoolkit.py",
@@ -466,7 +469,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_pr_metadata.py",
         "tools/tests/test_public_source_hygiene.py",
     }
-    expected_cmake = {"cmake/trtmcConfig.cmake.in"}
+    expected_cmake = {"cmake/ModelFamilies.cmake", "cmake/trtmcConfig.cmake.in"}
     expected_third_party = {
         "third_party/stb/stb_image.h",
         "third_party/stb/stb_image_resize2.h",

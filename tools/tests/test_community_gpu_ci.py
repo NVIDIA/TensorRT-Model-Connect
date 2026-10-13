@@ -1016,6 +1016,7 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
         commands.append(rendered)
         if rendered[:2] == ["cmake", "-S"]:
             assert Path(str(destination) + ".entrypoint").read_text() == "alpha\n"
+            assert "-DTRTMC_FAMILIES=alpha" in rendered
         if rendered[1:] == ["-m", "tools.ci", "pipeline", "selective-e2e"]:
             e2e_calls.append(env)
 

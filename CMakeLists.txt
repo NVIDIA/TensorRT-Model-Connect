@@ -303,18 +303,7 @@ endif()
 # A family owns its target, sources, dependencies, warnings, and installation.
 # The root knows only the directory convention; adding a family never changes
 # a central source or target list.
-file(GLOB _trtmc_family_runtime_cmake CONFIGURE_DEPENDS
-  "${PROJECT_SOURCE_DIR}/families/*/runtime/CMakeLists.txt"
-)
-foreach(_trtmc_runtime_cmake IN LISTS _trtmc_family_runtime_cmake)
-  get_filename_component(_trtmc_runtime_dir "${_trtmc_runtime_cmake}" DIRECTORY)
-  get_filename_component(_trtmc_family_dir "${_trtmc_runtime_dir}" DIRECTORY)
-  get_filename_component(_trtmc_family "${_trtmc_family_dir}" NAME)
-  add_subdirectory(
-    "${_trtmc_runtime_dir}"
-    "${CMAKE_BINARY_DIR}/families/${_trtmc_family}"
-  )
-endforeach()
+include(cmake/ModelFamilies.cmake)
 
 add_library(trtmc_media_io STATIC apps/cli/io.cpp)
 target_include_directories(trtmc_media_io PRIVATE
