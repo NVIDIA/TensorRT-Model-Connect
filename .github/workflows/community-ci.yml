@@ -1335,7 +1335,8 @@ jobs:
           name: gpu-ci-intent-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
           if-no-files-found: error
-          retention-days: 7
+          # Preserve ownership through GitHub's 30-day rerun window.
+          retention-days: 35
 
       - name: Reserve a GPU instance
         id: reserve
@@ -1369,7 +1370,7 @@ jobs:
           name: ${{ steps.prepare.outputs.lease_artifact_name }}
           path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 35
 
       - name: Build the GPU image and validate the exact PR merge
         id: test
@@ -1631,7 +1632,7 @@ jobs:
           name: gpu-ci-lease-final-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 35
 
       - name: Upload the smoke-test log
         if: always()
