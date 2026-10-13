@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Run and report the TRTMC release performance matrix."""
+
 from __future__ import annotations
 import argparse
 import sys
@@ -47,7 +49,6 @@ _TIMING_STABILITY_SAMPLE_COUNT = 10
 _TIMING_STABILITY_MAX_HALF_CHANGE_PERCENT = 5.0
 _TIMING_STABILITY_MEDIAN_BAND_PERCENT = 5.0
 _TIMING_STABILITY_MIN_IN_BAND = 8
-'Run and report the TRTMC release performance matrix.'
 
 
 def parser() -> argparse.ArgumentParser:
