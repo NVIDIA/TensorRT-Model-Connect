@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE=trtmc-community-base:local
+FROM ${BASE_IMAGE}
+
+# The upstream reference needs a different Transformers/Torch environment from
+# the native builder. Keep the shared interpreter and its dependencies intact.
+ENV TRTMC_REFERENCE_PYTHON=/opt/lance-reference/bin/python
+COPY reference-requirements.lock verify_reference_environment.py /opt/trtmc-ci/lance/
+RUN /usr/bin/python3.12 -m venv /opt/lance-reference && \
+    /opt/lance-reference/bin/python -m pip install \
+      --disable-pip-version-check --no-cache-dir --no-index \
+      --only-binary=:all: --require-hashes \
+      --requirement /opt/trtmc-ci/lance/reference-requirements.lock && \
+    /opt/lance-reference/bin/python -m pip check && \
+    /opt/lance-reference/bin/python -I /opt/trtmc-ci/lance/verify_reference_environment.py && \
+    /opt/venv/bin/python -m pip check
