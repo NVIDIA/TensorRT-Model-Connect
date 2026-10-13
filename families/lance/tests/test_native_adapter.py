@@ -120,15 +120,3 @@ def test_image_input_matches_fixed_square_task_geometry():
     values = adapter.image_values(Image.new("RGB", (39, 21), (0, 0, 0)))
     assert values.shape == (3, 448, 448) and values.dtype == np.float32 and values.flags.c_contiguous
     np.testing.assert_allclose(values[:, 10, 20], [-1.7922626, -1.7520971, -1.4802198], rtol=1e-6)
-
-
-def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmark(tmp_path):
-    from trtmc_aiperf_qual.config import Environment
-    from trtmc_aiperf_qual.models import resolve_model
-
-    repository = Path(__file__).resolve().parents[3]
-    model = resolve_model("lance-3b-x2t-image", Environment({"repo": str(repository)}))
-    assert model["reference"]["backend"] == "reference" and "not_covered" not in model["reference"]
-    assert (repository / model["reference"]["adapter"]).is_file()
-    assert model["candidate"]["benchmark_sequence_length"]["extra_tokens"] == 288
-    assert model["candidate"]["tokenizer_subfolder"] == "Lance_3B"

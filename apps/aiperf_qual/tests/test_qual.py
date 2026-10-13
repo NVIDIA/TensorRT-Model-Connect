@@ -843,3 +843,15 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     write_report(tmp_path, {"model": "m", "provenance": {}, "performance": [item]})
     assert "| 40.000 per audio second |" in (tmp_path / "report.md").read_text()
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])
+
+
+def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmark():
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    repository = Path(__file__).resolve().parents[3]
+    model = resolve_model("lance-3b-x2t-image", Environment({"repo": str(repository)}))
+    assert model["reference"]["backend"] == "reference" and "not_covered" not in model["reference"]
+    assert (repository / model["reference"]["adapter"]).is_file()
+    assert model["candidate"]["benchmark_sequence_length"]["extra_tokens"] == 288
+    assert model["candidate"]["tokenizer_subfolder"] == "Lance_3B"
