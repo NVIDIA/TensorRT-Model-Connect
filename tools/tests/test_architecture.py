@@ -595,6 +595,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     expected_tool_tests = {
         "tools/tests/__init__.py",
         "tools/tests/test_architecture.py",
+        "tools/tests/test_cmake_family_selection.py",
         "tools/tests/test_coderabbit_config.py",
         "tools/tests/test_community_ci.py",
         "tools/tests/test_community_gpu_ci.py",
@@ -642,6 +643,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "qualification_tests/benchmark_qualification/performance/tests/test_timing_contracts.py",
     }
     expected_cmake = {
+        "cmake/ModelFamilies.cmake",
         "cmake/trtmcConfig.cmake.in",
         "cmake/edge_llm/EdgeLLM.cmake",
         "cmake/edge_llm/CheckNative.cmake",
