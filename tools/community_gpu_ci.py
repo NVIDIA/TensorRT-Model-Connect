@@ -417,9 +417,9 @@ def selected_families(
     if scope == "all":
         return tuple(sorted(set(SHARED_SMOKE_FAMILIES) | set(direct) | set(added)))
     if scope == "families":
-        if not selected or direct != selected or added:
-            raise CommunityGpuError("family scope requires existing families only")
-        return selected
+        if not (selected or added) or direct != selected:
+            raise CommunityGpuError("family scope requires its directly changed families")
+        return tuple(sorted((*selected, *added)))
     raise CommunityGpuError(f"GPU execution received non-GPU scope: {scope!r}")
 
 
