@@ -288,6 +288,222 @@ def test_undeclared_owner_and_context_symlink_cannot_read_host_files(tmp_path):
         images._family_inputs(root, "../first")
 
 
+def reference_declaration(root, family="first", revision="a" * 40):
+    path = root / "families" / family / "tests" / "reference-source.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"repository": "example/reference", "revision": revision}))
+    return path
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"[]",
+        b"{",
+        b"null",
+        b'{"repository":"a/b","repository":"c/d","revision":"' + b"a" * 40 + b'"}',
+        json.dumps({"repository": "https://github.com/a/b", "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a/b;echo secret", "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a/../b", "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a%2Fb/c", "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a%2Fb", "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a/%2e%2e", "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a/b%3Becho", "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a/b%252d", "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a/b.git", "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a/b", "revision": "main"}).encode(),
+        json.dumps({"repository": "a/b", "revision": "A" * 40}).encode(),
+        json.dumps({"repository": "a/b", "revision": "a" * 40, "token": "secret"}).encode(),
+        json.dumps({"repository": 1, "revision": "a" * 40}).encode(),
+        json.dumps({"repository": "a/b", "revision": None}).encode(),
+    ],
+)
+def test_reference_declaration_rejected_before_any_docker_operation(tmp_path, monkeypatch, raw):
+    root = repository(tmp_path)
+    reference_declaration(root).write_bytes(raw)
+    monkeypatch.setattr(images, "docker", lambda *_, **__: pytest.fail("Docker called"))
+    monkeypatch.setattr(images, "inspect", lambda *_, **__: pytest.fail("Docker called"))
+    with pytest.raises(images.ImagePreparationError):
+        images.ensure_family_image(root, "first", BASE, time.monotonic() + 60)
+
+
+@pytest.mark.parametrize("kind", ["file", "parent", "oversize", "collision"])
+def test_reference_input_cannot_escape_or_ambiguously_override_context(tmp_path, kind):
+    root = repository(tmp_path)
+    declaration = reference_declaration(root)
+    if kind == "file":
+        external = tmp_path / "external.json"
+        declaration.rename(external)
+        declaration.symlink_to(external)
+    elif kind == "parent":
+        external = tmp_path / "external-tests"
+        declaration.parent.rename(external)
+        declaration.parent.symlink_to(external)
+    elif kind == "oversize":
+        declaration.write_bytes(b" " * (images.MAX_FILE + 1))
+    else:
+        ci = declaration.parent.parent / "ci"
+        ci.mkdir()
+        (ci / "Dockerfile.dependencies").write_text("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n")
+        (ci / "reference-source.json").write_bytes(declaration.read_bytes())
+    with pytest.raises(images.ImagePreparationError):
+        images._family_inputs(root, "first")
+
+
+def test_reference_declaration_preserves_existing_encoded_unreserved_owner():
+    source = {"repository": "example%2Dorg/reference", "revision": "a" * 40}
+    assert images._reference_source(json.dumps(source).encode()) == source
+    recipe = images._reference_recipe(b"ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n", source)
+    assert b"https://github.com/example-org/reference.git" in recipe
+
+
+def test_existing_reference_declarations_follow_the_supported_contract():
+    root = Path(__file__).resolve().parents[2]
+    declarations = list((root / "families").glob("*/tests/reference-source.json"))
+    assert declarations
+    for path in declarations:
+        images._reference_source(path.read_bytes())
+
+
+def test_selected_reference_source_build_is_pinned_keyed_and_verified_before_return(
+    tmp_path,
+    monkeypatch,
+):
+    root = repository(tmp_path)
+    declaration = reference_declaration(root)
+    reference_declaration(root, "second", "b" * 40)
+    (root / "families" / "first" / "requirements.txt").unlink()
+    calls, contexts = [], []
+    prepared = image(CHILD, ["shared-layer", "reference-layer"])
+    monkeypatch.setattr(
+        images, "inspect", lambda reference, **_: image() if reference == BASE else prepared
+    )
+
+    def docker(args, **kwargs):
+        calls.append((args, kwargs))
+        if args[0] == "build":
+            context = Path(args[-1])
+            contexts.append(
+                {
+                    str(p.relative_to(context)): p.read_text()
+                    for p in context.rglob("*")
+                    if p.is_file()
+                }
+            )
+            name, value = args[args.index("--label") + 1].split("=", 1)
+            prepared["Config"]["Labels"][name] = value
+        return ""
+
+    monkeypatch.setattr(images, "docker", docker)
+    assert images.ensure_family_image(root, "first", BASE, time.monotonic() + 60) == CHILD
+    context = contexts[-1]
+    recipe = context["Dockerfile.dependencies"]
+    receipt = json.loads(context["build-inputs.json"])
+    assert set(context) == {"reference-source.json", "Dockerfile.dependencies", "build-inputs.json"}
+    assert receipt["reference_source"] == json.loads(declaration.read_text())
+    assert (
+        receipt["inputs"]["reference-source.json"]
+        == hashlib.sha256(declaration.read_bytes()).hexdigest()
+    )
+    assert "--depth=1 https://github.com/example/reference.git " + "a" * 40 in recipe
+    assert "checkout --detach " + "a" * 40 in recipe
+    assert "GIT_TERMINAL_PROMPT=0" in recipe and "env -i" in recipe
+    assert "pip install" not in recipe
+    assert "ENV TRTMC_REFERENCE_SOURCE_DIR=/opt/trtmc-reference" in recipe
+    assert "b" * 40 not in json.dumps(context)
+    probe = calls[-1][0]
+    assert probe[:7] == [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--entrypoint",
+        "/opt/venv/bin/python",
+        CHILD,
+    ]
+    assert probe[-3:] == [
+        json.dumps(receipt["reference_source"], sort_keys=True),
+        images.REFERENCE_DIRECTORY,
+        images.REFERENCE_RECEIPT,
+    ]
+    assert "--mount" not in str(calls) and "--secret" not in str(calls)
+    declaration.write_text(json.dumps({"repository": "example/reference", "revision": "c" * 40}))
+    images.ensure_family_image(root, "first", BASE, time.monotonic() + 60)
+    assert receipt["input_key"] != json.loads(contexts[-1]["build-inputs.json"])["input_key"]
+
+
+def test_reference_receipt_failure_prevents_prepared_image_admission(tmp_path, monkeypatch):
+    root = repository(tmp_path)
+    reference_declaration(root)
+    prepared = image(CHILD, ["shared-layer", "reference-layer"])
+    monkeypatch.setattr(
+        images, "inspect", lambda reference, **_: image() if reference == BASE else prepared
+    )
+
+    def docker(args, **kwargs):
+        if args[0] == "build":
+            name, value = args[args.index("--label") + 1].split("=", 1)
+            prepared["Config"]["Labels"][name] = value
+        if args[0] == "run" and "-c" in args:
+            raise images.ImagePreparationError("reference source revision changed")
+        return ""
+
+    monkeypatch.setattr(images, "docker", docker)
+    with pytest.raises(images.ImagePreparationError, match="reference source revision changed"):
+        images.ensure_family_image(root, "first", BASE, time.monotonic() + 60)
+
+
+@pytest.mark.parametrize(
+    "damage", [None, "timestamps", "revision", "receipt", "environment", "tracked-file"]
+)
+def test_reference_probe_checks_real_checkout_and_receipt(tmp_path, monkeypatch, damage):
+    root = repository(tmp_path)
+    revision = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    expected = {"repository": "example/reference", "revision": revision}
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(json.dumps(expected))
+    if damage == "revision":
+        expected["revision"] = "0" * 40
+        receipt.write_text(json.dumps(expected))
+    elif damage == "receipt":
+        receipt.write_text("{}")
+    elif damage == "tracked-file":
+        (root / "families" / "first" / "requirements.txt").write_text("changed\n")
+    elif damage == "timestamps":
+        for path in (root / "families").rglob("*.txt"):
+            os.utime(path, (12345678, 12345678))
+    monkeypatch.setattr(images, "REFERENCE_DIRECTORY", str(root))
+    monkeypatch.setattr(images, "REFERENCE_RECEIPT", str(receipt))
+
+    def docker(args, **kwargs):
+        assert args[:6] == [
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "/opt/venv/bin/python",
+        ]
+        environment = {**os.environ, "TRTMC_REFERENCE_SOURCE_DIR": str(root)}
+        if damage == "environment":
+            environment.pop("TRTMC_REFERENCE_SOURCE_DIR")
+        # Execute the trusted probe against a real fixture checkout. No PR or
+        # reference Python is imported by either the host test or the probe.
+        subprocess.run(
+            [sys.executable, *args[7:]], env=environment, capture_output=True, check=True
+        )
+        return ""
+
+    monkeypatch.setattr(images, "docker", docker)
+    if damage in (None, "timestamps"):
+        images._verify_reference_source(CHILD, expected, time.monotonic() + 60)
+    else:
+        with pytest.raises(subprocess.CalledProcessError):
+            images._verify_reference_source(CHILD, expected, time.monotonic() + 60)
+
+
 def test_pull_erases_auth_before_any_image_execution(tmp_path, monkeypatch):
     base = base_manifest()
     token = tmp_path / "token"

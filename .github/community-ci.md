@@ -174,6 +174,19 @@ credentials. A family layer must extend the pulled common base. The public
 Dockerfile and family requirements remain available for local reproduction
 without access to the private registry.
 
+A family may also declare `tests/reference-source.json` with exactly
+`repository` (a public GitHub `owner/repo`) and `revision` (a full lowercase
+40-character commit SHA). During dependency preparation, CI fetches that exact
+commit inside the credential-free family build and sets
+`TRTMC_REFERENCE_SOURCE_DIR=/opt/trtmc-reference`. The declaration and generated
+recipe participate in the family layer identity. CI verifies the resulting
+checkout and its receipt in a network-disabled container before test entry.
+This declaration also works for families without extra Python requirements.
+It does not install upstream requirements or change the shared interpreter:
+any additional packages or independent reference interpreter belong in the
+family's `ci/Dockerfile.dependencies`. Source preparation failures are environment
+failures, and the PR entry point has not run in that case.
+
 Previously qualified family image locks remain supported by the separate image
 qualification path. Their admission still requires actual qualification and
 cleanup; an ordinary dynamically prepared layer does not receive that claim.
