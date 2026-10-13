@@ -517,6 +517,90 @@ def _log(start: float, message: str) -> None:
     print(f"[brev provision +{time.monotonic() - start:.1f}s] {message}", file=sys.stderr)
 
 
+def _create_diagnostics(stdout: str, stderr: str, returncode: int | None, completion: str) -> dict:
+    """Retain allowlisted hints, never upstream text or a rejection verdict.
+
+    Brev can omit HTTP status when rendering an API error. In particular, a
+    failed command or a rate-limit message does not prove that no VM exists.
+    """
+    output = stdout + "\n" + stderr
+    patterns = {
+        "rate_limit": r"rate limit exceeded|too many requests",
+        "capacity": r"InsufficientCapacity|currently unavailable \(no capacity\)",
+        "quota": r"InsufficientQuota|ResourceExhausted|out of quota",
+        "authentication": r"Unauthenticated|api key invalid|auth malformed",
+        "authorization": r"PermissionDenied|permission denied",
+        "conflict": r"duplicate workspace|duplicate instance|already exists",
+        "transport": (
+            r"context deadline exceeded|Client\.Timeout exceeded|i/o timeout|"
+            r"connection reset by peer|unexpected EOF|no such host"
+        ),
+    }
+    return {
+        "completion": completion,
+        "returncode": returncode,
+        "signals": [name for name, pattern in patterns.items() if re.search(pattern, output, re.I)],
+        "workspace_http_statuses": sorted(
+            {
+                int(match)
+                for match in re.findall(
+                    r"https://brevapi\.us-west-2-prod\.control-plane\.brev\.dev/"
+                    r"api/organizations/[A-Za-z0-9_.:-]+/workspaces(?:\?\S*)? "
+                    r"([1-5][0-9]{2})\b",
+                    output,
+                )
+            }
+        ),
+        "stdout_bytes": len(stdout.encode("utf-8")),
+        "stderr_bytes": len(stderr.encode("utf-8")),
+        "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+    }
+
+
+def _record_create_diagnostics(
+    lease: dict,
+    path: Path,
+    start: float,
+    stdout: str = "",
+    stderr: str = "",
+    returncode: int | None = None,
+    completion: str = "returned",
+) -> None:
+    receipt = _create_diagnostics(stdout, stderr, returncode, completion)
+    lease["create_diagnostics"] = receipt
+    _save_lease(path, lease)
+    # Public job logs and lease artifacts contain only fixed vocabulary and
+    # counts. Provider errors may contain credentials or account details.
+    _log(start, "create diagnostics: " + json.dumps(receipt, sort_keys=True))
+
+
+def _create_was_skipped(result: subprocess.CompletedProcess[str], sku: str, disk_gb: int) -> bool:
+    """Recognize only v0.6.335's complete pre-worker catalog rejection.
+
+    These two branches return before creating a worker or calling CreateWorkspace.
+    API errors, partial output, and failed worker requests remain uncertain.
+    """
+    if result.returncode != 1 or result.stdout.strip():
+        return False
+    lines = [line for line in result.stderr.splitlines() if line]
+    for reason in (
+        "is not a recognized type; run 'brev search' to see available types",
+        "is currently unavailable (no capacity); try again later or run 'brev search' to find another type",
+    ):
+        expected = [
+            "Attempting to create 1 instance(s) with 1 parallel attempts",
+            f"Instance types to try: {sku} ({disk_gb}GB disk)",
+            f"Trying {sku} for 1 instance(s)...",
+            f'Skipping: instance type "{sku}" {reason}',
+            f"Type {sku} had failures, trying next type...",
+            "Warning: Only created 0/1 instances",
+            "could only create 0/1 instances",
+        ]
+        if lines == expected:
+            return True
+    return False
+
+
 def _run(
     command: Sequence[str],
     deadline: float,
@@ -526,6 +610,12 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     """Bound the CLI and its SSH subprocesses by the same absolute deadline."""
     timeout = min(cap, _remaining(deadline))
+    child_env = None
+    if tuple(command[:2]) == ("brev", "create"):
+        # v0.6.335 otherwise drops HTTP status from structured API errors.
+        # This feature affects error formatting, not HTTP header tracing. Its
+        # captured output must pass through _create_diagnostics before logging.
+        child_env = {**os.environ, "BREV_FEATURE_DEBUG": "true"}
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
@@ -535,6 +625,7 @@ def _run(
         encoding="utf-8",
         errors="replace",
         start_new_session=True,
+        env=child_env,
     )
     try:
         stdout, stderr = process.communicate(input_text, timeout=timeout)
@@ -1577,13 +1668,37 @@ def provision(
         _log(start, f"{instance}: creating exact type {instance_type} with {disk_gb} GiB disk")
         # v0.6.335 reads JSON stdin automatically. Adding --type would prepend a
         # second specification with its default 120 GiB disk. Keep default Jupyter.
-        result = _run(
-            ["brev", "create", instance, "--detached", "--mode", "vm"],
-            deadline,
-            PROBE_TIMEOUT,
-            input_text=json.dumps([candidate]),
+        try:
+            result = _run(
+                ["brev", "create", instance, "--detached", "--mode", "vm"],
+                deadline,
+                PROBE_TIMEOUT,
+                input_text=json.dumps([candidate]),
+            )
+        except CommandTimeout as error:
+            _record_create_diagnostics(
+                lease, path, start, error.stdout, error.stderr, completion="timeout"
+            )
+            raise
+        except (OSError, KeyboardInterrupt) as error:
+            _record_create_diagnostics(
+                lease,
+                path,
+                start,
+                completion="interrupted" if isinstance(error, KeyboardInterrupt) else "io_error",
+            )
+            raise
+        _record_create_diagnostics(
+            lease, path, start, result.stdout, result.stderr, result.returncode
         )
         if result.returncode:
+            if _create_was_skipped(result, instance_type, disk_gb):
+                lease.update(
+                    create_started=False,
+                    allocation_pending=False,
+                    create_submission="not_submitted_catalog_rejection",
+                )
+                _save_lease(path, lease)
             raise ProvisionError(f"Brev create failed (exit {result.returncode})")
         lease.update(create_accepted=True, phase="provisioning")
         _save_lease(path, lease)
