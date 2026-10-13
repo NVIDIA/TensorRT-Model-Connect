@@ -35,6 +35,9 @@ BASE_INPUTS = (
 PLATFORM = "linux/amd64"
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 FAMILY = re.compile(r"[a-z][a-z0-9_]*")
+REFERENCE_DECLARATION = "reference-source.json"
+REFERENCE_DIRECTORY = "/opt/trtmc-reference"
+REFERENCE_RECEIPT = "/opt/trtmc-ci/reference-source.json"
 MAX_FILE = 1024 * 1024
 MAX_CONTEXT = 16 * 1024 * 1024
 FAMILY_PREPARATION_SECONDS = 7200
@@ -489,6 +492,13 @@ def _family_inputs(repository: Path, family: str) -> dict[str, bytes]:
     requirements = owner / "requirements.txt"
     if requirements.exists() or requirements.is_symlink():
         files["requirements.txt"] = regular_bytes(requirements, root=repository)
+    if (owner / "tests").is_symlink():
+        raise ImagePreparationError("Family reference source inputs cannot contain symlinks")
+    declaration = owner / "tests" / REFERENCE_DECLARATION
+    if declaration.exists() or declaration.is_symlink():
+        content = regular_bytes(declaration, root=repository)
+        _reference_source(content)
+        files[REFERENCE_DECLARATION] = content
     ci = owner / "ci"
     if ci.is_symlink():
         raise ImagePreparationError("Family dependency contexts cannot contain symlinks")
@@ -507,6 +517,8 @@ def _family_inputs(repository: Path, family: str) -> dict[str, bytes]:
             if path.is_file():
                 name = str(path.relative_to(ci))
                 content = regular_bytes(path, root=repository)
+                if name in {REFERENCE_DECLARATION, "build-inputs.json"}:
+                    raise ImagePreparationError("Family dependency input uses a reserved path")
                 if name in files and files[name] != content:
                     raise ImagePreparationError("Family dependency input paths overlap")
                 files[name] = content
@@ -517,6 +529,8 @@ def _family_inputs(repository: Path, family: str) -> dict[str, bytes]:
 
 def _default_recipe(files: dict[str, bytes]) -> bytes:
     if "requirements.txt" not in files:
+        if set(files) == {REFERENCE_DECLARATION}:
+            return b"ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n"
         raise ImagePreparationError(
             "Family dependency inputs require a requirements file or recipe"
         )
@@ -540,6 +554,104 @@ def _default_recipe(files: dict[str, bytes]) -> bytes:
     ).encode()
 
 
+def _reference_source(raw: bytes) -> dict[str, str]:
+    source = object_json(raw)
+    repository = source.get("repository")
+    decoded = urllib.parse.unquote(repository) if isinstance(repository, str) else ""
+    if (
+        set(source) != {"repository", "revision"}
+        or not isinstance(repository, str)
+        or len(repository.split("/")) != 2
+        or any("/" in urllib.parse.unquote(part) for part in repository.split("/"))
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", decoded)
+        or decoded.endswith(".git")
+        or not isinstance(source.get("revision"), str)
+        or not re.fullmatch(r"[0-9a-f]{40}", source["revision"])
+    ):
+        raise ImagePreparationError(
+            "Reference source requires a GitHub owner/repo and exact commit"
+        )
+    return source
+
+
+def _reference_recipe(recipe: bytes, source: dict[str, str]) -> bytes:
+    # Fetch only public Git objects inside the secret-free build. Disable Git
+    # configuration, hooks, credential helpers, submodules and interactive auth.
+    git = (
+        "env -i PATH=/usr/bin:/bin HOME=/tmp GIT_CONFIG_NOSYSTEM=1 "
+        "GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 "
+        "/usr/bin/git -c core.hooksPath=/dev/null -c credential.helper= "
+        "-c protocol.allow=never -c protocol.https.allow=always "
+        "-c transfer.fsckObjects=true "
+    )
+    checkout = git + "-C " + REFERENCE_DIRECTORY + " "
+    script = (
+        "test ! -e "
+        + REFERENCE_DIRECTORY
+        + " && "
+        + git
+        + "init --template= "
+        + REFERENCE_DIRECTORY
+        + " && "
+        + checkout
+        + "fetch --no-tags --depth=1 https://github.com/"
+        + urllib.parse.unquote(source["repository"])
+        + ".git "
+        + source["revision"]
+        + ' && test "$('
+        + checkout
+        + 'rev-parse FETCH_HEAD)" = '
+        + source["revision"]
+        + " && "
+        + checkout
+        + "checkout --detach "
+        + source["revision"]
+    )
+    return (
+        recipe.rstrip()
+        + b"\n"
+        + ("COPY " + REFERENCE_DECLARATION + " " + REFERENCE_RECEIPT + "\n").encode()
+        + ("RUN " + json.dumps(["/bin/sh", "-eu", "-c", script]) + "\n").encode()
+        + ("ENV TRTMC_REFERENCE_SOURCE_DIR=" + REFERENCE_DIRECTORY + "\n").encode()
+    )
+
+
+def _verify_reference_source(image_id: str, source: dict[str, str], deadline: float) -> None:
+    # This probe runs in the prepared container, not in the trusted host process.
+    # It does not import reference code or infer any family-specific packages.
+    probe = """import json, os, pathlib, subprocess, sys
+expected = json.loads(sys.argv[1])
+root, receipt = sys.argv[2:]
+assert os.environ.get('TRTMC_REFERENCE_SOURCE_DIR') == root, 'reference source environment changed'
+assert json.loads(pathlib.Path(receipt).read_text()) == expected, 'reference source receipt changed'
+env = {'PATH': '/usr/bin:/bin', 'HOME': '/tmp', 'GIT_CONFIG_NOSYSTEM': '1',
+       'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_TERMINAL_PROMPT': '0'}
+git = ['/usr/bin/git', '-c', 'core.hooksPath=/dev/null', '-C', root]
+head = subprocess.check_output(git + ['rev-parse', 'HEAD'], env=env, text=True).strip()
+assert head == expected['revision'], 'reference source revision changed'
+subprocess.run(git + ['diff', '--quiet', '--no-ext-diff', '--no-textconv', 'HEAD', '--'],
+               env=env, check=True)
+"""
+    docker(
+        [
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "/opt/venv/bin/python",
+            image_id,
+            "-I",
+            "-c",
+            probe,
+            json.dumps(source, sort_keys=True),
+            REFERENCE_DIRECTORY,
+            REFERENCE_RECEIPT,
+        ],
+        timeout=min(180, max(1, deadline - time.monotonic())),
+    )
+
+
 def ensure_family_image(repository: Path, family: str, base_image_id: str, deadline: float) -> str:
     """Build only one selected family's declared layer on the already pulled common base."""
     if not IMAGE_ID.fullmatch(base_image_id):
@@ -549,6 +661,12 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
         return base_image_id
     if "Dockerfile.dependencies" not in files:
         files["Dockerfile.dependencies"] = _default_recipe(files)
+    reference_source = None
+    if REFERENCE_DECLARATION in files:
+        reference_source = _reference_source(files[REFERENCE_DECLARATION])
+        files["Dockerfile.dependencies"] = _reference_recipe(
+            files["Dockerfile.dependencies"], reference_source
+        )
     base = inspect(base_image_id)
     if base["Id"] != base_image_id:
         raise ImagePreparationError("Local shared base identity changed")
@@ -609,6 +727,7 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
                     ),
                     "base_input_key": base_labels.get(BASE_KEY_LABEL),
                     "input_key": key,
+                    "reference_source": reference_source,
                     "inputs": {
                         name: hashlib.sha256(data).hexdigest() for name, data in files.items()
                     },
@@ -669,6 +788,8 @@ def ensure_family_image(repository: Path, family: str, base_image_id: str, deadl
         ],
         timeout=min(180, max(1, deadline - time.monotonic())),
     )
+    if reference_source is not None:
+        _verify_reference_source(prepared["Id"], reference_source, deadline)
     return prepared["Id"]
 
 
