@@ -7,7 +7,7 @@ This example uses **BAAI/bge-small-en-v1.5**. Prepare the runtime using
 [Build from Source](../getting-started/source-build.md), including the `trtmc_model_bert`
 and `trtmc_cli_bert` targets, and build the model using
 [Build a Bundle](./build-a-bundle.md). Use the existing
-[BGE FP16 profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/bert/tests/benchmark/bge-small-en-v1.5.yaml)
+[BGE FP16 profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/0bccb5e93af0e5ad346aaf44e404396f54b2e7de/families/bert/tests/benchmark/bge-small-en-v1.5.yaml)
 and run its family correctness checks first. The commands below assume the bundle
 is `bge-small-en-v1.5.bundle` and `trtmc-server` is on `PATH`.
 
