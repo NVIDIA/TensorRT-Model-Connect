@@ -258,6 +258,30 @@ def test_run_one_builds_qualifies_and_applies_the_bundle_policy(tmp_path, monkey
     assert json.loads((tmp_path / "m/build.json").read_text())["status"] == "built"
 
 
+def test_build_capacity_resolution_does_not_change_the_resume_configuration(tmp_path, monkeypatch):
+    _stub_phases(monkeypatch)
+    model = _model("m", "org/m")
+    model["candidate"]["max_sequence_length"] = 256
+    environment = Environment({})
+    key = campaign.run_key(environment, model)
+
+    def build(environment, resolved, out, python=None):
+        resolved["candidate"]["max_sequence_length"] = 257
+        return {"status": "built"}
+
+    def qualify(resolved, environment, out):
+        assert resolved["candidate"]["max_sequence_length"] == 257
+        (out / "report.json").write_text(json.dumps({"verdict": {"category": "pass"}}))
+        return {"verdict": {"category": "pass"}}
+
+    monkeypatch.setattr(campaign.bundles, "ensure_bundle", build)
+    monkeypatch.setattr(campaign, "qualify", qualify)
+    campaign.run_one(environment, model, tmp_path / "out")
+    assert model["candidate"]["max_sequence_length"] == 256
+    assert campaign.run_key(environment, model) == key
+    assert campaign._finished(tmp_path / "out", key) == "pass"
+
+
 @pytest.mark.parametrize("acc, complete, timed, delete", [
     ("pass", True, True, True),
     ("pass", False, True, False),
@@ -362,7 +386,7 @@ def test_machine_model_list_is_validated(config, message):
         selection.select(config, CATALOG)
 
 
-def test_summary_lists_excluded_models_unless_a_result_exists(tmp_path):
+def test_summary_omits_exclusions_but_keeps_an_actual_result_from_another_host(tmp_path):
     root = tmp_path / "gb300-1"
     campaign.write_exclusions(root, [{"profile": "flux-2-dev", "task": "image_generation", "reason": "80 GB GPU"},
                                      {"profile": "qwen36-27b", "task": "text_generation", "reason": "80 GB GPU"}])
@@ -370,8 +394,54 @@ def test_summary_lists_excluded_models_unless_a_result_exists(tmp_path):
     other.mkdir(parents=True)
     (other / "report.json").write_text(json.dumps({"task": "text_generation", "verdict": {"category": "pass"}}))
     text, counts = campaign.summary([tmp_path / "gb300-2", root])
-    assert counts == {"pass": 1, "excluded": 1}
-    assert "| White | flux-2-dev | image_generation | gb300-1 |" in text and "80 GB GPU" in text
+    assert counts == {"pass": 1}
+    assert "flux-2-dev" not in text and "1 models" in text
+    assert "| Green | qwen36-27b |" in text
+    assert len(json.loads((root / campaign.EXCLUSIONS).read_text())) == 2
+
+
+def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import absolute
+    from trtmc_aiperf_qual.models import resolve_model
+
+    environment = Environment({"repo": str(REPOSITORY), "bundle_root": str(tmp_path / "engines"),
+                               "runtime_root": "/rt", "worker": "/rt/worker", "serve_python": "/py"})
+    model = resolve_model("qwen3-embedding-0.6b", environment)
+    plans = {"stsb": [{"request": {"prompt": "short"}}],
+             "scifact-retrieval": [{"request": {"prompt": "x" * 256}}]}
+    monkeypatch.setattr(absolute, "plan", lambda environment, model, item: plans[item["suite"]])
+
+    class Tokenizer:
+        def __call__(self, text, *, add_special_tokens):
+            assert add_special_tokens
+            return {"input_ids": list(range(len(text)))}
+
+    monkeypatch.setattr(absolute, "_candidate_tokenizer", lambda model: Tokenizer())
+    command = bundles.build_command(environment, model, tmp_path / "build")
+    descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
+    assert descriptor["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 257
+    assert model["candidate"]["bundle"].startswith("qwen3-embedding-0.6b-benchmark/")
+    assert plans["scifact-retrieval"][0]["request"]["prompt"] == "x" * 256
+    evidence = json.loads((tmp_path / "build/benchmark-capacity.json").read_text())
+    assert evidence["required_sequence_length"] == 257 and evidence["extra_tokens"] == 1
+
+
+def test_benchmark_capacity_planning_failure_prevents_a_catalog_fallback(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import absolute
+    from trtmc_aiperf_qual.models import resolve_model
+
+    environment = Environment({"repo": str(REPOSITORY), "bundle_root": str(tmp_path / "engines"),
+                               "runtime_root": "/rt", "worker": "/rt/worker", "serve_python": "/py"})
+    model = resolve_model("qwen3-embedding-0.6b", environment)
+    monkeypatch.setattr(absolute, "_candidate_tokenizer", lambda model: None)
+
+    def unavailable(*args):
+        raise ValueError("benchmark dataset unavailable")
+
+    monkeypatch.setattr(absolute, "plan", unavailable)
+    result = bundles.ensure_bundle(environment, model, tmp_path / "out")
+    assert result["status"] == "failed" and "benchmark dataset unavailable" in result["reason"]
+    assert not (tmp_path / "out/artifacts/build/candidate-model.json").exists()
 
 
 def test_preflight_reports_missing_paths_and_interpreters(tmp_path):

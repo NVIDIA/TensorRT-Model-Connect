@@ -68,7 +68,54 @@ def _descriptor(model: Mapping[str, Any], work: Path, python: str | None) -> Pat
     return path
 
 
+def _benchmark_sequence_length(environment: Environment, model: Mapping[str, Any], work: Path) -> None:
+    """Size an opted-in bundle from the actual prepared gold requests, without changing those requests.
+
+    The model configuration supplies extra tokens added by its runtime. All family semantics stay in
+    that configuration; this function only counts prepared prompt tokens with the pinned tokenizer.
+    """
+    candidate = model["candidate"]
+    settings = candidate.get("benchmark_sequence_length")
+    if settings is None:
+        return
+    from . import absolute
+
+    try:
+        extra = int(settings.get("extra_tokens", 0))
+        if extra < 0:
+            raise ValueError("extra_tokens must be non-negative")
+        tokenizer = absolute._candidate_tokenizer(model)
+        suites = {}
+        for item in model.get("absolute") or []:
+            if not item.get("metric") or item.get("fit_prompt") or item.get("pair_format"):
+                raise ValueError("benchmark_sequence_length needs independent gold prompt requests")
+            problems = absolute.plan(environment, model, item)
+            lengths = []
+            for problem in problems:
+                prompt = problem["request"].get("prompt")
+                if not isinstance(prompt, str):
+                    raise ValueError("benchmark_sequence_length requires a text prompt in every request")
+                lengths.append(len(tokenizer(prompt, add_special_tokens=True)["input_ids"]) + extra)
+            if not lengths:
+                raise ValueError(f"{item['suite']}: no benchmark requests")
+            suites[item["suite"]] = {"requests": len(lengths), "required_sequence_length": max(lengths)}
+        if not suites:
+            raise ValueError("benchmark_sequence_length needs at least one gold suite")
+        required = max(suite["required_sequence_length"] for suite in suites.values())
+        length = max(int(candidate.get("max_sequence_length") or 0), required)
+    except Exception as error:  # noqa: BLE001 - capacity planning must fail before any GPU build
+        raise RuntimeError(f"benchmark capacity planning: {error}") from error
+    candidate["build"] = {**candidate.get("build", {}), "max_sequence_length": length}
+    candidate["max_sequence_length"] = length
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "benchmark-capacity.json").write_text(json.dumps({
+        "tokenizer": absolute.tokenizer_source(model), "extra_tokens": extra, "suites": suites,
+        "required_sequence_length": required, "build_sequence_length": length,
+    }, indent=2) + "\n")
+
+
 def build_command(environment: Environment, model: Mapping[str, Any], work: Path, python: str | None = None) -> list[str]:
+    _benchmark_sequence_length(environment, model, work)
     descriptor = _descriptor(model, work, python)
     target = (["--model", str(descriptor)] if descriptor else
               ["--manifest-root", str(environment.path("repo") / "families"), "--model", model["catalog_profile"]])

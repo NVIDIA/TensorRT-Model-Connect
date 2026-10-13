@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build for the actual STS-B and SciFact prompts, including the EOS appended by Qwen's runtime.
+# Both sides still receive the same benchmark requests; accuracy tolerances are unchanged.
+candidate:
+  build: {name: qwen3-embedding-0.6b-benchmark}
+  benchmark_sequence_length: {extra_tokens: 1}

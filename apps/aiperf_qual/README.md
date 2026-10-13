@@ -53,6 +53,11 @@ initial noise on both sides); CLIP-T and video validity for videos; MagicBrush C
 world-model video parity. The pixel parity under latent replay is reported only (`informational`).
 
 A suite with `base: catalog` overrides the profile's catalog request with its dataset fields.
+For an encoder profile with `candidate.benchmark_sequence_length`, the build counts the prepared
+gold-suite prompts with its pinned tokenizer and uses their maximum length plus the configured
+`extra_tokens`. Qwen3-Embedding reserves one token for its runtime EOS. The evidence is written to
+`artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
+Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
 
 ### Verdict rules
 
@@ -72,12 +77,15 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
   attempt. Low scores from successfully returned answers do not trigger precision fallback.
 - Both sides run separately with one server and concurrency 1. Legacy Acc replica, MPS, and overlap settings
   are ignored by qualification; their contended timings cannot serve as speed evidence.
-- Every AIPerf run has a deadline: three times the profile's seconds in the run's ledger (`run-all --ledger`, at
-  least ten minutes), else 12 hours; a GPU phase that fails before producing its result runs once more.
+- Every AIPerf run has a 12-hour deadline unless the environment explicitly sets `deadlines.<profile>`.
+  Scheduling ledgers only determine assignment: historical rescoring durations can omit fresh inference.
+  A GPU phase that fails before producing its result runs once more.
 - `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
   comparison: a Task without an Acc check), Red (Acc worse than
   native beyond its margin), Yellow (an Acc difference not shown either way), Green (quality passes with available
   benchmark timings). Historical fixed-workload reports retain their original performance lights.
+  Profiles excluded by the machine model list remain in `excluded.json` for audit and do not contribute
+  report rows, totals, White counts, or pass-rate denominators. A measured result from another host still counts.
 
 ### Performance
 
