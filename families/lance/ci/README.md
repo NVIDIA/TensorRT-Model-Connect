@@ -10,7 +10,7 @@ NumPy 1.26 do not replace the builder's dependencies.
 wheel closure. Installation requires every recorded SHA-256 and disables both
 index resolution and source distributions. A missing wheel or failed import
 therefore fails environment preparation instead of starting a long extension
-build. `verify_reference_environment.py` checks imports and the Torch/CUDA/C++
+build. The Dockerfile checks imports and the Torch/CUDA/C++
 ABI combination during the image build; it does not claim GPU or model parity.
 
 The GPU binaries come from the following public releases:
@@ -92,8 +92,11 @@ and unchanged test selection.
 
 ## Updating the lock
 
-Start with `reference-requirements.in` and resolve for CPython 3.12,
-`x86_64-manylinux_2_28`, using public PyPI and the official CUDA 13 Torch index.
+Start with the family's `../requirements.txt` and the reference binary versions
+above, then resolve the upstream image reference's import closure for CPython
+3.12 and `x86_64-manylinux_2_28`, using public PyPI and the official CUDA 13 Torch
+index. Keep the general family dependency declaration in that canonical file;
+this lock records the concrete reference environment.
 Select one compatible wheel per resolved package, record its published
 SHA-256 and public URL, and add the explicitly published FlashAttention wheel
 for that Torch/CUDA/Python/C++ ABI. Verify the full dependency closure, build the
