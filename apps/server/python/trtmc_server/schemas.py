@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""OpenAI-compatible request shapes supported by the text MVP."""
+"""Strict request shapes for the supported serving endpoints."""
 
 from __future__ import annotations
 
@@ -50,3 +50,10 @@ class CompletionRequest(GenerationRequest):
 class ChatCompletionRequest(GenerationRequest):
     messages: list[ChatMessage] = Field(min_length=1, max_length=2)
     max_completion_tokens: int | None = Field(default=None, ge=1)
+
+
+class EmbeddingRequest(StrictRequest):
+    model: str
+    input: str | list[str]
+    encoding_format: Literal["float"] = "float"
+    user: str | None = None

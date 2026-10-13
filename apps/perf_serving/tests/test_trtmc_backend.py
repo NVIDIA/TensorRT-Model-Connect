@@ -35,7 +35,7 @@ FAKE_WORKER = textwrap.dedent("""\
             continue
         print(json.dumps({{"id": message["id"], "ok": True, "observation": {{
             "runtime_e2e_wall_ms": 7.25, "echo": request, "artifact_base": message["artifact_base"],
-            "pid": os.getpid()}}}}),
+            "pid": os.getpid(), "full_observation": message["full_observation"]}}}}),
             flush=True)
 """)
 
@@ -60,6 +60,17 @@ def test_invoke_returns_worker_wall_time_and_observation(tmp_path, worker):
         assert result.model_call_ms == 7.25
         assert result.observation["echo"] == {"image_path": "/x.png"}
         assert "runtime_e2e_wall_ms" not in result.observation
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("operation", ["encode", "embed"])
+def test_embedding_transport_is_complete_without_full_logging(tmp_path, worker, operation):
+    backend = TrtmcWorkerBackend(worker=worker, session={**session(), "operation": operation},
+                                scratch=tmp_path, full_observations=False)
+    try:
+        result = backend.invoke({"prompt": "The capital of France is Paris."}, tmp_path / "out")
+        assert result.observation["full_observation"] is True
     finally:
         backend.close()
 

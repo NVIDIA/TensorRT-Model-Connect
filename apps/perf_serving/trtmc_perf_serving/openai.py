@@ -125,6 +125,10 @@ def chat(body: Mapping[str, Any], base: Mapping[str, Any], renderer: ChatRendere
 
 def embeddings(body: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, Any]:
     _check_fields(body, {"input", "dimensions"})
+    if body.get("dimensions") is not None:
+        raise RequestError("dimensions is unsupported; the native Task returns its full vector")
+    if body.get("encoding_format", "float") != "float":
+        raise RequestError("only encoding_format=float is supported")
     value = body.get("input")
     if isinstance(value, list) and len(value) == 1:
         value = value[0]

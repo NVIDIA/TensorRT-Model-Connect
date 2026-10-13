@@ -17,6 +17,7 @@ struct LoadOptions;
 namespace trtmc::server {
 
 // Runs the private serialized protocol used by the Python serving control plane.
+int run_task_worker(ITask& task, std::istream& input, std::ostream& output);
 int run_text_worker(ITask& task, std::istream& input, std::ostream& output);
 int run_text_worker(const Model& model, std::istream& input, std::ostream& output);
 int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std::istream& input,

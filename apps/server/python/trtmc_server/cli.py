@@ -32,7 +32,7 @@ def positive(value: str) -> int:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="trtmc-server",
-        description="Serve text-generation bundles through persistent native workers",
+        description="Serve text-generation bundles and embedding bundles through persistent native workers",
     )
     result.add_argument("bundle", nargs="?", help="single .bundle artifact")
     result.add_argument("--model-name", help="API model name for the positional bundle")
@@ -41,7 +41,7 @@ def parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="NAME=PATH",
-        help="register another text model; repeatable",
+        help="register another model; repeatable",
     )
     result.add_argument("--replicas", type=positive, default=1)
     result.add_argument("--host", default="127.0.0.1")

@@ -9,7 +9,7 @@ import asyncio
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 from pathlib import Path
@@ -22,6 +22,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .errors import (
     ModelNotFoundError,
+    WorkerError,
     WorkerCrashedError,
     WorkerProtocolError,
     WorkerRequestTooLargeError,
@@ -30,10 +31,10 @@ from .errors import (
     WorkerTimeoutError,
 )
 from .metrics import Metrics
-from .protocol import chat_prompt, extract_result, generation_config, public_worker_error
+from .protocol import chat_prompt, extract_embedding, extract_result, generation_config, public_worker_error
 from .records import RequestPolicy, RequestRecords
 from .registry import ModelRegistry
-from .schemas import ChatCompletionRequest, CompletionRequest, GenerationRequest
+from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest
 from .worker import WorkerSession
 
 
@@ -64,6 +65,7 @@ class _BodyLimitMiddleware:
         if scope["type"] != "http" or scope["path"] not in {
             "/v1/completions",
             "/v1/chat/completions",
+            "/v1/embeddings",
         }:
             await self.app(scope, receive, send)
             return
@@ -223,7 +225,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             await asyncio.to_thread(registry.close)
             records.close()
 
-    app = FastAPI(title="TensorRT-Model-Connect Text Server", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="TensorRT-Model-Connect Server", version="0.1.0", lifespan=lifespan)
     app.add_middleware(_BodyLimitMiddleware, limit=config.max_body_bytes)
 
     app.add_middleware(RequestPolicy, records=records)
@@ -491,6 +493,81 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             chat=False,
         )
 
+    async def execute_task(
+        http_request: Request, model: str, capability: str, operation: str,
+        payload: dict[str, Any], validate: Callable[[Any], Any],
+    ) -> Any:
+        route = http_request.url.path
+        context = http_request.state.timing
+        context["model"] = model
+        request_id = http_request.state.request_id
+        admitted = time.monotonic()
+        try:
+            if not registry.supports(model, capability):
+                metrics.reject(route, 400)
+                return error_response(400, "unsupported_task", "model does not support this endpoint", param="model")
+            session = registry.acquire(model)
+        except ModelNotFoundError as error:
+            metrics.reject(route, 404)
+            return error_response(404, error.code, str(error), param="model")
+        except WorkerSaturatedError:
+            metrics.reject(route, 429)
+            response = error_response(429, "server_busy", "all model worker replicas are busy")
+            response.headers["Retry-After"] = "1"
+            return response
+        except RuntimeError:
+            metrics.reject(route, 503)
+            return error_response(503, "server_draining", "server is not accepting requests")
+        queue_seconds = time.monotonic() - admitted
+        context.update(replica=getattr(session, "replica_name", None),
+                       admission_ms=queue_seconds * 1000, streaming="none")
+        metrics.begin()
+        started = time.monotonic()
+        status = 500
+        try:
+            result = await _worker_request(session, payload, operation=operation, validate=validate)
+            context.update(model_call_ms=result["model_call_ms"], timing_scope=result["timing_scope"])
+            status = 200
+            return result
+        except asyncio.CancelledError:
+            status = 499
+            raise
+        except WorkerError as error:
+            invalid = (isinstance(error, WorkerRemoteError) and isinstance(error.details, Mapping) and
+                       error.details.get("type") == "invalid_request_error")
+            status = (504 if isinstance(error, WorkerTimeoutError) else
+                      503 if isinstance(error, WorkerCrashedError) else
+                      413 if isinstance(error, WorkerRequestTooLargeError) else
+                      400 if invalid else 502)
+            return error_response(status, error.code, public_worker_error(error), request_id=request_id)
+        finally:
+            elapsed = time.monotonic() - started
+            context["worker_roundtrip_ms"] = elapsed * 1000
+            metrics.finish(route, status, queue_seconds=queue_seconds, inference_seconds=elapsed)
+
+    @app.post("/v1/embeddings")
+    async def embeddings(http_request: Request, request: EmbeddingRequest) -> Any:
+        route = http_request.url.path
+        http_request.state.timing["model"] = request.model
+        value = request.input
+        if isinstance(value, list) and len(value) == 1:
+            value = value[0]
+        if not isinstance(value, str) or not value:
+            metrics.reject(route, 400)
+            return error_response(400, "unsupported_parameter", "input must be one non-empty string", param="input")
+        if len(value.encode("utf-8")) > config.max_prompt_bytes:
+            metrics.reject(route, 413)
+            return error_response(413, "content_too_large", "input exceeds the server limit", param="input")
+        result = await execute_task(http_request, request.model, "embeddings", "embed",
+                                    {"input": value}, extract_embedding)
+        if isinstance(result, JSONResponse):
+            return result
+        vector, _ = extract_embedding(result)
+        http_request.state.timing.update(input_items=1, embedding_dimensions=len(vector))
+        # The native Task does not expose token usage; omit it rather than fabricate zero.
+        return {"object": "list", "model": request.model,
+                "data": [{"object": "embedding", "index": 0, "embedding": vector}]}
+
     @app.post("/v1/chat/completions")
     async def chat_completions(http_request: Request, request: ChatCompletionRequest) -> Any:
         try:
@@ -519,9 +596,10 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
     return app
 
 
-async def _worker_request(session: WorkerSession, payload: dict[str, Any]) -> Any:
+async def _worker_request(session: WorkerSession, payload: dict[str, Any], *,
+                          operation: str = "generate", validate: Callable[[Any], Any] = extract_result) -> Any:
     try:
-        task = asyncio.wrap_future(session.submit("generate", payload))
+        task = asyncio.wrap_future(session.submit(operation, payload))
     except BaseException:
         session.close()
         raise
@@ -529,7 +607,7 @@ async def _worker_request(session: WorkerSession, payload: dict[str, Any]) -> An
     try:
         result = await asyncio.shield(task)
         try:
-            extract_result(result)
+            validate(result)
         except WorkerProtocolError as error:
             ownership = asyncio.wrap_future(session.retire(error))
             await asyncio.shield(ownership)

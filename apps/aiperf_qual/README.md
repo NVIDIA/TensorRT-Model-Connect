@@ -332,6 +332,27 @@ older passing timing. Workloads outside the recheck keep their original measurem
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
 
 
+## Native endpoint pilot coverage
+
+The native `trtmc-server` endpoint expansion is tracked in
+[epic #1667](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1667).
+Each row qualifies only its named profile and workload; other models and load
+modes require their own evidence.
+
+| Profile | Endpoint / AIPerf type | Qualified workload | Evidence |
+| --- | --- | --- | --- |
+| `bge-small-en-v1.5` | `/v1/embeddings` / `embeddings` | One sentence per request, FP16, context 512, concurrency 1; five fixed example sentences, 5 warmups and 50 measured requests | [Stage 1](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1668) |
+
+The embedding pilot passed the unchanged bert family correctness checks and a
+real published AIPerf 0.13.0 run on one GB300 with TensorRT 11.1.0.106. All
+55 responses contained complete 384-value vectors; client/server request IDs
+and timing exports were matched. Additional epic stages remain planned until
+their native correctness and actual client runs are complete.
+
+Use [Profile Embeddings with AIPerf](../../website/docs/user-guides/profile-embeddings-with-aiperf.md)
+for the short recipe. Native Task-call wall time stays separate from client HTTP
+latency; this small run is an integration example, not a performance gate.
+
 ## Text profiling with the persistent server
 
 `text-profile` reuses `trtmc-server` with AIPerf's built-in `completions` and

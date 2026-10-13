@@ -520,6 +520,14 @@ if(TRTMC_BUILD_TESTS)
     target_link_libraries(test_server_worker PRIVATE trtmc_server nlohmann_json::nlohmann_json)
     target_compile_options(test_server_worker PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME server_worker COMMAND test_server_worker)
+
+    add_executable(test_server_embedding_worker apps/server/tests/test_embedding_worker.cpp)
+    target_include_directories(test_server_embedding_worker PRIVATE
+      ${PROJECT_SOURCE_DIR}/apps ${PROJECT_SOURCE_DIR}/core/runtime/include)
+    target_link_libraries(test_server_embedding_worker PRIVATE trtmc_server nlohmann_json::nlohmann_json)
+    target_compile_options(test_server_embedding_worker PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server_embedding_worker COMMAND test_server_embedding_worker)
+    set_tests_properties(server_embedding_worker PROPERTIES LABELS cpu)
   endif()
 
   add_library(trtmc_test_cli_fixture SHARED apps/cli/tests/test_family_cli.cpp)

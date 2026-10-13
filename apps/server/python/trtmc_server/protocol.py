@@ -58,6 +58,27 @@ def extract_result(result: Any) -> tuple[str, int, dict[str, float]]:
     return str(result["text"]), tokens, timings
 
 
+def extract_embedding(result: Any) -> tuple[list[float], dict[str, float]]:
+    if not isinstance(result, Mapping):
+        raise WorkerProtocolError("worker embedding result must be an object")
+    values = result.get("values")
+    if (not isinstance(values, list) or not values or
+            type(result.get("dim")) is not int or result["dim"] != len(values) or
+            any(isinstance(value, bool) or not isinstance(value, (int, float)) or
+                not math.isfinite(value) for value in values)):
+        raise WorkerProtocolError("worker embedding result must contain a complete finite vector")
+    return values, extract_task_timing(result)
+
+
+def extract_task_timing(result: Mapping[str, Any]) -> dict[str, float]:
+    wall = result.get("model_call_ms")
+    if (isinstance(wall, bool) or not isinstance(wall, (int, float)) or
+            not math.isfinite(wall) or wall < 0 or
+            result.get("timing_scope") != "public_task_call_wall"):
+        raise WorkerProtocolError("worker result has invalid public Task timing")
+    return {"model_call_ms": float(wall)}
+
+
 def public_worker_error(error: Exception) -> str:
     if isinstance(error, WorkerRequestTooLargeError):
         return "request exceeds the native worker transport limit"
