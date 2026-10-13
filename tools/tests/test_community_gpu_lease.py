@@ -257,3 +257,330 @@ def test_recovery_failure_cannot_publish_an_instance_name(monkeypatch, tmp_path)
     _api_fixture(monkeypatch, artifacts=[])
     assert recovery.main() == 75
     assert not output.exists()
+
+
+def _intent_fixture(attempt=1):
+    lease, artifact, _ = _fixture(attempt)
+    lease.update(
+        phase="prepared",
+        intent_prepared=True,
+        instance_id=None,
+        create_started=True,
+        create_accepted=False,
+        allocation_pending=True,
+    )
+    archive = _archive(lease)
+    artifact.update(
+        name=f"gpu-ci-intent-123-{attempt}",
+        digest="sha256:" + hashlib.sha256(archive).hexdigest(),
+    )
+    return lease, artifact, archive
+
+
+def test_hard_killed_reservation_recovers_preexisting_intent(monkeypatch, tmp_path):
+    lease, artifact, archive = _intent_fixture()
+    calls, _ = _api_fixture(
+        monkeypatch,
+        artifacts=[artifact],
+        archives={f"repos/{REPOSITORY}/actions/artifacts/201/zip": archive},
+    )
+    destination = tmp_path / "lease.json"
+    result = recovery.recover(REPOSITORY, 123, 2, SHA, destination)
+    assert result == {"instance_name": "trtmc-gpu-ci-123-1"}
+    recovered = json.loads(destination.read_text())
+    assert recovered["create_started"] and recovered["allocation_pending"]
+    assert recovered["instance_id"] is None and not recovered.get("cleanup_confirmed", False)
+    assert calls[-1].endswith("/201/zip")
+
+
+@pytest.mark.parametrize("intent_uploaded", [False, True])
+def test_cancelled_before_post_is_closed_only_by_authoritative_skipped_step(
+    monkeypatch, tmp_path, intent_uploaded
+):
+    producer = _producer()
+    producer["steps"][0]["conclusion"] = "skipped"
+    _, artifact, archive = _intent_fixture()
+    calls, _ = _api_fixture(
+        monkeypatch,
+        jobs=[producer],
+        artifacts=[artifact] if intent_uploaded else [],
+        archives={f"repos/{REPOSITORY}/actions/artifacts/201/zip": archive},
+    )
+    cleanups = []
+    monkeypatch.setattr(recovery, "cleanup", lambda *a, **kw: cleanups.append((a, kw)))
+    result = recovery.cleanup_attempts(REPOSITORY, 123, 2, SHA, tmp_path, prior_only=False)
+    assert result == {"cleanup_confirmed": "true"}
+    assert not cleanups and not any("artifacts" in call for call in calls)
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "failure", None])
+def test_reservation_that_may_have_started_never_turns_intent_into_no_submission(
+    monkeypatch, tmp_path, conclusion
+):
+    producer = _producer()
+    producer["steps"][0]["conclusion"] = conclusion
+    _, artifact, archive = _intent_fixture()
+    _api_fixture(
+        monkeypatch,
+        jobs=[producer],
+        artifacts=[artifact],
+        archives={f"repos/{REPOSITORY}/actions/artifacts/201/zip": archive},
+    )
+    calls = []
+
+    def unknown(name, *, lease_file, timeout):
+        calls.append(name)
+        lease = json.loads(lease_file.read_text())
+        assert timeout == 90 and lease["allocation_pending"] and lease["create_started"]
+        raise RuntimeError("unknown submission remains unresolved")
+
+    monkeypatch.setattr(recovery, "cleanup", unknown)
+    with pytest.raises(RuntimeError, match="unresolved"):
+        recovery.cleanup_attempts(REPOSITORY, 123, 2, SHA, tmp_path, prior_only=True)
+    assert calls == ["trtmc-gpu-ci-123-1"]
+
+
+def test_full_owner_rerun_releases_every_older_producer_before_new_allocation(
+    monkeypatch, tmp_path
+):
+    artifacts, archives = [], {}
+    for attempt in (1, 2):
+        _, artifact, archive = _fixture(attempt)
+        artifacts.append(artifact)
+        archives[f"repos/{REPOSITORY}/actions/artifacts/{artifact['id']}/zip"] = archive
+    current = _producer(3)
+    current.update(status="in_progress", conclusion=None, completed_at=None)
+    _api_fixture(
+        monkeypatch,
+        jobs=[_producer(2), current, _producer(1)],
+        artifacts=artifacts,
+        archives=archives,
+    )
+    calls = []
+
+    def deleted(name, *, lease_file, timeout):
+        assert timeout == 90 and json.loads(lease_file.read_text())["name"] == name
+        calls.append(name)
+
+    monkeypatch.setattr(recovery, "cleanup", deleted)
+    result = recovery.cleanup_attempts(REPOSITORY, 123, 3, SHA, tmp_path, prior_only=True)
+    assert result == {"cleanup_confirmed": "true"}
+    assert calls == ["trtmc-gpu-ci-123-1", "trtmc-gpu-ci-123-2"]
+
+
+def test_cleanup_only_rerun_releases_all_original_attempts_not_only_latest(monkeypatch, tmp_path):
+    artifacts, archives = [], {}
+    for attempt in (1, 2):
+        _, artifact, archive = _fixture(attempt)
+        artifacts.append(artifact)
+        archives[f"repos/{REPOSITORY}/actions/artifacts/{artifact['id']}/zip"] = archive
+    placeholder = _producer(3)
+    placeholder.update(conclusion="skipped", steps=[])
+    _api_fixture(
+        monkeypatch,
+        jobs=[_producer(1), _producer(2), placeholder],
+        artifacts=artifacts,
+        archives=archives,
+    )
+    calls = []
+    monkeypatch.setattr(recovery, "cleanup", lambda name, **kw: calls.append(name))
+    assert recovery.cleanup_attempts(REPOSITORY, 123, 3, SHA, tmp_path, prior_only=False) == {
+        "cleanup_confirmed": "true"
+    }
+    assert calls == ["trtmc-gpu-ci-123-1", "trtmc-gpu-ci-123-2"]
+
+
+def test_newer_skipped_reservation_cannot_hide_an_older_unconfirmed_allocation(
+    monkeypatch, tmp_path
+):
+    latest = _producer(2)
+    latest["steps"][0]["conclusion"] = "skipped"
+    _, artifact, archive = _intent_fixture(1)
+    _api_fixture(
+        monkeypatch,
+        jobs=[_producer(1), latest],
+        artifacts=[artifact],
+        archives={f"repos/{REPOSITORY}/actions/artifacts/201/zip": archive},
+    )
+    monkeypatch.setattr(
+        recovery,
+        "cleanup",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("older allocation unconfirmed")),
+    )
+    with pytest.raises(RuntimeError, match="older allocation"):
+        recovery.cleanup_attempts(REPOSITORY, 123, 2, SHA, tmp_path, prior_only=False)
+
+
+@pytest.mark.parametrize("fault", ["running", "different_sha", "duplicate", "missing_artifact"])
+def test_any_unverified_previous_owner_blocks_new_allocation(monkeypatch, tmp_path, fault):
+    older = _producer(1)
+    _, latest_artifact, latest_archive = _fixture(2)
+    _, older_artifact, _ = _fixture(1)
+    jobs = [older, _producer(2)]
+    artifacts = [older_artifact, latest_artifact]
+    if fault == "running":
+        older["status"] = "in_progress"
+    elif fault == "different_sha":
+        older["head_sha"] = "b" * 40
+    elif fault == "duplicate":
+        jobs.append(copy.deepcopy(older))
+    else:
+        artifacts = [latest_artifact]
+    _api_fixture(
+        monkeypatch,
+        jobs=jobs,
+        artifacts=artifacts,
+        archives={f"repos/{REPOSITORY}/actions/artifacts/202/zip": latest_archive},
+    )
+    calls = []
+    monkeypatch.setattr(recovery, "cleanup", lambda name, **kw: calls.append(name))
+
+    def stop_observing(_seconds):
+        raise recovery.RecoveryError("fixture observation ended with cleanup unconfirmed")
+
+    monkeypatch.setattr(recovery.time, "sleep", stop_observing)
+    with pytest.raises(recovery.RecoveryError):
+        recovery.cleanup_attempts(REPOSITORY, 123, 3, SHA, tmp_path, prior_only=True)
+    # Bad evidence blocks a new POST, but cannot strand an independently
+    # verified VM from another completed attempt.
+    assert calls == ["trtmc-gpu-ci-123-2"]
+
+
+def test_initial_attempt_has_no_previous_allocation_to_reconcile(monkeypatch, tmp_path):
+    def forbidden(*a, **kw):
+        raise AssertionError("first attempt must not query or delete any older instance")
+
+    monkeypatch.setattr(recovery, "_api", forbidden)
+    monkeypatch.setattr(recovery, "cleanup", forbidden)
+    assert recovery.cleanup_attempts(REPOSITORY, 123, 1, SHA, tmp_path, prior_only=True) == {
+        "cleanup_confirmed": "true"
+    }
+
+
+def test_known_owned_vm_is_released_before_waiting_for_an_older_unknown_create(
+    monkeypatch, tmp_path
+):
+    _, older, older_archive = _intent_fixture(1)
+    _, later, later_archive = _fixture(2)
+    _api_fixture(
+        monkeypatch,
+        jobs=[_producer(1), _producer(2)],
+        artifacts=[older, later],
+        archives={
+            f"repos/{REPOSITORY}/actions/artifacts/201/zip": older_archive,
+            f"repos/{REPOSITORY}/actions/artifacts/202/zip": later_archive,
+        },
+    )
+    calls = []
+
+    def cleanup(name, *, lease_file, timeout):
+        calls.append(name)
+        assert timeout == 90
+        if json.loads(lease_file.read_text())["instance_id"] is None:
+            raise RuntimeError("unknown allocation remains unresolved")
+
+    monkeypatch.setattr(recovery, "cleanup", cleanup)
+    with pytest.raises(RuntimeError, match="unresolved"):
+        recovery.cleanup_attempts(REPOSITORY, 123, 3, SHA, tmp_path, prior_only=False)
+    assert calls == ["trtmc-gpu-ci-123-2", "trtmc-gpu-ci-123-1"]
+
+
+def test_transient_github_inventory_failure_is_retried_before_releasing_the_original_owner(
+    monkeypatch, tmp_path
+):
+    calls, _ = _api_fixture(monkeypatch)
+    api = recovery._api
+    failures = 1
+    sleeps = []
+
+    def flaky(path, *, binary=False):
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise recovery.RecoveryError("temporary provider error")
+        return api(path, binary=binary)
+
+    monkeypatch.setattr(recovery, "_api", flaky)
+    monkeypatch.setattr(recovery.time, "sleep", sleeps.append)
+    deleted = []
+    monkeypatch.setattr(recovery, "cleanup", lambda name, **kw: deleted.append(name))
+    assert recovery.cleanup_attempts(REPOSITORY, 123, 2, SHA, tmp_path, prior_only=True) == {
+        "cleanup_confirmed": "true"
+    }
+    assert sleeps == [recovery.POLL_INTERVAL] and calls
+    assert deleted == ["trtmc-gpu-ci-123-1"]
+
+
+def test_one_unresponsive_known_identity_cannot_starve_another_owned_vm(monkeypatch, tmp_path):
+    _, first, first_archive = _fixture(1)
+    _, second, second_archive = _fixture(2)
+    calls, _ = _api_fixture(
+        monkeypatch,
+        jobs=[_producer(1), _producer(2)],
+        artifacts=[first, second],
+        archives={
+            f"repos/{REPOSITORY}/actions/artifacts/201/zip": first_archive,
+            f"repos/{REPOSITORY}/actions/artifacts/202/zip": second_archive,
+        },
+    )
+    observed, sleeps = [], []
+
+    def cleanup(name, *, lease_file, timeout):
+        assert timeout == 90
+        observed.append(name)
+        if len(observed) == 1:
+            # The bounded helper may learn the ID during its first pass. That
+            # state must survive later metadata outages and further passes.
+            lease = json.loads(lease_file.read_text())
+            lease["first_pass_evidence"] = True
+            lease_file.write_text(json.dumps(lease))
+            raise recovery.ProvisionError("deletion remains unconfirmed")
+        if name.endswith("-1"):
+            assert json.loads(lease_file.read_text())["first_pass_evidence"]
+
+    api = recovery._api
+
+    def failing_after_initial_download(path, *, binary=False):
+        if len(observed) >= 2:
+            raise recovery.RecoveryError("later GitHub outage")
+        return api(path, binary=binary)
+
+    monkeypatch.setattr(recovery, "_api", failing_after_initial_download)
+    monkeypatch.setattr(recovery, "cleanup", cleanup)
+    monkeypatch.setattr(recovery.time, "sleep", sleeps.append)
+    assert recovery.cleanup_attempts(REPOSITORY, 123, 3, SHA, tmp_path, prior_only=False) == {
+        "cleanup_confirmed": "true"
+    }
+    assert observed == ["trtmc-gpu-ci-123-1", "trtmc-gpu-ci-123-2", "trtmc-gpu-ci-123-1"]
+    assert sleeps == [recovery.POLL_INTERVAL]
+    assert sum(path.endswith("/201/zip") for path in calls) == 1
+
+
+def test_unavailable_artifact_is_retried_without_redeleting_a_confirmed_other_attempt(
+    monkeypatch, tmp_path
+):
+    _, first, first_archive = _fixture(1)
+    _, second, second_archive = _fixture(2)
+    calls, responses = _api_fixture(
+        monkeypatch,
+        jobs=[_producer(1), _producer(2)],
+        artifacts=[second],
+        archives={
+            f"repos/{REPOSITORY}/actions/artifacts/201/zip": first_archive,
+            f"repos/{REPOSITORY}/actions/artifacts/202/zip": second_archive,
+        },
+    )
+    observed = []
+    monkeypatch.setattr(recovery, "cleanup", lambda name, **kw: observed.append(name))
+
+    def restore_metadata(_seconds):
+        responses[f"repos/{REPOSITORY}/actions/runs/123/artifacts?per_page=100&page=1"][
+            "artifacts"
+        ] = [first, second]
+
+    monkeypatch.setattr(recovery.time, "sleep", restore_metadata)
+    assert recovery.cleanup_attempts(REPOSITORY, 123, 3, SHA, tmp_path, prior_only=False) == {
+        "cleanup_confirmed": "true"
+    }
+    assert observed == ["trtmc-gpu-ci-123-2", "trtmc-gpu-ci-123-1"]
+    assert sum(path.endswith("/202/zip") for path in calls) == 1

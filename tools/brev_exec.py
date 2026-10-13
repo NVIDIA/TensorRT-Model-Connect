@@ -909,6 +909,7 @@ def _load_lease(path: Path | None, name: str) -> dict | None:
         "owned_instance_observed",
         "ownership_blocked",
         "cleanup_confirmed",
+        "intent_prepared",
     ):
         if key in lease and type(lease[key]) is not bool:
             raise ProvisionError("the persisted Brev lease has an invalid ownership state")
@@ -1598,6 +1599,8 @@ def provision(
     fallback_provider: str = "aws",
     attempts: int = 1,
     probe_image: str = DEFAULT_PROBE_IMAGE,
+    prepare_only: bool = False,
+    from_intent: bool = False,
 ) -> str:
     """Create exactly one fixed-profile VM; leave its persisted lease for cleanup."""
     _validate_name(instance)
@@ -1616,6 +1619,8 @@ def provision(
         )
     if provider not in {"", "aws", "nebius"} or not probe_image or lease_file is None:
         raise ValueError("a supported provider, probe image and persistent lease file are required")
+    if prepare_only and from_intent:
+        raise ValueError("preparing and consuming an allocation intent are separate operations")
     if host_ram_gib is not None:
         if type(host_ram_gib) is not int or host_ram_gib not in {64, 128} or instance_type:
             raise ValueError("host RAM must be 64 or 128 GiB without an explicit instance type")
@@ -1630,11 +1635,11 @@ def provision(
     del gpu, fallback_provider
     path = Path(lease_file)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
+    if path.exists() and not from_intent:
         raise ProvisionError("a persisted lease already exists; refusing another allocation")
     start = time.monotonic()
     deadline = start + timeout
-    lease = {
+    requested = {
         "schema_version": 1,
         "name": instance,
         "sku": instance_type,
@@ -1648,15 +1653,70 @@ def provision(
         "create_accepted": False,
         "stock_bootstrap": True,
     }
-    with path.open("x", encoding="utf-8") as output:
-        output.write(json.dumps(lease, indent=2) + "\n")
-        output.flush()
+    if from_intent:
+        lease = _load_lease(path, instance)
+        if not lease or any(
+            lease.get(key) != value
+            for key, value in {
+                **{
+                    key: requested[key]
+                    for key in ("name", "sku", "requested_disk_gb", "host_ram_gib")
+                },
+                "provider": provider or lease.get("provider"),
+                "phase": "prepared",
+                "intent_prepared": True,
+                "instance_id": None,
+                "create_started": True,
+                "allocation_pending": True,
+                "create_accepted": False,
+            }.items()
+        ):
+            raise ProvisionError("the allocation intent does not match this reservation")
+        for key, environment in (
+            ("run_id", "GITHUB_RUN_ID"),
+            ("run_attempt", "GITHUB_RUN_ATTEMPT"),
+        ):
+            if (
+                key in lease
+                and os.environ.get(environment)
+                and str(lease[key]) != os.environ[environment]
+            ):
+                raise ProvisionError("the allocation intent belongs to a different run attempt")
+        # The immutable artifact stays conservative. This local transition can
+        # prove a pre-POST failure only if the runner survives to publish it.
+        lease.update(phase="validating_intent", create_started=False, allocation_pending=False)
+        _save_lease(path, lease)
+    else:
+        lease = requested
+        run_id, run_attempt = os.environ.get("GITHUB_RUN_ID"), os.environ.get("GITHUB_RUN_ATTEMPT")
+        if instance == f"trtmc-gpu-ci-{run_id}-{run_attempt}":
+            lease.update(run_id=run_id, run_attempt=run_attempt)
+        with path.open("x", encoding="utf-8") as output:
+            output.write(json.dumps(lease, indent=2) + "\n")
+            output.flush()
     try:
-        lease["organization_id"] = _allocation_organization(deadline)
+        organization = _allocation_organization(deadline)
+        if from_intent and lease.get("organization_id") != organization:
+            raise ProvisionError("the allocation intent organization changed")
+        lease["organization_id"] = organization
         _save_lease(path, lease)
         if _inventory(instance, deadline, start) is not None:
             raise ProvisionError("instance name already exists; refusing to reuse or delete it")
         candidate = _select_instance(instance_type, disk_gb, provider, deadline, host_ram_gib)
+        if prepare_only:
+            # Upload this intent before permitting the create step. Once that
+            # step could have run, its archived state must assume a possible
+            # submission, even if a hard kill loses every later local write.
+            lease.update(
+                provider=candidate["provider"],
+                phase="prepared",
+                intent_prepared=True,
+                allocation_pending=True,
+                create_started=True,
+            )
+            _save_lease(path, lease)
+            _publish_name(instance, instance_type, organization)
+            return instance
         lease.update(
             provider=candidate["provider"],
             phase="creating",
@@ -1751,6 +1811,9 @@ def provision_main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--attempts", type=int, default=1)
     parser.add_argument("--probe-image", default=DEFAULT_PROBE_IMAGE)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--prepare-only", action="store_true")
+    mode.add_argument("--from-intent", action="store_true")
     arguments = parser.parse_args(argv)
     try:
         print(provision(**vars(arguments)))
