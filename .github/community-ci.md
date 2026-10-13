@@ -38,11 +38,16 @@ If Dev is enabled, it receives that exact captured snapshot through a dispatch
 of `community-ci.yml` from the selected CI branch. A moving PR merge ref cannot
 silently change Dev's source. A newer PR head invalidates an older request.
 
-The metadata jobs follow the exact Stable and Dev run IDs. Stable keeps its
-existing result publisher. Dev publishes its final result from the execution
-workflow after cleanup is confirmed; a metadata observer timeout or API error
-cannot replace the execution result. Each lane completes independently, so
-Stable does not wait for Dev. Only the metadata jobs need dispatch permission.
+The metadata jobs follow the exact Stable and Dev run IDs. The Dev candidate
+makes each trusted execution publish its own pending and cleanup-gated final
+status. Its outer observer publishes only when reusing the legacy Stable CPU
+workflow. Each lane completes independently, so Stable does not wait for Dev.
+Only metadata jobs need dispatch permission.
+
+When qualification starts from the current `main` entry, its older observer can
+still overwrite Dev's commit status; inspect the dispatched execution's result
+and release evidence. The direct Dev entry uses the candidate observer. Promote
+the observer guard and both-lane inner publisher together.
 
 ## Switch and branch selection
 
@@ -59,15 +64,32 @@ The switch is captured once per request. Turning it off stops Dev on subsequent
 requests; work already started finishes normally. A Dev branch selection alone
 does not enable automatic dual running. Dev must not be a required merge check.
 
-For manual qualification, select **Actions > Community CI > Run workflow** and
-enter a PR number. Selecting `ci/developer` runs Dev against the existing Stable
-PR snapshot; with dual running enabled it also publishes the paired Stable result.
-Selecting `main` manually starts Stable and, when enabled, Dev. Keep the internal
-snapshot, lane, and request inputs at their defaults. Manual starts require
-maintain or admin access. `run_gpu_smoke` retains the existing manual GPU opt-in.
-For Dev qualification, `gpu_provider` can select AWS or Nebius explicitly.
-Its default `auto` retains Brev's normal selection. The override is forwarded
-only to Dev executions; Stable does not receive this experimental input.
+For manual qualification, use the protected Dev branch with an explicit Dev
+lane. This exercises Dev's own coordinator, observer, and resource owner without
+starting or publishing Stable:
+
+```bash
+gh workflow run community-ci.yml --repo NVIDIA/TensorRT-Model-Connect \
+  --ref ci/developer -f ci_lane=dev -f pr_number=1581
+```
+
+Replace the example PR number with the PR to qualify. Keep the internal snapshot
+and request inputs empty. The default Dev profile uses AWS; this entry also
+accepts `gpu_provider=aws` or `gpu_provider=nebius` for explicit qualification.
+Manual starts require maintain or admin access. A direct Dev entry forces only
+the Dev lane regardless of the dual-run switch and selects `ci/developer` as its
+implementation.
+
+The existing `main` manual entry with `ci_lane=dev` remains supported. Its current
+schema does not declare `gpu_provider`, so omit that input when starting from
+`main`. Its older observer can still overwrite Dev's commit status until
+promotion; inspect the dispatched execution's result and release evidence.
+
+Stable coordination and publication remain restricted to `refs/heads/main`.
+The only other coordinator entry is `workflow_dispatch` on exact
+`refs/heads/ci/developer` with explicit `ci_lane=dev`. Dev requests for the default
+Stable lane, automatic Dev events, tags, and other branches are not admitted.
+The approved execution refs remain `main` and protected `ci/developer`.
 
 ## Dev GPU experiment
 
@@ -311,8 +333,9 @@ credentials and the Docker socket are not mounted into the test containers.
 Develop and qualify GPU runner changes on `ci/developer`. A PR for this change
 must target `ci/developer`, so merging it updates the implementation selected by
 the Dev lane. After qualification, promote the reviewed Dev implementation to
-`main` in a separate PR. Keep the Stable lane unchanged during development and
-apply the main-only publisher guard from #1341 before promotion.
+`main` in a separate PR. Keep the active Stable lane unchanged during development.
+Retain main-only Stable coordination, the explicit Dev-only manual entry,
+and approved ref guards together with execution-owned status publication.
 
 Container isolation addresses dependency and writable-state contamination. It
 does not grant access to gated checkpoints, stage undeclared secondary assets,
@@ -324,7 +347,8 @@ The existing `gpu-ci-dispatch` environment permits `main` and protected
 need protection and environment approval. Dev uses a disposable Brev instance,
 with cleanup in the job and an independent cleanup job. Per-PR and per-lane
 concurrency keeps independent PRs parallel; shared provider quota can still
-prevent allocation. Dev GPU type and CUDA architecture default to L40 and 89.
+prevent allocation. The default Dev profile uses AWS L4; explicit provider
+qualification can select the configured Nebius L40S profile.
 
 ## Qualification and promotion
 
@@ -352,5 +376,13 @@ Stable CPU-to-GPU pipeline from `main`. The original PR run becomes a read-only
 view of that pipeline's real CPU result, preserving the existing Internal CI
 bridge without running the CPU suite twice. The trusted base's promotion marker
 controls this transition, so a promotion PR still receives ordinary Stable CPU
-tests before it is merged. Dev qualification from `ci/developer` continues to
-reuse the current Stable PR run. The live cutover still requires post-merge proof.
+tests before it is merged. Manual Dev qualification starts from `ci/developer`
+with explicit `ci_lane=dev` and captures the same Stable source snapshot.
+The live cutover still requires post-merge proof.
+
+The legacy CPU compatibility check pins the matching trusted execution and
+retries bounded GitHub read failures while that same run is queued or executing.
+Only its real CPU success can pass. The observer includes queue time in a
+355-minute wall-clock budget within the hosted job limit; exhaustion reports an
+infrastructure observation error without restarting the child or claiming a CPU
+result that was not observed.

@@ -91,19 +91,28 @@ def test_registered_entry_keeps_image_production_out_of_pr_statuses() -> None:
     assert caller["concurrency"]["cancel-in-progress"] == "false"
 
 
-def workflow_condition(expression: str, *, task: str, snapshot: str = "") -> bool:
+def workflow_condition(
+    expression: str,
+    *,
+    task: str,
+    snapshot: str = "",
+    ref: str = "refs/heads/main",
+    lane: str = "stable",
+) -> bool:
     expression = expression.removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("&&", " and ").replace("||", " or ")
     expression = expression.replace("!cancelled()", "not cancelled()")
     return bool(
         eval(
-            expression,
+            "(" + expression + ")",
             {"__builtins__": {}},
             {
                 "github": SimpleNamespace(
-                    event_name="workflow_dispatch", repository="NVIDIA/TensorRT-Model-Connect"
+                    event_name="workflow_dispatch",
+                    repository="NVIDIA/TensorRT-Model-Connect",
+                    ref=ref,
                 ),
-                "inputs": SimpleNamespace(task=task, source_snapshot=snapshot),
+                "inputs": SimpleNamespace(task=task, source_snapshot=snapshot, ci_lane=lane),
                 "cancelled": lambda: False,
                 "always": lambda: True,
                 "contains": lambda sequence, item: item in sequence,
@@ -115,7 +124,9 @@ def workflow_condition(expression: str, *, task: str, snapshot: str = "") -> boo
     )
 
 
-def test_registered_audit_cannot_enter_test_or_producer_jobs() -> None:
+@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/heads/ci/developer"])
+@pytest.mark.parametrize("lane", ["stable", "dev"])
+def test_registered_audit_cannot_enter_test_or_producer_jobs(ref: str, lane: str) -> None:
     caller = yaml.load(
         (ROOT / ".github/workflows/community-ci.yml").read_text(), Loader=yaml.BaseLoader
     )
@@ -143,8 +154,10 @@ def test_registered_audit_cannot_enter_test_or_producer_jobs() -> None:
             task == "dependency-image-access-check"
         )
         for name, snapshot in (("snapshot", ""), ("authorize", "frozen"), ("required", "frozen")):
-            assert workflow_condition(jobs[name]["if"], task=task, snapshot=snapshot) == (
-                task == "test"
+            assert workflow_condition(
+                jobs[name]["if"], task=task, snapshot=snapshot, ref=ref, lane=lane
+            ) == (
+                task == "test" and (name != "snapshot" or ref == "refs/heads/main" or lane == "dev")
             )
     assert WORKFLOW["jobs"]["produce"]["if"] == "${{ needs.authorize.outputs.allowed == 'true' }}"
     assert WORKFLOW["jobs"]["cleanup"]["if"] == (
