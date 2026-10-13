@@ -21,6 +21,8 @@ class Encoder final : public trtmc::IEncoding {
     trtmc::EmbeddingResult encode(const std::string& text) override {
         if (text == "nonfinite")
             return {{std::numeric_limits<float>::infinity()}, 1};
+        if (text == "wrong_dimension")
+            return {{0.25F, -2.0F}, 3};
         if (text != "Exact input: caf\xc3\xa9")
             throw std::runtime_error("fixture received a changed input");
         std::vector<float> values(384, 0.25F);
@@ -71,23 +73,27 @@ void test_complete_vector_and_recovery() {
             "native timing is explicit");
 }
 
-void test_nonfinite_is_fatal_and_redacted() {
-    Encoder encoder;
-    std::istringstream input("{\"id\":\"bad\",\"op\":\"embed\",\"input\":\"nonfinite\"}\n");
-    std::ostringstream output;
-    require(trtmc::server::run_task_worker(encoder, input, output) == 1,
-            "invalid native output retires worker");
-    const auto replies = messages(output.str());
-    require(replies.size() == 2 && replies[1].at("ok") == false &&
-                replies[1].at("error").at("message") == "native worker operation failed",
-            "native output errors are redacted");
+void test_invalid_output_is_fatal_and_redacted() {
+    for (const auto* text : {"nonfinite", "wrong_dimension"}) {
+        Encoder encoder;
+        std::istringstream input(Json{{"id", "bad"}, {"op", "embed"}, {"input", text}}.dump() +
+                                 "\n");
+        std::ostringstream output;
+        require(trtmc::server::run_task_worker(encoder, input, output) == 1,
+                "invalid native output retires worker");
+        const auto replies = messages(output.str());
+        require(replies.size() == 2 && replies[1].at("ok") == false &&
+                    replies[1].at("error").at("message") == "native worker operation failed",
+                "native output errors are redacted");
+    }
 }
+
 } // namespace
 
 int main() {
     try {
         test_complete_vector_and_recovery();
-        test_nonfinite_is_fatal_and_redacted();
+        test_invalid_output_is_fatal_and_redacted();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

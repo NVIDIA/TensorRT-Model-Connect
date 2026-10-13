@@ -285,6 +285,12 @@ int run_text_protocol(std::int64_t default_tokens, Generate&& generate, std::ist
                         input, output, std::move(streaming));
 }
 
+const std::vector<float>& checked_embedding_values(const EmbeddingResult& result) {
+    if (result.dim <= 0 || static_cast<std::size_t>(result.dim) != result.data.size())
+        throw std::runtime_error("embedding Task returned inconsistent dimensions");
+    return result.data;
+}
+
 template <class Invoke, class Values>
 int run_embedding_protocol(Invoke&& invoke, Values&& extract_values, std::istream& input,
                            std::ostream& output) {
@@ -321,7 +327,7 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) 
             throw std::invalid_argument("bundle does not implement encoding");
         return run_embedding_protocol(
             [&](const std::string& text) { return encoder->encode(text); },
-            [](const EmbeddingResult& result) { return result.data; }, input, output);
+            checked_embedding_values, input, output);
     }
     if (std::string_view(task.task()) == IEmbedding::kTask) {
         auto* embedding = dynamic_cast<IEmbedding*>(&task);
@@ -329,7 +335,7 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) 
             throw std::invalid_argument("bundle does not implement embedding");
         return run_embedding_protocol(
             [&](const std::string& text) { return embedding->embed(text); },
-            [](const EmbeddingResult& result) { return result.data; }, input, output);
+            checked_embedding_values, input, output);
     }
     return run_text_worker(task, input, output);
 }
