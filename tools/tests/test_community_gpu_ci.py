@@ -3712,6 +3712,28 @@ def test_family_result_preserves_failed_skipped_and_unrun_cases(tmp_path):
     assert result["evidence"] == "original validation error"
 
 
+@pytest.mark.parametrize("phase", ["gpu", "environment"])
+def test_preentry_probe_result_preserves_phase_and_evidence(tmp_path, phase):
+    path = tmp_path / "result.json"
+    env = {
+        "TRTMC_NATIVE_BUILD_DIR": str(tmp_path / "build"),
+        "TRTMC_GPU_RESULT_FILE": str(path),
+    }
+    evidence = f"{phase} probe failed before the PR entrypoint"
+    with pytest.raises(RuntimeError, match=evidence):
+        with community_gpu_ci._family_result(env, "alpha") as record:
+            record["requested_cases"] = ["one"]
+            community_gpu_ci._phase(record, env, phase, "infra_failure")
+            raise RuntimeError(evidence)
+    result = community_gpu_ci._container_result(path, "alpha", 1, {}, ("one",))
+    assert result["phase"] == phase
+    assert result["evidence"] == evidence
+    assert result["status"] == "failed"
+    assert result["failure_class"] == "infra_failure"
+    assert result["entrypoint_started"] is False
+    assert result["cases"] == {"one": "not_run"}
+
+
 @pytest.mark.parametrize("mutation", ["missing", "empty", "skipped", "wrong_owner", "symlink"])
 def test_container_exit_zero_requires_complete_owned_e2e_evidence(tmp_path, mutation):
     path = tmp_path / "result.json"

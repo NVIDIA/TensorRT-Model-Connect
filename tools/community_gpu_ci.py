@@ -863,6 +863,7 @@ def _container_result(
             "plan",
             "dependencies",
             "gpu",
+            "environment",
             "configure",
             "build",
             "runtime",
