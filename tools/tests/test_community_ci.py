@@ -3291,6 +3291,94 @@ def test_gpu_failure_reaches_release_before_original_result(tmp_path, gpu_job, p
     assert (tmp_path / "result-output").read_text() == f"conclusion={state}\n"
 
 
+def test_interrupted_gpu_evidence_survives_blocked_cleanup_and_reruns(tmp_path, gpu_job):
+    """Execute diagnostics and retain each attempt while deletion is unconfirmed."""
+    report = {
+        "schema_version": 1,
+        "families": [{
+            "family": "example", "status": "running", "phase": "environment",
+            "failure_class": "infra_failure", "entrypoint_started": False,
+            "requested_cases": ["one"], "cases": {"one": "not_run"},
+        }],
+    }
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    for attempt in (1, 2):
+        directory = tmp_path / str(attempt)
+        directory.mkdir()
+        harness = JobHarness(directory, gpu_job)
+        log = directory / "gpu-ci-output.log"
+        log.write_text("TRTMC_GPU_SUMMARY=" + json.dumps(report) + "\npartial build output\n")
+        summary = directory / "trtmc-community-gpu-summary.json"
+        summarize = harness.steps["Summarize every selected GPU family"]
+        result = subprocess.run(
+            ["bash", "-e", "-c", summarize["run"].replace(
+                "/tmp/gpu-ci-output.log", shlex.quote(str(log))
+            )],
+            cwd=REPO_ROOT,
+            env={**harness.environment, "GITHUB_STEP_SUMMARY": str(directory / "rendered")},
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        result = harness.run("classification", SUMMARY_FILE=str(summary))
+        assert result.returncode == 0, result.stderr
+        assert (directory / "classification-output").read_text() == "failure_class=infra_failure\n"
+
+        # Replace only the artifact service with an immutable local store. A
+        # rerun must not collide with or replace the earlier attempt's output.
+        upload = harness.steps["Upload the smoke-test log"]
+        name = upload["with"]["name"].replace("${{ github.run_id }}", "123").replace(
+            "${{ github.run_attempt }}", str(attempt)
+        )
+        destination = artifacts / name
+        destination.mkdir()
+        for path in upload["with"]["path"].splitlines():
+            source = Path(path.replace("/tmp/gpu-ci-output.log", str(log)).replace(
+                "${{ runner.temp }}", str(directory)
+            ))
+            shutil.copyfile(source, destination / source.name)
+        released = harness.run("release", VM_CLEANUP_EXIT="75")
+        assert released.returncode == 75
+        assert not (directory / "release-output").exists()
+        assert not (directory / "result-output").exists()
+        assert (destination / log.name).read_text() == log.read_text()
+        receipt = json.loads((destination / summary.name).read_text())
+        assert receipt["families"][0]["phase"] == "environment"
+        assert receipt["passed"] is False and receipt["complete"] is False
+    assert len(list(artifacts.iterdir())) == 2
+
+
+@pytest.mark.parametrize("diagnostic", ["Summarize every selected GPU family", "classification"])
+def test_gpu_diagnostic_failure_still_releases_and_cannot_report_success(
+    tmp_path, gpu_job, diagnostic
+):
+    harness = JobHarness(tmp_path, gpu_job)
+    step = harness.steps[diagnostic]
+    assert step["if"] == "always()"
+    assert not step.get("continue-on-error", False)
+    assert 0 < step["timeout-minutes"] <= 2
+    # An unwritable output is a real script failure, even after successful GPU
+    # execution. It must not turn into a passing conclusion after release.
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=REPO_ROOT,
+        env={**harness.environment, "GITHUB_STEP_SUMMARY": str(tmp_path),
+             "GITHUB_OUTPUT": str(tmp_path), "SUMMARY_FILE": str(tmp_path / "missing")},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode != 0
+    assert "always()" in harness.steps["release"]["if"]
+    assert "classification" not in harness.steps["release"]["if"]
+    released = harness.run("release")
+    assert released.returncode == 0, released.stderr
+    result = harness.run(
+        "result", JOB_STATUS="failure", TEST_OUTCOME="success", TEST_CONCLUSION="success",
+        CLEANUP_CONFIRMED="true",
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "result-output").read_text() == "conclusion=failure\n"
+
+
 def _cleanup_evidence(
     tmp_path,
     attempts,
@@ -3515,13 +3603,22 @@ def test_gpu_lease_survives_reservation_and_cleanup_with_a_trusted_backstop(gpu_
         "Reserve a GPU instance",
         "Preserve the GPU instance lease",
         "Build the GPU image and validate the exact PR merge",
+        "Summarize every selected GPU family",
+        "Classify the GPU result",
+        "Upload the smoke-test log",
         "Always tear down the GPU instance",
+        "Record the step conclusion",
         "Preserve the final GPU instance lease",
     ]
     assert [names.index(name) for name in ordered] == sorted(names.index(name) for name in ordered)
     assert names.index("Always tear down the GPU instance") < names.index(
         "Record the step conclusion"
     )
+    output = steps["Upload the smoke-test log"]
+    assert output["if"] == "always()"
+    assert output["continue-on-error"] is True
+    assert 0 < output["timeout-minutes"] <= 2
+    assert not output["with"].get("overwrite")
     intent = steps["Preserve the GPU allocation intent before creation"]
     assert intent.get("if") in (None, "success()", "${{ success() }}")
     assert intent["with"]["name"] == "gpu-ci-intent-${{ github.run_id }}-${{ github.run_attempt }}"
