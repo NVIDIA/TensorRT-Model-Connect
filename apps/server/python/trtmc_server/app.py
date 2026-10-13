@@ -31,10 +31,10 @@ from .errors import (
     WorkerTimeoutError,
 )
 from .metrics import Metrics
-from .protocol import chat_prompt, extract_embedding, extract_result, generation_config, public_worker_error
+from .protocol import chat_prompt, extract_embedding, extract_ranking, extract_result, generation_config, public_worker_error
 from .records import RequestPolicy, RequestRecords
 from .registry import ModelRegistry
-from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest
+from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest
 from .worker import WorkerSession
 
 
@@ -66,6 +66,7 @@ class _BodyLimitMiddleware:
             "/v1/completions",
             "/v1/chat/completions",
             "/v1/embeddings",
+            "/v1/ranking",
         }:
             await self.app(scope, receive, send)
             return
@@ -567,6 +568,28 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         # The native Task does not expose token usage; omit it rather than fabricate zero.
         return {"object": "list", "model": request.model,
                 "data": [{"object": "embedding", "index": 0, "embedding": vector}]}
+
+    @app.post("/v1/ranking")
+    async def ranking(http_request: Request, request: RankingRequest) -> Any:
+        route = http_request.url.path
+        context = http_request.state.timing
+        context["model"] = request.model
+        documents = [passage.text for passage in request.passages]
+        size = len(request.query.text.encode("utf-8")) + sum(len(text.encode("utf-8")) for text in documents)
+        if size > config.max_prompt_bytes:
+            metrics.reject(route, 413)
+            return error_response(413, "content_too_large", "query and passages exceed the server limit")
+        result = await execute_task(http_request, request.model, "reranking", "rerank",
+                                    {"query": request.query.text, "documents": documents},
+                                    lambda value: extract_ranking(value, len(documents)))
+        if isinstance(result, JSONResponse):
+            return result
+        scores, _ = extract_ranking(result, len(documents))
+        order = sorted(range(len(scores)), key=lambda index: -scores[index])
+        context.update(input_items=len(documents), passages=len(documents),
+                       query_bytes=len(request.query.text.encode("utf-8")),
+                       passage_bytes=[len(text.encode("utf-8")) for text in documents])
+        return {"rankings": [{"index": index, "logit": scores[index]} for index in order]}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(http_request: Request, request: ChatCompletionRequest) -> Any:

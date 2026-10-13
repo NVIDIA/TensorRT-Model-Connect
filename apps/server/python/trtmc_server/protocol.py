@@ -70,6 +70,17 @@ def extract_embedding(result: Any) -> tuple[list[float], dict[str, float]]:
     return values, extract_task_timing(result)
 
 
+def extract_ranking(result: Any, expected_count: int) -> tuple[list[float], dict[str, float]]:
+    if not isinstance(result, Mapping):
+        raise WorkerProtocolError("worker ranking result must be an object")
+    scores = result.get("scores")
+    if (not isinstance(scores, list) or len(scores) != expected_count or
+            any(isinstance(value, bool) or not isinstance(value, (int, float)) or
+                not math.isfinite(value) for value in scores)):
+        raise WorkerProtocolError("worker ranking result must contain one finite score per passage")
+    return scores, extract_task_timing(result)
+
+
 def extract_task_timing(result: Mapping[str, Any]) -> dict[str, float]:
     wall = result.get("model_call_ms")
     if (isinstance(wall, bool) or not isinstance(wall, (int, float)) or

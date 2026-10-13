@@ -173,5 +173,5 @@ class ModelRegistry:
         capabilities = metadata.get("capabilities")
         if (not isinstance(capabilities, list) or not capabilities or
                 not all(isinstance(value, str) for value in capabilities) or
-                not {"text_generation", "embeddings"}.intersection(capabilities)):
+                not {"text_generation", "embeddings", "reranking"}.intersection(capabilities)):
             raise WorkerProtocolError("worker does not advertise a supported capability")

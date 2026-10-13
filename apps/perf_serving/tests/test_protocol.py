@@ -82,6 +82,16 @@ def test_stop_sequences_truncate_text():
         openai.stop_sequences({"stop": [""]})
 
 
+@pytest.mark.parametrize("body", [
+    {"query": {"text": "q"}, "passages": []},
+    {"query": {"text": "q"}, "passages": [{"text": "a"}], "truncate": "END"},
+    {"query": {"text": 1}, "passages": [{"text": "a"}]},
+])
+def test_ranking_rejects_unsupported_truncation_and_non_text_inputs(body):
+    with pytest.raises(openai.RequestError):
+        openai.ranking(body, {})
+
+
 def test_ranking_and_image_generation_mapping():
     ranking = openai.ranking({"query": {"text": "q"}, "passages": [{"text": "a"}, {"text": "b"}]}, {})
     assert ranking == {"query": "q", "documents": ["a", "b"]}

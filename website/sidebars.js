@@ -64,6 +64,7 @@ module.exports = {
         'user-guides/run-inference',
         'user-guides/serve-text-generation',
         'user-guides/profile-embeddings-with-aiperf',
+        'user-guides/profile-reranking-with-aiperf',
         {
           type: 'category',
           label: 'Task Guides',

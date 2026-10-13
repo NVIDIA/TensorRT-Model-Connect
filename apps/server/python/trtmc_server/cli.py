@@ -32,7 +32,7 @@ def positive(value: str) -> int:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="trtmc-server",
-        description="Serve text-generation bundles and embedding bundles through persistent native workers",
+        description="Serve text-generation bundles alongside embedding and reranking bundles through persistent native workers",
     )
     result.add_argument("bundle", nargs="?", help="single .bundle artifact")
     result.add_argument("--model-name", help="API model name for the positional bundle")

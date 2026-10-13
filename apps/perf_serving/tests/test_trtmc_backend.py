@@ -109,3 +109,13 @@ def test_isolate_requests_uses_a_fresh_worker_per_request(tmp_path, worker):
         assert backend.describe()["isolate_requests"] is True
     finally:
         backend.close()
+
+
+def test_ranking_transport_is_complete_without_full_logging(tmp_path, worker):
+    backend = TrtmcWorkerBackend(worker=worker, session={**session(), "operation": "rerank"},
+                                scratch=tmp_path, full_observations=False)
+    try:
+        result = backend.invoke({"query": "q", "documents": ["a", "b"]}, tmp_path / "out")
+        assert result.observation["full_observation"] is True
+    finally:
+        backend.close()

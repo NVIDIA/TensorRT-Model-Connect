@@ -57,3 +57,14 @@ class EmbeddingRequest(StrictRequest):
     input: str | list[str]
     encoding_format: Literal["float"] = "float"
     user: str | None = None
+
+
+class RankingText(StrictRequest):
+    text: str = Field(min_length=1)
+
+
+class RankingRequest(StrictRequest):
+    model: str
+    query: RankingText
+    passages: list[RankingText] = Field(min_length=1)
+    truncate: Literal["NONE"] = "NONE"

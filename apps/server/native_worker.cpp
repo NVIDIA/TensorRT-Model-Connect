@@ -318,6 +318,40 @@ int run_embedding_protocol(Invoke&& invoke, Values&& extract_values, std::istrea
         input, output);
 }
 
+template <class Invoke, class Scores>
+int run_ranking_protocol(Invoke&& invoke, Scores&& extract_scores, std::istream& input,
+                         std::ostream& output) {
+    const Json ready{
+        {"event", "ready"}, {"protocol_version", 2}, {"capabilities", Json::array({"reranking"})}};
+    return run_protocol(
+        ready,
+        {{"rerank",
+          [&](const Json& request) {
+              const auto query = string_field(request, "query");
+              const auto found = request.find("documents");
+              if (found == request.end() || !found->is_array() || found->empty() ||
+                  !std::all_of(found->begin(), found->end(), [](const Json& value) {
+                      return value.is_string() && !value.get_ref<const std::string&>().empty();
+                  }))
+                  throw ProtocolError("documents must be a non-empty list of non-empty strings");
+              const auto documents = found->get<std::vector<std::string>>();
+              const auto started = std::chrono::steady_clock::now();
+              auto result = invoke(query, documents);
+              const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - started)
+                                       .count();
+              const auto scores = extract_scores(result);
+              if (scores.size() != documents.size() ||
+                  !std::all_of(scores.begin(), scores.end(),
+                               [](float score) { return std::isfinite(score); }))
+                  throw std::runtime_error("ranking Task returned invalid scores");
+              return Json{{"scores", scores},
+                          {"model_call_ms", wall_ms},
+                          {"timing_scope", "public_task_call_wall"}};
+          }}},
+        input, output);
+}
+
 int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) {
     // Legacy bundle modes select the declared public Task before invocation.
     // Several families implement more C++ interfaces than a given bundle enables.
@@ -336,6 +370,17 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) 
         return run_embedding_protocol(
             [&](const std::string& text) { return embedding->embed(text); },
             checked_embedding_values, input, output);
+    }
+
+    if (std::string_view(task.task()) == IReranking::kTask) {
+        auto* ranking = dynamic_cast<IReranking*>(&task);
+        if (!ranking)
+            throw std::invalid_argument("bundle does not implement reranking");
+        return run_ranking_protocol(
+            [&](const std::string& query, const std::vector<std::string>& documents) {
+                return ranking->rerank_batch(query, documents);
+            },
+            [](const std::vector<float>& scores) { return scores; }, input, output);
     }
     return run_text_worker(task, input, output);
 }
@@ -358,6 +403,20 @@ int run_model_worker(const Model& model, std::istream& input, std::ostream& outp
                                                                     result.values().end());
                                       },
                                       input, output);
+    }
+
+    if (model.supports<TextQueryDocumentsToRelevance>()) {
+        const auto task = model.task<TextQueryDocumentsToRelevance>();
+        return run_ranking_protocol(
+            [&](const std::string& query, const std::vector<std::string>& documents) {
+                return task.run({query, documents});
+            },
+            [](const DocumentRelevanceResult& result) {
+                if (result.kind() != TRTMC_SCORE_LOGIT)
+                    throw std::runtime_error("NIM ranking requires raw logit scores");
+                return std::vector<float>(result.scores().begin(), result.scores().end());
+            },
+            input, output);
     }
     return run_text_worker(model, input, output);
 }

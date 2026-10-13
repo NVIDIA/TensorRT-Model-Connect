@@ -356,16 +356,22 @@ modes require their own evidence.
 | Profile | Endpoint / AIPerf type | Qualified workload | Evidence |
 | --- | --- | --- | --- |
 | `bge-small-en-v1.5` | `/v1/embeddings` / `embeddings` | One sentence per request, FP16, context 512, concurrency 1; five fixed example sentences, 5 warmups and 50 measured requests | [Stage 1](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1668) |
+| `nemotron-rerank-vl-1b-v2` | `/v1/ranking` / `nim_rankings` | One query plus two fixed text passages, FP16, context 685, concurrency 1; 5 warmups and 50 measured requests | [Stage 2](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1669) |
 
 The embedding pilot passed the unchanged bert family correctness checks and a
 real published AIPerf 0.13.0 run on one GB300 with TensorRT 11.1.0.106. All
-55 responses contained complete 384-value vectors; client/server request IDs
-and timing exports were matched. Additional epic stages remain planned until
-their native correctness and actual client runs are complete.
+55 responses contained complete 384-value vectors.
+
+The reranking pilot passed the unchanged eagle_vlm family correctness checks
+and the same published client run configuration. All 55 responses retained
+real finite scores and original passage indices. Both pilots matched all
+client/server request IDs and timing exports. Additional epic stages remain
+planned until their native correctness and actual client runs are complete.
 
 Use [Profile Embeddings with AIPerf](../../website/docs/user-guides/profile-embeddings-with-aiperf.md)
-for the short recipe. Native Task-call wall time stays separate from client HTTP
-latency; this small run is an integration example, not a performance gate.
+or [Profile Reranking with AIPerf](../../website/docs/user-guides/profile-reranking-with-aiperf.md)
+for the short recipes. Native Task-call wall time stays separate from client
+HTTP latency; these small runs are integration examples, not performance gates.
 
 ## Text profiling with the persistent server
 
