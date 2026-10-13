@@ -187,7 +187,9 @@ def _candidate_tokenizer(model: Mapping[str, Any]) -> Any:
     from transformers import AutoTokenizer
 
     name, revision = tokenizer_source(model)
-    return AutoTokenizer.from_pretrained(name, revision=revision,
+    options = ({"subfolder": model["candidate"]["tokenizer_subfolder"]}
+               if model["candidate"].get("tokenizer_subfolder") else {})
+    return AutoTokenizer.from_pretrained(name, revision=revision, **options,
                                          trust_remote_code=bool(model["reference"].get("trust_remote_code")))
 
 

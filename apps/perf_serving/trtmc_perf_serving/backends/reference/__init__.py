@@ -107,4 +107,7 @@ class ReferenceBackend:
                           {**dict(invocation.extra or {}), "model_only_ms": invocation.model_call_ms})
 
     def close(self) -> None:
+        close = getattr(self._adapter, "close", None)
+        if close is not None:
+            close()
         self._adapter = None

@@ -4,9 +4,14 @@
 # Image understanding of a unified model: MMStar.
 absolute: [mmstar]
 
+candidate:
+  build: {name: lance-3b-x2t-image-benchmark}
+  tokenizer_subfolder: Lance_3B
+  # 256 image tokens, up to 16 template tokens, and the benchmark's 16 generated tokens.
+  benchmark_sequence_length: {extra_tokens: 288}
+
 reference:
-  # The upstream Lance inference is a batch command (inference_lance.py) that loads the model on every invocation;
-  # serving it per request needs a resident adapter around its internals, not written yet.
-  not_covered: the upstream Lance inference reloads the model per invocation; no resident native adapter yet
+  adapter: families/lance/reference/adapter.py
+  prepare: families/lance/reference/prepare.py
   requirements: families/lance/requirements.txt  # the family's dependencies, layered on the serving interpreter
   build_isolation: false  # its requirements build native extensions against the installed torch
