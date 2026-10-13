@@ -1538,21 +1538,9 @@ jobs:
           cleanup_checkpoint_token
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
 
-      - name: Always tear down the GPU instance
-        id: release
-        if: ${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}
-        env:
-          INSTANCE_NAME: ${{ steps.prepare.outputs.instance_name }}
-        run: |
-          set -euo pipefail
-          python3 -m tools.brev_exec cleanup \
-            --instance "$INSTANCE_NAME" \
-            --lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" \
-            --until-deleted
-          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
-
       - name: Summarize every selected GPU family
         if: always()
+        timeout-minutes: 1
         run: |
           python3 -m tools.community_gpu_ci \
             --summarize-log /tmp/gpu-ci-output.log \
@@ -1562,6 +1550,7 @@ jobs:
       - name: Classify the GPU result
         if: always()
         id: classification
+        timeout-minutes: 1
         env:
           SUMMARY_FILE: ${{ runner.temp }}/trtmc-community-gpu-summary.json
         run: |
@@ -1604,6 +1593,34 @@ jobs:
               output.write(f"failure_class={category}\n")
           PY
 
+      # Preserve local execution evidence before blocking deletion. Diagnostic
+      # failures cannot skip release, and final status still waits for release.
+      - name: Upload the smoke-test log
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gpu-ci-output-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/gpu-ci-output.log
+            ${{ runner.temp }}/trtmc-community-gpu-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Always tear down the GPU instance
+        id: release
+        if: ${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}
+        env:
+          INSTANCE_NAME: ${{ steps.prepare.outputs.instance_name }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.brev_exec cleanup \
+            --instance "$INSTANCE_NAME" \
+            --lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" \
+            --until-deleted
+          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+
       - name: Record the step conclusion
         if: always()
         id: result
@@ -1633,18 +1650,6 @@ jobs:
           path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
           if-no-files-found: error
           retention-days: 35
-
-      - name: Upload the smoke-test log
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: gpu-ci-output-${{ needs.gpu-authorize.outputs.pr_number }}
-          path: |
-            /tmp/gpu-ci-output.log
-            ${{ runner.temp }}/trtmc-community-gpu-summary.json
-          if-no-files-found: ignore
-          retention-days: 7
 
   cleanup:
     name: Community GPU / Cleanup
