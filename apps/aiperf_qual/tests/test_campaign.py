@@ -524,12 +524,15 @@ def test_summary_keeps_the_latest_result_of_a_profile_run_on_several_roots(tmp_p
 
 def test_summary_counts_every_planned_profile(tmp_path):
     root = tmp_path / "gb300-1"
-    campaign.write_plan(root, ["a", "b"], [{"profile": "c", "reason": "no Task defaults"}])
+    campaign.write_plan(root, ["a", "b"], [{"profile": "c", "reason": "no Task defaults for 'structured_decision' (c)"},
+                                           {"profile": "bad", "reason": "unknown benchmark 'typo'"}])
     (root / "a").mkdir()
     (root / "a/report.json").write_text(json.dumps({"task": "t", "started": 1.0, "verdict": {"category": "pass"}}))
     text, counts = campaign.summary([root])
     assert counts == {"pass": 1, "not-run": 1, "config-error": 1}
-    assert "| White | b | - | gb300-1 |" in text and "no Task defaults" in text
+    assert "| White | b | - | gb300-1 |" in text and "unknown benchmark 'typo'" in text
+    assert "| White | c |" not in text and "no Task defaults" not in text
+    assert len(json.loads((root / campaign.PLAN).read_text())["config_errors"]) == 2
 
 
 def test_run_all_exit_code_reports_harness_failures():

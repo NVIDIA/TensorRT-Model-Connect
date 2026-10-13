@@ -308,7 +308,7 @@ def exit_code(records: Sequence[Mapping[str, Any]], config_errors: Sequence[Mapp
 
 
 def write_exclusions(out_root: Path, excluded: Sequence[Mapping[str, Any]]) -> None:
-    """Record the profiles the machine's model list leaves out, so the summary shows them."""
+    """Audit the profiles the machine's model list leaves out, outside result statistics."""
     out_root.mkdir(parents=True, exist_ok=True)
     (out_root / EXCLUSIONS).write_text(json.dumps(list(excluded), indent=2) + "\n")
 
@@ -495,8 +495,8 @@ def run_context(roots: Sequence[Path]) -> str:
 
 
 def collect(roots: Sequence[Path]) -> tuple[dict[str, dict[str, Any]], collections.Counter, dict[str, int]]:
-    """The latest result of every planned or reported profile. Exclusions remain in excluded.json
-    for audit, outside result rows and statistics; an actual result from another host still counts."""
+    """Latest results of configured profiles. Exclusions and absent Task configurations remain
+    in run metadata for coverage audit, outside result statistics; real results still count."""
     rows = {}
     for root in roots:
         plan = json.loads((root / PLAN).read_text()) if (root / PLAN).is_file() else {}
@@ -511,7 +511,9 @@ def collect(roots: Sequence[Path]) -> tuple[dict[str, dict[str, Any]], collectio
             row = _row(directory)
             if row and row["time"] >= rows.get(directory.name, {}).get("time", float("-inf")):
                 rows[directory.name] = {**row, "root": root.name}  # the latest run of a profile wins
-    rows = {profile: row for profile, row in rows.items() if row["category"] != "excluded"}
+    rows = {profile: row for profile, row in rows.items()
+            if row["category"] != "excluded" and not (
+                row["category"] == "config-error" and str(row.get("notes", "")).startswith("no Task defaults"))}
     counts = collections.Counter(row["category"] for row in rows.values())
     ordered = [*CATEGORIES, *sorted(set(counts) - set(CATEGORIES))]
     return rows, counts, {category: position for position, category in enumerate(ordered)}

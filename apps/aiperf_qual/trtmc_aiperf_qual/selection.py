@@ -4,7 +4,7 @@
 
     models:
       include: all                     # all ready catalog profiles (default), or names / glob patterns
-      exclude:                         # a reason is required; excluded models are listed in the summary
+      exclude:                         # a reason is required; exclusions remain in the run audit
         - {profile: "flux-2-dev*", reason: "does not fit in 80 GB"}
       max_checkpoint_gib: 30           # optional: also exclude larger checkpoints (unknown sizes are kept)
 """

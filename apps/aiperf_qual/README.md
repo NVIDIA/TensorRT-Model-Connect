@@ -86,6 +86,8 @@ Dataset or tokenizer failures stop capacity planning rather than falling back to
   benchmark timings). Historical fixed-workload reports retain their original performance lights.
   Profiles excluded by the machine model list remain in `excluded.json` for audit and do not contribute
   report rows, totals, White counts, or pass-rate denominators. A measured result from another host still counts.
+  Catalog profiles without Task test defaults remain in `plan.json` for coverage audit, outside those
+  statistics too. Invalid configurations of supported tests still appear as White errors.
 
 ### Performance
 
