@@ -1563,9 +1563,8 @@ jobs:
         if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ steps.reserve.outputs.lease_artifact_name }}
+          name: gpu-ci-lease-final-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
-          overwrite: true
           if-no-files-found: error
           retention-days: 7
 
@@ -1644,31 +1643,36 @@ jobs:
         run: brev login --api-key "$BREV_API_KEY"
 
       - name: Recover the GPU instance lease
+        id: recover
         if: ${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}
         continue-on-error: true
-        timeout-minutes: 1
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
-          LEASE_ARTIFACT_NAME: ${{ needs.provision-and-test.outputs.lease_artifact_name }}
         run: |
           set -euo pipefail
-          # Producer outputs retain the allocation attempt when this job is rerun.
-          test -n "$LEASE_ARTIFACT_NAME"
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "$LEASE_ARTIFACT_NAME" \
-            --dir "$RUNNER_TEMP/gpu-ci-lease"
+          # Job outputs disappear on runner timeout. GitHub's completed producer
+          # metadata identifies the original attempt even on a cleanup-only rerun.
+          python3 -m tools.community_gpu_lease \
+            --lease-file "$RUNNER_TEMP/gpu-ci-lease/trtmc-gpu-ci-lease.json"
 
       - name: Delete the deterministic GPU instance
         id: release
         if: ${{ always() && steps.cleanup-checkout.outcome == 'success' && steps.cleanup-login.outcome == 'success' }}
         env:
-          INSTANCE_NAME: ${{ needs.provision-and-test.outputs.instance_name }}
+          INSTANCE_NAME: ${{ steps.recover.outputs.instance_name || needs.provision-and-test.outputs.instance_name }}
+          RECOVERED_NO_ALLOCATION: ${{ steps.recover.outputs.cleanup_confirmed }}
           INSTANCE_TYPE: ${{ needs.provision-and-test.outputs.instance_type }}
           ORGANIZATION_ID: ${{ needs.provision-and-test.outputs.organization_id }}
           ALLOCATION_REQUESTED: ${{ needs.provision-and-test.outputs.allocation_requested }}
           OWNER_CLEANUP_CONFIRMED: ${{ needs.provision-and-test.outputs.cleanup_confirmed }}
         run: |
           set -euo pipefail
+          if [ "${RECOVERED_NO_ALLOCATION:-}" = true ]; then
+            echo "GitHub confirms the original reservation step was skipped."
+            echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Never reconstruct an allocation identity from this job's rerun attempt.
           if [ -z "$INSTANCE_NAME" ]; then
             echo "::error::Original allocation identity is unavailable; cleanup remains unconfirmed."

@@ -2996,6 +2996,134 @@ def test_uncertain_create_absence_never_confirms_cleanup(fake, clock):
     assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
 
 
+@pytest.mark.parametrize("completion", ["returned", "timeout", "interrupted", "io_error"])
+def test_create_failure_retains_safe_evidence_without_claiming_absence(
+    fake, clock, monkeypatch, capsys, completion
+):
+    token = "bak-do-not-publish-this-value"
+    upstream = f"rate limit exceeded: account-private https://private.example/{token}"
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] != "create":
+            return fake(command, deadline, cap, **kwargs)
+        if completion == "timeout":
+            raise brev_provision.CommandTimeout("create exceeded its wait", "", upstream)
+        if completion == "interrupted":
+            raise KeyboardInterrupt()
+        if completion == "io_error":
+            raise OSError(upstream)
+        return subprocess.CompletedProcess(command, 1, "", upstream)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    with pytest.raises((brev_provision.ProvisionError, OSError, KeyboardInterrupt)):
+        fake.provision()
+    lease = json.loads(fake.lease.read_text())
+    receipt = lease["create_diagnostics"]
+    assert receipt["completion"] == completion
+    assert receipt["returncode"] == (1 if completion == "returned" else None)
+    assert receipt["signals"] == (["rate_limit"] if completion in {"returned", "timeout"} else [])
+    assert lease["allocation_pending"] and lease["instance_id"] is None
+    assert lease["create_started"] and not lease["create_accepted"]
+    evidence = fake.lease.read_text() + capsys.readouterr().err
+    assert all(value not in evidence for value in (token, "account-private", "private.example"))
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
+
+
+def test_create_success_records_receipt_before_waiting_for_readiness(fake):
+    assert fake.provision() == "gpu"
+    receipt = json.loads(fake.lease.read_text())["create_diagnostics"]
+    assert receipt["completion"] == "returned" and receipt["returncode"] == 0
+
+
+def test_create_diagnostics_disambiguate_http_status_without_publishing_upstream_body():
+    token = "bak-private-value"
+    prefix = (
+        "https://brevapi.us-west-2-prod.control-plane.brev.dev/"
+        "api/organizations/private-org/workspaces?local=true "
+    )
+    receipts = []
+    for status in (429, 500):
+        text = prefix + str(status) + ' Error {"errors":[{"message":"rate limit exceeded ' + token
+        receipt = brev_provision._create_diagnostics("", text, 1, "returned")
+        assert receipt["workspace_http_statuses"] == [status]
+        assert receipt["signals"] == ["rate_limit"]
+        assert "private-org" not in json.dumps(receipt) and token not in json.dumps(receipt)
+        receipts.append(receipt)
+    assert receipts[0] != receipts[1]
+
+
+def test_create_debug_formatting_is_scoped_to_captured_child(monkeypatch):
+    environments = []
+
+    class Process:
+        returncode = 1
+
+        def communicate(self, input_text, timeout):
+            return "", "upstream error"
+
+    def popen(command, **kwargs):
+        assert kwargs["stdout"] == subprocess.PIPE and kwargs["stderr"] == subprocess.PIPE
+        environments.append(kwargs["env"])
+        return Process()
+
+    monkeypatch.delenv("BREV_FEATURE_DEBUG", raising=False)
+    monkeypatch.setattr(brev_provision.subprocess, "Popen", popen)
+    deadline = brev_provision.time.monotonic() + 30
+    brev_provision._run(["brev", "create", "gpu"], deadline)
+    brev_provision._run(["brev", "ls", "--json"], deadline)
+    assert environments[0]["BREV_FEATURE_DEBUG"] == "true"
+    assert environments[1] is None and "BREV_FEATURE_DEBUG" not in os.environ
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_complete_catalog_skip_has_no_allocation_to_delete(fake, monkeypatch, unavailable):
+    reason = (
+        "is currently unavailable (no capacity); try again later or run 'brev search' to find another type"
+        if unavailable
+        else "is not a recognized type; run 'brev search' to see available types"
+    )
+    output = (
+        "Attempting to create 1 instance(s) with 1 parallel attempts\n"
+        "Instance types to try: g6.4xlarge (500GB disk)\n\n"
+        "Trying g6.4xlarge for 1 instance(s)...\n"
+        f'Skipping: instance type "g6.4xlarge" {reason}\n\n'
+        "Type g6.4xlarge had failures, trying next type...\n\n\n"
+        "Warning: Only created 0/1 instances\ncould only create 0/1 instances\n"
+    )
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] == "create":
+            return subprocess.CompletedProcess(command, 1, "", output)
+        return fake(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    with pytest.raises(brev_provision.ProvisionError, match="create failed"):
+        fake.provision()
+    lease = json.loads(fake.lease.read_text())
+    assert not lease["create_started"] and not lease["allocation_pending"]
+    assert lease["create_submission"] == "not_submitted_catalog_rejection"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+    assert not any(event.startswith("delete") for event in fake.events)
+
+    # Similar errors cannot establish rejection after a worker may have submitted
+    # a request, with multiple candidates, or with incomplete process output.
+    for mutated in (
+        output + "[Worker 1] Trying g6.4xlarge for instance 'gpu'...\n",
+        output.replace("1 parallel", "2 parallel"),
+        output.replace("g6.4xlarge", "g6.8xlarge"),
+        output.removesuffix("could only create 0/1 instances\n"),
+        output + "rate limit exceeded\n",
+    ):
+        result = subprocess.CompletedProcess(["brev", "create", "gpu"], 1, "", mutated)
+        assert not brev_provision._create_was_skipped(result, "g6.4xlarge", 500)
+    for code, stdout in ((0, ""), (-9, ""), (1, "partial response")):
+        result = subprocess.CompletedProcess(["brev", "create", "gpu"], code, stdout, output)
+        assert not brev_provision._create_was_skipped(result, "g6.4xlarge", 500)
+
+
 @pytest.mark.parametrize("point", ["initial", "before_probe", "after_probe"])
 @pytest.mark.parametrize("bad_json", [False, True])
 def test_inventory_errors_preserve_the_same_allocation(fake, monkeypatch, point, bad_json, capsys):

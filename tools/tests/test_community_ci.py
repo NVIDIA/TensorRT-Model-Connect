@@ -3263,6 +3263,45 @@ def test_backstop_never_guesses_an_allocation_from_the_current_attempt(
     assert not harness.events("provision")
 
 
+def test_backstop_uses_recovered_identity_when_cancelled_owner_outputs_are_empty(tmp_path):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
+    lease = tmp_path / "gpu-ci-lease/trtmc-gpu-ci-lease.json"
+    lease.parent.mkdir()
+    lease.write_text(json.dumps({"name": "trtmc-gpu-ci-123-1", "instance_id": "owned-vm"}))
+    result = harness.run(
+        "Delete the deterministic GPU instance",
+        GITHUB_RUN_ATTEMPT="3",
+        INSTANCE_NAME="trtmc-gpu-ci-123-1",  # recovered from the original producer
+        INSTANCE_TYPE="",
+        ORGANIZATION_ID="",
+        ALLOCATION_REQUESTED="",
+        OWNER_CLEANUP_CONFIRMED="",
+    )
+    assert result.returncode == 0, result.stderr
+    assert harness.events("cleanup") == [
+        "-m tools.brev_exec cleanup --instance trtmc-gpu-ci-123-1 "
+        f"--lease-file {lease} --until-deleted",
+    ]
+    assert json.loads(lease.read_text())["instance_id"] == "owned-vm"
+    assert (tmp_path / "Delete-the-deterministic-GPU-instance-output").read_text() == (
+        "cleanup_confirmed=true\n"
+    )
+
+
+def test_backstop_uses_github_skipped_reservation_proof_without_an_instance(tmp_path):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
+    result = harness.run(
+        "Delete the deterministic GPU instance",
+        INSTANCE_NAME="",
+        RECOVERED_NO_ALLOCATION="true",
+    )
+    assert result.returncode == 0, result.stderr
+    assert not harness.events("cleanup")
+    assert not harness.events("provision")
+
+
 @pytest.mark.parametrize("cleanup_exit", [0, 73])
 def test_owning_job_cleanup_failure_is_not_swallowed(tmp_path, gpu_job, cleanup_exit):
     harness = JobHarness(tmp_path, gpu_job)
@@ -3300,9 +3339,14 @@ def test_gpu_lease_survives_reservation_and_cleanup_with_a_trusted_backstop(gpu_
         step = steps[name]
         assert "always()" in step["if"]
         assert step["with"]["path"] == "${{ runner.temp }}/trtmc-gpu-ci-lease.json"
-        assert step["with"]["name"] == "${{ steps.reserve.outputs.lease_artifact_name }}"
         assert step["with"]["if-no-files-found"] == "error"
-    assert steps["Preserve the final GPU instance lease"]["with"]["overwrite"] is True
+        assert not step["with"].get("overwrite")
+    assert steps["Preserve the GPU instance lease"]["with"]["name"] == (
+        "${{ steps.reserve.outputs.lease_artifact_name }}"
+    )
+    assert steps["Preserve the final GPU instance lease"]["with"]["name"] == (
+        "gpu-ci-lease-final-${{ github.run_id }}-${{ github.run_attempt }}"
+    )
     cleanup = workflow["jobs"]["cleanup"]
     assert gpu_job["timeout-minutes"] == 360
     assert cleanup["timeout-minutes"] == 360
@@ -3314,14 +3358,14 @@ def test_gpu_lease_survives_reservation_and_cleanup_with_a_trusted_backstop(gpu_
     }
     download = cleanup_steps["Recover the GPU instance lease"]
     assert download["continue-on-error"] is True
-    assert download["timeout-minutes"] == 1
-    assert 'gh run download "$GITHUB_RUN_ID"' in download["run"]
-    assert download["env"]["LEASE_ARTIFACT_NAME"] == (
-        "${{ needs.provision-and-test.outputs.lease_artifact_name }}"
-    )
-    assert '--name "$LEASE_ARTIFACT_NAME"' in download["run"]
-    assert "GITHUB_RUN_ATTEMPT" not in download["run"]
+    assert download["timeout-minutes"] == 3
+    assert download["id"] == "recover"
+    assert "python3 -m tools.community_gpu_lease" in download["run"]
+    assert "needs.provision-and-test.outputs" not in str(download)
     delete = cleanup_steps["Delete the deterministic GPU instance"]
+    assert delete["env"]["INSTANCE_NAME"] == (
+        "${{ steps.recover.outputs.instance_name || needs.provision-and-test.outputs.instance_name }}"
+    )
     assert "always()" in delete["if"]
     assert "steps.cleanup-checkout.outcome == 'success'" in delete["if"]
     assert "steps.cleanup-login.outcome == 'success'" in delete["if"]
