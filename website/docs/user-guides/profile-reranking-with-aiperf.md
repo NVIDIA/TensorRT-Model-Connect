@@ -7,7 +7,7 @@ This example uses **nvidia/llama-nemotron-rerank-vl-1b-v2** with text passages.
 Prepare the runtime using [Build from Source](../getting-started/source-build.md),
 including the `trtmc_model_eagle_vlm` target, and build the model using
 [Build a Bundle](./build-a-bundle.md). Use the existing
-[FP16 profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/eagle_vlm/tests/benchmark/nemotron-rerank-vl-1b-v2.yaml)
+[FP16 profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/0bccb5e93af0e5ad346aaf44e404396f54b2e7de/families/eagle_vlm/tests/benchmark/nemotron-rerank-vl-1b-v2.yaml)
 and run its family correctness checks first.
 
 The commands assume `nemotron-rerank-vl-1b-v2.bundle` is already built and
@@ -65,8 +65,8 @@ HTTP latency. Reranking has no token-generation TTFT or inter-token latency.
 ## Run another built reranker
 
 Use its bundle, model name, matching tokenizer/revision, family runtime libraries,
-and family correctness criteria. A compatible public document-relevance Task or
-existing reranking bundle can reuse the route; each model needs qualification.
+and family correctness criteria. A public document-relevance Task returning raw logits, or an existing
+reranking bundle, can reuse the route; each model needs qualification.
 
 `/v1/ranking` accepts `query.text` and a non-empty list of `passages[].text`.
 It returns all real scores in descending order as `rankings[].logit`, retaining
