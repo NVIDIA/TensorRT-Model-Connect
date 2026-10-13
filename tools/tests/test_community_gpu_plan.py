@@ -117,19 +117,53 @@ def test_static_plan_uses_git_blobs_without_any_pr_import(tmp_path, monkeypatch)
     ]
 
 
-def test_frozen_plan_contains_effective_baseline_and_no_deferred_checkpoint(tmp_path):
+def test_new_owner_frozen_plan_retains_every_premerge_case_without_baselines(tmp_path):
+    repo = repository(tmp_path)
+    manifest = repo / "families/alpha/tests/manifests/smoke.json"
+    data = json.loads(manifest.read_text())
+    data["testcases"].extend(
+        [
+            {"name": "alpha-second", "premerge": True},
+            {"name": "alpha-nightly", "premerge": False},
+        ]
+    )
+    manifest.write_text(json.dumps(data))
+    sha = commit(repo)
+    selection = {
+        **environment(),
+        "TRTMC_GPU_FAMILIES": "[]",
+        "TRTMC_GPU_DIRECT_FAMILIES": "[]",
+        "TRTMC_GPU_ADDED_FAMILIES": '["alpha"]',
+    }
+    path = tmp_path / "plan.json"
+    ci.export_gpu_plan(repo, sha, selection, path)
+    plans, active = ci.verify_gpu_plan(repo, selection, path)
+    assert active == ("alpha",) and tuple(plans) == ("alpha",)
+    assert plans["alpha"].testcases == ("alpha-second", "alpha-smoke")
+    assert plans["alpha"].checkpoints == (("example/alpha", "a" * 40),)
+
+
+@pytest.mark.parametrize("added", [False, True])
+def test_frozen_plan_contains_effective_baseline_and_no_deferred_checkpoint(tmp_path, added):
     repo = repository(tmp_path, deferred=True)
     for family in ci.SHARED_SMOKE_FAMILIES:
         owner(repo, family)
     sha = commit(repo)
     path = tmp_path / "plan.json"
-    ci.export_gpu_plan(repo, sha, environment(), path)
-    plans, active = ci.verify_gpu_plan(repo, environment(), path)
+    selection = environment()
+    if added:
+        selection.update(
+            TRTMC_GPU_FAMILIES="[]",
+            TRTMC_GPU_DIRECT_FAMILIES="[]",
+            TRTMC_GPU_ADDED_FAMILIES='["alpha"]',
+        )
+    ci.export_gpu_plan(repo, sha, selection, path)
+    plans, active = ci.verify_gpu_plan(repo, selection, path)
     assert active == ci.SHARED_SMOKE_FAMILIES and len(plans) == 6
     assert plans["alpha"].checkpoints == () and plans["alpha"].testcases == ()
     assert plans["alpha"].deferred_testcases == ("alpha-smoke",)
     assert all(plans[family].testcases == (family + "-smoke",) for family in active)
-    assert ci.execution_budget_seconds(environment(), path) == min(
+    assert ci.execution_budget_seconds(selection, path) == min(
         ci.MAX_EXECUTION_SECONDS,
         len(active)
         * (ci.FAMILY_PREPARATION_SECONDS + ci.STAGING_TIMEOUT_SECONDS + ci.FAMILY_TIMEOUT_SECONDS),

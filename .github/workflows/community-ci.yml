@@ -1019,19 +1019,30 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          python3 -m tools.test_impact --base "$BASE_SHA" --head "$HEAD_SHA" \
-            | tee "$RUNNER_TEMP/trtmc-gpu-impact.json"
           python3 - <<'PY'
           import json
           import os
           import re
           import subprocess
+          from dataclasses import asdict
           from pathlib import Path
           from pathlib import PurePosixPath
+          from tools.test_impact import classify
 
-          summary = json.loads(
-              (Path(os.environ["RUNNER_TEMP"]) / "trtmc-gpu-impact.json").read_text()
+          merge_base = subprocess.check_output(
+              ["git", "merge-base", os.environ["BASE_SHA"], os.environ["HEAD_SHA"]],
+              text=True,
+          ).strip()
+          # Rename detection lists only the destination with --name-only.
+          # Include both endpoints so moving shared code cannot hide its impact.
+          changed = subprocess.check_output(
+              [
+                  "git", "diff", "--no-renames", "--name-only", "--diff-filter=ACMRTD",
+                  "-z", merge_base, os.environ["HEAD_SHA"], "--",
+              ],
+              text=True,
           )
+          summary = asdict(classify(Path.cwd(), [path for path in changed.split("\0") if path]))
           gpu_enabled = os.environ["GPU_EXECUTION_ENABLED"].lower() == "true"
           manual_gpu_enabled = (
               os.environ["EVENT_NAME"] == "workflow_dispatch"
@@ -1057,6 +1068,28 @@ jobs:
                   ).returncode == 0
                   if exists:
                       added_families.add(family)
+          if added_families:
+              # New owners are absent from the trusted checkout, so the generic
+              # classifier conservatively treats their paths as shared changes.
+              # Reclassify only the remaining paths with that same trusted code:
+              # adding an owner alone must not select unrelated baseline models.
+              remaining_paths = [
+                  path for path in summary["changed_files"]
+                  if not (
+                      len(PurePosixPath(path).parts) >= 2
+                      and PurePosixPath(path).parts[0] == "families"
+                      and PurePosixPath(path).parts[1] in added_families
+                  )
+              ]
+              remaining = classify(Path.cwd(), remaining_paths)
+              if remaining.scope != "all":
+                  summary["scope"] = "families"
+                  summary["families"] = summary["direct_families"]
+          serialized = json.dumps(summary)
+          (Path(os.environ["RUNNER_TEMP"]) / "trtmc-gpu-impact.json").write_text(
+              serialized + "\n"
+          )
+          print(serialized)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(
                   "families="
@@ -1140,11 +1173,11 @@ jobs:
               raise SystemExit("added-family selection must be sorted and unique")
           if set(added_families) & set(families):
               raise SystemExit("added families must not be in the trusted family inventory")
-          if scope != "all" and added_families:
-              raise SystemExit("only all scope may select added families")
-          if scope == "families" and (not families or direct_families != families):
+          if scope == "families" and (
+              not (families or added_families) or direct_families != families
+          ):
               raise SystemExit("family scope requires its directly changed families")
-          if scope in {"docs", "none"} and (families or direct_families):
+          if scope in {"docs", "none"} and (families or direct_families or added_families):
               raise SystemExit(f"{scope} scope must not select families")
           PY
 

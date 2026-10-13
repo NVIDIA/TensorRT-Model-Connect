@@ -694,12 +694,20 @@ def test_shared_gpu_plan_includes_direct_and_new_families() -> None:
     )
 
 
+@pytest.mark.parametrize("existing", [[], ["llama"]])
+def test_family_only_gpu_plan_keeps_new_owners_without_unrelated_baselines(existing) -> None:
+    selected = community_gpu_ci.selected_families(
+        "families", json.dumps(existing), json.dumps(existing), '["new_family"]'
+    )
+    assert selected == tuple(sorted([*existing, "new_family"]))
+
+
 @pytest.mark.parametrize(
     ("scope", "families", "direct", "added"),
     [
         ("docs", "[]", "[]", "[]"),
         ("families", "[]", "[]", "[]"),
-        ("families", '["bert"]', '["bert"]', '["new_family"]'),
+        ("families", '["bert"]', "[]", '["new_family"]'),
         ("families", '["bert"]', "[]", "[]"),
         ("all", '["bert"]', '["bert"]', '["bert"]'),
         ("all", '["bert"]', '["gpt2"]', "[]"),

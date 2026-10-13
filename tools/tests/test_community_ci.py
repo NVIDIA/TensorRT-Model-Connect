@@ -1073,21 +1073,49 @@ python3() {
 
 @pytest.mark.parametrize(
     (
-        "changed_path",
+        "changed_paths",
         "expected_scope",
         "expected_families",
         "expected_direct_families",
         "expected_added_families",
     ),
     [
-        ("families/bert/model.py", "families", ["bert"], ["bert"], []),
-        ("families/new_family/model.py", "all", ["bert", "gpt2"], [], ["new_family"]),
-        ("README.md", "docs", [], [], []),
+        (("families/bert/model.py",), "families", ["bert"], ["bert"], []),
+        (("families/new_family/model.py",), "families", [], [], ["new_family"]),
+        (
+            ("families/new_family/model.py", "website/docs/new-family.md"),
+            "families",
+            [],
+            [],
+            ["new_family"],
+        ),
+        (
+            ("families/new_family/model.py", "families/bert/model.py"),
+            "families",
+            ["bert"],
+            ["bert"],
+            ["new_family"],
+        ),
+        (
+            ("families/new_family/model.py", "CMakeLists.txt"),
+            "all",
+            ["bert", "gpt2"],
+            [],
+            ["new_family"],
+        ),
+        (
+            ("families/new_family/model.py", "families/bert/model.py", "CMakeLists.txt"),
+            "all",
+            ["bert", "gpt2"],
+            ["bert"],
+            ["new_family"],
+        ),
+        (("README.md",), "docs", [], [], []),
     ],
 )
 def test_gpu_impact_executes_only_trusted_base_code(
     tmp_path: Path,
-    changed_path: str,
+    changed_paths: tuple[str, ...],
     expected_scope: str,
     expected_families: list[str],
     expected_direct_families: list[str],
@@ -1128,10 +1156,11 @@ def test_gpu_impact_executes_only_trusted_base_code(
     git("add", ".")
     git("-c", "core.hooksPath=/dev/null", "commit", "-m", "trusted fixture")
     base = git("rev-parse", "HEAD")
-    changed = repository / changed_path
-    changed.parent.mkdir(parents=True, exist_ok=True)
-    changed.write_text("# pull-request content\n", encoding="utf-8")
-    git("add", changed_path)
+    for changed_path in changed_paths:
+        changed = repository / changed_path
+        changed.parent.mkdir(parents=True, exist_ok=True)
+        changed.write_text("# pull-request content\n", encoding="utf-8")
+        git("add", changed_path)
     git("-c", "core.hooksPath=/dev/null", "commit", "-m", "untrusted fixture")
     head = git("rev-parse", "HEAD")
 
@@ -1188,6 +1217,20 @@ def test_gpu_impact_executes_only_trusted_base_code(
         assert values["scope"] == summary["scope"]
         assert values["gpu_enabled"] == "false"
         assert values["run_gpu"] == "false"
+        validation = subprocess.run(
+            [
+                "bash",
+                "-c",
+                _workflow_step_script(
+                    "community-ci.yml", "gpu-authorize", "Validate the GPU selection"
+                ),
+            ],
+            env={**os.environ, **{key.upper(): value for key, value in values.items()}},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert validation.returncode == 0, validation.stdout + validation.stderr
 
     output.write_text("", encoding="utf-8")
     manual = subprocess.run(
@@ -1215,6 +1258,93 @@ def test_gpu_impact_executes_only_trusted_base_code(
     assert manual_values["run_gpu"] == (
         "true" if manual_summary["scope"] in {"all", "families"} else "false"
     )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_scope", "expected_direct"),
+    [
+        ("core/runtime/shared.py", "all", []),
+        ("core/runtime/shared\nname.py", "all", []),
+        ("CMakeLists.txt", "all", []),
+        ("families/bert/runtime/helper.py", "families", ["bert"]),
+        ("README.md", "families", []),
+    ],
+)
+def test_gpu_impact_retains_both_rename_owners(
+    tmp_path: Path, source: str, expected_scope: str, expected_direct: list[str]
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for family in ("bert", "gpt2"):
+        root = repository / "families" / family
+        root.mkdir(parents=True)
+        (root / "model.py").write_text("# trusted model\n")
+    tools = repository / "tools"
+    tools.mkdir()
+    (tools / "__init__.py").touch()
+    shutil.copyfile(REPO_ROOT / "tools/test_impact.py", tools / "test_impact.py")
+    origin = repository / source
+    origin.parent.mkdir(parents=True, exist_ok=True)
+    origin.write_text("# exact rename content\n")
+
+    def git(*arguments: str) -> str:
+        return subprocess.check_output(
+            [
+                "git",
+                "-c",
+                "user.name=CI Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "core.hooksPath=/dev/null",
+                *arguments,
+            ],
+            cwd=repository,
+            text=True,
+        ).strip()
+
+    git("init", "-q")
+    git("config", "diff.renames", "true")
+    git("add", ".")
+    git("commit", "-qm", "trusted fixture")
+    base = git("rev-parse", "HEAD")
+    destination = "families/new_family/model.py"
+    (repository / destination).parent.mkdir()
+    git("mv", source, destination)
+    git("commit", "-qm", "rename fixture")
+    head = git("rev-parse", "HEAD")
+    assert git("diff", "--name-only", base, head).splitlines() == [destination]
+    git("checkout", "--detach", base)
+    output = tmp_path / "output"
+    script = _workflow_step_script(
+        "community-ci.yml", "gpu-authorize", "Resolve the changed model families"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=repository,
+        env={
+            **os.environ,
+            "PYTHONPATH": "",
+            "BASE_SHA": base,
+            "HEAD_SHA": head,
+            "GPU_EXECUTION_ENABLED": "false",
+            "MANUAL_GPU_EXECUTION_ENABLED": "false",
+            "EVENT_NAME": "pull_request_target",
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(output),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(result.stdout)
+    assert set(summary["changed_files"]) == {source, destination}
+    assert summary["scope"] == expected_scope
+    assert summary["direct_families"] == expected_direct
+    assert summary["families"] == (["bert", "gpt2"] if expected_scope == "all" else expected_direct)
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert json.loads(values["added_families"]) == ["new_family"]
 
 
 @pytest.mark.parametrize("provision_exitcode", [0, 1])
