@@ -5,6 +5,8 @@
 
 import json
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -195,6 +197,156 @@ def test_invalid_static_owner_fails_before_any_execution(tmp_path, kind):
     with pytest.raises(ci.CommunityGpuError):
         ci.export_gpu_plan(repo, sha, environment(), path)
     assert not path.exists()
+
+
+def external_assets(repo, *, value=None):
+    manifest = repo / "families/alpha/tests/manifests/smoke.json"
+    data = json.loads(manifest.read_text())
+    data["external_files"] = (
+        [{"path": "weights.bin", "url": "https://example.test/weights.bin"}]
+        if value is None
+        else value
+    )
+    manifest.write_text(json.dumps(data))
+
+
+def asset_recipe(repo):
+    recipe = repo / "families/alpha/ci/Dockerfile.dependencies"
+    recipe.parent.mkdir(parents=True, exist_ok=True)
+    # This must remain inert during plan admission, even in the secret-bearing job.
+    recipe.write_text("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN exit 97\n")
+    return recipe
+
+
+@pytest.mark.parametrize("kind", ["missing", "symlink", "directory", "oversize"])
+def test_selected_external_assets_require_a_regular_family_recipe(tmp_path, kind):
+    repo = repository(tmp_path)
+    external_assets(repo)
+    recipe = asset_recipe(repo)
+    if kind == "missing":
+        recipe.unlink()
+    elif kind == "symlink":
+        target = recipe.with_suffix(".real")
+        recipe.rename(target)
+        recipe.symlink_to(target.name)
+    elif kind == "directory":
+        recipe.unlink()
+        recipe.mkdir()
+    else:
+        recipe.write_bytes(b"#" * (ci.MAX_DEPENDENCY_CATALOG_BYTES + 1))
+    sha = commit(repo)
+    path = tmp_path / "plan.json"
+    with pytest.raises(ci.CommunityGpuError, match="external_files.*Dockerfile.dependencies"):
+        ci.family_plan(repo, "alpha")
+    with pytest.raises(ci.CommunityGpuError, match="external_files.*Dockerfile.dependencies"):
+        ci.export_gpu_plan(repo, sha, environment(), path)
+    assert not path.exists()
+
+
+def test_external_asset_recipe_parent_cannot_alias_another_owner(tmp_path):
+    repo = repository(tmp_path)
+    external_assets(repo)
+    recipe = asset_recipe(repo)
+    source = recipe.parent
+    target = repo / "families/other/ci"
+    target.parent.mkdir()
+    source.rename(target)
+    source.symlink_to("../other/ci", target_is_directory=True)
+    assert (source / recipe.name).is_file()
+    sha = commit(repo)
+    with pytest.raises(ci.CommunityGpuError, match="external_files.*Dockerfile.dependencies"):
+        ci.family_plan(repo, "alpha")
+    with pytest.raises(ci.CommunityGpuError, match="external_files.*Dockerfile.dependencies"):
+        ci.export_gpu_plan(repo, sha, environment(), tmp_path / "plan.json")
+
+
+@pytest.mark.parametrize("declaration", ["weights.bin", {}, False])
+def test_selected_external_asset_declaration_must_be_a_list(tmp_path, declaration):
+    repo = repository(tmp_path)
+    external_assets(repo, value=declaration)
+    asset_recipe(repo)
+    sha = commit(repo)
+    with pytest.raises(ci.CommunityGpuError, match="external_files must be a list"):
+        ci.export_gpu_plan(repo, sha, environment(), tmp_path / "plan.json")
+
+
+def test_frozen_external_asset_admission_uses_source_recipe_not_working_tree(tmp_path):
+    repo = repository(tmp_path)
+    external_assets(repo)
+    missing_sha = commit(repo)
+    recipe = asset_recipe(repo)
+    # An untracked working-tree recipe cannot repair an immutable source plan.
+    with pytest.raises(ci.CommunityGpuError, match="external_files.*Dockerfile.dependencies"):
+        ci.export_gpu_plan(repo, missing_sha, environment(), tmp_path / "missing.json")
+    ready_sha = commit(repo)
+    original = recipe.read_bytes()
+    recipe.unlink()
+    path = tmp_path / "plan.json"
+    ci.export_gpu_plan(repo, ready_sha, environment(), path)
+    assert json.loads(path.read_text())["active_families"] == ["alpha"]
+    recipe.write_bytes(original)
+    plans, active = ci.verify_gpu_plan(repo, environment(), path)
+    assert active == ("alpha",) and plans["alpha"].testcases == ("alpha-smoke",)
+    recipe.write_text("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n")
+    with pytest.raises(ci.CommunityGpuError):
+        ci.verify_gpu_plan(repo, environment(), path)
+
+
+def test_external_asset_plan_runs_in_the_standalone_container_wrapper(tmp_path):
+    repo = repository(tmp_path)
+    external_assets(repo)
+    asset_recipe(repo)
+    # The family container receives only this wrapper, not its host-only sibling.
+    wrapper = tmp_path / "community_gpu_ci.py"
+    wrapper.write_bytes(Path(ci.__file__).read_bytes())
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import runpy, sys; from pathlib import Path; "
+            "runner = runpy.run_path(sys.argv[1]); "
+            "print(runner['family_plan'](Path(sys.argv[2]), 'alpha').testcases)",
+            str(wrapper),
+            str(repo),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "('alpha-smoke',)"
+
+
+@pytest.mark.parametrize("selection", ["other_owner", "nightly", "deferred", "empty"])
+def test_unselected_or_empty_external_assets_do_not_require_a_recipe(tmp_path, selection):
+    repo = repository(tmp_path, deferred=selection == "deferred")
+    external_assets(repo, value=[] if selection == "empty" else None)
+    chosen = environment()
+    if selection == "other_owner":
+        owner(repo, "beta")
+        chosen = environment("beta")
+    elif selection == "nightly":
+        path = repo / "families/alpha/tests/manifests/smoke.json"
+        data = json.loads(path.read_text())
+        data["testcases"][0]["premerge"] = False
+        path.write_text(json.dumps(data))
+        (path.parent / "other.json").write_text(json.dumps({
+            "family": "alpha", "testcases": [{"name": "alpha-other", "premerge": True}],
+        }))
+    elif selection == "deferred":
+        for family in ci.SHARED_SMOKE_FAMILIES:
+            owner(repo, family)
+    sha = commit(repo)
+    path = tmp_path / "plan.json"
+    ci.export_gpu_plan(repo, sha, chosen, path)
+    plans, active = ci.verify_gpu_plan(repo, chosen, path)
+    assert active == (
+        ("beta",) if selection == "other_owner"
+        else ci.SHARED_SMOKE_FAMILIES if selection == "deferred"
+        else ("alpha",)
+    )
+    assert plans
 
 
 @pytest.mark.parametrize("mutation", ["head", "dirty", "cases", "checkpoint", "tree", "selection"])

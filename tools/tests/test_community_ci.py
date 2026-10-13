@@ -1869,14 +1869,39 @@ def test_backstop_requires_explicit_trusted_no_allocation_proof(tmp_path, outcom
     assert "needs.provision-and-test.outputs" not in str(harness.steps["release"])
 
 
+@pytest.mark.parametrize("preparation_failure", ["configuration", "external_assets"])
 def test_preparation_failure_finalizes_infra_without_brev_credentials(
-    tmp_path, execution_publisher
+    tmp_path, execution_publisher, gpu_job, preparation_failure
 ):
+    calls = tmp_path / "brev-calls"
+    if preparation_failure == "external_assets":
+        from tools.tests.test_community_gpu_plan import commit, external_assets
+
+        repository, catalog, environment = _host_selection_fixture(tmp_path)
+        external_assets(repository)
+        (repository / "families/alpha/ci/Dockerfile.dependencies").unlink()
+        environment["SOURCE_SHA"] = commit(repository)
+        environment["PROTECTED_DEPENDENCY_CATALOG"] = json.dumps(catalog)
+        environment["BREV_CALLS"] = str(calls)
+        profile = next(step for step in gpu_job["steps"] if step.get("id") == "host_profile")
+        preparation = subprocess.run(
+            ["bash", "-c", 'brev() { echo called >> "$BREV_CALLS"; return 91; }\n' + profile["run"]],
+            cwd=repository,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert preparation.returncode != 0
+        assert "external_files require a regular family-owned ci/Dockerfile.dependencies" in (
+            preparation.stderr
+        )
+        assert not (tmp_path / "trtmc-gpu-plan.json").exists()
+        assert not (tmp_path / "host-output").exists() and not calls.exists()
     owner = _workflow_step_script(
         "community-ci.yml", "provision-and-test", "Confirm that reservation was skipped"
     )
     output = tmp_path / "owner-output"
-    calls = tmp_path / "brev-calls"
     result = subprocess.run(
         ["bash", "-c", 'brev() { printf "%s\\n" "$*" >> "$BREV_CALLS"; return 91; }\n' + owner],
         env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(output), "BREV_CALLS": str(calls)},
@@ -1889,6 +1914,24 @@ def test_preparation_failure_finalizes_infra_without_brev_credentials(
         "no_allocation_confirmed=true",
         "cleanup_confirmed=true",
     ]
+    backstop = _workflow_step_script(
+        "community-ci.yml", "cleanup", "Confirm an initial skipped allocation"
+    )
+    result = subprocess.run(
+        ["bash", "-c", backstop],
+        env={
+            "PATH": os.environ["PATH"],
+            "GITHUB_OUTPUT": str(tmp_path / "backstop-output"),
+            "GITHUB_RUN_ATTEMPT": "1",
+            "RESERVE_OUTCOME": "skipped",
+            "NO_ALLOCATION_CONFIRMED": "true",
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0
+    assert (tmp_path / "backstop-output").read_text() == "cleanup_confirmed=true\n"
     conclusion = _workflow_step_script(
         "community-ci.yml", "provision-and-test", "Record the step conclusion"
     )
