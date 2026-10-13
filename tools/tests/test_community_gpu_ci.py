@@ -4344,3 +4344,115 @@ def test_real_probe_timeout_retains_partial_stdout_and_stderr_with_bounded_drain
                 os.kill(int(child_pid.read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_allocation_intent_is_conservative_without_issuing_create(fake):
+    assert fake.provision(prepare_only=True) == "gpu"
+    assert not fake.creates and not fake.api.requests
+    lease = json.loads(fake.lease.read_text())
+    assert lease["phase"] == "prepared" and lease["intent_prepared"]
+    assert lease["organization_id"] == "org-test"
+    assert lease["create_started"] and lease["allocation_pending"]
+    assert not lease["create_accepted"] and lease["instance_id"] is None
+    # Once the next step could run, a surviving intent is not a receipt saying
+    # that no request was submitted, even when the VM is currently absent.
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=61)
+    assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
+
+
+def test_prepared_intent_runs_one_blocking_reservation_and_cannot_be_reused(fake):
+    fake.provision(prepare_only=True)
+    assert fake.provision(from_intent=True) == "gpu"
+    assert fake.creates == ["gpu"]
+    assert json.loads(fake.lease.read_text())["phase"] == "ready"
+    with pytest.raises(brev_provision.ProvisionError, match="does not match"):
+        fake.provision(from_intent=True)
+    assert fake.creates == ["gpu"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"sku": "g6e.2xlarge"},
+        {"requested_disk_gb": 120},
+        {"provider": "nebius"},
+        {"phase": "creating"},
+        {"instance_id": "foreign-instance"},
+        {"create_accepted": True},
+        {"create_started": False},
+        {"intent_prepared": False},
+        {"allocation_pending": False},
+    ],
+)
+def test_reservation_rejects_a_changed_or_consumed_intent(fake, change):
+    fake.provision(provider="aws", prepare_only=True)
+    lease = json.loads(fake.lease.read_text())
+    lease.update(change)
+    fake.lease.write_text(json.dumps(lease))
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision(provider="aws", from_intent=True)
+    assert not fake.creates and not fake.api.requests
+
+
+def test_intent_revalidates_organization_before_post_and_never_deletes_a_foreign_vm(
+    fake, monkeypatch
+):
+    fake.provision(prepare_only=True)
+    monkeypatch.setattr(brev_provision, "_allocation_organization", lambda deadline: "org-other")
+    with pytest.raises(brev_provision.ProvisionError, match="organization changed"):
+        fake.provision(from_intent=True)
+    assert not fake.creates and not fake.api.requests
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert not fake.api.requests
+
+
+@pytest.mark.parametrize("request_arrived", [False, True])
+def test_hard_kill_during_create_recovers_only_the_uploaded_conservative_intent(
+    fake, monkeypatch, request_arrived
+):
+    fake.provision(prepare_only=True)
+    uploaded_intent = fake.lease.read_bytes()
+
+    def killed(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] == "create":
+            if request_arrived:
+                fake(command, deadline, cap, **kwargs)
+            # A process kill skips the helper's exception handler and the
+            # post-reservation artifact upload in the producer job.
+            raise SystemExit(137)
+        return fake(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", killed)
+    with pytest.raises(SystemExit):
+        fake.provision(from_intent=True)
+    fake.lease.write_bytes(uploaded_intent)
+    monkeypatch.setattr(brev_provision, "_run", fake)
+    if request_arrived:
+        assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+        assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+        assert fake.name is None and fake.creates == ["gpu"]
+    else:
+        with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+            brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=61)
+        assert not fake.creates
+        assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
+
+
+def test_prepare_and_consume_modes_are_mutually_exclusive_without_provider_calls(fake):
+    with pytest.raises(ValueError, match="separate operations"):
+        fake.provision(prepare_only=True, from_intent=True)
+    assert not fake.commands and not fake.api.requests
+
+
+def test_prepared_intent_cannot_be_consumed_by_a_new_run_attempt(fake, monkeypatch):
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    name = "trtmc-gpu-ci-123-1"
+    assert brev_provision.provision(name, lease_file=fake.lease, prepare_only=True) == name
+    lease = json.loads(fake.lease.read_text())
+    assert lease["run_id"] == "123" and lease["run_attempt"] == "1"
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    with pytest.raises(brev_provision.ProvisionError, match="different run attempt"):
+        brev_provision.provision(name, lease_file=fake.lease, from_intent=True)
+    assert not fake.creates and not fake.api.requests

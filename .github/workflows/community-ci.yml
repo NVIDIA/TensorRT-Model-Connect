@@ -1197,13 +1197,14 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      actions: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
       failure_class: ${{ steps.classification.outputs.failure_class }}
-      instance_name: ${{ steps.reserve.outputs.instance_name }}
-      lease_artifact_name: ${{ steps.reserve.outputs.lease_artifact_name }}
-      instance_type: ${{ steps.reserve.outputs.instance_type }}
-      organization_id: ${{ steps.reserve.outputs.organization_id }}
+      instance_name: ${{ steps.prepare.outputs.instance_name }}
+      lease_artifact_name: ${{ steps.prepare.outputs.lease_artifact_name }}
+      instance_type: ${{ steps.prepare.outputs.instance_type }}
+      organization_id: ${{ steps.prepare.outputs.organization_id }}
       allocation_requested: ${{ steps.reserve.outputs.allocation_requested }}
       reserve_outcome: ${{ steps.reserve.outcome }}
       no_allocation_confirmed: ${{ steps.no_allocation.outputs.no_allocation_confirmed }}
@@ -1285,8 +1286,16 @@ jobs:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
         run: brev login --api-key "$BREV_API_KEY"
 
-      - name: Reserve a GPU instance
-        id: reserve
+      - name: Release every earlier allocation attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.community_gpu_lease --cleanup-prior \
+            --lease-directory "$RUNNER_TEMP/gpu-ci-prior-leases"
+
+      - name: Prepare the GPU allocation intent
+        id: prepare
         env:
           GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
           HOST_RAM_GIB: ${{ steps.host_profile.outputs.host_ram_gib }}
@@ -1305,14 +1314,12 @@ jobs:
             64|128) ;;
             *) echo "::error::Unknown qualified host RAM profile."; exit 1 ;;
           esac
-          # The helper persists its lease before creating one exact catalog
-          # type, then passively polls Brev metadata before probing readiness.
-          # Allow bootstrap to finish on this VM without repairs or replacement.
-          # The deterministic name also covers cancellation before upload.
+          # This step reads the catalog and ownership scope but cannot create.
+          # Its conservative intent must be uploaded before Reserve can run.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
           echo "lease_artifact_name=gpu-ci-lease-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
-          echo "allocation_requested=false" >> "$GITHUB_OUTPUT"
-          python3 -m tools.brev_exec provision \
+          echo "gpu_provider=$gpu_provider" >> "$GITHUB_OUTPUT"
+          python3 -m tools.brev_exec provision --prepare-only \
             --instance "$instance_name" \
             --provider "$gpu_provider" --host-ram-gib "$host_ram_gib" \
             --disk-gb 500 \
@@ -1320,6 +1327,31 @@ jobs:
             --lease-file "$lease_file" \
             --timeout 2700 \
             --attempts 1
+
+      - name: Preserve the GPU allocation intent before creation
+        id: intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gpu-ci-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Reserve a GPU instance
+        id: reserve
+        if: ${{ success() && steps.intent.outcome == 'success' && steps.intent.outputs.artifact-id != '' }}
+        env:
+          INSTANCE_NAME: ${{ steps.prepare.outputs.instance_name }}
+          GPU_PROVIDER: ${{ steps.prepare.outputs.gpu_provider }}
+          HOST_RAM_GIB: ${{ steps.host_profile.outputs.host_ram_gib }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.brev_exec provision --from-intent \
+            --instance "$INSTANCE_NAME" \
+            --provider "$GPU_PROVIDER" --host-ram-gib "$HOST_RAM_GIB" \
+            --disk-gb 500 --min-free-disk-gb 200 \
+            --lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" \
+            --timeout 2700 --attempts 1
 
       - name: Confirm that reservation was skipped
         id: no_allocation
@@ -1331,10 +1363,10 @@ jobs:
           echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
 
       - name: Preserve the GPU instance lease
-        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
+        if: ${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ steps.reserve.outputs.lease_artifact_name }}
+          name: ${{ steps.prepare.outputs.lease_artifact_name }}
           path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
           if-no-files-found: error
           retention-days: 7
@@ -1507,9 +1539,9 @@ jobs:
 
       - name: Always tear down the GPU instance
         id: release
-        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
+        if: ${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}
         env:
-          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+          INSTANCE_NAME: ${{ steps.prepare.outputs.instance_name }}
         run: |
           set -euo pipefail
           python3 -m tools.brev_exec cleanup \
@@ -1593,7 +1625,7 @@ jobs:
           echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
 
       - name: Preserve the final GPU instance lease
-        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
+        if: ${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gpu-ci-lease-final-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1617,8 +1649,11 @@ jobs:
     name: Community GPU / Cleanup
     needs: [gpu-authorize, provision-and-test]
     if: >-
-      ${{ always() && needs.gpu-authorize.result == 'success' &&
-      needs.gpu-authorize.outputs.run_gpu == 'true' }}
+      ${{ always() && ((needs.gpu-authorize.result == 'success' &&
+      needs.gpu-authorize.outputs.run_gpu == 'true') ||
+      (github.event_name == 'workflow_dispatch' && github.run_attempt > 1 &&
+      inputs.source_snapshot != '' && !startsWith(inputs.task, 'dependency-image') &&
+      (github.ref == 'refs/heads/ci/developer' || github.ref == 'refs/heads/main'))) }}
     runs-on: ubuntu-24.04
     environment:
       name: gpu-ci-dispatch
@@ -1631,15 +1666,17 @@ jobs:
       cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
 
     steps:
-      - name: Confirm that no allocation needs a backstop
+      - name: Confirm an initial skipped allocation
         id: no_allocation
         env:
           RESERVE_OUTCOME: ${{ needs.provision-and-test.outputs.reserve_outcome }}
           NO_ALLOCATION_CONFIRMED: ${{ needs.provision-and-test.outputs.no_allocation_confirmed }}
         run: |
           set -euo pipefail
-          if [ "$RESERVE_OUTCOME" = skipped ] && [ "$NO_ALLOCATION_CONFIRMED" = true ]; then
-            echo "The trusted owner confirms reservation was skipped; no Brev request is needed."
+          if [ "$GITHUB_RUN_ATTEMPT" = 1 ] \
+            && [ "$RESERVE_OUTCOME" = skipped ] \
+            && [ "$NO_ALLOCATION_CONFIRMED" = true ]; then
+            echo "The initial reservation was skipped; no allocation exists in this workflow."
             echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -1675,91 +1712,17 @@ jobs:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
         run: brev login --api-key "$BREV_API_KEY"
 
-      - name: Recover the GPU instance lease
-        id: recover
-        if: ${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}
-        continue-on-error: true
-        timeout-minutes: 3
+      - name: Delete every original GPU allocation
+        id: release
+        if: ${{ always() && steps.no_allocation.outputs.cleanup_confirmed != 'true' && steps.cleanup-checkout.outcome == 'success' && steps.cleanup-login.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Job outputs disappear on runner timeout. GitHub's completed producer
-          # metadata identifies the original attempt even on a cleanup-only rerun.
-          python3 -m tools.community_gpu_lease \
-            --lease-file "$RUNNER_TEMP/gpu-ci-lease/trtmc-gpu-ci-lease.json"
-
-      - name: Delete the deterministic GPU instance
-        id: release
-        if: ${{ always() && steps.cleanup-checkout.outcome == 'success' && steps.cleanup-login.outcome == 'success' }}
-        env:
-          INSTANCE_NAME: ${{ steps.recover.outputs.instance_name || needs.provision-and-test.outputs.instance_name }}
-          RECOVERED_NO_ALLOCATION: ${{ steps.recover.outputs.cleanup_confirmed }}
-          INSTANCE_TYPE: ${{ needs.provision-and-test.outputs.instance_type }}
-          ORGANIZATION_ID: ${{ needs.provision-and-test.outputs.organization_id }}
-          ALLOCATION_REQUESTED: ${{ needs.provision-and-test.outputs.allocation_requested }}
-          OWNER_CLEANUP_CONFIRMED: ${{ needs.provision-and-test.outputs.cleanup_confirmed }}
-        run: |
-          set -euo pipefail
-          if [ "${RECOVERED_NO_ALLOCATION:-}" = true ]; then
-            echo "GitHub confirms the original reservation step was skipped."
-            echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Never reconstruct an allocation identity from this job's rerun attempt.
-          if [ -z "$INSTANCE_NAME" ]; then
-            echo "::error::Original allocation identity is unavailable; cleanup remains unconfirmed."
-            exit 75
-          fi
-          lease_file="$RUNNER_TEMP/gpu-ci-lease/trtmc-gpu-ci-lease.json"
-          if [ ! -f "$lease_file" ]; then
-            if [ "$OWNER_CLEANUP_CONFIRMED" = true ]; then
-              echo "The owning job already confirmed this allocation was released."
-              echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            # Recover intent from the original trusted producer, never from a rerun name.
-            # A true flag is published only immediately before the create request.
-            python3 - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-
-          name = os.environ["INSTANCE_NAME"]
-          sku = os.environ["INSTANCE_TYPE"]
-          requested = os.environ["ALLOCATION_REQUESTED"]
-          organization = os.environ.get("ORGANIZATION_ID", "")
-          run_id = os.environ["GITHUB_RUN_ID"]
-          if not re.fullmatch(r"[0-9]+", run_id) or not re.fullmatch(
-              rf"trtmc-gpu-ci-{re.escape(run_id)}-[1-9][0-9]*", name
-          ):
-              raise SystemExit("Original allocation name does not belong to this workflow run")
-          if requested not in {"true", "false"} or not re.fullmatch(
-              r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", sku
-          ):
-              raise SystemExit("Original allocation intent is unavailable; cleanup is unconfirmed")
-          if organization and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", organization):
-              raise SystemExit("Original allocation organization is invalid")
-          path = Path(os.environ["RUNNER_TEMP"]) / "gpu-ci-lease/trtmc-gpu-ci-lease.json"
-          path.parent.mkdir(parents=True, exist_ok=True)
-          path.write_text(json.dumps({
-              "schema_version": 1,
-              "name": name,
-              "sku": sku,
-              "instance_id": None,
-              "organization_id": organization or None,
-              "create_started": requested == "true",
-              "allocation_pending": requested == "true",
-              "phase": "cleanup_unknown" if requested == "true" else "selecting",
-          }) + "\n")
-          PY
-          fi
-          python3 -m tools.brev_exec cleanup \
-            --instance "$INSTANCE_NAME" \
-            --lease-file "$lease_file" \
-            --until-deleted
-          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+          # Original producer metadata and immutable artifacts remain available
+          # when outputs disappear. Reconcile every attempt, never only the last.
+          python3 -m tools.community_gpu_lease --cleanup-all \
+            --lease-directory "$RUNNER_TEMP/gpu-ci-all-leases"
 
   publish:
     name: ${{ github.event_name == 'pull_request' && 'Stable Community CI' || inputs.ci_lane == 'dev' && 'Dev Community CI' || 'Stable Community CI' }} result
@@ -1782,6 +1745,8 @@ jobs:
           TEST_RESULT: ${{ needs.provision-and-test.outputs.conclusion }}
           GPU_FAILURE_CLASS: ${{ needs.provision-and-test.outputs.failure_class }}
           CLEANUP_RESULT: ${{ needs.cleanup.result }}
+          BACKSTOP_RELEASE_CONFIRMED: ${{ needs.cleanup.outputs.cleanup_confirmed }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           test "$AUTHORIZED_RESULT" = success
@@ -1793,7 +1758,12 @@ jobs:
           test "$GPU_AUTHORIZED" = success
           if [ "$RUN_GPU" = false ]; then
             test "$GPU_RESULT" = skipped
-            test "$CLEANUP_RESULT" = skipped
+            if [ "$ORIGINAL_RUN_ATTEMPT" -gt 1 ]; then
+              test "$CLEANUP_RESULT" = success
+              test "$BACKSTOP_RELEASE_CONFIRMED" = true
+            else
+              test "$CLEANUP_RESULT" = skipped
+            fi
           else
             test "$RUN_GPU" = true
             test "$GPU_RESULT" = success
@@ -1813,6 +1783,7 @@ jobs:
           GPU_FAILURE_CLASS: ${{ needs.provision-and-test.outputs.failure_class }}
           OWNER_RELEASE_CONFIRMED: ${{ needs.provision-and-test.outputs.cleanup_confirmed }}
           BACKSTOP_RELEASE_CONFIRMED: ${{ needs.cleanup.outputs.cleanup_confirmed }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.run_attempt }}
           NO_ALLOCATION_CONFIRMED: ${{ needs.provision-and-test.outputs.no_allocation_confirmed }}
           COMPLETE_RESULT: ${{ steps.complete.outcome }}
         run: |
@@ -1820,8 +1791,9 @@ jobs:
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           state=failure
           description="Complete Community CI: failure"
-          if [ "$GPU_RESULT" != skipped ] \
-            && [ "$OWNER_RELEASE_CONFIRMED" != true ] \
+          # The current owner cannot certify an older rerun allocation. Only
+          # the backstop reconciles every original producer in this workflow.
+          if { [ "$RUN_GPU" = true ] || [ "$ORIGINAL_RUN_ATTEMPT" -gt 1 ]; } \
             && [ "$BACKSTOP_RELEASE_CONFIRMED" != true ]; then
             state=pending
             description="Community CI release remains unconfirmed"

@@ -15,9 +15,10 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 import zipfile
 
-from tools.brev_exec import _load_lease, _save_lease
+from tools.brev_exec import POLL_INTERVAL, ProvisionError, _load_lease, _save_lease, cleanup
 
 
 OWNER_JOB = "Community GPU / Provision and test"
@@ -96,7 +97,11 @@ def select_artifact(artifacts: list[dict], producer: dict, repository_id: int) -
     run_id, attempt = producer["run_id"], producer["run_attempt"]
     # The final receipt has a separate immutable artifact. Replacing the initial
     # artifact would create an avoidable gap if the runner died during upload.
-    for name in (f"gpu-ci-lease-final-{run_id}-{attempt}", f"gpu-ci-lease-{run_id}-{attempt}"):
+    for name in (
+        f"gpu-ci-lease-final-{run_id}-{attempt}",
+        f"gpu-ci-lease-{run_id}-{attempt}",
+        f"gpu-ci-intent-{run_id}-{attempt}",
+    ):
         matches = [artifact for artifact in artifacts if artifact.get("name") == name]
         if not matches:
             continue
@@ -154,7 +159,7 @@ def decode_lease(archive: bytes, artifact: dict, producer: dict) -> dict:
     return lease
 
 
-def recover(repository: str, run_id: int, attempt: int, sha: str, destination: Path) -> dict:
+def _validate_identity(repository: str, run_id: int, attempt: int, sha: str) -> None:
     if (
         not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
         or run_id < 1
@@ -162,6 +167,10 @@ def recover(repository: str, run_id: int, attempt: int, sha: str, destination: P
         or not re.fullmatch(r"[0-9a-f]{40}", sha)
     ):
         raise RecoveryError("Invalid trusted workflow identity")
+
+
+def _context(repository: str, run_id: int, attempt: int, sha: str) -> tuple[str, dict, list[dict]]:
+    _validate_identity(repository, run_id, attempt, sha)
     prefix = f"repos/{repository}/actions/runs/{run_id}"
     run = _api(prefix)
     if (
@@ -174,7 +183,12 @@ def recover(repository: str, run_id: int, attempt: int, sha: str, destination: P
         or type(run["repository"].get("id")) is not int
     ):
         raise RecoveryError("The workflow run does not match the trusted cleanup context")
-    producer = select_producer(_rows(prefix + "/jobs?filter=all", "jobs"), run_id, attempt, sha)
+    return prefix, run, _rows(prefix + "/jobs?filter=all", "jobs")
+
+
+def _recover_producer(
+    repository: str, prefix: str, run: dict, producer: dict, destination: Path
+) -> dict:
     steps = producer.get("steps", [])
     reservations = [step for step in steps if step.get("name") == "Reserve a GPU instance"]
     if len(reservations) == 1 and reservations[0].get("conclusion") == "skipped":
@@ -196,18 +210,134 @@ def recover(repository: str, run_id: int, attempt: int, sha: str, destination: P
     return {"instance_name": lease["name"]}
 
 
+def recover(repository: str, run_id: int, attempt: int, sha: str, destination: Path) -> dict:
+    prefix, run, jobs = _context(repository, run_id, attempt, sha)
+    producer = select_producer(jobs, run_id, attempt, sha)
+    return _recover_producer(repository, prefix, run, producer, destination)
+
+
+def cleanup_attempts(
+    repository: str,
+    run_id: int,
+    attempt: int,
+    sha: str,
+    directory: Path,
+    *,
+    prior_only: bool,
+) -> dict:
+    """Release every original owner before a rerun may allocate again.
+
+    A newer producer or a cleanup-only rerun never replaces older ownership.
+    Missing evidence and uncertain requests block this call, never a new POST.
+    """
+    _validate_identity(repository, run_id, attempt, sha)
+    if prior_only and attempt == 1:
+        return {"cleanup_confirmed": "true"}
+    # Keep validated local leases: rediscovering from an older immutable
+    # artifact must not erase a newly learned VM ID or a deletion receipt.
+    recovered: dict[int, tuple[str, Path]] = {}
+    confirmed: set[int] = set()
+    producers: dict[int, dict] = {}
+    context = None
+    metadata_unconfirmed = True
+    while True:
+        try:
+            prefix, run, jobs = _context(repository, run_id, attempt, sha)
+            owners = [job for job in jobs if job.get("name") == OWNER_JOB]
+            if not owners:
+                raise RecoveryError("The original GPU producers are unavailable")
+            selected = {}
+            blocked_attempts = set()
+            metadata_unconfirmed = False
+            for job in owners:
+                owner_attempt = job.get("run_attempt")
+                if (
+                    type(owner_attempt) is not int
+                    or owner_attempt < 1
+                    or job.get("run_id") != run_id
+                    or job.get("head_sha") != sha
+                ):
+                    metadata_unconfirmed = True
+                    if type(owner_attempt) is int:
+                        blocked_attempts.add(owner_attempt)
+                        selected.pop(owner_attempt, None)
+                    continue
+                if owner_attempt > attempt or (prior_only and owner_attempt == attempt):
+                    continue
+                if job.get("conclusion") == "skipped":
+                    continue
+                if owner_attempt in selected or job.get("status") != "completed":
+                    metadata_unconfirmed = True
+                    blocked_attempts.add(owner_attempt)
+                    selected.pop(owner_attempt, None)
+                    continue
+                if owner_attempt not in blocked_attempts:
+                    selected[owner_attempt] = job
+            producers = selected
+            context = (prefix, run)
+        except (RecoveryError, OSError):
+            # A completed producer and its verified artifact remain ownership
+            # evidence through a later GitHub outage. Keep servicing those VMs.
+            pass
+        pending = []
+        evidence_unconfirmed = metadata_unconfirmed or context is None
+        if context is not None:
+            prefix, run = context
+            for owner_attempt, producer in sorted(producers.items()):
+                if owner_attempt in confirmed:
+                    continue
+                try:
+                    if owner_attempt not in recovered:
+                        destination = directory / str(owner_attempt) / LEASE_FILE
+                        result = _recover_producer(repository, prefix, run, producer, destination)
+                        if result.get("cleanup_confirmed") == "true":
+                            confirmed.add(owner_attempt)
+                            continue
+                        recovered[owner_attempt] = (result["instance_name"], destination)
+                    name, destination = recovered[owner_attempt]
+                    lease = _load_lease(destination, name)
+                    pending.append(
+                        (not bool(lease.get("instance_id")), owner_attempt, name, destination)
+                    )
+                except (RecoveryError, ProvisionError, OSError):
+                    evidence_unconfirmed = True
+        # Bounded passes provide fairness; a timeout never means deletion.
+        # One blocked identity cannot prevent another owned VM being released.
+        for _unknown, owner_attempt, name, destination in sorted(pending):
+            try:
+                cleanup(name, lease_file=destination, timeout=90)
+                confirmed.add(owner_attempt)
+            except (ProvisionError, OSError):
+                pass
+        if not evidence_unconfirmed and set(producers) <= confirmed:
+            return {"cleanup_confirmed": "true"}
+        print("GPU allocations remain unconfirmed; continuing reconciliation.", file=sys.stderr)
+        time.sleep(POLL_INTERVAL)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lease-file", required=True, type=Path)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--lease-file", type=Path)
+    mode.add_argument("--cleanup-prior", action="store_true")
+    mode.add_argument("--cleanup-all", action="store_true")
+    parser.add_argument("--lease-directory", type=Path)
     args = parser.parse_args()
     try:
-        result = recover(
+        identity = (
             os.environ["GITHUB_REPOSITORY"],
             int(os.environ["GITHUB_RUN_ID"]),
             int(os.environ["GITHUB_RUN_ATTEMPT"]),
             os.environ["GITHUB_SHA"],
-            args.lease_file,
         )
+        if args.lease_file:
+            result = recover(*identity, args.lease_file)
+        else:
+            if args.lease_directory is None:
+                raise RecoveryError("A directory is required for original allocation leases")
+            result = cleanup_attempts(
+                *identity, args.lease_directory, prior_only=args.cleanup_prior
+            )
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             for key, value in result.items():
                 output.write(f"{key}={value}\n")

@@ -863,8 +863,9 @@ def test_gpu_status_and_cleanup_fail_closed(
     steps = {step["name"]: step for step in job["steps"]}
     reserve = steps["Reserve a GPU instance"]
     assert reserve["id"] == "reserve"
-    assert "python3 -m tools.brev_exec provision" in reserve["run"]
-    assert 'echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"' in reserve["run"]
+    assert "python3 -m tools.brev_exec provision --from-intent" in reserve["run"]
+    prepare = steps["Prepare the GPU allocation intent"]
+    assert 'echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"' in prepare["run"]
     test_step = steps["Build the GPU image and validate the exact PR merge"]
     assert "sudo docker build -f Dockerfile.dev.x86-gpu" not in test_step["run"]
     assert "/tmp/community_gpu_images.py --pull-base" in test_step["run"]
@@ -885,8 +886,10 @@ def test_gpu_status_and_cleanup_fail_closed(
     }
     assert "${{" not in result["run"]
     cleanup = steps["Always tear down the GPU instance"]
-    assert cleanup["if"] == "${{ always() && steps.reserve.outputs.instance_name != '' }}"
-    assert cleanup["env"] == {"INSTANCE_NAME": "${{ steps.reserve.outputs.instance_name }}"}
+    assert cleanup["if"] == (
+        "${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}"
+    )
+    assert cleanup["env"] == {"INSTANCE_NAME": "${{ steps.prepare.outputs.instance_name }}"}
     assert test_step["env"]["INSTANCE_NAME"] == "${{ steps.reserve.outputs.instance_name }}"
     assert "python3 -m tools.brev_exec cleanup" in cleanup["run"]
     assert '--lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json"' in cleanup["run"]
@@ -895,10 +898,10 @@ def test_gpu_status_and_cleanup_fail_closed(
     assert job["outputs"] == {
         "conclusion": "${{ steps.result.outputs.conclusion }}",
         "failure_class": "${{ steps.classification.outputs.failure_class }}",
-        "instance_name": "${{ steps.reserve.outputs.instance_name }}",
-        "lease_artifact_name": "${{ steps.reserve.outputs.lease_artifact_name }}",
-        "instance_type": "${{ steps.reserve.outputs.instance_type }}",
-        "organization_id": "${{ steps.reserve.outputs.organization_id }}",
+        "instance_name": "${{ steps.prepare.outputs.instance_name }}",
+        "lease_artifact_name": "${{ steps.prepare.outputs.lease_artifact_name }}",
+        "instance_type": "${{ steps.prepare.outputs.instance_type }}",
+        "organization_id": "${{ steps.prepare.outputs.organization_id }}",
         "allocation_requested": "${{ steps.reserve.outputs.allocation_requested }}",
         "reserve_outcome": "${{ steps.reserve.outcome }}",
         "no_allocation_confirmed": "${{ steps.no_allocation.outputs.no_allocation_confirmed }}",
@@ -908,7 +911,7 @@ def test_gpu_status_and_cleanup_fail_closed(
     assert "always()" in cleanup_job["if"]
     assert "needs.gpu-authorize.outputs.run_gpu == 'true'" in cleanup_job["if"]
     cleanup_steps = {step["name"]: step for step in cleanup_job["steps"]}
-    cleanup_script = cleanup_steps["Delete the deterministic GPU instance"]["run"]
+    cleanup_script = cleanup_steps["Delete every original GPU allocation"]["run"]
     lease = tmp_path / "gpu-ci-lease/trtmc-gpu-ci-lease.json"
     lease.parent.mkdir()
     lease.write_text("{}")
@@ -930,8 +933,8 @@ def test_gpu_status_and_cleanup_fail_closed(
     )
     assert cleanup_result.returncode == 73, cleanup_result.stderr
     assert cleanup_result.stdout.splitlines() == [
-        "-m tools.brev_exec cleanup --instance trtmc-gpu-ci-123-1 "
-        f"--lease-file {tmp_path}/gpu-ci-lease/trtmc-gpu-ci-lease.json --until-deleted",
+        "-m tools.community_gpu_lease --cleanup-all "
+        f"--lease-directory {tmp_path}/gpu-ci-all-leases",
     ]
     _workflow_plan(tmp_path)
     # Execute the real workflow script with remote operations stubbed. A copy
@@ -1352,91 +1355,32 @@ def test_gpu_cleanup_can_delete_instance_after_reservation_failure(
     tmp_path: Path,
     provision_exitcode: int,
 ) -> None:
-    output = tmp_path / "output"
-    calls = tmp_path / "brev-calls"
-    brev = tmp_path / "brev"
-    brev.write_text(
-        '#!/bin/bash\nprintf "%s\\n" "$*" >> "$BREV_CALLS"\n',
-        encoding="utf-8",
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    harness = JobHarness(tmp_path, workflow["jobs"]["provision-and-test"])
+    prepared = harness.run("prepare")
+    assert prepared.returncode == 0, prepared.stderr
+    identity = dict(
+        line.split("=", 1) for line in (tmp_path / "prepare-output").read_text().splitlines()
     )
-    brev.chmod(0o755)
-    environment = {
-        **os.environ,
-        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-        "BREV_CALLS": str(calls),
-        "PROVISION_EXITCODE": str(provision_exitcode),
-        "GPU_TYPE": "L40",
-        "GPU_PROVIDER": "auto",
-        "HOST_RAM_GIB": "64",
-        "GITHUB_RUN_ID": "123",
-        "GITHUB_RUN_ATTEMPT": "2",
-        "GITHUB_OUTPUT": str(output),
-        "RUNNER_TEMP": str(tmp_path),
-    }
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            r"""
-python3() {
-  printf '%s %s\n' "$3" "$*" >> "$BREV_CALLS"
-  test "$1" = -m && test "$2" = tools.brev_exec || return 99
-  if [ "$3" = provision ]; then
-    # Publish the attempted identity even if the single allocation fails.
-    printf 'instance_name=trtmc-gpu-ci-123-2\n' >> "$GITHUB_OUTPUT"
-    printf '{"name":"trtmc-gpu-ci-123-2","instance_id":"test123"}\n' > "$RUNNER_TEMP/trtmc-gpu-ci-lease.json"
-    return "$PROVISION_EXITCODE"
-  fi
-  test "$3" = cleanup || return 98
-}
-"""
-            + _workflow_step_script(
-                "community-ci.yml", "provision-and-test", "Reserve a GPU instance"
-            ),
-        ],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
+    assert identity["instance_name"] == "trtmc-gpu-ci-123-2"
+    assert identity["lease_artifact_name"] == "gpu-ci-lease-123-2"
+    assert not harness.events("provision")
+    reserved = harness.run(
+        "reserve", PROVISION_EXIT=str(provision_exitcode), PROVISION_EMIT_NAME="false"
     )
-    assert result.returncode == provision_exitcode, result.stdout + result.stderr
-    instance_name = "trtmc-gpu-ci-123-2"
-    outputs = output.read_text(encoding="utf-8").splitlines()
-    assert outputs == [
-        "instance_name=trtmc-gpu-ci-123-2",
-        "lease_artifact_name=gpu-ci-lease-123-2",
-        "allocation_requested=false",
-        f"instance_name={instance_name}",
-    ]
-    assert dict(line.split("=", 1) for line in outputs)["instance_name"] == instance_name
-    cleanup = subprocess.run(
-        [
-            "bash",
-            "-c",
-            r"""
-python3() {
-  printf '%s %s\n' "$3" "$*" >> "$BREV_CALLS"
-  test "$3" = cleanup || return 99
-  test -f "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" || return 98
-}
-"""
-            + _workflow_step_script(
-                "community-ci.yml",
-                "provision-and-test",
-                "Always tear down the GPU instance",
-            ),
-        ],
-        env={**environment, "INSTANCE_NAME": instance_name},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
-    assert calls.read_text(encoding="utf-8").splitlines() == [
-        "provision -m tools.brev_exec provision --instance trtmc-gpu-ci-123-2 "
+    assert reserved.returncode == provision_exitcode, reserved.stderr
+    # The pre-upload identity survives even if create fails before publishing
+    # any reserve-step output. Owner cleanup must use that prepared identity.
+    assert not (tmp_path / "reserve-output").exists()
+    released = harness.run("release", INSTANCE_NAME=identity["instance_name"])
+    assert released.returncode == 0, released.stderr
+    assert harness.events("provision") == [
+        "-m tools.brev_exec provision --from-intent --instance trtmc-gpu-ci-123-2 "
         "--provider aws --host-ram-gib 64 --disk-gb 500 --min-free-disk-gb 200 "
         f"--lease-file {tmp_path}/trtmc-gpu-ci-lease.json --timeout 2700 --attempts 1",
-        f"cleanup -m tools.brev_exec cleanup --instance {instance_name} "
+    ]
+    assert harness.events("cleanup") == [
+        "-m tools.brev_exec cleanup --instance trtmc-gpu-ci-123-2 "
         f"--lease-file {tmp_path}/trtmc-gpu-ci-lease.json --until-deleted",
     ]
 
@@ -1469,7 +1413,7 @@ def test_community_premerge_has_independent_lanes_and_public_only_execution():
     assert "sleep" not in step["run"]
     gpu = executor["jobs"]["provision-and-test"]
     test = next(step for step in gpu["steps"] if step.get("id") == "test")
-    assert gpu["permissions"] == {"contents": "read"}
+    assert gpu["permissions"] == {"contents": "read", "actions": "read"}
     assert test["env"]["REGISTRY_TOKEN"] == "${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}"
     assert "github.token" not in json.dumps(test)
     assert test["env"]["HF_TOKEN"] == "${{ secrets.HF_TOKEN }}"
@@ -1829,7 +1773,8 @@ sleep() { SECONDS=$((SECONDS + 18001)); }
         ("true", "true", "success", "success", "success"),
         ("true", "true", "failure", "failure", "failure"),
         ("", "true", "failure", "failure", "failure"),
-        ("true", "", "failure", "failure", "failure"),
+        ("true", "", "failure", "failure", "pending"),
+        ("true", "", "success", "success", "pending"),
         ("", "", "failure", "failure", "pending"),
         ("", "", "success", "success", "pending"),
         ("", "", "skipped", "failure", "failure"),
@@ -1865,6 +1810,7 @@ def test_trusted_inner_status_requires_release_before_a_gpu_verdict(
             "GPU_FAILURE_CLASS": "none" if gpu == "success" else "pr_failure",
             "OWNER_RELEASE_CONFIRMED": owner,
             "BACKSTOP_RELEASE_CONFIRMED": backstop,
+            "ORIGINAL_RUN_ATTEMPT": "1",
             "COMPLETE_RESULT": complete,
             "GITHUB_REPOSITORY": "example/source",
             "GITHUB_SERVER_URL": "https://github.com",
@@ -1884,67 +1830,35 @@ def test_trusted_inner_status_requires_release_before_a_gpu_verdict(
         assert "description=Community CI release remains unconfirmed" in arguments
 
 
-@pytest.mark.parametrize(
-    "outcome,proof,confirmed",
-    [
-        ("skipped", "true", True),
-        ("skipped", "", False),
-        ("failure", "true", False),
-        ("cancelled", "true", False),
-        ("success", "true", False),
-        ("", "true", False),
-    ],
-)
-def test_backstop_requires_explicit_trusted_no_allocation_proof(
-    tmp_path, outcome, proof, confirmed
-):
+@pytest.mark.parametrize("outcome", ["skipped", "failure", "cancelled", "success", ""])
+def test_backstop_requires_explicit_trusted_no_allocation_proof(tmp_path, outcome):
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     owner = workflow["jobs"]["provision-and-test"]
     marker = next(s for s in owner["steps"] if s.get("id") == "no_allocation")
     assert marker["if"] == "${{ always() && steps.reserve.outcome == 'skipped' }}"
-    assert owner["outputs"]["reserve_outcome"] == "${{ steps.reserve.outcome }}"
-    backup = workflow["jobs"]["cleanup"]
-    step = backup["steps"][0]
-    assert step["id"] == "no_allocation"
-    assert step["env"] == {
-        "RESERVE_OUTCOME": "${{ needs.provision-and-test.outputs.reserve_outcome }}",
-        "NO_ALLOCATION_CONFIRMED": "${{ needs.provision-and-test.outputs.no_allocation_confirmed }}",
-    }
-    output = tmp_path / "output"
-    calls = tmp_path / "brev-calls"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'brev() { printf "%s\\n" "$*" >> "$BREV_CALLS"; return 91; }\n' + step["run"],
-        ],
-        env={
-            **os.environ,
-            "RESERVE_OUTCOME": outcome,
-            "NO_ALLOCATION_CONFIRMED": proof,
-            "GITHUB_OUTPUT": str(output),
-            "BREV_CALLS": str(calls),
-        },
-        capture_output=True,
-        text=True,
-        timeout=5,
+    harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
+    driver = _cleanup_evidence(
+        tmp_path,
+        [1],
+        skipped={1} if outcome == "skipped" else set(),
+        artifacts=False,
+        reserve_outcome=outcome,
     )
-    assert result.returncode == 0 and not calls.exists()
-    assert output.exists() is confirmed
-    if confirmed:
+    result = harness.run(
+        "release",
+        LEASE_DRIVER=str(driver),
+        NO_ALLOCATION_CONFIRMED="true",
+        OWNER_CLEANUP_CONFIRMED="true",
+    )
+    # Missing/cancelled owner outputs never count as evidence. Only original
+    # GitHub job metadata may prove that this attempt did not reach Reserve.
+    assert result.returncode == (0 if outcome == "skipped" else 75), result.stderr
+    assert not harness.events("cleanup")
+    output = tmp_path / "release-output"
+    assert output.exists() is (outcome == "skipped")
+    if output.exists():
         assert output.read_text() == "cleanup_confirmed=true\n"
-    for name in (
-        "Check out trusted GPU cleanup",
-        "Install the pinned Brev CLI",
-        "Log in to Brev",
-        "Recover the GPU instance lease",
-    ):
-        guarded = next(s for s in backup["steps"] if s["name"] == name)
-        assert guarded["if"] == "${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}"
-    # Without proof these guards stay eligible; normal owned-ID cleanup is retained.
-    delete = next(s for s in backup["steps"] if s.get("id") == "release")
-    assert "cleanup-login.outcome == 'success'" in delete["if"]
-    assert "--until-deleted" in delete["run"]
+    assert "needs.provision-and-test.outputs" not in str(harness.steps["release"])
 
 
 def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
@@ -1999,6 +1913,7 @@ def test_preparation_failure_finalizes_infra_without_brev_credentials(tmp_path):
             "GPU_FAILURE_CLASS": "infra_failure",
             "OWNER_RELEASE_CONFIRMED": "true",
             "BACKSTOP_RELEASE_CONFIRMED": "true",
+            "ORIGINAL_RUN_ATTEMPT": "1",
             "NO_ALLOCATION_CONFIRMED": "true",
             "COMPLETE_RESULT": "failure",
             "GITHUB_REPOSITORY": "example/source",
@@ -2111,7 +2026,8 @@ def test_gpu_receipt_classification_reaches_only_a_released_final_status(
             "GPU_RESULT": "success" if success else "failure",
             "GPU_FAILURE_CLASS": expected_class,
             "OWNER_RELEASE_CONFIRMED": "true" if released else "",
-            "BACKSTOP_RELEASE_CONFIRMED": "",
+            "BACKSTOP_RELEASE_CONFIRMED": "true" if released else "",
+            "ORIGINAL_RUN_ATTEMPT": "1",
             "NO_ALLOCATION_CONFIRMED": "",
             "COMPLETE_RESULT": "success" if success else "failure",
             "GITHUB_REPOSITORY": "example/source",
@@ -2157,7 +2073,8 @@ def test_absent_classification_output_defaults_to_infra_only_after_cpu_passes(
             "GPU_RESULT": "failure",
             "GPU_FAILURE_CLASS": category,
             "OWNER_RELEASE_CONFIRMED": "true",
-            "BACKSTOP_RELEASE_CONFIRMED": "",
+            "BACKSTOP_RELEASE_CONFIRMED": "true",
+            "ORIGINAL_RUN_ATTEMPT": "1",
             "NO_ALLOCATION_CONFIRMED": "",
             "COMPLETE_RESULT": "failure",
             "GITHUB_REPOSITORY": "example/source",
@@ -2728,10 +2645,26 @@ python3() {
   test "$1" = -m || return 94
   case "$2:$3" in
     tools.brev_exec:provision)
+      if [ "$4" = --prepare-only ]; then
+        printf 'prepare\t%s\n' "$*" >> "$TRACE"
+        printf '{"name":"%s","create_started":true,"allocation_pending":true}\n' "$RESERVED_INSTANCE" > "$RUNNER_TEMP/trtmc-gpu-ci-lease.json"
+        return "${PREPARE_EXIT:-0}"
+      fi
       printf 'provision\t%s\n' "$*" >> "$TRACE"
-      printf 'instance_name=%s\n' "$RESERVED_INSTANCE" >> "$GITHUB_OUTPUT"
+      if [ "${PROVISION_EMIT_NAME:-true}" = true ]; then
+        printf 'instance_name=%s\n' "$RESERVED_INSTANCE" >> "$GITHUB_OUTPUT"
+      fi
       printf '{"name":"%s","instance_id":"test123"}\n' "$RESERVED_INSTANCE" > "$RUNNER_TEMP/trtmc-gpu-ci-lease.json"
       return "$PROVISION_EXIT"
+      ;;
+    tools.community_gpu_lease:*)
+      if [ -n "${LEASE_DRIVER:-}" ]; then
+        command python3 "$LEASE_DRIVER" "${@:3}"
+        return "$?"
+      fi
+      printf 'reconcile\t%s\n' "$*" >> "$TRACE"
+      test "$VM_CLEANUP_EXIT" = 0 || return "$VM_CLEANUP_EXIT"
+      printf 'cleanup_confirmed=true\n' >> "$GITHUB_OUTPUT"
       ;;
     tools.brev_exec:cleanup)
       printf 'cleanup\t%s\n' "$*" >> "$TRACE"
@@ -2774,10 +2707,12 @@ class JobHarness:
             "GITHUB_RUN_ID": "123",
             "GITHUB_RUN_ATTEMPT": "2",
             "GITHUB_REPOSITORY": "example/repository",
+            "GITHUB_SHA": "a" * 40,
             "GPU_TYPE": "L40S",
-            "GPU_PROVIDER": "auto",
+            "GPU_PROVIDER": "aws",
             "HOST_RAM_GIB": "64",
             "RESERVED_INSTANCE": "trtmc-gpu-ci-123-2",
+            "INSTANCE_NAME": "trtmc-gpu-ci-123-2",
             "PROVISION_EXIT": "0",
             "COORDINATOR_EXIT": "0",
             "VM_CLEANUP_EXIT": "0",
@@ -3058,7 +2993,7 @@ def test_failed_blocking_reservation_stops_normal_test_admission(tmp_path, gpu_j
     # Even an unsuccessful helper leaves the actual attempted name available
     # for the job's always-run teardown.
     cleanup = harness.steps["release"]
-    assert cleanup["env"]["INSTANCE_NAME"] == "${{ steps.reserve.outputs.instance_name }}"
+    assert cleanup["env"]["INSTANCE_NAME"] == "${{ steps.prepare.outputs.instance_name }}"
     assert "always()" in cleanup["if"]
     result = harness.run("release", INSTANCE_NAME=harness.reserve_output())
     assert result.returncode == 0
@@ -3088,7 +3023,7 @@ def test_gpu_provider_selects_one_qualified_exact_type(tmp_path, gpu_job, provid
     assert choice["type"] == "choice"
     assert choice["default"] == "auto"
     assert choice["options"] == ["auto", "aws", "nebius"]
-    reserve = next(step for step in gpu_job["steps"] if step.get("id") == "reserve")
+    reserve = next(step for step in gpu_job["steps"] if step.get("id") == "prepare")
     assert reserve["env"]["HOST_RAM_GIB"] == "${{ steps.host_profile.outputs.host_ram_gib }}"
     assert reserve["env"]["GPU_PROVIDER"] == "${{ inputs.gpu_provider || 'auto' }}"
     arguments = tmp_path / "helper-arguments"
@@ -3121,7 +3056,7 @@ python3() {
         return
     assert result.returncode == 0, result.stdout + result.stderr
     argv = arguments.read_bytes().decode().split("\0")[:-1]
-    assert argv[:3] == ["-m", "tools.brev_exec", "provision"]
+    assert argv[:4] == ["-m", "tools.brev_exec", "provision", "--prepare-only"]
     assert "--gpu" not in argv and "--instance-type" not in argv
     assert "--fallback-provider" not in argv
     assert argv.count("--provider") == 1
@@ -3305,36 +3240,25 @@ git() {
 
 
 @pytest.mark.parametrize("cleanup_exit", [0, 73])
-def test_independent_cleanup_verifies_the_single_instance_and_propagates_failure(
+def test_independent_cleanup_verifies_every_original_attempt_and_propagates_failure(
     tmp_path, gpu_job, cleanup_exit
 ):
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     cleanup = workflow["jobs"]["cleanup"]
     assert "always()" in cleanup["if"]
     assert "provision-and-test" in cleanup["needs"]
-    job = {"steps": cleanup["steps"]}
-    harness = JobHarness(tmp_path, job)
-    result = harness.run(
-        "Delete the deterministic GPU instance",
-        VM_CLEANUP_EXIT=str(cleanup_exit),
-        INSTANCE_NAME="trtmc-gpu-ci-123-1",
-        INSTANCE_TYPE="g6.4xlarge",
-        ORGANIZATION_ID="org-original",
-        ALLOCATION_REQUESTED="true",
-        OWNER_CLEANUP_CONFIRMED="",
-    )
+    harness = JobHarness(tmp_path, cleanup)
+    result = harness.run("release", VM_CLEANUP_EXIT=str(cleanup_exit))
     assert result.returncode == cleanup_exit, result.stdout + result.stderr
-    assert harness.events("cleanup") == [
-        "-m tools.brev_exec cleanup --instance trtmc-gpu-ci-123-1 "
-        f"--lease-file {tmp_path}/gpu-ci-lease/trtmc-gpu-ci-lease.json --until-deleted",
+    assert harness.events("reconcile") == [
+        "-m tools.community_gpu_lease --cleanup-all "
+        f"--lease-directory {tmp_path}/gpu-ci-all-leases",
     ]
     assert not harness.events("brev")
     assert not harness.events("provision")
     assert not harness.events("coordinate")
-    recovered = json.loads((tmp_path / "gpu-ci-lease/trtmc-gpu-ci-lease.json").read_text())
-    assert recovered["name"] == "trtmc-gpu-ci-123-1"
-    assert recovered["organization_id"] == "org-original"
-    assert recovered["create_started"] and recovered["allocation_pending"]
+    output = tmp_path / "release-output"
+    assert output.exists() is (cleanup_exit == 0)
 
 
 @pytest.mark.parametrize("phase,exit_code", [("reserve", 23), ("test", 1), ("test", 130)])
@@ -3367,69 +3291,198 @@ def test_gpu_failure_reaches_release_before_original_result(tmp_path, gpu_job, p
     assert (tmp_path / "result-output").read_text() == f"conclusion={state}\n"
 
 
-@pytest.mark.parametrize(
-    "name,requested,confirmed,expected",
-    [
-        ("", "true", "", 75),
-        ("trtmc-gpu-ci-999-1", "true", "", 1),
-        ("trtmc-gpu-ci-123-1", "", "", 1),
-        ("trtmc-gpu-ci-123-1", "true", "true", 0),
-    ],
-)
-def test_backstop_never_guesses_an_allocation_from_the_current_attempt(
-    tmp_path, name, requested, confirmed, expected
+def _cleanup_evidence(
+    tmp_path,
+    attempts,
+    *,
+    skipped=(),
+    artifacts=True,
+    foreign=False,
+    reserve_outcome="failure",
+    intent_only=False,
 ):
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
-    harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
-    result = harness.run(
-        "Delete the deterministic GPU instance",
-        INSTANCE_NAME=name,
-        INSTANCE_TYPE="g6.4xlarge",
-        ALLOCATION_REQUESTED=requested,
-        OWNER_CLEANUP_CONFIRMED=confirmed,
+    """Execute the real recovery CLI; replace only provider and GitHub I/O."""
+    from tools.tests.test_community_gpu_lease import _archive, _fixture, _producer
+
+    repository = "example/repository"
+    prefix = f"repos/{repository}/actions/runs/123"
+    responses = {
+        prefix: {
+            "id": 123,
+            "head_sha": "a" * 40,
+            "path": ".github/workflows/community-ci.yml",
+            "repository": {"id": 5, "full_name": repository},
+        },
+        prefix + "/jobs?filter=all&per_page=100&page=1": {"jobs": []},
+        prefix + "/artifacts?per_page=100&page=1": {"artifacts": []},
+    }
+    for attempt in attempts:
+        producer = _producer(attempt)
+        producer["steps"][0]["conclusion"] = reserve_outcome
+        if attempt in skipped:
+            producer["steps"][0]["conclusion"] = "skipped"
+        responses[prefix + "/jobs?filter=all&per_page=100&page=1"]["jobs"].append(producer)
+        if not artifacts:
+            continue
+        lease, artifact, archive = _fixture(attempt)
+        if intent_only:
+            artifact["name"] = f"gpu-ci-intent-123-{attempt}"
+            lease.update(instance_id=None, create_accepted=False, allocation_pending=True)
+            lease["intent_prepared"] = True
+        if foreign:
+            lease["name"] = "trtmc-gpu-ci-999-1"
+        if intent_only or foreign:
+            archive = _archive(lease)
+            artifact["digest"] = "sha256:" + hashlib.sha256(archive).hexdigest()
+        responses[prefix + "/artifacts?per_page=100&page=1"]["artifacts"].append(artifact)
+        responses[f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"] = {
+            "binary": archive.hex()
+        }
+    data = tmp_path / "github-evidence.json"
+    data.write_text(json.dumps(responses))
+    driver = tmp_path / "reconcile.py"
+    driver.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+        "from tools import community_gpu_lease as recovery\n"
+        f"responses = json.loads(Path({str(data)!r}).read_text())\n"
+        "def api(path, *, binary=False):\n"
+        "    value = responses[path]\n"
+        "    return bytes.fromhex(value['binary']) if binary else value\n"
+        "def cleanup(name, *, lease_file, timeout):\n"
+        "    lease = json.loads(lease_file.read_text())\n"
+        "    assert lease['name'] == name and lease['organization_id'] == 'org-fixture'\n"
+        "    assert timeout == 90\n"
+        "    with open(os.environ['TRACE'], 'a') as trace:\n"
+        "        trace.write('cleanup\\t' + name + '\\n')\n"
+        "    if os.environ['VM_CLEANUP_EXIT'] != '0':\n"
+        "        raise recovery.ProvisionError('deletion remains unconfirmed')\n"
+        "recovery._api = api\n"
+        "recovery.cleanup = cleanup\n"
+        "def stop(_delay):\n"
+        "    raise recovery.RecoveryError('fixture observation ended after incomplete reconciliation')\n"
+        "recovery.time.sleep = stop\n"
+        "raise SystemExit(recovery.main())\n"
     )
-    assert result.returncode == expected, result.stdout + result.stderr
-    assert not harness.events("cleanup")
-    assert not harness.events("provision")
+    return driver
 
 
-def test_backstop_uses_recovered_identity_when_cancelled_owner_outputs_are_empty(tmp_path):
+@pytest.mark.parametrize("fault", ["missing-artifact", "foreign-name", "unknown-delete"])
+def test_backstop_never_guesses_an_allocation_from_the_current_attempt(tmp_path, fault):
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
-    lease = tmp_path / "gpu-ci-lease/trtmc-gpu-ci-lease.json"
-    lease.parent.mkdir()
-    lease.write_text(json.dumps({"name": "trtmc-gpu-ci-123-1", "instance_id": "owned-vm"}))
+    driver = _cleanup_evidence(
+        tmp_path, [1], artifacts=fault != "missing-artifact", foreign=fault == "foreign-name"
+    )
     result = harness.run(
-        "Delete the deterministic GPU instance",
+        "release",
+        LEASE_DRIVER=str(driver),
         GITHUB_RUN_ATTEMPT="3",
-        INSTANCE_NAME="trtmc-gpu-ci-123-1",  # recovered from the original producer
+        INSTANCE_NAME="trtmc-gpu-ci-123-3",
+        ALLOCATION_REQUESTED="false",
+        OWNER_CLEANUP_CONFIRMED="true",
+        VM_CLEANUP_EXIT="73" if fault == "unknown-delete" else "0",
+    )
+    assert result.returncode == 75, result.stdout + result.stderr
+    assert harness.events("cleanup") == (
+        ["trtmc-gpu-ci-123-1"] if fault == "unknown-delete" else []
+    )
+    assert not harness.events("provision")
+    assert not (tmp_path / "release-output").exists()
+
+
+def test_backstop_uses_every_recovered_identity_when_cancelled_owner_outputs_are_empty(tmp_path):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
+    driver = _cleanup_evidence(tmp_path, [1, 2])
+    result = harness.run(
+        "release",
+        LEASE_DRIVER=str(driver),
+        GITHUB_RUN_ATTEMPT="3",
+        INSTANCE_NAME="",
         INSTANCE_TYPE="",
         ORGANIZATION_ID="",
         ALLOCATION_REQUESTED="",
         OWNER_CLEANUP_CONFIRMED="",
     )
     assert result.returncode == 0, result.stderr
-    assert harness.events("cleanup") == [
-        "-m tools.brev_exec cleanup --instance trtmc-gpu-ci-123-1 "
-        f"--lease-file {lease} --until-deleted",
-    ]
-    assert json.loads(lease.read_text())["instance_id"] == "owned-vm"
-    assert (tmp_path / "Delete-the-deterministic-GPU-instance-output").read_text() == (
-        "cleanup_confirmed=true\n"
-    )
+    assert harness.events("cleanup") == ["trtmc-gpu-ci-123-1", "trtmc-gpu-ci-123-2"]
+    for attempt in (1, 2):
+        recovered = json.loads(
+            (tmp_path / f"gpu-ci-all-leases/{attempt}/trtmc-gpu-ci-lease.json").read_text()
+        )
+        assert recovered["run_attempt"] == attempt
+        assert recovered["instance_id"] == "vm-fixture"
+    assert not (tmp_path / "gpu-ci-all-leases/3").exists()
+    assert (tmp_path / "release-output").read_text() == "cleanup_confirmed=true\n"
 
 
-def test_backstop_uses_github_skipped_reservation_proof_without_an_instance(tmp_path):
+def test_backstop_skipped_new_attempt_still_releases_older_allocation(tmp_path):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
+    driver = _cleanup_evidence(tmp_path, [1, 2], skipped={2})
+    result = harness.run("release", LEASE_DRIVER=str(driver), NO_ALLOCATION_CONFIRMED="true")
+    assert result.returncode == 0, result.stderr
+    assert harness.events("cleanup") == ["trtmc-gpu-ci-123-1"]
+    assert (tmp_path / "release-output").read_text() == "cleanup_confirmed=true\n"
+    assert not harness.events("provision")
+
+
+def test_backstop_recovers_durable_intent_after_runner_dies_before_lease_upload(tmp_path):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
+    driver = _cleanup_evidence(tmp_path, [1], intent_only=True)
+    result = harness.run("release", LEASE_DRIVER=str(driver), GITHUB_RUN_ATTEMPT="3")
+    assert result.returncode == 0, result.stderr
+    assert harness.events("cleanup") == ["trtmc-gpu-ci-123-1"]
+    lease = json.loads((tmp_path / "gpu-ci-all-leases/1/trtmc-gpu-ci-lease.json").read_text())
+    assert lease["intent_prepared"] and lease["allocation_pending"]
+    assert lease["instance_id"] is None
+    assert (tmp_path / "release-output").read_text() == "cleanup_confirmed=true\n"
+
+
+@pytest.mark.parametrize(
+    "attempt,outcome,proof,confirmed",
+    [
+        ("1", "skipped", "true", True),
+        ("1", "skipped", "", False),
+        ("1", "failure", "true", False),
+        ("1", "cancelled", "true", False),
+        ("1", "success", "true", False),
+        ("1", "", "true", False),
+        ("2", "skipped", "true", False),
+        ("3", "skipped", "true", False),
+    ],
+)
+def test_credential_free_no_allocation_proof_only_closes_initial_attempt(
+    tmp_path, attempt, outcome, proof, confirmed
+):
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
     result = harness.run(
-        "Delete the deterministic GPU instance",
-        INSTANCE_NAME="",
-        RECOVERED_NO_ALLOCATION="true",
+        "no_allocation",
+        GITHUB_RUN_ATTEMPT=attempt,
+        RESERVE_OUTCOME=outcome,
+        NO_ALLOCATION_CONFIRMED=proof,
     )
     assert result.returncode == 0, result.stderr
-    assert not harness.events("cleanup")
-    assert not harness.events("provision")
+    assert not harness.trace.exists()
+    output = tmp_path / "no_allocation-output"
+    assert output.exists() is confirmed
+    if confirmed:
+        assert output.read_text() == "cleanup_confirmed=true\n"
+    for name in (
+        "Check out trusted GPU cleanup",
+        "Install the pinned Brev CLI",
+        "Log in to Brev",
+    ):
+        assert harness.steps[name]["if"] == (
+            "${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}"
+        )
+    assert (
+        "steps.no_allocation.outputs.cleanup_confirmed != 'true'" in harness.steps["release"]["if"]
+    )
 
 
 @pytest.mark.parametrize("cleanup_exit", [0, 73])
@@ -3455,50 +3508,283 @@ def test_gpu_lease_survives_reservation_and_cleanup_with_a_trusted_backstop(gpu_
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     steps = {step["name"]: step for step in gpu_job["steps"]}
     names = [step["name"] for step in gpu_job["steps"]]
-    assert names.index("Reserve a GPU instance") < names.index("Preserve the GPU instance lease")
-    assert names.index("Preserve the GPU instance lease") < names.index(
-        "Build the GPU image and validate the exact PR merge"
-    )
-    assert names.index("Always tear down the GPU instance") < names.index(
-        "Preserve the final GPU instance lease"
-    )
+    ordered = [
+        "Release every earlier allocation attempt",
+        "Prepare the GPU allocation intent",
+        "Preserve the GPU allocation intent before creation",
+        "Reserve a GPU instance",
+        "Preserve the GPU instance lease",
+        "Build the GPU image and validate the exact PR merge",
+        "Always tear down the GPU instance",
+        "Preserve the final GPU instance lease",
+    ]
+    assert [names.index(name) for name in ordered] == sorted(names.index(name) for name in ordered)
     assert names.index("Always tear down the GPU instance") < names.index(
         "Record the step conclusion"
     )
-    for name in ("Preserve the GPU instance lease", "Preserve the final GPU instance lease"):
+    intent = steps["Preserve the GPU allocation intent before creation"]
+    assert intent.get("if") in (None, "success()", "${{ success() }}")
+    assert intent["with"]["name"] == "gpu-ci-intent-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert steps["Reserve a GPU instance"]["if"] == (
+        "${{ success() && steps.intent.outcome == 'success' && steps.intent.outputs.artifact-id != '' }}"
+    )
+    for name in (
+        "Preserve the GPU allocation intent before creation",
+        "Preserve the GPU instance lease",
+        "Preserve the final GPU instance lease",
+    ):
         step = steps[name]
-        assert "always()" in step["if"]
+        if step is not intent:
+            assert "always()" in step["if"]
+        assert step["uses"].startswith("actions/upload-artifact@")
         assert step["with"]["path"] == "${{ runner.temp }}/trtmc-gpu-ci-lease.json"
         assert step["with"]["if-no-files-found"] == "error"
         assert not step["with"].get("overwrite")
-    assert steps["Preserve the GPU instance lease"]["with"]["name"] == (
-        "${{ steps.reserve.outputs.lease_artifact_name }}"
+        assert not step.get("continue-on-error", False)
+    assert (
+        steps["Preserve the GPU instance lease"]["with"]["name"]
+        == "${{ steps.prepare.outputs.lease_artifact_name }}"
     )
     assert steps["Preserve the final GPU instance lease"]["with"]["name"] == (
         "gpu-ci-lease-final-${{ github.run_id }}-${{ github.run_attempt }}"
     )
+    prior = steps["Release every earlier allocation attempt"]
+    assert "--cleanup-prior" in prior["run"]
+    assert prior.get("if") in (None, "success()", "${{ success() }}")
+    assert not prior.get("continue-on-error", False)
     cleanup = workflow["jobs"]["cleanup"]
     assert gpu_job["timeout-minutes"] == 360
     assert cleanup["timeout-minutes"] == 360
     assert cleanup["permissions"] == {"contents": "read", "actions": "read"}
+    assert gpu_job["permissions"] == {"contents": "read", "actions": "read"}
     cleanup_steps = {step["name"]: step for step in cleanup["steps"]}
     assert cleanup_steps["Check out trusted GPU cleanup"]["with"] == {
         "ref": "${{ github.sha }}",
         "persist-credentials": False,
     }
-    download = cleanup_steps["Recover the GPU instance lease"]
-    assert download["continue-on-error"] is True
-    assert download["timeout-minutes"] == 3
-    assert download["id"] == "recover"
-    assert "python3 -m tools.community_gpu_lease" in download["run"]
-    assert "needs.provision-and-test.outputs" not in str(download)
-    delete = cleanup_steps["Delete the deterministic GPU instance"]
-    assert delete["env"]["INSTANCE_NAME"] == (
-        "${{ steps.recover.outputs.instance_name || needs.provision-and-test.outputs.instance_name }}"
-    )
+    delete = cleanup_steps["Delete every original GPU allocation"]
+    assert delete["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    assert "needs.provision-and-test.outputs" not in str(delete)
     assert "always()" in delete["if"]
     assert "steps.cleanup-checkout.outcome == 'success'" in delete["if"]
     assert "steps.cleanup-login.outcome == 'success'" in delete["if"]
-    assert "--until-deleted" in delete["run"]
+    assert "python3 -m tools.community_gpu_lease --cleanup-all" in delete["run"]
     assert "|| true" not in delete["run"]
     assert "-r2" not in delete["run"] and "-r3" not in delete["run"]
+
+
+@pytest.mark.parametrize(
+    "prepare_exit,upload_outcome,artifact_id,expected_posts",
+    [
+        (0, "success", "17", 1),
+        (23, "skipped", "", 0),
+        (0, "failure", "", 0),
+        (0, "cancelled", "", 0),
+        (0, "success", "", 0),
+        (0, "failure", "17", 0),
+    ],
+)
+def test_no_allocation_post_before_confirmed_immutable_intent_upload(
+    tmp_path, gpu_job, prepare_exit, upload_outcome, artifact_id, expected_posts
+):
+    harness = JobHarness(tmp_path, gpu_job)
+    prepared = harness.run("prepare", PREPARE_EXIT=str(prepare_exit))
+    assert prepared.returncode == prepare_exit
+    assert not harness.events("provision")
+    assert len(harness.events("prepare")) == 1
+    # Evaluate the checked-in Actions admission expression in a shell after
+    # substituting its three step-result inputs. Upload itself is a hosted action.
+    expression = harness.steps["reserve"]["if"].removeprefix("${{ ").removesuffix(" }}")
+    replacements = {
+        "success()": "${PRIOR_SUCCESS}",
+        "steps.intent.outcome": '"${UPLOAD_OUTCOME}"',
+        "steps.intent.outputs.artifact-id": '"${ARTIFACT_ID}"',
+    }
+    for old, new in replacements.items():
+        expression = expression.replace(old, new)
+    expression = expression.replace("${PRIOR_SUCCESS}", '"${PRIOR_SUCCESS}" == true')
+    script = STUBS + f"if [[ {expression} ]]; then\n" + harness.steps["reserve"]["run"] + "\nfi\n"
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=REPO_ROOT,
+        env={
+            **harness.environment,
+            "GITHUB_OUTPUT": str(tmp_path / "reserve-output"),
+            "PRIOR_SUCCESS": str(prepare_exit == 0 and upload_outcome == "success").lower(),
+            "UPLOAD_OUTCOME": upload_outcome,
+            "ARTIFACT_ID": artifact_id,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(harness.events("provision")) == expected_posts
+    assert not harness.events("coordinate")
+
+
+@pytest.mark.parametrize("prior_cleanup_exit", [0, 73])
+def test_prior_attempt_cleanup_blocks_new_create_until_confirmed(
+    tmp_path, gpu_job, prior_cleanup_exit
+):
+    harness = JobHarness(tmp_path, gpu_job)
+    driver = _cleanup_evidence(tmp_path, [1])
+    prior = harness.run(
+        "Release every earlier allocation attempt",
+        LEASE_DRIVER=str(driver),
+        VM_CLEANUP_EXIT=str(prior_cleanup_exit),
+    )
+    assert prior.returncode == (0 if prior_cleanup_exit == 0 else 75), prior.stderr
+    assert harness.events("cleanup") == ["trtmc-gpu-ci-123-1"]
+    if prior.returncode == 0:
+        assert harness.run("prepare").returncode == 0
+        assert harness.run("reserve").returncode == 0
+        kinds = [line.split("\t", 1)[0] for line in harness.trace.read_text().splitlines()]
+        assert kinds == ["cleanup", "prepare", "provision"]
+    else:
+        assert not harness.events("prepare")
+        assert not harness.events("provision")
+
+
+@pytest.mark.parametrize(
+    "updates,expected",
+    [
+        ({}, True),
+        ({"github.run_attempt": 1}, False),
+        ({"needs.gpu-authorize.outputs.run_gpu": "false"}, True),
+        ({"needs.gpu-authorize.result": "cancelled"}, True),
+        ({"needs.gpu-authorize.result": "failure"}, True),
+        ({"github.ref": "refs/heads/main"}, True),
+        ({"github.ref": "refs/heads/contributor-change"}, False),
+        ({"github.ref": "refs/tags/ci/developer"}, False),
+        ({"github.event_name": "pull_request"}, False),
+        ({"github.event_name": "pull_request_target"}, False),
+        ({"inputs.source_snapshot": ""}, False),
+        ({"inputs.task": "dependency-image-access"}, False),
+        (
+            {
+                "github.run_attempt": 1,
+                "needs.gpu-authorize.result": "success",
+                "needs.gpu-authorize.outputs.run_gpu": "true",
+            },
+            True,
+        ),
+    ],
+)
+def test_cleanup_job_admits_trusted_reruns_after_current_cpu_failure(tmp_path, updates, expected):
+    """Evaluate actual job admission; running its shell alone misses skipped jobs."""
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    condition = workflow["jobs"]["cleanup"]["if"].strip().removeprefix("${{").removesuffix("}}")
+    context = {
+        "github.event_name": "workflow_dispatch",
+        "github.run_attempt": 2,
+        "github.ref": "refs/heads/ci/developer",
+        "inputs.source_snapshot": '{"merge_sha":"' + "b" * 40 + '"}',
+        "inputs.task": "premerge",
+        "needs.gpu-authorize.result": "skipped",
+        "needs.gpu-authorize.outputs.run_gpu": "",
+        **updates,
+    }
+    for key, value in context.items():
+        condition = condition.replace(key, repr(value))
+    condition = (
+        condition.replace("&&", " and ")
+        .replace("||", " or ")
+        .replace("!startsWith", "not startsWith")
+    )
+    admitted = eval(
+        condition.strip(),
+        {"__builtins__": {}},
+        {"always": lambda: True, "startsWith": lambda value, prefix: value.startswith(prefix)},
+    )
+    assert admitted is expected
+    if admitted:
+        harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
+        driver = _cleanup_evidence(tmp_path, [1])
+        result = harness.run("release", LEASE_DRIVER=str(driver))
+        assert result.returncode == 0, result.stderr
+        assert harness.events("cleanup") == ["trtmc-gpu-ci-123-1"]
+
+
+@pytest.mark.parametrize("run_gpu", ["", "false"])
+@pytest.mark.parametrize("cpu", ["success", "failure", "cancelled"])
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_rerun_without_current_gpu_result_remains_pending_until_old_allocations_released(
+    tmp_path, run_gpu, cpu, confirmed
+):
+    script = _workflow_step_script(
+        "community-ci.yml", "publish", "Publish the released Dev workflow conclusion"
+    )
+    writes = tmp_path / "writes"
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$@" > "$STATUS_WRITES"; }\n' + script],
+        env={
+            **os.environ,
+            "HEAD_SHA": "a" * 40,
+            "CPU_RESULT": cpu,
+            "RUN_GPU": run_gpu,
+            "GPU_RESULT": "skipped",
+            "GPU_FAILURE_CLASS": "",
+            "OWNER_RELEASE_CONFIRMED": "true",
+            "BACKSTOP_RELEASE_CONFIRMED": "true" if confirmed else "",
+            "ORIGINAL_RUN_ATTEMPT": "2",
+            "NO_ALLOCATION_CONFIRMED": "true",
+            "COMPLETE_RESULT": "success" if cpu == "success" and run_gpu == "false" else "failure",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "123",
+            "STATUS_WRITES": str(writes),
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = (
+        "pending"
+        if not confirmed
+        else "success"
+        if cpu == "success" and run_gpu == "false"
+        else "failure"
+    )
+    assert f"state={expected}" in writes.read_text().splitlines()
+
+
+@pytest.mark.parametrize(
+    "attempt,cleanup,confirmed,expected",
+    [
+        ("1", "skipped", "", 0),
+        ("1", "success", "true", 1),
+        ("2", "success", "true", 0),
+        ("2", "success", "", 1),
+        ("2", "skipped", "true", 1),
+        ("2", "failure", "true", 1),
+        ("2", "cancelled", "", 1),
+        ("3", "success", "true", 0),
+    ],
+)
+def test_empty_current_gpu_plan_requires_historical_release_on_rerun(
+    attempt, cleanup, confirmed, expected
+):
+    script = _workflow_step_script(
+        "community-ci.yml", "publish", "Require the complete Community CI result"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "EVENT_NAME": "workflow_dispatch",
+            "AUTHORIZED_RESULT": "success",
+            "CPU_RESULT": "success",
+            "GPU_AUTHORIZED": "success",
+            "RUN_GPU": "false",
+            "GPU_RESULT": "skipped",
+            "CLEANUP_RESULT": cleanup,
+            "BACKSTOP_RELEASE_CONFIRMED": confirmed,
+            "ORIGINAL_RUN_ATTEMPT": attempt,
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == expected, result.stderr
