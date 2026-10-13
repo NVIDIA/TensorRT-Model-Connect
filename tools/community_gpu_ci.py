@@ -264,6 +264,20 @@ def _static_gpu_plan(repository: Path, source_sha: str, env: dict[str, str]) -> 
                 target = shadow / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(_git_plan(repository, "cat-file", "blob", oid), encoding="utf-8")
+            # External assets require the owner's existing preparation entry.
+            # Its presence must come from this immutable source, never from the
+            # orchestrator checkout. Invalid/oversized entries remain absent so
+            # only manifests that actually need this recipe fail admission.
+            relative = f"families/{owner}/ci/Dockerfile.dependencies"
+            entry = entries.get(relative, ())
+            if entry[:2] in {("100644", "blob"), ("100755", "blob")}:
+                size = int(_git_plan(repository, "cat-file", "-s", entry[2]).strip())
+                if size <= MAX_DEPENDENCY_CATALOG_BYTES:
+                    target = shadow / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(
+                        _git_plan(repository, "cat-file", "blob", entry[2]), encoding="utf-8"
+                    )
 
         plans = {}
         for owner in selection["selected_families"]:
@@ -462,6 +476,22 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
                     else:
                         deferred.append(name)
             if selected_cases:
+                external_files = manifest.get("external_files", [])
+                if not isinstance(external_files, list):
+                    raise ValueError("external_files must be a list")
+                if external_files:
+                    try:
+                        recipe = root / "ci/Dockerfile.dependencies"
+                        if any(
+                            parent.is_symlink() for parent in (root.parent, root, recipe.parent)
+                        ):
+                            raise ValueError("Asset preparation must stay within its owner")
+                        _dependency_bytes(recipe, root=repository)
+                    except (RuntimeError, OSError, ValueError):
+                        raise ValueError(
+                            f"{family} external_files require a regular family-owned "
+                            "ci/Dockerfile.dependencies to prepare assets before the PR entrypoint"
+                        ) from None
                 if "hf_id" in manifest:
                     checkpoints.add(
                         _checkpoint(

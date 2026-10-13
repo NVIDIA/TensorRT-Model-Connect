@@ -162,6 +162,13 @@ After CPU passes, trusted CI reads the frozen PR's declarative test manifests an
 checks its test plan before reserving a VM. It does not import PR Python during
 this preparation. The VM verifies the same frozen plan before execution.
 
+A selected manifest declaring nonempty `external_files` must include a regular
+`families/<family>/ci/Dockerfile.dependencies` in that same frozen PR source.
+The family recipe prepares and validates those assets and supplies any directory
+variables its tests require. Missing preparation recipes fail before allocation;
+they do not defer cases or count as a successful test. Recipe admission alone
+does not prove that preparation or model validation will succeed.
+
 One GPU execution reserves one Brev VM and pulls one verified private shared
 base by immutable digest. The base identity depends only on its common Dockerfile
 and environment inputs, so a family dependency change does not rebuild the base.
