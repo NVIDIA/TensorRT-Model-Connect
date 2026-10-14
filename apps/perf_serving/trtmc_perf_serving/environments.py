@@ -27,7 +27,10 @@ def _digest(requirements: Path, build_isolation: bool, prepare: Path | None = No
     digest.update(requirements.read_bytes())
     if prepare is not None:
         digest.update(b"\0prepare\0" + prepare.read_bytes())
-    digest.update(f"{sys.executable}\0{sys.version}\0build-isolation={build_isolation}".encode())
+    # python and python3 in one venv are aliases. Include the venv prefix as
+    # well as the resolved binary so different parent environments stay apart.
+    interpreter = f"{Path(sys.executable).resolve()}\0{sys.prefix}\0{sys.version}"
+    digest.update(f"{interpreter}\0build-isolation={build_isolation}".encode())
     return digest.hexdigest()
 
 
