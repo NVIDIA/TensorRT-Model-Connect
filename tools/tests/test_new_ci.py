@@ -1315,8 +1315,22 @@ def test_installed_sdk_builds_plain_c_and_cpp_without_cuda(
         validate_installed_sdk(prefix)
 
 
-def test_family_staging_preserves_product_files_and_excludes_references(tmp_path: Path) -> None:
-    from conanfile import _package_families
+def test_family_staging_preserves_product_files_and_excludes_references(tmp_path: Path, monkeypatch) -> None:
+    import runpy
+    import sys
+
+    # The staging function uses only pathlib/shutil. CPU CI does not install
+    # Conan, so isolate the recipe's unrelated build-tool imports here.
+    with monkeypatch.context() as patch:
+        for name, module in {
+            "conan": SimpleNamespace(ConanFile=object),
+            "conan.errors": SimpleNamespace(ConanException=RuntimeError),
+            "conan.tools.cmake": SimpleNamespace(CMake=None, CMakeToolchain=None, cmake_layout=None),
+            "conan.tools.files": SimpleNamespace(copy=None),
+        }.items():
+            patch.setitem(sys.modules, name, module)
+        recipe = runpy.run_path(str(Path(__file__).resolve().parents[2] / "conanfile.py"))
+    _package_families = recipe["_package_families"]
 
     source, package = tmp_path / "source", tmp_path / "package"
     files = {
