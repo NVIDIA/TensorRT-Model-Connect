@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 from io import BytesIO
+from pathlib import Path
 import urllib.request
 
 import numpy as np
@@ -32,6 +33,9 @@ def test_checkpoint_resolution_preserves_parsed_offline_policy(monkeypatch, tmp_
     from huggingface_hub import constants
 
     monkeypatch.delenv("TRTMC_LFM25_VL_CHECKPOINT", raising=False)
+    (tmp_path / "config.json").write_bytes(
+        (Path(__file__).parent / "fixtures/config.json").read_bytes()
+    )
     monkeypatch.setattr(constants, "HF_HUB_OFFLINE", offline)
     calls = []
 
@@ -53,6 +57,9 @@ def test_local_checkpoint_override_avoids_hub_resolution(monkeypatch, tmp_path):
     import huggingface_hub
 
     monkeypatch.setenv("TRTMC_LFM25_VL_CHECKPOINT", str(tmp_path))
+    (tmp_path / "config.json").write_bytes(
+        (Path(__file__).parent / "fixtures/config.json").read_bytes()
+    )
 
     def unexpected(*args, **kwargs):
         pytest.fail("local checkpoint override attempted Hub resolution")

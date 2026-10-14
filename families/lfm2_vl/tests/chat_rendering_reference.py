@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     options, provenance = reference_source(args.model_dir)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, **options)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=False, **options)
     history = [
         {"role": "user", "content": "First question."},
         {"role": "assistant", "content": "<think>old reasoning</think>\u2003 First answer.\u00a0"},

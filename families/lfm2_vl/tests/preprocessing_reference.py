@@ -37,7 +37,7 @@ def main():
     )
     args = parser.parse_args()
     options, provenance = reference_source(args.checkpoint)
-    processor = AutoProcessor.from_pretrained(args.checkpoint, **options)
+    processor = AutoProcessor.from_pretrained(args.checkpoint, trust_remote_code=False, **options)
     fixture_dir = args.output.parent
     data_dir = fixture_dir / "preprocessing"
     data_dir.mkdir(parents=True, exist_ok=True)

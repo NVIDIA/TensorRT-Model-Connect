@@ -11,9 +11,11 @@ import subprocess
 
 from .lfm25_vl_sampling_reference import couple
 from .native_probes import build_native_probe
+from .reference_source import guard_reference_model
 
 
 def compare_sampled(model, inputs, media, bundle, runtime, directory, *, steps=64):
+    guard_reference_model(model)
     import numpy as np
     import torch
     from transformers.generation.logits_process import (

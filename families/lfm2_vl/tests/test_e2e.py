@@ -18,6 +18,7 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 
 from .semantic_contract import compare_semantics
 from .native_probes import build_native_probe
+from .reference_source import reference_source
 
 MANIFEST = json.loads((Path(__file__).parent / "manifests/lfm25-vl-1.6b.json").read_text())
 CHECKPOINT = MANIFEST["hf_id"]
@@ -53,12 +54,17 @@ def _model_card_image():
 def _checkpoint():
     supplied = os.environ.get("TRTMC_LFM25_VL_CHECKPOINT")
     if supplied:
-        return Path(supplied)
-    from huggingface_hub import constants, snapshot_download
+        checkpoint = Path(supplied)
+    else:
+        from huggingface_hub import constants, snapshot_download
 
-    return Path(
-        snapshot_download(CHECKPOINT, revision=REVISION, local_files_only=constants.HF_HUB_OFFLINE)
-    )
+        checkpoint = Path(
+            snapshot_download(
+                CHECKPOINT, revision=REVISION, local_files_only=constants.HF_HUB_OFFLINE
+            )
+        )
+    reference_source(str(checkpoint))
+    return checkpoint
 
 
 def _fixtures(directory, processor):
@@ -317,6 +323,7 @@ def test_e2e(case_name, tmp_path, request):
     record_evidence(
         "checkpoint", {"model_dir": str(checkpoint), "hf_id": CHECKPOINT, "hf_revision": REVISION}
     )
+    reference_source(str(checkpoint))
     processor = AutoProcessor.from_pretrained(
         checkpoint, trust_remote_code=MANIFEST["trust_remote_code"]
     )
@@ -333,6 +340,7 @@ def test_e2e(case_name, tmp_path, request):
     record_evidence("commands", {"argv": native.args})
     record_evidence("native", {"stdout": native.stdout, "stderr": native.stderr})
     actual = {case["name"]: case for case in map(json.loads, native.stdout.splitlines())}
+    reference_source(str(checkpoint))
     model = AutoModelForImageTextToText.from_pretrained(
         checkpoint,
         dtype={"bf16": torch.bfloat16, "fp16": torch.float16}[CONTRACT["reference_precision"]],

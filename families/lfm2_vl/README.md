@@ -40,6 +40,15 @@ at most 1,024 tokens per resized image and ten tiles per source image. RGB byte
 images and normalized RGB Float32 images are accepted; normalized pixels are
 converted to the corresponding RGB byte values before preprocessing.
 
+Reference validation remains on Transformers 5.2.0. Before its loaders run,
+family helpers reject config-supplied Hub/fallback kernel selectors, including
+nested attention/expert settings, configuration-file redirects, and local
+adapter redirects. The sampling
+helper also checks the already loaded model before forwarding it. This is a
+scoped validation-input mitigation; it neither patches the library generally
+nor qualifies a newer Transformers release. Use the declared checkpoint for
+reference validation.
+
 The family owns its original-reference fixtures and complete model-card
 acceptance matrix, including all eight advertised languages, multiple images,
 OCR, aspect ratios, image budgets, tool use, and the full context boundary:
