@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY requirements.txt /opt/trtmc-ci/family-requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+        --no-build-isolation -r /opt/trtmc-ci/family-requirements.txt \
+    && python -m pip check
+
+ENV TRTMC_LFM2_VL_MODEL_DIR=/opt/trtmc-lfm2-vl-assets
+RUN python -c 'import os, urllib.request; from pathlib import Path; from PIL import Image; \
+    destination = Path(os.environ["TRTMC_LFM2_VL_MODEL_DIR"]) / "model-card.jpg"; \
+    destination.parent.mkdir(parents=True, exist_ok=True); \
+    url = "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"; \
+    response = urllib.request.urlopen(url, timeout=60); \
+    destination.write_bytes(response.read()); response.close(); \
+    image = Image.open(destination); image.verify(); image.close()'
