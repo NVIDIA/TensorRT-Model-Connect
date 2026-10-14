@@ -53,11 +53,16 @@ def main():
             "tiles": [],
         }
         for i, (rows, cols) in enumerate(output.spatial_shapes.tolist()):
-            pixel_path = data_dir / f"{name}-{i}-pixels.bin.xz"
-            mask_path = data_dir / f"{name}-{i}-mask.bin.xz"
-            pixel_path.write_bytes(lzma.compress(output.pixel_values[i].numpy().tobytes()))
+            pixel_path = data_dir / f"{name}-{i}-pixels.xz.bin"
+            mask_path = data_dir / f"{name}-{i}-mask.xz.bin"
+            pixel_path.write_bytes(
+                lzma.compress(output.pixel_values[i].numpy().tobytes(), format=lzma.FORMAT_XZ)
+            )
             mask_path.write_bytes(
-                lzma.compress(output.pixel_attention_mask[i].numpy().astype("<i4").tobytes())
+                lzma.compress(
+                    output.pixel_attention_mask[i].numpy().astype("<i4").tobytes(),
+                    format=lzma.FORMAT_XZ,
+                )
             )
             record["tiles"].append(
                 {
@@ -74,6 +79,7 @@ def main():
                 "checkpoint": "LiquidAI/LFM2.5-VL-1.6B",
                 "revision": "919fde3d022e3f90a4716006f993938ee8c2eb97",
                 "transformers": transformers.__version__,
+                "compression": "xz",
                 "cases": results,
             },
             indent=2,

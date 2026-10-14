@@ -43,6 +43,7 @@ def probe(tmp_path_factory):
 
 @pytest.mark.parametrize("case", ORACLE["cases"], ids=lambda case: case["name"])
 def test_reference_pixels_shapes_and_placeholders(probe, tmp_path, case):
+    assert ORACLE["compression"] == "xz"
     prefix = tmp_path / "tile-"
     result = subprocess.run(
         [str(probe), *map(str, case["arguments"]), str(prefix)],
@@ -55,8 +56,12 @@ def test_reference_pixels_shapes_and_placeholders(probe, tmp_path, case):
         tile["shape"] for tile in case["tiles"]
     ]
     for i, tile in enumerate(case["tiles"]):
-        pixels = lzma.decompress((HERE / "fixtures" / tile["pixels"]).read_bytes())
-        mask = lzma.decompress((HERE / "fixtures" / tile["mask"]).read_bytes())
+        pixels = lzma.decompress(
+            (HERE / "fixtures" / tile["pixels"]).read_bytes(), format=lzma.FORMAT_XZ
+        )
+        mask = lzma.decompress(
+            (HERE / "fixtures" / tile["mask"]).read_bytes(), format=lzma.FORMAT_XZ
+        )
         rows, cols = tile["shape"]
         assert Path(str(prefix) + str(i)).read_bytes() == pixels[: rows * cols * 768 * 4]
         assert Path(str(prefix) + str(i) + ".padded").read_bytes() == pixels

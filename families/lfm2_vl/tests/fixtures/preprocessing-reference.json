@@ -20,8 +20,8 @@
             16,
             16
           ],
-          "pixels": "preprocessing/square-0-pixels.bin.xz",
-          "mask": "preprocessing/square-0-mask.bin.xz"
+          "pixels": "preprocessing/square-0-pixels.xz.bin",
+          "mask": "preprocessing/square-0-mask.xz.bin"
         }
       ]
     },
@@ -42,8 +42,8 @@
             8,
             32
           ],
-          "pixels": "preprocessing/wide-0-pixels.bin.xz",
-          "mask": "preprocessing/wide-0-mask.bin.xz"
+          "pixels": "preprocessing/wide-0-pixels.xz.bin",
+          "mask": "preprocessing/wide-0-mask.xz.bin"
         }
       ]
     },
@@ -64,8 +64,8 @@
             48,
             14
           ],
-          "pixels": "preprocessing/tall-0-pixels.bin.xz",
-          "mask": "preprocessing/tall-0-mask.bin.xz"
+          "pixels": "preprocessing/tall-0-pixels.xz.bin",
+          "mask": "preprocessing/tall-0-mask.xz.bin"
         }
       ]
     },
@@ -86,56 +86,56 @@
             32,
             32
           ],
-          "pixels": "preprocessing/large-0-pixels.bin.xz",
-          "mask": "preprocessing/large-0-mask.bin.xz"
+          "pixels": "preprocessing/large-0-pixels.xz.bin",
+          "mask": "preprocessing/large-0-mask.xz.bin"
         },
         {
           "shape": [
             32,
             32
           ],
-          "pixels": "preprocessing/large-1-pixels.bin.xz",
-          "mask": "preprocessing/large-1-mask.bin.xz"
+          "pixels": "preprocessing/large-1-pixels.xz.bin",
+          "mask": "preprocessing/large-1-mask.xz.bin"
         },
         {
           "shape": [
             32,
             32
           ],
-          "pixels": "preprocessing/large-2-pixels.bin.xz",
-          "mask": "preprocessing/large-2-mask.bin.xz"
+          "pixels": "preprocessing/large-2-pixels.xz.bin",
+          "mask": "preprocessing/large-2-mask.xz.bin"
         },
         {
           "shape": [
             32,
             32
           ],
-          "pixels": "preprocessing/large-3-pixels.bin.xz",
-          "mask": "preprocessing/large-3-mask.bin.xz"
+          "pixels": "preprocessing/large-3-pixels.xz.bin",
+          "mask": "preprocessing/large-3-mask.xz.bin"
         },
         {
           "shape": [
             32,
             32
           ],
-          "pixels": "preprocessing/large-4-pixels.bin.xz",
-          "mask": "preprocessing/large-4-mask.bin.xz"
+          "pixels": "preprocessing/large-4-pixels.xz.bin",
+          "mask": "preprocessing/large-4-mask.xz.bin"
         },
         {
           "shape": [
             32,
             32
           ],
-          "pixels": "preprocessing/large-5-pixels.bin.xz",
-          "mask": "preprocessing/large-5-mask.bin.xz"
+          "pixels": "preprocessing/large-5-pixels.xz.bin",
+          "mask": "preprocessing/large-5-mask.xz.bin"
         },
         {
           "shape": [
             26,
             38
           ],
-          "pixels": "preprocessing/large-6-pixels.bin.xz",
-          "mask": "preprocessing/large-6-mask.bin.xz"
+          "pixels": "preprocessing/large-6-pixels.xz.bin",
+          "mask": "preprocessing/large-6-mask.xz.bin"
         }
       ]
     },
@@ -156,40 +156,40 @@
             32,
             32
           ],
-          "pixels": "preprocessing/budget-0-pixels.bin.xz",
-          "mask": "preprocessing/budget-0-mask.bin.xz"
+          "pixels": "preprocessing/budget-0-pixels.xz.bin",
+          "mask": "preprocessing/budget-0-mask.xz.bin"
         },
         {
           "shape": [
             32,
             32
           ],
-          "pixels": "preprocessing/budget-1-pixels.bin.xz",
-          "mask": "preprocessing/budget-1-mask.bin.xz"
+          "pixels": "preprocessing/budget-1-pixels.xz.bin",
+          "mask": "preprocessing/budget-1-mask.xz.bin"
         },
         {
           "shape": [
             32,
             32
           ],
-          "pixels": "preprocessing/budget-2-pixels.bin.xz",
-          "mask": "preprocessing/budget-2-mask.bin.xz"
+          "pixels": "preprocessing/budget-2-pixels.xz.bin",
+          "mask": "preprocessing/budget-2-mask.xz.bin"
         },
         {
           "shape": [
             32,
             32
           ],
-          "pixels": "preprocessing/budget-3-pixels.bin.xz",
-          "mask": "preprocessing/budget-3-mask.bin.xz"
+          "pixels": "preprocessing/budget-3-pixels.xz.bin",
+          "mask": "preprocessing/budget-3-mask.xz.bin"
         },
         {
           "shape": [
             18,
             26
           ],
-          "pixels": "preprocessing/budget-4-pixels.bin.xz",
-          "mask": "preprocessing/budget-4-mask.bin.xz"
+          "pixels": "preprocessing/budget-4-pixels.xz.bin",
+          "mask": "preprocessing/budget-4-mask.xz.bin"
         }
       ]
     },
@@ -210,10 +210,11 @@
             26,
             38
           ],
-          "pixels": "preprocessing/nosplit-0-pixels.bin.xz",
-          "mask": "preprocessing/nosplit-0-mask.bin.xz"
+          "pixels": "preprocessing/nosplit-0-pixels.xz.bin",
+          "mask": "preprocessing/nosplit-0-mask.xz.bin"
         }
       ]
     }
-  ]
+  ],
+  "compression": "xz"
 }
