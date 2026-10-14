@@ -559,6 +559,37 @@ def test_pipeline_exposes_only_active_stages(tmp_path: Path) -> None:
     )
 
 
+def test_setup_prepares_only_the_selected_reference_after_install(tmp_path: Path, monkeypatch) -> None:
+    import trtmc_perf_serving.environments as environments
+
+    for family in ("alpha", "beta"):
+        root = tmp_path / "families" / family
+        (root / "tests/reference").mkdir(parents=True)
+        (root / "model.py").write_text("def build(request, writer): pass\n")
+        (root / "tests/requirements.txt").write_text("reference-dependency\n")
+        (root / "tests/reference/prepare.py").write_text("# reference setup\n")
+    events = []
+    monkeypatch.setattr(WheelPackageManager, "install_once", lambda self: events.append("install"))
+
+    def prepare(requirements, root, *, prepare):
+        events.append((requirements, root, prepare))
+        return root / "bin/python"
+
+    monkeypatch.setattr(environments, "reference_python", prepare)
+    CiPipeline(CiContext(tmp_path, {"MODEL": "alpha"})).run("setup")
+    tests = tmp_path / "families/alpha/tests"
+    assert events == ["install", (tests / "requirements.txt", tmp_path / ".ci/reference/alpha",
+                                 tests / "reference/prepare.py")]
+
+
+def test_setup_without_a_selected_family_does_not_prepare_references(tmp_path: Path, monkeypatch) -> None:
+    import trtmc_perf_serving.environments as environments
+
+    monkeypatch.setattr(WheelPackageManager, "install_once", lambda self: None)
+    monkeypatch.setattr(environments, "reference_python", lambda *_args, **_kwargs: pytest.fail("unexpected install"))
+    CiPipeline(CiContext(tmp_path, {"UNRELATED": "value"})).run("setup")
+
+
 def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
     source = inspect.getsource(WheelPackageManager.build)
     assert '"--no-isolation"' in source
@@ -934,6 +965,7 @@ def test_trusted_container_mounts_hugging_face_caches_read_only(tmp_path: Path) 
             "TRTMC_CI_IMAGE": "trtmc:test",
             "TRTMC_CI_CONTAINER_NAME": "trtmc-test",
             "HF_HOME": str(cache),
+            "MODEL": "alpha",
             "HF_HUB_CACHE": str(nested_cache),
             "HUGGINGFACE_HUB_CACHE": str(cache),
             "HF_MODULES_CACHE": str(modules_cache),
@@ -945,6 +977,7 @@ def test_trusted_container_mounts_hugging_face_caches_read_only(tmp_path: Path) 
     _options, mounts = container._runtime_boundary()
     specifications = set(mounts[1::2])
 
+    assert "MODEL=alpha" in container._environment_arguments()
     assert f"{cache}:{cache}:ro" in specifications
     assert f"{modules_cache}:{modules_cache}" in specifications
     assert f"{nested_cache}:{nested_cache}" not in specifications

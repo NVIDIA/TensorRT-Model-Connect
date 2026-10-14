@@ -10,7 +10,7 @@ import pytest
 
 
 @pytest.fixture(scope="session")
-def reference_python(tmp_path_factory) -> Path:
+def reference_python() -> Path:
     configured = os.environ.get("TRTMC_REFERENCE_PYTHON")
     if configured:
         python = Path(configured).resolve()
@@ -22,6 +22,6 @@ def reference_python(tmp_path_factory) -> Path:
     tests = Path(__file__).resolve().parent
     return prepare(
         tests / "requirements.txt",
-        tmp_path_factory.mktemp("yolo11-reference"),
+        tests.parents[2] / ".ci" / "reference" / "yolo11",
         prepare=tests / "reference/prepare.py",
     )
