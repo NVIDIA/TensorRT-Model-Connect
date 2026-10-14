@@ -16,6 +16,20 @@ from tensorrt_model_connect.bundle_writer import BundleWriter
 from tensorrt_model_connect import model_support
 
 
+def _read_bundle(path):
+    data = path.read_bytes()
+    assert data[:8] == b"BUNDLE\x01\x00"
+    payload_offset = 16 + int.from_bytes(data[8:16], "little")
+    header = json.loads(data[16:payload_offset])
+    sections = {}
+    for name, entry in header["sections"].items():
+        start = payload_offset + entry["offset"]
+        end = start + entry["length"]
+        assert payload_offset <= start < end <= len(data)
+        sections[name] = data[start:end]
+    return header, sections
+
+
 @pytest.mark.parametrize(
     "precision,capacity,verbose", [("bf16", 32768, False), ("fp16", 256, True)]
 )
@@ -30,6 +44,13 @@ def test_owned_cli_preserves_builder_arguments_and_bundle_sections(
     checkpoint.joinpath("generation_config.json").write_text(
         json.dumps({"bos_token_id": 1, "eos_token_id": 7, "pad_token_id": 0})
     )
+    tokenizer_assets = {
+        "tokenizer.json": b'{"model":{"type":"BPE","vocab":{"test":0},"merges":[]}}',
+        "tokenizer_config.json": b'{"bos_token":"<|startoftext|>"}',
+        "chat_template.jinja": b"{{ messages[0]['content'] }}",
+    }
+    for name, data in tokenizer_assets.items():
+        checkpoint.joinpath(name).write_bytes(data)
     resolved = []
 
     def resolve(name, revision):
@@ -85,6 +106,40 @@ def test_owned_cli_preserves_builder_arguments_and_bundle_sections(
     assert vision_calls[0] == vision_calls[1]
     assert vision_calls[0][0] == checkpoint and vision_calls[0][2] == precision
     assert owned_path.read_bytes() == legacy_path.read_bytes()
+    header, sections = _read_bundle(owned_path)
+    assert {key: header[key] for key in ("format", "family", "task", "backend")} == {
+        "format": 1,
+        "family": "lfm2_vl",
+        "task": "images_text_to_text",
+        "backend": "trt",
+    }
+    assert sections["engine.plan"] == b"decoder placeholder"
+    assert sections["vision.plan"] == b"vision placeholder"
+    assert sections["vision_positions.bin"] == np.zeros(1, dtype="<f4").tobytes()
+    assert json.loads(sections["vision.json"]) == {
+        "hidden_size": 1152,
+        "position_grid": 16,
+        "image_token_id": 396,
+        "max_patches": 4096,
+        "min_image_tokens": 64,
+        "max_image_tokens": 256,
+        "max_tiles": 10,
+    }
+    runtime = json.loads(sections["runtime.json"])
+    expected_runtime = {
+        "precision": precision,
+        "max_cache_length": capacity,
+        "decoder_engine_layout": "single",
+        "hidden_size": 2048,
+        "vocab_size": 65536,
+        "bos_token_id": 1,
+        "eos_token_id": 7,
+        "pad_token_id": 0,
+        "native_kv_cache": True,
+        "native_kv_contract_version": 1,
+    }
+    assert {key: runtime[key] for key in expected_runtime} == expected_runtime
+    assert {name: sections[name] for name in tokenizer_assets} == tokenizer_assets
 
 
 @pytest.mark.parametrize("capacity", [0, -1, True])

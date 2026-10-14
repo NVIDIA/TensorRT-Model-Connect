@@ -47,7 +47,9 @@ def _fixtures(directory, processor):
     from PIL import Image, ImageDraw, ImageFont
 
     photo = directory / "model-card.jpg"
-    photo.write_bytes(urllib.request.urlopen(CARD_IMAGE).read())
+    with urllib.request.urlopen(CARD_IMAGE, timeout=60) as response:
+        photo.write_bytes(response.read())
+    record_evidence("inputs", {"model_card_image": {"source_url": CARD_IMAGE, "file": photo}})
     ocr = Image.new("RGB", (1024, 768), "white")
     draw = ImageDraw.Draw(ocr)
     font = ImageFont.load_default(size=52)
@@ -66,6 +68,8 @@ def _fixtures(directory, processor):
     }
     metadata = {}
     for name, image in images.items():
+        # Both paths use this one decoded RGB image: native reads the lossless
+        # Float32 file, while the reference processor receives the PIL object.
         path = directory / (name + ".f32")
         np.asarray(image, dtype=np.float32).tofile(path)
         metadata[name] = {"path": str(path), "height": image.height, "width": image.width}
