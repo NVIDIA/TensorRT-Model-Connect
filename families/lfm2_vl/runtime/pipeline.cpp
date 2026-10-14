@@ -258,6 +258,8 @@ Lfm2VlTextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& inpu
     // leave the convolution history stale.
     for (int32_t token : input_ids)
         run_step(token, logits);
+    if (image_offset_ != image_embeddings_.size())
+        throw std::runtime_error("LFM2-VL image features do not match prompt placeholders");
     const auto prefill_end = Clock::now();
 
     std::vector<int32_t> output = input_ids;
@@ -285,7 +287,7 @@ void Lfm2VlTextGenerationPipeline::run_step(int32_t token_id, std::vector<float>
     if (decoder_->has_input("decode_phase"))
         inputs["decode_phase"] = Tensor{&phase, {1, 1}, DType::kInt32};
     state_->prepare_step(inputs);
-    const std::int32_t use_image = token_id == 396 && !image_embeddings_.empty();
+    const std::int32_t use_image = !decode && token_id == 396 && !image_embeddings_.empty();
     const float* embedding = zero_embedding_.data();
     if (use_image) {
         if (image_offset_ + 2048 > image_embeddings_.size())

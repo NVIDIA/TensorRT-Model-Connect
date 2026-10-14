@@ -44,8 +44,8 @@ class BuildRequest:
             raise ValueError("max_sequence_length must be a positive integer")
         if self.precision.lower() not in {"bf16", "fp16"}:
             raise ValueError("LFM2-VL supports only bf16 and fp16 builds")
-        if self.backend not in {"trt", "trt_rtx"}:
-            raise ValueError("LFM2-VL requires a TensorRT backend")
+        if self.backend != "trt":
+            raise ValueError("LFM2-VL supports only the trt backend")
 
 
 def layer_tensor_name(stem: str, layer: int) -> str:
@@ -1079,6 +1079,8 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one dense LFM2-VL bundle without shared model orchestration."""
+    if request.backend != "trt":
+        raise ValueError("LFM2-VL supports only the trt backend")
     if getattr(request, "dynamic_kv_cache", False):
         raise NotImplementedError("lfm2_vl does not support dynamic_kv_cache")
 

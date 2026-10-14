@@ -10,6 +10,7 @@ import shutil
 import subprocess
 
 from .lfm25_vl_sampling_reference import couple
+from .native_probes import build_native_probe
 
 
 def compare_sampled(model, inputs, media, bundle, runtime, directory, *, steps=64):
@@ -58,8 +59,9 @@ def compare_sampled(model, inputs, media, bundle, runtime, directory, *, steps=6
     rows = []
     cache = None
     stderr = (directory / "sampling-native.log").open("w")
+    logits_probe = build_native_probe("lfm25_vl_logits_probe", runtime, directory)
     probe = subprocess.Popen(
-        [str(runtime / "families/lfm2_vl/lfm25_vl_logits_probe"), str(bundle)],
+        [str(logits_probe), str(bundle)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=stderr,

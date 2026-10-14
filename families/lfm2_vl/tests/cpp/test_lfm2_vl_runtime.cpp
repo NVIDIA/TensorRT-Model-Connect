@@ -7,17 +7,21 @@
 #include "families/lfm2_vl/runtime/hybrid_state.h"
 #include "families/lfm2_vl/runtime/kv_cache.h"
 #include "families/lfm2_vl/runtime/pipeline.h"
+#include "families/lfm2_vl/runtime/plugin_helpers.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cuda_runtime_api.h>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -41,9 +45,12 @@ class FakeLfm2VlModule final : public trtmc::ITrtModule {
         int32_t write_index{0};
         int32_t kv_length{0};
         int32_t decode_phase{0};
+        int32_t use_image{0};
+        float image_value{0.0F};
     };
 
-    FakeLfm2VlModule(cudaStream_t stream, trtmc::DType state_dtype, int32_t vocab_size = 6)
+    FakeLfm2VlModule(cudaStream_t stream, trtmc::DType state_dtype, int32_t vocab_size = 6,
+                     int32_t capacity = 8)
         : stream_(stream), state_dtype_(state_dtype), vocab_size_(vocab_size),
           device_logits_({vocab_size}, trtmc::DType::kFloat32, stream) {
         add("token_id", {1}, trtmc::DType::kInt32, true);
@@ -51,10 +58,10 @@ class FakeLfm2VlModule final : public trtmc::ITrtModule {
         add("position_id", {1}, trtmc::DType::kInt32, true);
         add("cache_write_indices", {1}, trtmc::DType::kInt32, true);
         add("key_value_lengths", {1}, trtmc::DType::kInt32, true);
-        add("cache_k_0", {1, 2, 8, 4}, state_dtype_, true);
-        add("cache_v_0", {1, 2, 8, 4}, state_dtype_, true);
-        add("present_k_0", {1, 2, 8, 4}, state_dtype_, false);
-        add("present_v_0", {1, 2, 8, 4}, state_dtype_, false);
+        add("cache_k_0", {1, 2, capacity, 4}, state_dtype_, true);
+        add("cache_v_0", {1, 2, capacity, 4}, state_dtype_, true);
+        add("present_k_0", {1, 2, capacity, 4}, state_dtype_, false);
+        add("present_v_0", {1, 2, capacity, 4}, state_dtype_, false);
         add("conv_state_0", {4, 3}, state_dtype_, true);
         add("present_conv_0", {4, 3}, state_dtype_, false);
         add("logits", {vocab_size}, trtmc::DType::kFloat32, false);
@@ -62,6 +69,11 @@ class FakeLfm2VlModule final : public trtmc::ITrtModule {
     }
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        if (!vision_output.empty())
+            return {{"image_embeddings",
+                     {vision_output.data(),
+                      {static_cast<int64_t>(vision_output.size() / 2048), 2048},
+                      trtmc::DType::kFloat32}}};
         forward_async(inputs);
         sync();
         return {};
@@ -73,9 +85,13 @@ class FakeLfm2VlModule final : public trtmc::ITrtModule {
         calls.push_back(Call{scalar(inputs, "token_id"), scalar(inputs, "position_id"),
                              scalar(inputs, "cache_write_indices"),
                              scalar(inputs, "key_value_lengths"),
-                             inputs.count("decode_phase") ? scalar(inputs, "decode_phase") : 0});
+                             inputs.count("decode_phase") ? scalar(inputs, "decode_phase") : 0,
+                             inputs.count("use_image") ? scalar(inputs, "use_image") : 0,
+                             inputs.count("image_embedding")
+                                 ? *static_cast<const float*>(inputs.at("image_embedding").data)
+                                 : 0.0F});
         std::vector<float> logits(static_cast<std::size_t>(vocab_size_), -10.0F);
-        logits[2] = 10.0F;
+        logits[next_token] = 10.0F;
         device_logits_.copy_from_host(logits.data());
         const auto present = bindings_.find("present_conv_0");
         if (present != bindings_.end()) {
@@ -139,6 +155,8 @@ class FakeLfm2VlModule final : public trtmc::ITrtModule {
     }
 
     std::vector<Call> calls;
+    int32_t next_token{2};
+    std::vector<float> vision_output;
 
   private:
     struct Entry {
@@ -174,7 +192,7 @@ class RecordingTokenizer final : public trtmc::ITokenizer {
         last_text = text;
         // Simulate add_bos_token=true applied to text that already begins with
         // the chat template's literal BOS token.
-        return {1, 1, 4};
+        return ids;
     }
     std::string decode(const std::vector<int32_t>&) const override { return "decoded"; }
     int32_t id_for_token(std::string_view token) const override {
@@ -183,6 +201,7 @@ class RecordingTokenizer final : public trtmc::ITokenizer {
     std::string token_for_id(int32_t id) const override { return id == 1 ? "<|startoftext|>" : ""; }
 
     mutable std::string last_text;
+    std::vector<int32_t> ids{1, 1, 4};
 };
 
 void test_native_kv_and_double_buffered_conv(cudaStream_t stream) {
@@ -405,6 +424,177 @@ void test_pipeline_rejects_logits_contract_mismatch(cudaStream_t stream) {
     }
 }
 
+void test_pipeline_image_feature_boundaries(cudaStream_t stream) {
+    const auto run = [&](std::vector<int32_t> ids, const char* expected_error) {
+        auto decoder = std::make_unique<FakeLfm2VlModule>(stream, trtmc::DType::kFloat16, 512);
+        decoder->next_token = 396;
+        auto* trace = decoder.get();
+        auto kv =
+            std::make_unique<trtmc::Lfm2VlKvCache>(1, 8, 2, 4, stream, trtmc::DType::kFloat16);
+        auto conv =
+            std::make_unique<trtmc::Lfm2VlConvState>(1, 4, 3, stream, trtmc::DType::kFloat16);
+        auto state = std::make_unique<trtmc::Lfm2VlHybridState>(std::move(kv), std::move(conv));
+        auto vision = std::make_unique<FakeLfm2VlModule>(stream, trtmc::DType::kFloat16);
+        vision->vision_output.assign(2048, 0.25F);
+        auto tokenizer = std::make_shared<RecordingTokenizer>();
+        tokenizer->ids = std::move(ids);
+        trtmc::Lfm2VlTextGenConfig config;
+        config.vocab_size = 512;
+        config.id_eos = 5;
+        trtmc::Lfm2VlTextGenerationPipeline pipeline(std::move(decoder), std::move(state), config,
+                                                     stream, tokenizer, "", std::move(vision),
+                                                     std::vector<float>(256 * 1152, 0.0F));
+        trtmc::Lfm2VlRequest request;
+        request.prompt = "<image>Describe it.";
+        request.min_image_tokens = request.max_image_tokens = 1;
+        request.split_images = 0;
+        request.generation.max_new_tokens = 2;
+        request.generation.temperature = 0.0F;
+        trtmc::ImageResult image;
+        image.height = image.width = 32;
+        image.pixels.assign(32 * 32 * 3, 127.0F);
+        request.images.push_back(std::move(image));
+        bool rejected = false;
+        try {
+            const auto result = pipeline.generate(request);
+            if (!expected_error) {
+                check(result.token_ids == std::vector<int32_t>({396, 396}),
+                      "generated image-token IDs remain valid decoder outputs");
+                check(trace->calls.size() == 4, "three prompt tokens and one generated token run");
+                if (trace->calls.size() == 4) {
+                    const auto& prefill = trace->calls[1];
+                    const auto& decode = trace->calls[3];
+                    check(prefill.token == 396 && prefill.decode_phase == 0 &&
+                              prefill.use_image == 1 && prefill.image_value == 0.25F,
+                          "prompt image placeholder receives its projected feature");
+                    check(decode.token == 396 && decode.decode_phase == 1 &&
+                              decode.use_image == 0 && decode.image_value == 0.0F,
+                          "generated image token receives its ordinary token embedding");
+                }
+            }
+        } catch (const std::runtime_error& error) {
+            rejected = true;
+            check(expected_error &&
+                      std::string(error.what()).find(expected_error) != std::string::npos,
+                  "image feature mismatch reports the expected boundary");
+        }
+        check(rejected == (expected_error != nullptr),
+              "image feature counts must match all and only prompt placeholders");
+    };
+    run({1, 396, 4}, nullptr);
+    run({1, 4}, "image features do not match prompt placeholders");
+    run({1, 396, 396, 4}, "image placeholders exceed image features");
+}
+
+void test_pipeline_real_tokenizer_bos_modes(cudaStream_t stream) {
+    const char* path = std::getenv("TRTMC_LFM2_VL_TOKENIZER_JSON");
+    if (!path || !*path)
+        return;
+    std::ifstream input(path, std::ios::binary);
+    check(input.good(), "open pinned tokenizer for actual prompt framing");
+    const std::string source((std::istreambuf_iterator<char>(input)),
+                             std::istreambuf_iterator<char>());
+    const auto temporary = std::filesystem::temp_directory_path() /
+                           ("trtmc-lfm2-vl-runtime-" + std::to_string(getpid()) + ".bundle");
+    const std::string header =
+        R"({"format":1,"family":"lfm2_vl","task":"images_text_to_text","backend":"trt","sections":{"tokenizer.json":{"offset":0,"length":)" +
+        std::to_string(source.size()) + "}}}";
+    {
+        std::ofstream output(temporary, std::ios::binary);
+        output.write("BUNDLE\x01\0", 8);
+        const auto size = static_cast<std::uint64_t>(header.size());
+        for (int shift = 0; shift < 64; shift += 8)
+            output.put(static_cast<char>((size >> shift) & 0xffU));
+        output << header << source;
+    }
+    const trtmc::BundleReader bundle(temporary.string());
+    auto tokenizer = trtmc::lfm2_vl::create_tokenizer(bundle);
+    std::filesystem::remove(temporary);
+    auto decoder = std::make_unique<FakeLfm2VlModule>(stream, trtmc::DType::kFloat16, 65536, 32);
+    auto* trace = decoder.get();
+    auto kv = std::make_unique<trtmc::Lfm2VlKvCache>(1, 32, 2, 4, stream, trtmc::DType::kFloat16);
+    auto conv = std::make_unique<trtmc::Lfm2VlConvState>(1, 4, 3, stream, trtmc::DType::kFloat16);
+    auto state = std::make_unique<trtmc::Lfm2VlHybridState>(std::move(kv), std::move(conv));
+    trtmc::Lfm2VlTextGenConfig config;
+    config.vocab_size = 65536;
+    config.id_bos = 1;
+    config.id_eos = 7;
+    config.chat_template_format = "chatml";
+    auto vision = std::make_unique<FakeLfm2VlModule>(stream, trtmc::DType::kFloat16);
+    vision->vision_output.assign(2048, 0.25F);
+    trtmc::Lfm2VlTextGenerationPipeline pipeline(std::move(decoder), std::move(state), config,
+                                                 stream, tokenizer, "", std::move(vision),
+                                                 std::vector<float>(256 * 1152, 0.0F));
+    trtmc::TextGenerationConfig request;
+    request.max_new_tokens = 1;
+    request.temperature = 0.0F;
+    const auto check_prompt = [&](const std::string& prompt, bool chat,
+                                  const std::vector<int32_t>& expected) {
+        trace->calls.clear();
+        request.use_chat_template = chat;
+        (void)pipeline.generate(prompt, request);
+        std::vector<int32_t> actual;
+        for (const auto& call : trace->calls)
+            actual.push_back(call.token);
+        check(actual == expected, "actual tokenizer/pipeline preserves the original BOS mode");
+        check(std::count(actual.begin(), actual.end(), 1) == 1,
+              "runtime prompt has neither missing nor duplicated BOS");
+    };
+    // Independent AutoTokenizer goldens: default encode for raw text, and
+    // apply_chat_template followed by encode(add_special_tokens=False) for chat.
+    const std::vector<int32_t> chat_ids{1, 6, 6423, 708, 36309, 7, 708, 6, 64015, 708};
+    check_prompt("Hello", false, {1, 36309});
+    check_prompt("Hello", true, chat_ids);
+    check_prompt("<|startoftext|><|im_start|>user\nHello<|im_end|>\n"
+                 "<|im_start|>assistant\n",
+                 false, chat_ids);
+
+    trace->next_token = 396;
+    trace->calls.clear();
+    request.max_new_tokens = 2;
+    trtmc::Lfm2VlRequest image_request;
+    image_request.prompt = "<image>Describe it.";
+    image_request.generation = request;
+    image_request.min_image_tokens = image_request.max_image_tokens = 1;
+    image_request.split_images = 0;
+    trtmc::ImageResult image;
+    image.height = image.width = 32;
+    image.pixels.assign(32 * 32 * 3, 127.0F);
+    image_request.images.push_back(std::move(image));
+    const auto image_output = pipeline.generate(image_request);
+    // Original AutoTokenizer.decode([396,396], skip_special_tokens=True) is
+    // empty; skipping the special spelling must not remove returned token IDs.
+    check(image_output.token_ids == std::vector<int32_t>({396, 396}) && image_output.text.empty(),
+          "generated image tokens match original visible-text decoding");
+    check(std::count_if(trace->calls.begin(), trace->calls.end(),
+                        [](const auto& call) { return call.use_image == 1; }) == 1 &&
+              trace->calls.back().token == 396 && trace->calls.back().decode_phase == 1 &&
+              trace->calls.back().use_image == 0,
+          "real tokenizer uses image features only for the prompt placeholder");
+
+    namespace api = trtmc::internal;
+    api::ConversationPartView part = api::TextPartView{"Hello"};
+    api::ConversationMessageView message{api::MessageRole::User, {&part, 1}};
+    const std::vector<api::ConfigEntry> options{
+        {"max_new_tokens", std::int64_t{2}}, {"temperature", 0.0}, {"top_k", std::int64_t{1}}};
+    trace->calls.clear();
+    const auto conversation = pipeline.run(api::TextConversationRequest{{&message, 1}, {}},
+                                           {options.data(), options.size()});
+    std::vector<int32_t> actual_prompt;
+    for (const auto& call : trace->calls)
+        if (call.decode_phase == 0)
+            actual_prompt.push_back(call.token);
+    check(actual_prompt == chat_ids, "typed request executes the original rendered prompt IDs");
+    check(conversation.token_ids == std::vector<int32_t>({396, 396}) && conversation.parts.empty(),
+          "skipped image spellings do not become text, reasoning, or tool parts");
+    check(conversation.finish_reason == api::FinishReason::Length &&
+              conversation.usage.input_tokens == actual_prompt.size() &&
+              conversation.usage.output_tokens == conversation.token_ids.size() &&
+              conversation.usage.total_tokens ==
+                  actual_prompt.size() + conversation.token_ids.size(),
+          "typed usage counts the executed prompt IDs and generated tokens with its budget stop");
+}
+
 } // namespace
 
 int main() {
@@ -422,6 +612,8 @@ int main() {
     test_pipeline_uses_safe_one_token_progression(stream);
     test_pipeline_chat_and_raw_bos_dedup(stream);
     test_pipeline_rejects_logits_contract_mismatch(stream);
+    test_pipeline_image_feature_boundaries(stream);
+    test_pipeline_real_tokenizer_bos_modes(stream);
     cudaStreamDestroy(stream);
     return failures;
 }

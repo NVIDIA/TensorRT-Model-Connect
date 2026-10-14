@@ -91,3 +91,20 @@ def test_owned_cli_preserves_builder_arguments_and_bundle_sections(
 def test_owned_request_rejects_invalid_capacity(tmp_path, capacity):
     with pytest.raises(ValueError, match="positive integer"):
         model.BuildRequest(tmp_path, max_sequence_length=capacity)
+
+
+def test_backend_label_cannot_disagree_with_the_tensor_rt_builder(tmp_path):
+    with pytest.raises(ValueError, match="only the trt backend"):
+        model.BuildRequest(tmp_path, backend="trt_rtx")
+    request = LegacyBuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "unsupported.bundle",
+        family="lfm2_vl",
+        task="images_text_to_text",
+        precision="bf16",
+        backend="trt_rtx",
+    )
+    # Reject before reading a checkpoint, invoking an engine builder, or writing
+    # any bundle metadata, including for compatibility callers.
+    with pytest.raises(ValueError, match="only the trt backend"):
+        model.build(request, None)

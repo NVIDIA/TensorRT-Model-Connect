@@ -14,8 +14,8 @@ trtmc lfm2_vl build LiquidAI/LFM2.5-VL-1.6B \
   --precision bf16 --max-sequence-length 32768 -o lfm25-vl.bundle
 ```
 
-The native `images_text_to_text` Task accepts ordered images and text, multiple
-conversation turns. Image parts retain their order within each message. The
+The native `images_text_to_text` Task accepts ordered images and text across
+multiple conversation turns. Image parts retain their order within each message. The
 `text_conversation` Task accepts text-only messages, tool definitions, and tool
 results, returning typed tool calls with their generated token IDs. The runtime
 does not execute tools.
@@ -50,10 +50,16 @@ PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
   families/lfm2_vl/tests --e2e-model lfm2_vl -q
 ```
 
-Selected E2E requires `TRTMC_RUNTIME_ROOT` pointing to a build containing the
-family DSO, TensorRT backend, and `lfm2_vl_probe` test executable. An existing
+Selected E2E requires `TRTMC_RUNTIME_ROOT` pointing to the native runtime
+libraries, including the family DSO, C API, and TensorRT backend. The test builds
+its own clients with a C++ compiler and CUDA toolkit headers; installed runtimes
+do not need to ship test executables. An existing
 pinned snapshot and bundle can be supplied through `TRTMC_LFM25_VL_CHECKPOINT`
 and `TRTMC_LFM25_VL_BUNDLE`.
+
+To include real checkpoint token IDs and rendered-prompt BOS controls, set
+`TRTMC_LFM2_VL_TOKENIZER_JSON` to the pinned checkpoint's `tokenizer.json` when
+running `test_lfm2_vl_pretokenizer` and `test_lfm2_vl_runtime`.
 
 Acceptance compares task behavior with the original model: caption facts,
 ordered image colors, OCR content with whitespace normalized, answer language

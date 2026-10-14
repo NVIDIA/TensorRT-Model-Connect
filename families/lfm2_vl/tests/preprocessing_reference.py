@@ -7,6 +7,11 @@ import json
 import lzma
 from pathlib import Path
 
+if __package__:
+    from .reference_source import reference_source
+else:
+    from reference_source import reference_source
+
 CASES = [
     ("square", 256, 256, 64, 256, 10, True),
     ("wide", 128, 512, 64, 256, 10, True),
@@ -25,11 +30,17 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(__file__).parent / "fixtures/preprocessing-reference.json",
+    )
     args = parser.parse_args()
-    processor = AutoProcessor.from_pretrained(args.checkpoint)
-    fixture_dir = Path(__file__).parent / "fixtures"
+    options, provenance = reference_source(args.checkpoint)
+    processor = AutoProcessor.from_pretrained(args.checkpoint, **options)
+    fixture_dir = args.output.parent
     data_dir = fixture_dir / "preprocessing"
-    data_dir.mkdir(exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
     results = []
     for name, h, w, minimum, maximum, tiles, split in CASES:
         y, x = np.indices((h, w))
@@ -72,12 +83,10 @@ def main():
                 }
             )
         results.append(record)
-    destination = Path(__file__).parent / "fixtures/preprocessing-reference.json"
-    destination.write_text(
+    args.output.write_text(
         json.dumps(
             {
-                "checkpoint": "LiquidAI/LFM2.5-VL-1.6B",
-                "revision": "919fde3d022e3f90a4716006f993938ee8c2eb97",
+                **provenance,
                 "transformers": transformers.__version__,
                 "compression": "xz",
                 "cases": results,

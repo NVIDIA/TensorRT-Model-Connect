@@ -191,16 +191,19 @@ Lfm2VlTextGenerationPipeline::run(const internal::TextConversationRequest& input
     std::vector<internal::ImagesTextMessage> messages;
     for (std::size_t i = 0; i < parts.size(); ++i)
         messages.push_back({input.messages[i].role, {parts[i].data(), parts[i].size()}});
-    const auto text =
-        run(internal::ImagesTextToTextRequest{{messages.data(), messages.size()}, input.tools},
-            supplied);
+    const auto prepared =
+        lfm2_vl_prepare_request({{messages.data(), messages.size()}, input.tools}, supplied);
+    const auto input_tokens = encode_prompt(prepared.prompt, prepared.generation).size();
+    const auto text = generate(prepared);
     auto result = lfm2_vl_parse_conversation(text.text, false, !input.tools.empty());
     lfm2_vl_assign_tool_call_ids(result, input);
     result.token_ids = text.token_ids;
     result.setup_ms = text.setup_ms;
     result.prefill_ms = text.prefill_ms;
     result.decode_ms = text.decode_ms;
+    result.usage.input_tokens = input_tokens;
     result.usage.output_tokens = text.token_ids.size();
+    result.usage.total_tokens = input_tokens + text.token_ids.size();
     const bool stopped =
         !text.token_ids.empty() && std::find(config_.id_eos_ids.begin(), config_.id_eos_ids.end(),
                                              text.token_ids.back()) != config_.id_eos_ids.end();

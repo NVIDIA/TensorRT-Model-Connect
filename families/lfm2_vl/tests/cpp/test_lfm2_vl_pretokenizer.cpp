@@ -306,7 +306,7 @@ void test_chat_and_tool_added_tokens_are_not_split() {
 }
 
 void test_real_pinned_tokenizer_when_provided() {
-    const char* path = std::getenv("TRTMC_LFM2-VL_TOKENIZER_JSON");
+    const char* path = std::getenv("TRTMC_LFM2_VL_TOKENIZER_JSON");
     if (path == nullptr || *path == '\0')
         return;
     std::ifstream input(path, std::ios::binary);
@@ -319,11 +319,21 @@ void test_real_pinned_tokenizer_when_provided() {
     const trtmc::BundleReader bundle(bundle_path.string());
     auto tokenizer = trtmc::lfm2_vl::create_tokenizer(bundle);
     std::filesystem::remove(bundle_path);
+    // Piece fixtures omit postprocessing. The original complete tokenizer's
+    // default encode prepends BOS, even when the input contains a literal BOS.
+    const auto with_postprocessor = [](Ids ids) {
+        ids.insert(ids.begin(), 1);
+        return ids;
+    };
     check(tokenizer->decode({1334, 542, 518, 5242}) == ":\nA) Paris",
           "real pinned tokenizer fixes the reported decoder token sequence");
     for (const auto& fixture : supported_language_fixtures()) {
-        check(tokenizer->encode(fixture.text) == fixture.ids,
+        check(tokenizer->encode(fixture.text) == with_postprocessor(fixture.ids),
               std::string("real pinned tokenizer ids: ") + fixture.name);
+    }
+    for (const auto& fixture : whitespace_run_fixtures()) {
+        check(tokenizer->encode(fixture.text) == with_postprocessor(fixture.ids),
+              std::string("real pinned whitespace ids: ") + fixture.name);
     }
 
     const std::string chat =
@@ -331,11 +341,11 @@ void test_real_pinned_tokenizer_when_provided() {
         "<|im_end|>\n<|im_start|>assistant\n";
     const Ids expected_chat{1,     6,   6423, 708,  3493, 856, 779, 5706, 803,   4481, 540,
                             42275, 797, 1235, 2359, 523,  7,   708, 6,    64015, 708};
-    check(tokenizer->encode(chat) == expected_chat,
+    check(tokenizer->encode(chat) == with_postprocessor(expected_chat),
           "real pinned tokenizer preserves exact chat prompt IDs");
 
     const std::string tool_prompt = "<|startoftext|><|im_start|>Hello<|im_end|><|tool_call_start|>";
-    check(tokenizer->encode(tool_prompt) == Ids({1, 6, 36309, 7, 10}),
+    check(tokenizer->encode(tool_prompt) == with_postprocessor({1, 6, 36309, 7, 10}),
           "real pinned tokenizer preserves raw ChatML and tool token IDs");
 
     const std::vector<std::pair<std::string, Ids>> contractions{
@@ -343,7 +353,8 @@ void test_real_pinned_tokenizer_when_provided() {
         {"DON'T", {545, 2332, 32640}}, {"SHE'S", {560, 6347, 24406}},
     };
     for (const auto& [text, ids] : contractions)
-        check(tokenizer->encode(text) == ids, "real pinned contraction IDs: " + text);
+        check(tokenizer->encode(text) == with_postprocessor(ids),
+              "real pinned contraction IDs: " + text);
 }
 
 } // namespace

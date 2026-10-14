@@ -34,6 +34,8 @@ def test_caption_preserves_facts_without_matching_wording():
         "New York Harbor is not its location.",
         "The statue is not green.",
         "Green is not the statue's color.",
+        "Liberty Island cannot be its location.",
+        "New York Harbor can't be its location.",
     ],
 )
 def test_caption_rejects_direct_denial_even_after_positive_facts(denial):
@@ -94,17 +96,34 @@ def test_color_negation_and_language_mismatch_fail():
 
 @pytest.mark.parametrize(
     "answer",
-    ["It is not red.", "It isn't red.", "Red is not its color.", "It is red. It is not red."],
+    [
+        "It is not red.",
+        "It isn't red.",
+        "Red is not its color.",
+        "It is red. It is not red.",
+        "Red can't be its color.",
+        "Red cannot be its color.",
+        "Red can’t be its color.",
+        "It cannot be red.",
+    ],
 )
 def test_color_rejects_direct_denial(answer):
     assert not compare("language-en", "Red", answer)["equivalent"]
 
 
 def test_color_ignores_unrelated_negation():
-    for answer in ["The image is red. It is not a square.", "No objects are visible. It is red."]:
+    for answer in [
+        "The image is red. It is not a square.",
+        "No objects are visible. It is red.",
+        "Not blue; it is red.",
+        "It is red, not blue.",
+        "It cannot be blue; it is red.",
+        "Not white; it is red.",
+    ]:
         assert compare("language-en", "Red", answer)["equivalent"]
     for answer in ["Maybe red.", "I cannot tell whether the image is red."]:
         assert not compare("language-en", "Red", answer)["equivalent"]
+    assert not compare("language-en", "Red", "Red and black, not white.")["equivalent"]
 
 
 def test_image_order_cannot_be_swapped():

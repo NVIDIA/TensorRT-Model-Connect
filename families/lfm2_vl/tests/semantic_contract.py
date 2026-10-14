@@ -89,9 +89,13 @@ def english_fact_denied(text, fact):
         r"show|shows|shown|depict|depicts|depicted|feature|features|featured|"
         r"have|has|iconic"
     )
-    before = rf"(?:\b(?:not|no|never|without)\b|n['’]t)\s+(?:(?:{links})\s+){{0,6}}(?:{fact})"
+    before = (
+        rf"(?:\b(?:not|no|never|without|cannot)\b|n['’]t)\s+"
+        rf"(?:(?:{links})\s+){{0,6}}(?:{fact})"
+    )
     after = (
-        rf"(?:{fact})\s+(?:(?:is|was)\s+(?:not|never)|(?:is|was)n['’]t)\s+"
+        rf"(?:{fact})\s+(?:(?:is|was)\s+(?:not|never)|(?:is|was)n['’]t|"
+        r"(?:cannot|can['’]t|couldn['’]t|could\s+not|can\s+not)\s+be)\s+"
         r"(?:(?:the|its|a|correct|actual|statue['’]s|image['’]s)\s+){0,3}"
         r"(?:colou?r|location|setting|landmark|subject|where|shown|depicted|pictured|present)\b"
     )
@@ -106,15 +110,21 @@ def color_answer(text, language):
             re.sub(r"[\u064b-\u065f\u0670\u0640]", "", value).replace("أ", "ا").replace("إ", "ا")
         )
     if language == "en":
-        denied = any(english_fact_denied(value, pattern) for pattern in COLOR_WORDS["en"].values())
         uncertain = re.search(
-            r"(?:\b(?:unsure|maybe|cannot)\b|can't)[^.;!?]{0,60}\b(?:red|blue|green)\b", value
+            r"(?:\b(?:unsure|maybe)\b|(?:cannot|can['’]t)\s+(?:tell|determine|identify|say))"
+            r"[^.;!?]{0,60}\b(?:red|blue|green)\b",
+            value,
         )
-        if denied or uncertain:
+        if uncertain:
             return None
     elif re.search(NEGATION[language], value):
         return None
     found = {color for color, pattern in COLOR_WORDS[language].items() if re.search(pattern, value)}
+    if language == "en":
+        for color in tuple(found):
+            terms = {match[0] for match in re.finditer(COLOR_WORDS["en"][color], value)}
+            if all(english_fact_denied(value, rf"\b{re.escape(term)}\b") for term in terms):
+                found.remove(color)
     if len(found) != 1 or "other" in found:
         return None
     # A translated color word inside an English sentence does not demonstrate

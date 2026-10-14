@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
                 std::int32_t phase = request.value("decode", !request.value("reset", false));
                 if (module->has_input("decode_phase"))
                     inputs["decode_phase"] = {&phase, {1, 1}, trtmc::DType::kInt32};
-                std::int32_t use_image = token == 396 && !image_embeddings.empty();
+                std::int32_t use_image = !phase && token == 396 && !image_embeddings.empty();
                 float* embedding = zero.data();
                 if (use_image) {
                     if (image_offset + 2048 > image_embeddings.size())

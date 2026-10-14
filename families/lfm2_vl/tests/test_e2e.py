@@ -17,6 +17,7 @@ import pytest
 from tools.e2e_evidence import evidence_stage, record_evidence
 
 from .semantic_contract import compare_semantics
+from .native_probes import build_native_probe
 
 MANIFEST = json.loads((Path(__file__).parent / "manifests/lfm25-vl-1.6b.json").read_text())
 CHECKPOINT = MANIFEST["hf_id"]
@@ -255,8 +256,7 @@ def test_e2e(case_name, tmp_path, request):
 
     assert torch.cuda.is_available(), "selected model-card E2E requires CUDA"
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
-    probe = runtime / "families/lfm2_vl/lfm2_vl_probe"
-    assert probe.is_file(), "build the family-local native semantic Task probe"
+    probe = build_native_probe("lfm2_vl_probe", runtime, tmp_path)
     checkpoint = Path(
         os.environ.get("TRTMC_LFM25_VL_CHECKPOINT")
         or snapshot_download(CHECKPOINT, revision=REVISION)
@@ -345,6 +345,11 @@ def test_e2e(case_name, tmp_path, request):
             )
         expected = output[0, inputs.input_ids.shape[1] :].tolist()
         observed = actual[case["name"]]["tokens"]
+        if not case["images"]:
+            usage = actual[case["name"]]
+            assert usage["input_tokens"] == inputs.input_ids.shape[1]
+            assert usage["output_tokens"] == len(observed)
+            assert usage["total_tokens"] == inputs.input_ids.shape[1] + len(observed)
         expected_text = processor.tokenizer.decode(
             expected, skip_special_tokens=False
         ).removesuffix("<|im_end|>")

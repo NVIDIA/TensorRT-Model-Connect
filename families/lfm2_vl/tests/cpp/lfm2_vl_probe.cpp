@@ -237,6 +237,12 @@ int main(int argc, char** argv) {
                     auto output = conversation->run(input, api::Config{std::move(config)});
                     const auto tokens = output.result().token_ids();
                     result["tokens"] = std::vector<std::int32_t>(tokens.begin(), tokens.end());
+                    const auto usage = output.result().usage();
+                    if (!usage.input_tokens || !usage.output_tokens || !usage.total_tokens)
+                        throw std::runtime_error("text Task did not report complete token usage");
+                    result["input_tokens"] = *usage.input_tokens;
+                    result["output_tokens"] = *usage.output_tokens;
+                    result["total_tokens"] = *usage.total_tokens;
                     std::string text;
                     result["calls"] = json::array();
                     for (const auto& part : output.message().parts) {

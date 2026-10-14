@@ -8,13 +8,19 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
+if __package__:
+    from .reference_source import reference_source
+else:
+    from reference_source import reference_source
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
+    options, provenance = reference_source(args.model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, **options)
     history = [
         {"role": "user", "content": "First question."},
         {"role": "assistant", "content": "<think>old reasoning</think>\u2003 First answer.\u00a0"},
@@ -61,8 +67,7 @@ def main():
     Path(args.output).write_text(
         json.dumps(
             {
-                "checkpoint": "LiquidAI/LFM2.5-VL-1.6B",
-                "revision": "919fde3d022e3f90a4716006f993938ee8c2eb97",
+                **provenance,
                 "cases": cases,
             },
             ensure_ascii=False,
