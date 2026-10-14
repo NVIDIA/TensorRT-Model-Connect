@@ -135,6 +135,11 @@ public/internal session outputs must agree. Token, code, and original/native
 waveform differences remain diagnostics rather than semantic acceptance
 thresholds. Component and sampling-probability tests remain separate.
 
+Selected manifest cases produce named `test_e2e[case_name]` results. One complete
+13-case matrix runs per pytest invocation, even when a single case is selected;
+every selected result requires the full matrix to pass. The first selected case
+archives the shared execution, and each case records its own result and media.
+
 ```bash
 PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
   families/lfm2_audio/tests --e2e-model lfm2_audio -q
