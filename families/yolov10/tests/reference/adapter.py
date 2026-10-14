@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""YOLOv10's native pipeline for the trtmc-perf-serve reference backend (``detect``): the Ultralytics YOLOv10
-architecture with the checkpoint's weights (the family's checkpoint reader), letterboxed to 640, NMS-free
-(the one-to-one head's detections at the request's ``score_threshold``).
-"""
+"""YOLOv10 eager PyTorch reference for the detect serving benchmark."""
 
 from __future__ import annotations
 
@@ -51,40 +48,22 @@ def _observation(rows: list[list[float]], geometry: Mapping[str, Any]) -> dict[s
             "coordinates": "xyxy", "units": "pixels"}
 
 
+
 class Adapter:
     def __init__(self, spec: Any, host: Any) -> None:
+        from families.yolov10.tests.reference.model import load_model
+
         self.host = host
-        import json
-
-        from ultralytics import YOLO
-
-        from families.yolov10.checkpoint import Checkpoint
-
         if spec.precision not in DTYPES:
             raise self.host.Error(f"YOLOv10 reference runs at fp16 or fp32, not {spec.precision}")
         self.spec = spec
-        directory = _model_directory(spec)
-        architecture = json.loads((directory / "config.json").read_text()).get("model")
-        if architecture not in ("yolov10n.yaml", "yolov10s.yaml", "yolov10x.yaml"):
-            raise self.host.Error(f"unsupported YOLOv10 architecture {architecture!r}")
-        model = YOLO(architecture, task="detect").model
-        checkpoint = Checkpoint.open(directory, framework="pt")
-        state = {name[len("model."):]: reader.get_tensor(name) for name, reader in checkpoint.tensor_map.items()
-                 if name.startswith("model.")}
-        missing, _ = model.load_state_dict(state, strict=False)
-        if missing:
-            raise self.host.Error(f"YOLOv10 checkpoint lacks tensors: {missing[:5]}")
-        self.model = model.eval().to(device="cuda", dtype=spec.dtype)
+        self.model = load_model(_model_directory(spec)).to(device="cuda", dtype=spec.dtype)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
+        from families.yolov10.tests.reference.model import detections
+
         image = self.host.load_image(str(self.host.required(request, "image_path")))
         pixels, geometry = _letterbox(image, self.spec.dtype)
         threshold = float(request.get("score_threshold", 0.25))
-
-        def run() -> Any:
-            raw = self.model(pixels)
-            rows = (raw[0] if isinstance(raw, (list, tuple)) else raw)[0]
-            return rows[rows[:, 4] >= threshold]
-
-        kept, model_ms = self.host.timed(run)
+        kept, model_ms = self.host.timed(lambda: detections(self.model(pixels), threshold))
         return self.host.invocation(_observation(kept.detach().float().cpu().tolist(), geometry), model_ms)

@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Direct build, native runtime, and ultralytics reference proof for YOLOv5."""
+"""Direct build, native runtime, and PyTorch reference proof for YOLOv5."""
 
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -102,7 +103,7 @@ def _asset(case: dict) -> Path:
     return path
 
 
-def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, reference_python: Path) -> None:
+def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
@@ -141,7 +142,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, reference_pytho
 
     reference_output = tmp_path / "reference.npz"
     subprocess.run(
-        [str(reference_python), str(TEST_ROOT / "reference/e2e.py"),
+        [sys.executable, str(TEST_ROOT / "reference/e2e.py"),
          str(model_dir), str(image), str(reference_output)],
         check=True, timeout=600,
         env={**os.environ, "PYTHONPATH": str(TEST_ROOT.parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", "")},

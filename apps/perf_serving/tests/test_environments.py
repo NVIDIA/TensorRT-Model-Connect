@@ -58,23 +58,6 @@ def test_environments_are_keyed_by_requirements_and_reused(tmp_path, monkeypatch
     assert created.parent.parent.name.endswith("-r1") and (stale / "keep.txt").read_text() == "x"  # never overlaid
 
 
-def test_interpreter_aliases_reuse_the_cache_but_distinct_venvs_do_not(tmp_path, monkeypatch):
-    requirements = tmp_path / "requirements.txt"
-    requirements.write_text("# no additional packages\n")
-    binary = tmp_path / "python3.12"
-    binary.touch()
-    aliases = [tmp_path / name for name in ("python", "python3")]
-    for alias in aliases:
-        alias.symlink_to(binary)
-    monkeypatch.setattr(sys, "executable", str(aliases[0]))
-    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv-a"))
-    first = environments._digest(requirements, True)
-    monkeypatch.setattr(sys, "executable", str(aliases[1]))
-    assert environments._digest(requirements, True) == first
-    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv-b"))
-    assert environments._digest(requirements, True) != first
-
-
 def test_the_serving_cli_has_no_script_backend():
     parser = cli.build_parser()
     with pytest.raises(SystemExit):

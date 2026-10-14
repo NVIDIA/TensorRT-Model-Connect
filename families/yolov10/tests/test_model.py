@@ -170,7 +170,7 @@ def test_reference_checkpoint_preserves_torch_values_and_dtypes(
     import torch
     from safetensors.torch import save_file as save_torch_file
 
-    from families.yolov10.tests.reference.e2e import _reference_tensors
+    from families.yolov10.tests.reference.model import load_tensors as _reference_tensors
 
     dtype = getattr(torch, dtype_name)
     values = {
@@ -219,7 +219,7 @@ def test_reference_checkpoint_prefers_single_file_over_an_index(tmp_path: Path) 
     import torch
     from safetensors.torch import save_file as save_torch_file
 
-    from families.yolov10.tests.reference.e2e import _reference_tensors
+    from families.yolov10.tests.reference.model import load_tensors as _reference_tensors
 
     value = torch.tensor([3.0], dtype=torch.float16)
     save_torch_file({"model.weight": value}, str(tmp_path / "model.safetensors"))
@@ -232,7 +232,7 @@ def test_reference_checkpoint_uses_declared_mapping_not_all_shard_keys(tmp_path:
     import torch
     from safetensors.torch import save_file as save_torch_file
 
-    from families.yolov10.tests.reference.e2e import _reference_tensors
+    from families.yolov10.tests.reference.model import load_tensors as _reference_tensors
 
     save_torch_file(
         {"model.weight": torch.tensor([1.0]), "off_index": torch.tensor([99.0])},
@@ -266,7 +266,7 @@ def test_reference_checkpoint_rejects_a_missing_declared_tensor(tmp_path: Path) 
     from safetensors import SafetensorError
     from safetensors.torch import save_file as save_torch_file
 
-    from families.yolov10.tests.reference.e2e import _reference_tensors
+    from families.yolov10.tests.reference.model import load_tensors as _reference_tensors
 
     save_torch_file({"other": torch.tensor([1.0])}, str(tmp_path / "part.safetensors"))
     (tmp_path / "model.safetensors.index.json").write_text(
@@ -326,37 +326,3 @@ def test_checkpoint_rejects_invalid_index_json(tmp_path: Path, framework: str) -
     (tmp_path / "model.safetensors.index.json").write_text("{invalid json", encoding="utf-8")
     with pytest.raises(json.JSONDecodeError):
         Checkpoint.open(tmp_path, framework=framework)
-
-
-@pytest.mark.parametrize("prepared", [False, True])
-def test_reference_uses_prepared_cache_or_writable_scratch(tmp_path, monkeypatch, prepared):
-    import runpy
-    from types import SimpleNamespace
-    from trtmc_perf_serving import environments
-
-    tests = tmp_path / "families/yolov10/tests"
-    tests.mkdir(parents=True)
-    cache = tmp_path / ".ci/reference/yolov10"
-    scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    if prepared:
-        cache.mkdir(parents=True)
-    calls = []
-
-    def prepare(requirements, root, **kwargs):
-        calls.append((requirements, root, kwargs["prepare"]))
-        return root / "bin/python"
-
-    def mktemp(name):
-        assert not prepared, "an offline prepared environment must be reused"
-        return scratch
-
-    monkeypatch.delenv("TRTMC_REFERENCE_PYTHON", raising=False)
-    monkeypatch.setattr(environments, "reference_python", prepare)
-    fixture = runpy.run_path(str(Path(__file__).with_name("conftest.py")))["reference_python"].__wrapped__
-    fixture.__globals__["__file__"] = str(tests / "conftest.py")
-    expected = cache if prepared else scratch
-    assert fixture(SimpleNamespace(mktemp=mktemp)) == expected / "bin/python"
-    assert calls == [(tests / "requirements.txt", expected, tests / "reference/prepare.py")]
-    if not prepared:
-        assert not (tmp_path / ".ci").exists()

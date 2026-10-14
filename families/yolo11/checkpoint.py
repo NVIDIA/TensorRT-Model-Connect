@@ -73,7 +73,7 @@ class Checkpoint:
 
         # Only load trusted checkpoints: PyTorch archives still use pickle.
         # Replace upstream classes locally, without changing sys.modules or
-        # importing Ultralytics, even when it is installed for reference tests.
+        # importing upstream model code.
         archive_pickle = SimpleNamespace(
             __name__=__name__, Unpickler=_CheckpointUnpickler, load=pickle.load
         )

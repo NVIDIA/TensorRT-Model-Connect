@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run the official Ultralytics YOLOv10 archive for qualification."""
+"""Run the independent eager PyTorch YOLOv10 reference for qualification."""
 
 from __future__ import annotations
 
@@ -76,29 +76,13 @@ def _model_directory(model: str, revision: str | None, local_files_only: bool) -
 
 def _load_model(model_dir: Path, precision: str) -> Any:
     import torch
-    from ultralytics import YOLO
-
-    from families.yolov10.checkpoint import Checkpoint
+    from families.yolov10.tests.reference.model import load_model
 
     try:
         dtype = {"fp16": torch.float16, "fp32": torch.float32}[precision]
     except KeyError as error:
         raise ValueError(f"unsupported reference precision {precision!r}") from error
-    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    architecture = config.get("model") if isinstance(config, dict) else None
-    supported = {"yolov10n.yaml", "yolov10s.yaml", "yolov10x.yaml"}
-    if not isinstance(architecture, str) or architecture not in supported:
-        raise ValueError(f"unsupported YOLOv10 reference architecture: {architecture!r}")
-    model = YOLO(architecture, task="detect").model
-    checkpoint = Checkpoint.open(model_dir, framework="pt")
-    raw = {name: reader.get_tensor(name) for name, reader in checkpoint.tensor_map.items()}
-    state = {
-        name[len("model.") :]: value for name, value in raw.items() if name.startswith("model.")
-    }
-    missing, _ = model.load_state_dict(state, strict=False)
-    if missing:
-        raise ValueError(f"YOLOv10 reference is missing checkpoint tensors: {missing[:5]}")
-    return model.eval().to(device="cuda", dtype=dtype)
+    return load_model(model_dir).to(device="cuda", dtype=dtype)
 
 
 def _prepare_image(image_path: str, dtype: Any) -> tuple[Any, dict[str, Any]]:
@@ -133,12 +117,11 @@ def _detect(
     model: Any, pixels: Any, geometry: Mapping[str, Any], threshold: float
 ) -> dict[str, Any]:
     import torch
+    from families.yolov10.tests.reference.model import detections
 
     with torch.inference_mode():
-        raw = model(pixels)
-    raw = raw[0] if isinstance(raw, (list, tuple)) else raw
-    rows = raw[0]
-    kept = rows[rows[:, 4] >= threshold].detach().float().cpu().tolist()
+        kept = detections(model(pixels), threshold)
+    rows = kept.detach().float().cpu().tolist()
     scale = float(geometry["scale"])
     pad_x = int(geometry["pad_x"])
     pad_y = int(geometry["pad_y"])
@@ -149,15 +132,15 @@ def _detect(
             (float(row[2]) - pad_x) / scale,
             (float(row[3]) - pad_y) / scale,
         ]
-        for row in kept
+        for row in rows
     ]
     return {
         "image_height": int(geometry["height"]),
         "image_width": int(geometry["width"]),
-        "detections": len(kept),
+        "detections": len(rows),
         "boxes": boxes,
-        "scores": [float(row[4]) for row in kept],
-        "class_ids": [int(row[5]) for row in kept],
+        "scores": [float(row[4]) for row in rows],
+        "class_ids": [int(row[5]) for row in rows],
     }
 
 
@@ -227,7 +210,7 @@ def _performance(arguments: argparse.Namespace) -> int:
     result = {
         "schema_version": "trtmc.perf-baseline/v1",
         "status": "completed",
-        "backend": "ultralytics",
+        "backend": "pytorch",
         "framework": "pytorch",
         "model": arguments.model,
         "family": arguments.family,

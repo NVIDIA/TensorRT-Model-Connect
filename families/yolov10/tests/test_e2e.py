@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Direct build, native runtime, and ultralytics reference proof for YOLOv10."""
+"""Direct build, native runtime, and PyTorch reference proof for YOLOv10."""
 
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -124,7 +125,7 @@ def _record_reference_boxes(rows, scale: float, pad_x: float, pad_y: float) -> N
         record_evidence("reference_preview", {"error": f"{type(error).__name__}: {error}"})
 
 
-def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, reference_python: Path) -> None:
+def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     record_evidence(
@@ -176,7 +177,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, reference_pytho
         record_evidence("checkpoint", {"configuration": json.loads((model_dir / "config.json").read_text())})
         reference_output = tmp_path / "reference.npz"
         subprocess.run(
-            [str(reference_python), str(TEST_ROOT / "reference/e2e.py"),
+            [sys.executable, str(TEST_ROOT / "reference/e2e.py"),
              str(model_dir), str(image), str(reference_output)],
             check=True, timeout=600,
             env={**os.environ, "PYTHONPATH": str(TEST_ROOT.parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", "")},

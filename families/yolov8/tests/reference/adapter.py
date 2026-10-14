@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""YOLOv8's native pipeline for the trtmc-perf-serve reference backend (``detect``): the official Ultralytics
-archive (yolov8n.pt), letterboxed to 640, Ultralytics NMS (IoU 0.7, at most 300 boxes) at the request's
-``score_threshold``.
-"""
+"""YOLOv8 eager PyTorch reference for the detect serving benchmark."""
 
 from __future__ import annotations
 
@@ -50,34 +47,22 @@ def _observation(rows: list[list[float]], geometry: Mapping[str, Any]) -> dict[s
             "boxes": boxes, "scores": [float(row[4]) for row in rows], "class_ids": [int(row[5]) for row in rows],
             "coordinates": "xyxy", "units": "pixels"}
 
-ARCHIVE = "yolov8n.pt"
-
 
 class Adapter:
     def __init__(self, spec: Any, host: Any) -> None:
-        self.host = host
-        import torch
+        from families.yolov8.tests.reference.model import load_model
 
+        self.host = host
         if spec.precision not in DTYPES:
             raise self.host.Error(f"YOLOv8 reference runs at fp16 or fp32, not {spec.precision}")
         self.spec = spec
-        blob = torch.load(str(_model_directory(spec) / ARCHIVE), map_location="cpu", weights_only=False)
-        model = blob.get("model") if isinstance(blob, dict) else None
-        if model is None:
-            raise self.host.Error(f"{ARCHIVE} has no model entry")
-        self.model = model.eval().to(device="cuda", dtype=spec.dtype)
+        self.model = load_model(_model_directory(spec)).to(device="cuda", dtype=spec.dtype)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
-        from ultralytics.utils.ops import non_max_suppression
+        from families.yolov8.tests.reference.model import detections
 
         image = self.host.load_image(str(self.host.required(request, "image_path")))
         pixels, geometry = _letterbox(image, self.spec.dtype)
         threshold = float(request.get("score_threshold", 0.25))
-
-        def run() -> Any:
-            raw = self.model(pixels)
-            raw = raw[0] if isinstance(raw, (list, tuple)) else raw
-            return non_max_suppression(raw, conf_thres=threshold, iou_thres=0.7, max_det=300)[0]
-
-        kept, model_ms = self.host.timed(run)
+        kept, model_ms = self.host.timed(lambda: detections(self.model(pixels), threshold))
         return self.host.invocation(_observation(kept.detach().float().cpu().tolist(), geometry), model_ms)

@@ -1,68 +1,62 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run the unchanged upstream E2E oracle outside the MC build process."""
+"""Compute the independent eager PyTorch reference for native E2E comparisons."""
 
 from pathlib import Path
-import json
 import sys
+import json
 
 import numpy as np
+from PIL import Image
+import torch
+
+from families.yolov10.tests.reference.model import detections, load_model
 
 
-def _reference_yaml(model_dir: Path) -> str:
-    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    model = config.get("model") if isinstance(config, dict) else None
-    if not isinstance(model, str) or model not in {"yolov10n.yaml", "yolov10s.yaml", "yolov10x.yaml"}:
-        raise ValueError(f"unsupported YOLOv10 reference architecture: {model!r}")
-    return model
-
-
-def _reference_tensors(model_dir: Path) -> dict:
-    from families.yolov10.checkpoint import Checkpoint
-
-    checkpoint = Checkpoint.open(model_dir, framework="pt")
-    return {name: reader.get_tensor(name) for name, reader in checkpoint.tensor_map.items()}
-
-
-def _letterbox(image, size: int):
-    """Ultralytics preprocessing: keep aspect, pad with 114, scale to [0, 1]."""
-    from PIL import Image
-
-    scale = min(size / image.height, size / image.width)
-    resized = image.resize(
-        (round(image.width * scale), round(image.height * scale)), Image.BILINEAR
+def _pixels(source):
+    scale = min(640 / source.height, 640 / source.width)
+    resized = source.resize(
+        (round(source.width * scale), round(source.height * scale)), Image.Resampling.BILINEAR
     )
-    canvas = Image.new("RGB", (size, size), (114, 114, 114))
-    left = (size - resized.width) // 2
-    top = (size - resized.height) // 2
-    canvas.paste(resized, (left, top))
-    array = np.asarray(canvas, dtype=np.float32).transpose(2, 0, 1) / 255.0
-    return array[None].copy(), scale, float(left), float(top)
+    canvas = Image.new("RGB", (640, 640), (114, 114, 114))
+    pad_x, pad_y = (640 - resized.width) // 2, (640 - resized.height) // 2
+    canvas.paste(resized, (pad_x, pad_y))
+    pixels = np.asarray(canvas, dtype=np.float32).transpose(2, 0, 1)[None].copy() / 255.0
+    return torch.from_numpy(pixels), scale, pad_x, pad_y
+
+
+def _check_snapshot(raw, expected):
+    values = raw.detach().numpy()
+    values = values[0]
+    assert list(values.shape) == expected["shape"]
+    indices = np.linspace(0, values.size - 1, len(expected["values"]), dtype=np.int64)
+    np.testing.assert_allclose(
+        values.reshape(-1)[indices], expected["values"], atol=1e-4, rtol=1e-5
+    )
+    kept = detections(raw).detach().numpy()
+    np.testing.assert_allclose(
+        kept, np.asarray(expected["detections"]).reshape(-1, 6), atol=1e-4, rtol=1e-5
+    )
+
+
+def _verify_reference(reference, model_dir, image, original):
+    name = json.loads((model_dir / "config.json").read_text())["model"].removesuffix(".yaml")
+    snapshot = json.loads((Path(__file__).with_name("snapshots") / f"{name}.json").read_text())
+    _check_snapshot(original, snapshot["cases"]["original"])
+    mirrored = Image.open(image).convert("RGB").transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    pixels, *_ = _pixels(mirrored)
+    _check_snapshot(reference(pixels), snapshot["cases"]["mirrored"])
 
 
 def run(model_dir: Path, image: Path, output: Path) -> None:
-    from ultralytics import YOLO
-
-    # The reference must run the checkpoint under test. YOLO(<directory>)
-    # quietly downloads its own weights instead, which would compare the engine
-    # against a different model.
-    reference = YOLO(_reference_yaml(model_dir), task="detect").model
-    raw = _reference_tensors(model_dir)
-    state = {key[len("model."):]: value for key, value in raw.items() if key.startswith("model.")}
-    missing, unexpected = reference.load_state_dict(state, strict=False)
-    assert not missing, f"reference is missing checkpoint tensors: {missing[:5]}"
-    reference = reference.eval()
-
-    import torch
-    from PIL import Image
-
-    source = Image.open(image).convert("RGB")
-    letterboxed, scale, pad_x, pad_y = _letterbox(source, 640)
-    with torch.no_grad():
-        expected = reference(torch.from_numpy(letterboxed))
-    expected = (expected[0] if isinstance(expected, (list, tuple)) else expected)[0].numpy()
-    np.savez(output, expected=expected, scale=scale, pad_x=pad_x, pad_y=pad_y)
+    reference = load_model(model_dir)
+    pixels, scale, pad_x, pad_y = _pixels(Image.open(image).convert("RGB"))
+    with torch.inference_mode():
+        raw = reference(pixels)
+        _verify_reference(reference, model_dir, image, raw)
+        values = raw[0]
+    np.savez(output, expected=values.numpy(), scale=scale, pad_x=pad_x, pad_y=pad_y)
 
 
 if __name__ == "__main__":

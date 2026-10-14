@@ -1,43 +1,61 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run the unchanged upstream E2E oracle outside the MC build process."""
+"""Compute the independent eager PyTorch reference for native E2E comparisons."""
 
 from pathlib import Path
 import sys
+import json
 
 import numpy as np
+from PIL import Image
+import torch
+
+from families.yolov8.tests.reference.model import detections, load_model
+
+
+def _pixels(source):
+    scale = min(640 / source.height, 640 / source.width)
+    resized = source.resize(
+        (round(source.width * scale), round(source.height * scale)), Image.Resampling.BILINEAR
+    )
+    canvas = Image.new("RGB", (640, 640), (114, 114, 114))
+    pad_x, pad_y = (640 - resized.width) // 2, (640 - resized.height) // 2
+    canvas.paste(resized, (pad_x, pad_y))
+    pixels = np.asarray(canvas, dtype=np.float32).transpose(2, 0, 1)[None].copy() / 255.0
+    return torch.from_numpy(pixels), scale, pad_x, pad_y
+
+
+def _check_snapshot(raw, expected):
+    values = raw.detach().numpy()
+    assert list(values.shape) == expected["shape"]
+    indices = np.linspace(0, values.size - 1, len(expected["values"]), dtype=np.int64)
+    np.testing.assert_allclose(
+        values.reshape(-1)[indices], expected["values"], atol=1e-4, rtol=1e-5
+    )
+    kept = detections(raw).detach().numpy()
+    np.testing.assert_allclose(
+        kept, np.asarray(expected["detections"]).reshape(-1, 6), atol=1e-4, rtol=1e-5
+    )
+
+
+def _verify_reference(reference, model_dir, image, original):
+    name = "yolov8n"
+    snapshot = json.loads((Path(__file__).with_name("snapshots") / f"{name}.json").read_text())
+    _check_snapshot(original, snapshot["cases"]["original"])
+    mirrored = Image.open(image).convert("RGB").transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    pixels, *_ = _pixels(mirrored)
+    _check_snapshot(reference(pixels), snapshot["cases"]["mirrored"])
 
 
 def run(model_dir: Path, image: Path, output: Path) -> None:
-
-    import torch
-    from PIL import Image
-    from ultralytics.utils.ops import non_max_suppression
-
-    # The reference must run the archive under test, and must see the same
-    # letterboxed pixels the runtime seam produced.
-    blob = torch.load(str(model_dir / "yolov8n.pt"), map_location="cpu", weights_only=False)
-    reference = blob["model"].float().eval()
-
-    size = 640
-    source = Image.open(image).convert("RGB")
-    scale = min(size / source.height, size / source.width)
-    resized = source.resize(
-        (round(source.width * scale), round(source.height * scale)), Image.BILINEAR
-    )
-    canvas = Image.new("RGB", (size, size), (114, 114, 114))
-    pad_x = (size - resized.width) // 2
-    pad_y = (size - resized.height) // 2
-    canvas.paste(resized, (pad_x, pad_y))
-    pixels = np.asarray(canvas, dtype=np.float32).transpose(2, 0, 1)[None] / 255.0
-
-    with torch.no_grad():
-        raw = reference(torch.from_numpy(pixels.astype(np.float32)))
-    raw = raw[0] if isinstance(raw, (list, tuple)) else raw
-    kept = non_max_suppression(raw, conf_thres=0.25, iou_thres=0.7, max_det=300)[0].numpy()
-
-    np.savez(output, kept=kept, scale=scale, pad_x=pad_x, pad_y=pad_y)
+    reference = load_model(model_dir)
+    pixels, scale, pad_x, pad_y = _pixels(Image.open(image).convert("RGB"))
+    with torch.inference_mode():
+        raw = reference(pixels)
+        _verify_reference(reference, model_dir, image, raw)
+        values = detections(raw)
+    np.savez(output, kept=values.numpy(), scale=scale, pad_x=pad_x, pad_y=pad_y)
 
 
 if __name__ == "__main__":

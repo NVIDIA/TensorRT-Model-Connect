@@ -44,7 +44,7 @@ performance:
       runner: task-reference
       script: tests/reference/benchmark.py
       mode: pytorch-eager
-      reference_backend: ultralytics
+      reference_backend: pytorch
       precision: fp32
       output_contract: detection-parity
       min_box_iou: 0.9

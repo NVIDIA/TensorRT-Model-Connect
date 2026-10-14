@@ -46,7 +46,7 @@ def _make_executable(path: Path) -> None:
 
 
 def _package_families(source: Path, package: Path) -> None:
-    """Keep isolated upstream reference programs out of the product wheel."""
+    """Keep test reference implementations out of the product wheel."""
     def ignore(directory: str, names: list[str]) -> set[str]:
         excluded = {"__pycache__"}
         if Path(directory).name == "tests":

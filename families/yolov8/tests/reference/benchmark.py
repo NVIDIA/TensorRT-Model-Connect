@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run the official Ultralytics YOLOv8 archive for qualification."""
+"""Run the independent eager PyTorch YOLOv8 reference for qualification."""
 
 from __future__ import annotations
 
@@ -16,9 +16,6 @@ import statistics
 import sys
 import time
 from typing import Any, Mapping, Sequence
-
-
-ARCHIVE = "yolov8n.pt"
 
 
 def _accuracy_parser() -> argparse.ArgumentParser:
@@ -79,19 +76,13 @@ def _model_directory(model: str, revision: str | None, local_files_only: bool) -
 
 def _load_model(model_dir: Path, precision: str) -> Any:
     import torch
+    from families.yolov8.tests.reference.model import load_model
 
     try:
         dtype = {"fp16": torch.float16, "fp32": torch.float32}[precision]
     except KeyError as error:
         raise ValueError(f"unsupported reference precision {precision!r}") from error
-    archive = model_dir / ARCHIVE
-    if not archive.is_file():
-        raise FileNotFoundError(f"YOLOv8 model directory has no {ARCHIVE}: {model_dir}")
-    blob = torch.load(str(archive), map_location="cpu", weights_only=False)
-    model = blob.get("model") if isinstance(blob, dict) else None
-    if model is None:
-        raise ValueError(f"YOLOv8 archive has no model entry: {archive}")
-    return model.eval().to(device="cuda", dtype=dtype)
+    return load_model(model_dir).to(device="cuda", dtype=dtype)
 
 
 def _prepare_image(image_path: str, dtype: Any) -> tuple[Any, dict[str, Any]]:
@@ -126,17 +117,10 @@ def _detect(
     model: Any, pixels: Any, geometry: Mapping[str, Any], threshold: float
 ) -> dict[str, Any]:
     import torch
-    from ultralytics.utils.ops import non_max_suppression
+    from families.yolov8.tests.reference.model import detections
 
     with torch.inference_mode():
-        raw = model(pixels)
-        raw = raw[0] if isinstance(raw, (list, tuple)) else raw
-        kept = non_max_suppression(
-            raw,
-            conf_thres=threshold,
-            iou_thres=0.7,
-            max_det=300,
-        )[0]
+        kept = detections(model(pixels), threshold)
     rows = kept.detach().float().cpu().tolist()
     scale = float(geometry["scale"])
     pad_x = int(geometry["pad_x"])
@@ -226,7 +210,7 @@ def _performance(arguments: argparse.Namespace) -> int:
     result = {
         "schema_version": "trtmc.perf-baseline/v1",
         "status": "completed",
-        "backend": "ultralytics",
+        "backend": "pytorch",
         "framework": "pytorch",
         "model": arguments.model,
         "family": arguments.family,

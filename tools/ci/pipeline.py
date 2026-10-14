@@ -9,31 +9,9 @@ from collections.abc import Callable
 
 from .context import CiContext
 from .e2e import E2ERunner
-from .package import WheelPackageManager, family_ids
+from .package import WheelPackageManager
 from .process import CiError
 from .quality import ImpactAnalyzer, SourceQualityChecks, UnitTestRunner
-
-
-def prepare_family_reference(context: CiContext) -> None:
-    """Prepare the selected test oracle while the setup stage still has network access."""
-    family = context.env.get("MODEL")
-    if not family:
-        return
-    if family not in family_ids(context.repository):
-        raise CiError(f"unknown test-reference family: {family}")
-    tests = context.repository / "families" / family / "tests"
-    requirements = tests / "requirements.txt"
-    if not requirements.is_file():
-        return
-    from trtmc_perf_serving.environments import reference_python
-
-    prepare = tests / "reference" / "prepare.py"
-    python = reference_python(
-        requirements,
-        context.repository / ".ci" / "reference" / family,
-        prepare=prepare if prepare.is_file() else None,
-    )
-    print(f"Prepared {family} test reference: {python}")
 
 
 class CiPipeline:
@@ -51,10 +29,7 @@ class CiPipeline:
                 ("Build native wheel", package.build),
                 ("Install and verify native wheel", package.install_once),
             ),
-            "setup": (
-                ("Install and verify native wheel", package.install_once),
-                ("Prepare isolated test reference", lambda: prepare_family_reference(context)),
-            ),
+            "setup": (("Install and verify native wheel", package.install_once),),
             "selective-e2e": (("Run impacted family E2E", E2ERunner(context).selective),),
         }
 
