@@ -411,6 +411,8 @@ HOST_INSTANCE_TYPES = {
     "nebius": {64: NEBIUS_INSTANCE_TYPE, 128: "gpu-l40s-a.1gpu-32vcpu-128gb"},
 }
 POLL_INTERVAL = 60.0
+CREATE_RATE_LIMIT_ATTEMPTS = 3
+CREATE_RATE_LIMIT_DELAY = 60.0
 CLI_TIMEOUT = 30.0
 PROBE_TIMEOUT = 180.0
 CLEANUP_TIMEOUT = 900.0
@@ -568,6 +570,8 @@ def _record_create_diagnostics(
 ) -> None:
     receipt = _create_diagnostics(stdout, stderr, returncode, completion)
     lease["create_diagnostics"] = receipt
+    if lease.get("create_attempts"):
+        lease["create_attempts"][-1]["diagnostics"] = receipt
     _save_lease(path, lease)
     # Public job logs and lease artifacts contain only fixed vocabulary and
     # counts. Provider errors may contain credentials or account details.
@@ -599,6 +603,46 @@ def _create_was_skipped(result: subprocess.CompletedProcess[str], sku: str, disk
         if lines == expected:
             return True
     return False
+
+
+def _create_was_rate_limited(
+    result: subprocess.CompletedProcess[str], name: str, org: str, sku: str, disk_gb: int
+) -> bool:
+    """Recognize a complete v0.6.335 single-worker workspace HTTP 429.
+
+    A diagnostic substring or the CLI's generic exit code is insufficient.
+    This policy treats an explicit rate-limiter rejection as retryable, while
+    retaining ownership and querying for resources before retry and cleanup.
+    """
+    if result.returncode != 1 or result.stdout.strip():
+        return False
+    lines = [line.rstrip() for line in result.stderr.splitlines() if line.strip()]
+    expected_prefix = [
+        "Attempting to create 1 instance(s) with 1 parallel attempts",
+        f"Instance types to try: {sku} ({disk_gb}GB disk)",
+        f"Trying {sku} for 1 instance(s)...",
+        f"[Worker 1] Trying {sku} for instance '{name}'...",
+        f"[Worker 1] {sku} Failed: [error]",
+        "github.com/brevdev/brev-cli/pkg/cmd/gpucreate.(*createContext).createWorkspace",
+        "/go/src/github.com/brevdev/brev-cli/pkg/cmd/gpucreate/gpucreate.go:1252",
+    ]
+    expected_suffix = [
+        f"Type {sku} had failures, trying next type...",
+        "Warning: Only created 0/1 instances",
+        "could only create 0/1 instances",
+    ]
+    if len(lines) != 11 or lines[:7] != expected_prefix or lines[8:] != expected_suffix:
+        return False
+    endpoint = (
+        f"https://brevapi.us-west-2-prod.control-plane.brev.dev/api/organizations/{org}/workspaces"
+    )
+    return (
+        re.fullmatch(
+            r": " + re.escape(endpoint) + r"(?:\?[^\s]*)? 429 Too Many Requests(?: [^\r\n]*)?",
+            lines[7],
+        )
+        is not None
+    )
 
 
 def _run(
@@ -910,6 +954,7 @@ def _load_lease(path: Path | None, name: str) -> dict | None:
         "ownership_blocked",
         "cleanup_confirmed",
         "intent_prepared",
+        "rate_limit_retry_policy",
     ):
         if key in lease and type(lease[key]) is not bool:
             raise ProvisionError("the persisted Brev lease has an invalid ownership state")
@@ -945,6 +990,27 @@ def _load_lease(path: Path | None, name: str) -> dict | None:
             or name != f"trtmc-gpu-ci-{run}-{attempt}"
         ):
             raise ProvisionError("the persisted Brev lease has a different original run attempt")
+    history = lease.get("create_attempts")
+    if history is not None:
+        if (
+            not isinstance(history, list)
+            or not 1 <= len(history) <= CREATE_RATE_LIMIT_ATTEMPTS
+            or any(
+                not isinstance(item, dict)
+                or type(item.get("attempt")) is not int
+                or item["attempt"] != index
+                or not isinstance(item.get("outcome"), str)
+                or item.get("outcome")
+                not in {"pending", "unknown", "rate_limited", "accepted", "not_submitted"}
+                for index, item in enumerate(history, 1)
+            )
+            or any(item["outcome"] != "rate_limited" for item in history[:-1])
+            or (
+                lease.get("create_started") is not True
+                and not (len(history) == 1 and history[0]["outcome"] == "not_submitted")
+            )
+        ):
+            raise ProvisionError("the persisted Brev creation attempts are invalid")
     return lease
 
 
@@ -1127,7 +1193,7 @@ def _cleanup_workspace(body: dict | None, lease: dict) -> None:
     lease["organization_id"] = body["organizationId"]
 
 
-def _cleanup_list_absent(body: dict | None, lease: dict) -> bool:
+def _cleanup_list_absent(body: dict | None, lease: dict, *, allow_same_name: bool = False) -> bool:
     if not isinstance(body, dict) or set(body) != {"items"} or not isinstance(body["items"], list):
         raise InventoryError("Brev cleanup inventory is invalid or incomplete")
     items = body["items"]
@@ -1150,13 +1216,17 @@ def _cleanup_list_absent(body: dict | None, lease: dict) -> bool:
                 "Brev cleanup inventory changed organization; refusing confirmation"
             )
         if (item["id"] == lease["instance_id"] and item["name"] != lease["name"]) or (
-            item["name"] == lease["name"] and item["id"] != lease["instance_id"]
+            not allow_same_name
+            and item["name"] == lease["name"]
+            and item["id"] != lease["instance_id"]
         ):
             raise ProvisionError(
                 "Brev cleanup inventory changed instance identity; refusing confirmation"
             )
     return not any(
-        item["id"] == lease["instance_id"] or item["name"] == lease["name"] for item in items
+        item["id"] == lease["instance_id"]
+        or (not allow_same_name and item["name"] == lease["name"])
+        for item in items
     )
 
 
@@ -1340,6 +1410,7 @@ def _cleanup(
     *,
     lease: dict | None = None,
     lease_file: Path | None = None,
+    allow_same_name: bool = False,
 ) -> None:
     del uncertain_create
     accepted = bool(lease and lease.get("delete_accepted"))
@@ -1484,7 +1555,7 @@ def _cleanup(
                 _log(start, f"{name}: cleanup LIST HTTP {list_status}")
                 if list_status != 200:
                     raise InventoryError("the original organization inventory is unavailable")
-                is_absent = _cleanup_list_absent(list_body, lease)
+                is_absent = _cleanup_list_absent(list_body, lease, allow_same_name=allow_same_name)
                 absent = absent + 1 if is_absent else 0
                 if not is_absent and not accepted:
                     lease["delete_outcome_unknown"] = False
@@ -1519,6 +1590,207 @@ def _cleanup(
         time.sleep(delay if deadline is None else min(delay, _remaining(deadline)))
 
 
+def _cleanup_rate_limited_creation(
+    name: str,
+    deadline: float | None,
+    start: float,
+    *,
+    lease: dict,
+    lease_file: Path | None,
+) -> None:
+    """Drain every owned ID before completing a rate-limited create attempt.
+
+    Complete HTTP 429 responses are treated as rate-limiter rejections by our
+    retry policy. That is not an external atomicity guarantee: authenticated
+    inventories still discover late or duplicate instances before completion.
+    A pending or unknown request without any observed ID remains unresolved.
+    """
+    org, sku = lease.get("organization_id"), lease.get("sku")
+    if lease.get("create_started") is not True or not org or not sku:
+        raise ProvisionError("rate-limited cleanup requires the original owned creation scope")
+    children = lease.setdefault("cleanup_instances", {})
+    if not isinstance(children, dict):
+        raise ProvisionError("rate-limited cleanup has an invalid owned instance ledger")
+    for identity, child in children.items():
+        if (
+            not isinstance(identity, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", identity)
+            or not isinstance(child, dict)
+            or any(
+                child.get(key) != expected
+                for key, expected in (
+                    ("name", name),
+                    ("instance_id", identity),
+                    ("organization_id", org),
+                    ("sku", sku),
+                    ("create_started", True),
+                    ("allocation_pending", False),
+                )
+            )
+            or any(
+                key in child and type(child[key]) is not bool
+                for key in (
+                    "create_started",
+                    "allocation_pending",
+                    "cleanup_confirmed",
+                    "delete_accepted",
+                    "delete_attempted",
+                    "delete_outcome_unknown",
+                    "owned_instance_observed",
+                    "ownership_blocked",
+                )
+            )
+        ):
+            raise ProvisionError("rate-limited cleanup has conflicting owned instance evidence")
+
+    def remember(identity: str, source: dict | None = None) -> dict:
+        child = {
+            "schema_version": 1,
+            "name": name,
+            "instance_id": identity,
+            "organization_id": org,
+            "sku": sku,
+            "create_started": True,
+            "allocation_pending": False,
+            "phase": "cleanup",
+        }
+        if source is not None:
+            for key in (
+                "cleanup_confirmed",
+                "delete_accepted",
+                "delete_attempted",
+                "delete_outcome_unknown",
+                "owned_instance_observed",
+                "ownership_blocked",
+            ):
+                if key in source:
+                    child[key] = source[key]
+        children[identity] = child
+        if lease_file is not None:
+            _save_lease(lease_file, lease)
+        return child
+
+    identity = lease.get("instance_id")
+    if identity is not None and identity not in children:
+        remember(identity, lease)
+    lease.update(phase="cleanup", cleanup_confirmed=False)
+    if lease_file is not None:
+        _save_lease(lease_file, lease)
+    history = lease.get("create_attempts", [])
+    rejected_only = bool(history) and all(
+        attempt["outcome"] in {"rate_limited", "not_submitted"} for attempt in history
+    )
+    cursor = lease.get("cleanup_cursor", 0)
+    if type(cursor) is not int or cursor < 0:
+        raise ProvisionError("rate-limited cleanup has an invalid instance cursor")
+    absent = 0
+    while True:
+        if deadline is not None:
+            _remaining(deadline)
+        inventory_valid = False
+        matching = []
+        try:
+            auth_status, auth_body = _cleanup_request("AUTH", org, deadline)
+            _log(start, f"{name}: cleanup AUTH HTTP {auth_status}")
+            if auth_status != 200 or not isinstance(auth_body, dict):
+                raise InventoryError("the original cleanup organization is unavailable")
+            if auth_body.get("id") != org:
+                raise ProvisionError("Brev cleanup organization changed; refusing discovery")
+            list_status, list_body = _cleanup_request("LIST", org, deadline)
+            _log(start, f"{name}: cleanup LIST HTTP {list_status}")
+            if list_status != 200:
+                raise InventoryError("the original organization inventory is unavailable")
+            # Validate the entire scope before using any matching record. This
+            # internal mode checks identities while permitting multiple owned
+            # IDs under the unique, previously absent CI allocation name.
+            _cleanup_list_absent(list_body, {**lease, "instance_id": None}, allow_same_name=True)
+            matching = [item for item in list_body["items"] if item["name"] == name]
+            inventory_valid = True
+            for row in matching:
+                identity = row["id"]
+                try:
+                    if identity not in children:
+                        status, body = _cleanup_request("GET", identity, deadline)
+                        _log(start, f"{name}: discovery GET HTTP {status}")
+                        if status != 200:
+                            raise InventoryError(
+                                "an owned name has not exposed its exact instance type"
+                            )
+                        candidate = {**lease, "instance_id": identity}
+                        _cleanup_workspace(body, candidate)
+                        child = remember(identity)
+                        child["owned_instance_observed"] = True
+                        if lease_file is not None:
+                            _save_lease(lease_file, lease)
+                    elif children[identity].get("cleanup_confirmed"):
+                        # A later inventory must override an earlier absence proof.
+                        children[identity].update(cleanup_confirmed=False, delete_accepted=False)
+                        if lease_file is not None:
+                            _save_lease(lease_file, lease)
+                except (ProvisionError, OSError):
+                    inventory_valid = False
+                    _log(start, f"{name}: one discovered instance has unresolved ownership")
+        except (ProvisionError, OSError):
+            inventory_valid = False
+            _log(start, f"{name}: complete cleanup inventory is unavailable or inconsistent")
+
+        # Previously authenticated IDs stay actionable during a LIST/AUTH
+        # outage. Bound each turn so one slow deletion cannot strand another.
+        serviced = False
+        pending = [child for child in children.values() if not child.get("cleanup_confirmed")]
+        if pending:
+            offset = cursor % len(pending)
+            pending = pending[offset:] + pending[:offset]
+        for child in pending:
+            if deadline is not None:
+                _remaining(deadline)
+            # The backstop may give the entire call only 90 seconds. Persist
+            # the next turn before blocking so a slow first ID cannot starve
+            # other VMs when cleanup is resumed from its lease.
+            cursor += 1
+            lease["cleanup_cursor"] = cursor
+            if lease_file is not None:
+                _save_lease(lease_file, lease)
+            serviced = True
+            child_deadline = time.monotonic() + 90
+            if deadline is not None:
+                child_deadline = min(deadline, child_deadline)
+            try:
+                _cleanup(
+                    name,
+                    child_deadline,
+                    start,
+                    lease=child,
+                    allow_same_name=True,
+                )
+            except (ProvisionError, OSError):
+                _log(start, f"{name}: an owned instance remains pending deletion")
+            finally:
+                if lease_file is not None:
+                    _save_lease(lease_file, lease)
+
+        all_deleted = all(child.get("cleanup_confirmed") is True for child in children.values())
+        can_confirm = all_deleted and (rejected_only or bool(children))
+        if inventory_valid and not matching and not serviced and can_confirm:
+            absent += 1
+            if absent >= 2:
+                lease.update(
+                    phase="deleted" if children else "unallocated",
+                    allocation_pending=False,
+                    cleanup_confirmed=True,
+                )
+                if lease_file is not None:
+                    _save_lease(lease_file, lease)
+                _log(
+                    start, f"{name}: all owned allocations absent in two authenticated inventories"
+                )
+                return
+        else:
+            absent = 0
+        delay = 2.0 if inventory_valid and can_confirm else POLL_INTERVAL
+        time.sleep(delay if deadline is None else min(delay, _remaining(deadline)))
+
+
 def cleanup(
     instance: str,
     *,
@@ -1545,7 +1817,17 @@ def cleanup(
                 f"{instance}: original lease unavailable or invalid; deletion remains blocked",
             )
             time.sleep(POLL_INTERVAL)
-    if lease is not None and lease.get("create_started") is False:
+    rate_limited = bool(
+        lease
+        and lease.get("create_started") is True
+        and (
+            any(
+                attempt["outcome"] == "rate_limited" for attempt in lease.get("create_attempts", [])
+            )
+            or (lease.get("rate_limit_retry_policy") is True and "create_attempts" not in lease)
+        )
+    )
+    if lease is not None and lease.get("create_started") is False and not rate_limited:
         if (
             lease.get("instance_id") is not None
             or lease.get("allocation_pending")
@@ -1570,7 +1852,8 @@ def cleanup(
         }
         _save_lease(path, lease)
     try:
-        _cleanup(
+        release = _cleanup_rate_limited_creation if rate_limited else _cleanup
+        release(
             instance,
             None if until_deleted else start + timeout,
             start,
@@ -1583,6 +1866,102 @@ def cleanup(
             _save_lease(path, lease)
         raise ProvisionError(f"cleanup of {instance} remains unconfirmed") from None
     return instance
+
+
+def _create_with_rate_limit_retry(
+    instance: str, candidate: dict, deadline: float, start: float, lease: dict, path: Path
+) -> None:
+    """Retry explicit admission rejections while preserving every attempt."""
+    org, sku, disk_gb = lease["organization_id"], lease["sku"], lease["requested_disk_gb"]
+    for attempt in range(1, CREATE_RATE_LIMIT_ATTEMPTS + 1):
+        _remaining(deadline)
+        # Record the potentially submitted attempt before starting the process.
+        # A kill between submission and its response must remain unknown.
+        lease.setdefault("create_attempts", []).append({"attempt": attempt, "outcome": "pending"})
+        lease.update(phase="creating", allocation_pending=True, create_started=True)
+        _save_lease(path, lease)
+        try:
+            result = _run(
+                ["brev", "create", instance, "--detached", "--mode", "vm"],
+                deadline,
+                PROBE_TIMEOUT,
+                input_text=json.dumps([candidate]),
+            )
+        except CommandTimeout as error:
+            lease["create_attempts"][-1]["outcome"] = "unknown"
+            _record_create_diagnostics(
+                lease, path, start, error.stdout, error.stderr, completion="timeout"
+            )
+            raise
+        except (OSError, KeyboardInterrupt) as error:
+            lease["create_attempts"][-1]["outcome"] = "unknown"
+            _record_create_diagnostics(
+                lease,
+                path,
+                start,
+                completion="interrupted" if isinstance(error, KeyboardInterrupt) else "io_error",
+            )
+            raise
+        if result.returncode == 0:
+            outcome = "accepted"
+        elif _create_was_rate_limited(result, instance, org, sku, disk_gb):
+            outcome = "rate_limited"
+        elif _create_was_skipped(result, sku, disk_gb):
+            outcome = "not_submitted"
+        else:
+            outcome = "unknown"
+        lease["create_attempts"][-1]["outcome"] = outcome
+        _record_create_diagnostics(
+            lease, path, start, result.stdout, result.stderr, result.returncode
+        )
+        if outcome == "accepted":
+            lease.update(create_accepted=True, phase="provisioning")
+            _save_lease(path, lease)
+            return
+        if outcome != "rate_limited":
+            if outcome == "not_submitted" and attempt == 1:
+                lease.update(
+                    create_started=False,
+                    allocation_pending=False,
+                    create_submission="not_submitted_catalog_rejection",
+                )
+                _save_lease(path, lease)
+            raise ProvisionError(f"Brev create failed (exit {result.returncode})")
+        lease["phase"] = "rate_limited"
+        _save_lease(path, lease)
+        if attempt == CREATE_RATE_LIMIT_ATTEMPTS:
+            raise ProvisionError(
+                f"Brev create rejected with HTTP 429 after {attempt} attempts (infra_failure)"
+            )
+        delay = CREATE_RATE_LIMIT_DELAY + secrets.randbelow(31)
+        _log(
+            start,
+            f"{instance}: create HTTP 429 ({attempt}/{CREATE_RATE_LIMIT_ATTEMPTS}); "
+            f"waiting {delay:g}s before reconciling the same allocation",
+        )
+        time.sleep(min(delay, _remaining(deadline)))
+        while True:
+            _remaining(deadline)
+            try:
+                current_org = _allocation_organization(deadline)
+            except (ProvisionError, OSError):
+                _log(start, f"{instance}: retry organization unavailable; no create submitted")
+                _pause(deadline)
+                continue
+            if current_org != org:
+                raise ProvisionError("Brev retry organization changed; refusing another create")
+            row = _inventory(instance, deadline, start, instance_type=sku)
+            if row is not None:
+                lease.update(
+                    instance_id=row["id"],
+                    allocation_pending=False,
+                    create_accepted=True,
+                    phase="provisioning",
+                )
+                _save_lease(path, lease)
+                _log(start, f"{instance}: recovered the existing instance after HTTP 429")
+                return
+            break
 
 
 def provision(
@@ -1651,6 +2030,9 @@ def provision(
         "allocation_pending": False,
         "create_started": False,
         "create_accepted": False,
+        # This reaches the immutable pre-POST artifact, so a lost runner can
+        # still recover multiple IDs without its newer local attempt ledger.
+        "rate_limit_retry_policy": True,
         "stock_bootstrap": True,
     }
     if from_intent:
@@ -1726,42 +2108,8 @@ def provision(
         _save_lease(path, lease)
         _publish_name(instance, instance_type, lease["organization_id"])
         _log(start, f"{instance}: creating exact type {instance_type} with {disk_gb} GiB disk")
-        # v0.6.335 reads JSON stdin automatically. Adding --type would prepend a
-        # second specification with its default 120 GiB disk. Keep default Jupyter.
-        try:
-            result = _run(
-                ["brev", "create", instance, "--detached", "--mode", "vm"],
-                deadline,
-                PROBE_TIMEOUT,
-                input_text=json.dumps([candidate]),
-            )
-        except CommandTimeout as error:
-            _record_create_diagnostics(
-                lease, path, start, error.stdout, error.stderr, completion="timeout"
-            )
-            raise
-        except (OSError, KeyboardInterrupt) as error:
-            _record_create_diagnostics(
-                lease,
-                path,
-                start,
-                completion="interrupted" if isinstance(error, KeyboardInterrupt) else "io_error",
-            )
-            raise
-        _record_create_diagnostics(
-            lease, path, start, result.stdout, result.stderr, result.returncode
-        )
-        if result.returncode:
-            if _create_was_skipped(result, instance_type, disk_gb):
-                lease.update(
-                    create_started=False,
-                    allocation_pending=False,
-                    create_submission="not_submitted_catalog_rejection",
-                )
-                _save_lease(path, lease)
-            raise ProvisionError(f"Brev create failed (exit {result.returncode})")
-        lease.update(create_accepted=True, phase="provisioning")
-        _save_lease(path, lease)
+        # v0.6.335 consumes one exact JSON candidate without an extra --type.
+        _create_with_rate_limit_retry(instance, candidate, deadline, start, lease, path)
         _wait_ready(
             instance,
             probe_image,

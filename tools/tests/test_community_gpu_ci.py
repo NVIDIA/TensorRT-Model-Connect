@@ -4479,3 +4479,488 @@ def test_prepared_intent_cannot_be_consumed_by_a_new_run_attempt(fake, monkeypat
     with pytest.raises(brev_provision.ProvisionError, match="different run attempt"):
         brev_provision.provision(name, lease_file=fake.lease, from_intent=True)
     assert not fake.creates and not fake.api.requests
+
+
+# Captured from v0.6.335 against a local synthetic HTTP server. Only the origin,
+# organization and instance name are normalized; no live credentials are used.
+_RATE_LIMIT_STDERR = """Attempting to create 1 instance(s) with 1 parallel attempts
+Instance types to try: g6.4xlarge (500GB disk)
+
+Trying g6.4xlarge for 1 instance(s)...
+[Worker 1] Trying g6.4xlarge for instance 'gpu'...
+[Worker 1] g6.4xlarge Failed: [error]\x20
+github.com/brevdev/brev-cli/pkg/cmd/gpucreate.(*createContext).createWorkspace
+/go/src/github.com/brevdev/brev-cli/pkg/cmd/gpucreate/gpucreate.go:1252
+: https://brevapi.us-west-2-prod.control-plane.brev.dev/api/organizations/org-test/workspaces?cli_version=v0.6.335&local=true&os=linux&utm_source=cli 429 Too Many Requests {"errors": [{"type": "RateLimitExceeded", "message": "rate limit exceeded"}]}
+
+Type g6.4xlarge had failures, trying next type...
+
+
+Warning: Only created 0/1 instances
+could only create 0/1 instances
+"""
+
+
+def _rate_limit_result(stderr=_RATE_LIMIT_STDERR, *, returncode=1, stdout=""):
+    return subprocess.CompletedProcess(["brev", "create", "gpu"], returncode, stdout, stderr)
+
+
+def _script_rate_limited_create(fake, monkeypatch, results):
+    remaining = list(results)
+    fake.create_leases = []
+    monkeypatch.setattr(brev_provision.secrets, "randbelow", lambda upper: 0)
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] != "create":
+            return fake(command, deadline, cap, **kwargs)
+        fake.create_leases.append(json.loads(fake.lease.read_text()))
+        fake(command, deadline, cap, **kwargs)
+        assert remaining, "unexpected extra create request"
+        result = remaining.pop(0)
+        if isinstance(result, BaseException):
+            fake.name = None
+            raise result
+        if result.returncode:
+            fake.name = None
+        return result
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    return run
+
+
+def _rate_limit_lease(fake):
+    return json.loads(fake.lease.read_text())
+
+
+def test_429_retries_after_delay_and_reuses_one_allocation(fake, clock, monkeypatch):
+    _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result("", returncode=0)]
+    )
+
+    assert fake.provision() == "gpu"
+
+    attempts = _rate_limit_lease(fake)["create_attempts"]
+    assert [attempt["outcome"] for attempt in attempts] == ["rate_limited", "accepted"]
+    creates = [(command, at) for command, at in fake.command_times if command[1] == "create"]
+    assert len(creates) == 2
+    assert 60 <= creates[1][1] - creates[0][1] <= 90
+    assert all(command[2] == "gpu" for command, _at in creates)
+    assert all(lease["create_attempts"][-1]["outcome"] == "pending" for lease in fake.create_leases)
+    assert all(lease["allocation_pending"] for lease in fake.create_leases)
+    assert _rate_limit_lease(fake)["instance_id"] == "allocation-gpu"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    assert fake.name is None and _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_three_429s_return_infra_error_then_confirm_no_dangling_allocation(
+    fake, clock, monkeypatch
+):
+    _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result(), _rate_limit_result()]
+    )
+
+    status = brev_provision.provision_main(["--instance", "gpu", "--lease-file", str(fake.lease)])
+
+    assert status == 75
+    assert len(fake.creates) == 3
+    assert [attempt["outcome"] for attempt in _rate_limit_lease(fake)["create_attempts"]] == [
+        "rate_limited"
+    ] * 3
+    assert not any(command[1] in {"exec", "refresh"} for command in fake.commands)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    lease = _rate_limit_lease(fake)
+    assert lease["cleanup_confirmed"] and not lease["allocation_pending"]
+    assert lease["phase"] == "unallocated"
+    assert len([request for request in fake.api.requests if request[0] == "LIST"]) >= 2
+    assert not any(request[0] == "DELETE" for request in fake.api.requests)
+
+
+def test_visible_instance_after_429_is_recovered_without_another_create(fake, monkeypatch):
+    create_run = _script_rate_limited_create(fake, monkeypatch, [_rate_limit_result()])
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] == "ls" and fake.creates:
+            fake.name = "gpu"
+        return create_run(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert fake.provision() == "gpu"
+    assert fake.creates == ["gpu"]
+    assert _rate_limit_lease(fake)["instance_id"] == "allocation-gpu"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    assert fake.name is None and _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_inventory_429_does_not_authorize_another_create(fake, clock, monkeypatch):
+    create_run = _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result("", returncode=0)]
+    )
+    unavailable = []
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] == "ls" and len(fake.creates) == 1 and len(unavailable) < 2:
+            unavailable.append(clock.now)
+            return subprocess.CompletedProcess(command, 1, "", "429 Too Many Requests")
+        return create_run(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert fake.provision() == "gpu"
+    assert len(unavailable) == 2
+    times = [at for command, at in fake.command_times if command[1] == "create"]
+    assert len(times) == 2 and times[1] >= unavailable[-1] + brev_provision.POLL_INTERVAL
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _rate_limit_result("rate limit exceeded"),
+        _rate_limit_result(
+            _RATE_LIMIT_STDERR.replace("429 Too Many Requests", "500 Internal Server Error")
+        ),
+        _rate_limit_result(_RATE_LIMIT_STDERR + "prior workspace POST returned HTTP 403\n"),
+        brev_provision.CommandTimeout("create timed out", "", _RATE_LIMIT_STDERR),
+        OSError("connection reset after workspace POST"),
+    ],
+    ids=["text-only", "http-500", "mixed-status", "timeout", "transport"],
+)
+def test_uncertain_create_is_never_retried_or_declared_clean(fake, monkeypatch, failure):
+    _script_rate_limited_create(fake, monkeypatch, [failure])
+    with pytest.raises((brev_provision.ProvisionError, OSError)):
+        fake.provision()
+    assert fake.creates == ["gpu"]
+    assert _rate_limit_lease(fake)["allocation_pending"]
+    assert _rate_limit_lease(fake)["create_attempts"][0]["outcome"] == "unknown"
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+@pytest.mark.parametrize("during_post", [False, True], ids=["backoff", "post"])
+def test_interruption_preserves_only_the_requests_that_could_have_been_sent(
+    fake, clock, monkeypatch, during_post
+):
+    responses = (
+        [_rate_limit_result(), KeyboardInterrupt()] if during_post else [_rate_limit_result()]
+    )
+    _script_rate_limited_create(fake, monkeypatch, responses)
+    if not during_post:
+
+        def interrupt_sleep(seconds):
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(brev_provision.time, "sleep", interrupt_sleep)
+    with pytest.raises(KeyboardInterrupt):
+        fake.provision()
+    monkeypatch.setattr(brev_provision.time, "sleep", clock.sleep)
+    outcomes = [attempt["outcome"] for attempt in _rate_limit_lease(fake)["create_attempts"]]
+    if during_post:
+        assert len(fake.creates) == 2 and outcomes == ["rate_limited", "unknown"]
+        with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+            brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+        assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+    else:
+        assert fake.creates == ["gpu"] and outcomes == ["rate_limited"]
+        assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+        assert _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _rate_limit_result(_RATE_LIMIT_STDERR.replace("org-test", "another-org")),
+        _rate_limit_result(
+            _RATE_LIMIT_STDERR.replace(
+                "brevapi.us-west-2-prod.control-plane.brev.dev", "other.example"
+            )
+        ),
+        _rate_limit_result(_RATE_LIMIT_STDERR.replace("g6.4xlarge", "g6e.2xlarge")),
+        _rate_limit_result(_RATE_LIMIT_STDERR.replace("instance 'gpu'", "instance 'unowned'")),
+        _rate_limit_result(
+            _RATE_LIMIT_STDERR.replace("1 parallel attempts", "2 parallel attempts")
+        ),
+        _rate_limit_result(_RATE_LIMIT_STDERR.removesuffix("could only create 0/1 instances\n")),
+        _rate_limit_result(stdout="Created an instance"),
+        _rate_limit_result(returncode=0),
+    ],
+    ids=["org", "origin", "sku", "name", "parallel", "truncated", "stdout", "exit-code"],
+)
+def test_only_complete_matching_workspace_429_is_retryable(result):
+    assert not brev_provision._create_was_rate_limited(result, "gpu", "org-test", "g6.4xlarge", 500)
+
+
+def test_pinned_cli_workspace_429_is_recognized():
+    assert brev_provision._create_was_rate_limited(
+        _rate_limit_result(), "gpu", "org-test", "g6.4xlarge", 500
+    )
+
+
+class _OwnedInstances:
+    """Control-plane state can expose multiple IDs independently of create's response."""
+
+    def __init__(self, clock, identities=()):
+        self.clock = clock
+        self.instances = {identity: self.workspace(identity) for identity in identities}
+        self.requests = []
+        self.list_count = 0
+        self.on_list = None
+        self.delete_statuses = []
+        self.auth_status = 200
+
+    @staticmethod
+    def workspace(identity):
+        return {
+            "id": identity,
+            "name": "gpu",
+            "organizationId": "org-test",
+            "instanceType": "g6.4xlarge",
+            "status": "RUNNING",
+        }
+
+    def __call__(self, method, identity, deadline):
+        self.requests.append((method, identity, self.clock.now))
+        assert deadline is None or self.clock.now < deadline
+        if method == "AUTH":
+            return self.auth_status, {"id": "org-test"}
+        if method == "LIST":
+            self.list_count += 1
+            if self.on_list:
+                self.on_list(self)
+            return 200, {"items": list(self.instances.values())}
+        if method == "GET":
+            return (200, self.instances[identity]) if identity in self.instances else (404, None)
+        assert method == "DELETE"
+        status = self.delete_statuses.pop(0) if self.delete_statuses else 202
+        if status not in {200, 202}:
+            return status, None
+        body = self.instances.pop(identity, None)
+        return (202, body) if body is not None else (404, None)
+
+
+def _rejected_creation(fake, monkeypatch):
+    _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result(), _rate_limit_result()]
+    )
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision()
+
+
+def test_late_instance_between_cleanup_inventories_is_deleted(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock)
+
+    def materialize(api):
+        if api.list_count == 2:
+            api.instances["late-gpu"] = api.workspace("late-gpu")
+
+    api.on_list = materialize
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    assert not api.instances
+    assert [identity for method, identity, _at in api.requests if method == "DELETE"] == [
+        "late-gpu"
+    ]
+    assert _rate_limit_lease(fake)["cleanup_confirmed"]
+    assert _rate_limit_lease(fake)["cleanup_instances"]["late-gpu"]["cleanup_confirmed"]
+
+
+def test_every_owned_duplicate_is_deleted_and_inventory_is_rechecked(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock, ["gpu-one", "gpu-two"])
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=360) == "gpu"
+    assert not api.instances
+    deletions = [(identity, at) for method, identity, at in api.requests if method == "DELETE"]
+    assert {identity for identity, _at in deletions} == {"gpu-one", "gpu-two"}
+    assert (
+        len(
+            [
+                at
+                for method, _identity, at in api.requests
+                if method == "LIST" and at >= deletions[-1][1]
+            ]
+        )
+        >= 2
+    )
+    assert set(_rate_limit_lease(fake)["cleanup_instances"]) == {"gpu-one", "gpu-two"}
+    assert all(
+        child["cleanup_confirmed"]
+        for child in _rate_limit_lease(fake)["cleanup_instances"].values()
+    )
+    assert _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_cleanup_retries_delete_429_without_leaving_the_instance(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock, ["gpu-one"])
+    api.delete_statuses = [429, 202]
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=360) == "gpu"
+    deletions = [at for method, _identity, at in api.requests if method == "DELETE"]
+    assert len(deletions) == 2 and deletions[1] - deletions[0] >= brev_provision.POLL_INTERVAL
+    assert not api.instances and _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "field,value", [("organizationId", "another-org"), ("instanceType", "g6.8xlarge")]
+)
+def test_discovery_never_deletes_a_foreign_org_or_sku(fake, clock, monkeypatch, field, value):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock, ["not-owned"])
+    api.instances["not-owned"][field] = value
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert "not-owned" in api.instances
+    assert not any(method == "DELETE" for method, _identity, _at in api.requests)
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+def test_org_query_failure_delays_create_and_org_change_blocks_it(fake, clock, monkeypatch):
+    _script_rate_limited_create(fake, monkeypatch, [_rate_limit_result()])
+    attempts = []
+
+    def organization(deadline):
+        attempts.append(clock.now)
+        if len(attempts) == 1:
+            return "org-test"
+        if len(attempts) == 2:
+            raise brev_provision.InventoryError("429 Too Many Requests")
+        return "changed-org"
+
+    monkeypatch.setattr(brev_provision, "_allocation_organization", organization)
+    with pytest.raises(brev_provision.ProvisionError, match="organization changed"):
+        fake.provision()
+    assert fake.creates == ["gpu"]
+    assert attempts[2] - attempts[1] >= brev_provision.POLL_INTERVAL
+    assert _rate_limit_lease(fake)["organization_id"] == "org-test"
+
+
+def test_one_conflicting_sku_does_not_strand_another_owned_instance(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock, ["wrong-sku", "owned-gpu"])
+    api.instances["wrong-sku"]["instanceType"] = "g6.8xlarge"
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240)
+    assert set(api.instances) == {"wrong-sku"}
+    assert [identity for method, identity, _at in api.requests if method == "DELETE"] == [
+        "owned-gpu"
+    ]
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+def test_known_owned_id_is_deleted_even_when_discovery_is_rate_limited(fake, clock, monkeypatch):
+    _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result("", returncode=0)]
+    )
+    assert fake.provision() == "gpu"
+    api = _OwnedInstances(clock, ["allocation-gpu"])
+    api.auth_status = 429
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240)
+    assert not api.instances
+    assert any(method == "DELETE" for method, _identity, _at in api.requests)
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+def test_500_after_a_429_stays_unknown_and_cannot_finish_empty_cleanup(fake, monkeypatch):
+    _script_rate_limited_create(
+        fake,
+        monkeypatch,
+        [
+            _rate_limit_result(),
+            _rate_limit_result(
+                _RATE_LIMIT_STDERR.replace("429 Too Many Requests", "500 Internal Server Error")
+            ),
+        ],
+    )
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision()
+    assert fake.creates == ["gpu", "gpu"]
+    assert [attempt["outcome"] for attempt in _rate_limit_lease(fake)["create_attempts"]] == [
+        "rate_limited",
+        "unknown",
+    ]
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+def test_provision_budget_exhausted_during_backoff_never_posts_again(fake, clock, monkeypatch):
+    _script_rate_limited_create(fake, monkeypatch, [_rate_limit_result()])
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision(timeout=30)
+    assert fake.creates == ["gpu"]
+    assert clock.now == 30
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    assert _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_cleanup_restarts_do_not_starve_a_second_id_behind_stuck_deletion(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+
+    class StuckFirstInstance(_OwnedInstances):
+        def __call__(self, method, identity, deadline):
+            if method == "DELETE" and identity == "first-stuck":
+                self.requests.append((method, identity, self.clock.now))
+                self.instances[identity]["status"] = "DELETING"
+                return 202, self.instances[identity]
+            return super().__call__(method, identity, deadline)
+
+    api = StuckFirstInstance(clock, ["first-stuck", "second-owned"])
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    # Each call reloads the persisted lease, as an owner/backstop replacement
+    # process does. The first deletion never completes within any time budget.
+    for _ in range(3):
+        with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+            brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=90)
+        assert "first-stuck" in api.instances
+        assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+    assert set(api.instances) == {"first-stuck"}
+    assert any(
+        method == "DELETE" and identity == "second-owned" for method, identity, _at in api.requests
+    )
+    assert _rate_limit_lease(fake)["cleanup_instances"]["second-owned"]["cleanup_confirmed"]
+
+
+def test_immutable_intent_records_retry_policy_before_create(fake):
+    assert fake.provision(prepare_only=True) == "gpu"
+    lease = _rate_limit_lease(fake)
+    assert lease["rate_limit_retry_policy"] is True
+    assert "create_attempts" not in lease
+    assert lease["create_started"] and lease["allocation_pending"]
+    assert fake.creates == []
+
+
+def test_backstop_with_only_immutable_intent_recovers_all_same_name_ids(fake, clock, monkeypatch):
+    fake.provision(prepare_only=True)
+    assert "create_attempts" not in _rate_limit_lease(fake)
+    api = _OwnedInstances(clock, ["first-created", "second-created"])
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=360) == "gpu"
+
+    assert not api.instances
+    assert {identity for method, identity, _at in api.requests if method == "DELETE"} == {
+        "first-created",
+        "second-created",
+    }
+    assert _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_backstop_with_only_immutable_intent_cannot_prove_empty_creation_rejected(
+    fake, clock, monkeypatch
+):
+    fake.provision(prepare_only=True)
+    assert "create_attempts" not in _rate_limit_lease(fake)
+    api = _OwnedInstances(clock)
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+    assert _rate_limit_lease(fake)["allocation_pending"]
+    assert not any(method == "DELETE" for method, _identity, _at in api.requests)
