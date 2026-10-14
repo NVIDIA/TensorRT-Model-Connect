@@ -7,28 +7,71 @@
 #include "families/lfm2/runtime/pretokenizer.h"
 #include "families/lfm2/runtime/tokenizer.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+namespace {
+
+std::filesystem::path pinned_tokenizer_path(const nlohmann::json& fixtures) {
+    if (const char* explicit_path = std::getenv("TRTMC_LFM25_TOKENIZER_JSON");
+        explicit_path != nullptr && *explicit_path != '\0')
+        return explicit_path;
+
+    std::filesystem::path cache;
+    for (const char* name : {"HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"}) {
+        const char* value = std::getenv(name);
+        if (value != nullptr && *value != '\0') {
+            cache = value;
+            break;
+        }
+    }
+    if (cache.empty()) {
+        const char* home = std::getenv("HF_HOME");
+        if (home != nullptr && *home != '\0')
+            cache = std::filesystem::path(home) / "hub";
+    }
+    if (cache.empty())
+        return {};
+
+    std::string repository = fixtures.at("hf_id").get<std::string>();
+    const auto revision = fixtures.at("revision").get<std::string>();
+    const auto separator = repository.find('/');
+    if (separator == std::string::npos ||
+        repository.find('/', separator + 1) != std::string::npos ||
+        repository.find('\\') != std::string::npos || revision.size() != 40 ||
+        !std::all_of(revision.begin(), revision.end(), [](char value) {
+            return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+        }))
+        throw std::runtime_error("Tokenizer fixture must name one exact checkpoint revision");
+    repository.replace(separator, 1, "--");
+    const auto path = cache / ("models--" + repository) / "snapshots" / revision / "tokenizer.json";
+    return std::filesystem::is_regular_file(path) ? path : std::filesystem::path{};
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     const bool require_token_ids = argc == 3 && std::string(argv[2]) == "--token-ids";
     if (argc != 2 && !require_token_ids)
         return 1;
-    const char* tokenizer_path = std::getenv("TRTMC_LFM25_TOKENIZER_JSON");
-    if (require_token_ids && (tokenizer_path == nullptr || *tokenizer_path == '\0')) {
-        std::cout
-            << "SKIP: set TRTMC_LFM25_TOKENIZER_JSON to the pinned checkpoint tokenizer.json\n";
-        return 77;
-    }
     std::ifstream fixture_file(argv[1]);
     const auto fixtures = nlohmann::json::parse(fixture_file);
+    const auto tokenizer_path = pinned_tokenizer_path(fixtures);
+    if (require_token_ids && tokenizer_path.empty()) {
+        std::cout << "SKIP: pinned tokenizer is absent; set TRTMC_LFM25_TOKENIZER_JSON "
+                     "or stage its exact HF cache snapshot\n";
+        return 77;
+    }
     std::unique_ptr<trtmc::ITokenizer> tokenizer;
-    if (tokenizer_path != nullptr && *tokenizer_path != '\0') {
+    if (!tokenizer_path.empty()) {
         std::ifstream input(tokenizer_path);
         if (!input) {
             std::cerr << "Cannot open the configured checkpoint tokenizer\n";

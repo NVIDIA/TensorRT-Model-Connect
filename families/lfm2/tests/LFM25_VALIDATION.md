@@ -183,6 +183,12 @@ TRTMC_LFM25_TOKENIZER_JSON="$PWD/models/LFM2.5-2.6B/tokenizer.json" \
   ctest --test-dir build -R '^test_lfm25_tokenizer_ids$' -V
 ```
 
+When `TRTMC_LFM25_TOKENIZER_JSON` is unset, the test checks the fixture's exact
+checkpoint revision in `HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`, or `HF_HOME/hub`,
+in that order of precedence. It never downloads or searches another revision.
+The token-ID check skips if the pinned asset is absent; an invalid explicit
+path fails.
+
 The successful test reports all 24 full token-ID fixture comparisons explicitly.
 This is a tokenizer check, not model-generation or multilingual-output proof.
 
