@@ -40,7 +40,7 @@ def positive_seconds(value: str) -> float:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="trtmc-server",
-        description="Serve text-generation bundles alongside embedding, reranking, and audio-transcription bundles through persistent native workers",
+        description="Serve text-generation bundles alongside embedding, reranking, audio-transcription, and object-detection bundles through persistent native workers",
     )
     result.add_argument("bundle", nargs="?", help="single .bundle artifact")
     result.add_argument("--model-name", help="API model name for the positional bundle")
@@ -63,6 +63,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--max-body-bytes", type=positive, default=1024 * 1024)
     result.add_argument("--max-prompt-bytes", type=positive, default=256 * 1024)
     result.add_argument("--max-new-tokens", type=positive, default=4096)
+    result.add_argument("--max-image-pixels", type=positive, default=16_000_000)
     result.add_argument("--max-audio-seconds", type=positive_seconds, default=30.0)
     result.add_argument("--records", type=Path, help="append terminal request timing JSONL (no text)")
     result.add_argument("--access-log", action="store_true")
@@ -148,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_generation_tokens=args.max_new_tokens,
                 records=args.records,
                 max_audio_seconds=args.max_audio_seconds,
+                max_image_pixels=args.max_image_pixels,
             ),
         )
         uvicorn_config = uvicorn.Config(

@@ -65,3 +65,35 @@ class UploadedInput:
 
     def close(self) -> None:
         self._directory.cleanup()
+
+
+def image_upload(url: str) -> tuple[bytes, str, dict[str, Any]]:
+    """Accept one embedded RGB image; never fetch client-provided URLs or paths."""
+    import base64
+    import binascii
+    import warnings
+
+    from PIL import Image
+
+    prefixes = {"data:image/png;base64,": ("PNG", ".png"),
+                "data:image/jpeg;base64,": ("JPEG", ".jpg")}
+    prefix = next((item for item in prefixes if url.startswith(item)), None)
+    if prefix is None:
+        raise ValueError("image must be a base64 PNG or JPEG data URL")
+    try:
+        data = base64.b64decode(url[len(prefix):], validate=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                if image.format != prefixes[prefix][0] or image.mode != "RGB" or getattr(image, "n_frames", 1) != 1:
+                    raise ValueError("image must contain one RGB PNG or JPEG frame")
+                width, height = image.size
+                if not 0 < width <= 2**31 - 1 or not 0 < height <= 2**31 - 1:
+                    raise ValueError("image dimensions are invalid")
+                image.verify()
+    except (binascii.Error, OSError, SyntaxError, Image.DecompressionBombError,
+            Image.DecompressionBombWarning) as error:
+        raise ValueError("image must be a readable RGB PNG or JPEG") from error
+    return data, prefixes[prefix][1], {"input_items": 1, "image_bytes": len(data),
+                                      "image_height": height, "image_width": width,
+                                      "image_pixels": height * width}

@@ -66,6 +66,7 @@ module.exports = {
         'user-guides/profile-embeddings-with-aiperf',
         'user-guides/profile-reranking-with-aiperf',
         'user-guides/profile-transcription-with-aiperf',
+        'user-guides/profile-detection-with-aiperf',
         {
           type: 'category',
           label: 'Task Guides',

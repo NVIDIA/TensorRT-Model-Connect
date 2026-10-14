@@ -225,6 +225,26 @@ void test_audio_task(const std::filesystem::path& root, const trtmc::LoadOptions
                 result.at("timing_scope") == "public_task_call_wall",
             "SDK defaults, declared Config, transcript and audio identity survive transport");
 }
+void test_detection_task(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    const auto bundle = write_bundle(root, "image_to_boxes", "image_boxes_fixture");
+    const auto path = root / "server-sdk-input.png";
+    std::vector<float> pixels(8 * 4 * 3, 0.0F);
+    pixels[0] = 1.0F;
+    trtmc::cli::io::save_png(path.string(), pixels, 8, 4);
+    const auto run = invoke(bundle, options,
+                            {{{"id", "image"}, {"op", "detect"}, {"image_path", path.string()}}});
+    std::filesystem::remove(path);
+    require(run.status == 0 && run.messages.size() == 2 &&
+                run.messages[0].at("capabilities") == Json::array({"object_detection"}),
+            "the declared SDK image-to-boxes Task is dispatched");
+    const auto& result = run.messages[1].at("result");
+    require(result.at("boxes").size() == 2 && result.at("boxes")[0].at("class_id") == 42 &&
+                result.at("boxes")[0].at("x_min") == -2 && result.at("boxes")[0].at("y_min") == 1 &&
+                result.at("boxes")[0].at("confidence") == .75 && result.at("image_width") == 8 &&
+                result.at("image_height") == 4 &&
+                result.at("timing_scope") == "public_task_call_wall",
+            "SDK defaults and complete native image detection results survive transport");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -239,6 +259,7 @@ int main(int argc, char** argv) {
         test_task_selection_and_failures(root, options);
         test_incremental_stream(root, options);
         test_audio_task(root, options);
+        test_detection_task(root, options);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

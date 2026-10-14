@@ -368,6 +368,8 @@ modes require their own evidence.
 | `nemotron-rerank-vl-1b-v2` | `/v1/ranking` / `nim_rankings` | One query plus two fixed text passages, FP16, context 685, concurrency 1; 5 warmups and 50 measured requests | [Stage 2](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1669) |
 | `whisper-tiny-fp16` | `/v1/audio/transcriptions` / `audio_transcription` | One complete mono PCM16 WAV clip; ten pinned LibriSpeech clips, FP16, context 128, output limit 120, concurrency 1; 5 warmups and 50 measured requests | [Stage 3](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1670) |
 
+| `yolo11n` | `/v1/infer` / `image_retrieval` | One original RGB image per request; 100 pinned COCO images, FP16, family threshold 0.25, concurrency 1; 5 warmups and 50 measured requests | [Stage 4](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1671) |
+
 The embedding pilot passed the unchanged bert family correctness checks and a
 real published AIPerf 0.13.0 run on one GB300 with TensorRT 11.1.0.106. All
 55 responses contained complete 384-value vectors.
@@ -390,9 +392,19 @@ half inputs, and an FP32 encoder disables TF32 operand rounding. The decoder
 computes its comparison-sensitive output projection in FP32. Older Whisper
 bundles need rebuilding. The numerical gates remain unchanged.
 
+The detection pilot passed the unchanged yolo11 checkpoint/native/reference testcase
+and 100-image family mAP gates. Native and reference mAP@[.50:.95] were both
+about 39.5% (permitted drop: 2 percentage points). One grayscale
+image was skipped under the RGB input contract and remains in the selection audit.
+All 100 HTTP/native verification calls and 55 published-client responses preserved
+the complete boxes, native class IDs, scores, and coordinate normalization; request
+and timing joins were complete. Prepared data URLs preserve original image bytes
+through AIPerf. This qualifies object detection; document/table layout remains planned.
+
 Use [Profile Embeddings with AIPerf](../../website/docs/user-guides/profile-embeddings-with-aiperf.md),
 [Profile Reranking with AIPerf](../../website/docs/user-guides/profile-reranking-with-aiperf.md),
-or [Profile Transcription with AIPerf](../../website/docs/user-guides/profile-transcription-with-aiperf.md)
+[Profile Transcription with AIPerf](../../website/docs/user-guides/profile-transcription-with-aiperf.md),
+or [Profile Object Detection with AIPerf](../../website/docs/user-guides/profile-detection-with-aiperf.md)
 for the short recipes. Native Task-call wall time stays separate from client
 HTTP latency; these small runs are integration examples, not performance gates.
 

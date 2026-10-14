@@ -32,11 +32,11 @@ from .errors import (
     WorkerTimeoutError,
 )
 from .metrics import Metrics
-from .protocol import chat_prompt, extract_embedding, extract_ranking, extract_result, extract_transcription, generation_config, public_worker_error
+from .protocol import chat_prompt, extract_embedding, extract_ranking, extract_result, extract_transcription, extract_detection, generation_config, public_worker_error
 from .records import RequestPolicy, RequestRecords
 from .registry import ModelRegistry
-from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest, TranscriptionRequest
-from .uploads import UploadedInput, multipart_audio, wav_metadata
+from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest, TranscriptionRequest, DetectionRequest
+from .uploads import UploadedInput, multipart_audio, wav_metadata, image_upload
 from .worker import WorkerSession
 
 
@@ -50,6 +50,7 @@ class ServerConfig:
         max_generation_tokens: int,
         records: Path | None = None,
         max_audio_seconds: float = 30.0,
+        max_image_pixels: int = 16_000_000,
     ) -> None:
         self.max_body_bytes = max_body_bytes
         self.max_prompt_bytes = max_prompt_bytes
@@ -58,6 +59,9 @@ class ServerConfig:
         if not math.isfinite(max_audio_seconds) or max_audio_seconds <= 0:
             raise ValueError("max_audio_seconds must be finite and positive")
         self.max_audio_seconds = max_audio_seconds
+        if type(max_image_pixels) is not int or max_image_pixels <= 0:
+            raise ValueError("max_image_pixels must be positive")
+        self.max_image_pixels = max_image_pixels
 
 
 class _BodyLimitMiddleware:
@@ -74,6 +78,7 @@ class _BodyLimitMiddleware:
             "/v1/embeddings",
             "/v1/ranking",
             "/v1/audio/transcriptions",
+            "/v1/infer",
         }:
             await self.app(scope, receive, send)
             return
@@ -603,6 +608,39 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         scores, _ = extract_ranking(result, len(documents))
         order = sorted(range(len(scores)), key=lambda index: -scores[index])
         return {"rankings": [{"index": index, "logit": scores[index]} for index in order]}
+
+    @app.post("/v1/infer")
+    async def detection(http_request: Request, request: DetectionRequest) -> Any:
+        route = http_request.url.path
+        context = http_request.state.timing
+        context.update(model=request.model, input_items=1)
+        try:
+            data, suffix, metadata = image_upload(request.input[0].url)
+            context.update(metadata)
+        except ValueError as error:
+            metrics.reject(route, 400)
+            return error_response(400, "invalid_request", str(error))
+        if context["image_pixels"] > config.max_image_pixels:
+            metrics.reject(route, 413)
+            return error_response(413, "content_too_large", "image exceeds the server pixel limit")
+        try:
+            model = request.model if request.model is not None else registry.default_model("object_detection")
+        except ValueError as error:
+            metrics.reject(route, 400)
+            return error_response(400, "model_required", str(error), param="model")
+        context["model"] = model
+        media = UploadedInput(data, suffix)
+
+        def validate(value):
+            return extract_detection(value, context["image_height"], context["image_width"])
+
+        result = await execute_task(http_request, model, "object_detection", "detect",
+                                    {"image_path": str(media.path)}, validate, release_input=media.close)
+        if isinstance(result, JSONResponse):
+            return result
+        boxes, _ = validate(result)
+        context["detection_boxes"] = len(result["boxes"])
+        return {"data": [{"index": 0, "bounding_boxes": boxes}]}
 
     @app.post("/v1/audio/transcriptions")
     async def transcriptions(http_request: Request) -> Any:

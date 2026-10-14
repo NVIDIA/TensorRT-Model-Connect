@@ -138,6 +138,12 @@ class ModelRegistry:
             raise ModelNotFoundError(f"model {model!r} is not registered")
         return capability in metadata.get("capabilities", [])
 
+    def default_model(self, capability: str) -> str:
+        matches = [name for name in self._order if self.supports(name, capability)]
+        if len(matches) != 1:
+            raise ValueError("specify model when there is not exactly one compatible model")
+        return matches[0]
+
     def models(self) -> list[dict[str, Any]]:
         return [
             {
@@ -173,5 +179,5 @@ class ModelRegistry:
         capabilities = metadata.get("capabilities")
         if (not isinstance(capabilities, list) or not capabilities or
                 not all(isinstance(value, str) for value in capabilities) or
-                not {"text_generation", "embeddings", "reranking", "audio_transcription"}.intersection(capabilities)):
+                not {"text_generation", "embeddings", "reranking", "audio_transcription", "object_detection"}.intersection(capabilities)):
             raise WorkerProtocolError("worker does not advertise a supported capability")

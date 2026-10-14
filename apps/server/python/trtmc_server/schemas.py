@@ -70,6 +70,16 @@ class RankingRequest(StrictRequest):
     truncate: Literal["NONE"] = "NONE"
 
 
+class DetectionImage(StrictRequest):
+    type: Literal["image_url"]
+    url: str = Field(min_length=1)
+
+
+class DetectionRequest(StrictRequest):
+    model: str | None = Field(default=None, min_length=1)
+    input: list[DetectionImage] = Field(min_length=1, max_length=1)
+
+
 class TranscriptionRequest(StrictRequest):
     model: str = Field(min_length=1)
     response_format: Literal["json", "text"] = "json"
