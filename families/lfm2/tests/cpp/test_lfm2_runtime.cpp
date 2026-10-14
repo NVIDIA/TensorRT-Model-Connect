@@ -41,11 +41,19 @@ class FakeLfm2Module final : public trtmc::ITrtModule {
         int32_t write_index{0};
         int32_t kv_length{0};
     };
+    struct PhaseCall {
+        int32_t value;
+        trtmc::DType dtype;
+        std::vector<int64_t> shape;
+    };
 
-    FakeLfm2Module(cudaStream_t stream, trtmc::DType state_dtype, int32_t vocab_size = 6)
+    FakeLfm2Module(cudaStream_t stream, trtmc::DType state_dtype, int32_t vocab_size = 6,
+                   bool explicit_phase = false)
         : stream_(stream), state_dtype_(state_dtype), vocab_size_(vocab_size),
           device_logits_({vocab_size}, trtmc::DType::kFloat32, stream) {
         add("token_id", {1}, trtmc::DType::kInt32, true);
+        if (explicit_phase)
+            add("decode_phase", {1, 1}, trtmc::DType::kInt32, true);
         add("position_id", {1}, trtmc::DType::kInt32, true);
         add("cache_write_indices", {1}, trtmc::DType::kInt32, true);
         add("key_value_lengths", {1}, trtmc::DType::kInt32, true);
@@ -68,6 +76,13 @@ class FakeLfm2Module final : public trtmc::ITrtModule {
     void forward_device_async(const trtmc::DeviceTensorMap&) override {}
 
     void forward_async(const trtmc::TensorMap& inputs) override {
+        if (has_input("decode_phase")) {
+            const auto& phase = inputs.at("decode_phase");
+            phase_calls.push_back({scalar(inputs, "decode_phase"), phase.dtype, phase.shape});
+        } else {
+            check(inputs.count("decode_phase") == 0,
+                  "legacy engines receive no undeclared decode-phase input");
+        }
         calls.push_back(Call{scalar(inputs, "token_id"), scalar(inputs, "position_id"),
                              scalar(inputs, "cache_write_indices"),
                              scalar(inputs, "key_value_lengths")});
@@ -136,6 +151,7 @@ class FakeLfm2Module final : public trtmc::ITrtModule {
     }
 
     std::vector<Call> calls;
+    std::vector<PhaseCall> phase_calls;
 
   private:
     struct Entry {
@@ -303,6 +319,47 @@ void test_pipeline_uses_safe_one_token_progression(cudaStream_t stream) {
     }
 }
 
+void test_pipeline_selects_decode_phase_and_resets(cudaStream_t stream) {
+    auto module = std::make_unique<FakeLfm2Module>(stream, trtmc::DType::kBFloat16, 6, true);
+    auto* trace = module.get();
+    auto kv = std::make_unique<trtmc::Lfm2KvCache>(1, 8, 2, 4, stream, trtmc::DType::kBFloat16);
+    auto conv = std::make_unique<trtmc::Lfm2ConvState>(1, 4, 3, stream, trtmc::DType::kBFloat16);
+    auto state = std::make_unique<trtmc::Lfm2HybridState>(std::move(kv), std::move(conv));
+    trtmc::Lfm2TextGenConfig config;
+    config.vocab_size = 6;
+    config.id_eos = 5;
+    config.id_eos_ids = {5}; // The fake emits 2, so all requested steps execute.
+    trtmc::Lfm2TextGenerationPipeline pipeline(std::move(module), std::move(state), config, stream);
+    trtmc::TextGenerationConfig request;
+    request.max_new_tokens = 3;
+    request.temperature = 0.0F;
+    const auto first = pipeline.generate_ids({1, 4, 5}, request);
+    check(first.token_ids == std::vector<int32_t>({1, 4, 5, 2, 2, 2}),
+          "phase test executes a complete three-token continuation");
+    std::vector<int32_t> phases;
+    for (const auto& call : trace->phase_calls) {
+        check(call.dtype == trtmc::DType::kInt32 && call.shape == std::vector<int64_t>({1, 1}),
+              "native phase input uses INT32[1,1] on every step");
+        phases.push_back(call.value);
+    }
+    check(phases == std::vector<int32_t>({0, 0, 0, 1, 1}),
+          "all prompt tokens use prefill rounding and only generated tokens use cached rounding");
+
+    trace->phase_calls.clear();
+    request.max_new_tokens = 2;
+    const auto second = pipeline.generate_ids({4}, request);
+    check(second.token_ids == std::vector<int32_t>({4, 2, 2}),
+          "second request executes after the previous cached decode");
+    phases.clear();
+    for (const auto& call : trace->phase_calls) {
+        check(call.dtype == trtmc::DType::kInt32 && call.shape == std::vector<int64_t>({1, 1}),
+              "reset request keeps the phase input contract");
+        phases.push_back(call.value);
+    }
+    check(phases == std::vector<int32_t>({0, 1}),
+          "new request resets to prefill before entering cached decode");
+}
+
 void test_pipeline_chat_and_raw_bos_dedup(cudaStream_t stream) {
     auto module = std::make_unique<FakeLfm2Module>(stream, trtmc::DType::kFloat16);
     auto* trace = module.get();
@@ -398,6 +455,7 @@ int main() {
     test_native_kv_and_double_buffered_conv(stream);
     test_native_contract_rejection_and_capacity(stream);
     test_pipeline_uses_safe_one_token_progression(stream);
+    test_pipeline_selects_decode_phase_and_resets(stream);
     test_pipeline_chat_and_raw_bos_dedup(stream);
     test_pipeline_rejects_logits_contract_mismatch(stream);
     cudaStreamDestroy(stream);

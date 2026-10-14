@@ -150,6 +150,26 @@ def _resolve_intermediate_size(raw: Mapping[str, Any], config: object) -> int:
     return multiple * ((adjusted + multiple - 1) // multiple)
 
 
+def _resolve_rope_theta(raw: Mapping[str, Any], config: object) -> float:
+    parameters = raw.get("rope_parameters")
+    if parameters is not None:
+        if not isinstance(parameters, dict) or set(parameters) != {"rope_type", "rope_theta"}:
+            raise ValueError("rope_parameters must contain rope_type and rope_theta")
+        if parameters["rope_type"] != "default":
+            raise ValueError("dense LFM2 supports only default rope_parameters")
+        theta = _positive_float(parameters["rope_theta"], "rope_parameters.rope_theta")
+        for alias in ("rope_theta", "theta"):
+            if alias in raw and _positive_float(raw[alias], alias) != theta:
+                raise ValueError(f"{alias} must agree with rope_parameters.rope_theta")
+        return theta
+    theta = _positive_float(
+        _first(raw, config, "rope_theta", "theta", default=1_000_000.0), "rope_theta"
+    )
+    if "theta" in raw and _positive_float(raw["theta"], "theta") != theta:
+        raise ValueError("theta must equal rope_theta")
+    return theta
+
+
 @dataclass(frozen=True)
 class DenseLfm2Config:
     vocab_size: int
@@ -295,12 +315,7 @@ def validate_dense_lfm2_config(config: object) -> DenseLfm2Config:
         and _positive_float(raw["block_norm_eps"], "block_norm_eps") != norm_eps
     ):
         raise ValueError("block_norm_eps must equal norm_eps")
-    rope_theta = _positive_float(
-        _first(raw, config, "rope_theta", "theta", default=1_000_000.0),
-        "rope_theta",
-    )
-    if "theta" in raw and _positive_float(raw["theta"], "theta") != rope_theta:
-        raise ValueError("theta must equal rope_theta")
+    rope_theta = _resolve_rope_theta(raw, config)
     if (
         "tie_word_embeddings" in raw
         and "tie_embedding" in raw

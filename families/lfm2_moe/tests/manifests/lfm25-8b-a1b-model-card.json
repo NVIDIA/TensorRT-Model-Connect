@@ -1,0 +1,25 @@
+{
+  "name": "lfm25-8b-a1b-model-card",
+  "hf_id": "LiquidAI/LFM2.5-8B-A1B",
+  "hf_revision": "5dd22602c2e9f6a097b1de4c4efe0658b605015c",
+  "bundle": "lfm25-8b-a1b-model-card-bf16.bundle",
+  "family": "lfm2_moe",
+  "task": "text_generation",
+  "precision": "bf16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "lfm25-8b-a1b-model-card-greedy-full",
+      "reference_precision": "bf16",
+      "prompt": "What is C. elegans?",
+      "max_new_tokens": 8192,
+      "do_sample": false,
+      "use_chat_template": true,
+      "repetition_penalty": 1.0,
+      "semantic_case": "model-card-quickstart",
+      "premerge": true
+    }
+  ],
+  "max_sequence_length": 128000,
+  "tensor_parallel_size": 1
+}

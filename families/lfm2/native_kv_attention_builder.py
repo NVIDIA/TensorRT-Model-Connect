@@ -54,12 +54,8 @@ def add_active_prefix_causal_masks(
         raise ValueError("native KV cache capacity must be positive")
 
     query_shape = network.add_shape(query_rows).get_output(0)
-    query_length = network.add_slice(
-        query_shape, start=(0,), shape=(1,), stride=(1,)
-    ).get_output(0)
-    zero_i32 = _constant(
-        network, (), np.array(0, dtype=np.int32), dtype=np.dtype(np.int32)
-    )
+    query_length = network.add_slice(query_shape, start=(0,), shape=(1,), stride=(1,)).get_output(0)
+    zero_i32 = _constant(network, (), np.array(0, dtype=np.int32), dtype=np.dtype(np.int32))
     one_i32 = _constant(
         network,
         (1,),
@@ -168,13 +164,10 @@ def add_explicit_masked_grouped_query_attention(
     scale: float | None = None,
     tag: str | None = None,
 ) -> trt.ITensor:
-    """Compute explicitly masked grouped-query attention."""
+    """Compute masked SDPA in FP32, rounding only its context to model dtype."""
 
     if num_kv_heads <= 0 or num_heads % num_kv_heads != 0:
-        raise ValueError(
-            f"num_heads={num_heads} must be divisible by "
-            f"num_kv_heads={num_kv_heads}"
-        )
+        raise ValueError(f"num_heads={num_heads} must be divisible by num_kv_heads={num_kv_heads}")
     if head_dim <= 0:
         raise ValueError("native KV attention head_dim must be positive")
     if query.dtype not in {trt.float16, trt.bfloat16, trt.float32}:
@@ -223,9 +216,7 @@ def add_explicit_masked_grouped_query_attention(
 
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim))
-    query_fp32 = network.add_cast(
-        query_grouped.get_output(0), trt.float32
-    ).get_output(0)
+    query_fp32 = network.add_cast(query_grouped.get_output(0), trt.float32).get_output(0)
     scale_tensor = _constant(
         network,
         (1, 1, 1, 1, 1),
@@ -236,12 +227,11 @@ def add_explicit_masked_grouped_query_attention(
         scale_tensor,
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
-    scaled_query = _cast(network, scaled_query, query.dtype)
 
     scores = network.add_matrix_multiply(
         scaled_query,
         trt.MatrixOperation.NONE,
-        safe_key.get_output(0),
+        _cast(network, safe_key.get_output(0), trt.float32),
         trt.MatrixOperation.TRANSPOSE,
     )
     if scores is None:
@@ -251,7 +241,7 @@ def add_explicit_masked_grouped_query_attention(
     masked_scores = network.add_select(
         mask_grouped.get_output(0),
         scores.get_output(0),
-        _blocked_score(network, query.dtype),
+        _blocked_score(network, trt.float32),
     )
     if masked_scores is None:
         raise RuntimeError("TensorRT failed to apply native KV attention mask")
@@ -267,7 +257,7 @@ def add_explicit_masked_grouped_query_attention(
     context_grouped = network.add_matrix_multiply(
         probabilities.get_output(0),
         trt.MatrixOperation.NONE,
-        safe_value.get_output(0),
+        _cast(network, safe_value.get_output(0), trt.float32),
         trt.MatrixOperation.NONE,
     )
     if context_grouped is None:
@@ -277,4 +267,4 @@ def add_explicit_masked_grouped_query_attention(
 
     context = network.add_shuffle(context_grouped.get_output(0))
     context.reshape_dims = (1, num_heads, -1, head_dim)
-    return context.get_output(0)
+    return _cast(network, context.get_output(0), query.dtype)

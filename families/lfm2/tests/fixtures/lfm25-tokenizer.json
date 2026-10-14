@@ -1,0 +1,542 @@
+{
+  "hf_id": "LiquidAI/LFM2.5-2.6B",
+  "revision": "654f9463ce32b05d0429d76fe1f580b27d4c1ac0",
+  "cases": [
+    {
+      "name": "english",
+      "text": "Hello, world! I'M ready.",
+      "pieces": [
+        "Hello",
+        ",",
+        " world",
+        "!",
+        " I",
+        "'M",
+        " ready",
+        "."
+      ],
+      "token_ids": [
+        35808,
+        20,
+        1530,
+        9,
+        358,
+        50750,
+        7676,
+        22
+      ]
+    },
+    {
+      "name": "arabic",
+      "text": "مرحبا، كيف حالك؟ ١٢٣",
+      "pieces": [
+        "مرحبا",
+        "،",
+        " كيف",
+        " حالك",
+        "؟",
+        " ",
+        "١٢٣"
+      ],
+      "token_ids": [
+        17880,
+        2262,
+        68059,
+        3279,
+        61111,
+        68814,
+        1397,
+        32839,
+        229,
+        71062,
+        71727,
+        101606
+      ]
+    },
+    {
+      "name": "chinese",
+      "text": "你好，世界！123",
+      "pieces": [
+        "你好",
+        "，世界",
+        "！",
+        "123"
+      ],
+      "token_ids": [
+        11253,
+        5899,
+        697,
+        10869,
+        8167,
+        9792
+      ]
+    },
+    {
+      "name": "french",
+      "text": "Bonjour, où est la voiture ?",
+      "pieces": [
+        "Bonjour",
+        ",",
+        " où",
+        " est",
+        " la",
+        " voiture",
+        " ?"
+      ],
+      "token_ids": [
+        34432,
+        12642,
+        20,
+        8693,
+        669,
+        443,
+        40044,
+        4718
+      ]
+    },
+    {
+      "name": "german",
+      "text": "Grüße, wo ist das Auto?",
+      "pieces": [
+        "Grüße",
+        ",",
+        " wo",
+        " ist",
+        " das",
+        " Auto",
+        "?"
+      ],
+      "token_ids": [
+        10205,
+        641,
+        6516,
+        20,
+        12022,
+        1667,
+        1664,
+        18374,
+        39
+      ]
+    },
+    {
+      "name": "italian",
+      "text": "Dov’è l’auto?",
+      "pieces": [
+        "Dov",
+        "’è",
+        " l",
+        "’auto",
+        "?"
+      ],
+      "token_ids": [
+        44,
+        498,
+        76763,
+        308,
+        81111,
+        39
+      ]
+    },
+    {
+      "name": "japanese",
+      "text": "こんにちは、世界。",
+      "pieces": [
+        "こんにちは",
+        "、世界",
+        "。"
+      ],
+      "token_ids": [
+        71560,
+        110404,
+        646
+      ]
+    },
+    {
+      "name": "korean",
+      "text": "안녕하세요, 세계!",
+      "pieces": [
+        "안녕하세요",
+        ",",
+        " 세계",
+        "!"
+      ],
+      "token_ids": [
+        13111,
+        109500,
+        20,
+        40119,
+        9
+      ]
+    },
+    {
+      "name": "portuguese",
+      "text": "Olá, onde está o carro?",
+      "pieces": [
+        "Olá",
+        ",",
+        " onde",
+        " está",
+        " o",
+        " carro",
+        "?"
+      ],
+      "token_ids": [
+        38513,
+        519,
+        20,
+        25855,
+        6952,
+        286,
+        111447,
+        39
+      ]
+    },
+    {
+      "name": "spanish",
+      "text": "¿Dónde está el coche?",
+      "pieces": [
+        "¿Dónde",
+        " está",
+        " el",
+        " coche",
+        "?"
+      ],
+      "token_ids": [
+        17494,
+        44,
+        58337,
+        6952,
+        616,
+        59976,
+        39
+      ]
+    },
+    {
+      "name": "vietnamese",
+      "text": "Xin chào, xe ở đâu?",
+      "pieces": [
+        "Xin",
+        " chào",
+        ",",
+        " xe",
+        " ở",
+        " đâu",
+        "?"
+      ],
+      "token_ids": [
+        64,
+        268,
+        478,
+        73432,
+        20,
+        74156,
+        73386,
+        75971,
+        39
+      ]
+    },
+    {
+      "name": "thai",
+      "text": "สวัสดี รถอยู่ที่ไหน ๑๒๓",
+      "pieces": [
+        "สว",
+        "ัสด",
+        "ี",
+        " รถอย",
+        "ู่",
+        "ท",
+        "ี่",
+        "ไหน",
+        " ",
+        "๑๒๓"
+      ],
+      "token_ids": [
+        72913,
+        72902,
+        111165,
+        72898,
+        73291,
+        73010,
+        73024,
+        73207,
+        72909,
+        72930,
+        74378,
+        229,
+        48687,
+        248,
+        48687,
+        249,
+        48687,
+        250
+      ]
+    },
+    {
+      "name": "indonesian",
+      "text": "Halo, di mana mobilnya?",
+      "pieces": [
+        "Halo",
+        ",",
+        " di",
+        " mana",
+        " mobilnya",
+        "?"
+      ],
+      "token_ids": [
+        48,
+        8499,
+        20,
+        717,
+        78821,
+        18677,
+        77915,
+        39
+      ]
+    },
+    {
+      "name": "hindi",
+      "text": "नमस्ते, कार कहाँ है? १२३",
+      "pieces": [
+        "नमस",
+        "्त",
+        "े,",
+        " क",
+        "ार",
+        " कह",
+        "ाँ",
+        " ह",
+        "ै?",
+        " ",
+        "१२३"
+      ],
+      "token_ids": [
+        79861,
+        72929,
+        73086,
+        74277,
+        72897,
+        72950,
+        73358,
+        74518,
+        72918,
+        72926,
+        39,
+        229,
+        84312,
+        84378,
+        85888
+      ]
+    },
+    {
+      "name": "russian",
+      "text": "Привет, где машина?",
+      "pieces": [
+        "Привет",
+        ",",
+        " где",
+        " машина",
+        "?"
+      ],
+      "token_ids": [
+        6744,
+        12827,
+        20,
+        16467,
+        53571,
+        1108,
+        39
+      ]
+    },
+    {
+      "name": "polish",
+      "text": "Cześć, gdzie jest samochód?",
+      "pieces": [
+        "Cześć",
+        ",",
+        " gdzie",
+        " jest",
+        " samochód",
+        "?"
+      ],
+      "token_ids": [
+        43,
+        1042,
+        10204,
+        20,
+        35038,
+        10857,
+        2517,
+        2306,
+        6920,
+        39
+      ]
+    },
+    {
+      "name": "unicode-numbers",
+      "text": "Ⅳ ² ¼ १२३४ ๑๒๓๔",
+      "pieces": [
+        "Ⅳ",
+        " ",
+        "²",
+        " ",
+        "¼",
+        " ",
+        "१२३",
+        "४",
+        " ",
+        "๑๒๓",
+        "๔"
+      ],
+      "token_ids": [
+        46236,
+        105,
+        229,
+        8387,
+        229,
+        33779,
+        229,
+        84312,
+        84378,
+        85888,
+        86343,
+        229,
+        48687,
+        248,
+        48687,
+        249,
+        48687,
+        250,
+        48687,
+        251
+      ]
+    },
+    {
+      "name": "whitespace",
+      "text": "a  b\t\n    c  ",
+      "pieces": [
+        "a",
+        " ",
+        " b",
+        "\t\n",
+        "   ",
+        " c",
+        "  "
+      ],
+      "token_ids": [
+        73,
+        229,
+        293,
+        1970,
+        360,
+        280,
+        266
+      ]
+    },
+    {
+      "name": "combining",
+      "text": "ạ́ b̀",
+      "pieces": [
+        "a",
+        "̣́",
+        " b",
+        "̀"
+      ],
+      "token_ids": [
+        73,
+        9685,
+        145,
+        105,
+        293,
+        145,
+        231
+      ]
+    },
+    {
+      "name": "tool-tokens",
+      "text": "<|tool_call_start|>[weather(city=\"Paris\")]<|tool_call_end|>",
+      "pieces": [
+        "<|",
+        "tool",
+        "_call",
+        "_start",
+        "|>[",
+        "weather",
+        "(city",
+        "=\"",
+        "Paris",
+        "\")]<|",
+        "tool",
+        "_call",
+        "_end",
+        "|>"
+      ],
+      "token_ids": [
+        124905,
+        67,
+        51492,
+        9619,
+        459,
+        747,
+        41176,
+        88029,
+        124906
+      ]
+    },
+    {
+      "name": "whole-vocabulary-tool-name",
+      "text": "_candidate",
+      "pieces": [
+        "_candidate"
+      ],
+      "token_ids": [
+        93497
+      ]
+    },
+    {
+      "name": "whole-vocabulary-portuguese",
+      "text": " português",
+      "pieces": [
+        " português"
+      ],
+      "token_ids": [
+        115132
+      ]
+    },
+    {
+      "name": "tool-name-boundaries",
+      "text": "get_candidate_status",
+      "pieces": [
+        "get",
+        "_candidate",
+        "_status"
+      ],
+      "token_ids": [
+        1265,
+        93497,
+        36118
+      ]
+    },
+    {
+      "name": "whole-vocabulary-in-context",
+      "text": "Use get_candidate_status in português.",
+      "pieces": [
+        "Use",
+        " get",
+        "_candidate",
+        "_status",
+        " in",
+        " português",
+        "."
+      ],
+      "token_ids": [
+        14374,
+        1172,
+        93497,
+        36118,
+        296,
+        115132,
+        22
+      ]
+    }
+  ]
+}

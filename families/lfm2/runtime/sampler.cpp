@@ -40,34 +40,36 @@ bool distribution_sampling_enabled(const Lfm2SamplingParams& params) {
             params.top_k <= 0 || params.top_k > 1 || params.seed >= 0);
 }
 
-struct FilteredDistribution {
-    std::vector<int32_t> indices;
-    std::vector<float> probabilities;
-    int32_t keep{0};
-};
-
 std::vector<int32_t> make_candidate_indices(const std::vector<float>& logits,
                                             int32_t candidate_count) {
     std::vector<int32_t> indices(logits.size());
     std::iota(indices.begin(), indices.end(), 0);
+    const auto descending = [&](int32_t lhs, int32_t rhs) {
+        const float left = logits[static_cast<std::size_t>(lhs)];
+        const float right = logits[static_cast<std::size_t>(rhs)];
+        return left > right || (left == right && lhs < rhs);
+    };
     std::partial_sort(indices.begin(), indices.begin() + candidate_count, indices.end(),
-                      [&](int32_t lhs, int32_t rhs) {
-                          return logits[static_cast<std::size_t>(lhs)] >
-                                 logits[static_cast<std::size_t>(rhs)];
-                      });
-    indices.resize(static_cast<std::size_t>(candidate_count));
+                      descending);
+    // HF masks scores strictly below the kth score, retaining every boundary
+    // tie. Truncating to exactly k changes the distribution for tied logits.
+    const float threshold = logits[static_cast<std::size_t>(indices[candidate_count - 1])];
+    indices.erase(std::remove_if(indices.begin() + candidate_count, indices.end(),
+                                 [&](int32_t index) { return logits[index] < threshold; }),
+                  indices.end());
+    std::sort(indices.begin(), indices.end(), descending);
     return indices;
 }
 
 std::vector<float> make_candidate_probabilities(const std::vector<float>& logits,
-                                                const std::vector<int32_t>& indices,
-                                                float temperature) {
-    const float maximum = logits[static_cast<std::size_t>(indices.front())];
+                                                const std::vector<int32_t>& indices) {
+    float maximum = -std::numeric_limits<float>::infinity();
+    for (int32_t index : indices)
+        maximum = std::max(maximum, logits[static_cast<std::size_t>(index)]);
     std::vector<float> probabilities(indices.size());
     float total = 0.0F;
     for (std::size_t index = 0; index < indices.size(); ++index) {
-        const float scaled =
-            (logits[static_cast<std::size_t>(indices[index])] - maximum) / temperature;
+        const float scaled = logits[static_cast<std::size_t>(indices[index])] - maximum;
         const float probability = std::isfinite(scaled) ? std::exp(scaled) : 0.0F;
         probabilities[index] = probability;
         total += probability;
@@ -83,45 +85,44 @@ std::vector<float> make_candidate_probabilities(const std::vector<float>& logits
     return probabilities;
 }
 
-void renormalize_prefix(std::vector<float>& probabilities, int32_t count) {
-    float prefix_total = 0.0F;
-    for (int32_t index = 0; index < count; ++index)
-        prefix_total += probabilities[static_cast<std::size_t>(index)];
-    if (prefix_total > 0.0F) {
-        for (int32_t index = 0; index < count; ++index)
-            probabilities[static_cast<std::size_t>(index)] /= prefix_total;
-    }
-}
-
-int32_t apply_min_p_filter(std::vector<float>& probabilities, int32_t candidate_count,
-                           float min_p) {
+int32_t apply_min_p_filter(const std::vector<float>& logits, const std::vector<int32_t>& indices,
+                           int32_t candidate_count, float min_p) {
     if (min_p <= 0.0F)
         return candidate_count;
 
-    const float threshold = min_p * probabilities.front();
+    // softmax(score) >= min_p * softmax(max_score) is equivalent to this
+    // log-space test, without rounding a normalization twice at the boundary.
+    const float threshold = logits[indices.front()] + std::log(min_p);
     int32_t keep = 0;
-    while (keep < candidate_count && probabilities[static_cast<std::size_t>(keep)] >= threshold) {
+    while (keep < candidate_count && logits[indices[static_cast<std::size_t>(keep)]] >= threshold) {
         ++keep;
     }
-    keep = std::max(keep, 1);
-    if (keep < candidate_count)
-        renormalize_prefix(probabilities, keep);
-    return keep;
+    return std::max(keep, 1);
 }
 
-int32_t apply_top_p_filter(const std::vector<float>& probabilities, int32_t keep, float top_p) {
+void apply_top_p_filter(const std::vector<float>& logits, std::vector<int32_t>& indices,
+                        float top_p) {
     if (!top_p_enabled(top_p))
-        return keep;
-
+        return;
+    // HF removes the ascending low-probability tail, including tokens exactly
+    // at 1-top_p. The complementary descending-prefix formulation changes
+    // which tied tokens survive at the nucleus boundary.
+    std::sort(indices.begin(), indices.end(), [&](int32_t lhs, int32_t rhs) {
+        return logits[lhs] < logits[rhs] || (logits[lhs] == logits[rhs] && lhs < rhs);
+    });
+    const auto probabilities = make_candidate_probabilities(logits, indices);
     float cumulative = 0.0F;
-    int32_t nucleus = 0;
-    while (nucleus < keep) {
-        cumulative += probabilities[static_cast<std::size_t>(nucleus)];
-        ++nucleus;
-        if (cumulative >= top_p)
+    std::size_t remove = 0;
+    while (remove + 1 < indices.size()) {
+        cumulative += probabilities[remove];
+        if (cumulative > 1.0F - top_p)
             break;
+        ++remove;
     }
-    return std::max(nucleus, 1);
+    indices.erase(indices.begin(), indices.begin() + static_cast<std::ptrdiff_t>(remove));
+    std::sort(indices.begin(), indices.end(), [&](int32_t lhs, int32_t rhs) {
+        return logits[lhs] > logits[rhs] || (logits[lhs] == logits[rhs] && lhs < rhs);
+    });
 }
 
 Lfm2SampleResult argmax(const std::vector<float>& logits, const Lfm2SamplingParams& params) {
@@ -137,8 +138,8 @@ Lfm2SampleResult argmax(const std::vector<float>& logits, const Lfm2SamplingPara
     return result;
 }
 
-FilteredDistribution make_distribution(const std::vector<float>& logits,
-                                       const Lfm2SamplingParams& params) {
+Lfm2SamplingDistribution make_distribution(std::vector<float> logits,
+                                           const Lfm2SamplingParams& params) {
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
     const float temperature = sanitize_temperature(params.temperature);
     const float top_p = sanitize_probability(params.top_p, 1.0F);
@@ -147,13 +148,18 @@ FilteredDistribution make_distribution(const std::vector<float>& logits,
     const int32_t candidate_count =
         resolved_top_k <= 0 ? vocab_size : std::min(resolved_top_k, vocab_size);
 
-    FilteredDistribution distribution;
+    // HF applies temperature to FP32 scores before top-k and softmax.
+    for (float& score : logits)
+        score /= temperature;
+    Lfm2SamplingDistribution distribution;
     distribution.indices = make_candidate_indices(logits, candidate_count);
-    distribution.probabilities =
-        make_candidate_probabilities(logits, distribution.indices, temperature);
-    distribution.keep = apply_min_p_filter(distribution.probabilities, candidate_count, min_p);
-    distribution.keep = apply_top_p_filter(distribution.probabilities, distribution.keep, top_p);
-    renormalize_prefix(distribution.probabilities, distribution.keep);
+    // Match HF's processor order. Applying min-p first can change the nucleus
+    // because it renormalizes the probabilities used by top-p.
+    apply_top_p_filter(logits, distribution.indices, top_p);
+    const int32_t keep = apply_min_p_filter(
+        logits, distribution.indices, static_cast<int32_t>(distribution.indices.size()), min_p);
+    distribution.indices.resize(static_cast<std::size_t>(keep));
+    distribution.probabilities = make_candidate_probabilities(logits, distribution.indices);
     return distribution;
 }
 
@@ -183,28 +189,14 @@ class Lfm2DistributionSampler final : public Lfm2ISampler {
         if (sanitize_temperature(params.temperature) < kSamplingEpsilon)
             return argmax(adjusted, params);
 
-        const auto distribution = make_distribution(adjusted, params);
+        const auto distribution = make_distribution(std::move(adjusted), params);
         state_ ^= state_ << 13;
         state_ ^= state_ >> 7;
         state_ ^= state_ << 17;
         const float sample = static_cast<float>(state_ & 0xFFFFFFFFULL) / 4294967296.0F;
 
-        float cumulative = 0.0F;
-        int32_t selected = distribution.keep - 1;
-        for (int32_t index = 0; index < distribution.keep; ++index) {
-            cumulative += distribution.probabilities[static_cast<std::size_t>(index)];
-            if (sample < cumulative) {
-                selected = index;
-                break;
-            }
-        }
-        Lfm2SampleResult result;
-        result.token_id = distribution.indices[static_cast<std::size_t>(selected)];
-        result.logprob =
-            std::log(std::max(distribution.probabilities[static_cast<std::size_t>(selected)],
-                              std::numeric_limits<float>::min()));
-        result.is_eos = lfm2_is_eos_token(params, result.token_id);
-        return result;
+        return lfm2_sample_from_distribution(distribution,
+                                             std::min(sample, std::nextafter(1.0F, 0.0F)), params);
     }
     void reset() override { state_ = initial_state_; }
 
@@ -228,6 +220,42 @@ void apply_repetition_penalty_to_history(std::vector<float>& logits, int32_t voc
 }
 
 } // namespace
+
+Lfm2SamplingDistribution lfm2_sampling_distribution(const float* logits, int32_t vocab_size,
+                                                    const Lfm2SamplingParams& params,
+                                                    const std::vector<int32_t>& token_history) {
+    auto adjusted =
+        lfm2_apply_repetition_penalty(logits, vocab_size, params.repetition_penalty, token_history);
+    if (adjusted.empty())
+        return {};
+    if (sanitize_temperature(params.temperature) < kSamplingEpsilon)
+        return {{argmax(adjusted, params).token_id}, {1.0F}};
+    return make_distribution(std::move(adjusted), params);
+}
+
+Lfm2SampleResult lfm2_sample_from_distribution(const Lfm2SamplingDistribution& distribution,
+                                               float uniform, const Lfm2SamplingParams& params) {
+    if (distribution.indices.empty() ||
+        distribution.indices.size() != distribution.probabilities.size())
+        throw std::invalid_argument("LFM2 sampling requires a nonempty distribution");
+    if (!std::isfinite(uniform) || uniform < 0.0F || uniform >= 1.0F)
+        throw std::invalid_argument("LFM2 sampling uniform must be in [0, 1)");
+    float cumulative = 0.0F;
+    std::size_t selected = distribution.indices.size() - 1;
+    for (std::size_t index = 0; index < distribution.indices.size(); ++index) {
+        cumulative += distribution.probabilities[index];
+        if (uniform < cumulative) {
+            selected = index;
+            break;
+        }
+    }
+    Lfm2SampleResult result;
+    result.token_id = distribution.indices[selected];
+    result.logprob =
+        std::log(std::max(distribution.probabilities[selected], std::numeric_limits<float>::min()));
+    result.is_eos = lfm2_is_eos_token(params, result.token_id);
+    return result;
+}
 
 bool lfm2_is_eos_token(const Lfm2SamplingParams& params, int32_t token_id) {
     return std::find(params.eos_token_ids.begin(), params.eos_token_ids.end(), token_id) !=

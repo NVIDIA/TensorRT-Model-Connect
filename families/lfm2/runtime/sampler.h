@@ -29,6 +29,20 @@ struct Lfm2SampleResult {
     bool is_eos{false};
 };
 
+// Candidates are ordered by descending processed score, then token ID. Keeping
+// the distribution separate from the RNG allows reference comparisons to use
+// the same uniform draw without assuming matching framework RNG algorithms.
+struct Lfm2SamplingDistribution {
+    std::vector<int32_t> indices;
+    std::vector<float> probabilities;
+};
+
+Lfm2SamplingDistribution lfm2_sampling_distribution(const float* logits, int32_t vocab_size,
+                                                    const Lfm2SamplingParams& params,
+                                                    const std::vector<int32_t>& token_history);
+Lfm2SampleResult lfm2_sample_from_distribution(const Lfm2SamplingDistribution& distribution,
+                                               float uniform, const Lfm2SamplingParams& params);
+
 class Lfm2ISampler {
   public:
     virtual ~Lfm2ISampler() = default;

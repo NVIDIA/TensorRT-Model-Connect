@@ -235,12 +235,14 @@ def _silu(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
 ) -> trt.ITensor:
-    sigmoid = network.add_activation(tensor, trt.ActivationType.SIGMOID)
-    return network.add_elementwise(
-        tensor,
-        sigmoid.get_output(0),
-        trt.ElementWiseOperation.PROD,
+    # F.silu rounds once after sigmoid and multiplication, not between them.
+    dtype = tensor.dtype
+    fp32 = _cast(network, tensor, trt.float32)
+    sigmoid = network.add_activation(fp32, trt.ActivationType.SIGMOID)
+    output = network.add_elementwise(
+        fp32, sigmoid.get_output(0), trt.ElementWiseOperation.PROD
     ).get_output(0)
+    return _cast(network, output, dtype)
 
 
 def _active_rope_cache(
@@ -319,18 +321,26 @@ def _apply_rope(
         num_heads=num_heads,
         head_dim=head_dim,
     )
-    rope = network.add_rotary_embedding(
-        heads,
-        cos_cache,
-        sin_cache,
-        False,
-        head_dim,
+    # The reference rounds the cosine and sine products separately before
+    # adding them. Keep native rotary operators, with a model-dtype boundary
+    # for each component, instead of one fused multiply-add rounding.
+    zero = _cast(
+        network,
+        _constant(network, (1, 1, head_dim // 2), np.zeros((1, 1, head_dim // 2), np.float32)),
+        heads.dtype,
     )
-    if rope is None:
-        raise RuntimeError("TensorRT failed to create LFM2 rotary embedding")
+    cosine = network.add_rotary_embedding(heads, cos_cache, zero, False, head_dim)
+    sine = network.add_rotary_embedding(heads, zero, sin_cache, False, head_dim)
+    if cosine is None or sine is None:
+        raise RuntimeError("TensorRT failed to create rotary components")
+    summed = network.add_elementwise(
+        _cast(network, cosine.get_output(0), trt.float32),
+        _cast(network, sine.get_output(0), trt.float32),
+        trt.ElementWiseOperation.SUM,
+    ).get_output(0)
     return _reshape_heads_to_rows(
         network,
-        rope.get_output(0),
+        _cast(network, summed, heads.dtype),
         width=num_heads * head_dim,
     )
 
@@ -421,8 +431,10 @@ def _add_conv_layer(
     network: trt.INetworkDefinition,
     hidden_state: trt.ITensor,
     conv_state: trt.ITensor,
+    decode_phase: trt.ITensor,
     weights: WeightDict,
     *,
+    position_id: trt.ITensor,
     prefix: str,
     config: DenseLfm2Config,
     storage_dtype: np.dtype,
@@ -472,9 +484,34 @@ def _add_conv_layer(
             (hidden, config.conv_l_cache - 1),
             (1, 1),
         ).get_output(0)
-        updated = network.add_concatenation([prior, bx_column.get_output(0)])
-        updated.axis = 1
-        present_conv = updated.get_output(0)
+        first = network.add_slice(
+            conv_state, (0, 0), (hidden, 1), (1, 1)
+        ).get_output(0)
+        rolled = network.add_concatenation([prior, first])
+        rolled.axis = 1
+        position = network.add_shuffle(position_id)
+        position.reshape_dims = (1, 1)
+        last = _constant(
+            network, (1, 1), np.array([[config.conv_l_cache - 1]], dtype=np.int32),
+            np_dtype=np.dtype(np.int32),
+        )
+        cached_index = network.add_elementwise(
+            position.get_output(0), last, trt.ElementWiseOperation.MIN
+        ).get_output(0)
+        # The original slow cached path writes at clamp(cache_position, 0, L-1)
+        # after rolling, even when a short prefix has not yet filled the cache.
+        # Prefill remains an append at the last column.
+        write_index = network.add_select(decode_phase, cached_index, last).get_output(0)
+        columns = _constant(
+            network, (1, config.conv_l_cache), np.arange(config.conv_l_cache, dtype=np.int32),
+            np_dtype=np.dtype(np.int32),
+        )
+        write_mask = network.add_elementwise(
+            columns, write_index, trt.ElementWiseOperation.EQUAL
+        ).get_output(0)
+        present_conv = network.add_select(
+            write_mask, bx_column.get_output(0), rolled.get_output(0)
+        ).get_output(0)
     else:
         present_conv = bx_column.get_output(0)
 
@@ -490,14 +527,16 @@ def _add_conv_layer(
         _cast(network, conv_weights, trt.float32),
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
+    # Cached reference decode rounds elementwise products to model dtype;
+    # Conv1d prefill accumulates unrounded products until its output boundary.
+    rounded_products = _cast(network, _cast(network, weighted, work_dtype), trt.float32)
+    weighted = network.add_select(decode_phase, rounded_products, weighted).get_output(0)
     convolved = network.add_reduce(
         weighted,
         trt.ReduceOperation.SUM,
         1 << 1,
         True,
     ).get_output(0)
-    # A depthwise convolution accumulates products before rounding the output
-    # to the model dtype; retaining half-rounded products changes the prefix.
     conv_row = network.add_shuffle(_cast(network, convolved, work_dtype))
     conv_row.reshape_dims = (1, hidden)
     conv_row_tensor = _bias(
@@ -635,10 +674,16 @@ def build_lfm2_engine(
     network = builder.create_network(flags)
     builder_config = builder.create_builder_config()
     builder_config.builder_optimization_level = 1
+    builder_config.clear_flag(trt.BuilderFlag.TF32)
     # Match the qualified native-KV builder ceiling. This is build-time tactic
     # scratch, not an eager runtime allocation.
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
 
+    decode_phase = network.add_input("decode_phase", trt.int32, (1, 1))
+    zero = _constant(network, (1, 1), np.zeros((1, 1), dtype=np.int32), np_dtype=np.dtype(np.int32))
+    decode_phase = network.add_elementwise(
+        decode_phase, zero, trt.ElementWiseOperation.GREATER
+    ).get_output(0)
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
     cache_write_indices = network.add_input(
@@ -731,7 +776,9 @@ def build_lfm2_engine(
                 network,
                 operator_input,
                 conv_state_inputs[conv_index],
+                decode_phase,
                 weights,
+                position_id=position_id,
                 prefix=prefix,
                 config=cfg,
                 storage_dtype=storage_dtype,
