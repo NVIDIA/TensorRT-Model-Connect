@@ -142,6 +142,12 @@ PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
 
 Set `TRTMC_RUNTIME_ROOT` to the built native runtime directory. The optional
 requirements in this family are needed for the original-model tests.
+For offline validation, stage the manifest's `external_files` (`asr.wav` and
+`question.wav`) in a directory and set `TRTMC_LFM2_AUDIO_MODEL_DIR` to that
+directory. Online local validation can download the same pinned inputs;
+`HF_HUB_OFFLINE=1` requires staged inputs and cached checkpoint files.
+The model, processor, detokenizer, and spoken-content ASR all use the
+same pinned checkpoint from the Hugging Face cache.
 
 For sampled card controls, `tests/cpp/sampling_draws.cpp` records native
 uniform draws and checks their consumption against the actual sampler.

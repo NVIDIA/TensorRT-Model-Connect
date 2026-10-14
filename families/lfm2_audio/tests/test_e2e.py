@@ -76,21 +76,56 @@ def native_probe(runtime, directory, *, public_api=False):
     return probe
 
 
+def audio_sources(directory):
+    from huggingface_hub.constants import HF_HUB_OFFLINE
+    import soundfile as sf
+
+    staged = os.environ.get("TRTMC_LFM2_AUDIO_MODEL_DIR")
+    if HF_HUB_OFFLINE and not staged:
+        raise FileNotFoundError("offline LFM audio validation requires TRTMC_LFM2_AUDIO_MODEL_DIR")
+    sources = {}
+    for asset in MANIFEST["external_files"]:
+        fixture = (Path(staged) if staged else directory) / asset["path"]
+        if staged:
+            if not fixture.is_file():
+                raise FileNotFoundError(f"staged LFM audio input is missing: {fixture}")
+        else:
+            urllib.request.urlretrieve(asset["url"], fixture)
+        samples, rate = sf.read(fixture, dtype="float32")
+        assert samples.ndim == 1
+        source = directory / (fixture.stem + ".f32")
+        samples.tofile(source)
+        sources[fixture.stem] = (source, int(rate))
+        record_evidence("inputs", {fixture.stem: {"source_url": asset["url"], "file": fixture}})
+    return sources
+
+
+def checkpoint_directory():
+    from huggingface_hub import constants, snapshot_download
+
+    return Path(
+        snapshot_download(
+            MANIFEST["hf_id"],
+            revision=MANIFEST["hf_revision"],
+            local_files_only=constants.HF_HUB_OFFLINE,
+        )
+    )
+
+
 def test_model_card_native_audio(request, tmp_path):
     if not selected(request.config):
         pytest.skip("select lfm2_audio to run real checkpoint and native GPU validation")
-    from huggingface_hub import snapshot_download
-    import soundfile as sf
     import torch
     from tensorrt_model_connect.bundle_writer import BundleWriter
     from families.lfm2_audio.model import BuildRequest, build
 
+    sources = audio_sources(tmp_path)
     assert torch.cuda.is_available()
     assert MANIFEST["tensor_parallel_size"] == 1, "LFM2.5 audio requires a single device"
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     probe = native_probe(runtime, tmp_path)
     api_probe = native_probe(runtime, tmp_path, public_api=True)
-    checkpoint = Path(snapshot_download(MANIFEST["hf_id"], revision=MANIFEST["hf_revision"]))
+    checkpoint = checkpoint_directory()
     bundle = tmp_path / MANIFEST["bundle"]
     with evidence_stage("build"):
         writer = BundleWriter(bundle)
@@ -108,23 +143,6 @@ def test_model_card_native_audio(request, tmp_path):
         except BaseException:
             writer.abort()
             raise
-    sources = {}
-    for stem in ("asr", "question"):
-        fixture = tmp_path / (stem + ".wav")
-        fixture_url = (
-            MANIFEST["reference_repository"].replace("github.com", "raw.githubusercontent.com")
-            + "/"
-            + MANIFEST["reference_revision"]
-            + "/assets/"
-            + stem
-            + ".wav"
-        )
-        urllib.request.urlretrieve(fixture_url, fixture)
-        samples, rate = sf.read(fixture, dtype="float32")
-        assert samples.ndim == 1
-        source = tmp_path / (stem + ".f32")
-        samples.tofile(source)
-        sources[stem] = (source, int(rate))
     cases = []
     for original in MANIFEST["testcases"]:
         case = dict(original)
@@ -293,6 +311,7 @@ def test_model_card_native_audio(request, tmp_path):
             "waveforms": [Path(job["waveform"]) for job in jobs],
             "asr_inputs": [Path(record["asr_input"]) for record in transcripts],
             "checkpoint_revision": MANIFEST["hf_revision"],
+            "reference_repository": MANIFEST["reference_repository"],
             "reference_revision": MANIFEST["reference_revision"],
         },
     )

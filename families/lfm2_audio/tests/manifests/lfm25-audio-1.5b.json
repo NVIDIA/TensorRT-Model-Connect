@@ -4,6 +4,16 @@
   "hf_revision": "c362a0625dfe45aa588dce5f0ada28a7e5707628",
   "reference_repository": "https://github.com/Liquid4All/liquid-audio",
   "reference_revision": "19e65845923a7f136442c95137884ec61eb386aa",
+  "external_files": [
+    {
+      "path": "asr.wav",
+      "url": "https://raw.githubusercontent.com/Liquid4All/liquid-audio/19e65845923a7f136442c95137884ec61eb386aa/assets/asr.wav"
+    },
+    {
+      "path": "question.wav",
+      "url": "https://raw.githubusercontent.com/Liquid4All/liquid-audio/19e65845923a7f136442c95137884ec61eb386aa/assets/question.wav"
+    }
+  ],
   "bundle": "lfm25-audio-1.5b.bundle",
   "family": "lfm2_audio",
   "task": "offline_speech_dialogue",
