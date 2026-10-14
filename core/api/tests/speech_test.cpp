@@ -141,6 +141,36 @@ void test_tts(const trtmc::Model& model) {
           "callback error releases execution owner");
 }
 
+void test_text_input(const trtmc::Model& model) {
+    trtmc_speech_session_api_v1 old_table{};
+    old_table.header = {1, 0, offsetof(trtmc_speech_session_api_v1, append_text)};
+    trtmc::SpeechSession old_runtime({}, &old_table, nullptr);
+    check(fails(TRTMC_UNSUPPORTED, [&] { (void)old_runtime.append_text("old runtime"); }),
+          "old session table remains safe when optional text tail is absent");
+    auto session = model.task<trtmc::DuplexSpeechDialogue>().create(dialogue());
+    check(!session.append_text(std::string(17, 'x')),
+          "text backpressure accepts no oversized input");
+    check(session.take_events().status == trtmc::SpeechPollStatus::Timeout,
+          "rejected text does not create partial events");
+    std::string text{"hi\0x", 4};
+    check(session.append_text(text), "speech session accepts text without a new model handle");
+    text[0] = 'X';
+    auto events = session.take_events();
+    check(events.events && events.events->size() == 1 &&
+              events.events->at(0).text == std::string("text:hi\0x", 9),
+          "accepted text is length-aware and does not retain borrowed storage");
+    session.cancel();
+    record(session.take_events());
+    check(fails(TRTMC_INVALID_ARGUMENT, [&] { (void)session.append_text("closed turn"); }),
+          "text append respects the session epoch lifecycle");
+    session.reset();
+    record(session.take_events());
+    check(session.append_text("next turn"), "text append resumes after reset");
+    session.close();
+    check(fails(TRTMC_INVALID_ARGUMENT, [&] { (void)session.append_text("released"); }),
+          "released text session is rejected");
+}
+
 void test_dialogue(const trtmc::Model& model) {
     const float values[]{0, 0, 0.25F, 0.5F};
     auto offline = model.task<trtmc::OfflineSpeechDialogue>().create(dialogue());
@@ -270,7 +300,7 @@ void test_tools(const trtmc::Model& model) {
 }
 
 void test_concurrency(const std::string& ordinary, const std::string& fatal_path,
-                      const trtmc::LoadOptions& options, int (*waiting)()) {
+                      const trtmc::LoadOptions& options, int (*waiting)(), bool text = false) {
     for (bool fatal : {false, true}) {
         auto model = trtmc::Model::load(fatal ? fatal_path : ordinary, options);
         auto session = model.task<trtmc::DuplexSpeechDialogue>().create(dialogue());
@@ -283,7 +313,13 @@ void test_concurrency(const std::string& ordinary, const std::string& fatal_path
               "second reader returns BUSY without blocking");
         if (fatal) {
             const float values[]{0, 0};
-            check(fails(TRTMC_INTERNAL_ERROR, [&] { (void)session.append_audio(values); }),
+            check(fails(TRTMC_INTERNAL_ERROR,
+                        [&] {
+                            if (text)
+                                (void)session.append_text("fatal");
+                            else
+                                (void)session.append_audio(values);
+                        }),
                   "unexpected logic error is fatal, not a masked user error");
         } else
             session.cancel();
@@ -316,18 +352,30 @@ int main(int argc, char** argv) {
         return 2;
     const std::filesystem::path root(argv[1]);
     const auto path = root / "speech-cpp.bundle", fatal = root / "speech-fatal.bundle",
-               malformed = root / "speech-malformed.bundle";
+               malformed = root / "speech-malformed.bundle",
+               unsupported = root / "speech-unsupported-text.bundle",
+               fatal_text = root / "speech-fatal-text.bundle";
     try {
         write_bundle(path, "ordinary");
         write_bundle(fatal, "fatal_append");
         write_bundle(malformed, "bad_event");
+        write_bundle(unsupported, "unsupported_text");
+        write_bundle(fatal_text, "fatal_text");
         trtmc::LoadOptions options;
         options.runtime_root = root.string();
         auto model = trtmc::Model::load(path.string(), options);
         test_asr(model);
         test_tts(model);
         test_dialogue(model);
+        test_text_input(model);
         test_tools(model);
+        auto legacy_model = trtmc::Model::load(unsupported.string(), options);
+        auto legacy_session = legacy_model.task<trtmc::DuplexSpeechDialogue>().create(dialogue());
+        check(fails(TRTMC_UNSUPPORTED, [&] { (void)legacy_session.append_text("unsupported"); }),
+              "families without text input reject it recoverably");
+        const float audio[]{0, 0};
+        check(legacy_session.append_audio(audio), "unsupported text leaves audio input usable");
+        legacy_session.close();
         void* library =
             dlopen((root / "libtrtmc_model_speech_fixture.so").c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!library)
@@ -337,6 +385,7 @@ int main(int argc, char** argv) {
         if (!waiting)
             throw std::runtime_error("missing speech fixture probe");
         test_concurrency(path.string(), fatal.string(), options, waiting);
+        test_concurrency(path.string(), fatal_text.string(), options, waiting, true);
         dlclose(library);
         auto bad_model = trtmc::Model::load(malformed.string(), options);
         auto bad_session = bad_model.task<trtmc::DuplexSpeechDialogue>().create(dialogue());
@@ -354,6 +403,8 @@ int main(int argc, char** argv) {
     std::filesystem::remove(path);
     std::filesystem::remove(fatal);
     std::filesystem::remove(malformed);
+    std::filesystem::remove(unsupported);
+    std::filesystem::remove(fatal_text);
     std::cerr << (failures ? "SOME FAILED\n" : "ALL PASSED\n");
     return failures ? 1 : 0;
 }

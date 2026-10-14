@@ -1,0 +1,2 @@
+# Reference validation only. Native deployment does not import this package.
+liquid-audio @ git+https://github.com/Liquid4All/liquid-audio.git@19e65845923a7f136442c95137884ec61eb386aa

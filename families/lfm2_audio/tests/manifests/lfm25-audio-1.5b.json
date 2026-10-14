@@ -1,0 +1,94 @@
+{
+  "name": "lfm25-audio-1.5b",
+  "hf_id": "LiquidAI/LFM2.5-Audio-1.5B",
+  "hf_revision": "c362a0625dfe45aa588dce5f0ada28a7e5707628",
+  "reference_repository": "https://github.com/Liquid4All/liquid-audio",
+  "reference_revision": "19e65845923a7f136442c95137884ec61eb386aa",
+  "bundle": "lfm25-audio-1.5b.bundle",
+  "family": "lfm2_audio",
+  "task": "offline_speech_dialogue",
+  "precision": "bf16",
+  "max_sequence_length": 32768,
+  "testcases": [
+    {
+      "name": "lfm25-audio-asr",
+      "premerge": true,
+      "mode": "asr",
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-tts-us-male",
+      "mode": "tts",
+      "voice": "us_male",
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-tts-us-female",
+      "mode": "tts",
+      "voice": "us_female",
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-tts-uk-male",
+      "mode": "tts",
+      "voice": "uk_male",
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-tts-uk-female",
+      "mode": "tts",
+      "voice": "uk_female",
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-tts-stream",
+      "mode": "tts_stream",
+      "voice": "us_male",
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-multiturn",
+      "mode": "chat",
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-tts-card-sampled",
+      "mode": "tts",
+      "voice": "uk_male",
+      "text": "What is this obsession people have with books? They put them in their houses—like they're trophies. What do you need it for after you read it?",
+      "audio_temperature": 0.8,
+      "audio_top_k": 64,
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-dialogue-card-sampled",
+      "mode": "chat",
+      "audio_temperature": 1.0,
+      "audio_top_k": 4,
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-speech-response",
+      "mode": "speech_response",
+      "max_new_tokens": 512
+    },
+    {
+      "name": "lfm25-audio-mixed-input",
+      "mode": "mixed",
+      "max_new_tokens": 64,
+      "text": "Summarize the audio in one sentence."
+    },
+    {
+      "name": "lfm25-audio-text-response",
+      "mode": "text",
+      "max_new_tokens": 128,
+      "text": "What does a red traffic light mean?"
+    },
+    {
+      "name": "lfm25-audio-context-32768",
+      "mode": "text",
+      "max_new_tokens": 1,
+      "context_tokens": 32768
+    }
+  ]
+}
