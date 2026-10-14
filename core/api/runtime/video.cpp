@@ -409,6 +409,15 @@ struct ActionVideoStorage final : ResultStorage {
 struct AudioVideoStorage final : ResultStorage {
     explicit AudioVideoStorage(internal::AudioVideoResult result)
         : video(std::move(result.video)), audio(std::move(result.audio)) {
+        if (internal::is_worker_completion(video.result.frames)) {
+            // A distributed worker rank returns no media; rank 0 owns the synchronized result.
+            output_check(audio.result.samples.empty() && !result.audio_start_seconds,
+                         "worker completion must not contain audio or an audio clock origin");
+            view.video = video.view;
+            fill_audio_result_view(audio, &view.audio);
+            view.audio_start_seconds = 0.0;
+            return;
+        }
         output_check(
             result.audio_start_seconds && std::isfinite(*result.audio_start_seconds) &&
                 !video.result.timestamps_seconds.empty() && !audio.result.samples.empty(),

@@ -39,12 +39,8 @@ std::vector<float> intrinsics(const Command& command) {
     return values;
 }
 
-nlohmann::json write_video(const VideoGenerationResult& video, const std::string& directory) {
-    const auto frames = video.frames();
-    // The C result has already validated the exact worker-completion sentinel.
-    // It carries no image/frame payload; never create an empty output directory.
-    if (frames.empty())
-        return {{"worker", true}};
+nlohmann::json write_frames(Span<const trtmc_image_result_view_v1> frames, Span<const double> times,
+                            const std::string& directory) {
     std::filesystem::create_directories(directory);
     nlohmann::json files = nlohmann::json::array();
     for (std::size_t frame = 0; frame < frames.size(); ++frame) {
@@ -59,18 +55,51 @@ nlohmann::json write_video(const VideoGenerationResult& video, const std::string
                                   path);
         files.push_back(path);
     }
-    nlohmann::json times = nlohmann::json::array();
-    for (const auto time : video.timestamps_seconds())
-        times.push_back(time);
+    nlohmann::json timestamps = nlohmann::json::array();
+    for (const auto time : times)
+        timestamps.push_back(time);
     return {{"output", directory},
             {"frames", std::move(files)},
             {"height", frames[0].height},
             {"width", frames[0].width},
             {"channels", frames[0].channels},
-            {"timestamps_seconds", std::move(times)},
-            {"conditioned_prefix_frames", video.conditioned_prefix_frames()},
-            {"setup_ms", video.setup_ms()},
-            {"inference_ms", video.inference_ms()}};
+            {"timestamps_seconds", std::move(timestamps)}};
+}
+
+nlohmann::json write_video(const VideoGenerationResult& video, const std::string& directory) {
+    const auto frames = video.frames();
+    // The C result has already validated the exact worker-completion sentinel.
+    // It carries no image/frame payload; never create an empty output directory.
+    if (frames.empty())
+        return {{"worker", true}};
+    auto json = write_frames(frames, video.timestamps_seconds(), directory);
+    json["conditioned_prefix_frames"] = video.conditioned_prefix_frames();
+    json["setup_ms"] = video.setup_ms();
+    json["inference_ms"] = video.inference_ms();
+    return json;
+}
+
+// Synchronized video + audio: the frames as in generate-video plus OUTPUT/audio.wav
+// (interleaved PCM at the result's own rate and channel count).
+nlohmann::json write_audio_video(const AudioVideoGenerationResult& result,
+                                 const std::string& directory) {
+    const auto frames = result.frames();
+    if (frames.empty())
+        return {{"worker", true}};
+    auto json = write_frames(frames, result.timestamps_seconds(), directory);
+    const auto audio = result.audio();
+    if (!audio.sample_rate || *audio.sample_rate == 0)
+        throw std::runtime_error("text_to_audio_video result has no audio sample rate");
+    const auto audio_path = (std::filesystem::path(directory) / "audio.wav").string();
+    io::write_wav_interleaved(audio.samples, static_cast<std::int32_t>(*audio.sample_rate),
+                              static_cast<std::int32_t>(audio.channels), audio_path);
+    json["audio"] = audio_path;
+    json["audio_sample_rate"] = *audio.sample_rate;
+    json["audio_channels"] = audio.channels;
+    json["audio_start_seconds"] = result.audio_start_seconds();
+    json["setup_ms"] = result.video_view().setup_ms;
+    json["inference_ms"] = result.video_view().inference_ms;
+    return json;
 }
 
 void generate_world(const Command& command, const Model& model, std::string_view id,
@@ -127,6 +156,8 @@ std::string_view video_task_for_command(const Command& command, const Model& mod
     if (!command.selected_task.empty())
         return {};
     if (command.kind == CommandKind::kGenerateVideo) {
+        if (!has_option(command, "--image") && model.info().bundle_task == TextToAudioVideo::kTask)
+            return TextToAudioVideo::kTask;
         if (has_option(command, "--image") ||
             model.info().bundle_task == InitialImageTextToVideo::kTask)
             return InitialImageTextToVideo::kTask;
@@ -163,6 +194,16 @@ bool dispatch_sdk_video(const Command& command, const Model& model, std::string_
         const auto result =
             task.run({image_view(image), require_option(command, "--prompt")}, config);
         detail::write_json(output, write_video(result, require_option(command, "--output")));
+        return true;
+    }
+    if (command.kind == CommandKind::kGenerateVideo && id == TextToAudioVideo::kTask) {
+        if (has_option(command, "--image") || has_option(command, "--initial-latents-raw"))
+            throw std::invalid_argument("TextToAudioVideo accepts only --prompt and Task config");
+        const auto task = model.task<TextToAudioVideo>();
+        const auto config =
+            detail::task_config(command, task.config_fields(), {"--prompt", "--output"});
+        const auto result = task.run({require_option(command, "--prompt")}, config);
+        detail::write_json(output, write_audio_video(result, require_option(command, "--output")));
         return true;
     }
     if (command.kind != CommandKind::kGenerateVideo || id != TextToVideo::kTask)
