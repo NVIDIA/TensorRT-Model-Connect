@@ -9,6 +9,10 @@
   "trust_remote_code": false,
   "max_sequence_length": 32768,
   "tensor_parallel_size": 1,
+  "external_files": [{
+    "path": "model-card.jpg",
+    "url": "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
+  }],
   "testcases": [{
     "name": "lfm25-vl-1.6b-model-card",
     "premerge": true,

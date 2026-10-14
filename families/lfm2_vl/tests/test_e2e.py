@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import subprocess
 import re
-import urllib.request
 
 import pytest
 
@@ -24,9 +23,7 @@ CHECKPOINT = MANIFEST["hf_id"]
 REVISION = MANIFEST["hf_revision"]
 CONTRACT = MANIFEST["testcases"][0]
 CASE = CONTRACT["name"]
-CARD_IMAGE = (
-    "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
-)
+CARD_IMAGE = MANIFEST["external_files"][0]["url"]
 
 
 def _selected(config):
@@ -42,13 +39,33 @@ def _selected(config):
         pytest.skip("LFM2-VL was not selected")
 
 
+def _model_card_image():
+    root = os.environ.get("TRTMC_LFM2_VL_MODEL_DIR")
+    if not root:
+        raise ValueError("selected LFM2-VL E2E requires TRTMC_LFM2_VL_MODEL_DIR")
+    photo = Path(root) / MANIFEST["external_files"][0]["path"]
+    if not photo.is_file():
+        raise FileNotFoundError(f"LFM2-VL staged model-card image is missing: {photo}")
+    return photo
+
+
+def _checkpoint():
+    supplied = os.environ.get("TRTMC_LFM25_VL_CHECKPOINT")
+    if supplied:
+        return Path(supplied)
+    from huggingface_hub import constants, snapshot_download
+
+    return Path(
+        snapshot_download(CHECKPOINT, revision=REVISION, local_files_only=constants.HF_HUB_OFFLINE)
+    )
+
+
 def _fixtures(directory, processor):
     import numpy as np
     from PIL import Image, ImageDraw, ImageFont
 
     photo = directory / "model-card.jpg"
-    with urllib.request.urlopen(CARD_IMAGE, timeout=60) as response:
-        photo.write_bytes(response.read())
+    photo.write_bytes(_model_card_image().read_bytes())
     record_evidence("inputs", {"model_card_image": {"source_url": CARD_IMAGE, "file": photo}})
     ocr = Image.new("RGB", (1024, 768), "white")
     draw = ImageDraw.Draw(ocr)
@@ -253,7 +270,6 @@ def test_e2e(case_name, tmp_path, request):
         },
     )
     import torch
-    from huggingface_hub import snapshot_download
     from transformers import AutoModelForImageTextToText, AutoProcessor
     from tensorrt_model_connect.bundle_writer import BundleWriter
     from families.lfm2_vl.model import BuildRequest, build
@@ -261,10 +277,7 @@ def test_e2e(case_name, tmp_path, request):
     assert torch.cuda.is_available(), "selected model-card E2E requires CUDA"
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     probe = build_native_probe("lfm2_vl_probe", runtime, tmp_path)
-    checkpoint = Path(
-        os.environ.get("TRTMC_LFM25_VL_CHECKPOINT")
-        or snapshot_download(CHECKPOINT, revision=REVISION)
-    )
+    checkpoint = _checkpoint()
     assert MANIFEST["tensor_parallel_size"] == 1, "LFM2-VL requires one runtime rank"
     assert CONTRACT["reference_backend"] == "hf_transformers"
     bundle = Path(os.environ.get("TRTMC_LFM25_VL_BUNDLE", str(tmp_path / MANIFEST["bundle"])))

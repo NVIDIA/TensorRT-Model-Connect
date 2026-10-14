@@ -57,6 +57,21 @@ do not need to ship test executables. An existing
 pinned snapshot and bundle can be supplied through `TRTMC_LFM25_VL_CHECKPOINT`
 and `TRTMC_LFM25_VL_BUNDLE`.
 
+The manifest's `external_files` declares the original model-card photo for
+preparation before offline E2E. For a local run, download it first and point
+`TRTMC_LFM2_VL_MODEL_DIR` to the directory containing `model-card.jpg`:
+
+```bash
+mkdir -p /tmp/lfm2-vl-inputs
+curl --fail --location --max-time 60 \
+  'https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg' \
+  -o /tmp/lfm2-vl-inputs/model-card.jpg
+export TRTMC_LFM2_VL_MODEL_DIR=/tmp/lfm2-vl-inputs
+```
+
+The test records the source URL and actual input file. Native and reference
+inference use the same decoded RGB pixels; the test does not download inputs.
+
 To include real checkpoint token IDs and rendered-prompt BOS controls, set
 `TRTMC_LFM2_VL_TOKENIZER_JSON` to the pinned checkpoint's `tokenizer.json` when
 running `test_lfm2_vl_pretokenizer` and `test_lfm2_vl_runtime`.
