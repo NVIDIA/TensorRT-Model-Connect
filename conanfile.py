@@ -51,6 +51,9 @@ class TensorRTModelConnectConan(ConanFile):
 
     settings = "os", "compiler", "build_type", "arch"
 
+    def _windows(self) -> bool:
+        return str(self.settings.os) == "Windows"
+
     def layout(self) -> None:
         cmake_layout(self)
         # CMakeToolchain derives install directories from the package layout.
@@ -62,10 +65,19 @@ class TensorRTModelConnectConan(ConanFile):
         for name in (
             "TRT_ROOT",
             "CMAKE_CUDA_ARCHITECTURES",
+            "TRTMC_FAMILIES",
+            # Windows hosts have no system nlohmann_json; point CMake at an
+            # installed package (for example a conan install --requires output).
+            "CMAKE_PREFIX_PATH",
         ):
             value = os.environ.get(name)
             if value:
                 toolchain.cache_variables[name] = value
+        if self._windows():
+            # The Windows port covers the native runtime, CLI, and model
+            # families; the server, BYOK bridge, and examples stay ELF-only.
+            for option in ("TRTMC_BUILD_SERVER", "TRTMC_ENABLE_BYOK", "TRTMC_BUILD_EXAMPLES"):
+                toolchain.cache_variables[option] = False
         toolchain.generate()
 
     def build(self) -> None:
@@ -73,7 +85,66 @@ class TensorRTModelConnectConan(ConanFile):
         cmake.configure()
         cmake.build()
 
+    def _package_windows(self) -> None:
+        source = Path(self.source_folder)
+        build = Path(self.build_folder)
+        module_bin = Path(self.package_folder) / "tensorrt_model_connect" / "bin"
+        # Windows has no RUNPATH: the executable, runtime DLLs, backend, and
+        # family DLLs share one directory, which is also the runtime root.
+        copy(self, "trtmc.exe", src=str(build), dst=str(module_bin), keep_path=False)
+        copy(self, "*.dll", src=str(build), dst=str(module_bin), keep_path=False)
+        selected = [name for name in os.environ.get("TRTMC_FAMILIES", "").split(";") if name]
+        expected = set(selected) or {
+            path.parent.name for path in (source / "families").glob("*/model.py")
+        }
+        packaged = {
+            path.stem.removeprefix("trtmc_model_") for path in module_bin.glob("trtmc_model_*.dll")
+        }
+        required = (
+            "trtmc.exe",
+            "trtmc_core.dll",
+            "trtmc_runtime.dll",
+            "trtmc_c.dll",
+            "trtmc_backend_trt.dll",
+        )
+        if not all((module_bin / name).is_file() for name in required):
+            raise ConanException("native Windows runtime package is incomplete")
+        if packaged != expected:
+            raise ConanException(
+                f"family DLL set does not match: missing={sorted(expected - packaged)}, "
+                f"extra={sorted(packaged - expected)}"
+            )
+        self._package_windows_cli(source, module_bin, expected)
+
+    def _package_windows_cli(self, source: Path, module_bin: Path, families: set[str]) -> None:
+        # trtmc.exe resolves family commands from families/<family>/cli.json
+        # beside the executable and loads native adapters from that directory.
+        expected = set()
+        for family in sorted(families):
+            declaration = source / "families" / family / "cli.json"
+            if not declaration.is_file():
+                continue
+            copy(
+                self,
+                declaration.name,
+                src=str(declaration.parent),
+                dst=str(module_bin / "families" / family),
+                keep_path=False,
+            )
+            commands = json.loads(declaration.read_text(encoding="utf-8"))["commands"]
+            if any(command["executor"] == "native" for command in commands):
+                expected.add(f"trtmc_cli_{family}.dll")
+        packaged = {path.name for path in module_bin.glob("trtmc_cli_*.dll")}
+        if packaged != expected:
+            raise ConanException(
+                f"family CLI adapter set does not match CLI declarations: "
+                f"missing={sorted(expected - packaged)}, extra={sorted(packaged - expected)}"
+            )
+
     def package(self) -> None:
+        if self._windows():
+            self._package_windows()
+            return
         source = Path(self.source_folder)
         build = Path(self.build_folder)
         package = Path(self.package_folder)

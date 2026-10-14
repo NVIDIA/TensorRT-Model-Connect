@@ -1,0 +1,8 @@
+{
+  "threshold_overrides": {
+    "min_frame_psnr_mean_db": 15.0,
+    "min_frame_psnr_min_db": 14.0,
+    "min_audio_log_spectrogram_corr": 0.85,
+    "audio_rms_ratio_range": [0.8, 1.25]
+  }
+}
