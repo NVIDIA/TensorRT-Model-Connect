@@ -493,3 +493,40 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("reference", expected)
     with evidence_stage("compare"):
         _assert_contract(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+
+
+@pytest.mark.parametrize("precision", ["fp16", "fp32"])
+def test_checkpoint_gelu_matches_pytorch(request, precision):
+    selected, enabled = _selected_cases(request.config)
+    if not enabled or not selected:
+        pytest.skip("activation numerics require an explicitly selected Whisper E2E case")
+
+    import torch
+    import tensorrt as trt
+
+    from families.whisper import graph_ops
+
+    assert torch.cuda.is_available(), "selected Whisper activation validation requires CUDA"
+    dtype = torch.float16 if precision == "fp16" else torch.float32
+    values = torch.linspace(-4, 4, 257, device="cuda", dtype=torch.float32).to(dtype)
+    expected = torch.nn.functional.gelu(values, approximate="none")
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    tensor = network.add_input("input", trt.float16 if precision == "fp16" else trt.float32,
+                               tuple(values.shape))
+    output = graph_ops.add_activation(network, tensor, "gelu",
+                                      dtype=np.float16 if precision == "fp16" else np.float32)
+    output.name = "output"
+    network.mark_output(output)
+    plan = builder.build_serialized_network(network, builder.create_builder_config())
+    assert plan is not None
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan)
+    context = engine.create_execution_context()
+    actual = torch.empty_like(values)
+    context.set_tensor_address("input", values.data_ptr())
+    context.set_tensor_address("output", actual.data_ptr())
+    assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected)

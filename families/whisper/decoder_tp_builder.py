@@ -220,6 +220,7 @@ def _add_whisper_tp_decoder_layer(
     dtype: np.dtype,
     work_trt_dtype,
     tp_size: int,
+    activation_type: str = "gelu",
 ):
     attention_window = max_cache_length + 1
 
@@ -304,7 +305,7 @@ def _add_whisper_tp_decoder_layer(
     fc1 = _add_linear_with_bias(
         network, fn, hidden_size, local_ffn_dim,
         weights[f"{prefix}.w_fc1"], weights[f"{prefix}.fc1_bias"], dtype=dtype)
-    act = graph_ops.add_activation(network, fc1, "gelu_new", dtype=dtype)
+    act = graph_ops.add_activation(network, fc1, activation_type, dtype=dtype)
     fc2 = graph_ops.add_matmul_rhs_constant(
         network, act, local_ffn_dim, hidden_size,
         weights[f"{prefix}.w_fc2"], dtype=dtype)
@@ -429,6 +430,7 @@ def build_whisper_tp_decoder_engine(
             dtype=work_np_dtype,
             work_trt_dtype=work_trt_dtype,
             tp_size=tp,
+            activation_type=config.hidden_act or "gelu",
         )
         hidden_state = result["hidden"]
         present_k_outputs.append(result["present_k"])

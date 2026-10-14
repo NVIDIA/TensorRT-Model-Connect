@@ -395,6 +395,7 @@ class _WhisperModel:
                 max_cache_length=max_cache_length,
                 max_source_positions=max_source_positions,
                 dtype=work_np_dtype,
+                activation_type=config.hidden_act or "gelu",
             )
             hidden_state = result["hidden"]
             present_k_outputs.append(result["present_k"])
@@ -586,7 +587,7 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
     # Conv1 output: [1, hidden, 1, mel_length]. Squeeze to 2D for GELU, then back to 4D.
     c1_sq = network.add_shuffle(c1.get_output(0))
     c1_sq.reshape_dims = (hidden, mel_length)
-    c1o_2d = graph_ops.add_activation(network, c1_sq.get_output(0), "gelu_new", dtype=work_np_dtype)
+    c1o_2d = graph_ops.add_activation(network, c1_sq.get_output(0), config.hidden_act or "gelu", dtype=work_np_dtype)
     c1_unsq = network.add_shuffle(c1o_2d)
     c1_unsq.reshape_dims = (1, hidden, 1, mel_length)
 
@@ -607,7 +608,7 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
     # Conv2 output: [1, hidden, 1, max_source_positions]. Squeeze to 2D for GELU.
     c2_sq = network.add_shuffle(c2.get_output(0))
     c2_sq.reshape_dims = (hidden, max_source_positions)
-    c2o_2d = graph_ops.add_activation(network, c2_sq.get_output(0), "gelu_new", dtype=work_np_dtype)
+    c2o_2d = graph_ops.add_activation(network, c2_sq.get_output(0), config.hidden_act or "gelu", dtype=work_np_dtype)
 
     # Transpose to [max_source_positions, hidden]
     cr = network.add_shuffle(c2o_2d)
@@ -670,7 +671,7 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
             weights[f"{pfx}.b_fc1"],
             dtype=work_np_dtype,
         )
-        act = graph_ops.add_activation(network, fc1, "gelu_new", dtype=work_np_dtype)
+        act = graph_ops.add_activation(network, fc1, config.hidden_act or "gelu", dtype=work_np_dtype)
         fc2 = graph_ops.add_bias_sum(
             network,
             graph_ops.add_matmul_rhs_constant(
@@ -728,6 +729,7 @@ def _add_whisper_decoder_layer(
     max_cache_length,
     max_source_positions,
     dtype=np.float32,
+    activation_type="gelu",
 ):
     attention_size = hidden_size
     attention_window = max_cache_length + 1
@@ -901,6 +903,7 @@ def _add_whisper_decoder_layer(
         hidden_size=hidden_size,
         mlp_size=ffn_dim,
         dtype=dtype,
+        activation_type=activation_type,
     )
     out = network.add_elementwise(pca, mlp, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}

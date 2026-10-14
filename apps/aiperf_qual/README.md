@@ -369,13 +369,15 @@ real finite scores and original passage indices. Both pilots matched all
 client/server request IDs and timing exports. Additional epic stages remain
 planned until their native correctness and actual client runs are complete.
 
-The transcription pilot passed the unchanged whisper family native/reference
+The transcription pilot passed the existing whisper family native/reference
 testcase and benchmark WER criteria on the exact served bundle. The ten native
 transcripts matched the FP32 reference under family WER normalization; both
 had 3.59% WER against the gold corpus. All 55 published-client responses matched
 the corresponding native transcript, with complete request and timing joins.
 Audio sample rates, counts, and durations remain recorded. This stage qualifies
 recorded complete clips; streaming ASR and audio question answering remain planned.
+Whisper now honors the checkpoint GELU with an FP32 activation boundary for
+half inputs; older Whisper bundles need rebuilding. The numerical gates remain unchanged.
 
 Use [Profile Embeddings with AIPerf](../../website/docs/user-guides/profile-embeddings-with-aiperf.md),
 [Profile Reranking with AIPerf](../../website/docs/user-guides/profile-reranking-with-aiperf.md),
