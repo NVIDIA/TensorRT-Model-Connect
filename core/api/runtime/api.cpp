@@ -5,11 +5,11 @@
 
 #include "api_internal.h"
 #include "trtmc/bundle.h"
+#include "trtmc/runtime/dynamic_library.h"
 #include "trtmc/runtime/family_loader.h"
 
 #include <algorithm>
 #include <cstddef>
-#include <dlfcn.h>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -252,10 +252,11 @@ ConvertedConfig::ConvertedConfig(const trtmc_config_view_v1* config) {
 
 std::string default_runtime_root() {
     static const unsigned char library_location = 0;
-    Dl_info info{};
-    if (dladdr(&library_location, &info) == 0 || info.dli_fname == nullptr)
+    try {
+        return platform::module_path_containing(&library_location).parent_path().string();
+    } catch (const std::exception&) {
         throw ApiFailure{TRTMC_INTERNAL_ERROR, "cannot locate the runtime library directory"};
-    return std::filesystem::absolute(info.dli_fname).parent_path().string();
+    }
 }
 
 struct TaskSnapshot {
