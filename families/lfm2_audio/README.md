@@ -116,7 +116,10 @@ waveform synthesis.
 ## Validation
 
 The family tests pin the original `Liquid4All/liquid-audio` source at commit
-`19e65845923a7f136442c95137884ec61eb386aa`. The real-model gate checks task
+`19e65845923a7f136442c95137884ec61eb386aa`. The reference dependency is the
+official `liquid-audio==1.3.0` wheel, whose package sources match that commit.
+Wheel-only installation avoids requiring its source-build backend during
+dependency preparation. The real-model gate checks task
 semantics: ASR content, the requested TTS words, woodworking slogans followed by
 chair-specific dialogue, the red-light answer, audio/text ordering, retained
 dialogue history, and completion within the documented budget. Saved native and
