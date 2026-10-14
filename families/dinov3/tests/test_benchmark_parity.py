@@ -49,6 +49,11 @@ def test_complete_feature_values_match_and_pooled_only_output_is_not_evidence(pr
     native = observation(registers)
     gate = {"profile": profile}
     assert compare(native, native, gate)[0] is True
+    candidate = {key: value for key, value in native.items() if key != "num_register_tokens"}
+    # The public candidate output has no register-count metadata; its owning manifest supplies it.
+    assert compare(candidate, candidate, gate)[0] is True
+    assert compare(candidate, native, gate)[0] is True
+    assert compare(candidate, {**native, "num_register_tokens": registers + 1}, gate)[0] is False
     incomplete = {key: value for key, value in native.items() if key != "last_hidden_state"}
     assert compare(incomplete, native, gate)[0] is None
 
