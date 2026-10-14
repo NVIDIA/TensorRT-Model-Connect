@@ -116,19 +116,28 @@ def test_capability_admission_limits_and_rejection_records(tmp_path):
         assert client.post("/v1/ranking", json={**BODY, "query": {"text": "x" * 129}}).status_code == 413
         assert client.post("/v1/ranking", content=b"x" * 1025).status_code == 413
     assert not registry.calls
-    assert [json.loads(line)["status"] for line in path.read_text().splitlines()] == [404, 400, 429, 413, 413]
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["status"] for row in records] == [404, 400, 429, 413, 413]
+    assert [row["query_bytes"] for row in records[:4]] == [18, 18, 18, 129]
+    for row in records[:4]:
+        assert row["passages"] == row["input_items"] == 2 and row["passage_bytes"] == [5, 6]
 
 
 @pytest.mark.parametrize("updates", [
     {"scores": []}, {"scores": [True, 2.0]}, {"scores": {"$array_length": 2}},
+    {"scores": [10**400, 2.0]}, {"model_call_ms": 10**400},
     {"model_call_ms": -1}, {"timing_scope": "unknown"},
 ])
-def test_invalid_native_output_is_rejected_and_retires_lane(updates):
+def test_invalid_native_output_is_rejected_and_retires_lane(updates, tmp_path):
     registry = Registry()
     registry.result.update(updates)
-    with client_for(registry) as client:
+    path = tmp_path / "records.jsonl"
+    with client_for(registry, path) as client:
         response = client.post("/v1/ranking", json=BODY)
     assert response.status_code == 502 and registry.retired and registry.closed == 1
+    record = json.loads(path.read_text())
+    assert record["passages"] == 2 and record["query_bytes"] == 18
+    assert record["passage_bytes"] == [5, 6]
 
 
 def test_registry_accepts_ranking_capability_and_rejects_unknown_only():

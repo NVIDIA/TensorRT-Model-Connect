@@ -58,14 +58,22 @@ def extract_result(result: Any) -> tuple[str, int, dict[str, float]]:
     return str(result["text"]), tokens, timings
 
 
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def extract_embedding(result: Any) -> tuple[list[float], dict[str, float]]:
     if not isinstance(result, Mapping):
         raise WorkerProtocolError("worker embedding result must be an object")
     values = result.get("values")
     if (not isinstance(values, list) or not values or
             type(result.get("dim")) is not int or result["dim"] != len(values) or
-            any(isinstance(value, bool) or not isinstance(value, (int, float)) or
-                not math.isfinite(value) for value in values)):
+            any(not _finite_number(value) for value in values)):
         raise WorkerProtocolError("worker embedding result must contain a complete finite vector")
     return values, extract_task_timing(result)
 
@@ -75,16 +83,14 @@ def extract_ranking(result: Any, expected_count: int) -> tuple[list[float], dict
         raise WorkerProtocolError("worker ranking result must be an object")
     scores = result.get("scores")
     if (not isinstance(scores, list) or len(scores) != expected_count or
-            any(isinstance(value, bool) or not isinstance(value, (int, float)) or
-                not math.isfinite(value) for value in scores)):
+            any(not _finite_number(value) for value in scores)):
         raise WorkerProtocolError("worker ranking result must contain one finite score per passage")
     return scores, extract_task_timing(result)
 
 
 def extract_task_timing(result: Mapping[str, Any]) -> dict[str, float]:
     wall = result.get("model_call_ms")
-    if (isinstance(wall, bool) or not isinstance(wall, (int, float)) or
-            not math.isfinite(wall) or wall < 0 or
+    if (not _finite_number(wall) or wall < 0 or
             result.get("timing_scope") != "public_task_call_wall"):
         raise WorkerProtocolError("worker result has invalid public Task timing")
     return {"model_call_ms": float(wall)}

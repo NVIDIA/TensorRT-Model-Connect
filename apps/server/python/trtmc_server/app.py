@@ -575,7 +575,10 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         context = http_request.state.timing
         context["model"] = request.model
         documents = [passage.text for passage in request.passages]
-        size = len(request.query.text.encode("utf-8")) + sum(len(text.encode("utf-8")) for text in documents)
+        context.update(input_items=len(documents), passages=len(documents),
+                       query_bytes=len(request.query.text.encode("utf-8")),
+                       passage_bytes=[len(text.encode("utf-8")) for text in documents])
+        size = context["query_bytes"] + sum(context["passage_bytes"])
         if size > config.max_prompt_bytes:
             metrics.reject(route, 413)
             return error_response(413, "content_too_large", "query and passages exceed the server limit")
@@ -586,9 +589,6 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             return result
         scores, _ = extract_ranking(result, len(documents))
         order = sorted(range(len(scores)), key=lambda index: -scores[index])
-        context.update(input_items=len(documents), passages=len(documents),
-                       query_bytes=len(request.query.text.encode("utf-8")),
-                       passage_bytes=[len(text.encode("utf-8")) for text in documents])
         return {"rankings": [{"index": index, "logit": scores[index]} for index in order]}
 
     @app.post("/v1/chat/completions")

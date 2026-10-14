@@ -121,6 +121,7 @@ def test_capability_admission_limits_and_rejection_records(tmp_path):
 
 @pytest.mark.parametrize("updates", [
     {"values": {"$array_length": 384}}, {"dim": 383}, {"values": [True], "dim": 1},
+    {"values": [10**400], "dim": 1}, {"model_call_ms": 10**400},
     {"model_call_ms": -1}, {"timing_scope": "unknown"},
 ])
 def test_invalid_native_output_is_rejected_and_retires_lane(updates):
