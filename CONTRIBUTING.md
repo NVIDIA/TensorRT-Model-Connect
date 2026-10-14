@@ -198,81 +198,64 @@ Resolve blocking and high-severity findings before marking the pull request
 ready. If a finding requires an architecture or policy decision, leave the pull
 request in draft, record the question, and ask a maintainer. Rerun the affected
 validation and self-review after material changes. Self-review does not replace
-public CI, protected CI, or maintainer review.
+Community CI or maintainer review.
 
 ### 9. Run contributor-visible Community CI
 
-Opening a pull request or pushing a new commit automatically starts **Stable
-Community CI** with the existing four parallel CPU stages: source quality,
-documentation, ownership and impact, and C++/Python unit tests. The
-`Community CPU / Required` result requires all four to pass.
+Opening a pull request targeting `main` or pushing a new commit automatically
+starts **Stable Community GPU CI**. Its four parallel CPU stages cover source
+quality, documentation, ownership and impact, and C++/Python unit tests. Only
+after they all pass does CI check the GPU test plan and allocate an isolated VM
+for GPU-impacting changes. Each selected family runs in a fresh container; the
+final result waits for confirmed VM cleanup.
 
-Stable automatic Community GPU execution remains disabled during qualification.
-Maintainers retain the existing manual GPU smoke option. **Dev Community CI**
-is the experimental pipeline from the protected CI development branch. When
-`TRTMC_COMMUNITY_CI_DUAL_RUN=true`, it tests the same captured PR snapshot.
-Only after `Community CPU / Required` passes in Dev does Dev start the Brev GPU
-stage for GPU-impacting changes. Dev failures do not change Stable's result.
+Keep each PR focused on one family where possible. The automatic GPU plan admits
+at most five directly changed or added families; larger changes must be split
+before a VM is allocated. Shared changes additionally run the five shared smoke
+families. Documentation-only changes require no GPU allocation. CI does not
+silently drop selected families to fit its execution budget.
 
-The CPU jobs run on fresh GitHub-hosted `ubuntu-24.04` runners with read-only
-repository permission and no access to private runners, secrets, or GPUs.
-Source quality checks required SPDX headers and rejects changes to `LICENSE`
-or `NOTICE` relative to the tested merge's base.
+The CPU jobs run on fresh GitHub-hosted runners. GPU CI uses a disposable cloud
+VM and a shared dependency base, with family-owned dependency layers prepared
+only for selected families. Public Dockerfiles and dependency inputs allow local
+reproduction without private registry access. Contributor test containers receive
+no repository, Hub, Brev or registry credentials.
 
-The [Dev GPU experiment](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/ci/developer/.github/workflows/community-ci.yml)
-is maintained separately on `ci/developer`. Its isolated GPU instance receives no
-repository, Hub, or Brev credentials. Stable retains its existing manual GPU
-configuration, including the Hub credential for gated checkpoints; this PR does
-not change that configuration.
+`Stable Community GPU CI` on the current PR head is the single automated premerge
+gate. Historical `Stable Community CI` results from the CPU-only pipeline do not
+satisfy this new gate. Existing PRs need a fresh Stable execution that publishes
+the new context. `Community CPU / Required` alone is not completion of that gate. Native
+checks such as DCO and PR Metadata remain visible contributor feedback and do
+not replace the aggregate. See the [Community CI guide](.github/community-ci.md)
+for failure classification, test selection and environment preparation.
 
-Public Actions logs show the individual stages and failing commands. The
-[Community CI guide](.github/community-ci.md) explains the switch, CI branch
-selection, qualification evidence, and later promotion. Native pull-request checks
-such as DCO and PR Metadata remain separate. The existing Internal CI trigger
-and merge gate continue unchanged during this comparison.
+### 10. Hand off for NVIDIA maintainer review
 
-### 10. Ask a maintainer to trigger protected CI
+When `Stable Community GPU CI` succeeds on the current PR head, automated validation
+is complete and the PR is ready for review by an NVIDIA employee maintainer.
+There is no separate Internal CI trigger or private premerge requirement.
+A green result does not approve the change or merge it automatically.
 
-Internal premerge remains the required gate during Community premerge
-qualification. Follow the existing maintainer-triggered process below until
-the separate gate migration is complete.
+Use the Actions summary and linked logs when validation fails. Preparation
+failures are reported separately from failures after the family's test entry
+point. The latter identify a family execution problem, not necessarily proof
+that the PR introduced a new bug. Resource cleanup remains mandatory in both
+cases. A pending result during cleanup is not a passing result.
 
-Opening a pull request or pushing to your fork does **not** start the protected
-premerge suite. After public CPU validation passes and the pull request is
-ready for protected CI, mention the repository maintainer in a pull-request
-comment:
-
-```text
-@yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
-```
-
-The maintainer verifies the pull-request head and a successful `Community CPU /
-Required` stage in the existing PR run, then applies the one-shot `run-internal-ci`
-label. Only
-collaborators with repository `maintain` or `admin` permission can authorize
-that trigger.
-The trusted bridge consumes the label, rechecks that CPU aggregate in Community
-CI, captures the current PR head SHA, and dispatches protected premerge
-validation without waiting for the later GPU stage.
-If authorization rejects the request, ask the maintainer to remove and re-add
-the retained label after satisfying the reported prerequisite. Adding an
-already-present label does not create a new trigger event.
-
-Wait for `TRTMC Internal CI / Automated premerge gate` to pass on the exact
-pull-request head SHA. This is an automated test result, not a request for an
-individual maintainer review.
-If you push another commit, the previous result no longer validates the current
-head; finish the update, wait for the automatic Community CPU stage, and
-mention `@yifeif-nv` once to request a new protected run. Private runner details,
-logs, artifacts, and URLs are not part of the public contribution interface.
+Private Nightly and separately authorized diagnostics remain independent.
+Private runner details, logs, artifacts and package coordinates must not be
+copied into public issues or PRs. Dev qualification is maintainer-operated and
+does not substitute for the required Stable result.
 
 ### 11. Respond to review and keep evidence current
 
 Address review feedback on the same topic branch and sign off every new commit.
-Keep the pull request current with upstream when requested. A new head requires
-a fresh public merge result and a fresh maintainer-triggered protected result
-before the pull request can merge. Maintainers merge accepted changes according
-to the repository ruleset.
+A new head requires a fresh automatic Stable result. Keep the PR current with
+upstream when requested and preserve meaningful test criteria when diagnosing
+failures. After an NVIDIA employee maintainer reviews and accepts the change,
+maintainers merge it according to the repository ruleset. CI readiness and human
+approval are separate requirements; GitHub permissions alone do not identify
+someone's employment.
 
 ## Established development practices
 

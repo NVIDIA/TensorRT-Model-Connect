@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE=trtmc-community-base:local
+FROM ${BASE_IMAGE}
+
+# The upstream reference needs a different Transformers/Torch environment from
+# the native builder. Keep the shared interpreter and its dependencies intact.
+ENV TRTMC_REFERENCE_PYTHON=/opt/lance-reference/bin/python
+COPY reference-requirements.lock /opt/trtmc-ci/lance/
+RUN /usr/bin/python3.12 -m venv /opt/lance-reference && \
+    /opt/lance-reference/bin/python -m pip install \
+      --disable-pip-version-check --no-cache-dir --no-index \
+      --only-binary=:all: --require-hashes \
+      --requirement /opt/trtmc-ci/lance/reference-requirements.lock && \
+    /opt/lance-reference/bin/python -m pip check && \
+    /opt/venv/bin/python -m pip check
+
+# Validate the image configuration here; no production family Python module is
+# needed for this build-only probe. These imports do not require a GPU.
+RUN /opt/lance-reference/bin/python -I -c '\
+from importlib import import_module, metadata; \
+from pathlib import Path; \
+import platform, sys; \
+assert sys.version_info[:2] == (3, 12); \
+assert platform.system() == "Linux" and platform.machine() == "x86_64"; \
+assert Path(sys.prefix) == Path("/opt/lance-reference"); \
+expected = {"torch": "2.10.0+cu130", "torchvision": "0.25.0+cu130", "flash-attn": "2.8.3", "transformers": "4.49.0", "numpy": "1.26.4"}; \
+actual = {name: metadata.version(name).lower() for name in expected}; \
+assert actual == expected, actual; \
+[import_module(name) for name in ("accelerate", "cv2", "einops", "imageio", "jinja2", "PIL", "safetensors.torch", "scipy", "sentencepiece", "sklearn", "tokenizers", "torchvision", "tqdm", "yaml")]; \
+import torch; \
+from flash_attn import flash_attn_varlen_func; \
+from torch.nn.attention.flex_attention import flex_attention; \
+from transformers import HfArgumentParser, Qwen2VLImageProcessor; \
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLVisionConfig; \
+assert torch.version.cuda == "13.0"; \
+assert torch._C._GLIBCXX_USE_CXX11_ABI; \
+assert all(callable(value) for value in (flash_attn_varlen_func, flex_attention, HfArgumentParser, Qwen2VLImageProcessor, Qwen2_5_VLVisionConfig)); \
+print("Lance reference dependency imports passed; GPU parity has not run", flush=True)'

@@ -36,12 +36,13 @@ branch, and push updated commits. Work sequentially and report every PR state.
 
 ## Current CI Contract
 
-Read `.github/workflows/internal-ci-bridge.yml` from current `github/main`.
-Source keeps only Internal CI Bridge and Pages workflows. Premerge, including
-legal compliance, and nightly execution stay in private Internal CI.
+Read `.github/workflows/community-ci.yml` and `.github/community-ci.md` from
+current `github/main`. PRs targeting `main` automatically run Stable Community
+CI: CPU checks, GPU plan admission, selected family execution and confirmed
+resource cleanup. `Stable Community GPU CI` is the single automated premerge gate.
+Internal premerge is not required; private Nightly remains independent.
 
-Before triggering premerge, capture the current PR metadata head and inspect its
-existing protected status:
+Capture the current PR head and inspect the latest aggregate status:
 
 ```bash
 REPOSITORY=NVIDIA/TensorRT-Model-Connect
@@ -50,53 +51,33 @@ pull=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
 PR_HEAD_SHA=$(jq -er '.head.sha' <<<"$pull")
 gh api \
   "repos/$REPOSITORY/commits/$PR_HEAD_SHA/status" \
-  --jq '[.statuses[] |
-    select(.context == "TRTMC Internal CI / Automated premerge gate")][0]'
-
-gh pr edit "$PR_NUMBER" \
-  --repo "$REPOSITORY" \
-  --add-label run-internal-ci
+  --jq '[.statuses[] | select(.context == "Stable Community GPU CI")][0]'
 ```
 
-If a label event was created for an older SHA, let the bridge report the
-superseded trigger, wait for `Community CPU / Required` on the current PR head,
-and retry.
-When authorization fails and leaves `run-internal-ci` attached, remove it before
-adding it again; adding an existing label does not emit another label event.
+A CPU-only result, dispatch success, optional Dev pass or stale-head result is
+not a Stable pass. Legacy `Stable Community CI` successes may be CPU-only and
+cannot satisfy the new context. Existing PRs without it require a fresh trusted
+Stable execution; do not copy statuses or bulk-dispatch unrelated PRs.
+The aggregate includes plan admission, any required GPU
+coverage and confirmed cleanup; a valid no-GPU plan is reported explicitly.
+Preparation errors and failures after the family entry point remain separate
+classifications. Neither permits resource release to be skipped.
 
-Only an actor whose repository permission is `maintain` or `admin`
-may add the one-shot trigger.
+- A successful current-head aggregate makes a PR CI-ready for NVIDIA employee
+  maintainer review. It is not human approval or authorization to merge.
+- Do not infer employment from a GitHub username, email, organization association
+  or repository permission. Use the project's human maintainer process.
+- If the current exact head is already pending or successful, do not start a
+  duplicate run. Opening or pushing the PR has already triggered Stable.
+- If the head changes, treat old results as stale and observe the new automatic
+  run. Retry a failed unchanged head only with rerun authorization.
+- Do not apply the retired Internal CI label or use private premerge as an extra
+  ordinary merge gate. Optional Dev qualification cannot overwrite Stable.
+- Never start premerge after the PR has merged. Pages and private Nightly follow
+  independent paths.
 
-Never use the legacy `run-ci` label. The bridge consumes `run-internal-ci`,
-verifies the open PR targets `main`, and rechecks the event SHA, PR metadata
-SHA, and a successful `Community CPU / Required` job for that head before
-dispatching only `pr_number` and `head_sha`. The label path does not wait for
-the later Community GPU stage.
-
-Internal CI resolves and tests the exact pull-request merge whose first parent
-is the current `main` revision and whose second parent is the authorized PR
-head. It publishes the sanitized result on that exact head SHA.
-
-The Source-visible premerge result is only the sanitized
-`TRTMC Internal CI / Automated premerge gate` status on that exact head: `PENDING`, then `PASS` or
-`FAIL`, with a target URL on the pull request's checks page. A successful
-bridge dispatch is not a successful premerge result.
-
-Raw logs, artifacts, internal packages, runner details, and nightly execution
-stay private. Never copy them into Source Actions, Source artifacts, status
-target URLs, or PR comments. A source-head guard failure is the exception to
-the no-comment norm: the bridge publishes only the public event/PR/branch SHA
-diagnostic, recovery instruction, and Source workflow link. It updates one
-marked comment instead of creating repeated comments.
-
-- If the current exact head is already `PENDING` or `PASS`, do not add the
-  trigger again.
-- If the head changes, treat the old result as stale and trigger the new head
-  once.
-- Retry a failed unchanged head only with explicit rerun authorization.
-- Never trigger premerge after the PR has merged. A merge does not rerun the
-  same premerge suite; Pages and scheduled Internal nightly follow independent
-  paths.
+Raw private logs, artifacts, packages, runner details and URLs remain private.
+Never copy them into public Actions, artifacts, statuses or PR comments.
 
 ## Lock Guard
 
@@ -149,12 +130,12 @@ gh pr checks <number> --repo NVIDIA/TensorRT-Model-Connect
 | State | Action |
 |-------|--------|
 | Checks pending/running | Wait; do not push noise; never request auto-merge |
-| Checks green and branch current | Merge if merge authority was granted; otherwise report OK |
+| Stable green and branch current | Report CI-ready for NVIDIA maintainer review; merge only after human acceptance and explicit merge authority |
 | Checks green but branch behind main | Rebase and push |
 | Checks failed and branch behind main | Rebase first, then diagnose/fix |
 | Checks failed and branch current | Diagnose/fix |
 | Merge conflicts | Rebase locally if mechanical; otherwise report blocker |
-| Missing required review | Report waiting on review |
+| NVIDIA maintainer review or acceptance missing | Report waiting on human review |
 
 ## Merge After CI
 
@@ -167,30 +148,26 @@ before CI is green, do not merge anyway.
 
 Before merging, verify all of the following against the latest PR head:
 
-- `gh pr checks <number> --repo NVIDIA/TensorRT-Model-Connect --watch --interval 30`
-  exits successfully.
-- `gh pr view <number> --repo NVIDIA/TensorRT-Model-Connect --json headRefOid,mergeable,mergeStateStatus,statusCheckRollup`
-  shows the same head SHA whose checks passed.
-- `mergeable` is `MERGEABLE` and `mergeStateStatus` is clean enough for the
-  repository ruleset, such as `CLEAN`.
-- Every expected CI check in `statusCheckRollup` has completed with conclusion
-  `SUCCESS`. Treat `QUEUED`, `PENDING`, `IN_PROGRESS`, `WAITING`,
-  `REQUESTED`, empty conclusion, missing check rollup, skipped unexpectedly,
-  or failing as a merge blocker.
-- The same completed successful check set belongs to the current `headRefOid`.
-  If a new commit lands after checks pass, restart the wait.
-- The current head has a successful `TRTMC Internal CI / Automated premerge gate` commit status.
-  A green bridge run, a result on an older head, or a ruleset without required
-  status checks does not satisfy this gate.
+- `gh pr view <number> --repo NVIDIA/TensorRT-Model-Connect --json headRefOid,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup`
+  shows the same head SHA whose `Stable Community GPU CI` status succeeded.
+- The latest `Stable Community GPU CI` status on that head is `success`, with the
+  execution's final result and required cleanup complete. A missing, pending,
+  failed or errored aggregate blocks merging. A successful observer or CPU stage
+  cannot replace it.
+- An NVIDIA employee maintainer has reviewed and accepted the change. CI success
+  alone and the absence of a GitHub review rule do not satisfy this human step.
+- `mergeable` is `MERGEABLE`, the repository rules permit merging, and there are
+  no unresolved blocking review findings.
+- The live required-status rules agree with the documented Stable gate. If the
+  former Internal gate remains required, report the incomplete settings migration
+  rather than changing settings or silently bypassing it.
+- A new commit after validation or review requires rechecking current-head
+  evidence and the review state.
 
-If `gh pr checks` exits nonzero, including exit code 8 for pending checks, do
-not merge. If any check is pending or queued, wait and poll. If any check fails,
-diagnose and fix it. If no CI checks are reported for the head SHA, report a
-human blocker instead of merging.
-
-Do not infer safety from `mergeable=MERGEABLE`, an allowed merge button, a
-ruleset that lacks required status checks, or successful local tests. Those are
-not substitutes for completed successful GitHub CI.
+`gh pr checks` is useful for diagnostics, but optional Dev, private CI and other
+nonrequired checks are not additional premerge gates. Inspect their failures when
+relevant without treating every visible check as required. Do not infer safety
+from `mergeable=MERGEABLE`, an enabled merge button or local tests alone.
 
 Use an explicit merge command only after those checks pass. Do not include
 `--auto`:
@@ -241,40 +218,27 @@ and restart CI evaluation.
 
 ## Diagnose Failed Checks
 
-Use Source Actions logs only for the retained Source workflows: Internal CI
-Bridge and Pages. List recent Source bridge runs:
+List Community CI runs and inspect the exact execution linked by the current
+head's Stable status:
 
 ```bash
 gh run list \
   --repo NVIDIA/TensorRT-Model-Connect \
-  --workflow internal-ci-bridge.yml \
+  --workflow community-ci.yml \
   --limit 20
-```
-
-Inspect failed retained-Source logs:
-
-```bash
 gh run view <run-id> --repo NVIDIA/TensorRT-Model-Connect --log-failed
 ```
 
-For a failed `TRTMC Internal CI / Automated premerge gate` status, inspect Internal CI only when
-authorized. If private evidence is unavailable, report the exact head,
-sanitized status, and a human blocker; do not guess or disclose private URLs.
+Use the job summary and structured family results to separate plan admission,
+preparation, family execution and cleanup failures. A failed family entry point
+does not by itself establish that the PR introduced a model bug. Preserve the
+original failure while checking release evidence; do not retry model failures
+by replacing VMs or weaken assertions to make the run green.
 
-Download Internal artifacts only when authorized and when a private job points
-to structured outputs:
-
-```bash
-mkdir -p .ci_artifacts/pr<number>
-gh run download <run-id> \
-  --repo <internal-owner>/<internal-ci-repository> \
-  --dir .ci_artifacts/pr<number>
-```
-
-Keep downloaded Internal evidence local and private. Never attach it to the
-Source PR or a Source workflow. When E2E artifacts exist, inspect `result.json`
-fields such as `status`, `failure_type`, stage statuses, stage messages, metric
-values, and thresholds.
+Private Nightly evidence is optional and may be inspected only when authorized.
+Keep it local and private. Never attach private logs, artifacts, runner details,
+package coordinates or URLs to the public PR or workflow. If unavailable, report
+the evidence gap without guessing. It is not an extra ordinary premerge gate.
 
 Classify failures:
 

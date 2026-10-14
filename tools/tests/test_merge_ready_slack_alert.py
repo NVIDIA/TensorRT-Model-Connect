@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Execute the real alert shell with fake GitHub and Slack boundaries."""
+"""Execute the real review-ready alert shell with fake GitHub and Slack boundaries."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ WORKFLOW = (
     Path(__file__).resolve().parents[2]
     / ".github/workflows/community-activity-slack-alert.yml"
 )
-INTERNAL_GATE = "TRTMC Internal CI / Automated premerge gate"
+STABLE_GATE = "Stable Community GPU CI"
 
 
 def scenario() -> dict:
@@ -38,13 +38,7 @@ def scenario() -> dict:
             "author_association": "CONTRIBUTOR",
             "html_url": "https://github.com/NVIDIA/TensorRT-Model-Connect/pull/1190",
         },
-        "statuses": [{"id": 10, "context": INTERNAL_GATE, "state": "success"}],
-        "checks": [
-            {"id": index, "name": name, "status": "completed", "conclusion": "success"}
-            for index, name in enumerate(
-                ("Community CPU / Required", "PR Metadata / Required", "DCO"), 1
-            )
-        ],
+        "statuses": [{"id": 10, "context": STABLE_GATE, "state": "success"}],
     }
 
 
@@ -81,19 +75,27 @@ elif "/pulls/" in endpoint:
 elif "/statuses?" in endpoint:
     values = data.get("statuses_after", data["statuses"]) if counts[endpoint] > 1 else data["statuses"]
     head = endpoint.split("/commits/")[1].split("/")[0]
-    print(json.dumps(values + [m for m in markers if m["head"] == head]))
+    if "statuses_by_head" in data:
+        values = data["statuses_by_head"].get(head, [])
+    values = values + [m for m in markers if m["head"] == head]
+    # Separate page arrays exercise gh --paginate aggregation.
+    for page in [values[:1], values[1:]]:
+        print(json.dumps(page))
     if data.get("partial_status_error"):
         sys.exit(1)
-elif "/check-runs?" in endpoint:
-    # Separate page objects exercise gh --paginate aggregation.
-    for check in data["checks"]:
-        print(json.dumps({"check_runs": [check]}))
 else:
     raise AssertionError(endpoint)
 """
 
 
-def run_alert(tmp_path: Path, data: dict, *, dry_run: bool = False) -> subprocess.CompletedProcess:
+def run_alert(
+    tmp_path: Path,
+    data: dict,
+    *,
+    dry_run: bool = False,
+    token: str = "fake-token",
+    webhook: str = "https://hooks.slack.test/review-ready",
+) -> subprocess.CompletedProcess:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
     for name in ("gh", "curl"):
@@ -109,8 +111,8 @@ def run_alert(tmp_path: Path, data: dict, *, dry_run: bool = False) -> subproces
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "FAKE_ROOT": str(tmp_path),
-            "GH_TOKEN": "fake-token",
-            "SLACK_WEBHOOK_URL": "" if dry_run else "https://hooks.slack.test/merge-ready",
+            "GH_TOKEN": token,
+            "SLACK_WEBHOOK_URL": "" if dry_run else webhook,
             "REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
             "DRY_RUN": str(dry_run).lower(),
         },
@@ -120,40 +122,94 @@ def run_alert(tmp_path: Path, data: dict, *, dry_run: bool = False) -> subproces
     )
 
 
-def test_merge_ready_alert_posts_green_pass_for_external_contributor(tmp_path: Path) -> None:
-    data = scenario()
-    result = run_alert(tmp_path, data)
-    assert result.returncode == 0, result.stderr
-    payload = json.loads((tmp_path / "payloads.jsonl").read_text())
-    assert payload["text"].startswith("✅ PASS · PR #1190 ready to merge")
-    assert "&lt;!here&gt;" in json.dumps(payload)
-    assert "<!here>" not in json.dumps(payload)
-    assert "Internal CI" in json.dumps(payload)
-    assert json.loads((tmp_path / "markers.json").read_text())[0]["state"] == "success"
-
-
-@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
-def test_repository_members_do_not_receive_merge_ready_alerts(
+@pytest.mark.parametrize("association", ["CONTRIBUTOR", "OWNER", "MEMBER", "COLLABORATOR"])
+def test_stable_pass_requests_employee_review_for_every_pr_author(
     tmp_path: Path, association: str
 ) -> None:
     data = scenario()
     data["pull"]["author_association"] = association
     result = run_alert(tmp_path, data)
     assert result.returncode == 0, result.stderr
-    assert not (tmp_path / "payloads.jsonl").exists()
+    payload = json.loads((tmp_path / "payloads.jsonl").read_text())
+    assert payload["text"].startswith("✅ PASS · PR #1190 ready for NVIDIA review")
+    assert "&lt;!here&gt;" in json.dumps(payload)
+    assert "<!here>" not in json.dumps(payload)
+    assert STABLE_GATE in json.dumps(payload)
+    assert "CI success is not review approval" in json.dumps(payload)
+    assert "Internal CI" not in json.dumps(payload)
+    marker = json.loads((tmp_path / "markers.json").read_text())[0]
+    assert marker["state"] == "success"
+    assert marker["context"] == "Slack / Review-ready alert #1190"
+    calls = (tmp_path / "calls.jsonl").read_text()
+    assert f"/commits/{data['pull']['head']['sha']}/statuses?" in calls
+    assert "/check-runs?" not in calls
 
 
 @pytest.mark.parametrize("state", ["pending", "failure", "error", "missing"])
-def test_internal_ci_must_pass_on_the_current_head(tmp_path: Path, state: str) -> None:
+def test_current_stable_gate_must_pass_even_when_older_status_succeeded(
+    tmp_path: Path, state: str
+) -> None:
     data = scenario()
     data["statuses"] = (
         []
         if state == "missing"
-        else [{"id": 11, "context": INTERNAL_GATE, "state": state}, *data["statuses"]]
+        else [{"id": 11, "context": STABLE_GATE, "state": state}, *data["statuses"]]
     )
     result = run_alert(tmp_path, data)
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "payloads.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        "Community CPU / Required",
+        "Stable Community CI",
+        "Dev Community CI",
+        "TRTMC Internal CI / Automated premerge gate",
+    ],
+)
+def test_other_successful_gates_cannot_replace_stable(tmp_path: Path, context: str) -> None:
+    data = scenario()
+    data["statuses"] = [{"id": 12, "context": context, "state": "success"}]
+    assert run_alert(tmp_path, data).returncode == 0
+    assert not (tmp_path / "payloads.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    "state,description",
+    [
+        ("pending", "Community CI release remains unconfirmed"),
+        ("failure", "Complete Community CI: pr_failure"),
+        ("error", "Complete Community CI: infra_failure"),
+    ],
+)
+def test_gpu_failure_or_unconfirmed_cleanup_never_notifies(
+    tmp_path: Path, state: str, description: str
+) -> None:
+    data = scenario()
+    data["statuses"].append(
+        {"id": 12, "context": STABLE_GATE, "state": state, "description": description}
+    )
+    assert run_alert(tmp_path, data).returncode == 0
+    assert not (tmp_path / "payloads.jsonl").exists()
+
+
+def test_pass_on_old_head_cannot_authorize_current_head(tmp_path: Path) -> None:
+    data = scenario()
+    data["statuses_by_head"] = {"c" * 40: data["statuses"]}
+    assert run_alert(tmp_path, data).returncode == 0
+    assert not (tmp_path / "payloads.jsonl").exists()
+
+
+@pytest.mark.parametrize("mergeable_state", ["blocked", "unstable", "clean"])
+def test_ci_ready_does_not_wait_for_employee_approval(
+    tmp_path: Path, mergeable_state: str
+) -> None:
+    data = scenario()
+    data["pull"]["mergeable_state"] = mergeable_state
+    assert run_alert(tmp_path, data).returncode == 0
+    assert (tmp_path / "payloads.jsonl").exists()
 
 
 @pytest.mark.parametrize(
@@ -164,32 +220,25 @@ def test_internal_ci_must_pass_on_the_current_head(tmp_path: Path, state: str) -
         ("state", "closed"),
         ("mergeable", None),
         ("mergeable", False),
-        ("mergeable_state", "blocked"),
         ("mergeable_state", "dirty"),
+        ("base", {"ref": "ci/developer", "sha": "b" * 40}),
+        ("head", {"sha": "not-a-commit"}),
     ],
 )
-def test_unmergeable_prs_do_not_notify(tmp_path: Path, field: str, value: object) -> None:
+def test_ineligible_prs_do_not_notify(tmp_path: Path, field: str, value: object) -> None:
     data = scenario()
     data["pull"][field] = value
     assert run_alert(tmp_path, data).returncode == 0
     assert not (tmp_path / "payloads.jsonl").exists()
 
 
-@pytest.mark.parametrize("pending", [False, True])
-def test_newer_failed_or_pending_public_check_overrides_old_success(
-    tmp_path: Path, pending: bool
-) -> None:
+def test_internal_failure_does_not_block_stable_success(tmp_path: Path) -> None:
     data = scenario()
-    data["checks"].append(
-        {
-            "id": 100,
-            "name": "DCO",
-            "status": "in_progress" if pending else "completed",
-            "conclusion": None if pending else "failure",
-        }
+    data["statuses"].append(
+        {"id": 20, "context": "TRTMC Internal CI / Automated premerge gate", "state": "failure"}
     )
     assert run_alert(tmp_path, data).returncode == 0
-    assert not (tmp_path / "payloads.jsonl").exists()
+    assert (tmp_path / "payloads.jsonl").exists()
 
 
 @pytest.mark.parametrize("change", ["head", "base", "closed", "gate"])
@@ -201,7 +250,7 @@ def test_readiness_is_rechecked_before_delivery(tmp_path: Path, change: str) -> 
     elif change == "closed":
         data["pull_after"]["state"] = "closed"
     else:
-        data["statuses_after"] = [{"id": 12, "context": INTERNAL_GATE, "state": "pending"}]
+        data["statuses_after"] = [{"id": 12, "context": STABLE_GATE, "state": "pending"}]
     assert run_alert(tmp_path, data).returncode == 0
     assert not (tmp_path / "payloads.jsonl").exists()
 
@@ -230,6 +279,13 @@ def test_partial_github_response_cannot_authorize_an_alert(tmp_path: Path) -> No
     assert not (tmp_path / "payloads.jsonl").exists()
 
 
+@pytest.mark.parametrize("missing", ["token", "webhook"])
+def test_missing_credentials_fail_before_external_calls(tmp_path: Path, missing: str) -> None:
+    result = run_alert(tmp_path, scenario(), **{missing: ""})
+    assert result.returncode != 0
+    assert not (tmp_path / "calls.jsonl").exists()
+
+
 def test_dry_run_previews_without_webhook_or_status_writes(tmp_path: Path) -> None:
     result = run_alert(tmp_path, scenario(), dry_run=True)
     assert result.returncode == 0, result.stderr
@@ -250,10 +306,11 @@ def test_workflow_runs_only_trusted_metadata_and_serializes_delivery() -> None:
         "schedule",
         "workflow_dispatch",
     }
-    assert "TensorRT-Model-Connect Internal CI Bridge" in events["workflow_run"]["workflows"]
+    assert events["workflow_run"]["workflows"] == ["Community CI"]
+    assert "notify-ready-pr" not in workflow["jobs"]
     job = workflow["jobs"]["notify-merge-ready-pr"]
     assert workflow["permissions"] == {}
-    assert job["permissions"] == {"checks": "read", "pull-requests": "read", "statuses": "write"}
+    assert job["permissions"] == {"pull-requests": "read", "statuses": "write"}
     assert job["concurrency"]["cancel-in-progress"] is False
     assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in job["if"]
     assert all("uses" not in step for step in job["steps"])
