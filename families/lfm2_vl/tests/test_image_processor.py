@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native pixel tensors must be bit-exact to the independent processor oracle."""
 
-import hashlib
 import json
+import lzma
 from pathlib import Path
 import shutil
 import subprocess
@@ -50,20 +50,17 @@ def test_reference_pixels_shapes_and_placeholders(probe, tmp_path, case):
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-    assert hashlib.sha256(result[0].encode()).hexdigest() == case["placeholders_sha256"]
+    assert result[0] == case["placeholders"]
     assert [list(map(int, line.split())) for line in result[1:]] == [
         tile["shape"] for tile in case["tiles"]
     ]
     for i, tile in enumerate(case["tiles"]):
-        assert hashlib.sha256(Path(str(prefix) + str(i)).read_bytes()).hexdigest() == tile["sha256"]
-        assert (
-            hashlib.sha256(Path(str(prefix) + str(i) + ".padded").read_bytes()).hexdigest()
-            == tile["padded_sha256"]
-        )
-        assert (
-            hashlib.sha256(Path(str(prefix) + str(i) + ".mask").read_bytes()).hexdigest()
-            == tile["mask_sha256"]
-        )
+        pixels = lzma.decompress((HERE / "fixtures" / tile["pixels"]).read_bytes())
+        mask = lzma.decompress((HERE / "fixtures" / tile["mask"]).read_bytes())
+        rows, cols = tile["shape"]
+        assert Path(str(prefix) + str(i)).read_bytes() == pixels[: rows * cols * 768 * 4]
+        assert Path(str(prefix) + str(i) + ".padded").read_bytes() == pixels
+        assert Path(str(prefix) + str(i) + ".mask").read_bytes() == mask
 
 
 @pytest.mark.parametrize(

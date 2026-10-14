@@ -3,8 +3,8 @@
 """Regenerate integer-image preprocessing receipts from the pinned processor."""
 
 import argparse
-import hashlib
 import json
+import lzma
 from pathlib import Path
 
 CASES = [
@@ -27,6 +27,9 @@ def main():
     parser.add_argument("checkpoint")
     args = parser.parse_args()
     processor = AutoProcessor.from_pretrained(args.checkpoint)
+    fixture_dir = Path(__file__).parent / "fixtures"
+    data_dir = fixture_dir / "preprocessing"
+    data_dir.mkdir(exist_ok=True)
     results = []
     for name, h, w, minimum, maximum, tiles, split in CASES:
         y, x = np.indices((h, w))
@@ -46,21 +49,21 @@ def main():
         record = {
             "name": name,
             "arguments": [h, w, minimum, maximum, tiles, int(split)],
-            "placeholders_sha256": hashlib.sha256(tokens.encode()).hexdigest(),
+            "placeholders": tokens,
             "tiles": [],
         }
         for i, (rows, cols) in enumerate(output.spatial_shapes.tolist()):
-            tensor = output.pixel_values[i, : rows * cols].numpy()
+            pixel_path = data_dir / f"{name}-{i}-pixels.bin.xz"
+            mask_path = data_dir / f"{name}-{i}-mask.bin.xz"
+            pixel_path.write_bytes(lzma.compress(output.pixel_values[i].numpy().tobytes()))
+            mask_path.write_bytes(
+                lzma.compress(output.pixel_attention_mask[i].numpy().astype("<i4").tobytes())
+            )
             record["tiles"].append(
                 {
                     "shape": [rows, cols],
-                    "sha256": hashlib.sha256(tensor.tobytes()).hexdigest(),
-                    "padded_sha256": hashlib.sha256(
-                        output.pixel_values[i].numpy().tobytes()
-                    ).hexdigest(),
-                    "mask_sha256": hashlib.sha256(
-                        output.pixel_attention_mask[i].numpy().astype("<i4").tobytes()
-                    ).hexdigest(),
+                    "pixels": str(pixel_path.relative_to(fixture_dir)),
+                    "mask": str(mask_path.relative_to(fixture_dir)),
                 }
             )
         results.append(record)

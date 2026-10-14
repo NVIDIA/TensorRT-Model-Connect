@@ -81,13 +81,38 @@ def normalized(text):
     return " ".join(unicodedata.normalize("NFKC", text).split())
 
 
+def english_fact_denied(text, fact):
+    """Recognize direct denials of a fixture fact, not unrelated negated clauses."""
+    links = (
+        r"the|a|an|its|actually|really|even|entirely|very|longer|"
+        r"on|in|at|from|be|been|located|situated|standing|"
+        r"show|shows|shown|depict|depicts|depicted|feature|features|featured|"
+        r"have|has|iconic"
+    )
+    before = rf"(?:\b(?:not|no|never|without)\b|n['’]t)\s+(?:(?:{links})\s+){{0,6}}(?:{fact})"
+    after = (
+        rf"(?:{fact})\s+(?:(?:is|was)\s+(?:not|never)|(?:is|was)n['’]t)\s+"
+        r"(?:(?:the|its|a|correct|actual|statue['’]s|image['’]s)\s+){0,3}"
+        r"(?:colou?r|location|setting|landmark|subject|where|shown|depicted|pictured|present)\b"
+    )
+    absent = rf"(?:{fact})\s+(?:is|was)\s+(?:absent|missing)\b"
+    return any(re.search(pattern, text) for pattern in (before, after, absent))
+
+
 def color_answer(text, language):
     value = normalized(text).casefold()
     if language == "ar":
         value = (
             re.sub(r"[\u064b-\u065f\u0670\u0640]", "", value).replace("أ", "ا").replace("إ", "ا")
         )
-    if re.search(NEGATION[language], value):
+    if language == "en":
+        denied = any(english_fact_denied(value, pattern) for pattern in COLOR_WORDS["en"].values())
+        uncertain = re.search(
+            r"(?:\b(?:unsure|maybe|cannot)\b|can't)[^.;!?]{0,60}\b(?:red|blue|green)\b", value
+        )
+        if denied or uncertain:
+            return None
+    elif re.search(NEGATION[language], value):
         return None
     found = {color for color, pattern in COLOR_WORDS[language].items() if re.search(pattern, value)}
     if len(found) != 1 or "other" in found:
@@ -112,16 +137,17 @@ def color_answer(text, language):
 
 def photo_facts(text):
     value = normalized(text).casefold()
-    if re.search(r"\b(?:not|no)\b[^.!?]{0,80}(?:statue of liberty|liberty island|green)", value):
+    facts = {
+        "landmark": r"\b(?:statue of liberty|lady liberty)\b",
+        "island": r"\bliberty island\b",
+        "location": r"\bnew york (?:harbou?r|bay)\b",
+        "green_exterior": r"\bgreen(?:ish)?\b",
+    }
+    if any(english_fact_denied(value, pattern) for pattern in facts.values()):
         return None
     if re.search(r"eiffel|big ben|\b(?:paris|london|rome)\b", value):
         return None
-    required = {
-        "landmark": bool(re.search(r"statue of liberty|lady liberty", value)),
-        "island": "liberty island" in value,
-        "location": bool(re.search(r"new york (?:harbou?r|bay)", value)),
-        "green_exterior": bool(re.search(r"\bgreen(?:ish)?\b", value)),
-    }
+    required = {name: bool(re.search(pattern, value)) for name, pattern in facts.items()}
     return required if all(required.values()) else None
 
 

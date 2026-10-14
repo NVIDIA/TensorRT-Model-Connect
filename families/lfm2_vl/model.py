@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -24,8 +25,27 @@ from .config import DenseLfm2VlConfig, validate_dense_lfm2_vl_config
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
+
+
+@dataclass(frozen=True)
+class BuildRequest:
+    model_dir: Path
+    precision: str = "bf16"
+    max_sequence_length: int | None = 32768
+    task: str = "images_text_to_text"
+    backend: str = "trt"
+    verbose: bool = False
+
+    def __post_init__(self):
+        if self.max_sequence_length is not None and (
+            type(self.max_sequence_length) is not int or self.max_sequence_length < 1
+        ):
+            raise ValueError("max_sequence_length must be a positive integer")
+        if self.precision.lower() not in {"bf16", "fp16"}:
+            raise ValueError("LFM2-VL supports only bf16 and fp16 builds")
+        if self.backend not in {"trt", "trt_rtx"}:
+            raise ValueError("LFM2-VL requires a TensorRT backend")
 
 
 def layer_tensor_name(stem: str, layer: int) -> str:
@@ -1059,22 +1079,22 @@ def _positive_int(value: object, name: str) -> int:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one dense LFM2-VL bundle without shared model orchestration."""
-    if request.dynamic_kv_cache:
+    if getattr(request, "dynamic_kv_cache", False):
         raise NotImplementedError("lfm2_vl does not support dynamic_kv_cache")
 
-    if request.image_height is not None:
+    if getattr(request, "image_height", None) is not None:
         raise NotImplementedError("lfm2_vl does not support image_height")
 
-    if request.image_width is not None:
+    if getattr(request, "image_width", None) is not None:
         raise NotImplementedError("lfm2_vl does not support image_width")
 
-    if request.video_num_frames is not None:
+    if getattr(request, "video_num_frames", None) is not None:
         raise NotImplementedError("lfm2_vl does not support video_num_frames")
 
-    if request.max_batch_size != 1:
+    if getattr(request, "max_batch_size", 1) != 1:
         raise NotImplementedError("lfm2_vl does not support max_batch_size")
 
-    if request.context_parallel_size != 1:
+    if getattr(request, "context_parallel_size", 1) != 1:
         raise ValueError("this family does not support context parallelism")
 
     if request.task not in {
@@ -1099,13 +1119,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "max_cache_length exceeds the checkpoint context capacity: "
             f"{max_cache_length} > {resolved.max_position_embeddings}"
         )
-    if request.tensor_parallel_size != 1:
+    if getattr(request, "tensor_parallel_size", 1) != 1:
         raise NotImplementedError("dense LFM2-VL does not support tensor-parallel builds")
-    if request.quantization not in {None, "none"}:
+    if getattr(request, "quantization", None) not in {None, "none"}:
         raise NotImplementedError("dense LFM2-VL does not support quantized builds")
-    if request.fp32_layers:
+    if getattr(request, "fp32_layers", ()):
         raise NotImplementedError("dense LFM2-VL does not support mixed-precision layers")
-    if request.mtp_seq_len is not None:
+    if getattr(request, "mtp_seq_len", None) is not None:
         raise NotImplementedError("dense LFM2-VL does not support MTP speculative decoding")
 
     weights = load_lfm2_vl_weights(str(model_dir), config, precision=precision)

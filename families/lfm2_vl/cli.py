@@ -14,18 +14,21 @@ def build(
     max_sequence_length: int = 32768,
     verbose: bool = False,
 ) -> int:
-    from tensorrt_model_connect import BuildRequest, build as build_bundle
+    from tensorrt_model_connect.bundle_writer import BundleWriter
     from tensorrt_model_connect.model_support import resolve_model
+    from .model import BuildRequest, build as build_model
 
-    build_bundle(
-        BuildRequest(
-            model_dir=resolve_model(model, revision),
-            output_path=output,
-            family="lfm2_vl",
-            task="images_text_to_text",
-            precision=precision,
-            max_sequence_length=max_sequence_length,
-            verbose=verbose,
-        )
+    request = BuildRequest(
+        model_dir=resolve_model(model, revision),
+        precision=precision,
+        max_sequence_length=max_sequence_length,
+        verbose=verbose,
     )
+    writer = BundleWriter(output)
+    try:
+        build_model(request, writer)
+        writer.finish()
+    except BaseException:
+        writer.abort()
+        raise
     return 0

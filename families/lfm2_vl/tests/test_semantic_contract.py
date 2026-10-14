@@ -23,6 +23,30 @@ def test_caption_preserves_facts_without_matching_wording():
         assert not compare("model-card", reference, wrong)["equivalent"]
 
 
+@pytest.mark.parametrize(
+    "denial",
+    [
+        "This does not depict the Statue of Liberty.",
+        "This is not Lady Liberty.",
+        "The statue is not located on Liberty Island.",
+        "The statue isn't in New York Harbor.",
+        "The statue is not in New York Bay.",
+        "New York Harbor is not its location.",
+        "The statue is not green.",
+        "Green is not the statue's color.",
+    ],
+)
+def test_caption_rejects_direct_denial_even_after_positive_facts(denial):
+    caption = "The green Statue of Liberty stands on Liberty Island in New York Harbor."
+    assert not compare("model-card", caption, caption + " " + denial)["equivalent"]
+
+
+def test_caption_ignores_unrelated_negation():
+    caption = "The green Statue of Liberty stands on Liberty Island in New York Harbor."
+    for detail in ["No boats are visible. ", "The island is not crowded. "]:
+        assert compare("model-card", caption, detail + caption)["equivalent"]
+
+
 def test_ocr_only_whitespace_is_permitted():
     assert compare(
         "image-budget", OCR_TEXT, "CABIN STATUS\n\nTemperature: 22 C\nSeat belts: FASTENED"
@@ -66,6 +90,21 @@ def test_color_negation_and_language_mismatch_fail():
     assert not compare("language-ar", "أحمر", "Red")["equivalent"]
     assert not compare("language-fr", "Rouge", "The image is rouge.")["equivalent"]
     assert not compare("aspect-ratio", "Green", "Red and green")["equivalent"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["It is not red.", "It isn't red.", "Red is not its color.", "It is red. It is not red."],
+)
+def test_color_rejects_direct_denial(answer):
+    assert not compare("language-en", "Red", answer)["equivalent"]
+
+
+def test_color_ignores_unrelated_negation():
+    for answer in ["The image is red. It is not a square.", "No objects are visible. It is red."]:
+        assert compare("language-en", "Red", answer)["equivalent"]
+    for answer in ["Maybe red.", "I cannot tell whether the image is red."]:
+        assert not compare("language-en", "Red", answer)["equivalent"]
 
 
 def test_image_order_cannot_be_swapped():

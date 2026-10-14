@@ -18,9 +18,11 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 
 from .semantic_contract import compare_semantics
 
-CHECKPOINT = "LiquidAI/LFM2.5-VL-1.6B"
-REVISION = "919fde3d022e3f90a4716006f993938ee8c2eb97"
-CASE = "lfm25-vl-1.6b-model-card"
+MANIFEST = json.loads((Path(__file__).parent / "manifests/lfm25-vl-1.6b.json").read_text())
+CHECKPOINT = MANIFEST["hf_id"]
+REVISION = MANIFEST["hf_revision"]
+CONTRACT = MANIFEST["testcases"][0]
+CASE = CONTRACT["name"]
 CARD_IMAGE = (
     "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"
 )
@@ -75,7 +77,8 @@ def _fixtures(directory, processor):
                 "prompt": prompt,
                 "images": [metadata[key] for key in media],
                 "media_names": media,
-                "max_new_tokens": 64,
+                "max_new_tokens": CONTRACT["max_new_tokens"],
+                "do_sample": CONTRACT["do_sample"],
                 **options,
             }
         )
@@ -247,7 +250,8 @@ def test_e2e(case_name, tmp_path, request):
     import torch
     from huggingface_hub import snapshot_download
     from transformers import AutoModelForImageTextToText, AutoProcessor
-    from tensorrt_model_connect import BuildRequest, build
+    from tensorrt_model_connect.bundle_writer import BundleWriter
+    from families.lfm2_vl.model import BuildRequest, build
 
     assert torch.cuda.is_available(), "selected model-card E2E requires CUDA"
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
@@ -257,23 +261,32 @@ def test_e2e(case_name, tmp_path, request):
         os.environ.get("TRTMC_LFM25_VL_CHECKPOINT")
         or snapshot_download(CHECKPOINT, revision=REVISION)
     )
-    bundle = Path(os.environ.get("TRTMC_LFM25_VL_BUNDLE", str(tmp_path / "vision.bundle")))
+    assert MANIFEST["tensor_parallel_size"] == 1, "LFM2-VL requires one runtime rank"
+    assert CONTRACT["reference_backend"] == "hf_transformers"
+    bundle = Path(os.environ.get("TRTMC_LFM25_VL_BUNDLE", str(tmp_path / MANIFEST["bundle"])))
     if not bundle.is_file():
         with evidence_stage("build"):
-            build(
-                BuildRequest(
-                    model_dir=checkpoint,
-                    output_path=bundle,
-                    family="lfm2_vl",
-                    task="images_text_to_text",
-                    precision="bf16",
-                    max_sequence_length=32768,
+            writer = BundleWriter(bundle)
+            try:
+                build(
+                    BuildRequest(
+                        model_dir=checkpoint,
+                        task=MANIFEST["task"],
+                        precision=MANIFEST["precision"],
+                        max_sequence_length=MANIFEST["max_sequence_length"],
+                    ),
+                    writer,
                 )
-            )
+                writer.finish()
+            except BaseException:
+                writer.abort()
+                raise
     record_evidence(
         "checkpoint", {"model_dir": str(checkpoint), "hf_id": CHECKPOINT, "hf_revision": REVISION}
     )
-    processor = AutoProcessor.from_pretrained(checkpoint)
+    processor = AutoProcessor.from_pretrained(
+        checkpoint, trust_remote_code=MANIFEST["trust_remote_code"]
+    )
     images, cases = _fixtures(tmp_path, processor)
     cases_path = tmp_path / "cases.json"
     cases_path.write_text(json.dumps(cases))
@@ -288,7 +301,10 @@ def test_e2e(case_name, tmp_path, request):
     record_evidence("native", {"stdout": native.stdout, "stderr": native.stderr})
     actual = {case["name"]: case for case in map(json.loads, native.stdout.splitlines())}
     model = AutoModelForImageTextToText.from_pretrained(
-        checkpoint, dtype=torch.bfloat16, device_map="cuda"
+        checkpoint,
+        dtype={"bf16": torch.bfloat16, "fp16": torch.float16}[CONTRACT["reference_precision"]],
+        device_map="cuda",
+        trust_remote_code=MANIFEST["trust_remote_code"],
     ).eval()
     evidence = []
     for case in cases:
