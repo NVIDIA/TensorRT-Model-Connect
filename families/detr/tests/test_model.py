@@ -62,6 +62,7 @@ def test_bundle_config_includes_detr_runtime_fields(tmp_path: Path):
 
     assert bundle_config["input_image_h"] == 800
     assert bundle_config["input_image_w"] == 800
+    assert bundle_config["dynamic_image_shapes"] is True
     assert bundle_config["num_queries"] == 100
     assert bundle_config["num_labels"] == 91
     assert bundle_config["image_mean"] == [0.485, 0.456, 0.406]

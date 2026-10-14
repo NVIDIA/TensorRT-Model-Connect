@@ -297,3 +297,19 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     actual = _native(binary, runtime_root, bundle, case)
     expected = _official_reference(model_dir, case)
     _assert_parity(actual, expected)
+
+    # The same bundle must accept images outside the original single fixture's
+    # aspect ratio, with the official resize and unchanged parity criteria.
+    from PIL import Image, ImageOps
+
+    with Image.open(_asset(case["test_image"])) as image:
+        variants = {
+            "portrait": image.transpose(Image.Transpose.ROTATE_90),
+            "square": ImageOps.pad(image, (max(image.size), max(image.size))),
+        }
+        for name, variant in variants.items():
+            path = tmp_path / f"{name}.png"
+            variant.save(path)
+            variant_case = {**case, "test_image": str(path)}
+            _assert_parity(_native(binary, runtime_root, bundle, variant_case),
+                           _official_reference(model_dir, variant_case))

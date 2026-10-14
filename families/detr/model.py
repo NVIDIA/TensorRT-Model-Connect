@@ -54,6 +54,8 @@ def _resolve_config(raw: dict) -> dict:
     fb = raw.get("_family_build_options") or {}
     image_h = int(fb.get("input_image_h", raw.get("_detr_image_h", 800)))
     image_w = int(fb.get("input_image_w", raw.get("_detr_image_w", 800)))
+    if image_h <= 0 or image_w <= 0:
+        raise ValueError("detr image capacity dimensions must be positive")
     return {
         "image_size_h": image_h,
         "image_size_w": image_w,
@@ -274,14 +276,10 @@ class _DetrModel:
         if cfg["position_embedding_type"] != "sine":
             raise NotImplementedError("detr only supports sine position embeddings")
 
-        feature_h = (image_h + 31) // 32
-        feature_w = (image_w + 31) // 32
-        seq_len = feature_h * feature_w
-
         if verbose:
             print(
-                f"[trtmc build] detr: image={image_h}x{image_w}, "
-                f"feature={feature_h}x{feature_w}, queries={num_queries}, "
+                f"[trtmc build] detr: max_image={image_h}x{image_w}, "
+                f"dynamic_image_shapes=True, queries={num_queries}, "
                 f"classes={num_labels + 1}, precision={precision}",
                 file=sys.stderr)
 
@@ -297,7 +295,12 @@ class _DetrModel:
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
         pixel_values = network.add_input(
-            "pixel_values", trt.float32, (1, 3, image_h, image_w))
+            "pixel_values", trt.float32, (1, 3, -1, -1))
+        profile = builder.create_optimization_profile()
+        profile.set_shape("pixel_values", (1, 3, 1, 1),
+                          (1, 3, min(image_h, 800), min(image_w, 800)),
+                          (1, 3, image_h, image_w))
+        trt_config.add_optimization_profile(profile)
         hidden_4d = pixel_values
         if hidden_4d.dtype != work_trt_dtype:
             hidden_4d = network.add_cast(hidden_4d, work_trt_dtype).get_output(0)
@@ -311,13 +314,12 @@ class _DetrModel:
             dtype=work_np_dtype)
         proj_flat = network.add_shuffle(proj)
         proj_flat.first_transpose = trt.Permutation([0, 2, 3, 1])
-        proj_flat.reshape_dims = (seq_len, d_model)
+        proj_flat.reshape_dims = (-1, d_model)
         hidden = proj_flat.get_output(0)
 
-        spatial_pos_np = graph_ops.make_sine_position_embedding(
-            feature_h, feature_w, d_model)
-        spatial_pos = graph_ops.add_constant(
-            network, (seq_len, d_model), spatial_pos_np.reshape(seq_len, d_model), dtype=np.float32)
+        # Batch-one, unpadded images: every feature position is valid. Generate
+        # positions from the actual feature grid, not the profile's maximum canvas.
+        spatial_pos = graph_ops.add_sine_position_embedding(network, proj, d_model)
         if spatial_pos.dtype != hidden.dtype:
             spatial_pos = network.add_cast(spatial_pos, hidden.dtype).get_output(0)
 
@@ -429,6 +431,7 @@ class _DetrModel:
             "model_type": config.model_type,
             "input_image_h": cfg["image_size_h"],
             "input_image_w": cfg["image_size_w"],
+            "dynamic_image_shapes": True,
             "shortest_edge": 800,
             "longest_edge": 1333,
             "image_mean": [0.485, 0.456, 0.406],
@@ -497,6 +500,7 @@ def build(request, writer) -> None:
             for key in (
                 "input_image_h",
                 "input_image_w",
+                "dynamic_image_shapes",
                 "shortest_edge",
                 "longest_edge",
                 "image_mean",

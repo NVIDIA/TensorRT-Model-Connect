@@ -107,17 +107,18 @@ std::vector<float> preprocess_detr_image(const float* image_pixels, int32_t imag
     const auto resize_shape = compute_detr_resize_shape(image_height, image_width, config);
     const int32_t resized_h = resize_shape.height;
     const int32_t resized_w = resize_shape.width;
-    const int32_t out_h = config.input_image_h;
-    const int32_t out_w = config.input_image_w;
-
-    if (resized_h > out_h || resized_w > out_w) {
+    if (resized_h > config.input_image_h || resized_w > config.input_image_w) {
         throw std::invalid_argument(
             "detr input resize dimensions exceed the engine input dimensions");
     }
-    if (resized_h != out_h || resized_w != out_w) {
+    if (!config.dynamic_image_shapes &&
+        (resized_h != config.input_image_h || resized_w != config.input_image_w)) {
         throw std::invalid_argument(
             "detr input resize dimensions require padding, but the engine has no pixel_mask input");
     }
+
+    const int32_t out_h = resized_h;
+    const int32_t out_w = resized_w;
 
     std::vector<float> resized(static_cast<std::size_t>(resized_h) * resized_w * 3U);
     if (stbir_resize(image_pixels, image_width, image_height,

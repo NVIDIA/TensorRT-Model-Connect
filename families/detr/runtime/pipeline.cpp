@@ -63,10 +63,11 @@ DetrObjectDetectionPipeline::DetrObjectDetectionPipeline(std::unique_ptr<ITrtMod
 ObjectDetectionResult DetrObjectDetectionPipeline::detect(const float* pixels, int32_t height,
                                                           int32_t width) {
     auto pixel_values = preprocess_detr_image(pixels, height, width, preprocess_config_);
+    const auto image_shape = compute_detr_resize_shape(height, width, preprocess_config_);
 
     Tensor img_t;
     img_t.data = pixel_values.data();
-    img_t.shape = {1, 3, preprocess_config_.input_image_h, preprocess_config_.input_image_w};
+    img_t.shape = {1, 3, image_shape.height, image_shape.width};
     img_t.dtype = DType::kFloat32;
 
     auto outputs = model_->forward({{"pixel_values", img_t}});

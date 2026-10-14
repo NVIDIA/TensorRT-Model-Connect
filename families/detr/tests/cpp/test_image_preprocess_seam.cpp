@@ -167,6 +167,37 @@ void test_detr_preprocess_rejects_invalid_config() {
     check(threw, "detr rejects zero image std");
 }
 
+void test_detr_dynamic_preprocess_preserves_actual_dimensions() {
+    trtmc::DetrPreprocessConfig config;
+    config.input_image_h = config.input_image_w = 1333;
+    config.dynamic_image_shapes = true;
+    const std::vector<float> pixels(3U * 600U * 900U, 0.75F);
+    try {
+        for (const auto shape : {trtmc::DetrResizeShape{600, 900}, trtmc::DetrResizeShape{900, 600},
+                                 trtmc::DetrResizeShape{600, 600}}) {
+            const auto resized =
+                trtmc::compute_detr_resize_shape(shape.height, shape.width, config);
+            const auto values =
+                trtmc::preprocess_detr_image(pixels.data(), shape.height, shape.width, config);
+            check(values.size() == 3U * resized.height * resized.width,
+                  "dynamic DETR uses the actual resized dimensions without padding");
+            check_close(values.front(), (0.75F - 0.485F) / 0.229F, 1e-5F,
+                        "dynamic DETR preserves normalization");
+        }
+    } catch (const std::invalid_argument& error) {
+        std::cerr << error.what() << '\n';
+        check(false, "dynamic DETR accepts landscape, portrait, and square images");
+    }
+    config.input_image_h = config.input_image_w = 799;
+    bool threw = false;
+    try {
+        (void)trtmc::preprocess_detr_image(pixels.data(), 600, 600, config);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "dynamic DETR still rejects images exceeding its profile capacity");
+}
+
 } // namespace
 
 int main() {
@@ -180,6 +211,7 @@ int main() {
     test_detr_preprocess_rejects_invalid_config();
     test_detr_preprocess_rejects_resize_larger_than_engine_input();
     test_detr_preprocess_rejects_padding_without_pixel_mask();
+    test_detr_dynamic_preprocess_preserves_actual_dimensions();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " detr preprocess test(s) failed\n";

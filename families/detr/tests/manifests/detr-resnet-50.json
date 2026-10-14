@@ -6,7 +6,7 @@
   "family": "detr",
   "task": "object_detection",
   "precision": "fp16",
-  "image_height": 796,
+  "image_height": 1333,
   "image_width": 1333,
   "testcases": [
     {
