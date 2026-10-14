@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run the production dialogue lifecycle on CPU with deterministic model callbacks.
 
-The anonymous Session is compiled unchanged from pipeline.cpp. Only its Engines
-dependency is replaced: the fake supplies token counts, generated media, and a
-barriers at assistant-prefix preparation and generated-text decoding. Test-only
-private visibility lets the latter arrange cancellation without sleeps. No
-CUDA headers or GPU are required.
+The anonymous Session lifecycle statements are compiled unchanged from pipeline.cpp.
+Fake Engines supplies deterministic model callbacks. A forwarding condition variable
+can pause the reader between its predicate and wait; test-only private visibility
+also permits cancellation barriers. No CUDA headers or GPU are required.
 """
 
 import shutil
@@ -38,8 +37,12 @@ def build_probe(directory, source_path=FAMILY / "runtime/pipeline.cpp"):
         extract(source, "const ConfigField kFields[] =", "std::string voice_prompt(")
         + extract(source, "struct AudioSegment {", "} // namespace")
     )
+    session = extract(source, "class Session final :", "} // namespace")
+    assert session.count("std::condition_variable cv_;") == 1
+    # Change only the synchronization object's type. Its forwarding wrapper
+    # preserves condition-variable semantics and exposes the predicate/wait gap.
     (directory / "session_under_test.inc").write_text(
-        extract(source, "class Session final :", "} // namespace")
+        session.replace("std::condition_variable cv_;", "ScheduledConditionVariable cv_;")
     )
     output = directory / "session_lifecycle"
     subprocess.run(
@@ -83,6 +86,7 @@ def probe(tmp_path_factory):
         "finish-empty",
         "cancel-startup",
         "cancel-delivery",
+        "stop-reader-handoff",
         "fail-assistant",
         "fail-generation",
         "fail-decode",

@@ -612,8 +612,11 @@ class Session final : public ISpeechDialogueSession, public ISpeechRealtimeContr
     }
     ~Session() override { stop(); }
     void stop() noexcept override {
-        stopped_.store(true);
-        cancelled_.store(true);
+        {
+            std::lock_guard<std::mutex> guard(event_mutex_);
+            stopped_.store(true);
+            cancelled_.store(true);
+        }
         cv_.notify_all();
     }
     bool append_audio(Span<const float> samples) override {

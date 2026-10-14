@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <exception>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -83,6 +84,34 @@ struct Engines {
             generated.stopped = !emit(generated, true);
         return generated;
     }
+};
+
+class ScheduledConditionVariable {
+  public:
+    std::function<void()> before_wait;
+    std::function<void()> before_notify;
+
+    template <class Predicate>
+    void wait(std::unique_lock<std::mutex>& lock, Predicate ready) {
+        while (!ready()) {
+            if (before_wait)
+                before_wait();
+            cv_.wait(lock);
+        }
+    }
+    template <class Rep, class Period, class Predicate>
+    bool wait_for(std::unique_lock<std::mutex>& lock,
+                  const std::chrono::duration<Rep, Period>& duration, Predicate ready) {
+        return cv_.wait_for(lock, duration, ready);
+    }
+    void notify_all() {
+        if (before_notify)
+            before_notify();
+        cv_.notify_all();
+    }
+
+  private:
+    std::condition_variable cv_;
 };
 
 // Visibility changes only: the delivery test probes the actual state mutex to
@@ -237,6 +266,63 @@ class StartupBarrier {
     std::condition_variable cv_;
     bool entered_{false}, released_{false};
 };
+
+void stop_reader_handoff() {
+    const auto engines = std::make_shared<Engines>();
+    Session session(engines, {{16000, 1}, std::nullopt}, {});
+    StartupBarrier predicate_window;
+    std::atomic<bool> inside_window{false}, notified_inside_window{false};
+    session.cv_.before_wait = [&] {
+        inside_window.store(true);
+        predicate_window.pause();
+        inside_window.store(false);
+    };
+    session.cv_.before_notify = [&] {
+        if (inside_window.load())
+            notified_inside_window.store(true);
+    };
+    std::promise<SpeechEventBatch> read_result;
+    auto read_done = read_result.get_future();
+    std::thread reader([&] {
+        try {
+            read_result.set_value(session.read_events(-1));
+        } catch (...) {
+            read_result.set_exception(std::current_exception());
+        }
+    });
+    predicate_window.wait();
+    std::promise<void> stop_started, stop_result;
+    auto started = stop_started.get_future(), stopped = stop_result.get_future();
+    std::thread stopper([&] {
+        stop_started.set_value();
+        session.stop();
+        stop_result.set_value();
+    });
+    started.wait();
+    // The controlled reader still owns event_mutex_ after observing false.
+    // A correct stop must wait for its atomic unlock-and-wait handoff. The
+    // deadline bounds this blocking assertion; no random scheduling is needed.
+    const bool stopped_in_window =
+        stopped.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    predicate_window.release();
+    if (stopped_in_window) {
+        // Recover the unfixed reader only after it has entered the real wait,
+        // so the negative control fails cleanly instead of hanging the test.
+        std::lock_guard<std::mutex> guard(session.event_mutex_);
+        session.cv_.notify_all();
+    }
+    stopper.join();
+    reader.join();
+    const auto batch = read_done.get();
+    session.cv_.before_wait = {};
+    session.cv_.before_notify = {};
+    require(!stopped_in_window && !notified_inside_window.load(),
+            "stop notified before the reader predicate-to-wait handoff");
+    require(batch.events.empty() && batch.state == SpeechReadState::EpochEnded,
+            "stop did not terminate the blocked reader");
+    expect_drained(session);
+    expect_closed_input(session);
+}
 
 void cancel_startup() {
     const auto engines = std::make_shared<Engines>();
@@ -450,6 +536,8 @@ int main(int argc, char** argv) {
             trtmc::lfm2_audio::cancel_startup();
         else if (std::string(argv[1]) == "cancel-delivery")
             trtmc::lfm2_audio::cancel_delivery();
+        else if (std::string(argv[1]) == "stop-reader-handoff")
+            trtmc::lfm2_audio::stop_reader_handoff();
         else if (std::string(argv[1]).rfind("fail-", 0) == 0)
             trtmc::lfm2_audio::generation_failure(argv[1]);
         else if (std::string(argv[1]).rfind("utf8-", 0) == 0)
