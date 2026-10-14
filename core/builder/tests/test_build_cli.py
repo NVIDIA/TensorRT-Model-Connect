@@ -541,3 +541,28 @@ def test_prepare_structure_requires_a_callable_family_hook(
             "-o", str(output),
         ])
     assert not output.exists()
+
+
+@pytest.mark.parametrize("remote", [True, False])
+def test_support_decision_records_the_hub_model_identity(
+    monkeypatch, tmp_path: Path, remote: bool
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(build_cli, "build", lambda request: None)
+    monkeypatch.setattr(build_cli, "_resolve_model", lambda name, revision: model)
+
+    def resolve(metadata):
+        seen.append((metadata.repo_id, metadata.revision))
+        return "example_owner", FamilySupport(("owner_default",), "owner_default")
+
+    monkeypatch.setattr(build_cli, "resolve_family", resolve)
+    name = "owner/example" if remote else str(model)
+
+    build_cli.main(
+        ["build", name, "--revision", "rev-1", "--output", str(tmp_path / "out.bundle")]
+    )
+
+    assert seen == [("owner/example", "rev-1") if remote else ("", "")]

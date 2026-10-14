@@ -512,6 +512,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/check_cyclomatic_complexity.py",
         "tools/community_ci.py",
         "tools/community_gpu_ci.py",
+        "tools/compatibility_export.py",
         "tools/e2e_evidence.py",
         "tools/e2e_report.py",
         "tools/legal_header_exceptions.toml",
@@ -519,6 +520,8 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/model_ci.py",
         "tools/model_benchmark.py",
         "tools/pr_metadata.py",
+        "tools/support_rules.schema.json",
+        "tools/support_rules_conformance.json",
         "tools/test_impact.py",
         "qualification_tests/benchmark_qualification/__init__.py",
         "qualification_tests/benchmark_qualification/accuracy.py",
@@ -598,6 +601,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_coderabbit_config.py",
         "tools/tests/test_community_ci.py",
         "tools/tests/test_community_gpu_ci.py",
+        "tools/tests/test_compatibility_export.py",
         "tools/tests/test_devtoolkit.py",
         "tools/tests/test_devtoolkit_capabilities.py",
         "tools/tests/test_e2e_evidence.py",
@@ -606,6 +610,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_new_ci.py",
         "tools/tests/test_model_benchmark.py",
         "tools/tests/test_pr_metadata.py",
+        "tools/tests/test_support_rules.py",
         "tools/tests/test_public_source_hygiene.py",
     }
     expected_qualification = migrated_qualification | {
