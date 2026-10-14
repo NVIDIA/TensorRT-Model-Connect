@@ -5,8 +5,8 @@
 
 #include "server/native_worker.h"
 
-#include "config.h"
 #include "cli/io.h"
+#include "config.h"
 #include "task_runtime.h"
 #include "trtmc/audio.hpp"
 #include "trtmc/control.hpp"
@@ -358,9 +358,9 @@ template <class Invoke, class Text>
 Json timed_transcription(Invoke&& invoke, Text&& extract_text) {
     const auto started = std::chrono::steady_clock::now();
     auto result = invoke();
-    const auto wall_ms = std::chrono::duration<double, std::milli>(
-                             std::chrono::steady_clock::now() - started)
-                             .count();
+    const auto wall_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+            .count();
     return {{"text", extract_text(result)},
             {"model_call_ms", wall_ms},
             {"timing_scope", "public_task_call_wall"}};
@@ -369,9 +369,11 @@ Json timed_transcription(Invoke&& invoke, Text&& extract_text) {
 template <class Invoke>
 int run_transcription_protocol(Invoke&& invoke, std::istream& input, std::ostream& output) {
     return run_protocol(
-        {{"event", "ready"}, {"protocol_version", 1},
+        {{"event", "ready"},
+         {"protocol_version", 1},
          {"capabilities", Json::array({"audio_transcription"})}},
-        {{"transcribe", [&](const Json& request) {
+        {{"transcribe",
+          [&](const Json& request) {
               cli::io::LoadedAudio audio;
               const auto path = string_field(request, "audio_path");
               try {
@@ -380,15 +382,18 @@ int run_transcription_protocol(Invoke&& invoke, std::istream& input, std::ostrea
                   throw ProtocolError("audio must be a readable WAV file");
               }
               if (audio.channels != 1 || audio.sample_rate <= 0 || audio.samples.empty() ||
-                  audio.samples.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
+                  audio.samples.size() >
+                      static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
                   !std::all_of(audio.samples.begin(), audio.samples.end(),
                                [](float value) { return std::isfinite(value); }))
-                  throw ProtocolError("audio must contain finite mono PCM samples at a positive rate");
+                  throw ProtocolError(
+                      "audio must contain finite mono PCM samples at a positive rate");
               auto result = invoke(audio, request);
               result["audio_sample_count"] = audio.samples.size();
               result["audio_sample_rate"] = audio.sample_rate;
               return result;
-          }}}, input, output);
+          }}},
+        input, output);
 }
 
 int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) {
@@ -437,10 +442,14 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) 
                     throw ProtocolError("config.max_output_tokens must be positive");
                 config.input_sample_rate = audio.sample_rate;
                 return timed_transcription(
-                    [&] { return transcription->transcribe(audio.samples.data(),
-                              static_cast<std::int32_t>(audio.samples.size()), config); },
+                    [&] {
+                        return transcription->transcribe(
+                            audio.samples.data(), static_cast<std::int32_t>(audio.samples.size()),
+                            config);
+                    },
                     [](const TextResult& result) { return result.text; });
-            }, input, output);
+            },
+            input, output);
     }
     return run_text_worker(task, input, output);
 }
@@ -486,10 +495,14 @@ int run_model_worker(const Model& model, std::istream& input, std::ostream& outp
                 const auto config = parse_sdk_config(request, fields);
                 const SpeechTranscriptionRequest input{
                     {{audio.samples.data(), audio.samples.size()},
-                     static_cast<std::uint32_t>(audio.sample_rate), 1}, {}};
-                return timed_transcription([&] { return task.run(input, config); },
+                     static_cast<std::uint32_t>(audio.sample_rate),
+                     1},
+                    {}};
+                return timed_transcription(
+                    [&] { return task.run(input, config); },
                     [](const auto& result) { return std::string(result.text()); });
-            }, input, output);
+            },
+            input, output);
     }
     return run_text_worker(model, input, output);
 }

@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "server/native_worker.h"
 #include "cli/io.h"
+#include "server/native_worker.h"
 #include "trtmc/core.hpp"
 
 #include <cstdint>
@@ -211,7 +211,9 @@ void test_audio_task(const std::filesystem::path& root, const trtmc::LoadOptions
     const std::vector<float> values{-1.0F, 0.0F, 0.5F, 1.0F};
     trtmc::cli::io::write_wav_interleaved({values.data(), values.size()}, 8000, 1, path.string());
     const auto run = invoke(bundle, options,
-                            {{{"id", "clip"}, {"op", "transcribe"}, {"audio_path", path.string()},
+                            {{{"id", "clip"},
+                              {"op", "transcribe"},
+                              {"audio_path", path.string()},
                               {"config", {{"suffix", "?"}, {"max_output_tokens", 7}}}}});
     std::filesystem::remove(path);
     require(run.status == 0 && run.messages.size() == 2 &&

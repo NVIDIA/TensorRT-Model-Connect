@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "server/native_worker.h"
 #include "cli/io.h"
+#include "server/native_worker.h"
 #include "trtmc/task.h"
 
 #include <filesystem>
@@ -50,11 +50,20 @@ std::vector<Json> messages(const std::string& output) {
 void verify(const std::string& path) {
     Transcriber task;
     std::stringstream input;
-    input << Json{{"id", "missing"}, {"op", "transcribe"}, {"audio_path", path + ".missing"}}.dump() << '\n';
-    input << Json{{"id", "config"}, {"op", "transcribe"}, {"audio_path", path},
-                  {"config", {{"max_output_tokens", 0}}}}.dump() << '\n';
-    input << Json{{"id", "clip"}, {"op", "transcribe"}, {"audio_path", path},
-                  {"config", {{"max_output_tokens", 7}}}}.dump() << '\n';
+    input << Json{{"id", "missing"}, {"op", "transcribe"}, {"audio_path", path + ".missing"}}.dump()
+          << '\n';
+    input << Json{{"id", "config"},
+                  {"op", "transcribe"},
+                  {"audio_path", path},
+                  {"config", {{"max_output_tokens", 0}}}}
+                 .dump()
+          << '\n';
+    input << Json{{"id", "clip"},
+                  {"op", "transcribe"},
+                  {"audio_path", path},
+                  {"config", {{"max_output_tokens", 7}}}}
+                 .dump()
+          << '\n';
     input << Json{{"id", "stop"}, {"op", "shutdown"}}.dump() << '\n';
     std::ostringstream output;
     require(trtmc::server::run_task_worker(task, input, output) == 0, "worker completes");
@@ -63,20 +72,28 @@ void verify(const std::string& path) {
     require(replies[0].at("capabilities") == Json::array({"audio_transcription"}),
             "only transcription is advertised");
     require(replies[1].at("error").at("type") == "invalid_request_error" &&
-                replies[2].at("error").at("type") == "invalid_request_error", "input errors recover");
+                replies[2].at("error").at("type") == "invalid_request_error",
+            "input errors recover");
     const auto& result = replies[3].at("result");
     require(replies[3].at("id") == "clip" && result.at("text") == "Exact transcript: caf\xc3\xa9.",
             "complete transcript and identity survive transport");
     require(result.at("audio_sample_count") == 4 && result.at("audio_sample_rate") == 8000 &&
                 result.at("model_call_ms").get<double>() >= 0 &&
-                result.at("timing_scope") == "public_task_call_wall", "audio identity and timing remain explicit");
+                result.at("timing_scope") == "public_task_call_wall",
+            "audio identity and timing remain explicit");
 
     task.fail = true;
-    std::istringstream bad(Json{{"id", "bad"}, {"op", "transcribe"}, {"audio_path", path},
-                               {"config", {{"max_output_tokens", 7}}}}.dump() + "\n");
+    std::istringstream bad(Json{{"id", "bad"},
+                                {"op", "transcribe"},
+                                {"audio_path", path},
+                                {"config", {{"max_output_tokens", 7}}}}
+                               .dump() +
+                           "\n");
     std::ostringstream failure;
-    require(trtmc::server::run_task_worker(task, bad, failure) == 1, "native failure retires the worker");
-    require(messages(failure.str())[1].at("error").at("message") == "native worker operation failed",
+    require(trtmc::server::run_task_worker(task, bad, failure) == 1,
+            "native failure retires the worker");
+    require(messages(failure.str())[1].at("error").at("message") ==
+                "native worker operation failed",
             "native details are redacted");
 }
 } // namespace
@@ -86,7 +103,8 @@ int main() {
                       ("trtmc-asr-" + std::to_string(std::random_device{}()) + ".wav");
     try {
         const std::vector<float> values{-1.0F, 0.0F, 0.5F, 1.0F};
-        trtmc::cli::io::write_wav_interleaved({values.data(), values.size()}, 8000, 1, path.string());
+        trtmc::cli::io::write_wav_interleaved({values.data(), values.size()}, 8000, 1,
+                                              path.string());
         verify(path.string());
         std::filesystem::remove(path);
     } catch (const std::exception& error) {
