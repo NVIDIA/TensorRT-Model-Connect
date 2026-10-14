@@ -18,13 +18,16 @@ from starlette.requests import Request
 
 async def multipart_audio(request: Request, limit: int) -> tuple[dict[str, Any], bytes]:
     try:
-        async with request.form(max_files=1, max_fields=4, max_part_size=limit) as form:
+        async with request.form(max_files=1, max_fields=4) as form:
             if any(len(form.getlist(key)) != 1 for key in form):
                 raise ValueError("multipart fields must occur once")
             upload = form.get("file")
             if not isinstance(upload, UploadFile):
                 raise ValueError("file must contain one uploaded WAV clip")
-            return {key: value for key, value in form.items() if key != "file"}, await upload.read()
+            data = await upload.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError("uploaded audio exceeds the server limit")
+            return {key: value for key, value in form.items() if key != "file"}, data
     except HTTPException as error:
         raise ValueError("invalid multipart WAV upload") from error
 
