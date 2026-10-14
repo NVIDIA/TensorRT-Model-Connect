@@ -45,6 +45,8 @@ def _serve_env(environment: Environment) -> dict[str, str]:
            "PYTHONPATH": f"{repo}/apps/perf_serving:{repo}/apps/benchmark:{repo}/core/builder:{repo}"}
     if environment.values.get("hf_hub_cache"):  # the cache that checkpoint retention manages
         env["HF_HUB_CACHE"] = str(environment["hf_hub_cache"])
+        # Remote-code modules are generated Python, separate from immutable checkpoint snapshots.
+        env.setdefault("HF_MODULES_CACHE", str(Path(environment["hf_hub_cache"]).parent / "hf-modules"))
     return env
 
 

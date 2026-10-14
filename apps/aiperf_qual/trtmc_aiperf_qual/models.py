@@ -6,9 +6,9 @@ A model's configuration is its catalog entry (checkpoint, revision, precision, b
 with the defaults of its Task (config/tasks.yaml). The candidate is the catalog bundle as shipped;
 accuracy comes from the Task's gold-labelled benchmarks (``absolute``) and whole-output checks
 (``supplementary``); a model with neither declares ``accuracy_source: none`` (Perf only). The native
-reference is the generic Hugging Face adapter of the operation. config/models/<profile>.yaml holds the
-exceptions (a reference environment, remote code, another native checkpoint, a build override) and is
-deep-merged last.
+reference is the generic Hugging Face adapter of the operation. Family-owned exceptions live in
+families/<family>/tests/aiperf/<profile>.yaml. Legacy config/models/<profile>.yaml remains supported;
+the family's definition is merged last.
 """
 
 from __future__ import annotations
@@ -150,6 +150,12 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         raise ConfigError(f"no Task defaults for {catalog_model.task!r} ({profile})")
     override_path = root / "models" / f"{profile}.yaml"
     override = configuration((yaml.safe_load(override_path.read_text()) if override_path.is_file() else None) or {})
+    family_path = repository / "families" / catalog_model.family / "tests" / "aiperf" / f"{profile}.yaml"
+    if family_path.is_file():
+        owned = yaml.safe_load(family_path.read_text())
+        if not isinstance(owned, dict):
+            raise ConfigError(f"{family_path} must contain a mapping")
+        override = deep_merge(override, configuration(owned))
     config = deep_merge(deep_merge(configuration(tasks["defaults"]),
                         configuration(tasks["tasks"][catalog_model.task])), override)
     candidate = dict(config.get("candidate", {}))
@@ -174,7 +180,8 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     if build:  # a bundle other than the catalog's: its own name, so the catalog bundle is never served instead
         build.setdefault("name", f"{profile}-qual")
 
-    absolute = _absolute(list(config.get("absolute") or []), tasks.get("benchmarks", {}),
+    definitions = deep_merge(tasks.get("benchmarks", {}), config.get("benchmarks", {}))
+    absolute = _absolute(list(config.get("absolute") or []), definitions,
                          (manifest.get("testcases") or [{}])[0], bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):

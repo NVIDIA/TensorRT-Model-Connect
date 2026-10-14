@@ -230,6 +230,32 @@ def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
     return ok, f"cosine {cosine:.5f}, relative L2 {relative:.4f}"
 
 
+def mask_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """Binary masks: equal source geometry, labels in {0, 1}, and foreground IoU within the gate."""
+    import numpy as np
+
+    shapes, masks = [], []
+    try:
+        for side in (candidate, native):
+            height, width = int((side or {}).get("height") or 0), int((side or {}).get("width") or 0)
+            values = np.asarray((side or {}).get("mask"))
+            if height <= 0 or width <= 0 or values.size != height * width:
+                return None, "missing mask or inconsistent source dimensions"
+            shapes.append((height, width))
+            masks.append(values.reshape(height, width))
+    except (TypeError, ValueError):
+        return None, "unreadable binary mask"
+    if any(not np.isin(mask, (0, 1)).all() for mask in masks):
+        return False, "mask labels outside {0, 1}"
+    if shapes[0] != shapes[1]:
+        return False, f"mask size differs: {shapes[0]} vs {shapes[1]}"
+    mine, theirs = (mask == 1 for mask in masks)
+    union = int(np.logical_or(mine, theirs).sum())
+    iou = float(np.logical_and(mine, theirs).sum()) / union if union else 1.0
+    return iou >= float(gate["min_mask_iou"]), f"mask IoU {iou:.5f}"
+
+
 def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
                     gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """Monocular geometry (the ``depth_artifact`` / ``valid_mask_artifact`` files both sides write): equal
@@ -310,7 +336,8 @@ def audio_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] 
     return match, reason
 
 
-PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"vector_parity": vector_parity, "geometry_parity": geometry_parity,
+PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"vector_parity": vector_parity, "mask_parity": mask_parity,
+                                                      "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
                                                       "audio_parity": audio_parity}
 # Parity metrics that read the output files the servers write (their artifacts are kept).

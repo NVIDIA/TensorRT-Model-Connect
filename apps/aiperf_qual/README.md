@@ -19,11 +19,20 @@ It does not use `qualification_tests/benchmark_qualification`.
 |---|---|---|
 | Execution | One workload recorder, with native and TRTMC servers running separately and speaking the same `/v1/tasks/{operation}` protocol: TRTMC (`trtmc-perf-serve --backend trtmc`, later `trtmc-server`) and the native reference (`--backend reference`: the generic adapter of the operation, or a family's own pipeline, `families/<family>/reference/adapter.py`). AIPerf sends every request. | No (adapters: per family) |
 | Task | `config/tasks.yaml`: per catalog Task, its benchmarks (`absolute`) and checks (`supplementary`), and Perf settings. | No |
-| Model | Derived from the catalog entry and its Task. `config/models/<profile>.yaml` holds only exceptions. | Only exceptions |
+| Model | Derived from the catalog entry and its Task. `families/<family>/tests/aiperf/<profile>.yaml` owns exceptions and benchmark definitions; legacy `config/models/<profile>.yaml` remains supported. | Per family |
 
 `trtmc-aiperf-qual plan` prints the derived configuration of every model; `trtmc-aiperf-qual matrix`
 writes the execution matrix (native path, environment, workloads, checks, and whether each profile is
 executable).
+
+Family definitions are merged after Task defaults and legacy overrides. They may declare local
+`benchmarks` and select them through `absolute`, so model-specific requests, native adapters and
+conversion criteria stay with their family. RT-DETR v2 keeps the bundle's fixed score threshold of
+0.3 on both sides. BiRefNet Lite compares binary foreground masks on 50 pinned COCO images against
+its official native model, using the unchanged family E2E IoU threshold of 0.90 for every image.
+This is conversion parity, not ADE20K semantic-segmentation accuracy. Acc and task-call P50 use the
+same requests. Remote-code module caches default to `hf-modules` beside the configured Hub cache;
+an explicit `HF_MODULES_CACHE` takes precedence.
 
 ### Accuracy
 
