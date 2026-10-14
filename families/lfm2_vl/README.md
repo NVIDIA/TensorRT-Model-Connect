@@ -69,8 +69,13 @@ curl --fail --location --max-time 60 \
 export TRTMC_LFM2_VL_MODEL_DIR=/tmp/lfm2-vl-inputs
 ```
 
-The test records the source URL and actual input file. Native and reference
-inference use the same decoded RGB pixels; the test does not download inputs.
+When this directory is supplied, the test requires the staged file and never
+falls back to a download. Without it, the test downloads the declared photo
+with a 60-second timeout for standalone or network-enabled runs. `HF_HUB_OFFLINE`
+controls checkpoint resolution, independently of this external image download.
+Evidence records the declared URL, acquisition mode, and actual input file;
+a local file's source is not authenticated by declaring the URL. Native and
+reference inference use the same decoded RGB pixels.
 
 To include real checkpoint token IDs and rendered-prompt BOS controls, set
 `TRTMC_LFM2_VL_TOKENIZER_JSON` to the pinned checkpoint's `tokenizer.json` when

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import re
+import urllib.request
 
 import pytest
 
@@ -65,8 +66,23 @@ def _fixtures(directory, processor):
     from PIL import Image, ImageDraw, ImageFont
 
     photo = directory / "model-card.jpg"
-    photo.write_bytes(_model_card_image().read_bytes())
-    record_evidence("inputs", {"model_card_image": {"source_url": CARD_IMAGE, "file": photo}})
+    if os.environ.get("TRTMC_LFM2_VL_MODEL_DIR"):
+        photo.write_bytes(_model_card_image().read_bytes())
+        acquisition = "staged"
+    else:
+        with urllib.request.urlopen(CARD_IMAGE, timeout=60) as response:
+            photo.write_bytes(response.read())
+        acquisition = "downloaded"
+    record_evidence(
+        "inputs",
+        {
+            "model_card_image": {
+                "declared_source_url": CARD_IMAGE,
+                "acquisition": acquisition,
+                "file": photo,
+            }
+        },
+    )
     ocr = Image.new("RGB", (1024, 768), "white")
     draw = ImageDraw.Draw(ocr)
     font = ImageFont.load_default(size=52)
