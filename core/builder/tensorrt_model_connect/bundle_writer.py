@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 
+from . import provenance
+
 
 BUNDLE_MAGIC = b"BUNDLE\x01\x00"
 _FORMAT = 1
@@ -55,6 +57,7 @@ class BundleWriter:
         self._failed_section = False
         self._finished = False
         self._aborted = False
+        self._build_request: Any = None
 
     def _ensure_writable(self) -> None:
         if self._finished:
@@ -89,12 +92,33 @@ class BundleWriter:
             "backend": _validate_id("backend", backend),
         }
 
+    def record_build(self, request: Any) -> None:
+        """Describe this bundle's build request in the core provenance section.
+
+        ``finish`` writes the description; bundles without a recorded request
+        carry no provenance section.
+        """
+
+        self._ensure_writable()
+        self._build_request = request
+
     @contextmanager
     def open_section(self, name: str) -> Iterator[BinaryIO]:
         """Open one file-backed section for incremental binary writes."""
 
         self._ensure_writable()
         name = _validate_nonempty_string("section name", name)
+        if name.startswith(provenance.CORE_SECTION_PREFIX):
+            raise ValueError(
+                f"section names starting with {provenance.CORE_SECTION_PREFIX!r} "
+                "are reserved for the core"
+            )
+        with self._stage_section(name) as section:
+            yield section
+
+    @contextmanager
+    def _stage_section(self, name: str) -> Iterator[BinaryIO]:
+        self._ensure_writable()
         if name in self._section_names:
             raise ValueError(f"duplicate bundle section name: {name!r}")
 
@@ -135,6 +159,13 @@ class BundleWriter:
             raise RuntimeError("cannot finish while a section is open")
         if self._failed_section:
             raise RuntimeError("cannot finish after a section write failed")
+        if self._build_request is not None:
+            record = provenance.collect(self._build_request)
+            with self._stage_section(provenance.PROVENANCE_SECTION) as section:
+                section.write(
+                    json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                )
+            self._build_request = None
 
         section_table: dict[str, dict[str, int]] = {}
         offset = 0

@@ -343,6 +343,43 @@ bool dispatch_throws(const trtmc::cli::Command& command, trtmc::ITask& task) {
     }
 }
 
+std::filesystem::path
+write_inspect_bundle(const std::string& name,
+                     const std::vector<std::pair<std::string, std::string>>& sections) {
+    nlohmann::json table = nlohmann::json::object();
+    std::string payload;
+    for (const auto& [section, bytes] : sections) {
+        table[section] = {{"offset", payload.size()}, {"length", bytes.size()}};
+        payload += bytes;
+    }
+    const std::string header = nlohmann::json{
+        {"format", 1},
+        {"family", "example"},
+        {"task", "text_generation"},
+        {"backend", "trt"},
+        {"sections", table}}.dump();
+    const auto path = std::filesystem::temp_directory_path() / name;
+    std::ofstream output(path, std::ios::binary);
+    output.write("BUNDLE\x01\x00", 8);
+    const std::uint64_t length = header.size();
+    for (int shift = 0; shift < 64; shift += 8)
+        output.put(static_cast<char>((length >> shift) & 0xffU));
+    output << header << payload;
+    return path;
+}
+
+nlohmann::json inspect_json(const std::filesystem::path& bundle) {
+    std::vector<std::string> arguments{"trtmc", "inspect", bundle.string()};
+    std::vector<char*> argv;
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    std::ostringstream output;
+    std::ostringstream error;
+    const int status = trtmc::cli::run(static_cast<int>(argv.size()), argv.data(), output, error);
+    check(status == 0, "inspect succeeds");
+    return status == 0 ? nlohmann::json::parse(output.str()) : nlohmann::json::object();
+}
+
 } // namespace
 
 int main() {
@@ -536,6 +573,21 @@ int main() {
           "batch transcription inputs preserve repeated option order");
     check(parse({"trtmc", "inspect", "model.bundle"}).kind == trtmc::cli::CommandKind::kInspect,
           "inspect does not require runtime root");
+    {
+        const nlohmann::json record{{"version", 1}, {"checkpoint", nullptr}};
+        const auto recorded = write_inspect_bundle(
+            "trtmc-cli-inspect-provenance.bundle",
+            {{"runtime.json", "{}"}, {"trtmc.provenance.json", record.dump()}});
+        const auto legacy =
+            write_inspect_bundle("trtmc-cli-inspect-legacy.bundle", {{"runtime.json", "{}"}});
+        check(inspect_json(recorded).value("provenance", nlohmann::json()) == record,
+              "inspect reports core build provenance");
+        const auto legacy_info = inspect_json(legacy);
+        check(legacy_info.contains("provenance") && legacy_info.at("provenance").is_null(),
+              "inspect reports a bundle without provenance as null");
+        std::filesystem::remove(recorded);
+        std::filesystem::remove(legacy);
+    }
     check(parse({"trtmc", "version"}).kind == trtmc::cli::CommandKind::kVersion,
           "version parses without bundle");
     check(parse_throws({"trtmc", "--version"}), "version flag alias is not accepted");

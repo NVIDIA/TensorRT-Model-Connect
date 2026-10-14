@@ -26,6 +26,7 @@ def build_bundle(request: BuildRequest, output: Path) -> None:
     from .model import build as build_model
 
     writer = BundleWriter(output)
+    writer.record_build(request)
     try:
         with graph_transform(request.graph_transform):
             build_model(request, writer)

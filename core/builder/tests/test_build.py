@@ -164,6 +164,9 @@ def test_build_finishes_after_family_returns(monkeypatch, tmp_path: Path) -> Non
         def __init__(self, destination: Path) -> None:
             events.append(("writer", destination))
 
+        def record_build(self, request: BuildRequest) -> None:
+            events.append(("record", request))
+
         def finish(self) -> None:
             events.append("finish")
 
@@ -181,8 +184,9 @@ def test_build_finishes_after_family_returns(monkeypatch, tmp_path: Path) -> Non
 
     assert build_core.build(request) is None
     assert events[0] == ("writer", request.output_path)
-    assert events[1][0:2] == ("build", request)
-    assert events[2:] == ["finish"]
+    assert events[1] == ("record", request)
+    assert events[2][0:2] == ("build", request)
+    assert events[3:] == ["finish"]
 
 
 def test_build_runs_graph_transform_before_family_engine_serialization(
@@ -203,6 +207,9 @@ def test_build_runs_graph_transform_before_family_engine_serialization(
 
     class FakeWriter:
         def __init__(self, _destination: Path) -> None:
+            pass
+
+        def record_build(self, _request: BuildRequest) -> None:
             pass
 
         def finish(self) -> None:
@@ -243,6 +250,9 @@ def test_build_aborts_and_preserves_family_error(monkeypatch, tmp_path: Path) ->
         def __init__(self, _destination: Path) -> None:
             pass
 
+        def record_build(self, _request: BuildRequest) -> None:
+            pass
+
         def finish(self) -> None:
             events.append("finish")
 
@@ -268,6 +278,9 @@ def test_build_aborts_if_finish_fails(monkeypatch, tmp_path: Path) -> None:
 
     class FakeWriter:
         def __init__(self, _destination: Path) -> None:
+            pass
+
+        def record_build(self, _request: BuildRequest) -> None:
             pass
 
         def finish(self) -> None:

@@ -54,6 +54,7 @@ def build(
         resolve_model(model, revision), variant, max_sequence_length, max_batch_size, max_options
     )
     writer = BundleWriter(output)
+    writer.record_build(request)
     try:
         build_model(request, writer)
         writer.finish()

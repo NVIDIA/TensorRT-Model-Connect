@@ -58,7 +58,7 @@ def test_bundle_selects_backend_before_import_and_aborts_on_owner_failure(monkey
         events.append(backend)
         monkeypatch.setitem(sys.modules, "families.bert.model", SimpleNamespace(build=lambda *args: (_ for _ in ()).throw(RuntimeError("build failed"))))
     monkeypatch.setattr(cli, "select_backend", select)
-    monkeypatch.setattr(cli, "BundleWriter", lambda output: SimpleNamespace(finish=lambda: events.append("finish"), abort=lambda: events.append("abort")))
+    monkeypatch.setattr(cli, "BundleWriter", lambda output: SimpleNamespace(record_build=lambda request: None, finish=lambda: events.append("finish"), abort=lambda: events.append("abort")))
     with pytest.raises(RuntimeError, match="build failed"):
         cli.build_bundle(cli.BuildRequest(tmp_path, backend="trt_rtx"), tmp_path / "out")
     assert events == ["trt_rtx", "abort"]

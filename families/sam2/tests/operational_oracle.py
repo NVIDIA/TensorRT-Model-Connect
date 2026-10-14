@@ -28,7 +28,9 @@ def assert_bundle_contract(bundle: Path) -> None:
         header_length = struct.unpack("<Q", stream.read(8))[0]
         header = json.loads(stream.read(header_length))
         sections = header["sections"]
-        assert set(sections) == _PLANS | {"runtime.json"}
+        assert {name for name in sections if not name.startswith("trtmc.")} == _PLANS | {
+            "runtime.json"
+        }
         for name in _PLANS:
             assert int(sections[name]["length"]) > 0
         runtime = sections["runtime.json"]

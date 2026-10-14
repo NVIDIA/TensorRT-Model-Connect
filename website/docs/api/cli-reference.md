@@ -71,7 +71,10 @@ trtmc version
 ```
 
 `inspect` accepts exactly one path and prints the format, family, task,
-backend, and section bounds. Family-owned section payloads are not decoded.
+backend, section bounds, and the core
+[build provenance](../architecture/bundle-format.md#build-provenance), which is
+`null` for a bundle built without it. Family-owned section payloads are not
+decoded.
 
 ## Run a bundle
 

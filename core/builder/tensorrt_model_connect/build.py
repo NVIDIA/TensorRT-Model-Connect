@@ -242,6 +242,7 @@ def build(request: BuildRequest) -> None:
     _select_backend(request.backend)
     family_module = _load_family(family)
     writer = BundleWriter(request.output_path)
+    writer.record_build(request)
     try:
         with graph_transform(request.graph_transform):
             family_module.build(request, writer)

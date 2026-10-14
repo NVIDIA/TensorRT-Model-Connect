@@ -31,6 +31,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -394,6 +395,20 @@ void require_finite(const std::vector<float>& values, const std::string& field) 
 
 void write_json(std::ostream& output, const nlohmann::json& value) {
     output << value.dump() << '\n';
+}
+
+// Core build provenance is optional metadata; older bundles report null.
+nlohmann::json read_provenance(const std::string& bundle_path) {
+    constexpr std::string_view kSection = "trtmc.provenance.json";
+    constexpr std::uint64_t kMaxBytes = 1U << 20U;
+    const BundleReader reader(bundle_path);
+    const BundleSectionInfo* section = reader.find_section(kSection);
+    if (section == nullptr)
+        return nullptr;
+    if (section->length > kMaxBytes)
+        throw std::runtime_error("bundle provenance exceeds 1 MiB");
+    const std::vector<char> bytes = reader.read_section(kSection);
+    return nlohmann::json::parse(bytes.begin(), bytes.end());
 }
 
 nlohmann::json text_json(const TextResult& result) {
@@ -1669,7 +1684,8 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
                                 {"family", bundle.family},
                                 {"task", bundle.task},
                                 {"backend", bundle.backend},
-                                {"sections", std::move(sections)}});
+                                {"sections", std::move(sections)},
+                                {"provenance", read_provenance(command.bundle)}});
             return EXIT_SUCCESS;
         }
         const bool has_byok_library = has_option(command, "--byok-library");

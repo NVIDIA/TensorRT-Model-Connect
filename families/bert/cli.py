@@ -65,6 +65,7 @@ def build_bundle(request: BuildRequest, output: Path, *, transform: GraphTransfo
     from .model import build as build_model
 
     writer = BundleWriter(output)
+    writer.record_build(request)
     try:
         with graph_transform(transform):
             build_model(request, writer)

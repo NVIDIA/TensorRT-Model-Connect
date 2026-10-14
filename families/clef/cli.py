@@ -36,6 +36,7 @@ def build_bundle(request: BuildRequest, output: Path):
     from .model import build as build_model
 
     writer = BundleWriter(output)
+    writer.record_build(request)
     try:
         build_model(request, writer)
         writer.finish()
