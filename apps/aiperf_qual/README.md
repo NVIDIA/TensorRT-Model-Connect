@@ -377,7 +377,8 @@ the corresponding native transcript, with complete request and timing joins.
 Audio sample rates, counts, and durations remain recorded. This stage qualifies
 recorded complete clips; streaming ASR and audio question answering remain planned.
 Whisper now honors the checkpoint GELU with an FP32 activation boundary for
-half inputs; older Whisper bundles need rebuilding. The numerical gates remain unchanged.
+half inputs, and an FP32 encoder disables TF32 operand rounding. Older Whisper
+bundles need rebuilding. The numerical gates remain unchanged.
 
 Use [Profile Embeddings with AIPerf](../../website/docs/user-guides/profile-embeddings-with-aiperf.md),
 [Profile Reranking with AIPerf](../../website/docs/user-guides/profile-reranking-with-aiperf.md),

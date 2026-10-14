@@ -556,6 +556,9 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
     tc.builder_optimization_level = 1
+    if precision == "fp32":
+        # Honor the FP32 encoder boundary without TF32 operand rounding.
+        tc.clear_flag(trt.BuilderFlag.TF32)
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype), dtype=work_np_dtype
