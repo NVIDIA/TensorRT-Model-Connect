@@ -87,7 +87,8 @@ and use `tests/requirements.txt` in a separate Python environment. Selected E2E
 tests reuse a cached environment under `.ci/reference/<family>`, or use an existing reference
 interpreter supplied as `TRTMC_REFERENCE_PYTHON=/absolute/path/to/python`.
 CI's connected `setup` stage prepares the selected `MODEL` reference before
-the E2E container goes offline. Local tests prepare the cache on first use.
+the E2E container goes offline. When no prepared cache exists, online tests use
+pytest's writable temporary directory, including with a read-only checkout.
 The upstream reference programs and their dependency declarations are excluded
 from the wheel. Qualification from the source checkout retains the same
 checkpoints, reference computations, and comparison thresholds.

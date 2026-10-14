@@ -10,7 +10,7 @@ import pytest
 
 
 @pytest.fixture(scope="session")
-def reference_python() -> Path:
+def reference_python(tmp_path_factory) -> Path:
     configured = os.environ.get("TRTMC_REFERENCE_PYTHON")
     if configured:
         python = Path(configured).resolve()
@@ -20,8 +20,13 @@ def reference_python() -> Path:
     from trtmc_perf_serving.environments import reference_python as prepare
 
     tests = Path(__file__).resolve().parent
+    cache = tests.parents[2] / ".ci" / "reference" / "yolov10"
+    if not cache.is_dir():
+        # Source-only runners can mount the checkout read-only. Their online
+        # first-use reference setup belongs in pytest's writable scratch.
+        cache = tmp_path_factory.mktemp("yolov10-reference")
     return prepare(
         tests / "requirements.txt",
-        tests.parents[2] / ".ci" / "reference" / "yolov10",
+        cache,
         prepare=tests / "reference/prepare.py",
     )
