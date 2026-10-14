@@ -16,7 +16,8 @@
       "do_sample": false,
       "use_chat_template": true,
       "repetition_penalty": 1.0,
-      "semantic_case": "model-card-quickstart"
+      "semantic_case": "model-card-quickstart",
+      "premerge": true
     }
   ],
   "max_sequence_length": 131072,

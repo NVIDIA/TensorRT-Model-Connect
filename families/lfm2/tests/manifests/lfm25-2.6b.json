@@ -15,7 +15,8 @@
       "max_new_tokens": 16,
       "do_sample": false,
       "repetition_penalty": 1.0,
-      "semantic_case": "raw-capital-completion"
+      "semantic_case": "raw-capital-completion",
+      "premerge": true
     },
     {
       "name": "lfm25-2.6b-chat",
@@ -25,7 +26,8 @@
       "do_sample": false,
       "use_chat_template": true,
       "repetition_penalty": 1.0,
-      "semantic_case": "chat-prefix-interface"
+      "semantic_case": "chat-prefix-interface",
+      "premerge": true
     },
     {
       "name": "lfm25-2.6b-tool-call",
@@ -37,7 +39,8 @@
       "expected_answers": [
         "set_temperature(temperature=22)"
       ],
-      "semantic_case": "positive-temperature-tool"
+      "semantic_case": "positive-temperature-tool",
+      "premerge": true
     },
     {
       "name": "lfm25-2.6b-tool-result",
@@ -49,7 +52,8 @@
       "expected_answers": [
         "22 degrees Celsius"
       ],
-      "semantic_case": "tool-result"
+      "semantic_case": "tool-result",
+      "premerge": true
     }
   ],
   "max_sequence_length": 512,
