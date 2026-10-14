@@ -406,6 +406,7 @@ if(TRTMC_BUILD_SERVER)
   target_link_libraries(trtmc_server
     PUBLIC trtmc_runtime trtmc_c
     PRIVATE
+      trtmc_media_io
       nlohmann_json::nlohmann_json
   )
   target_compile_options(trtmc_server PRIVATE -Wall -Wextra -Wpedantic)
@@ -536,6 +537,14 @@ if(TRTMC_BUILD_TESTS)
     target_compile_options(test_server_ranking_worker PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME server_ranking_worker COMMAND test_server_ranking_worker)
     set_tests_properties(server_ranking_worker PROPERTIES LABELS cpu)
+
+    add_executable(test_server_transcription_worker apps/server/tests/test_transcription_worker.cpp)
+    target_include_directories(test_server_transcription_worker PRIVATE
+      ${PROJECT_SOURCE_DIR}/apps ${PROJECT_SOURCE_DIR}/core/runtime/include)
+    target_link_libraries(test_server_transcription_worker PRIVATE trtmc_server trtmc_media_io nlohmann_json::nlohmann_json)
+    target_compile_options(test_server_transcription_worker PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server_transcription_worker COMMAND test_server_transcription_worker)
+    set_tests_properties(server_transcription_worker PROPERTIES LABELS cpu)
   endif()
 
   add_library(trtmc_test_cli_fixture SHARED apps/cli/tests/test_family_cli.cpp)
@@ -704,10 +713,11 @@ if(TRTMC_BUILD_TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_executable(test_server_sdk_worker apps/server/tests/test_sdk_worker.cpp)
     target_link_libraries(test_server_sdk_worker PRIVATE
-      trtmc_server trtmc_c nlohmann_json::nlohmann_json)
+      trtmc_server trtmc_media_io trtmc_c nlohmann_json::nlohmann_json)
     target_compile_options(test_server_sdk_worker PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_dependencies(test_server_sdk_worker trtmc-server trtmc_api_test_backend
-      trtmc_api_test_family trtmc_api_test_text_family trtmc_api_test_stream_family)
+      trtmc_api_test_family trtmc_api_test_text_family trtmc_api_test_stream_family
+      trtmc_api_test_audio_family)
     add_test(NAME server_sdk_worker
       COMMAND test_server_sdk_worker "${_trtmc_api_test_runtime_root}")
     add_test(NAME server_sdk_worker_process

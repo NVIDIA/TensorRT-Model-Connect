@@ -96,6 +96,16 @@ def extract_task_timing(result: Mapping[str, Any]) -> dict[str, float]:
     return {"model_call_ms": float(wall)}
 
 
+def extract_transcription(result: Any, sample_count: int, sample_rate: int) -> str:
+    if (not isinstance(result, Mapping) or not isinstance(result.get("text"), str) or
+            type(result.get("audio_sample_count")) is not int or
+            type(result.get("audio_sample_rate")) is not int or
+            result["audio_sample_count"] != sample_count or result["audio_sample_rate"] != sample_rate):
+        raise WorkerProtocolError("worker transcription result has invalid text or audio identity")
+    extract_task_timing(result)
+    return result["text"]
+
+
 def public_worker_error(error: Exception) -> str:
     if isinstance(error, WorkerRequestTooLargeError):
         return "request exceeds the native worker transport limit"

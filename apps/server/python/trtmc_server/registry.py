@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Own text-model worker processes without leaking serving concerns into the runtime."""
+"""Own model worker processes without leaking serving concerns into the runtime."""
 
 from __future__ import annotations
 
@@ -173,5 +173,5 @@ class ModelRegistry:
         capabilities = metadata.get("capabilities")
         if (not isinstance(capabilities, list) or not capabilities or
                 not all(isinstance(value, str) for value in capabilities) or
-                not {"text_generation", "embeddings", "reranking"}.intersection(capabilities)):
+                not {"text_generation", "embeddings", "reranking", "audio_transcription"}.intersection(capabilities)):
             raise WorkerProtocolError("worker does not advertise a supported capability")

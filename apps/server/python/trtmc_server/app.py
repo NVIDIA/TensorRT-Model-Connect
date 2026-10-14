@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""FastAPI control plane for persistent text-generation workers."""
+"""FastAPI control plane for persistent native Task workers."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -31,10 +32,11 @@ from .errors import (
     WorkerTimeoutError,
 )
 from .metrics import Metrics
-from .protocol import chat_prompt, extract_embedding, extract_ranking, extract_result, generation_config, public_worker_error
+from .protocol import chat_prompt, extract_embedding, extract_ranking, extract_result, extract_transcription, generation_config, public_worker_error
 from .records import RequestPolicy, RequestRecords
 from .registry import ModelRegistry
-from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest
+from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest, TranscriptionRequest
+from .uploads import UploadedInput, multipart_audio, wav_metadata
 from .worker import WorkerSession
 
 
@@ -47,11 +49,15 @@ class ServerConfig:
         max_prompt_bytes: int,
         max_generation_tokens: int,
         records: Path | None = None,
+        max_audio_seconds: float = 30.0,
     ) -> None:
         self.max_body_bytes = max_body_bytes
         self.max_prompt_bytes = max_prompt_bytes
         self.max_generation_tokens = max_generation_tokens
         self.records = records
+        if not math.isfinite(max_audio_seconds) or max_audio_seconds <= 0:
+            raise ValueError("max_audio_seconds must be finite and positive")
+        self.max_audio_seconds = max_audio_seconds
 
 
 class _BodyLimitMiddleware:
@@ -67,6 +73,7 @@ class _BodyLimitMiddleware:
             "/v1/chat/completions",
             "/v1/embeddings",
             "/v1/ranking",
+            "/v1/audio/transcriptions",
         }:
             await self.app(scope, receive, send)
             return
@@ -497,12 +504,14 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
     async def execute_task(
         http_request: Request, model: str, capability: str, operation: str,
         payload: dict[str, Any], validate: Callable[[Any], Any],
+        release_input: Callable[[], None] | None = None,
     ) -> Any:
         route = http_request.url.path
         context = http_request.state.timing
         context["model"] = model
         request_id = http_request.state.request_id
         admitted = time.monotonic()
+        session = None
         try:
             if not registry.supports(model, capability):
                 metrics.reject(route, 400)
@@ -519,6 +528,9 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         except RuntimeError:
             metrics.reject(route, 503)
             return error_response(503, "server_draining", "server is not accepting requests")
+        finally:
+            if session is None and release_input is not None:
+                release_input()
         queue_seconds = time.monotonic() - admitted
         context.update(replica=getattr(session, "replica_name", None),
                        admission_ms=queue_seconds * 1000, streaming="none")
@@ -526,7 +538,8 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         started = time.monotonic()
         status = 500
         try:
-            result = await _worker_request(session, payload, operation=operation, validate=validate)
+            result = await _worker_request(session, payload, operation=operation, validate=validate,
+                                           release_input=release_input)
             context.update(model_call_ms=result["model_call_ms"], timing_scope=result["timing_scope"])
             status = 200
             return result
@@ -591,6 +604,38 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         order = sorted(range(len(scores)), key=lambda index: -scores[index])
         return {"rankings": [{"index": index, "logit": scores[index]} for index in order]}
 
+    @app.post("/v1/audio/transcriptions")
+    async def transcriptions(http_request: Request) -> Any:
+        route = http_request.url.path
+        context = http_request.state.timing
+        try:
+            fields, data = await multipart_audio(http_request, config.max_body_bytes)
+            context.update(model=fields.get("model"), input_items=1, audio_bytes=len(data))
+            context.update(wav_metadata(data))
+            request = TranscriptionRequest.model_validate(fields)
+        except ValueError as error:
+            metrics.reject(route, 400)
+            return error_response(400, "invalid_request", str(error))
+        if context["audio_duration_seconds"] > config.max_audio_seconds:
+            metrics.reject(route, 413)
+            return error_response(413, "content_too_large", "audio duration exceeds the server limit")
+        if request.max_output_tokens is not None and request.max_output_tokens > config.max_generation_tokens:
+            metrics.reject(route, 400)
+            return error_response(400, "unsupported_parameter", "max_output_tokens exceeds the server limit")
+        native_config = ({"max_output_tokens": request.max_output_tokens}
+                         if request.max_output_tokens is not None else {})
+        media = UploadedInput(data, ".wav")
+        validate = lambda value: extract_transcription(value, context["audio_sample_count"],
+                                                       context["audio_sample_rate"])
+        result = await execute_task(http_request, request.model, "audio_transcription", "transcribe",
+                                    {"audio_path": str(media.path), "config": native_config}, validate,
+                                    release_input=media.close)
+        if isinstance(result, JSONResponse):
+            return result
+        text = validate(result)
+        context["transcript_bytes"] = len(text.encode("utf-8"))
+        return PlainTextResponse(text) if request.response_format == "text" else {"text": text}
+
     @app.post("/v1/chat/completions")
     async def chat_completions(http_request: Request, request: ChatCompletionRequest) -> Any:
         try:
@@ -620,11 +665,25 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
 
 
 async def _worker_request(session: WorkerSession, payload: dict[str, Any], *,
-                          operation: str = "generate", validate: Callable[[Any], Any] = extract_result) -> Any:
+                          operation: str = "generate", validate: Callable[[Any], Any] = extract_result,
+                          release_input: Callable[[], None] | None = None) -> Any:
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        try:
+            session.close()
+        finally:
+            if release_input is not None:
+                release_input()
+
     try:
         task = asyncio.wrap_future(session.submit(operation, payload))
     except BaseException:
-        session.close()
+        release()
         raise
     ownership = task
     try:
@@ -637,18 +696,18 @@ async def _worker_request(session: WorkerSession, payload: dict[str, Any], *,
             raise
         return result
     except asyncio.CancelledError:
-        def release(completed: asyncio.Future[Any]) -> None:
-            session.close()
+        def completed_release(completed: asyncio.Future[Any]) -> None:
+            release()
             try:
                 completed.exception()
             except BaseException:
                 pass
 
-        ownership.add_done_callback(release)
+        ownership.add_done_callback(completed_release)
         raise
     finally:
         if ownership.done():
-            session.close()
+            release()
 
 
 async def incremental_response(session: WorkerSession, payload: dict[str, Any], *, model: str,

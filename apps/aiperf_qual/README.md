@@ -357,6 +357,7 @@ modes require their own evidence.
 | --- | --- | --- | --- |
 | `bge-small-en-v1.5` | `/v1/embeddings` / `embeddings` | One sentence per request, FP16, context 512, concurrency 1; five fixed example sentences, 5 warmups and 50 measured requests | [Stage 1](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1668) |
 | `nemotron-rerank-vl-1b-v2` | `/v1/ranking` / `nim_rankings` | One query plus two fixed text passages, FP16, context 685, concurrency 1; 5 warmups and 50 measured requests | [Stage 2](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1669) |
+| `whisper-tiny-fp16` | `/v1/audio/transcriptions` / `audio_transcription` | One complete mono PCM16 WAV clip; ten pinned LibriSpeech clips, FP16, context 128, output limit 120, concurrency 1; 5 warmups and 50 measured requests | [Stage 3](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1670) |
 
 The embedding pilot passed the unchanged bert family correctness checks and a
 real published AIPerf 0.13.0 run on one GB300 with TensorRT 11.1.0.106. All
@@ -368,8 +369,17 @@ real finite scores and original passage indices. Both pilots matched all
 client/server request IDs and timing exports. Additional epic stages remain
 planned until their native correctness and actual client runs are complete.
 
-Use [Profile Embeddings with AIPerf](../../website/docs/user-guides/profile-embeddings-with-aiperf.md)
-or [Profile Reranking with AIPerf](../../website/docs/user-guides/profile-reranking-with-aiperf.md)
+The transcription pilot passed the unchanged whisper family native/reference
+testcase and benchmark WER criteria on the exact served bundle. The ten native
+transcripts matched the FP32 reference under family WER normalization; both
+had 3.59% WER against the gold corpus. All 55 published-client responses matched
+the corresponding native transcript, with complete request and timing joins.
+Audio sample rates, counts, and durations remain recorded. This stage qualifies
+recorded complete clips; streaming ASR and audio question answering remain planned.
+
+Use [Profile Embeddings with AIPerf](../../website/docs/user-guides/profile-embeddings-with-aiperf.md),
+[Profile Reranking with AIPerf](../../website/docs/user-guides/profile-reranking-with-aiperf.md),
+or [Profile Transcription with AIPerf](../../website/docs/user-guides/profile-transcription-with-aiperf.md)
 for the short recipes. Native Task-call wall time stays separate from client
 HTTP latency; these small runs are integration examples, not performance gates.
 

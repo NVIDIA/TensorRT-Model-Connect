@@ -68,3 +68,9 @@ class RankingRequest(StrictRequest):
     query: RankingText
     passages: list[RankingText] = Field(min_length=1)
     truncate: Literal["NONE"] = "NONE"
+
+
+class TranscriptionRequest(StrictRequest):
+    model: str = Field(min_length=1)
+    response_format: Literal["json", "text"] = "json"
+    max_output_tokens: int | None = Field(default=None, ge=1)

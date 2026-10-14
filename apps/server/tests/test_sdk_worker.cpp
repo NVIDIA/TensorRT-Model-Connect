@@ -4,6 +4,7 @@
  */
 
 #include "server/native_worker.h"
+#include "cli/io.h"
 #include "trtmc/core.hpp"
 
 #include <cstdint>
@@ -204,6 +205,24 @@ void test_incremental_stream(const std::filesystem::path& root, const trtmc::Loa
                 run.messages[2].at("result").at("model_call_ms").get<double>() >= 0,
             "terminal result carries scoped timing");
 }
+void test_audio_task(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    const auto bundle = write_bundle(root, "speech_transcription", "audio_fixture");
+    const auto path = root / "server-sdk-input.wav";
+    const std::vector<float> values{-1.0F, 0.0F, 0.5F, 1.0F};
+    trtmc::cli::io::write_wav_interleaved({values.data(), values.size()}, 8000, 1, path.string());
+    const auto run = invoke(bundle, options,
+                            {{{"id", "clip"}, {"op", "transcribe"}, {"audio_path", path.string()},
+                              {"config", {{"suffix", "?"}, {"max_output_tokens", 7}}}}});
+    std::filesystem::remove(path);
+    require(run.status == 0 && run.messages.size() == 2 &&
+                run.messages[0].at("capabilities") == Json::array({"audio_transcription"}),
+            "the declared SDK speech Task is dispatched");
+    const auto& result = run.messages[1].at("result");
+    require(result.at("text") == "asr:auto?" && result.at("audio_sample_count") == 4 &&
+                result.at("audio_sample_rate") == 8000 &&
+                result.at("timing_scope") == "public_task_call_wall",
+            "SDK defaults, declared Config, transcript and audio identity survive transport");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -217,6 +236,7 @@ int main(int argc, char** argv) {
         test_invalid_config_is_nonfatal(root, options);
         test_task_selection_and_failures(root, options);
         test_incremental_stream(root, options);
+        test_audio_task(root, options);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
