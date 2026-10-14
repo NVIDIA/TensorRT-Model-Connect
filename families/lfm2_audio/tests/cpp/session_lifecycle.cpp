@@ -26,10 +26,13 @@ using namespace internal;
 
 struct FakeTokenizer {
     std::function<void()> before_decode;
+    std::function<std::string(const std::vector<std::int32_t>&)> decode_value;
     std::vector<std::int32_t> encode(const std::string&) const { return {1}; }
-    std::string decode(const std::vector<std::int32_t>&) const {
+    std::string decode(const std::vector<std::int32_t>& ids) const {
         if (before_decode)
             before_decode();
+        if (decode_value)
+            return decode_value(ids);
         return "reply";
     }
 };
@@ -42,7 +45,9 @@ struct Engines {
     int max_context{1024};
     int generation_calls{0};
     std::function<void()> before_assistant;
+    std::function<void()> before_generate;
     std::function<void()> after_emit;
+    std::vector<std::vector<std::int32_t>> text_steps;
 
     History start(const std::string&) const {
         History history;
@@ -57,14 +62,23 @@ struct Engines {
     void append_audio(History& history, const AudioView&) {
         history.embeddings.resize(history.embeddings.size() + 2048);
     }
-    Generation generate(History&, const Options&, bool, const Emit& emit) {
+    Generation generate(History& history, const Options&, bool, const Emit& emit) {
         ++generation_calls;
+        if (before_generate)
+            before_generate();
         Generation generated;
-        generated.text = {42};
         generated.waveform = {0.25F, -0.25F};
-        generated.stopped = !emit(generated, false);
-        if (after_emit)
-            after_emit();
+        const auto steps =
+            text_steps.empty() ? std::vector<std::vector<std::int32_t>>{{42}} : text_steps;
+        for (const auto& ids : steps) {
+            generated.text = ids;
+            history.embeddings.resize(history.embeddings.size() + 2048);
+            generated.stopped = !emit(generated, false);
+            if (after_emit)
+                after_emit();
+            if (generated.stopped)
+                break;
+        }
         if (!generated.stopped)
             generated.stopped = !emit(generated, true);
         return generated;
@@ -335,6 +349,96 @@ void cancel_delivery() {
     expect_events(session, {SpeechEventKind::Reset}, SpeechReadState::Active, 2);
     require(session.append_text("next epoch"), "cancelled delivery did not reset");
 }
+
+void generation_failure(const std::string& mode) {
+    const auto engines = std::make_shared<Engines>();
+    Session session(engines, {{16000, 1}, std::nullopt}, {});
+    require(session.append_text("user input"), "input was unexpectedly backpressured");
+    session.commit_input_turn(false);
+    const auto committed_size = session.history_.embeddings.size();
+    const auto failure = [] { throw std::runtime_error("injected generation failure"); };
+    if (mode == "fail-assistant")
+        engines->before_assistant = failure;
+    else if (mode == "fail-generation")
+        engines->before_generate = failure;
+    else if (mode == "fail-decode")
+        engines->tokenizer->before_decode = failure;
+    else if (mode == "fail-after-media")
+        engines->after_emit = failure;
+    else
+        throw std::invalid_argument("unknown failure injection");
+    bool propagated = false;
+    try {
+        session.create_response();
+    } catch (const std::runtime_error& error) {
+        propagated = std::string(error.what()) == "injected generation failure";
+    }
+    require(propagated, "generation error was swallowed or replaced");
+    require(!session.waiting_response_, "failed generation retained waiting_response");
+    require(session.history_.embeddings.size() == committed_size,
+            "failed generation committed partial assistant history");
+    if (mode == "fail-after-media")
+        expect_events(session,
+                      {SpeechEventKind::TurnStarted, SpeechEventKind::AgentText,
+                       SpeechEventKind::AgentAudio, SpeechEventKind::TurnFinished},
+                      SpeechReadState::EpochEnded);
+    else
+        expect_events(session, {SpeechEventKind::TurnStarted, SpeechEventKind::TurnFinished},
+                      SpeechReadState::EpochEnded);
+    expect_drained(session);
+    engines->before_assistant = {};
+    engines->before_generate = {};
+    engines->tokenizer->before_decode = {};
+    engines->after_emit = {};
+    require(session.append_text("next input"), "failed generation did not release input");
+    session.commit_input_turn();
+    expect_events(session,
+                  {SpeechEventKind::TurnStarted, SpeechEventKind::AgentText,
+                   SpeechEventKind::AgentAudio, SpeechEventKind::TurnFinished},
+                  SpeechReadState::EpochEnded);
+    expect_drained(session);
+}
+
+void utf8_delivery(const std::string& mode) {
+    const auto engines = std::make_shared<Engines>();
+    std::string bytes;
+    std::vector<std::string> expected;
+    if (mode == "utf8-complete") {
+        bytes = "\xe2\x82\xac\xf0\x9f\x99\x82!";
+        expected = {"\xe2\x82\xac", "\xf0\x9f\x99\x82", "!"};
+    } else if (mode == "utf8-truncated") {
+        bytes = "\xe2\x82";
+        expected = {"\xef\xbf\xbd"};
+    } else if (mode == "utf8-invalid") {
+        bytes = "\xc3(";
+        expected = {"\xef\xbf\xbd("};
+    } else
+        throw std::invalid_argument("unknown UTF-8 case");
+    std::vector<std::int32_t> prefix;
+    for (const auto byte : bytes) {
+        prefix.push_back(static_cast<unsigned char>(byte));
+        engines->text_steps.push_back(prefix);
+    }
+    engines->tokenizer->decode_value = [](const std::vector<std::int32_t>& ids) {
+        std::string result;
+        for (const auto id : ids)
+            result.push_back(static_cast<char>(id));
+        return result;
+    };
+    Session session(engines, {{16000, 1}, std::nullopt}, {});
+    require(session.append_text("user input"), "input was unexpectedly backpressured");
+    session.commit_input_turn();
+    const auto batch = session.read_events(0);
+    std::vector<std::string> chunks;
+    for (const auto& event : batch.events)
+        if (event.kind == SpeechEventKind::AgentText)
+            chunks.push_back(event.text);
+    require(chunks == expected, "AgentText events do not preserve UTF-8 boundaries");
+    require(batch.events.front().kind == SpeechEventKind::TurnStarted &&
+                batch.events.back().kind == SpeechEventKind::TurnFinished,
+            "UTF-8 response did not preserve turn boundaries");
+    expect_drained(session);
+}
 } // namespace
 } // namespace trtmc::lfm2_audio
 
@@ -346,6 +450,10 @@ int main(int argc, char** argv) {
             trtmc::lfm2_audio::cancel_startup();
         else if (std::string(argv[1]) == "cancel-delivery")
             trtmc::lfm2_audio::cancel_delivery();
+        else if (std::string(argv[1]).rfind("fail-", 0) == 0)
+            trtmc::lfm2_audio::generation_failure(argv[1]);
+        else if (std::string(argv[1]).rfind("utf8-", 0) == 0)
+            trtmc::lfm2_audio::utf8_delivery(argv[1]);
         else
             trtmc::lfm2_audio::finish_case(argv[1]);
     } catch (const std::exception& error) {

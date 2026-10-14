@@ -8,6 +8,7 @@
   "family": "lfm2_audio",
   "task": "offline_speech_dialogue",
   "precision": "bf16",
+  "tensor_parallel_size": 1,
   "max_sequence_length": 32768,
   "testcases": [
     {

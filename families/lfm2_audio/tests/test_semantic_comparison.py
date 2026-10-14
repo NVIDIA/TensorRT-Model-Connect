@@ -3,12 +3,13 @@
 """Integration controls ensure speech acceptance cannot reduce to finite PCM."""
 
 import copy
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from families.lfm2_audio.tests.compare_semantics import compare
+from families.lfm2_audio.tests.compare_semantics import compare, suite_coverage
 
 
 @pytest.fixture
@@ -58,7 +59,7 @@ def speech_case(tmp_path):
 
 
 def test_semantic_speech_accepts_same_content_without_code_identity(speech_case):
-    result = compare(*speech_case)
+    result = compare(*speech_case, scope="partial")
     assert result["passed"]
     assert not result["cases"][0]["details"][0]["audio_codes_equal_diagnostic"]
 
@@ -68,7 +69,7 @@ def test_asr_binding_uses_exact_pcm_not_the_path(speech_case, tmp_path):
     snapshot = tmp_path / "renamed-asr-input.f32"
     snapshot.write_bytes(Path(transcripts[0]["asr_input"]).read_bytes())
     transcripts[0]["asr_input"] = str(snapshot)
-    assert compare(cases, actual, reference, public, transcripts)["passed"]
+    assert compare(cases, actual, reference, public, transcripts, scope="partial")["passed"]
 
 
 @pytest.mark.parametrize(
@@ -98,7 +99,7 @@ def test_semantic_speech_rejects_real_contract_failures(speech_case, failure):
         actual[0]["trace"]["tokens"] = [128]
     elif failure == "unfinished_asr":
         transcripts[0]["asr_ended"] = False
-    assert not compare(cases, actual, reference, public, transcripts)["passed"]
+    assert not compare(cases, actual, reference, public, transcripts, scope="partial")["passed"]
 
 
 @pytest.fixture
@@ -154,7 +155,7 @@ def dialogue_case(tmp_path):
 
 
 def test_dialogue_binds_spoken_text_to_both_producers(dialogue_case):
-    assert compare(*dialogue_case)["passed"]
+    assert compare(*dialogue_case, scope="partial")["passed"]
 
 
 @pytest.mark.parametrize("producer", ["native", "reference"])
@@ -166,6 +167,59 @@ def test_valid_speech_cannot_mask_unrelated_displayed_text(dialogue_case, produc
         public[0]["turns"][0]["text"] = wrong
     else:
         reference[0]["turns"][0]["text"] = wrong
-    result = compare(cases, actual, reference, public, transcripts)
+    result = compare(cases, actual, reference, public, transcripts, scope="partial")
     assert not result["passed"]
     assert not result["cases"][0]["checks"][f"turn_0_{producer}_displayed_speech_text"]
+
+
+def test_partial_speech_proof_cannot_claim_full_suite(speech_case):
+    full = compare(*speech_case)
+    assert not full["passed"] and not full["full_suite_passed"]
+    partial = compare(*speech_case, scope="partial")
+    assert partial["passed"] and partial["scope"] == "partial"
+    assert not partial["full_suite_passed"]
+    assert not all(partial["suite_coverage"].values())
+
+
+def add_stream(speech_case):
+    cases, actual, reference, public, transcripts = copy.deepcopy(speech_case)
+    streamed = dict(cases[0], name="stream-with-an-arbitrary-label", mode="tts_stream")
+    cases.append(streamed)
+    actual.append(dict(actual[0], name=streamed["name"], chunks=[960, 960]))
+    reference.append(dict(reference[0], name=streamed["name"]))
+    transcripts += [dict(record, name=streamed["name"]) for record in transcripts]
+    return cases, actual, reference, public, transcripts
+
+
+def test_stream_uses_matching_inputs_not_magic_case_name(speech_case):
+    result = compare(*add_stream(speech_case), scope="partial")
+    assert result["passed"]
+    assert result["cases"][1]["checks"]["streamed_offline_waveform"]
+
+
+@pytest.mark.parametrize("change", ["remove", "settings"])
+def test_stream_requires_an_equivalent_offline_case(speech_case, change):
+    cases, actual, reference, public, transcripts = add_stream(speech_case)
+    if change == "remove":
+        cases.pop(0)
+    else:
+        cases[0]["max_new_tokens"] += 1
+    result = compare(cases, actual, reference, public, transcripts, scope="partial")
+    assert not result["passed"]
+    row = next(row for row in result["cases"] if row["name"] == "stream-with-an-arbitrary-label")
+    assert not row["checks"]["streamed_offline_waveform"]
+
+
+MANIFEST_CASES = json.loads(
+    (Path(__file__).parent / "manifests/lfm25-audio-1.5b.json").read_text()
+)["testcases"]
+
+
+def test_model_card_scope_covers_the_declared_matrix():
+    assert all(suite_coverage(MANIFEST_CASES).values())
+
+
+@pytest.mark.parametrize("removed", [case["name"] for case in MANIFEST_CASES])
+def test_omitting_a_model_card_case_fails_coverage(removed):
+    remaining = [case for case in MANIFEST_CASES if case["name"] != removed]
+    assert not all(suite_coverage(remaining).values())

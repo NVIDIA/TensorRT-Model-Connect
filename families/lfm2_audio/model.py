@@ -13,11 +13,7 @@ from types import SimpleNamespace
 import numpy as np
 from safetensors import safe_open
 
-from .backbone import build_lfm2_engine
-from .checkpoint_mapper import load_lfm2_weights
 from .config import validate_dense_lfm2_config
-from .conformer import build_encoder
-from .depthformer import build_depthformer
 
 CHECKPOINT = "LiquidAI/LFM2.5-Audio-1.5B"
 REVISION = "c362a0625dfe45aa588dce5f0ada28a7e5707628"
@@ -36,8 +32,8 @@ class BuildRequest:
     def __post_init__(self):
         if self.precision != "bf16":
             raise ValueError("LFM2.5 audio requires BF16 precision")
-        if self.backend not in {"trt", "trt_rtx"}:
-            raise ValueError("LFM2.5 audio requires a TensorRT backend")
+        if self.backend != "trt":
+            raise ValueError("LFM2.5 audio builds only standard TensorRT plans")
         if self.max_sequence_length is not None and (
             type(self.max_sequence_length) is not int
             or not 1 <= self.max_sequence_length <= CONTEXT_LENGTH
@@ -158,6 +154,11 @@ def build(request, writer):
         "text_conversation",
     }:
         raise ValueError("unsupported LFM2.5 audio task")
+    from .backbone import build_lfm2_engine
+    from .checkpoint_mapper import load_lfm2_weights
+    from .conformer import build_encoder
+    from .depthformer import build_depthformer
+
     root = Path(request.model_dir)
     raw, detok_raw = load_config(root)
     max_context = request.max_sequence_length or CONTEXT_LENGTH

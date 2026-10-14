@@ -141,12 +141,22 @@ void test_tts(const trtmc::Model& model) {
           "callback error releases execution owner");
 }
 
+std::size_t legacy_text_tail_calls;
+trtmc_status TRTMC_CALL legacy_text_tail(trtmc_speech_session*, trtmc_string_view, trtmc_error**) {
+    ++legacy_text_tail_calls;
+    return TRTMC_OK;
+}
+
 void test_text_input(const trtmc::Model& model) {
     trtmc_speech_session_api_v1 old_table{};
     old_table.header = {1, 0, offsetof(trtmc_speech_session_api_v1, append_text)};
-    trtmc::SpeechSession old_runtime({}, &old_table, nullptr);
+    old_table.append_text = legacy_text_tail;
+    legacy_text_tail_calls = 0;
+    auto old_model = std::make_shared<trtmc::detail::ModelState>(trtmc::detail::core_api());
+    trtmc::SpeechSession old_runtime(std::move(old_model), &old_table, nullptr);
     check(fails(TRTMC_UNSUPPORTED, [&] { (void)old_runtime.append_text("old runtime"); }),
-          "old session table remains safe when optional text tail is absent");
+          "legacy table size rejects a non-null optional text tail");
+    check(legacy_text_tail_calls == 0, "legacy table size guard prevents optional tail invocation");
     auto session = model.task<trtmc::DuplexSpeechDialogue>().create(dialogue());
     check(!session.append_text(std::string(17, 'x')),
           "text backpressure accepts no oversized input");

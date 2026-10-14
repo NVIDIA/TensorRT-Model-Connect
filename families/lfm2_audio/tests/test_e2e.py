@@ -86,6 +86,7 @@ def test_model_card_native_audio(request, tmp_path):
     from families.lfm2_audio.model import BuildRequest, build
 
     assert torch.cuda.is_available()
+    assert MANIFEST["tensor_parallel_size"] == 1, "LFM2.5 audio requires a single device"
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     probe = native_probe(runtime, tmp_path)
     api_probe = native_probe(runtime, tmp_path, public_api=True)

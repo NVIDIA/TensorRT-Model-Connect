@@ -34,7 +34,44 @@ def waveform(path):
     return samples, blob
 
 
-def compare(cases, native, reference, public, transcripts):
+def suite_coverage(cases):
+    def greedy(case):
+        return case.get("audio_temperature", 0) <= 0 or case.get("audio_top_k", 1) == 1
+
+    def present(mode, predicate=lambda _case: True):
+        return any(case["mode"] == mode and predicate(case) for case in cases)
+
+    coverage = {
+        "asr": present("asr"),
+        "streaming_tts": present("tts_stream"),
+        "greedy_dialogue": present("chat", greedy),
+        "speech_response": present("speech_response"),
+        "mixed_input": present("mixed"),
+        "text_response": present("text", lambda case: "context_tokens" not in case),
+        "context_32768": present("text", lambda case: case.get("context_tokens") == 32768),
+        "sampled_card_tts": present(
+            "tts",
+            lambda case: (
+                case.get("voice") == "uk_male"
+                and case.get("audio_temperature") == 0.8
+                and case.get("audio_top_k") == 64
+            ),
+        ),
+        "sampled_card_dialogue": present(
+            "chat",
+            lambda case: case.get("audio_temperature") == 1.0 and case.get("audio_top_k") == 4,
+        ),
+    }
+    for voice in ("us_male", "us_female", "uk_male", "uk_female"):
+        coverage["greedy_tts_" + voice] = present(
+            "tts", lambda case, voice=voice: case.get("voice") == voice and greedy(case)
+        )
+    return coverage
+
+
+def compare(cases, native, reference, public, transcripts, *, scope="model-card"):
+    if scope not in {"model-card", "partial"}:
+        raise ValueError("unknown semantic validation scope")
     native = {item["name"]: item for item in native}
     reference = {item["name"]: item for item in reference}
     public = {item["name"]: item for item in public}
@@ -209,12 +246,36 @@ def compare(cases, native, reference, public, transcripts):
                 "details": details,
             }
         )
-    offline = next((case for case in cases if case["name"] == "lfm25-audio-tts-us-male"), None)
-    streamed = next((case for case in cases if case["mode"] == "tts_stream"), None)
-    if offline and streamed:
+    settings = {
+        "voice": "us_male",
+        "text_temperature": 0.0,
+        "text_top_k": 1,
+        "audio_temperature": 0.0,
+        "audio_top_k": 1,
+        "seed": 0,
+    }
+    for streamed in (case for case in cases if case["mode"] == "tts_stream"):
+        offline = next(
+            (
+                case
+                for case in cases
+                if case["mode"] == "tts"
+                and case["text"] == streamed["text"]
+                and case["max_new_tokens"] == streamed["max_new_tokens"]
+                and all(
+                    case.get(key, default) == streamed.get(key, default)
+                    for key, default in settings.items()
+                )
+            ),
+            None,
+        )
+        row = next(row for row in rows if row["name"] == streamed["name"])
+        if offline is None:
+            row["checks"]["streamed_offline_waveform"] = False
+            row["passed"] = False
+            continue
         a, b = waveform(offline["output"])[0], waveform(streamed["output"])[0]
         same = a.shape == b.shape and np.max(np.abs(a - b)) <= 1e-6
-        row = next(row for row in rows if row["name"] == streamed["name"])
         row["checks"]["streamed_offline_waveform"] = bool(same)
         chunks = native[streamed["name"]]["chunks"]
         row["checks"]["successive_stream_chunks"] = (
@@ -225,19 +286,35 @@ def compare(cases, native, reference, public, transcripts):
     voices = {
         case["voice"]: case
         for case in cases
-        if case["mode"] == "tts" and case.get("audio_temperature", 0) == 0
+        if case["mode"] == "tts"
+        and (case.get("audio_temperature", 0) <= 0 or case.get("audio_top_k", 1) == 1)
     }
-    if set(voices) == {"us_male", "us_female", "uk_male", "uk_female"}:
+    complete_voices = set(voices) == {"us_male", "us_female", "uk_male", "uk_female"}
+    if scope == "model-card":
+        for case in voices.values():
+            row = next(row for row in rows if row["name"] == case["name"])
+            row["checks"]["four_voice_coverage"] = complete_voices
+            row["passed"] &= complete_voices
+    if complete_voices:
         recordings = [waveform(case["output"])[1] for case in voices.values()]
         distinct = all(recordings[i] != recordings[j] for i in range(4) for j in range(i))
         for case in voices.values():
             row = next(row for row in rows if row["name"] == case["name"])
             row["checks"]["distinct_voice_conditioned_waveforms"] = distinct
             row["passed"] &= distinct
+    coverage = suite_coverage(cases)
+    passed = (
+        bool(rows)
+        and all(row["passed"] for row in rows)
+        and (scope == "partial" or all(coverage.values()))
+    )
     return {
-        "passed": all(row["passed"] for row in rows),
+        "passed": passed,
+        "scope": scope,
+        "suite_coverage": coverage,
+        "full_suite_passed": scope == "model-card" and passed,
         "cases": rows,
-        "voice_scope": "Four original voice prompts and intended spoken content; no independent perceptual timbre/accent score.",
+        "voice_scope": "Model-card scope requires all four original voice conditions; partial scope covers only supplied cases. No independent perceptual timbre/accent score.",
         "strict_sequences": "Preserved as diagnostics; task semantics are the acceptance contract.",
     }
 
@@ -254,12 +331,14 @@ def main():
     parser = argparse.ArgumentParser()
     for name in ("cases", "native", "reference", "public", "transcripts", "output"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--scope", choices=("model-card", "partial"), default="model-card")
     args = parser.parse_args()
     result = compare(
         *(
             read_records(getattr(args, name))
             for name in ("cases", "native", "reference", "public", "transcripts")
-        )
+        ),
+        scope=args.scope,
     )
     Path(args.output).write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     raise SystemExit(0 if result["passed"] else 1)

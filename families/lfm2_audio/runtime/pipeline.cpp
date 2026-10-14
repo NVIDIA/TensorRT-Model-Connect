@@ -799,6 +799,64 @@ class Session final : public ISpeechDialogueSession, public ISpeechRealtimeContr
             epoch_ended_ = true;
         cv_.notify_all();
     }
+    static std::string complete_text(std::string_view bytes, bool final, std::size_t& consumed) {
+        std::string text;
+        std::size_t offset = 0;
+        while (offset < bytes.size()) {
+            const auto first = static_cast<unsigned char>(bytes[offset]);
+            const std::size_t width = first < 0x80                     ? 1
+                                      : first >= 0xc2 && first <= 0xdf ? 2
+                                      : first >= 0xe0 && first <= 0xef ? 3
+                                      : first >= 0xf0 && first <= 0xf4 ? 4
+                                                                       : 0;
+            if (width == 0) {
+                text += "\xef\xbf\xbd";
+                ++offset;
+                continue;
+            }
+            std::size_t valid = 1;
+            while (valid < width && offset + valid < bytes.size()) {
+                const auto next = static_cast<unsigned char>(bytes[offset + valid]);
+                if (next < 0x80 || next > 0xbf ||
+                    (valid == 1 &&
+                     ((first == 0xe0 && next < 0xa0) || (first == 0xed && next > 0x9f) ||
+                      (first == 0xf0 && next < 0x90) || (first == 0xf4 && next > 0x8f))))
+                    break;
+                ++valid;
+            }
+            if (valid == width) {
+                text.append(bytes.substr(offset, width));
+                offset += width;
+            } else if (offset + valid == bytes.size() && !final) {
+                break;
+            } else {
+                // Match loss-tolerant ByteLevel decoding only once a sequence
+                // is known to be invalid, or generation has ended mid-character.
+                text += "\xef\xbf\xbd";
+                offset += valid;
+            }
+        }
+        consumed = offset;
+        return text;
+    }
+    void finish_response() {
+        {
+            std::lock_guard<std::mutex> state(state_mutex_);
+            waiting_response_ = false;
+        }
+        try {
+            event(SpeechEventKind::TurnFinished, {}, {}, 0, true);
+        } catch (...) {
+            // Even an allocation failure while enqueueing the terminal event
+            // must release a direct-session reader and preserve its exception.
+            {
+                std::lock_guard<std::mutex> events(event_mutex_);
+                epoch_ended_ = true;
+            }
+            cv_.notify_all();
+            throw;
+        }
+    }
     void respond() {
         History candidate;
         {
@@ -809,40 +867,59 @@ class Session final : public ISpeechDialogueSession, public ISpeechRealtimeContr
             cancelled_.store(false);
             event(SpeechEventKind::TurnStarted);
         }
-        engines_->append_text(candidate, "<|im_start|>assistant\n");
-        std::size_t emitted_samples = 0, emitted_text = 0;
-        std::lock_guard<std::mutex> execute(engines_->mutex);
-        auto result =
-            engines_->generate(candidate, cfg_, true, [&](const Generation& result, bool final) {
+        try {
+            engines_->append_text(candidate, "<|im_start|>assistant\n");
+            std::size_t emitted_samples = 0, emitted_text_bytes = 0, decoded_tokens = 0;
+            std::string decoded_text;
+            std::lock_guard<std::mutex> execute(engines_->mutex);
+            auto result = engines_->generate(
+                candidate, cfg_, true, [&](const Generation& result, bool final) {
+                    std::lock_guard<std::mutex> state(state_mutex_);
+                    if (cancelled_ || epoch_cancelled_ || stopped_)
+                        return false;
+                    if (result.text.size() > decoded_tokens) {
+                        decoded_text = engines_->tokenizer->decode(result.text);
+                        if (decoded_text.size() < emitted_text_bytes)
+                            throw std::runtime_error(
+                                "LFM audio text decoding changed an emitted prefix");
+                        decoded_tokens = result.text.size();
+                    }
+                    if (decoded_text.size() > emitted_text_bytes) {
+                        std::size_t consumed = 0;
+                        auto chunk =
+                            complete_text(std::string_view(decoded_text).substr(emitted_text_bytes),
+                                          final, consumed);
+                        if (!chunk.empty())
+                            event(SpeechEventKind::AgentText, std::move(chunk), {}, 0, final);
+                        emitted_text_bytes += consumed;
+                    }
+                    const auto ready = result.waveform.size();
+                    if (ready > emitted_samples) {
+                        std::vector<float> chunk(result.waveform.begin() + emitted_samples,
+                                                 result.waveform.begin() + ready);
+                        event(SpeechEventKind::AgentAudio, {}, std::move(chunk), emitted_samples,
+                              final);
+                        emitted_samples = ready;
+                    }
+                    return true;
+                });
+            if (!result.stopped)
+                engines_->append_text(candidate, "<|im_end|>\n");
+            {
                 std::lock_guard<std::mutex> state(state_mutex_);
-                if (cancelled_ || epoch_cancelled_ || stopped_)
-                    return false;
-                if (result.text.size() > emitted_text) {
-                    const std::vector<int32_t> ids(result.text.begin() + emitted_text,
-                                                   result.text.end());
-                    event(SpeechEventKind::AgentText, engines_->tokenizer->decode(ids), {}, 0,
-                          final);
-                    emitted_text = result.text.size();
-                }
-                const auto ready = result.waveform.size();
-                if (ready > emitted_samples) {
-                    std::vector<float> chunk(result.waveform.begin() + emitted_samples,
-                                             result.waveform.begin() + ready);
-                    event(SpeechEventKind::AgentAudio, {}, std::move(chunk), emitted_samples,
-                          final);
-                    emitted_samples = ready;
-                }
-                return true;
-            });
-        if (!result.stopped)
-            engines_->append_text(candidate, "<|im_end|>\n");
-        {
-            std::lock_guard<std::mutex> state(state_mutex_);
-            if (!result.stopped && !cancelled_ && !epoch_cancelled_ && !stopped_)
-                std::swap(history_, candidate);
-            waiting_response_ = false;
+                if (!result.stopped && !cancelled_ && !epoch_cancelled_ && !stopped_)
+                    std::swap(history_, candidate);
+            }
+        } catch (...) {
+            try {
+                finish_response();
+            } catch (...) {
+                // finish_response already marked the epoch terminal. Retain
+                // the original generation/callback failure for the caller.
+            }
+            throw;
         }
-        event(SpeechEventKind::TurnFinished, {}, {}, 0, true);
+        finish_response();
     }
     std::shared_ptr<Engines> engines_;
     Options cfg_;

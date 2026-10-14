@@ -170,3 +170,8 @@ completed response. The comparator checks that the generated PCM exactly equals
 the saved ASR input, so a transcript from a different waveform cannot qualify it.
 When reusing older results, external evidence orchestration must verify their
 provenance before creating the corresponding input snapshots.
+
+The comparator defaults to the complete model-card scope and fails if required
+task, voice, sampling, or context cases are missing. `--scope partial` explicitly
+checks only supplied cases and never reports a full-suite pass. A streaming case
+still requires an offline counterpart with the same input and generation settings.

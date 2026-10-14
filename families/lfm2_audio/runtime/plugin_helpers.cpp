@@ -38,16 +38,15 @@ std::shared_ptr<ITokenizer> create_tokenizer(const BundleReader& bundle) {
     const auto& section = require_section(bundle, "tokenizer.json");
     const bool pinned =
         lfm2_audio_uses_pinned_split_byte_level_pretokenizer(section.data(), section.size());
-    auto tokenizer = CreateBpeTokenizer(section.data(), section.size(), !pinned);
+    if (!pinned)
+        throw std::runtime_error("lfm2_audio tokenizer.json has an unsupported pre_tokenizer");
+    auto tokenizer = CreateBpeTokenizer(section.data(), section.size(), false);
     if (tokenizer == nullptr)
         throw std::runtime_error("lfm2 BPE tokenizer construction failed");
     if (lfm2_audio_uses_sequence_byte_level_decoder(section.data(), section.size()))
         tokenizer = lfm2_audio_wrap_byte_level_decoder(std::move(tokenizer));
-    if (pinned) {
-        tokenizer = lfm2_audio_wrap_pinned_pretokenizer(
-            std::move(tokenizer),
-            lfm2_audio_tokenizer_added_tokens(section.data(), section.size()));
-    }
+    tokenizer = lfm2_audio_wrap_pinned_pretokenizer(
+        std::move(tokenizer), lfm2_audio_tokenizer_added_tokens(section.data(), section.size()));
     return std::shared_ptr<ITokenizer>(std::move(tokenizer));
 }
 

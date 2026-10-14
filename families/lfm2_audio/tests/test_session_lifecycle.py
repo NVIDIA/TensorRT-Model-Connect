@@ -83,6 +83,13 @@ def probe(tmp_path_factory):
         "finish-empty",
         "cancel-startup",
         "cancel-delivery",
+        "fail-assistant",
+        "fail-generation",
+        "fail-decode",
+        "fail-after-media",
+        "utf8-complete",
+        "utf8-truncated",
+        "utf8-invalid",
     ],
 )
 def test_production_session_lifecycle(probe, case):
