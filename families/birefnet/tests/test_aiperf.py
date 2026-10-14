@@ -24,5 +24,3 @@ def test_birefnet_owns_its_binary_conversion_benchmark_and_native_loader():
     assert "label_column" not in suite["source"] and not suite.get("request")
     assert model["reference"]["adapter"] == "families/birefnet/reference/adapter.py"
     assert model["reference"]["trust_remote_code"] is True
-
-

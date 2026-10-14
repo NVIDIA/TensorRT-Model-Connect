@@ -19,5 +19,3 @@ def test_rtdetr_benchmark_uses_the_fixed_bundle_threshold():
     assert entry["suite_definition"]["request"] == {"score_threshold": 0.3}
     assert entry["suite_definition"]["selection"]["count"] == 500
     assert entry["gate"] == {"margin": 1.0}
-
-
