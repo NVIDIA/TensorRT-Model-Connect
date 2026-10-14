@@ -625,8 +625,9 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         native_config = ({"max_output_tokens": request.max_output_tokens}
                          if request.max_output_tokens is not None else {})
         media = UploadedInput(data, ".wav")
-        validate = lambda value: extract_transcription(value, context["audio_sample_count"],
-                                                       context["audio_sample_rate"])
+        def validate(value):
+            return extract_transcription(value, context["audio_sample_count"],
+                                         context["audio_sample_rate"])
         result = await execute_task(http_request, request.model, "audio_transcription", "transcribe",
                                     {"audio_path": str(media.path), "config": native_config}, validate,
                                     release_input=media.close)
