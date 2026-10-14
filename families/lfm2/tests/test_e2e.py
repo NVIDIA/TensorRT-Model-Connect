@@ -100,7 +100,7 @@ def _required_environment(tp_size: int):
 
 
 def _checkpoint(manifest: dict) -> Path:
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import constants, snapshot_download
 
     revision = manifest.get("hf_revision")
     assert isinstance(revision, str) and revision, "LFM2 reference must pin its checkpoint revision"
@@ -108,6 +108,7 @@ def _checkpoint(manifest: dict) -> Path:
         snapshot_download(
             repo_id=manifest["hf_id"],
             revision=revision,
+            local_files_only=constants.HF_HUB_OFFLINE,
         )
     )
     assert (path / "config.json").is_file(), path
