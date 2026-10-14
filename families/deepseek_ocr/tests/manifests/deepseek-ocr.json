@@ -1,6 +1,7 @@
 {
   "name": "deepseek-ocr",
   "hf_id": "deepseek-ai/DeepSeek-OCR-2",
+  "hf_revision": "aaa02f3811945a91062062994c5c4a3f4c0af2b0",
   "bundle": "deepseek-ocr.bundle",
   "family": "deepseek_ocr",
   "task": "vision_language_generation",

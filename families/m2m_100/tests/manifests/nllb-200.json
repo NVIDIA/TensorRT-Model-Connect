@@ -1,6 +1,7 @@
 {
   "name": "nllb-200-distilled-600m",
   "hf_id": "facebook/nllb-200-distilled-600M",
+  "hf_revision": "f8d333a098d19b4fd9a8b18f94170487ad3f821d",
   "bundle": "nllb-200-distilled-600m.bundle",
   "family": "m2m_100",
   "task": "text_generation",

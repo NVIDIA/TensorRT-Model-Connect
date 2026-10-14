@@ -1,6 +1,7 @@
 {
   "name": "bloom-560m-tp4",
   "hf_id": "bigscience/bloom-560m",
+  "hf_revision": "ac2ae5fab2ce3f9f40dc79b5ca9f637430d24971",
   "bundle": "bloom-560m-tp4.bundle",
   "family": "bloom",
   "task": "text_generation",

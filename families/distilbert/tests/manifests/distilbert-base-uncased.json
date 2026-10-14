@@ -1,6 +1,7 @@
 {
   "name": "distilbert-base-uncased",
   "hf_id": "distilbert/distilbert-base-uncased",
+  "hf_revision": "12040accade4e8a0f71eabdb258fecc2e7e948be",
   "bundle": "distilbert-base-uncased.bundle",
   "family": "distilbert",
   "task": "encoding",

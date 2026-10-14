@@ -1,6 +1,7 @@
 {
   "name": "wan21-t2v-1.3b",
   "hf_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+  "hf_revision": "0fad780a534b6463e45facd96134c9f345acfa5b",
   "bundle": "wan21-t2v-1.3b.bundle",
   "family": "wan_t2v",
   "task": "image_generation",

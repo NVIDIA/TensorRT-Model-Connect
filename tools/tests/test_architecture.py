@@ -2106,6 +2106,25 @@ def test_every_family_owns_at_least_one_explicit_premerge_case() -> None:
     assert violations == []
 
 
+def test_remote_manifests_pin_one_exact_checkpoint_revision() -> None:
+    violations: list[str] = []
+    revisions: dict[str, set[str]] = {}
+    for path in sorted(FAMILIES.glob("*/tests/manifests/*.json")):
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        if "hf_id" not in manifest:
+            continue
+        revision = manifest.get("hf_revision")
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            violations.append(f"{path.relative_to(REPO)}:hf_revision")
+            continue
+        revisions.setdefault(manifest["hf_id"], set()).add(revision)
+    # Variants of one checkpoint must validate the same immutable snapshot.
+    violations.extend(
+        f"{checkpoint}:{sorted(pins)}" for checkpoint, pins in revisions.items() if len(pins) > 1
+    )
+    assert violations == []
+
+
 def test_threshold_sidecars_are_optional_and_direct() -> None:
     violations: list[str] = []
     for family in family_dirs():

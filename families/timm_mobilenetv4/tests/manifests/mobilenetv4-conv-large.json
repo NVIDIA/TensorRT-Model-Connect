@@ -1,6 +1,7 @@
 {
   "name": "mobilenetv4-conv-large",
   "hf_id": "timm/mobilenetv4_conv_large.e500_r256_in1k",
+  "hf_revision": "033de0bd74b5261f7339c5de242a2e4785808aa3",
   "bundle": "mobilenetv4-conv-large.bundle",
   "family": "timm_mobilenetv4",
   "task": "image_to_class_scores",

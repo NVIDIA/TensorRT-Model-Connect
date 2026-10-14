@@ -1,6 +1,7 @@
 {
   "name": "gpt-neo-125m-tp4",
   "hf_id": "EleutherAI/gpt-neo-125m",
+  "hf_revision": "21def0189f5705e2521767faed922f1f15e7d7db",
   "bundle": "gpt-neo-125m-tp4.bundle",
   "family": "gpt_neo",
   "task": "text_generation",

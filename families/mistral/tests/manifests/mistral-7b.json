@@ -1,6 +1,7 @@
 {
   "name": "mistral-7b",
   "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
+  "hf_revision": "ec5deb64f2c6e6fa90c1abf74a91d5c93a9669ca",
   "bundle": "mistral-7b.bundle",
   "family": "mistral",
   "task": "text_generation",

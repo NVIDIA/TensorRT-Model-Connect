@@ -1,6 +1,7 @@
 {
   "name": "glm-4-9b",
   "hf_id": "THUDM/glm-4-9b-hf",
+  "hf_revision": "b44e98fcc8df0faba03a48b405356af6b91821e7",
   "bundle": "glm-4-9b.bundle",
   "family": "glm",
   "task": "text_generation",

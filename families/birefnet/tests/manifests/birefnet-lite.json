@@ -1,6 +1,7 @@
 {
   "name": "birefnet-lite",
   "hf_id": "ZhengPeng7/BiRefNet_lite",
+  "hf_revision": "aa62cd87eafb9cc43056d08ef3615a14628b831d",
   "bundle": "birefnet-lite.bundle",
   "family": "birefnet",
   "task": "segmentation",

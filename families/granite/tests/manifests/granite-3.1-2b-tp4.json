@@ -1,6 +1,7 @@
 {
   "name": "granite-3.1-2b-tp4",
   "hf_id": "ibm-granite/granite-3.1-2b-base",
+  "hf_revision": "bcf4e33e7debde263041db41869f9cdbeaae3f01",
   "bundle": "granite-3.1-2b-tp4.bundle",
   "family": "granite",
   "task": "text_generation",

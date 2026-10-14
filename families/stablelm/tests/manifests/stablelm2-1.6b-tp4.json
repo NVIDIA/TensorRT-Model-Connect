@@ -1,6 +1,7 @@
 {
   "name": "stablelm2-1.6b-tp4",
   "hf_id": "stabilityai/stablelm-2-1_6b",
+  "hf_revision": "f499ead74c53749bd93cebc6ce8bc0d7bdf1eaef",
   "bundle": "stablelm2-1.6b-tp4.bundle",
   "family": "stablelm",
   "task": "text_generation",

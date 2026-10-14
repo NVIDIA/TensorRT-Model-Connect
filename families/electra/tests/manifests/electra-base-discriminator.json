@@ -1,6 +1,7 @@
 {
   "name": "electra-base-discriminator",
   "hf_id": "google/electra-base-discriminator",
+  "hf_revision": "1ae76a97c7e84a4e640876a07453fccd636f0667",
   "bundle": "electra-base-discriminator.bundle",
   "family": "electra",
   "task": "encoding",

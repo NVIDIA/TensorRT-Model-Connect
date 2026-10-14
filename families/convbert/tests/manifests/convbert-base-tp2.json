@@ -1,6 +1,7 @@
 {
   "name": "convbert-base-tp2",
   "hf_id": "YituTech/conv-bert-base",
+  "hf_revision": "5cb451936b5c4a96562d8b146de85f64f9cf2c22",
   "bundle": "convbert-base-tp2.bundle",
   "family": "convbert",
   "task": "encoding",

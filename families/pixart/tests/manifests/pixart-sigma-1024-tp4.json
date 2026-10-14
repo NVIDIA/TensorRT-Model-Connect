@@ -1,6 +1,7 @@
 {
   "name": "pixart-sigma-1024-tp4",
   "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+  "hf_revision": "e102b3591cc82e97071b8b4cb90d834d0c487207",
   "bundle": "pixart-sigma-1024-tp4.bundle",
   "family": "pixart",
   "task": "image_generation",

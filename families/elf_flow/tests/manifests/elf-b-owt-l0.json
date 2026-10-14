@@ -1,6 +1,7 @@
 {
   "name": "elf-b-owt-l0",
   "hf_id": "embedded-language-flows/ELF-B-owt",
+  "hf_revision": "506a81d3ed3b2475e9ae754bae308e10f765d327",
   "hf_dependencies": [
     {
       "repo_id": "embedded-language-flows/t5_small_encoder_jax"

@@ -1,6 +1,7 @@
 {
   "name": "starcoder2-3b",
   "hf_id": "bigcode/starcoder2-3b",
+  "hf_revision": "733247c55e3f73af49ce8e9c7949bf14af205928",
   "bundle": "starcoder2-3b.bundle",
   "family": "starcoder2",
   "task": "text_generation",

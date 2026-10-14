@@ -1,6 +1,7 @@
 {
   "name": "rwkv-169m",
   "hf_id": "RWKV/rwkv-4-169m-pile",
+  "hf_revision": "46bdc280eb97b6141d5d51a935e0c4870ecaefcc",
   "bundle": "rwkv-169m.bundle",
   "family": "rwkv",
   "task": "text_generation",

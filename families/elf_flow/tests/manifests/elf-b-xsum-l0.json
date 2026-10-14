@@ -1,6 +1,7 @@
 {
   "name": "elf-b-xsum-l0",
   "hf_id": "embedded-language-flows/ELF-B-xsum",
+  "hf_revision": "8150551968f826c4421cf6bdeff9d6e7b766e23d",
   "hf_dependencies": [
     {
       "repo_id": "embedded-language-flows/t5_small_encoder_jax"

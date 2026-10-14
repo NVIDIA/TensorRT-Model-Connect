@@ -1,6 +1,7 @@
 {
   "name": "gpt2-125m-tp4",
   "hf_id": "openai-community/gpt2",
+  "hf_revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
   "bundle": "gpt2-125m-tp4.bundle",
   "family": "gpt2",
   "task": "text_generation",

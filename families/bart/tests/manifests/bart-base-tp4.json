@@ -1,6 +1,7 @@
 {
   "name": "bart-base-tp4",
   "hf_id": "facebook/bart-base",
+  "hf_revision": "aadd2ab0ae0c8268c7c9693540e9904811f36177",
   "bundle": "bart-base-tp4.bundle",
   "family": "bart",
   "task": "text_generation",

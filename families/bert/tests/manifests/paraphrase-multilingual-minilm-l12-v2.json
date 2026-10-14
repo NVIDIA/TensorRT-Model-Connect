@@ -1,6 +1,7 @@
 {
   "name": "paraphrase-multilingual-minilm-l12-v2",
   "hf_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "hf_revision": "e8f8c211226b894fcb81acc59f3b34ba3efd5f42",
   "bundle": "paraphrase-multilingual-minilm-l12-v2.bundle",
   "family": "bert",
   "task": "encoding",
