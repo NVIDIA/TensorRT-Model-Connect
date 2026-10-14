@@ -54,6 +54,14 @@ Conversion-parity benchmarks (`gold_metrics.PARITY`) compare each output with th
 tolerance: raw encoders' vectors, MoGe geometry, ACT action chunks, stereo disparities, PersonaPlex speech.
 Inputs a family prepares itself come from its `reference/inputs.py` (`family_inputs` suites).
 
+A family configuration can declare a complete local `benchmarks` entry (`suite`,
+`suite_definition`, `metric`, and `gate`) and select it through `absolute`, without adding
+family policy to the shared Task defaults. `family_parity` delegates
+to `gate.checker`, a `families.<family>.<module>:<function>` taking the two observations and gate;
+the ordinary parity decision still requires every selected sample to pass.
+DINOv3 uses 50 seeded COCO val2017 images, complete hidden and pooled features, and its existing
+family E2E criteria. Accuracy and task-call P50 come from the same extraction requests.
+
 Checks for every model of a Task (`supplementary`): text-to-speech round-trip WER (corpus, bootstrap) and
 audio validity (every output finite and not silent; the median per-sentence duration ratio to the native model
 within 0.5-2, as a sampling model's single utterance may run to its length limit on either side; an error

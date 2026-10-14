@@ -10,9 +10,11 @@ pairs): each side's units are scored, and a paired bootstrap over independent cl
 
 from __future__ import annotations
 
+import importlib
 import math
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -336,7 +338,25 @@ def audio_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] 
     return match, reason
 
 
-PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"vector_parity": vector_parity, "mask_parity": mask_parity,
+@lru_cache(maxsize=None)
+def _family_checker(entrypoint: str) -> Callable:
+    module, separator, name = entrypoint.partition(":")
+    if not separator or not module.startswith("families.") or not name.isidentifier():
+        raise ValueError("family parity checker must be a families.<family>.<module>:<function> entrypoint")
+    checker = getattr(importlib.import_module(module), name)
+    if not callable(checker):
+        raise ValueError(f"family parity checker is not callable: {entrypoint}")
+    return checker
+
+
+def family_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                  gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """Delegate a paired output check to its owning family; retain the ordinary all-sample parity decision."""
+    return _family_checker(str(gate["checker"]))(candidate, native, gate)
+
+
+PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"family_parity": family_parity,
+                                                      "vector_parity": vector_parity, "mask_parity": mask_parity,
                                                       "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
                                                       "audio_parity": audio_parity}

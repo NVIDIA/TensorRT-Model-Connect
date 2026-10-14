@@ -121,13 +121,21 @@ def deferred_files(observation: Mapping[str, Any], files: Mapping[Path, Any]) ->
     return {**observation, _FILES: dict(files)}
 
 
+def deferred_values(observation: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
+    """Encode host arrays as flat JSON values after the timed Task call, like the C++ worker."""
+    return {**observation, "_pending_values": dict(values)}
+
+
 def write_artifacts(observation: Any) -> Any:
     """Write the pending output arrays and files of an observation (any nesting); arrays get their sha256."""
     if isinstance(observation, list):
         return [write_artifacts(item) for item in observation]
     if not isinstance(observation, dict):
         return observation
-    result = {key: write_artifacts(value) for key, value in observation.items() if key not in (_PENDING, _FILES)}
+    result = {key: write_artifacts(value) for key, value in observation.items()
+              if key not in (_PENDING, _FILES, "_pending_values")}
+    for name, array in (observation.get("_pending_values") or {}).items():
+        result[name] = np.asarray(array).reshape(-1).tolist()
     for path, array in (observation.get(_FILES) or {}).items():
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         np.asarray(array).tofile(path)
@@ -218,4 +226,5 @@ class NativeHost:
     load_bytes = staticmethod(load_bytes)
     tensor_observation = staticmethod(tensor_observation)
     deferred_files = staticmethod(deferred_files)
+    deferred_values = staticmethod(deferred_values)
     invocation = staticmethod(invocation)

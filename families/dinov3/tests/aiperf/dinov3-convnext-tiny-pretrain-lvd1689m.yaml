@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/dinov3/reference/adapter.py
+  precision: fp16
+
+absolute: [coco_feature_parity]
+benchmarks:
+  coco_feature_parity:
+    suite: coco-feature-parity
+    metric: family_parity
+    gate:
+      checker: families.dinov3.validation:compare
+      profile: dinov3-convnext-tiny-pretrain-lvd1689m
+    suite_definition:
+      suite: coco-feature-parity
+      version: 1
+      # COCO val2017, pinned public export; conversion parity has no class labels.
+      # Image rights follow each original image's license: https://cocodataset.org/#termsofuse
+      source:
+        kind: hf_dataset
+        dataset: detection-datasets/coco
+        split: val
+        revision: cf0b22332314a937e9dc8a1957b21725430bb41d
+        data_files: {val: data/val-*.parquet}
+        image_column: image
+      selection: {method: seeded, count: 50}
+      fields: {image: image_path}

@@ -46,3 +46,24 @@ def test_evidence_writes_and_input_decoding_stay_outside_the_task_call_time(tmp_
     observation = invocation.observation
     assert np.array_equal(np.load(observation["artifact"]), np.arange(4.0)) and len(observation["sha256"]) == 64
     assert "_pending_array" not in observation and common._DECODED == {}
+
+
+def test_json_array_encoding_stays_outside_the_task_call_time(tmp_path, monkeypatch):
+    class Array:
+        def reshape(self, *args):
+            return self
+
+        def tolist(self):
+            time.sleep(0.1)
+            return [1.0, 2.0]
+
+    class ValuesAdapter:
+        def invoke(self, request, artifact_base):
+            return common.invocation(common.deferred_values({"shape": [2]}, {"values": Array()}), 0.0)
+
+    asarray = common.np.asarray
+    monkeypatch.setattr(common.np, "asarray", lambda value: value if isinstance(value, Array) else asarray(value))
+    monkeypatch.setattr(common, "synchronize", lambda: None)
+    result = backend(ValuesAdapter()).invoke({}, tmp_path / "values")
+    assert result.model_call_ms < 50
+    assert result.observation == {"shape": [2], "values": [1.0, 2.0]}

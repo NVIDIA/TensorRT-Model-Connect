@@ -1655,3 +1655,24 @@ def test_rejudge_keeps_the_gate_a_parity_entry_was_judged_against(tmp_path, monk
     assert cli.rejudge_reports([tmp_path], Environment({})) == 0
     rejudged, = json.loads((tmp_path / "report.json").read_text())["accuracy"]
     assert rejudged["status"] == "pass" and rejudged["gate"]["max_relative_l2"] == 0.04
+
+
+# A family owns the paired validation; shared code forwards its gate and retains
+# the all-sample decision, without an absolute native capability requirement.
+def test_family_parity_delegates_and_requires_every_paired_output(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    module = ModuleType("families.example.validation")
+    module.compare = lambda candidate, native, gate: (
+        candidate["value"] == native["value"] + gate["offset"], "paired value differs")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    item = {"suite": "paired", "metric": "family_parity",
+            "gate": {"checker": "families.example.validation:compare", "offset": 0}}
+    side = {"observations": {"greedy": {0: {"value": 0}, 1: {"value": 1}}}, "exit": {"greedy": 0}}
+    entry = absolute.judge_parity(item, [{"sample_id": "a"}, {"sample_id": "b"}], side, side)
+    assert entry["status"] == "pass" and entry["passed"] == entry["required_passes"] == 2
+    changed = {**side, "observations": {"greedy": {0: {"value": 0}, 1: {"value": 2}}}}
+    entry = absolute.judge_parity(item, [{"sample_id": "a"}, {"sample_id": "b"}], changed, side)
+    assert entry["status"] == "fail" and entry["passed"] == 1
+    assert entry["failures"][0]["sample_id"] == "b"

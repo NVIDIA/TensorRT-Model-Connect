@@ -721,6 +721,7 @@ Json run_extract_features(trtmc::ITask& task, const Json& request, const Timing&
         },
         [](const trtmc::ImageFeaturesResult& result) {
             return Json{{"processed_images", 1},
+                        {"last_hidden_state", result.last_hidden_state},
                         {"last_hidden_state_shape", result.last_hidden_state_shape},
                         {"pooler_output", result.pooler_output},
                         {"pooler_output_shape", result.pooler_output_shape},
