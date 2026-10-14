@@ -20,3 +20,14 @@ def test_generation_discovery_is_unchanged():
     family, support = resolve_family(ModelMetadata(config={"model_type": "qwen3"}, model_index={}))
     assert family == "qwen"
     assert support.tasks == ("text_generation",)
+
+
+def test_s1_mini_qwen3_fine_tune_has_one_qwen_owner():
+    metadata = ModelMetadata(
+        config={"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]},
+        model_index={},
+        files=("banner.jpg", "config.json", "model.safetensors"),
+    )
+    family, support = resolve_family(metadata)
+    assert family == "qwen"
+    assert support.tasks == ("text_generation",)
