@@ -7,7 +7,8 @@ from tensorrt_model_connect.model_support import family_support
 
 
 describe = family_support(
-    pipeline_classes=("RTDetrV2ForObjectDetection",),
+    model_types=("rt_detr_v2",),
+    architectures=("RtDetrV2ForObjectDetection",),
     tasks=("object_detection",),
     default_task="object_detection",
 )
