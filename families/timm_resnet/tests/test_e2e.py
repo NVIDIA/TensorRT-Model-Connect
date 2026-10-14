@@ -252,7 +252,8 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     from timm.data import create_transform, resolve_model_data_config
 
     image = Image.open(_asset(case["test_image"])).convert("RGB")
-    model = timm.create_model("hf-hub:" + manifest["hf_id"], pretrained=True).to("cuda").eval()
+    # Load the pinned snapshot the bundle was built from, not the Hub default branch.
+    model = timm.create_model("local-dir:" + str(model_dir), pretrained=True).to("cuda").eval()
     transform = create_transform(**resolve_model_data_config(model), is_training=False)
     pixels = transform(image).unsqueeze(0).to("cuda")
     with torch.no_grad():

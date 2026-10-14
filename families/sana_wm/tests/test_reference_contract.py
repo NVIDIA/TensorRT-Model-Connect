@@ -192,6 +192,53 @@ def test_official_reference_loads_stage1_encoder_from_explicit_local_directory(
     ]
 
 
+def test_official_reference_resolves_checkpoint_hub_uris_to_the_local_snapshot(
+    tmp_path: Path,
+) -> None:
+    repository = "Efficient-Large-Model/SANA-WM_bidirectional"
+    checkpoint = tmp_path / "snapshot"
+    (checkpoint / "vae").mkdir(parents=True)
+    calls: list[object] = []
+    official = ModuleType("inference_sana_wm")
+    official.resolve_hf_path = lambda path: calls.append(path) or path
+
+    official_reference.install_local_checkpoint(official, repository, checkpoint)
+
+    # The pinned config names its VAE by repository, which would otherwise
+    # resolve the Hub default branch.
+    assert official.resolve_hf_path(f"hf://{repository}") == str(checkpoint)
+    assert official.resolve_hf_path(f"hf://{repository}/vae") == str(checkpoint / "vae")
+    assert official.resolve_hf_path(str(checkpoint / "vae")) == str(checkpoint / "vae")
+    assert calls == [str(checkpoint / "vae")]
+    for undeclared in (f"hf://{repository}-v2/vae", "hf://other/repository"):
+        with pytest.raises(FileNotFoundError, match="undeclared"):
+            official.resolve_hf_path(undeclared)
+    with pytest.raises(FileNotFoundError, match="missing"):
+        official.resolve_hf_path(f"hf://{repository}/refiner")
+    assert calls == [str(checkpoint / "vae")]
+
+
+def test_official_reference_launcher_consumes_checkpoint_arguments(tmp_path: Path) -> None:
+    arguments, official = official_reference.parser().parse_known_args(
+        [
+            "--reference-repo",
+            str(tmp_path / "source"),
+            "--stage1-text-encoder",
+            str(tmp_path / "stage1"),
+            "--checkpoint-repo",
+            "owner/name",
+            "--checkpoint-dir",
+            str(tmp_path / "snapshot"),
+            "--seed",
+            "42",
+        ]
+    )
+
+    assert arguments.checkpoint_repo == "owner/name"
+    assert arguments.checkpoint_dir == tmp_path / "snapshot"
+    assert official == ["--seed", "42"]
+
+
 def test_qualification_environment_replaces_gui_opencv(monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(
@@ -309,6 +356,8 @@ def test_raw_snapshot_calls_declared_official_entrypoint(monkeypatch, tmp_path: 
     assert command[1] == str(e2e.TEST_ROOT / "official_reference.py")
     assert command[command.index("--reference-repo") + 1] == str(source)
     assert command[command.index("--stage1-text-encoder") + 1] == str(stage1_text_encoder)
+    assert command[command.index("--checkpoint-repo") + 1] == manifest["hf_id"]
+    assert command[command.index("--checkpoint-dir") + 1] == str(model_dir)
     assert command[command.index("--action") + 1] == case["action"]
     assert command[command.index("--intrinsics") + 1] == str(
         e2e._asset(case["camera_intrinsics_file"])
