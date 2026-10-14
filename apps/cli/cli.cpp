@@ -1639,8 +1639,7 @@ void print_usage(std::ostream& output) {
               "TensorRT-RTX runtime options:\n"
               "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
               "Task SDK options: [--task TASK_ID] [--set NAME=VALUE]...\n"
-              "Task SDK families default to the installed runtime directory.\n"
-              "Existing bundle modes still require an explicit --runtime-root.\n";
+              "Without --runtime-root, plugins load from the installed runtime directory.\n";
 }
 
 int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
@@ -1690,8 +1689,7 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
             const auto model = Model::load(command.bundle, options);
             return dispatch(command, model, output);
         }
-        if (command.runtime_root.empty())
-            throw std::invalid_argument("--runtime-root is required for an existing bundle mode");
+        // An empty runtime root selects the directory containing libtrtmc_runtime.
         std::unique_ptr<ITask> task =
             load_task(command.bundle, command.runtime_root, command.kv_cache_size_bytes,
                       command.runtime_cache_path, command.cuda_graphs);

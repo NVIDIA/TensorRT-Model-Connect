@@ -31,7 +31,7 @@ The bundle header names one backend:
 | `trt` | `libtrtmc_backend_trt.so` | Standard TensorRT Engine implementation. |
 | `trt_rtx` | `libtrtmc_backend_trt_rtx.so` | Optional TensorRT-RTX Engine implementation. |
 
-Both are loaded from the same required runtime root as the family DSO:
+Both are loaded from the same runtime root as the family DSO:
 
 ```bash
 trtmc run model.bundle \

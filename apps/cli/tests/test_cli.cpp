@@ -6,8 +6,10 @@
 #include "cli/cli.h"
 #include "cli/io.h"
 #include "cli/sdk_dispatch.h"
+#include "runtime/bundle/bundle_format.h"
 
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -46,6 +48,28 @@ bool parse_throws(std::vector<std::string> arguments) {
     } catch (const std::invalid_argument&) {
         return true;
     }
+}
+
+int run_cli(std::vector<std::string> arguments, std::ostream& output, std::ostream& error) {
+    std::vector<char*> argv;
+    argv.reserve(arguments.size());
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    return trtmc::cli::run(static_cast<int>(argv.size()), argv.data(), output, error);
+}
+
+void write_fake_bundle(const std::filesystem::path& path, const std::string& task) {
+    const std::string header = "{\"format\":1,\"family\":\"fake\",\"task\":\"" + task +
+                               "\",\"backend\":\"fake\","
+                               "\"sections\":{\"runtime.json\":{\"offset\":0,\"length\":2},"
+                               "\"engine.plan\":{\"offset\":2,\"length\":4}}}";
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(trtmc::kBundleMagic), 8);
+    const std::uint64_t length = header.size();
+    for (int shift = 0; shift < 64; shift += 8)
+        output.put(static_cast<char>((length >> shift) & 0xffU));
+    output.write(header.data(), static_cast<std::streamsize>(header.size()));
+    output.write("{}PLAN", 6);
 }
 
 class FakeText final : public trtmc::ITextGeneration,
@@ -357,6 +381,19 @@ int main() {
 
     check(parse({"trtmc", "run", "model.bundle"}).runtime_root.empty(),
           "Task SDK execution leaves an omitted runtime root for the installed default");
+    {
+        // CMake stages the fake backend and family beside libtrtmc_runtime.
+        const auto bundle =
+            std::filesystem::temp_directory_path() / "trtmc-cli-default-runtime-root.bundle";
+        write_fake_bundle(bundle, trtmc::IEmbedding::kTask);
+        std::ostringstream output;
+        std::ostringstream error;
+        const int status =
+            run_cli({"trtmc", "embed", bundle.string(), "--text", "abc"}, output, error);
+        std::filesystem::remove(bundle);
+        check(status == 0 && output.str().find("\"values\":[3.0,4.0]") != std::string::npos,
+              "existing bundle mode loads plugins beside the active runtime by default");
+    }
     const auto configured = parse({"trtmc", "run", "model.bundle", "--task", "text_continuation",
                                    "--set", "suffix=", "--set", "emit_eos=false"});
     check(configured.selected_task == "text_continuation" &&

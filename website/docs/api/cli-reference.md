@@ -78,17 +78,19 @@ backend, and section bounds. Family-owned section payloads are not decoded.
 Every execution command has this shape:
 
 ```bash
-trtmc COMMAND MODEL.bundle --runtime-root DIR [OPTIONS]
+trtmc COMMAND MODEL.bundle [--runtime-root DIR] [OPTIONS]
 ```
 
-`--runtime-root` is always required. It must contain the matching
-`libtrtmc_core.so`, `libtrtmc_runtime.so`, backend DSO, and selected family DSO.
-The CLI never searches the current directory, environment variables, or an
-installed fallback. Common load options are:
+Without `--runtime-root`, the CLI loads the backend and family DSOs named by
+the bundle from the directory containing the active `libtrtmc_runtime.so`. An
+explicit root must contain the matching `libtrtmc_core.so`,
+`libtrtmc_runtime.so`, backend DSO, and selected family DSO. The CLI never
+searches the current directory, environment variables, or a fallback runtime.
+Common load options are:
 
 | Option | Contract |
 | --- | --- |
-| `--runtime-root DIR` | Required exact DSO root. |
+| `--runtime-root DIR` | Exact DSO root; defaults to the active runtime directory. |
 | `--kv-cache-size BYTES\|GB\|GiB` | Runtime-sized KV capacity for a compatible bundle. |
 | `--runtime-cache PATH` | TensorRT-RTX cache path; rejected by the standard TensorRT backend. |
 | `--cuda-graphs` | Enable TensorRT-RTX CUDA graphs; rejected by the standard backend. |

@@ -31,8 +31,8 @@ Hugging Face or local checkpoint
   -> native C++ task API
 ```
 
-Native bundles resolve their matching family and TensorRT backend DSOs from an
-explicit runtime root. Complete-network platform offload is implemented within
+Native bundles resolve their matching family and TensorRT backend DSOs from one
+runtime root. Complete-network platform offload is implemented within
 the owning family. Both forms still require a compatible NVIDIA driver,
 CUDA/TensorRT cohort, dynamic loader, and system libraries.
 

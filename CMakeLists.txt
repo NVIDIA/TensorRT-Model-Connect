@@ -505,6 +505,7 @@ if(TRTMC_BUILD_TESTS)
   add_executable(test_cli apps/cli/tests/test_cli.cpp)
   target_include_directories(test_cli PRIVATE
     ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${PROJECT_SOURCE_DIR}/core
     ${PROJECT_SOURCE_DIR}/apps
   )
   target_link_libraries(test_cli PRIVATE trtmc_cli trtmc_c nlohmann_json::nlohmann_json)
@@ -590,12 +591,7 @@ if(TRTMC_BUILD_TESTS)
   )
   target_link_libraries(test_family_loader PRIVATE trtmc_runtime)
   target_compile_options(test_family_loader PRIVATE -Wall -Wextra -Wpedantic)
-  add_dependencies(test_family_loader
-    trtmc_test_backend_fake
-    trtmc_test_backend_fake_rtx
-    trtmc_test_family_fake
-  )
-  add_custom_command(TARGET test_family_loader POST_BUILD
+  add_custom_target(trtmc_test_default_runtime_root
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       $<TARGET_FILE:trtmc_test_backend_fake>
       $<TARGET_FILE_DIR:trtmc_runtime>
@@ -604,6 +600,17 @@ if(TRTMC_BUILD_TESTS)
       $<TARGET_FILE_DIR:trtmc_runtime>
     COMMENT "Copying fake runtime DSOs beside libtrtmc_runtime for automatic-root testing"
   )
+  add_dependencies(trtmc_test_default_runtime_root
+    trtmc_test_backend_fake
+    trtmc_test_family_fake
+  )
+  add_dependencies(test_family_loader
+    trtmc_test_backend_fake
+    trtmc_test_backend_fake_rtx
+    trtmc_test_family_fake
+    trtmc_test_default_runtime_root
+  )
+  add_dependencies(test_cli trtmc_test_default_runtime_root)
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
 
   set(_trtmc_api_test_runtime_root "${CMAKE_BINARY_DIR}/tests/api-runtime")

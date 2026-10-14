@@ -4,7 +4,8 @@ description: Select the native command matching the bundle's declared Task.
 ---
 
 Inspect the bundle, then call the Task named by its family manifest/header.
-Every execution command requires `--runtime-root DIR`.
+Execution commands load plugins from the directory containing the active
+`libtrtmc_runtime.so`; pass `--runtime-root DIR` to select another directory.
 
 | Task | Command | Primary result |
 | --- | --- | --- |
