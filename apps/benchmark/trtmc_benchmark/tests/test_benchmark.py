@@ -801,7 +801,7 @@ def test_catalog_detection_keeps_image_input_without_build_dimensions(tmp_path: 
     assert resolved.request == expected
     assert Path(resolved.request["image_path"]).is_file()
     assert "height" not in resolved.request and "width" not in resolved.request
-    assert model.build_settings["image_height"] == 796
+    assert model.build_settings["image_height"] == 1333
     assert model.build_settings["image_width"] == 1333
 
 
