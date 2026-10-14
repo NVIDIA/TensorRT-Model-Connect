@@ -3,12 +3,7 @@
 
 """Family-owned model and task support for pixart."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("pixart", "pixart_alpha", "pixart_sigma", "pixartalpha", "pixartsigma"),
-    pipeline_classes=("PixArtAlphaPipeline", "PixArtSigmaPipeline"),
-    tasks=("image_generation",),
-    default_task="image_generation",
-)
+describe = support_from_json(__file__)

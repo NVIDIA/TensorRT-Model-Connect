@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "timm_vgg"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "vgg11",
+            "vgg13",
+            "vgg16",
+            "vgg19"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "vgg11",
+            "vgg13",
+            "vgg16",
+            "vgg19"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    }
+  ]
+}

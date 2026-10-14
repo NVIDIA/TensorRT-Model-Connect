@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "moshi",
+            "personaplex",
+            "personaplex_7b"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "speech_to_speech"
+        ],
+        "default_task": "speech_to_speech"
+      }
+    }
+  ]
+}
