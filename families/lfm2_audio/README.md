@@ -144,8 +144,12 @@ Set `TRTMC_RUNTIME_ROOT` to the built native runtime directory. The optional
 requirements in this family are needed for the original-model tests.
 For offline validation, stage the manifest's `external_files` (`asr.wav` and
 `question.wav`) in a directory and set `TRTMC_LFM2_AUDIO_MODEL_DIR` to that
-directory. Online local validation can download the same pinned inputs;
-`HF_HUB_OFFLINE=1` requires staged inputs and cached checkpoint files.
+directory. Without this setting, validation downloads the declared URLs and
+requires external network access. `HF_HUB_OFFLINE=1` selects cached checkpoint
+files; it does not disable these external downloads. Fully offline validation
+requires both staged WAVs and cached checkpoint files. Evidence records the
+declared URL and whether each input was staged or downloaded; the test does not
+authenticate caller-supplied staged bytes.
 The model, processor, detokenizer, and spoken-content ASR all use the
 same pinned checkpoint from the Hugging Face cache.
 

@@ -77,12 +77,9 @@ def native_probe(runtime, directory, *, public_api=False):
 
 
 def audio_sources(directory):
-    from huggingface_hub.constants import HF_HUB_OFFLINE
     import soundfile as sf
 
     staged = os.environ.get("TRTMC_LFM2_AUDIO_MODEL_DIR")
-    if HF_HUB_OFFLINE and not staged:
-        raise FileNotFoundError("offline LFM audio validation requires TRTMC_LFM2_AUDIO_MODEL_DIR")
     sources = {}
     for asset in MANIFEST["external_files"]:
         fixture = (Path(staged) if staged else directory) / asset["path"]
@@ -96,7 +93,16 @@ def audio_sources(directory):
         source = directory / (fixture.stem + ".f32")
         samples.tofile(source)
         sources[fixture.stem] = (source, int(rate))
-        record_evidence("inputs", {fixture.stem: {"source_url": asset["url"], "file": fixture}})
+        record_evidence(
+            "inputs",
+            {
+                fixture.stem: {
+                    "declared_source_url": asset["url"],
+                    "acquisition": "staged" if staged else "downloaded",
+                    "file": fixture,
+                }
+            },
+        )
     return sources
 
 
