@@ -170,7 +170,7 @@ def test_reference_checkpoint_preserves_torch_values_and_dtypes(
     import torch
     from safetensors.torch import save_file as save_torch_file
 
-    from families.yolov10.tests.test_e2e import _reference_tensors
+    from families.yolov10.tests.reference.e2e import _reference_tensors
 
     dtype = getattr(torch, dtype_name)
     values = {
@@ -219,7 +219,7 @@ def test_reference_checkpoint_prefers_single_file_over_an_index(tmp_path: Path) 
     import torch
     from safetensors.torch import save_file as save_torch_file
 
-    from families.yolov10.tests.test_e2e import _reference_tensors
+    from families.yolov10.tests.reference.e2e import _reference_tensors
 
     value = torch.tensor([3.0], dtype=torch.float16)
     save_torch_file({"model.weight": value}, str(tmp_path / "model.safetensors"))
@@ -232,7 +232,7 @@ def test_reference_checkpoint_uses_declared_mapping_not_all_shard_keys(tmp_path:
     import torch
     from safetensors.torch import save_file as save_torch_file
 
-    from families.yolov10.tests.test_e2e import _reference_tensors
+    from families.yolov10.tests.reference.e2e import _reference_tensors
 
     save_torch_file(
         {"model.weight": torch.tensor([1.0]), "off_index": torch.tensor([99.0])},
@@ -266,7 +266,7 @@ def test_reference_checkpoint_rejects_a_missing_declared_tensor(tmp_path: Path) 
     from safetensors import SafetensorError
     from safetensors.torch import save_file as save_torch_file
 
-    from families.yolov10.tests.test_e2e import _reference_tensors
+    from families.yolov10.tests.reference.e2e import _reference_tensors
 
     save_torch_file({"other": torch.tensor([1.0])}, str(tmp_path / "part.safetensors"))
     (tmp_path / "model.safetensors.index.json").write_text(

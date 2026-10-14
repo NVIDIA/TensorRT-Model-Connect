@@ -61,7 +61,6 @@ packages = [
     "apps/benchmark/trtmc_benchmark",
     "apps/server/python/trtmc_server",
     "apps/perf_serving/trtmc_perf_serving",
-    "families",
 ]
 
 [tool.conan-py-build.sdist]

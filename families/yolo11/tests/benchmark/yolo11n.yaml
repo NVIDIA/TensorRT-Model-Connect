@@ -14,7 +14,7 @@ candidate:
     max_sequence_length: 1
 
 reference_environment:
-  requirements: ../../requirements.txt
+  requirements: ../requirements.txt
 
 accuracy:
   - name: coco2017-object-detection
@@ -24,7 +24,7 @@ accuracy:
     request: &detection-request
       score_threshold: 0.25
     reference:
-      command: reference.py
+      command: ../reference/benchmark.py
       precision: fp32
     gate:
       max_map_50_95_drop: 0.02
@@ -42,7 +42,7 @@ performance:
       iterations: 10
     reference:
       runner: task-reference
-      script: tests/benchmark/reference.py
+      script: tests/reference/benchmark.py
       mode: pytorch-eager
       reference_backend: ultralytics
       precision: fp32

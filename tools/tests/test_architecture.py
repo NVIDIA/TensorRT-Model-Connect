@@ -1145,7 +1145,9 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
     }
     assert 'edgellm = ["tensorrt-edgellm==0.11.0"]' in optional
 
-    requirements = sorted(FAMILIES.glob("*/requirements.txt"))
+    requirements = sorted(FAMILIES.glob("*/requirements.txt")) + sorted(
+        FAMILIES.glob("*/tests/requirements.txt")
+    )
     assert requirements
     for path in requirements:
         lines = dependency_lines(path)
@@ -1163,7 +1165,7 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
         path.relative_to(REPO)
         for family in family_dirs()
         for path in family.rglob("*requirements*.txt")
-        if path != family / "requirements.txt"
+        if path not in {family / "requirements.txt", family / "tests/requirements.txt"}
     ]
     assert nested == []
 

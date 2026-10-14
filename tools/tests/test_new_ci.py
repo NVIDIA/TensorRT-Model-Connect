@@ -1313,3 +1313,42 @@ def test_installed_sdk_builds_plain_c_and_cpp_without_cuda(
             validate_installed_sdk(prefix)
     else:
         validate_installed_sdk(prefix)
+
+
+def test_family_staging_preserves_product_files_and_excludes_references(tmp_path: Path) -> None:
+    from conanfile import _package_families
+
+    source, package = tmp_path / "source", tmp_path / "package"
+    files = {
+        "__init__.py": "",
+        "alpha/model.py": "def build(): pass\n",
+        "alpha/requirements.txt": "numpy\n",
+        "alpha/native_plugins/kernel.cu": "// build input\n",
+        "alpha/tests/test_model.py": "def test_shape(): pass\n",
+        "alpha/tests/reference/adapter.py": "import ultralytics\n",
+        "alpha/tests/requirements.txt": "ultralytics==8.3.0\n",
+        "alpha/__pycache__/model.pyc": "cache",
+    }
+    for name, text in files.items():
+        path = source / "families" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    _package_families(source, package)
+    actual = {p.relative_to(package / "families").as_posix()
+              for p in (package / "families").rglob("*") if p.is_file()}
+    assert actual == {"__init__.py", "alpha/model.py", "alpha/requirements.txt",
+                      "alpha/native_plugins/kernel.cu", "alpha/tests/test_model.py"}
+    for name in actual:
+        assert (package / "families" / name).read_text() == files[name]
+
+
+def test_wheel_validation_rejects_a_leaked_test_reference(tmp_path: Path) -> None:
+    family = tmp_path / "families/alpha"
+    family.mkdir(parents=True)
+    (family / "model.py").write_text("def build(): pass\n")
+    wheel = tmp_path / "leaked.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("families/alpha/tests/reference/adapter.py", "import ultralytics\n")
+    validator = WheelArchiveValidator(SimpleNamespace(repository=tmp_path))
+    with pytest.raises(CiError, match="isolated test references are packaged"):
+        validator.validate([wheel])

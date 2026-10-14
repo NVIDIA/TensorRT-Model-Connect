@@ -77,6 +77,19 @@ Python dependencies remain in `families/<family>/requirements.txt`. See
 identity and receipts, managed toolchain catalogs, and the explicit
 existing-interpreter local path.
 
+YOLOv5, YOLOv8, YOLOv10, and YOLO11 builds do not require the `ultralytics`
+package. Supply your own appropriately licensed checkpoint; Model Connect does
+not include model weights. The `.pt` readers require PyTorch and accept only
+trusted checkpoints, because the archive format uses pickle.
+
+Their upstream accuracy references live under each family's `tests/reference/`
+and use `tests/requirements.txt` in a separate Python environment. Selected E2E
+tests prepare that environment automatically, or use an existing reference
+interpreter supplied as `TRTMC_REFERENCE_PYTHON=/absolute/path/to/python`.
+The upstream reference programs and their dependency declarations are excluded
+from the wheel. Qualification from the source checkout retains the same
+checkpoints, reference computations, and comparison thresholds.
+
 The manual commands below remain the direct source-build path and show the
 operations performed by development mode.
 

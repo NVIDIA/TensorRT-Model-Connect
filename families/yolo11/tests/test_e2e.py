@@ -102,7 +102,7 @@ def _asset(case: dict) -> Path:
     return path
 
 
-def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
+def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, reference_python: Path) -> None:
     manifest, case = CASES[case_name]
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
@@ -139,31 +139,16 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     )
     actual = json.loads(completed.stdout)
 
-    import torch
-    from PIL import Image
-    from ultralytics.utils.ops import non_max_suppression
-
-    # The reference must run the archive under test, and must see the same
-    # letterboxed pixels the runtime seam produced.
-    blob = torch.load(str(model_dir / "yolo11n.pt"), map_location="cpu", weights_only=False)
-    reference = blob["model"].float().eval()
-
-    size = 640
-    source = Image.open(image).convert("RGB")
-    scale = min(size / source.height, size / source.width)
-    resized = source.resize(
-        (round(source.width * scale), round(source.height * scale)), Image.BILINEAR
+    reference_output = tmp_path / "reference.npz"
+    subprocess.run(
+        [str(reference_python), str(TEST_ROOT / "reference/e2e.py"),
+         str(model_dir), str(image), str(reference_output)],
+        check=True, timeout=600,
+        env={**os.environ, "PYTHONPATH": str(TEST_ROOT.parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", "")},
     )
-    canvas = Image.new("RGB", (size, size), (114, 114, 114))
-    pad_x = (size - resized.width) // 2
-    pad_y = (size - resized.height) // 2
-    canvas.paste(resized, (pad_x, pad_y))
-    pixels = np.asarray(canvas, dtype=np.float32).transpose(2, 0, 1)[None] / 255.0
-
-    with torch.no_grad():
-        raw = reference(torch.from_numpy(pixels.astype(np.float32)))
-    raw = raw[0] if isinstance(raw, (list, tuple)) else raw
-    kept = non_max_suppression(raw, conf_thres=0.25, iou_thres=0.7, max_det=300)[0].numpy()
+    with np.load(reference_output, allow_pickle=False) as result:
+        kept = result["kept"]
+        scale, pad_x, pad_y = (float(result[name]) for name in ("scale", "pad_x", "pad_y"))
 
     assert len(kept), "the reference found nothing above the threshold to compare against"
     assert len(actual["scores"]) == len(kept), (
