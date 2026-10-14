@@ -26,13 +26,13 @@ def _pixels(source):
     return torch.from_numpy(pixels), scale, pad_x, pad_y
 
 
-def _check_snapshot(raw, expected):
-    values = raw.detach().numpy()
-    values = values[0]
-    assert list(values.shape) == expected["shape"]
-    indices = np.linspace(0, values.size - 1, len(expected["values"]), dtype=np.int64)
+def _check_snapshot(raw, expected, predictions):
+    assert list(raw[0].shape) == expected["shape"]
+    values = predictions.detach().numpy()
+    assert list(values.shape) == expected["prediction_shape"]
+    indices = np.linspace(0, values.size - 1, len(expected["prediction_values"]), dtype=np.int64)
     np.testing.assert_allclose(
-        values.reshape(-1)[indices], expected["values"], atol=1e-4, rtol=1e-5
+        values.reshape(-1)[indices], expected["prediction_values"], atol=1e-4, rtol=1e-5
     )
     kept = detections(raw).detach().numpy()
     np.testing.assert_allclose(
@@ -43,10 +43,11 @@ def _check_snapshot(raw, expected):
 def _verify_reference(reference, model_dir, image, original):
     name = json.loads((model_dir / "config.json").read_text())["model"].removesuffix(".yaml")
     snapshot = json.loads((Path(__file__).with_name("snapshots") / f"{name}.json").read_text())
-    _check_snapshot(original, snapshot["cases"]["original"])
+    pixels, *_ = _pixels(Image.open(image).convert("RGB"))
+    _check_snapshot(original, snapshot["cases"]["original"], reference.predictions(pixels))
     mirrored = Image.open(image).convert("RGB").transpose(Image.Transpose.FLIP_LEFT_RIGHT)
     pixels, *_ = _pixels(mirrored)
-    _check_snapshot(reference(pixels), snapshot["cases"]["mirrored"])
+    _check_snapshot(reference(pixels), snapshot["cases"]["mirrored"], reference.predictions(pixels))
 
 
 def run(model_dir: Path, image: Path, output: Path) -> None:

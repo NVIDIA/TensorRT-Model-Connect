@@ -187,7 +187,8 @@ class DetectionHead(nn.Module):
                 )
             )
 
-    def forward(self, features):
+    def predictions(self, features):
+        """Decode each image cell before score-dependent top-k ordering."""
         logits, anchors, scales = [], [], []
         for level, feature in enumerate(features):
             batch, _, height, width = feature.shape
@@ -210,8 +211,11 @@ class DetectionHead(nn.Module):
         ).sum(dim=2)
         points, strides = torch.cat(anchors, dim=2), torch.cat(scales, dim=2)
         corners = torch.cat((points - distances[:, :2], points + distances[:, 2:]), dim=1) * strides
-        scores = raw[:, 4 * count :].sigmoid().transpose(1, 2)
-        corners = corners.transpose(1, 2)
+        scores = raw[:, 4 * count :].sigmoid()
+        return corners.transpose(1, 2), scores.transpose(1, 2)
+
+    def forward(self, features):
+        corners, scores = self.predictions(features)
         count = min(300, scores.shape[1])
         cells = scores.amax(dim=-1).topk(count, dim=-1).indices
         corners = corners.gather(1, cells[..., None].expand(-1, -1, 4))
@@ -219,7 +223,7 @@ class DetectionHead(nn.Module):
         confidence, indices = scores.flatten(1).topk(count, dim=-1)
         boxes = corners.gather(1, (indices // self.classes)[..., None].expand(-1, -1, 4))
         return torch.cat(
-            (boxes, confidence[..., None], (indices % self.classes)[..., None].to(raw.dtype)),
+            (boxes, confidence[..., None], (indices % self.classes)[..., None].to(scores.dtype)),
             dim=-1,
         )
 
@@ -242,7 +246,7 @@ class Network(nn.Module):
         self.stages["10"] = PartialAttention(weights, "10")
         self.head = DetectionHead(weights, classes)
 
-    def forward(self, pixels):
+    def _features(self, pixels):
         x, outputs = pixels, {}
         for index in range(11):
             x = self.stages[str(index)](x)
@@ -253,7 +257,15 @@ class Network(nn.Module):
         )
         medium = self.stages["19"](torch.cat((self.stages["17"](small), neck), dim=1))
         large = self.stages["22"](torch.cat((self.stages["20"](medium), outputs[10]), dim=1))
-        return self.head((small, medium, large))
+        return small, medium, large
+
+    def forward(self, pixels):
+        return self.head(self._features(pixels))
+
+    def predictions(self, pixels):
+        """Stable cell/channel order for comparison with the recorded oracle."""
+        boxes, scores = self.head.predictions(self._features(pixels))
+        return torch.cat((boxes, scores), dim=-1).transpose(1, 2)
 
 
 def load_model(directory: Path) -> nn.Module:
