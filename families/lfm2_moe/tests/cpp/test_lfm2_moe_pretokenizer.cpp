@@ -52,6 +52,8 @@ std::filesystem::path write_tokenizer_bundle(std::string_view tokenizer_json) {
 using Ids = std::vector<int32_t>;
 using PieceMap = std::unordered_map<std::string, Ids>;
 
+// Synthetic IDs below are sentinels for pretoken splitting and delegation.
+// The optional production-tokenizer test has its own pinned checkpoint oracle.
 PieceMap pinned_piece_ids() {
     return {
         {"Hello", {36309}},
@@ -219,8 +221,8 @@ std::vector<Fixture> supported_language_fixtures() {
 std::vector<Fixture> whitespace_run_fixtures() {
     // Pins the \s+(?!\S) alternative of the pinned Split regex: a
     // newline-free whitespace run followed by non-whitespace yields its final
-    // whitespace unit to the next piece. Every id below is the byte-level BPE
-    // encoding the reference Hugging Face tokenizer assigns the same text.
+    // whitespace unit to the next piece. IDs are synthetic delegation sentinels;
+    // the piece boundaries are the regex contract checked here.
     return {
         {"double-space", "a  b", {"a", " ", " b"}, {574, 730, 794}},
         {"space-before-digit", "a  5", {"a", " ", " ", "5"}, {574, 730, 730, 530}},
@@ -307,7 +309,7 @@ void test_chat_and_tool_added_tokens_are_not_split() {
 }
 
 void test_real_pinned_tokenizer_when_provided() {
-    const char* path = std::getenv("TRTMC_LFM2-MoE_TOKENIZER_JSON");
+    const char* path = std::getenv("TRTMC_LFM25_TOKENIZER_JSON");
     if (path == nullptr || *path == '\0')
         return;
     std::ifstream input(path, std::ios::binary);
@@ -320,31 +322,46 @@ void test_real_pinned_tokenizer_when_provided() {
     const trtmc::BundleReader bundle(bundle_path.string());
     auto tokenizer = trtmc::lfm2_moe::create_tokenizer(bundle);
     std::filesystem::remove(bundle_path);
-    check(tokenizer->decode({1334, 542, 518, 5242}) == ":\nA) Paris",
-          "real pinned tokenizer fixes the reported decoder token sequence");
-    for (const auto& fixture : supported_language_fixtures()) {
-        check(tokenizer->encode(fixture.text) == fixture.ids,
-              std::string("real pinned tokenizer ids: ") + fixture.name);
-    }
-
-    const std::string chat =
-        "<|startoftext|><|im_start|>user\nWhat is the capital of France? Answer in one word."
-        "<|im_end|>\n<|im_start|>assistant\n";
-    const Ids expected_chat{1,     6,   6423, 708,  3493, 856, 779, 5706, 803,   4481, 540,
-                            42275, 797, 1235, 2359, 523,  7,   708, 6,    64015, 708};
-    check(tokenizer->encode(chat) == expected_chat,
-          "real pinned tokenizer preserves exact chat prompt IDs");
-
-    const std::string tool_prompt = "<|startoftext|><|im_start|>Hello<|im_end|><|tool_call_start|>";
-    check(tokenizer->encode(tool_prompt) == Ids({1, 6, 36309, 7, 10}),
-          "real pinned tokenizer preserves raw ChatML and tool token IDs");
-
-    const std::vector<std::pair<std::string, Ids>> contractions{
-        {"I'M", {550, 51251}},         {"WE'RE", {24435, 516, 3277}}, {"HE'LL", {6347, 516, 5092}},
-        {"DON'T", {545, 2332, 32640}}, {"SHE'S", {560, 6347, 24406}},
+    // Original Transformers 5.2.0 TokenizersBackend, checkpoint revision
+    // 5dd22602c2e9f6a097b1de4c4efe0658b605015c. Its ByteLevel postprocessor
+    // gives identical IDs with add_special_tokens=true or false: no implicit BOS.
+    const std::vector<std::pair<std::string, Ids>> fixtures{
+        {"Hello, world!", {35808, 20, 1530, 9}},
+        {"Café déjà vu.", {43, 1804, 359, 18412, 23665, 22}},
+        {"¿Dónde está París?", {17494, 44, 58337, 6952, 35319, 39}},
+        {"中文标点，测试123。", {108820, 9756, 5837, 697, 57331, 9792, 646}},
+        {"日本語・テスト123", {62005, 2427, 108526, 9792}},
+        {"한국어 테스트 123", {60581, 4692, 110799, 229, 9792}},
+        {"Привет, мир! 123", {6744, 12827, 20, 48681, 9, 229, 9792}},
+        {"مرحبا، العالم ١٢٣", {17880, 2262, 68059, 3279, 35772, 229, 71062, 71727, 101606}},
+        {"नमस्ते दुनिया १२३",
+         {79861, 72929, 73086, 49507, 72979, 73522, 73016, 29669, 229, 84312, 84378, 85888}},
+        {"Grüße, Welt! 123", {10205, 641, 6516, 20, 9307, 9, 229, 9792}},
+        {"Bonjour, ça va ? 123", {34432, 12642, 20, 18256, 3722, 4718, 229, 9792}},
+        {"I'M", {49, 50750}},
+        {"WE'RE", {23934, 15, 2776}},
+        {"HE'LL", {5846, 15, 4591}},
+        {"DON'T", {44, 1831, 32139}},
+        {"SHE'S", {59, 5846, 23905}},
+        {"<|startoftext|><|im_start|>user\nWhat is the capital of France? Answer in one "
+         "word.<|im_end|>\n<|im_start|>assistant\n",
+         {124894, 124899, 5922, 207,  2992, 355,    278, 5205,   302,   3980, 39,
+          41774,  296,    734,  1858, 22,   124900, 207, 124899, 63514, 207}},
+        {"<|startoftext|><|im_start|>Hello<|im_end|><|tool_call_start|>",
+         {124894, 124899, 35808, 124900, 124905}},
+        {"Hello", {35808}},
+        {"<|startoftext|>Hello", {124894, 35808}},
     };
-    for (const auto& [text, ids] : contractions)
-        check(tokenizer->encode(text) == ids, "real pinned contraction IDs: " + text);
+    for (const auto& [text, ids] : fixtures)
+        check(tokenizer->encode(text) == ids, "real pinned tokenizer IDs: " + text);
+    check(tokenizer->decode({833, 41, 17, 4741}) == ":\nA) Paris",
+          "real pinned tokenizer decodes original-reference IDs");
+    check(tokenizer->encode("Hello") != Ids({124894, 35808}),
+          "an extra implicit BOS must not match the raw-input oracle");
+    check(tokenizer->encode("<|startoftext|>Hello") != Ids({35808}),
+          "a missing explicit BOS must not match the marker-input oracle");
+    std::cout << fixtures.size() << " production-tokenizer cases checked; "
+              << "decode and extra/missing BOS controls checked\n";
 }
 
 } // namespace

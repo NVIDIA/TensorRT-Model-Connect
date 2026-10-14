@@ -61,8 +61,8 @@ promise equal sampled sequences. The CPU sampler tests compare the complete
 filtered probability vectors and exact candidate masks against the actual
 Transformers processors. They then couple both distributions with the same
 uniform draw and require equal selected IDs. Model-level sampling proof must
-add native/reference logits from identical token histories, preserve this shared
-draw coupling as a numerical diagnostic. Sampled generation must satisfy the
+add native/reference logits from identical token histories and preserve this
+shared draw coupling as a numerical diagnostic. Sampled generation must satisfy the
 case-specific behavior contract; equal sampled IDs are not required. Greedy
 behavior alone does not establish sampling behavior.
 

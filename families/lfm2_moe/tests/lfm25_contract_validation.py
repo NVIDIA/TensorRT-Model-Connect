@@ -372,7 +372,8 @@ def main():
         return
 
     args.output.mkdir(parents=True, exist_ok=True)
-    if not args.metadata_only and any(args.output.iterdir()):
+    if (args.output / "native-metadata.json").exists() or (
+            not args.metadata_only and any(args.output.iterdir())):
         parser.error("use a new empty output directory to preserve earlier strict/semantic receipts")
     native_metadata = capture_native_metadata(args.bundle, args.runtime_root, args.client,
                                                args.reference_precision, args.inspector)

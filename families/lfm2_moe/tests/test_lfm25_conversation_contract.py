@@ -218,6 +218,51 @@ def test_native_metadata_records_sizes_and_runtime_precision(tmp_path):
     assert mismatch["precision_matches_reference"] is False
 
 
+@pytest.mark.parametrize("mode", [[], ["--metadata-only"], ["--identity-only"]])
+def test_existing_native_metadata_is_preserved_before_inspection(monkeypatch, tmp_path, mode):
+    import sys
+    from families.lfm2_moe.tests import lfm25_contract_validation as contract
+
+    output = tmp_path / "receipts"
+    output.mkdir()
+    receipt = output / "native-metadata.json"
+    original = b'{"precision_matches_reference": true, "prior_receipt": true}\n'
+    receipt.write_bytes(original)
+    semantic = output / "semantic-parity.json"
+    semantic.write_bytes(b'{"prior_contract": "passed"}\n')
+    semantic_original = semantic.read_bytes()
+
+    def unexpected_inspection(*_):
+        pytest.fail("artifact inspection must not run before the preservation guard")
+
+    monkeypatch.setattr(contract, "capture_native_metadata", unexpected_inspection)
+    monkeypatch.setattr(sys, "argv", ["contract", "--model-dir", "unused",
+        "--bundle", "unused", "--runtime-root", "unused", "--client", "unused",
+        "--output", str(output), *mode])
+    with pytest.raises(SystemExit) as error:
+        contract.main()
+    assert error.value.code == 2
+    assert receipt.read_bytes() == original
+    assert semantic.read_bytes() == semantic_original
+
+
+def test_metadata_only_creates_a_new_receipt_without_inference(monkeypatch, tmp_path):
+    import sys
+    from families.lfm2_moe.tests import lfm25_contract_validation as contract
+
+    output = tmp_path / "new-receipts"
+    monkeypatch.setattr(contract, "capture_native_metadata", lambda *args: {
+        "precision_matches_reference": True, "test_fixture": True})
+    monkeypatch.setattr(sys, "argv", ["contract", "--model-dir", "unused",
+        "--bundle", "unused", "--runtime-root", "unused", "--client", "unused",
+        "--output", str(output), "--metadata-only"])
+    contract.main()
+    assert json.loads((output / "native-metadata.json").read_text()) == {
+        "precision_matches_reference": True, "test_fixture": True,
+        "capture_timing": "metadata_only"}
+    assert list(output.iterdir()) == [output / "native-metadata.json"]
+
+
 def test_reference_and_native_failures_do_not_hide_later_cases(monkeypatch, tmp_path):
     import sys
     from contextlib import nullcontext
