@@ -89,6 +89,7 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_lfm25_moe_tokenizer PRIVATE trtmc_model_lfm2_moe nlohmann_json::nlohmann_json)
   add_test(NAME test_lfm25_moe_tokenizer COMMAND test_lfm25_moe_tokenizer
     ${PROJECT_SOURCE_DIR}/families/lfm2_moe/tests/fixtures/lfm25-tokenizer.json)
+  add_custom_target(test_lfm25_moe_tokenizer_ids DEPENDS test_lfm25_moe_tokenizer)
   add_test(NAME test_lfm25_moe_tokenizer_ids COMMAND test_lfm25_moe_tokenizer
     ${PROJECT_SOURCE_DIR}/families/lfm2_moe/tests/fixtures/lfm25-tokenizer.json --token-ids)
   set_tests_properties(test_lfm25_moe_tokenizer_ids PROPERTIES SKIP_RETURN_CODE 77)
