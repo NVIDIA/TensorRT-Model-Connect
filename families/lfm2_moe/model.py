@@ -232,18 +232,6 @@ def _per_head_rms_norm(
     return flattened.get_output(0)
 
 
-def _router_sigmoid(
-    network: trt.INetworkDefinition,
-    logits: trt.ITensor,
-) -> trt.ITensor:
-    # Preserve the already-rounded model-dtype router logits, then use FP32
-    # sigmoid operator math and round its result once, as torch.sigmoid does.
-    scores = network.add_activation(
-        _cast(network, logits, trt.float32), trt.ActivationType.SIGMOID
-    ).get_output(0)
-    return _cast(network, scores, logits.dtype)
-
-
 def _silu(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -647,7 +635,7 @@ def _add_moe_ffn(
 ) -> trt.ITensor:
     """Single-token routing and experts matching the Transformers BF16 path.
 
-    Router logits, sigmoid scores, and combine weights use the model dtype. The FP32
+    Router matmul, sigmoid, and combine weights use the model dtype. The FP32
     expert bias changes selection only; it never changes the gathered weights.
     """
 
@@ -691,7 +679,7 @@ def _add_moe_ffn(
         work_dtype=work_dtype,
         name=f"{prefix}.feed_forward.gate",
     )
-    scores = _router_sigmoid(network, logits)
+    scores = network.add_activation(logits, trt.ActivationType.SIGMOID).get_output(0)
 
     # 2. Selection uses biased scores; the bias never reaches combine weights.
     bias_tensor = _constant(
