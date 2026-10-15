@@ -3,13 +3,14 @@
 """Case-specific behavior checks against independently parsed original output."""
 
 import ast
+from fractions import Fraction
 import json
 import re
 import unicodedata
 
 STARTS_IN_REASONING = True
 CONTEXT = 131072
-POLICY = "model-card-semantic-v1"
+POLICY = "model-card-semantic-v2"
 LANGUAGE_ANCHORS = {
     "en": ("paris", "france", "capital"),
     "ar": ("باريس", "فرنسا", "عاصم"),
@@ -290,6 +291,197 @@ def organism_concepts(text, label):
     )
 
 
+# These three English claims are scoped to the model-card organism answer.
+# Gene counts exclude cells/base pairs; development excludes lifespan and
+# generation turnover. Missing additional facts are not contradictions.
+_CLAIM_NUMBER = r"\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:thousand|million|k))?"
+_CLAIM_APPROX = r"(?:(?:approximately|approx\.?|about|around|roughly|~)\s*)?"
+_CLAIM_DENIAL = r"(?P<denial>(?:(?:does\s+not|doesn['’]t)\s+(?:have|contain)|not)\s+)?"
+_CLAIM_DURATION = (
+    rf"{_CLAIM_DENIAL}{_CLAIM_APPROX}(?P<low>{_CLAIM_NUMBER})"
+    rf"(?:\s*(?:-|to)\s*(?P<high>{_CLAIM_NUMBER}))?"
+    r"\s*(?P<unit>hours?|days?|weeks?)\b"
+)
+
+
+def _claim_number(value):
+    value = value.replace(",", "").replace(" ", "")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)(thousand|million|k)?", value)
+    return Fraction(match[1]) * {None: 1, "k": 1000, "thousand": 1000, "million": 1000000}[match[2]]
+
+
+def _claim_negated(match):
+    return bool(
+        match.groupdict().get("denial")
+        or re.search(
+            r"(?:\bnot|n['’]t)\s+(?:fully\s+)?(?:sequenced|published|completed|released|take)\b"
+            r"|\bnot\s+(?:in\s+)?\(?\s*\d",
+            match[0],
+        )
+    )
+
+
+def _other_organism_claim(match):
+    """Exclude explicit other-organism subjects, not generic comparisons to them.
+
+    This bounded grammar recognizes named subject/predicate forms and attached
+    ``in humans`` qualifiers. It does not attempt general coreference resolution.
+    """
+    other = r"(?:humans?|homo sapiens|mice|mouse|yeast|drosophila)"
+    prefix = match.string[: match.start()]
+    suffix = match.string[match.end() :]
+    subject = (
+        rf"\b{other}(?:['’]s|['’])?\s+"
+        r"(?:(?:genomes?|genome sequence)\s+)?"
+        r"(?:(?:(?:do(?:es)?\s+not|doesn['’]t|don['’]t)\s+)?"
+        r"(?:has|have|contains?|carry|carries|uses?)\s+)?$"
+    )
+    return bool(
+        re.search(subject, prefix)
+        or re.match(rf"genomes?\s+(?:of|in)\s+(?:the\s+)?{other}\b", match[0])
+        or re.match(rf"\s+(?:in|of)\s+(?:the\s+)?{other}\b", suffix)
+    )
+
+
+def organism_reproduction_claims(text):
+    """Read explicit reproduction modes and direct denials, without truth claims.
+
+    Hermaphroditism, self-fertilization, eggs, and missing modes imply nothing.
+    Only the bounded reproduction phrases below supply claims.
+    """
+    value = normalized(text).replace("*", "")
+    value = re.sub(r"\bnot\s+(?:only|just|merely)\b", "", value)
+    denial = r"(?P<denial>(?:(?:do(?:es)?|did)\s+not|doesn['’]t|don['’]t|didn['’]t|cannot|can['’]t|never|not)\s+)?"
+    mode = r"(?:asexually|sexually|asexual|sexual|parthenogenesis)"
+    modes = rf"(?P<modes>{mode}(?:\s*(?:,?\s+(?:and|or|but also)\s+){mode})*)"
+    restriction = r"(?P<exclusive>only\s+|exclusively\s+)?"
+    patterns = (
+        rf"\b{denial}reproduc(?:e|es|ing)\s+{restriction}(?:both\s+)?(?:by\s+|via\s+|through\s+)?{modes}\b",
+        rf"\breproduc(?:e|es|ing)\s+(?P<denial>not\s+){restriction}(?:by\s+|via\s+|through\s+)?{modes}\b",
+        rf"\b(?P<denial>no\s+|not\s+|without\s+|(?:does not|doesn['’]t)\s+(?:use|undergo)\s+)?{restriction}{modes}\s+reproduction\b",
+        rf"\breproduction\s+(?:is|occurs|happens|takes place)\s+{denial}{restriction}(?:both\s+)?(?:by\s+|via\s+|through\s+)?{modes}\b",
+    )
+    claims = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, value):
+            if _other_organism_claim(match):
+                continue
+            identified = {
+                "asexual" if item.startswith("asexual") or item == "parthenogenesis" else "sexual"
+                for item in re.findall(mode, match["modes"])
+            }
+            denied = bool(match["denial"])
+            claims.update((item, denied) for item in identified)
+            if match["exclusive"] and not denied:
+                claims.update((item, True) for item in {"sexual", "asexual"} - identified)
+    return claims
+
+
+def compare_organism_reproduction_claims(reference, native):
+    """Reject opposing explicit modes or denials; a missing mode is not a claim."""
+    expected = organism_reproduction_claims(reference)
+    actual = organism_reproduction_claims(native)
+    if expected and actual:
+        for left, right in ((expected, actual), (actual, expected)):
+            affirmed = {mode for mode, denied in left if not denied}
+            other_denied = {mode for mode, denied in right if denied}
+            assert not affirmed & other_denied, (
+                "native/reference explicit reproduction modes conflict by denial"
+            )
+        reference_modes = {mode for mode, denied in expected if not denied}
+        native_modes = {mode for mode, denied in actual if not denied}
+        if reference_modes and native_modes:
+            assert reference_modes & native_modes, (
+                "native/reference explicit reproduction modes conflict"
+            )
+    return {
+        "shared_property": bool(expected and actual),
+        "reference_claims": [list(claim) for claim in sorted(expected)],
+        "native_claims": [list(claim) for claim in sorted(actual)],
+        "scope": "Explicit reproduction modes only; missing additional modes are not contradictions.",
+    }
+
+
+def organism_numeric_claims(text):
+    """Extract bounded, explicit final-answer claims, without judging their truth."""
+    value = (
+        normalized(text)
+        .replace("*", "")
+        .translate(str.maketrans({dash: "-" for dash in "‐‑‒–—﹣－"}))
+    )
+    facts = {"sequencing_year": set(), "gene_count": set(), "egg_to_adult_days": set()}
+    year_patterns = (
+        r"\bgenomes?\b[^.!?]{0,100}?\bsequenced\s*(?:(?:in|not)\s*){0,2}\(?\s*((?:19|20)\d{2})\b",
+        r"\bgenome\s+sequenc(?:e|ing)\b[^.!?]{0,60}?\b(?:published|completed|released)"
+        r"\s+(?:(?:in|not)\s+){0,2}((?:19|20)\d{2})\b",
+        r"\b((?:19|20)\d{2}),?\s+(?:its\s+|the\s+)?genome\s+(?:was\s+)?(?:not\s+)?(?:fully\s+)?sequenced\b",
+    )
+    for pattern in year_patterns:
+        for match in re.finditer(pattern, value):
+            if _other_organism_claim(match):
+                continue
+            year = Fraction(match[1])
+            facts["sequencing_year"].add((year, year, _claim_negated(match)))
+    gene_patterns = (
+        rf"\b{_CLAIM_DENIAL}{_CLAIM_APPROX}(?P<number>{_CLAIM_NUMBER})\s+(?:protein[- ]coding\s+)?genes\b",
+        rf"\bgenes\s*\(\s*(?:e\.g\.,?\s*)?{_CLAIM_DENIAL}{_CLAIM_APPROX}(?P<number>{_CLAIM_NUMBER})\s*\)",
+    )
+    for pattern in gene_patterns:
+        for match in re.finditer(pattern, value):
+            if _other_organism_claim(match):
+                continue
+            number = _claim_number(match["number"])
+            facts["gene_count"].add((number, number, _claim_negated(match)))
+    egg_to_adult = r"(?:from\s+)?egg[ -]+to[ -]+(?:an?\s+)?adult"
+    duration_patterns = (
+        rf"{_CLAIM_DURATION}\s+{egg_to_adult}\b",
+        rf"\b{egg_to_adult}(?:\s+development)?\s+(?:in|takes|requires|does not take)\s+{_CLAIM_DURATION}",
+    )
+    for pattern in duration_patterns:
+        for match in re.finditer(pattern, value):
+            scale = {"hour": Fraction(1, 24), "day": 1, "week": 7}[match["unit"].rstrip("s")]
+            low = _claim_number(match["low"]) * scale
+            high = _claim_number(match["high"] or match["low"]) * scale
+            assert low <= high, "organism duration has a reversed range"
+            facts["egg_to_adult_days"].add((low, high, _claim_negated(match)))
+    return facts
+
+
+def compare_organism_numeric_claims(reference, native):
+    """Compare shared explicit properties; no implicit numeric tolerance.
+
+    Scalar claims must be equal after unit/format normalization; explicit ranges
+    must overlap. Approximation words alone do not invent a wider interval.
+    A denied interval conflicts with an affirmative claim wholly inside it.
+    """
+    expected, actual = organism_numeric_claims(reference), organism_numeric_claims(native)
+    shared = [name for name in expected if expected[name] and actual[name]]
+    for name in shared:
+        for left, right in ((expected[name], actual[name]), (actual[name], expected[name])):
+            affirmed = [claim for claim in left if not claim[2]]
+            other_affirmed = [claim for claim in right if not claim[2]]
+            denied = [claim for claim in right if claim[2]]
+            if affirmed and other_affirmed:
+                assert all(
+                    any(max(a[0], b[0]) <= min(a[1], b[1]) for b in other_affirmed)
+                    for a in affirmed
+                ), f"native/reference explicit {name} claims conflict"
+            assert not any(b[0] <= a[0] <= a[1] <= b[1] for a in affirmed for b in denied), (
+                f"native/reference explicit {name} claims conflict by denial"
+            )
+    return {
+        "shared_properties": shared,
+        "reference_claims": {
+            key: [[str(a), str(b), denied] for a, b, denied in sorted(values)]
+            for key, values in expected.items()
+        },
+        "native_claims": {
+            key: [[str(a), str(b), denied] for a, b, denied in sorted(values)]
+            for key, values in actual.items()
+        },
+    }
+
+
 def evaluate(name, native, expected_parts, reference_ids, eos, request, input_count):
     """Return reviewable checks; token equality is deliberately not a gate."""
     actual_parts = native.get("parts", [{"type": "text", "text": native.get("text", "")}])
@@ -409,6 +601,12 @@ def evaluate(name, native, expected_parts, reference_ids, eos, request, input_co
     elif name in {"model-card-quickstart", "model-card-sampling", "sampled-answer-completion"}:
         for label, text in (("reference", expected_text), ("native", actual_text)):
             organism_concepts(text, label)
+        checks["explicit_factual_claims"] = compare_organism_numeric_claims(
+            expected_text, actual_text
+        )
+        checks["explicit_reproduction_claims"] = compare_organism_reproduction_claims(
+            expected_text, actual_text
+        )
         if name == "sampled-answer-completion":
             checks["completion_state"] = "final_answer_present"
             checks["scope"] = (
