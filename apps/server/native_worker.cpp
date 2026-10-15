@@ -565,7 +565,21 @@ int run_model_worker(const Model& model, std::istream& input, std::ostream& outp
         const auto fields = task.config_fields();
         return run_transcription_protocol(
             [&](const cli::io::LoadedAudio& audio, const Json& request) {
-                const auto config = parse_sdk_config(request, fields);
+                auto mapped = request;
+                auto supplied = mapped.find("config");
+                const auto declares = [&](std::string_view name) {
+                    return std::any_of(fields.begin(), fields.end(),
+                                       [&](const auto& field) { return field.name == name; });
+                };
+                if (supplied != mapped.end() && supplied->is_object() &&
+                    supplied->contains("max_output_tokens") && !declares("max_output_tokens") &&
+                    declares("max_new_tokens")) {
+                    if (supplied->contains("max_new_tokens"))
+                        throw ProtocolError("duplicate transcription token limit");
+                    (*supplied)["max_new_tokens"] = supplied->at("max_output_tokens");
+                    supplied->erase("max_output_tokens");
+                }
+                const auto config = parse_sdk_config(mapped, fields);
                 const SpeechTranscriptionRequest input{
                     {{audio.samples.data(), audio.samples.size()},
                      static_cast<std::uint32_t>(audio.sample_rate),

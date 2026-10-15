@@ -54,7 +54,7 @@ class AudioFixture final : public IModel,
     explicit AudioFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
     std::vector<TaskInstance> task_bindings() override {
-        if (mode_ == "asr_only")
+        if (mode_ == "asr_only" || mode_ == "asr_new_tokens")
             return {bind<ISpeechTranscription>(*this, fields_for(ISpeechTranscription::kTask))};
         if (mode_ == "history_single_only")
             return {bind<ITextAudioTokenHistoryToAudio>(
@@ -85,7 +85,8 @@ class AudioFixture final : public IModel,
             bind<IBatchTextToSpeech>(*this, fields_for(IBatchTextToSpeech::kTask))};
     }
     trtmc::Span<const ConfigField> fields_for(std::string_view task) const {
-        if ((mode_ == "asr_only" && task != ISpeechTranscription::kTask) ||
+        if (((mode_ == "asr_only" || mode_ == "asr_new_tokens") &&
+             task != ISpeechTranscription::kTask) ||
             (mode_ == "history_single_only" && task != ITextAudioTokenHistoryToAudio::kTask) ||
             (mode_ == "audio_single_only" && task != ITextToAudio::kTask &&
              task != ITextToSpeech::kTask) ||
@@ -120,6 +121,14 @@ class AudioFixture final : public IModel,
             return declared;
         }
         if (task == ISpeechTranscription::kTask || task == ISpeechTranslation::kTask) {
+            if (mode_ == "asr_new_tokens") {
+                static const ConfigField declared[] = {
+                    {"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}},
+                     "Transcript suffix"},
+                    {"max_new_tokens", ConfigKind::I64, ConfigValue{std::int64_t{224}},
+                     "Output token limit"}};
+                return declared;
+            }
             static const ConfigField declared[] = {
                 {"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}},
                  "Transcript suffix"},
@@ -166,8 +175,10 @@ class AudioFixture final : public IModel,
             {single_asr_, static_cast<std::int32_t>(*audio.sample_rate),
              static_cast<std::int32_t>(audio.channels)});
         for (const auto& entry : config)
-            if (entry.name == "max_output_tokens")
+            if (entry.name == "max_output_tokens" || entry.name == "max_new_tokens")
                 result.decode_ms = static_cast<double>(options.max_output_tokens);
+        if (mode_ == "asr_new_tokens")
+            result.text += ":" + std::to_string(options.max_output_tokens);
         return result;
     }
     TextResult run(const SpeechTranslationRequest& input, ConfigView config) override {
@@ -461,7 +472,7 @@ class AudioFixture final : public IModel,
                 options.preset = std::get<std::string_view>(value);
             if (name == "suffix")
                 options.suffix = std::get<std::string_view>(value);
-            if (name == "max_output_tokens")
+            if (name == "max_output_tokens" || name == "max_new_tokens")
                 options.max_output_tokens = std::get<std::int64_t>(value);
         };
         for (const auto& field : fields)

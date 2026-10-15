@@ -225,6 +225,35 @@ void test_audio_task(const std::filesystem::path& root, const trtmc::LoadOptions
                 result.at("timing_scope") == "public_task_call_wall",
             "SDK defaults, declared Config, transcript and audio identity survive transport");
 }
+void test_audio_task_new_token_field(const std::filesystem::path& root,
+                                     const trtmc::LoadOptions& options) {
+    const auto bundle = write_bundle(root, "asr_new_tokens", "audio_fixture");
+    const auto path = root / "server-sdk-token-field.wav";
+    const std::vector<float> values{-1.0F, 0.0F, 0.5F, 1.0F};
+    trtmc::cli::io::write_wav_interleaved({values.data(), values.size()}, 8000, 1, path.string());
+    const auto run = invoke(bundle, options,
+                            {{{"id", "duplicate"},
+                              {"op", "transcribe"},
+                              {"audio_path", path.string()},
+                              {"config", {{"max_output_tokens", 7}, {"max_new_tokens", 8}}}},
+                             {{"id", "wire"},
+                              {"op", "transcribe"},
+                              {"audio_path", path.string()},
+                              {"config", {{"max_output_tokens", 7}}}},
+                             {{"id", "declared"},
+                              {"op", "transcribe"},
+                              {"audio_path", path.string()},
+                              {"config", {{"max_new_tokens", 9}}}}});
+    std::filesystem::remove(path);
+    require(run.status == 0 && run.messages.size() == 4,
+            "token-field mapping errors leave the SDK speech worker usable");
+    require(run.messages[1].at("ok") == false &&
+                run.messages[1].at("error").at("type") == "invalid_request_error",
+            "a wire alias cannot overwrite an explicit Task token limit");
+    require(run.messages[2].at("result").at("text") == "asr:auto!:7" &&
+                run.messages[3].at("result").at("text") == "asr:auto!:9",
+            "wire and declared token limits reach the actual SDK speech Task");
+}
 void test_detection_task(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
     const auto bundle = write_bundle(root, "image_to_boxes", "image_boxes_fixture");
     const auto path = root / "server-sdk-input.png";
@@ -259,6 +288,7 @@ int main(int argc, char** argv) {
         test_task_selection_and_failures(root, options);
         test_incremental_stream(root, options);
         test_audio_task(root, options);
+        test_audio_task_new_token_field(root, options);
         test_detection_task(root, options);
         return 0;
     } catch (const std::exception& error) {
