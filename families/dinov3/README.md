@@ -102,9 +102,12 @@ Run the remaining commands inside this container.
 
 ## 3. Build the DINOv3 runtime
 
+Use the builder directly from the checkout. The focused CMake command below
+builds the required native targets; a full editable wheel build is unnecessary
+for this deployment.
+
 ```bash
-python -m pip install --no-deps -e . -C py-only=true
-python -m pip install --requirement families/dinov3/requirements.txt
+export PYTHONPATH="$PWD/core/builder:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
 TRTMC_BUILD_DIR="build-sm${TRTMC_SM}"
 
@@ -132,6 +135,10 @@ test -f "$TRTMC_RUNTIME_ROOT/libtrtmc_model_dinov3.so"
 
 `TRTMC_RUNTIME_ROOT` must contain the core runtime, TensorRT backend, and
 DINOv3 family shared libraries produced by this build.
+
+The family `requirements.txt` contains timm/Pillow dependencies used by the
+independent Python reference tests. They are not required to build the bundle
+or run the native deployment path above.
 
 ## 4. Build the TensorRT bundle
 
