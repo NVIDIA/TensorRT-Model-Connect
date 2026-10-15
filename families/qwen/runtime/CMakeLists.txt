@@ -50,6 +50,7 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME test_qwen_chat_templates COMMAND test_qwen_chat_templates)
 
   foreach(test_name IN ITEMS
+      test_qwen_debug_windows
       test_qwen_embedding_pipeline
       test_qwen_native_kv_cache
       test_qwen_sampler
@@ -71,6 +72,7 @@ if(TRTMC_BUILD_TESTS)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
   target_link_libraries(test_qwen_text_stream PRIVATE Threads::Threads)
+  set_tests_properties(test_qwen_debug_windows PROPERTIES SKIP_RETURN_CODE 77)
   set_tests_properties(test_qwen_native_kv_cache PROPERTIES SKIP_RETURN_CODE 77)
 
   add_executable(qwen_logits_trace
