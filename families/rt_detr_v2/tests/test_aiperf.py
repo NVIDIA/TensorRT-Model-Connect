@@ -3,16 +3,14 @@
 
 from pathlib import Path
 
-import pytest
-
 REPOSITORY = Path(__file__).resolve().parents[3]
 
 
-def test_rtdetr_benchmark_uses_the_fixed_bundle_threshold():
-    models = pytest.importorskip("trtmc_aiperf_qual.models")
+def test_rtdetr_benchmark_uses_the_fixed_bundle_threshold(monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY / "apps/aiperf_qual"))
     from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
 
-    resolve_model = models.resolve_model
     model = resolve_model("rtdetr-v2-r18", Environment({"repo": str(REPOSITORY)}))
     entry, = model["absolute"]
     assert entry["suite"] == "coco-map"

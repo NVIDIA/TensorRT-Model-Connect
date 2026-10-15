@@ -3,16 +3,14 @@
 
 from pathlib import Path
 
-import pytest
-
 REPOSITORY = Path(__file__).resolve().parents[3]
 
 
-def test_birefnet_owns_its_binary_conversion_benchmark_and_native_loader():
-    models = pytest.importorskip("trtmc_aiperf_qual.models")
+def test_birefnet_owns_its_binary_conversion_benchmark_and_native_loader(monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY / "apps/aiperf_qual"))
     from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
 
-    resolve_model = models.resolve_model
     model = resolve_model("birefnet-lite", Environment({"repo": str(REPOSITORY)}))
     entry, = model["absolute"]
     assert entry["metric"] == "mask_parity"
