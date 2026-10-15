@@ -164,8 +164,8 @@ class _InternVLModel:
             "num_image_pad_tokens": image_seq_length,
             "vision_output_dim": config.hidden_size,
             "preprocessor_type": "simple_chw",
-            "image_mean": [0.48145466, 0.4578275, 0.40821073],
-            "image_std": [0.26862954, 0.26130258, 0.27577711],
+            "image_mean": [0.485, 0.456, 0.406],
+            "image_std": [0.229, 0.224, 0.225],
             "interpolation": "bicubic",
             "vl_prompt_template": (
                 "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
