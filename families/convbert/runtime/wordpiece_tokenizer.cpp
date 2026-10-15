@@ -495,7 +495,9 @@ class WordPieceTokenizer final : public ITokenizer {
 
         for (auto& [token, id] : vocab_obj.items()) {
             int32_t token_id = id.get<int32_t>();
-            if (token_id >= 0 && token_id < static_cast<int32_t>(vocab_size)) {
+            if (token_id >= 0) {
+                if (static_cast<size_t>(token_id) >= mIdToToken.size())
+                    mIdToToken.resize(static_cast<size_t>(token_id) + 1);
                 mIdToToken[token_id] = token;
                 mTokenToId[token] = token_id;
             }
