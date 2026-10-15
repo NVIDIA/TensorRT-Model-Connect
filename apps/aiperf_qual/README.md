@@ -381,14 +381,14 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
 
 
-## Native endpoint pilot coverage
+## Native endpoint group coverage
 
 The native `trtmc-server` endpoint expansion is tracked in
 [epic #1667](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1667).
 Stages 1–10 require every supported checkpoint in each group for one workload.
-The original pilot results below qualify only their named profiles. Stages 1–4
-are being expanded to the full groups; their pilot PRs alone do not complete
-that coverage.
+Use each stage issue for its per-model results. The original pilot results
+below qualify only their named profiles; their pilot PRs alone do not establish
+full-group coverage.
 
 Discover the current checkpoint inventory from family-owned manifests:
 
@@ -441,12 +441,16 @@ separate from the owning family's numerical/quality criteria. It establishes
 no capacity or performance regression gate. The client is AIPerf 0.13.0 from
 PyPI; an AIPerf source checkout is unnecessary.
 
+## Native endpoint pilot coverage
+
+These original deliveries are historical pilot evidence. Use the stage issues
+for the expanded per-model correctness and client results.
+
 | Profile | Endpoint / AIPerf type | Qualified workload | Evidence |
 | --- | --- | --- | --- |
 | `bge-small-en-v1.5` | `/v1/embeddings` / `embeddings` | One sentence per request, FP16, context 512, concurrency 1; five fixed example sentences, 5 warmups and 50 measured requests | [Stage 1](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1668) |
 | `nemotron-rerank-vl-1b-v2` | `/v1/ranking` / `nim_rankings` | One query plus two fixed text passages, FP16, context 685, concurrency 1; 5 warmups and 50 measured requests | [Stage 2](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1669) |
 | `whisper-tiny-fp16` | `/v1/audio/transcriptions` / `audio_transcription` | One complete mono PCM16 WAV clip; ten pinned LibriSpeech clips, FP16, context 128, output limit 120, concurrency 1; 5 warmups and 50 measured requests | [Stage 3](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1670) |
-
 | `yolo11n` | `/v1/infer` / `image_retrieval` | One original RGB image per request; 100 pinned COCO images, FP16, family threshold 0.25, concurrency 1; 5 warmups and 50 measured requests | [Stage 4](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1671) |
 
 The embedding pilot passed the unchanged bert family correctness checks and a

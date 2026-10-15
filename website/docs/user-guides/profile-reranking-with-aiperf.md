@@ -64,6 +64,8 @@ HTTP latency. Reranking has no token-generation TTFT or inter-token latency.
 
 ## Run another built reranker
 
+Find the current profiles in the [model-group inventory](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#native-endpoint-group-coverage).
+
 Use its bundle, model name, matching tokenizer/revision, family runtime libraries,
 and family correctness criteria. A public document-relevance Task returning raw logits, or an existing
 reranking bundle, can reuse the route; each model needs qualification.

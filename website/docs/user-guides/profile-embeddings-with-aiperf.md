@@ -69,6 +69,8 @@ Use the same steps with its bundle, model name, matching tokenizer/revision,
 and family runtime libraries. The server supports public semantic embedding
 or pooled-feature Tasks and existing embedding/encoding bundle modes.
 Validate the particular family before treating its model as qualified.
+Use the [model-group inventory](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#native-endpoint-group-coverage)
+to find the current profiles and their family-owned manifests.
 
 Each request accepts one non-empty string or a one-element string list and
 returns the full float vector produced by the family. Pooling and normalization

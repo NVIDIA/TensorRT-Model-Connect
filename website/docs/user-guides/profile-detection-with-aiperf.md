@@ -84,4 +84,4 @@ validate that family's output and label space first. The bundle must declare
 legacy `object_detection` or SDK `image_to_boxes`. If serving multiple compatible
 detectors, select one with `--extra-inputs model:YOUR_MODEL_NAME`; otherwise the
 server uses the sole compatible detector. See the
-[coverage matrix](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#native-endpoint-pilot-coverage).
+[model-group inventory](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#native-endpoint-group-coverage).

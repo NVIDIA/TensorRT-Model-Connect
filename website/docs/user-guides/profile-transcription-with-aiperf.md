@@ -72,6 +72,10 @@ latency in seconds divided by clip duration; report client and Task factors
 separately. Build/load/startup and warmup are excluded. This small integration
 example does not establish a performance regression gate or streaming TTFT.
 
-For another built ASR model, replace the bundle and API model name, and use only its declared Task controls. Validate that family's actual
-bundle and transcripts first. See [transcription Tasks](./multimodal-speech.md)
-and the [coverage matrix](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#native-endpoint-pilot-coverage).
+## Run another built ASR model
+
+Replace the bundle and API model name, choose a token limit supported by that
+bundle, and validate its family's transcripts first. Streaming-oriented models
+can use this endpoint when their family also implements whole-clip transcription;
+the endpoint returns one final transcript. See [transcription Tasks](./multimodal-speech.md)
+and the [model-group inventory](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#native-endpoint-group-coverage).
