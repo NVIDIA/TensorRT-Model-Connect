@@ -41,7 +41,8 @@ def coerce_request(request: object) -> BuildRequest:
         return request
     for name, default in (("max_batch_size", 1), ("tensor_parallel_size", 1),
                           ("context_parallel_size", 1), ("dynamic_kv_cache", False),
-                          ("image_height", None), ("image_width", None), ("video_num_frames", None)):
+                          ("image_height", None), ("image_width", None), ("video_num_frames", None),
+                          ("mtp_seq_len", None)):
         if getattr(request, name, default) != default:
             raise NotImplementedError(f"boltz2 does not support {name}")
     if getattr(request, "quantization", None) not in {None, "none"} or getattr(request, "fp32_layers", ()):
@@ -49,7 +50,7 @@ def coerce_request(request: object) -> BuildRequest:
     fields = BuildRequest.__dataclass_fields__
     legacy = {"family", "output_path", "graph_transform", "max_batch_size", "tensor_parallel_size",
               "context_parallel_size", "dynamic_kv_cache", "image_height", "image_width",
-              "video_num_frames", "quantization", "fp32_layers"}
+              "video_num_frames", "quantization", "fp32_layers", "mtp_seq_len"}
     if unknown := set(vars(request)) - set(fields) - legacy:
         raise ValueError(f"unknown Boltz-2 build inputs: {sorted(unknown)}")
     return BuildRequest(**{name: getattr(request, name) for name in fields})
