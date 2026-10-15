@@ -6,15 +6,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from trtmc_aiperf_qual.config import Environment
-from trtmc_aiperf_qual.models import resolve_model
-
 PROFILES = ("dinov3-vits16-pretrain-lvd1689m", "dinov3-convnext-tiny-pretrain-lvd1689m")
 REPO = Path(__file__).resolve().parents[3]
 
 
 @pytest.mark.parametrize("profile", PROFILES)
-def test_formal_profile_uses_one_image_suite_for_accuracy_and_timing(profile):
+def test_formal_profile_uses_one_image_suite_for_accuracy_and_timing(profile, monkeypatch):
+    monkeypatch.syspath_prepend(str(REPO / "apps/aiperf_qual"))
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
     model = resolve_model(profile, Environment({"repo": str(REPO)}))
     assert model["accuracy_source"] == "absolute"
     assert len(model["absolute"]) == 1
