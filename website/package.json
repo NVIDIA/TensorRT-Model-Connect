@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "npm run diagrams:check && docusaurus build",
+    "build": "npm run diagrams:check && docusaurus build && node scripts/check-model-pages.js",
     "clear": "docusaurus clear",
     "diagrams:build": "node scripts/render-diagrams.mjs",
     "diagrams:check": "node scripts/render-diagrams.mjs --check",
     "serve": "docusaurus serve",
     "start": "docusaurus start --host 0.0.0.0",
-    "test:model-support": "node --test plugins/model-support-inventory/index.test.js"
+    "test:model-support": "node --test plugins/model-support-inventory/index.test.js && python3 -m unittest discover -s scripts -p 'test_collect*py'"
   },
   "dependencies": {
     "@docusaurus/core": "3.10.2",
