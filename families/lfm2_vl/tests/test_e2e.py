@@ -28,6 +28,42 @@ CASE = CONTRACT["name"]
 CARD_IMAGE = MANIFEST["external_files"][0]["url"]
 
 
+def _finish_reason(tokens, eos_token_id, max_new_tokens):
+    """Diagnostic inference only: neither generate nor the probe returns a reason."""
+    eos_ids = eos_token_id if isinstance(eos_token_id, (list, tuple)) else [eos_token_id]
+    if tokens and tokens[-1] in eos_ids:
+        return "eos_token"
+    if len(tokens) == max_new_tokens:
+        return "length"
+    return "unknown"
+
+
+def _report_semantic_failures(evidence):
+    # Pytest truncates the full evidence list in assertion messages. Emit exact
+    # failed responses separately, bounded by the cases' generation budgets;
+    # omit token arrays, prompts, and tensors from this console diagnostic.
+    fields = (
+        "name",
+        "input_tokens",
+        "max_new_tokens",
+        "reference_text",
+        "native_text",
+        "reference_calls",
+        "native_calls",
+        "reference_finish_reason",
+        "native_finish_reason",
+        "finish_reason_basis",
+        "semantic",
+    )
+    for item in evidence:
+        if not item["semantic"]["equivalent"]:
+            print(
+                "LFM2_VL_SEMANTIC_FAILURE "
+                + json.dumps({key: item[key] for key in fields}, ensure_ascii=False),
+                flush=True,
+            )
+
+
 def _selected(config):
     models = config.getoption("--e2e-model", default=[]) or []
     cases = config.getoption("--e2e-testcase", default=[]) or []
@@ -435,8 +471,16 @@ def test_e2e(case_name, tmp_path, request):
             {
                 "name": case["name"],
                 "input_tokens": inputs.input_ids.shape[1],
+                "max_new_tokens": case["max_new_tokens"],
                 "reference_tokens": expected,
                 "native_tokens": observed,
+                "reference_finish_reason": _finish_reason(
+                    expected, model.generation_config.eos_token_id, case["max_new_tokens"]
+                ),
+                "native_finish_reason": _finish_reason(
+                    observed, model.generation_config.eos_token_id, case["max_new_tokens"]
+                ),
+                "finish_reason_basis": "inferred_from_final_token_and_generation_limit",
                 "exact_match": observed == expected
                 and observed_text == expected_text
                 and observed_calls == expected_calls
@@ -467,4 +511,5 @@ def test_e2e(case_name, tmp_path, request):
     )
     record_evidence("reference", {"greedy_cases": evidence, "sampled": sampled})
     with evidence_stage("compare"):
+        _report_semantic_failures(evidence)
         assert all(item["semantic"]["equivalent"] for item in evidence), evidence
