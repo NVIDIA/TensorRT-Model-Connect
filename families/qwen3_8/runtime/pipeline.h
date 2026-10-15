@@ -10,6 +10,7 @@
 
 #include "families/qwen3_8/runtime/inference_state.h"
 #include "families/qwen3_8/runtime/mtp_scheduler.h"
+#include "families/qwen3_8/runtime/prefill_runner.h"
 #include "families/qwen3_8/runtime/sampler.h"
 #include "families/qwen3_8/runtime/tokenizer.h"
 #include "trtmc/runtime/trt_module.h"
@@ -39,7 +40,8 @@ class RecurrentPipeline final : public ITextGeneration {
                       std::shared_ptr<ITokenizer> tokenizer = nullptr,
                       std::string model_id_str = "",
                       std::unique_ptr<Qwen38ISampler> sampler = nullptr,
-                      std::unique_ptr<Qwen38MtpScheduler> mtp_scheduler = nullptr);
+                      std::unique_ptr<Qwen38MtpScheduler> mtp_scheduler = nullptr,
+                      std::unique_ptr<Qwen38PrefillRunner> prefill_runner = nullptr);
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }
@@ -70,6 +72,9 @@ class RecurrentPipeline final : public ITextGeneration {
     // reproducible by a plain single-token re-run, which only holds for
     // deterministic greedy decoding.
     std::unique_ptr<Qwen38MtpScheduler> mtp_scheduler_;
+    // Present when the bundle ships prefill_engine.plan: prompts are consumed
+    // chunk_len() tokens per engine call instead of one decoder step per token.
+    std::unique_ptr<Qwen38PrefillRunner> prefill_runner_;
 
     std::vector<int32_t> generate_from_ids(const std::vector<int32_t>& input_ids,
                                            int32_t max_new_tokens,
@@ -79,6 +84,15 @@ class RecurrentPipeline final : public ITextGeneration {
                                                        int32_t max_new_tokens);
 
     bool is_eos(int32_t token) const;
+
+    // Feed prompt tokens [0, input_ids.size()) through the multi-token prefill
+    // engine as far as the KV cache allows; returns how many were consumed
+    // (always the whole prompt unless it outgrows the cache). `logits` holds
+    // the last consumed token's logits. With a non-null `hidden`, it receives
+    // that token's hidden state and every consumed token at position >= 1 is
+    // also passed to the MTP scheduler's warm-up draft().
+    std::size_t prefill_chunks(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
+                               std::vector<float>* hidden);
 
     // hidden_state_out, when non-null, is filled with the decoder's
     // hidden_state output (D2H copy) -- used by the speculative decode loop

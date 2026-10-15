@@ -10,6 +10,7 @@ add_library(trtmc_model_qwen3_8 SHARED
   pipeline.cpp
   plugin.cpp
   plugin_helpers.cpp
+  prefill_runner.cpp
   recurrent_state.cpp
   sampler.cpp
 )
@@ -61,6 +62,7 @@ if(TRTMC_BUILD_TESTS)
     kv_cache.cpp
     mtp_scheduler.cpp
     pipeline.cpp
+    prefill_runner.cpp
     recurrent_state.cpp
     sampler.cpp
   )

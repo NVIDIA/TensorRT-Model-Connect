@@ -31,10 +31,12 @@ RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
                                      const char* name, std::shared_ptr<ITokenizer> tokenizer,
                                      std::string model_id_str,
                                      std::unique_ptr<Qwen38ISampler> sampler,
-                                     std::unique_ptr<Qwen38MtpScheduler> mtp_scheduler)
+                                     std::unique_ptr<Qwen38MtpScheduler> mtp_scheduler,
+                                     std::unique_ptr<Qwen38PrefillRunner> prefill_runner)
     : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
       name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      sampler_(std::move(sampler)), mtp_scheduler_(std::move(mtp_scheduler)) {
+      sampler_(std::move(sampler)), mtp_scheduler_(std::move(mtp_scheduler)),
+      prefill_runner_(std::move(prefill_runner)) {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
 }
@@ -111,10 +113,12 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
-        run_step(input_ids[i], logits);
-
-    run_step(input_ids.back(), logits);
+    // Multi-token engine first; whatever it could not take (prompt longer than
+    // the KV cache) goes through the single-token decoder, which shifts the
+    // cache as it fills.
+    std::size_t consumed = prefill_chunks(input_ids, logits, nullptr);
+    for (; consumed < input_ids.size(); ++consumed)
+        run_step(input_ids[consumed], logits);
     auto t_prefill_end = SteadyClock::now();
 
     // ── Decode phase ──
@@ -138,6 +142,64 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
                   static_cast<int>(input_ids.size()), decode_steps);
 
     return output;
+}
+
+std::size_t RecurrentPipeline::prefill_chunks(const std::vector<int32_t>& input_ids,
+                                              std::vector<float>& logits,
+                                              std::vector<float>* hidden) {
+    if (!prefill_runner_)
+        return 0;
+    prefill_runner_->bind_state();
+
+    const int32_t chunk = prefill_runner_->chunk_len();
+    std::vector<float> rows;
+    std::vector<float> warm_hidden;
+    std::vector<float> prev_hidden; // hidden state of the token just before the chunk
+    std::size_t consumed = 0;
+    while (consumed < input_ids.size()) {
+        const int32_t n = static_cast<int32_t>(
+            std::min<std::size_t>(static_cast<std::size_t>(chunk), input_ids.size() - consumed));
+        if (!prefill_runner_->fits(n))
+            break;
+        prefill_runner_->run_chunk(input_ids.data() + consumed, n, logits,
+                                   hidden != nullptr ? &rows : nullptr);
+        if (hidden != nullptr) {
+            const std::size_t hs = rows.size() / static_cast<std::size_t>(n);
+            // MTP warm-up pairs each token with the hidden state of the one before it;
+            // position 0 has no predecessor and gets no entry.
+            const int32_t first = (consumed == 0) ? 1 : 0;
+            if (mtp_scheduler_->has_prefill()) {
+                const int32_t m = n - first;
+                if (m > 0) {
+                    warm_hidden.resize(static_cast<std::size_t>(m) * hs);
+                    for (int32_t r = 0; r < m; ++r) {
+                        const int32_t j = first + r;
+                        const float* prev =
+                            (j == 0) ? prev_hidden.data()
+                                     : rows.data() + static_cast<std::size_t>(j - 1) * hs;
+                        std::copy(prev, prev + hs,
+                                  warm_hidden.begin() + static_cast<std::ptrdiff_t>(r * hs));
+                    }
+                    const std::size_t pos0 = consumed + static_cast<std::size_t>(first);
+                    mtp_scheduler_->prefill_warmup(
+                        input_ids.data() + pos0, static_cast<int32_t>(pos0), warm_hidden.data(), m);
+                }
+            } else {
+                for (int32_t j = first; j < n; ++j) {
+                    const std::size_t pos = consumed + static_cast<std::size_t>(j);
+                    const float* prev = (j == 0)
+                                            ? prev_hidden.data()
+                                            : rows.data() + static_cast<std::size_t>(j - 1) * hs;
+                    mtp_scheduler_->draft(input_ids[pos], static_cast<int32_t>(pos), prev);
+                }
+            }
+            prev_hidden.assign(rows.end() - static_cast<std::ptrdiff_t>(hs), rows.end());
+        }
+        consumed += static_cast<std::size_t>(n);
+    }
+    if (hidden != nullptr && consumed > 0)
+        *hidden = std::move(prev_hidden);
+    return consumed;
 }
 
 bool RecurrentPipeline::is_eos(int32_t token) const {
@@ -168,8 +230,12 @@ RecurrentPipeline::generate_from_ids_speculative(const std::vector<int32_t>& inp
     // (known) token at the current position -- mirrors the decode loop
     // below exactly, just with known tokens instead of sampled ones. --
     auto t_prefill_start = SteadyClock::now();
-    run_step(input_ids[0], logits, &hidden);
-    for (std::size_t i = 1; i < input_ids.size(); ++i) {
+    std::size_t consumed = prefill_chunks(input_ids, logits, &hidden);
+    if (consumed == 0) {
+        run_step(input_ids[0], logits, &hidden);
+        consumed = 1;
+    }
+    for (std::size_t i = consumed; i < input_ids.size(); ++i) {
         mtp_scheduler_->draft(input_ids[i], static_cast<int32_t>(i), hidden.data());
         run_step(input_ids[i], logits, &hidden);
     }
