@@ -24,6 +24,10 @@ void require(bool value, const char* message) {
 
 class Transcriber final : public trtmc::ITranscription {
   public:
+    explicit Transcriber(bool streaming_mode = false) : streaming_mode_(streaming_mode) {}
+    const char* task() const noexcept override {
+        return streaming_mode_ ? trtmc::IStreamingTranscription::kTask : kTask;
+    }
     bool fail{false};
     int calls{0};
     trtmc::TextResult transcribe(const float* samples, std::int32_t count,
@@ -37,6 +41,9 @@ class Transcriber final : public trtmc::ITranscription {
             throw std::runtime_error("private failure path");
         return {"Exact transcript: caf\xc3\xa9.", {}};
     }
+
+  private:
+    bool streaming_mode_;
 };
 
 std::vector<Json> messages(const std::string& output) {
@@ -47,8 +54,8 @@ std::vector<Json> messages(const std::string& output) {
     return result;
 }
 
-void verify(const std::string& path) {
-    Transcriber task;
+void verify(const std::string& path, bool streaming_mode = false) {
+    Transcriber task(streaming_mode);
     std::stringstream input;
     input << Json{{"id", "missing"}, {"op", "transcribe"}, {"audio_path", path + ".missing"}}.dump()
           << '\n';
@@ -106,6 +113,7 @@ int main() {
         trtmc::cli::io::write_wav_interleaved({values.data(), values.size()}, 8000, 1,
                                               path.string());
         verify(path.string());
+        verify(path.string(), true);
         std::filesystem::remove(path);
     } catch (const std::exception& error) {
         std::filesystem::remove(path);

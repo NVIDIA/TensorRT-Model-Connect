@@ -428,8 +428,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     text.add_argument("--environment", type=Path, required=True)
     text.add_argument("--config", type=Path, required=True)
     text.add_argument("--out", type=Path, required=True)
+    endpoints = commands.add_parser("endpoint-models", help="inventory every checkpoint for a native endpoint group")
+    endpoints.add_argument("--repo", type=Path, required=True)
+    endpoints.add_argument("--group", choices=("embeddings", "reranking", "transcription", "detection"), required=True)
+    endpoint_run = commands.add_parser("endpoint-profile", help="verify and profile one built native endpoint model")
+    endpoint_run.add_argument("--environment", type=Path, required=True)
+    endpoint_run.add_argument("--profile", required=True)
+    endpoint_run.add_argument("--bundle", type=Path, required=True)
+    endpoint_run.add_argument("--inputs", type=Path, required=True)
+    endpoint_run.add_argument("--out", type=Path, required=True)
+    endpoint_run.add_argument("--max-output-tokens", type=int, default=120)
     arguments = parser.parse_args(argv)
     try:
+        if arguments.command == "endpoint-profile":
+            from .endpoint_profile import profile as endpoint_profile
+
+            result = endpoint_profile(load_environment(arguments.environment), arguments.profile,
+                                      arguments.bundle, arguments.inputs, arguments.out,
+                                      token_limit=arguments.max_output_tokens)
+            print(json.dumps(result, indent=2))
+            return 0
+        if arguments.command == "endpoint-models":
+            from .endpoint_catalog import print_inventory
+
+            print_inventory(arguments.repo, arguments.group)
+            return 0
         if arguments.command == "text-profile":
             from .text_profile import profile
 

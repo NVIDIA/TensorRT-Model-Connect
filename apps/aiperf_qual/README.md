@@ -385,8 +385,61 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
 
 The native `trtmc-server` endpoint expansion is tracked in
 [epic #1667](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/1667).
-Each row qualifies only its named profile and workload; other models and load
-modes require their own evidence.
+Stages 1–10 require every supported checkpoint in each group for one workload.
+The original pilot results below qualify only their named profiles. Stages 1–4
+are being expanded to the full groups; their pilot PRs alone do not complete
+that coverage.
+
+Discover the current checkpoint inventory from family-owned manifests:
+
+```bash
+PYTHONPATH=apps/aiperf_qual:apps/benchmark:core/builder:. \
+  python -m trtmc_aiperf_qual endpoint-models --repo . --group embeddings
+```
+
+Groups are `embeddings`, `reranking`, `transcription`, and `detection`.
+Each checkpoint has one normal full-model profile, with precision and parallel
+variants listed separately. Partial/distributed-only checkpoints remain explicit
+gaps. Discovery reports `unverified`; it does not claim correctness or AIPerf
+qualification. An encoder bundle is not counted as a reranker merely because
+the family implementation inherits both interfaces. Streaming-oriented ASR
+checkpoints with a whole-clip Task belong to the recorded-clip workload; this
+does not establish streaming HTTP support.
+
+After running the owning family's unchanged correctness checks on an actual
+bundle, `endpoint-profile` automates the existing native/HTTP and pip-client
+checks for that profile. It reuses `trtmc-server`, the native benchmark worker,
+the published AIPerf runner, and request/metric joins. Use a local environment
+file containing your paths:
+
+```yaml
+repo: /path/to/TensorRT-Model-Connect
+serve_python: /path/to/serving-python
+runtime_root: /path/to/native-build
+aiperf_python: /path/to/aiperf-venv/bin/python
+aiperf: /path/to/aiperf-venv/bin/python
+hf_datasets_cache: /path/to/datasets
+```
+
+```bash
+PYTHONPATH=apps/aiperf_qual:apps/benchmark:apps/perf_serving:core/builder:. \
+  python -m trtmc_aiperf_qual endpoint-profile \
+    --environment /path/to/local-environment.yaml \
+    --profile bge-small-en-v1.5 --bundle /path/to/bge.bundle \
+    --inputs apps/aiperf_qual/examples/embedding-inputs.jsonl \
+    --out /path/to/new-result-directory
+```
+
+Use the existing sentence/ranking examples or prepared audio/image JSONL from
+the guides below. The command verifies every corpus input against native output,
+then checks all 55 complete responses from five warmups and 50 measured requests,
+including original media bytes, complete vectors/transcripts/boxes, native class
+IDs or passage indices, and every request/timing join. Results separate HTTP
+latency from public Task time. Build/load/startup, native/HTTP verification and
+warmup are excluded from measured throughput. This transport verification is
+separate from the owning family's numerical/quality criteria. It establishes
+no capacity or performance regression gate. The client is AIPerf 0.13.0 from
+PyPI; an AIPerf source checkout is unnecessary.
 
 | Profile | Endpoint / AIPerf type | Qualified workload | Evidence |
 | --- | --- | --- | --- |

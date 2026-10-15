@@ -477,7 +477,10 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) 
             },
             [](const std::vector<float>& scores) { return scores; }, input, output);
     }
-    if (std::string_view(task.task()) == ITranscription::kTask) {
+    if (std::string_view(task.task()) == ITranscription::kTask ||
+        std::string_view(task.task()) == IStreamingTranscription::kTask) {
+        // A streaming-oriented bundle may also implement whole-clip transcription.
+        // Invoke that public capability; the family owns its decoding policy.
         auto* transcription = dynamic_cast<ITranscription*>(&task);
         if (!transcription)
             throw std::invalid_argument("bundle does not implement transcription");
