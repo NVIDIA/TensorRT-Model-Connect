@@ -1246,6 +1246,35 @@ def test_prepare_only_checks_explicit_bundle_identity_without_loading_a_model(
     assert bundle.read_bytes() == b"user bundle"
 
 
+@pytest.mark.parametrize("matches", [True, False])
+def test_prepare_only_binds_an_explicit_bundle_to_the_manifest_checkpoint(
+    tmp_path: Path, monkeypatch, capsys, matches: bool
+) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    bundle = tmp_path / "model.bundle"
+    bundle.write_bytes(b"user bundle")
+    revision = model.hf_revision if matches else "b" * 40
+    provenance = {"version": 1, "checkpoint": {"hf_id": model.hf_id, "revision": revision}}
+    monkeypatch.setattr(
+        benchmark_builder.subprocess, "run",
+        lambda command, **_: subprocess.CompletedProcess(command, 0, json.dumps(
+            {"family": "gpt2", "task": "text_generation", "provenance": provenance}
+        ), ""),
+    )
+    arguments = [
+        "run", "--model", "distilgpt2", "--manifest-root", str(REPO / "families"),
+        "--bundle", str(bundle), "--prepare-only", "--no-build",
+    ]
+    if matches:
+        assert main(arguments) == 0
+        assert json.loads(capsys.readouterr().out)["bundles"][0]["provenance"] == provenance
+        return
+    with pytest.raises(SystemExit) as error:
+        main(arguments)
+    assert error.value.code == 2
+    assert "bundle checkpoint mismatch" in capsys.readouterr().err
+
+
 def test_worker_request_carries_the_manifest_bundle_identity(tmp_path: Path) -> None:
     model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
     case = resolve_case(model, tmp_path / "model.bundle").with_values(runtime_root=tmp_path)

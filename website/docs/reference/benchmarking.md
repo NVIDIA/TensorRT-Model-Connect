@@ -25,6 +25,16 @@ trtmc-bench run \
 builder and cached; pass `--no-build` when every selected bundle must already
 exist.
 
+Every bundle is read with `trtmc inspect` before use. If its
+[build provenance](../architecture/bundle-format.md#build-provenance) records a
+checkpoint other than the manifest's pinned `hf_id` and `hf_revision`, the
+bundle is rejected, whether it was just built, reused from the cache, or passed
+with `--bundle`. Bundles that record no checkpoint, and builds from
+`--model-dir`, are not compared. Each bundle-preparation record in
+`result.json` keeps the recorded provenance, and the report shows it with the
+case's reproduction details. The cache receipt next to a managed bundle only
+decides whether the bundle is rebuilt.
+
 Run a checked-in multi-model specification with:
 
 ```bash

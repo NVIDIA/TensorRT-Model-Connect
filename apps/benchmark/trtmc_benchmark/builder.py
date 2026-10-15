@@ -38,6 +38,9 @@ class BundlePreparation:
     stdout_log: Path | None = None
     stderr_log: Path | None = None
     build_identity: str | None = None
+    # Core build provenance reported by `trtmc inspect`; None when not inspected
+    # or when the bundle records none.
+    provenance: Mapping[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -50,6 +53,7 @@ class BundlePreparation:
             "stdout_log": str(self.stdout_log) if self.stdout_log else None,
             "stderr_log": str(self.stderr_log) if self.stderr_log else None,
             "build_identity": self.build_identity,
+            "provenance": self.provenance,
             "included_in_performance_metrics": False,
         }
 
@@ -64,6 +68,8 @@ class _BuildPlan:
     identity: str | None
     runtime_root: Path | None
     cases: tuple[ResolvedCase, ...]
+    # The pinned checkpoint the bundle must record; None for an explicit model directory.
+    checkpoint: Mapping[str, str] | None
 
 
 class BundleBuilder:
@@ -139,10 +145,14 @@ class BundleBuilder:
             case.bundle_is_explicit for case in cases
         )
         if requested.is_file() and not managed and not rebuild:
+            provenance = None
             if not dry_run:
-                _validate_bundle(requested, model, cases[0].runtime_root)
+                provenance = _validate_bundle(
+                    requested, model, cases[0].runtime_root, _manifest_checkpoint(model)
+                )
             return requested, BundlePreparation(
-                model.name, "would_reuse" if dry_run else "reused", requested
+                model.name, "would_reuse" if dry_run else "reused", requested,
+                provenance=provenance,
             )
         if requested.is_file() and not managed:
             raise BenchmarkError(
@@ -156,11 +166,14 @@ class BundleBuilder:
 
         plan = self._plan(model, cases)
         if not rebuild and _matches_receipt(plan):
+            provenance = None
             if not dry_run:
-                _validate_bundle(plan.bundle, model, plan.runtime_root)
+                provenance = _validate_bundle(
+                    plan.bundle, model, plan.runtime_root, plan.checkpoint
+                )
             return plan.bundle, BundlePreparation(
                 model.name, "would_reuse" if dry_run else "reused", plan.bundle,
-                build_identity=plan.identity,
+                build_identity=plan.identity, provenance=provenance,
             )
         if not allow_build:
             raise BenchmarkError(
@@ -202,8 +215,10 @@ class BundleBuilder:
         if timeout <= 0:
             raise BenchmarkError("TRTMC_BENCH_BUILD_TIMEOUT_S must be positive")
         identity = _build_identity(model, model_dir, command) if explicit is None else None
+        checkpoint = _manifest_checkpoint(model) if explicit is None else None
         return _BuildPlan(
-            model, model_dir, bundle, command, timeout, identity, cases[0].runtime_root, tuple(cases)
+            model, model_dir, bundle, command, timeout, identity, cases[0].runtime_root,
+            tuple(cases), checkpoint,
         )
 
     def _build(self, plan: _BuildPlan) -> BundlePreparation:
@@ -251,7 +266,7 @@ class BundleBuilder:
                 artifacts=(("stdout", stdout_log), ("stderr", stderr_log)),
             )
         try:
-            _validate_bundle(temporary, plan.model, plan.runtime_root)
+            provenance = _validate_bundle(temporary, plan.model, plan.runtime_root, plan.checkpoint)
         except BenchmarkError:
             temporary.unlink(missing_ok=True)
             raise
@@ -267,10 +282,17 @@ class BundleBuilder:
             stdout_log=stdout_log,
             stderr_log=stderr_log,
             build_identity=plan.identity,
+            provenance=provenance,
         )
 
 
-def _validate_bundle(bundle: Path, model: ModelDescriptor, runtime_root: Path | None) -> None:
+def _validate_bundle(
+    bundle: Path,
+    model: ModelDescriptor,
+    runtime_root: Path | None,
+    checkpoint: Mapping[str, str] | None,
+) -> Mapping[str, Any] | None:
+    """Check the bundle's family, Task, and recorded checkpoint; return its build provenance."""
     # Reuse the public native Bundle reader; do not duplicate its file parser in Python.
     native = runtime_root / "trtmc" if runtime_root is not None else None
     command = (
@@ -288,14 +310,33 @@ def _validate_bundle(bundle: Path, model: ModelDescriptor, runtime_root: Path | 
     try:
         info = json.loads(result.stdout)
         actual = info["family"], info["task"]
-    except (ValueError, KeyError, TypeError) as error:
+        # Inspectors that predate core build provenance omit the field.
+        provenance = info.get("provenance")
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
         raise BenchmarkError(f"invalid bundle inspection result for {bundle}") from error
+    if provenance is not None and not isinstance(provenance, dict):
+        raise BenchmarkError(f"invalid bundle inspection result for {bundle}")
     if actual != (model.family, model.task):
         raise BenchmarkError(
             f"bundle identity mismatch for {bundle}: expected family {model.family!r} "
             f"and Task {model.task!r}, found family {actual[0]!r} and Task {actual[1]!r}; "
             "rebuild the managed cache with --rebuild, or select a matching explicit bundle"
         )
+    recorded = (provenance or {}).get("checkpoint")
+    if checkpoint is not None and recorded is not None and recorded != checkpoint:
+        raise BenchmarkError(
+            f"bundle checkpoint mismatch for {bundle}: {model.name} pins "
+            f"{json.dumps(dict(checkpoint), sort_keys=True)}, but the bundle records "
+            f"{json.dumps(recorded, sort_keys=True)}; rebuild the managed cache with "
+            "--rebuild, or select a matching explicit bundle"
+        )
+    return provenance
+
+
+def _manifest_checkpoint(model: ModelDescriptor) -> dict[str, str] | None:
+    if not model.hf_id or not model.hf_revision:
+        return None
+    return {"hf_id": model.hf_id, "revision": model.hf_revision}
 
 
 def _source_digest(model: ModelDescriptor) -> str:
