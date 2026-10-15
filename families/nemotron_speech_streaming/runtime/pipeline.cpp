@@ -373,6 +373,8 @@ std::vector<float> RnntPipeline::run_prompt_kernel(const float* encoder_frame) {
         throw std::runtime_error("RnntPipeline: run_prompt_kernel called without engine");
     const int32_t enc_dim = config_.encoder_hidden_size;
     const int32_t num_p = config_.num_prompts;
+    if (prompt_onehot_.size() != static_cast<std::size_t>(num_p))
+        throw std::runtime_error("RnntPipeline: language prompt state is not initialized");
 
     TensorMap inputs;
     inputs["encoder_frame"] =
@@ -439,6 +441,10 @@ TextResult RnntPipeline::transcribe(const float* audio_data, int32_t num_samples
                                     const TranscriptionConfig& request) {
     const int32_t max_new_tokens = request.max_output_tokens;
     const int32_t input_sample_rate = request.input_sample_rate;
+    auto language = request.source_language;
+    if (language == "en" && config_.prompt_dictionary.count("en-US"))
+        language = "en-US";
+    setup_prompt_state(language);
 
     int32_t actual_mel_frames = 0;
     auto mel = extract_padded_mel(audio_data, num_samples, input_sample_rate, actual_mel_frames);
