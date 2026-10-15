@@ -34,34 +34,6 @@ _FAST_OPT_IMAGE_HEIGHT = 1080
 _FAST_OPT_IMAGE_WIDTH = 1920
 _FAST_MAX_IMAGE_HEIGHT = 2160
 _FAST_MAX_IMAGE_WIDTH = 3840
-_ZERO_PAD_SELECTION = frozenset(
-    {
-        "mask_head.res_blocks.1.0.layers.5",
-        "mask_head.res_blocks.2.0.layers.2",
-        "mask_head.res_blocks.2.0.layers.5",
-        "mask_head.res_blocks.3.0.layers.2",
-        "mask_head.res_blocks.3.0.layers.5",
-        "mask_head.resamplers.1.1",
-        "mask_head.resamplers.2.1",
-        "neck.res_blocks.2.0.layers.2",
-        "neck.res_blocks.2.0.layers.5",
-        "neck.res_blocks.2.1.layers.2",
-        "neck.res_blocks.2.1.layers.5",
-        "neck.res_blocks.3.0.layers.2",
-        "neck.res_blocks.3.0.layers.5",
-        "neck.res_blocks.3.1.layers.2",
-        "neck.res_blocks.3.1.layers.5",
-        "points_head.res_blocks.1.0.layers.2",
-        "points_head.res_blocks.1.0.layers.5",
-        "points_head.res_blocks.2.0.layers.2",
-        "points_head.res_blocks.2.0.layers.5",
-        "points_head.res_blocks.3.0.layers.2",
-        "points_head.res_blocks.3.0.layers.5",
-        "points_head.resamplers.0.1",
-        "points_head.resamplers.1.1",
-        "points_head.resamplers.2.1",
-    }
-)
 
 
 def _fuse_half_pixel_x2_conv_weight(weight: np.ndarray) -> np.ndarray:
@@ -332,19 +304,7 @@ class _NativeMogeGraph:
         elif compute_dtype != self.trt.float32:
             raise ValueError(f"Unsupported MoGe convolution compute dtype: {compute_dtype}")
         tensor = self.cast(tensor, compute_dtype, f"{name}.input_cast")
-        zero_pad = module in _ZERO_PAD_SELECTION
-        if zero_pad and (
-            replicate_padding != 1
-            or stride != 1
-            or tuple(int(value) for value in weight.shape[2:]) != (3, 3)
-        ):
-            raise ValueError(
-                f"MoGe selected zero-pad convolution {module!r} must be stride-1 3x3 "
-                "with one pixel of source replicate padding"
-            )
-        padded = (
-            tensor if zero_pad else self.replicate_pad(tensor, replicate_padding, f"{name}.pad")
-        )
+        padded = self.replicate_pad(tensor, replicate_padding, f"{name}.pad")
         layer = self._layer(
             self.network.add_convolution_nd(
                 padded,
@@ -357,7 +317,7 @@ class _NativeMogeGraph:
             name,
         )
         layer.stride_nd = (stride, stride)
-        layer.padding_nd = (1, 1) if zero_pad else (0, 0)
+        layer.padding_nd = (0, 0)
         return layer.get_output(0)
 
     def deconvolution(
