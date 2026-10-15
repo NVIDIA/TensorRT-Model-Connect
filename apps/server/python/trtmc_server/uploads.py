@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import tempfile
+import threading
 import wave
 from pathlib import Path
 from typing import Any
@@ -67,12 +69,48 @@ class UploadedInput:
         self._directory.cleanup()
 
 
-def image_upload(url: str) -> tuple[bytes, str, dict[str, Any]]:
+async def create_uploaded_input(data: bytes, suffix: str) -> UploadedInput:
+    """Write off the event loop and reclaim a cancelled, in-flight creation."""
+    created: list[UploadedInput] = []
+    finished = threading.Event()
+
+    def create() -> UploadedInput:
+        try:
+            media = UploadedInput(data, suffix)
+            created.append(media)
+            return media
+        finally:
+            finished.set()
+
+    def consume(completed: asyncio.Future[Any]) -> None:
+        if not completed.cancelled():
+            completed.exception()
+
+    pending = asyncio.create_task(asyncio.to_thread(create))
+    pending.add_done_callback(consume)
+    try:
+        return await asyncio.shield(pending)
+    except asyncio.CancelledError:
+        def cleanup() -> None:
+            finished.wait()
+            for media in created:
+                media.close()
+
+        cleanup_task = asyncio.get_running_loop().run_in_executor(None, cleanup)
+        cleanup_task.add_done_callback(consume)
+        raise
+
+
+class ImagePixelLimitError(ValueError):
+    def __init__(self, metadata: dict[str, Any]) -> None:
+        super().__init__("image exceeds the server pixel limit")
+        self.metadata = metadata
+
+
+def image_upload(url: str, max_pixels: int) -> tuple[bytes, str, dict[str, Any]]:
     """Accept one embedded RGB image; never fetch client-provided URLs or paths."""
     import base64
     import binascii
-    import warnings
-
     from PIL import Image
 
     prefixes = {"data:image/png;base64,": ("PNG", ".png"),
@@ -82,18 +120,22 @@ def image_upload(url: str) -> tuple[bytes, str, dict[str, Any]]:
         raise ValueError("image must be a base64 PNG or JPEG data URL")
     try:
         data = base64.b64decode(url[len(prefix):], validate=True)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as image:
-                if image.format != prefixes[prefix][0] or image.mode != "RGB" or getattr(image, "n_frames", 1) != 1:
-                    raise ValueError("image must contain one RGB PNG or JPEG frame")
-                width, height = image.size
-                if not 0 < width <= 2**31 - 1 or not 0 < height <= 2**31 - 1:
-                    raise ValueError("image dimensions are invalid")
-                image.verify()
+        with Image.open(io.BytesIO(data)) as image:
+            if image.format != prefixes[prefix][0] or image.mode != "RGB" or getattr(image, "n_frames", 1) != 1:
+                raise ValueError("image must contain one RGB PNG or JPEG frame")
+            width, height = image.size
+            if not 0 < width <= 2**31 - 1 or not 0 < height <= 2**31 - 1:
+                raise ValueError("image dimensions are invalid")
+            metadata = {"input_items": 1, "image_bytes": len(data),
+                        "image_height": height, "image_width": width,
+                        "image_pixels": height * width}
+            if metadata["image_pixels"] > max_pixels:
+                raise ImagePixelLimitError(metadata)
+            image.verify()
+        # verify() checks the container; a fresh decoder must read the pixels.
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
     except (binascii.Error, OSError, SyntaxError, Image.DecompressionBombError,
             Image.DecompressionBombWarning) as error:
         raise ValueError("image must be a readable RGB PNG or JPEG") from error
-    return data, prefixes[prefix][1], {"input_items": 1, "image_bytes": len(data),
-                                      "image_height": height, "image_width": width,
-                                      "image_pixels": height * width}
+    return data, prefixes[prefix][1], metadata

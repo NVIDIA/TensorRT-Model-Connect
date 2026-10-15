@@ -1,19 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
 from concurrent.futures import Future
 import io
 import json
 from pathlib import Path
+import threading
 
 from fastapi.testclient import TestClient
-from PIL import Image
+import httpx
+from PIL import Image, ImageFile
 import pytest
 
 from trtmc_server.app import ServerConfig, create_app
 from trtmc_server.errors import ModelNotFoundError, WorkerCrashedError, WorkerSaturatedError
 from trtmc_server.registry import ModelRegistry
+from trtmc_server import uploads
 
 
 def image(fmt="PNG", mode="RGB"):
@@ -188,3 +192,135 @@ def test_default_model_requires_unique_capability():
     registry._metadata["text"]["capabilities"] = ["object_detection"]
     with pytest.raises(ValueError, match="specify model"):
         registry.default_model("object_detection")
+
+
+def test_corrupt_jpeg_pixels_rejected_before_native_call():
+    registry = Registry()
+    complete = image("JPEG")
+    scan = complete.index(b"\xff\xda")
+    registry.image = complete[:scan + 2 + int.from_bytes(complete[scan + 2:scan + 4], "big")]
+    with Image.open(io.BytesIO(registry.image)) as header:
+        assert header.size == (8, 4)
+        header.verify()
+    with Image.open(io.BytesIO(registry.image)) as pixels, pytest.raises(OSError):
+        pixels.load()
+    with client_for(registry) as client:
+        response = client.post("/v1/infer", json=payload(registry))
+    assert response.status_code == 400 and registry.calls == 0
+
+
+def test_pixel_limit_is_checked_before_decoding(monkeypatch):
+    registry = Registry()
+
+    def unexpected_decode(*args, **kwargs):
+        raise AssertionError("oversized images must not be decoded")
+
+    monkeypatch.setattr(ImageFile.ImageFile, "load", unexpected_decode)
+    with client_for(registry, max_image_pixels=16) as client:
+        response = client.post("/v1/infer", json=payload(registry))
+    assert response.status_code == 413 and registry.calls == 0
+
+
+def test_image_preparation_keeps_unrelated_requests_responsive(monkeypatch):
+    async def run():
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+        started, release = asyncio.Event(), threading.Event()
+        inspection_threads = []
+        inspect = uploads.image_upload
+
+        def blocked_inspection(*args):
+            inspection_threads.append(threading.get_ident())
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(3), "event loop did not release image inspection"
+            return inspect(*args)
+
+        monkeypatch.setattr(uploads, "image_upload", blocked_inspection)
+        monkeypatch.setattr("trtmc_server.app.image_upload", blocked_inspection)
+        registry = Registry()
+        app = create_app(registry, ServerConfig(max_body_bytes=16000, max_prompt_bytes=128,
+                                               max_generation_tokens=128))
+
+        @app.get("/test-ping")
+        async def ping():
+            return {"alive": True}
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+            pending = asyncio.create_task(client.post("/v1/infer", json=payload(registry)))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                response = await asyncio.wait_for(client.get("/test-ping"), 2)
+                assert response.status_code == 200 and response.json() == {"alive": True}
+                assert not pending.done()
+            finally:
+                release.set()
+            assert (await asyncio.wait_for(pending, 3)).status_code == 200
+        assert inspection_threads and all(value != loop_thread for value in inspection_threads)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["inspection", "file_creation"])
+def test_cancelled_image_preparation_releases_inflight_resources(monkeypatch, phase):
+    async def run():
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+        started = asyncio.Event()
+        release, inspected, closed = threading.Event(), threading.Event(), threading.Event()
+        paths, preparation_threads, cleanup_threads = [], [], []
+        inspect, original_upload = uploads.image_upload, uploads.UploadedInput
+
+        def block():
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(3), "event loop did not release image preparation"
+
+        def inspection(*args):
+            preparation_threads.append(threading.get_ident())
+            try:
+                if phase == "inspection":
+                    block()
+                return inspect(*args)
+            finally:
+                inspected.set()
+
+        class TrackedUpload(original_upload):
+            def __init__(self, *args):
+                preparation_threads.append(threading.get_ident())
+                super().__init__(*args)
+                paths.append(self.path)
+                if phase == "file_creation":
+                    block()
+
+            def close(self):
+                cleanup_threads.append(threading.get_ident())
+                super().close()
+                closed.set()
+
+        monkeypatch.setattr("trtmc_server.app.image_upload", inspection)
+        monkeypatch.setattr(uploads, "UploadedInput", TrackedUpload)
+        registry = Registry()
+        app = create_app(registry, ServerConfig(max_body_bytes=16000, max_prompt_bytes=128,
+                                               max_generation_tokens=128))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+            pending = asyncio.create_task(client.post("/v1/infer", json=payload(registry)))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                assert not pending.done()
+                pending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+                if phase == "file_creation":
+                    assert paths and all(path.exists() for path in paths)
+            finally:
+                release.set()
+            completion = inspected if phase == "inspection" else closed
+            assert await asyncio.wait_for(asyncio.to_thread(completion.wait, 3), 4)
+        assert registry.calls == 0 and all(not path.exists() for path in paths)
+        assert preparation_threads and all(value != loop_thread for value in preparation_threads)
+        if phase == "file_creation":
+            assert len(paths) == 1 and cleanup_threads
+            assert all(value != loop_thread for value in cleanup_threads)
+        else:
+            assert not paths
+
+    asyncio.run(run())

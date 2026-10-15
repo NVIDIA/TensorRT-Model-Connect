@@ -36,7 +36,7 @@ from .protocol import chat_prompt, extract_embedding, extract_ranking, extract_r
 from .records import RequestPolicy, RequestRecords
 from .registry import ModelRegistry
 from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest, TranscriptionRequest, DetectionRequest
-from .uploads import UploadedInput, multipart_audio, wav_metadata, image_upload
+from .uploads import UploadedInput, multipart_audio, wav_metadata, image_upload, create_uploaded_input, ImagePixelLimitError
 from .worker import WorkerSession
 
 
@@ -615,21 +615,23 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         context = http_request.state.timing
         context.update(model=request.model, input_items=1)
         try:
-            data, suffix, metadata = image_upload(request.input[0].url)
+            data, suffix, metadata = await asyncio.to_thread(image_upload, request.input[0].url,
+                                                            config.max_image_pixels)
             context.update(metadata)
+        except ImagePixelLimitError as error:
+            context.update(error.metadata)
+            metrics.reject(route, 413)
+            return error_response(413, "content_too_large", str(error))
         except ValueError as error:
             metrics.reject(route, 400)
             return error_response(400, "invalid_request", str(error))
-        if context["image_pixels"] > config.max_image_pixels:
-            metrics.reject(route, 413)
-            return error_response(413, "content_too_large", "image exceeds the server pixel limit")
         try:
             model = request.model if request.model is not None else registry.default_model("object_detection")
         except ValueError as error:
             metrics.reject(route, 400)
             return error_response(400, "model_required", str(error), param="model")
         context["model"] = model
-        media = UploadedInput(data, suffix)
+        media = await create_uploaded_input(data, suffix)
 
         def validate(value):
             return extract_detection(value, context["image_height"], context["image_width"])
