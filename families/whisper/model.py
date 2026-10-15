@@ -308,6 +308,7 @@ class _WhisperModel:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
@@ -412,16 +413,10 @@ class _WhisperModel:
             eps_tensor,
             dtype=work_np_dtype,
         )
-        logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"], dtype=work_np_dtype
+        # Preserve close token scores before argmax; a cast after FP16 GEMM is too late.
+        logits = graph_ops.add_logits_projection(
+            network, hidden_state, hidden, vocab, weights["w_out"]
         )
-        logits = graph_ops.add_bias_sum(
-            network, logits, vocab, np.zeros(vocab, dtype=work_np_dtype), dtype=work_np_dtype
-        )
-
-        # Logits output: always FP32 for accurate argmax/sampling
-        if work_trt_dtype != trt.float32:
-            logits = network.add_cast(logits, trt.float32).get_output(0)
         logits.name = "logits"
         network.mark_output(logits)
 

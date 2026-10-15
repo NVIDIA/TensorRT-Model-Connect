@@ -9,7 +9,7 @@ This example uses **openai/whisper-tiny**. Prepare the native runtime using
 [Build a Bundle](./build-a-bundle.md) with the existing
 [Whisper FP16 profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/e3eeb98f2e5ba1f0ceaf40126d07a3ed02257a2e/families/whisper/tests/benchmark/whisper-tiny-fp16.yaml).
 Rebuild older Whisper bundles from current source for the corrected GELU
-activation and FP32 encoder arithmetic, and run the family correctness checks first. The commands below assume
+activation and FP32 encoder/logit arithmetic, and run the family correctness checks first. The commands below assume
 `whisper-tiny-fp16.bundle` is already built and `trtmc-server` is on `PATH`.
 
 Run from the TRTMC checkout in your prepared GPU environment. In Docker, use

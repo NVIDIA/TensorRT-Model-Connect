@@ -364,6 +364,7 @@ def build_whisper_tp_decoder_engine(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
@@ -439,15 +440,8 @@ def build_whisper_tp_decoder_engine(
     hidden_state = graph_ops.add_layer_norm(
         network, hidden_state, hidden, rank_weights["final_norm"],
         rank_weights["final_norm_beta"], eps_tensor, dtype=work_np_dtype)
-    logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, rank_weights["w_out"],
-        dtype=work_np_dtype)
-    logits = graph_ops.add_bias_sum(
-        network, logits, vocab, np.zeros(vocab, dtype=work_np_dtype),
-        dtype=work_np_dtype)
-
-    if work_trt_dtype != trt.float32:
-        logits = network.add_cast(logits, trt.float32).get_output(0)
+    logits = graph_ops.add_logits_projection(
+        network, hidden_state, hidden, vocab, rank_weights["w_out"])
     logits.name = "logits"
     network.mark_output(logits)
 
