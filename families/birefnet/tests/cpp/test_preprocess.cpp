@@ -62,12 +62,21 @@ void test_mask_threshold_is_respected() {
           "and fails a threshold of 0.8");
 }
 
+void test_mask_resampling_uses_reference_floor_coordinates() {
+    // The official reference maps output index i to floor(i * input / output).
+    const std::vector<float> logits{-8.0F, 8.0F, -8.0F, 8.0F, 8.0F, -8.0F, -8.0F, -8.0F, -8.0F};
+    const auto mask = trtmc::mask_from_logits(logits.data(), 3, 3, 2, 2, 0.5F);
+    check(mask == std::vector<int32_t>({0, 1, 1, 1}),
+          "noninteger resizing preserves the reference mask coordinates");
+}
+
 } // namespace
 
 int main() {
     test_preprocessing_normalises_with_imagenet_statistics();
     test_mask_thresholds_and_resamples_to_the_source_size();
     test_mask_threshold_is_respected();
+    test_mask_resampling_uses_reference_floor_coordinates();
     if (failures != 0) {
         std::fprintf(stderr, "%d birefnet check(s) failed\n", failures);
         return EXIT_FAILURE;
