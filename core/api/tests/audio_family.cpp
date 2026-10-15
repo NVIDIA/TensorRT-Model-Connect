@@ -170,15 +170,15 @@ class AudioFixture final : public IModel,
         const auto options = parse(config, ISpeechTranscription::kTask);
         const auto audio = resolve_audio(input.audio);
         ++single_asr_;
-        auto result = transcript(
-            "asr:" + std::string(input.source_language.value_or("auto")) + options.suffix, audio,
-            {single_asr_, static_cast<std::int32_t>(*audio.sample_rate),
-             static_cast<std::int32_t>(audio.channels)});
+        auto text = "asr:" + std::string(input.source_language.value_or("auto")) + options.suffix;
+        if (mode_ == "asr_new_tokens")
+            text += ":" + std::to_string(options.max_output_tokens);
+        auto result = transcript(std::move(text), audio,
+                                 {single_asr_, static_cast<std::int32_t>(*audio.sample_rate),
+                                  static_cast<std::int32_t>(audio.channels)});
         for (const auto& entry : config)
             if (entry.name == "max_output_tokens" || entry.name == "max_new_tokens")
                 result.decode_ms = static_cast<double>(options.max_output_tokens);
-        if (mode_ == "asr_new_tokens")
-            result.text += ":" + std::to_string(options.max_output_tokens);
         return result;
     }
     TextResult run(const SpeechTranslationRequest& input, ConfigView config) override {

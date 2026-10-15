@@ -2,10 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from trtmc_aiperf_qual.endpoint_profile import check_output, input_key
+from trtmc_aiperf_qual.config import ConfigError, Environment
+
+
+@pytest.mark.parametrize("model", [None, SimpleNamespace(task="text_generation")])
+def test_invalid_or_nonendpoint_profile_has_a_clear_selection_error(tmp_path, monkeypatch, model):
+    import trtmc_benchmark.catalog as catalog
+    from trtmc_aiperf_qual.endpoint_profile import profile
+
+    entry = SimpleNamespace(name="invalid", model=model)
+    monkeypatch.setattr(catalog, "ManifestCatalog", lambda _: SimpleNamespace(entries=lambda: [entry]))
+    for name in ("unknown", "invalid"):
+        with pytest.raises(ConfigError, match="not a native endpoint catalog profile"):
+            profile(Environment({"repo": str(tmp_path)}), name, Path("unused"), Path("unused"),
+                    tmp_path / "uncreated")
+    assert not (tmp_path / "uncreated").exists()
 
 
 def test_singleton_embedding_wire_forms_keep_the_same_input_identity():

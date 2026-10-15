@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .aiperf_runner import run_aiperf
-from .config import Environment
+from .config import ConfigError, Environment
 from .endpoint_catalog import GROUP_TASKS, inventory
 from .services import gpu_exclusive, text_serving
 from .text_profile import check_aiperf, digest, git, join_records, statistics
@@ -156,10 +156,13 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
     from trtmc_perf_serving.backends.trtmc import TrtmcWorkerBackend
 
     repo = environment.path("repo")
-    entry = next(e for e in ManifestCatalog(repo / "families").entries() if e.name == name)
-    group = next(g for g, tasks in GROUP_TASKS.items() if entry.model.task in tasks)
+    entry = next((e for e in ManifestCatalog(repo / "families").entries() if e.name == name), None)
+    group = next((g for g, tasks in GROUP_TASKS.items()
+                  if entry and entry.model and entry.model.task in tasks), None)
+    if group is None:
+        raise ConfigError(f"{name!r} is not a native endpoint catalog profile")
     if not any(row["profile"] == name for row in inventory(repo, group)):
-        raise ValueError("select the group's normal full-model checkpoint profile")
+        raise ConfigError("select the group's normal full-model checkpoint profile")
     out.mkdir(parents=True, exist_ok=False)
     client = str(environment["aiperf_python"])
     client_info = check_aiperf(environment, {})
@@ -219,6 +222,8 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
         checked = 0
         for record in run.raw_records(phase=None):
             key = input_key(group, record["payload"])
+            if key not in expected:
+                raise ConfigError("client input not in verified corpus")
             observed = expected[key]
             response = json.loads(record["responses"][-1]["text"])
             checked += check_output(group, response, observed["observation"], observed["dimensions"])

@@ -44,7 +44,6 @@ class RnntPipeline final : public ITranscription, public IStreamingTranscription
     // the bundle's prompt_dictionary. Returns 0 when the bundle has no
     // prompt_kernel or when `tag` is empty. Throws on unknown tags.
     int32_t resolve_prompt_index(const std::string& tag) const;
-    void setup_prompt_state(const std::string& language);
 
     ~RnntPipeline() override;
 
@@ -71,18 +70,19 @@ class RnntPipeline final : public ITranscription, public IStreamingTranscription
     std::vector<float> run_predictor(int32_t token_id, std::vector<float>& state_h,
                                      std::vector<float>& state_c);
     std::vector<float> run_joint(const float* encoder_frame, const float* pred_output);
-    std::vector<float> run_prompt_kernel(const float* encoder_frame);
+    std::vector<float> prompt_for_language(const std::string& language) const;
+    std::vector<float> run_prompt_kernel(const float* encoder_frame,
+                                         const std::vector<float>& prompt_onehot);
     void decode_encoder_frames(const std::vector<float>& encoder_output, int32_t frame_count,
                                int32_t token_limit, std::vector<float>& pred_output,
                                std::vector<float>& state_h, std::vector<float>& state_c,
-                               std::vector<int32_t>& emitted);
+                               std::vector<int32_t>& emitted,
+                               const std::vector<float>& prompt_onehot);
 
     std::unique_ptr<ITrtModule> encoder_;
     std::unique_ptr<ITrtModule> predictor_;
     std::unique_ptr<ITrtModule> joint_;
     std::unique_ptr<ITrtModule> prompt_kernel_;
-    std::vector<float> prompt_onehot_;
-    int32_t prompt_index_{-1};
     std::map<int32_t, std::vector<char>> streaming_encoder_sections_;
     std::map<int32_t, std::vector<char>> streaming_first_encoder_sections_;
     std::map<int32_t, std::unique_ptr<ITrtModule>> streaming_encoders_;

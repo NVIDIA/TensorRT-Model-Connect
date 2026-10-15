@@ -55,6 +55,29 @@ class Module final : public ITrtModule {
     std::function<TensorMap(const TensorMap&)> invoke_;
 };
 
+class Backend final : public IBackend {
+  public:
+    explicit Backend(std::function<std::unique_ptr<ITrtModule>()> create)
+        : create_(std::move(create)) {}
+    std::unique_ptr<ITrtModule> create_module(const void*, size_t,
+                                              const ModuleCreateOptions&) override {
+        return create_();
+    }
+    std::unique_ptr<ITrtModule>
+    create_module_prebound(const void*, size_t, const ModuleCreateOptions&,
+                           const std::vector<ModuleExternalBinding>&) override {
+        throw std::logic_error("unused");
+    }
+    BackendDualProfileModules create_dual_profile_modules(const void*, size_t,
+                                                          const ModuleCreateOptions&) override {
+        throw std::logic_error("unused");
+    }
+    const char* name() const override { return "test"; }
+
+  private:
+    std::function<std::unique_ptr<ITrtModule>()> create_;
+};
+
 Tensor tensor(std::vector<float>& values) {
     Tensor result;
     result.data = values.data();
@@ -100,12 +123,23 @@ int main() {
         config.mel_hop_length = 8;
         config.mel_chunk_length = 1;
         config.mel_length = 32;
+        config.encoder_layers = 1;
+        config.att_context_right = 0;
+        config.supported_right_contexts = {0};
         MelFilterbank bank;
         bank.n_freq_bins = 9;
         bank.n_mel_bins = 2;
         bank.data.assign(18, 1.0F);
+        Backend backend([&] {
+            return std::make_unique<Module>([&](const TensorMap&) {
+                return TensorMap{{"encoder_output", tensor(features)},
+                                 {"cache_last_channel_next", tensor(state)},
+                                 {"cache_last_time_next", tensor(state)}};
+            });
+        });
         RnntPipeline pipeline(std::move(encoder), std::move(predictor), std::move(joint),
-                              std::move(prompt), {}, nullptr, {}, {}, config, bank, nullptr);
+                              std::move(prompt), {{0, {'p'}}}, &backend, {}, {{0, {'p'}}}, config,
+                              bank, nullptr);
         const std::vector<float> audio(128, 0.1F);
         pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()));
         check(prompts.size() == 1 && prompts.back() == std::vector<float>({0, 0, 1}),
@@ -118,6 +152,31 @@ int main() {
         pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()));
         check(prompts.size() == 3 && prompts.back() == std::vector<float>({0, 0, 1}),
               "each request resets the prompt instead of reusing the previous language");
+        TranscriptionStreamConfig stream_config;
+        stream_config.att_context_right = 0;
+        stream_config.language = "de-DE";
+        auto german = pipeline.create_transcription_stream(stream_config);
+        pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()));
+        check(prompts.back() == std::vector<float>({0, 0, 1}),
+              "whole-clip decoding uses English while a German stream exists");
+        auto before = prompts.size();
+        german->accept_audio(audio.data(), static_cast<int32_t>(audio.size()), true);
+        check(prompts.size() > before, "the German stream actually executes prompt decoding");
+        for (auto index = before; index < prompts.size(); ++index)
+            check(prompts[index] == std::vector<float>({0, 1, 0}),
+                  "whole-clip English does not overwrite an existing stream's German prompt");
+        german->reset();
+        stream_config.language = "en-US";
+        auto english = pipeline.create_transcription_stream(stream_config);
+        english->accept_audio(audio.data(), static_cast<int32_t>(audio.size()), true);
+        check(prompts.back() == std::vector<float>({0, 0, 1}),
+              "a second stream owns its English prompt");
+        before = prompts.size();
+        german->accept_audio(audio.data(), static_cast<int32_t>(audio.size()), true);
+        check(prompts.size() > before, "the reset German stream executes prompt decoding");
+        for (auto index = before; index < prompts.size(); ++index)
+            check(prompts[index] == std::vector<float>({0, 1, 0}),
+                  "stream reset and another stream preserve the original German prompt");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
