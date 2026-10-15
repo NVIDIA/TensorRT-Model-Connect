@@ -8,6 +8,6 @@ from tensorrt_model_connect.model_support import family_support
 
 describe = family_support(
     model_types=("mpnet",),
-    tasks=("embedding", "encoding", "reranking"),
-    default_task="embedding",
+    tasks=("text_to_embedding", "text_to_pooled_features", "text_pair_to_relevance"),
+    default_task="text_to_embedding",
 )

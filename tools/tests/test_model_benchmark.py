@@ -1884,7 +1884,12 @@ def test_encoder_embedding_comparison_restores_pre_refactor_gates() -> None:
 
 @pytest.mark.parametrize(
     ("task", "expected_mode", "expected_operation"),
-    [("encoding", "cls", "encode"), ("embedding", "embedding", "embed")],
+    [
+        ("encoding", "cls", "encode"),
+        ("embedding", "embedding", "embed"),
+        ("text_to_pooled_features", "cls", "encode"),
+        ("text_to_embedding", "embedding", "embed"),
+    ],
 )
 def test_encoder_accuracy_uses_task_semantics_without_model_specific_runner(
     tmp_path: Path,
