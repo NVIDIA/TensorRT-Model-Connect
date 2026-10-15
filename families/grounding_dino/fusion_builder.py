@@ -26,11 +26,25 @@ before each softmax. Both are numerical-stability steps: a softmax is
 invariant to a constant shift, and the clamp never binds at these magnitudes,
 so neither is reproduced here.
 
-The text enhancer that follows is ordinary post-norm self-attention over the
-text tokens, with the same posed-query rule the rest of this model uses - q
-and k see the position embeddings, v does not. Its ``layer_norm_before`` and
+The text enhancer that follows is post-norm self-attention over the text
+tokens, with the same posed-query rule the rest of this model uses - q and k
+see the position embeddings, v does not. Its ``layer_norm_before`` and
 ``layer_norm_after`` are **both** applied after their residual add; the names
 describe position in the block, not pre- versus post-norm.
+
+Two of its rules were settled by measuring the reference's own attention
+weights, because reading the call chain gives the wrong answer:
+
+* **the phrase block mask marks what is allowed.** The call site hands the
+  enhancer ``~text_self_attention_masks`` and then applies
+  ``(1 - mask) * dtype.min``, which reads as though within-phrase attention is
+  masked out. Dumping the reference attention shows the opposite: every row
+  attends exactly to its own phrase and nowhere else. The negations cancel
+  somewhere in the chain; the measured pattern is what this reproduces;
+* **the sine position embedding uses the per-phrase position ids**, the same
+  ``[0, 0, 1, 0, 0, 1, 2, 0, 0]`` the text tower uses - not the plain token
+  index. Using ``arange`` scores 0.9993 with a maximum error of 0.47, which is
+  the kind of near-miss an absolute cosine gate would wave through.
 """
 
 from __future__ import annotations
