@@ -5,10 +5,16 @@ adds native TensorRT image-feature extraction for the public timm DINOv3
 ViT-B/16 checkpoint at a fixed 736x736 engine shape. The build goes directly
 from the checkpoint to a TensorRT-Model-Connect bundle; it does not use ONNX.
 
-This guide targets Linux x86_64 systems with an NVIDIA A100 or H200 GPU. Build
-the bundle separately for every deployment GPU model and TensorRT/runtime
-cohort. Do not reuse an A100 plan on H200 or an H200 plan on A100. Default
-TensorRT plans are not portable across GPU models or TensorRT versions.
+This source deployment path supports Linux x86_64 and aarch64/SBSA hosts with
+an NVIDIA GPU supported by the pinned CUDA and TensorRT stack. A100 and H200
+are measured configurations. Other supported devices, including GB300, use
+the same target-local build flow and must pass the smoke and accuracy checks
+before being recorded as qualified.
+
+Build the bundle separately for every deployment GPU model and
+TensorRT/runtime cohort. Do not reuse an engine built for one GPU model or
+TensorRT version on another. Default TensorRT plans are not portable across
+GPU models or TensorRT versions.
 
 Prerequisites are Git, Docker, NVIDIA Container Toolkit, a compatible NVIDIA
 driver, and network access for the first container and checkpoint download.
@@ -53,8 +59,8 @@ the bundle from this PR and then load it with an older family library.
 
 ## 2. Start the GPU development container
 
-These commands use the repository's x86_64 development image and expose one
-selected GPU to the container:
+These commands select the repository development image for the host
+architecture and expose one selected GPU to the container:
 
 ```bash
 GPU=0
@@ -65,8 +71,18 @@ TRTMC_SM="$(
   tr -d '.[:space:]'
 )"
 
+case "$(uname -m)" in
+  x86_64) DOCKERFILE=Dockerfile.dev.x86 ;;
+  aarch64) DOCKERFILE=Dockerfile.dev.aarch64 ;;
+  *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}')"
+df -h "$DOCKER_ROOT"
+docker system df
+
 docker build \
-  -f Dockerfile.dev.x86 \
+  -f "$DOCKERFILE" \
   -t trtmc-dinov3:pr-1594 \
   requirements
 
@@ -152,7 +168,7 @@ backend `trt`.
 ## 5. Extract image features
 
 ```bash
-IMAGE=/absolute/path/to/input.jpg
+IMAGE="$PWD/families/dinov3/tests/data/test_img.jpeg"
 OUTPUT_JSON="$PWD/dinov3-features.json"
 
 "$TRTMC_BINARY" extract-features "$BUNDLE" \
@@ -178,8 +194,12 @@ assert result["last_hidden_state_shape"] == [1, 2121, 768]
 assert result["pooler_output_shape"] == [1, 768]
 assert len(result["last_hidden_state"]) == 1 * 2121 * 768
 assert len(result["pooler_output"]) == 768
+assert result["pooler_output"] == result["last_hidden_state"][:768]
 PY
 ```
+
+The repository image above provides a copy-paste smoke input. Replace `IMAGE`
+with an image path visible inside the container for application testing.
 
 `extract-features` writes the complete FP32 hidden state and pooler output as
 flat row-major JSON arrays, so the output file is large. Use the accompanying
@@ -217,6 +237,8 @@ sizes, and checkpoints require a separate build and qualification.
   `libtrtmc_backend_trt.so` and `libtrtmc_model_dinov3.so`.
 - If TensorRT cannot deserialize the plan, rebuild the bundle on the deployment
   GPU with the deployment TensorRT version.
+- If the image build fails with `no space left on device`, inspect the Docker
+  root reported in step 2 and remove only confirmed-unused Docker resources.
 - If image decoding fails, use a format supported by the native CLI decoder
   and confirm that the file is readable inside the container.
 
