@@ -4,6 +4,7 @@
 """Pinned LFM2.5 MoE geometry and expert-weight orientation."""
 
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,7 +53,8 @@ def test_unsupported_contract_is_rejected(field, value):
         validate_lfm2_moe_config(SimpleNamespace(raw=raw))
 
 
-def test_expert_weight_mapping_preserves_gate_up_and_down(monkeypatch):
+@pytest.mark.parametrize("disk_backed", [False, True])
+def test_expert_weight_mapping_preserves_gate_up_and_down(monkeypatch, tmp_path, disk_backed):
     # Distinct, non-symmetric values detect transposes and swapped SwiGLU branches.
     cfg = SimpleNamespace(hidden_size=4, moe_intermediate_size=3, num_experts=2)
     tensors = {}
@@ -66,8 +68,9 @@ def test_expert_weight_mapping_preserves_gate_up_and_down(monkeypatch):
     )
     tensors["model.layers.2.feed_forward.expert_bias"] = np.array([0.1, -0.2], dtype=np.float32)
     monkeypatch.setattr(checkpoint_mapper, "_load_tensor", lambda _, name: tensors[name])
-    weights = checkpoint_mapper.WeightDict()
-    checkpoint_mapper._store_moe_feed_forward(weights, [], "model.layers.2", "layer.2", cfg)
+    with tempfile.TemporaryFile(dir=tmp_path) as storage:
+        weights = checkpoint_mapper.WeightDict(storage_file=storage if disk_backed else None)
+        checkpoint_mapper._store_moe_feed_forward(weights, [], "model.layers.2", "layer.2", cfg)
     for i in range(2):
         base = f"model.layers.2.feed_forward.experts.{i}"
         np.testing.assert_array_equal(

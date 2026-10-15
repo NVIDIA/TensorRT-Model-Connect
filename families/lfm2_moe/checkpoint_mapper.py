@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from typing import BinaryIO
 
 import numpy as np
 import ml_dtypes  # noqa: F401 -- enables BF16 safetensors arrays
@@ -17,6 +19,22 @@ from .config import Lfm2MoeConfig, validate_lfm2_moe_config
 
 class WeightDict(dict):
     """Flat, shape-checked float32 weights consumed by ``model.py``."""
+
+    def __init__(self, *, storage_file: BinaryIO | None = None):
+        super().__init__()
+        self._storage_file = storage_file
+
+    def __setitem__(self, key, value):
+        if self._storage_file is not None and isinstance(value, np.ndarray):
+            array = np.ascontiguousarray(value, dtype=np.float32)
+            offset = self._storage_file.seek(0, os.SEEK_END)
+            if self._storage_file.write(memoryview(array).cast("B")) != array.nbytes:
+                raise OSError("incomplete LFM2-MoE weight write")
+            self._storage_file.flush()
+            value = np.memmap(
+                self._storage_file, dtype=np.float32, mode="r", offset=offset, shape=array.shape
+            )
+        super().__setitem__(key, value)
 
 
 class _ReaderCollection(list):
@@ -196,6 +214,7 @@ def load_lfm2_moe_weights(
     config: object,
     *,
     precision: str = "bf16",
+    storage_file: BinaryIO | None = None,
 ) -> WeightDict:
     """Load LFM2-MoE checkpoints without importing Transformers."""
 
@@ -209,7 +228,7 @@ def load_lfm2_moe_weights(
     attention = cfg.attention_size
     kv_attention = cfg.kv_attention_size
 
-    weights = WeightDict()
+    weights = WeightDict(storage_file=storage_file)
     embedding_name = "model.embed_tokens.weight"
     weights["embedding"] = _load_exact(readers, embedding_name, (vocab, hidden))
 

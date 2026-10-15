@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -484,15 +485,15 @@ def _add_conv_layer(
             (hidden, config.conv_l_cache - 1),
             (1, 1),
         ).get_output(0)
-        first = network.add_slice(
-            conv_state, (0, 0), (hidden, 1), (1, 1)
-        ).get_output(0)
+        first = network.add_slice(conv_state, (0, 0), (hidden, 1), (1, 1)).get_output(0)
         rolled = network.add_concatenation([prior, first])
         rolled.axis = 1
         position = network.add_shuffle(position_id)
         position.reshape_dims = (1, 1)
         last = _constant(
-            network, (1, 1), np.array([[config.conv_l_cache - 1]], dtype=np.int32),
+            network,
+            (1, 1),
+            np.array([[config.conv_l_cache - 1]], dtype=np.int32),
             np_dtype=np.dtype(np.int32),
         )
         cached_index = network.add_elementwise(
@@ -503,7 +504,9 @@ def _add_conv_layer(
         # Prefill remains an append at the last column.
         write_index = network.add_select(decode_phase, cached_index, last).get_output(0)
         columns = _constant(
-            network, (1, config.conv_l_cache), np.arange(config.conv_l_cache, dtype=np.int32),
+            network,
+            (1, config.conv_l_cache),
+            np.arange(config.conv_l_cache, dtype=np.int32),
             np_dtype=np.dtype(np.int32),
         )
         write_mask = network.add_elementwise(
@@ -1256,15 +1259,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.mtp_seq_len is not None:
         raise NotImplementedError("LFM2-MoE does not support MTP speculative decoding")
 
-    weights = load_lfm2_moe_weights(str(model_dir), config, precision=precision)
-    plan = build_lfm2_moe_engine(
-        config,
-        weights,
-        max_cache_length,
-        precision=precision,
-        verbose=bool(request.verbose),
-        debug_layer_outputs=False,
-    )
+    # Keep canonical FP32 constants on disk while TensorRT compiles the graph.
+    # The mappings remain alive until serialization releases all network users.
+    with tempfile.TemporaryFile(prefix="trtmc-lfm2-moe-weights-") as storage:
+        weights = load_lfm2_moe_weights(
+            str(model_dir), config, precision=precision, storage_file=storage
+        )
+        plan = build_lfm2_moe_engine(
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            verbose=bool(request.verbose),
+            debug_layer_outputs=False,
+        )
+        del weights
 
     runtime_config = _runtime_config(
         model_dir,

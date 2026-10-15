@@ -10,6 +10,12 @@ point values remain diagnostics, rather than generation acceptance gates.
 
 ## Checkpoint and build
 
+The build stores canonical FP32 weights in a temporary file until TensorRT
+serialization finishes. This checkpoint needs about 33 GiB of temporary disk
+space, in addition to the bundle output. Set `TMPDIR` to an existing directory
+on disk if the system temporary directory uses tmpfs; RAM-backed storage does
+not reduce the build's host-memory requirement.
+
 Download the pinned checkpoint, then build a BF16 bundle. Run these commands
 from the repository root in an environment with the project's build dependencies:
 

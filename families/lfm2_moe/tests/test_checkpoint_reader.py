@@ -50,7 +50,8 @@ def test_reader_does_not_guess_another_checkpoint_format(tmp_path):
         checkpoint_mapper._open_safetensors(tmp_path)
 
 
-def test_build_wires_checkpoint_precision_and_capacity(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fail_engine", [False, True])
+def test_build_wires_checkpoint_precision_and_capacity(tmp_path, monkeypatch, fail_engine):
     pytest.importorskip("tensorrt")  # Bindings only; graph construction is replaced below.
     from families.lfm2_moe import model
 
@@ -58,17 +59,23 @@ def test_build_wires_checkpoint_precision_and_capacity(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps(raw))
     sentinel = object()
     calls = []
+    storage_files = []
 
-    def load(directory, config, *, precision):
+    def load(directory, config, *, precision, storage_file):
         assert Path(directory) == tmp_path and config.raw == raw
         assert precision == "bf16"
+        assert not storage_file.closed
+        storage_files.append(storage_file)
         calls.append("weights")
         return sentinel
 
     def engine(config, weights, capacity, **options):
         assert config.raw == raw and weights is sentinel and capacity == 128000
         assert options == {"precision": "bf16", "verbose": True, "debug_layer_outputs": False}
+        assert not storage_files[0].closed
         calls.append("engine")
+        if fail_engine:
+            raise RuntimeError("engine construction failed")
         return b"fixture plan"
 
     class Writer:
@@ -103,7 +110,14 @@ def test_build_wires_checkpoint_precision_and_capacity(tmp_path, monkeypatch):
         mtp_seq_len=None,
     )
     writer = Writer()
+    if fail_engine:
+        with pytest.raises(RuntimeError, match="engine construction failed"):
+            model.build(request, writer)
+        assert calls == ["weights", "engine"]
+        assert storage_files[0].closed
+        return
     model.build(request, writer)
+    assert storage_files[0].closed
     assert calls == ["weights", "engine"]
     assert writer.header == {"family": "lfm2_moe", "task": "text_generation", "backend": "trt"}
     assert writer.runtime["max_cache_length"] == 128000
