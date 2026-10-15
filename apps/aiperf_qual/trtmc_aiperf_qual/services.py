@@ -161,6 +161,8 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             command += ["--reference-options", json.dumps(reference["options"])]
         if reference.get("adapter"):  # the family's own native pipeline
             command += ["--reference-adapter", str(repo / reference["adapter"])]
+    if environment.media_root() is not None:  # requests name their media by digest
+        command += ["--media-root", str(environment.media_root())]
     if keep_artifacts:  # checks that read output artifacts (audio, images) after the run
         command.append("--keep-artifacts")
     if memory_probe:  # peak GPU memory per call; only meaningful while this server is alone on the GPU

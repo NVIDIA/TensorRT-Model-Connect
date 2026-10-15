@@ -53,9 +53,11 @@ first one.
 | `GET /health/live`, `/health/ready`, `/v1/models`, `/v1/serving/info` | — | — |
 
 A request body is merged over the profile's base request. Paths inside
-`*_path`/`*_paths` fields are sent inline as
-`{"$file": {"suffix": ".png", "b64": "..."}}` and written to per-request files
-on the server. OpenAI fields that every backend cannot honor in the same way
+`*_path`/`*_paths` fields are sent as `$file` references and written to per-request files
+on the server: the bytes inline, `{"$file": {"suffix": ".png", "b64": "..."}}`, or, for a server started with
+`--media-root`, the digest of a file in that shared media store,
+`{"$file": {"suffix": ".png", "sha256": "..."}}` (the server resolves it only inside its store and checks the bytes
+against the digest; a client never names a path). OpenAI fields that every backend cannot honor in the same way
 (for example `ignore_eos`) are rejected with HTTP 400 instead of being
 silently ignored.
 

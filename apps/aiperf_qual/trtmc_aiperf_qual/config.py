@@ -42,6 +42,15 @@ class Environment:
     def __getitem__(self, key: str) -> Any:
         return require(self.values, key, "environment")
 
+    def media_root(self) -> Path | None:
+        """The media store of this machine, shared by every model, side and run: ``media_root``, else a folder of
+        the datasets cache. Each input image, clip and frame is kept once, named by its digest; requests,
+        AIPerf inputs and raw exports carry the digest only."""
+        if self.values.get("media_root"):
+            return Path(self.values["media_root"])
+        cache = self.values.get("hf_datasets_cache")
+        return Path(cache) / "trtmc-media" if cache else None
+
 
 def load_environment(path: Path) -> Environment:
     values = _load(path)

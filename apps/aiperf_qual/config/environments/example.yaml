@@ -12,6 +12,7 @@ worker: /path/to/runtime/trtmc_benchmark_worker         # built with --serve sup
 serve_python: /path/to/trtmc-venv/bin/python            # torch, transformers, TRTMC runtime, perf_serving reqs
 aiperf: /path/to/aiperf-venv/bin/aiperf                 # apps/aiperf_qual/setup.sh creates this environment
 hf_datasets_cache: /path/to/state/hf-datasets
+# media_root: /path/to/state/media                     # optional: the shared media store (default <hf_datasets_cache>/trtmc-media)
 hf_hub_cache: /path/to/huggingface/hub                  # checkpoint cache of builds and references
 reference_env_root: /path/to/state/ref-envs             # per-family reference environments
 ports: {reference: 8900, candidate: 8901}

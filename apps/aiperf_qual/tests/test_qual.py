@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -421,7 +422,8 @@ def test_requests_with_top_k_one_are_greedy():
 def _environment(tmp_path=None):
     from trtmc_aiperf_qual.config import Environment
 
-    return Environment({"repo": str(REPOSITORY), **({"data_root": str(tmp_path)} if tmp_path else {})})
+    return Environment({"repo": str(REPOSITORY),
+                        **({"data_root": str(tmp_path), "media_root": str(tmp_path / "media")} if tmp_path else {})})
 
 
 def _manifest(path, text):
@@ -450,7 +452,9 @@ def test_tsv_manifests_and_nested_file_fields(tmp_path):
                                     "records": "samples", "file_fields": ["media.0.path"]},
                          "fields": {"media.0.path": "image_path", "question": "prompt"}}, _environment(tmp_path))
     request = suite.samples[0]["request"]
-    assert request["prompt"] == "What text?" and request["image_path"]["$file"]["suffix"] == ".jpg"
+    assert request["prompt"] == "What text?"
+    # The image is kept once in the media store; the request names it by digest.
+    assert request["image_path"] == {"$file": {"suffix": ".jpg", "sha256": hashlib.sha256(b"jpg").hexdigest()}}
 
 
 def test_etth1_windows_follow_the_declared_window(tmp_path):

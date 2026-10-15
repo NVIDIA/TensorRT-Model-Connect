@@ -294,7 +294,7 @@ retention:
 ```
 
 Only set `hf_cache: delete_unused` for a cache this batch exclusively owns. Deletion never leaves
-the configured roots. Reference environments, datasets, runtime binaries and reports are kept.
+the configured roots. Reference environments, datasets (with the shared media store), runtime binaries and reports are kept.
 The peak includes the current checkpoint, bundle and generated media, plus the next checkpoint
 if prefetch is enabled (`--no-prefetch` avoids that overlap). Temporary cleanup happens per model,
 so there must still be enough space for one model's complete scoring workload.
@@ -328,6 +328,32 @@ directory's `rerun-<timestamp>/`; its responses replace that side's Acc, task ti
 AIPerf metrics together. `execution.rechecked.jsonl` keeps the active measurements and superseded history.
 Outputs are reused only with their matching execution evidence; a failed regeneration cannot retain an
 older passing timing. Workloads outside the recheck keep their original measurements.
+
+### Shared media store
+
+A dataset with images, audio or video (ImageNet, COCO, LibriSpeech, ...) is kept **once per machine**, not once
+per model. `build_suite` writes every input to a content-addressed store and the request carries only its digest:
+
+```text
+<media_root>/<aa>/<sha256><suffix>     # read-only, named by content; one store for every model, side, suite and run
+```
+
+```json
+{"image_path": {"$file": {"suffix": ".jpg", "sha256": "<64 hex digits>"}}}
+```
+
+The store defaults to `<hf_datasets_cache>/trtmc-media`; `media_root` in the environment file moves it (put it on the
+large disk). `services.serving` starts every server with `--media-root`; a server resolves a digest only inside its own
+store, checks the bytes against it, and hands the backend a per-request copy, so a client never names a path and a
+backend never modifies the store. Because requests no longer contain the bytes, `<suite>.inputs.jsonl`, AIPerf's
+`inputs.json` and `profile_export_raw.jsonl` hold a few hundred bytes per request instead of the whole image: a
+10 000-image ImageNet suite wrote about 5 GB of inline base64 per side and model, and now writes kilobytes per request.
+
+`request_sha` is content-bound (the same bytes have the same digest on every machine), so a result stays
+self-consistent without the store. Inline `b64` remains accepted by the server for ad-hoc requests and the OpenAI routes;
+results written before this change keep their inline payloads and stay readable. Any run of a suite repopulates the store
+from its dataset, so the store is a cache: `retention` never deletes it, and deleting it only costs the next run a rewrite.
+A suite with media and neither `media_root` nor `hf_datasets_cache` configured is a configuration error.
 
 ## Extending
 

@@ -73,6 +73,35 @@ def test_task_route_merges_base_request_materializes_files_and_records_request_i
     assert not (config.scratch / "req-1").exists()  # artifacts are not kept by default
 
 
+def test_task_route_serves_media_store_references_from_its_own_store(tmp_path):
+    from trtmc_perf_serving.files import store_media
+
+    store = tmp_path / "store"
+    backend = FakeBackend()
+    client, config = client_for(tmp_path, backend, media_root=store)
+    body = {"request": {"image_path": store_media(store, b"stored", ".png")}}
+
+    response = client.post("/v1/tasks/classify", json=body, headers={"X-Request-ID": "req-ref"})
+
+    assert response.status_code == 200
+    assert backend.requests[0]["files"]["image_path"] == b"stored"
+    assert not (config.scratch / "req-ref").exists()
+
+
+def test_task_route_rejects_a_media_reference_the_server_cannot_resolve(tmp_path):
+    from trtmc_perf_serving.files import FILE_KEY
+
+    backend = FakeBackend()
+    reference = {FILE_KEY: {"suffix": ".png", "sha256": "ab" * 32}}
+    for config in ({}, {"media_root": tmp_path / "empty-store"}):
+        client, _ = client_for(tmp_path, backend, **config)
+
+        response = client.post("/v1/tasks/classify", json={"request": {"image_path": reference}})
+
+        assert response.status_code == 400 and "media" in response.json()["error"]["message"]
+    assert backend.requests == []
+
+
 @pytest.mark.parametrize("payload", [{"image_path": "/etc/hostname"},
                                      {"image_paths": ["/etc/hostname"]},
                                      {"inputs": {"audio_path": "../secret.wav"}}])

@@ -72,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--records", type=Path, required=True, help="per-request JSONL record file")
     serve.add_argument("--scratch", type=Path, required=True, help="per-request input/output directory")
+    serve.add_argument("--media-root", type=Path,
+                       help="media store (<aa>/<sha256><suffix> files) that requests name by digest; shared by every "
+                            "model and run so the inputs of a dataset exist once")
     serve.add_argument("--max-queue", type=int, default=64, help="waiting requests before 429 (0: none)")
     serve.add_argument("--keep-artifacts", action="store_true", help="keep per-request inputs and outputs")
     serve.add_argument("--memory-probe", action="store_true",
@@ -186,7 +189,7 @@ def serve(arguments: argparse.Namespace) -> int:
         base_request=profile.base_request, records=arguments.records, scratch=arguments.scratch,
         model_name=arguments.model_name or profile.model.name, max_queue=arguments.max_queue,
         keep_artifacts=arguments.keep_artifacts, full_observations=arguments.full_observations,
-        memory_probe=memory_probe, latent_replay=latent_replay, info={"profile": profile.model.name, "testcase": profile.testcase, "family": profile.model.family,
+        memory_probe=memory_probe, latent_replay=latent_replay, media_root=arguments.media_root, info={"profile": profile.model.name, "testcase": profile.testcase, "family": profile.model.family,
               "platform": platform.fingerprint(), "host": platform.host_details()})
     try:
         uvicorn.run(create_app(backend, config), host=arguments.host, port=arguments.port, log_level="warning")

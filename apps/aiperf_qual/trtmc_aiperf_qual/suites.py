@@ -634,7 +634,7 @@ def _family_input_records(source: Mapping[str, Any], selection: Mapping[str, Any
 
 
 def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suite:
-    from trtmc_perf_serving.files import inline_files
+    from trtmc_perf_serving.files import externalize_files
 
     source = definition["source"]
     kind = require(source, "kind", "source")
@@ -685,7 +685,11 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
             request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
         if isinstance(request.get("prompt"), str) and (definition.get("prompt_prefix") or definition.get("prompt_suffix")):
             request["prompt"] = f"{definition.get('prompt_prefix', '')}{request['prompt']}{definition.get('prompt_suffix', '')}"
-        request = inline_files(request)
+        try:  # the media go to the shared store once; the request keeps their digests
+            request = externalize_files(request, environment.media_root())
+        except ValueError as error:
+            raise ConfigError(f"suite {definition['suite']}: {error}; set media_root (or hf_datasets_cache) "
+                              "in the environment") from error
         sample = {"sample_id": record["id"], "task": record.get("task", definition["suite"]),
                   "request": request, "request_sha": request_sha(request)}
         if "label" in record:

@@ -88,8 +88,9 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
     targets = [sample["label"]["png_b64"] for sample in suite.samples]
     from trtmc_perf_serving.files import materialize_files
 
-    # The source images the edits start from (inlined in the requests): files for the scorer's baseline.
-    sources = [materialize_files(sample["request"], out / "edits-sources" / str(index)).get("image_path")
+    # The source images the edits start from (references into the media store): files for the scorer's baseline.
+    sources = [materialize_files(sample["request"], out / "edits-sources" / str(index),
+                                 media_root=environment.media_root()).get("image_path")
                for index, sample in enumerate(suite.samples)]
     scored = {}
     for side, rows in outputs.items():
