@@ -7,8 +7,13 @@ from tensorrt_model_connect.model_support import family_support
 
 
 describe = family_support(
-    model_types=("dinov3_vit", "dinov3_convnext", "vit_small_patch16_dinov3_qkvb"),
-    architectures=("vit_small_patch16_dinov3_qkvb",),
+    model_types=(
+        "dinov3_vit",
+        "dinov3_convnext",
+        "vit_small_patch16_dinov3_qkvb",
+        "vit_base_patch16_dinov3_qkvb",
+    ),
+    architectures=("vit_small_patch16_dinov3_qkvb", "vit_base_patch16_dinov3_qkvb"),
     tasks=("image_features",),
     default_task="image_features",
 )

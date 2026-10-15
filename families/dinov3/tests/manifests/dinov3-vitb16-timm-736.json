@@ -1,0 +1,22 @@
+{
+  "name": "dinov3-vitb16-timm-736",
+  "hf_id": "timm/vit_base_patch16_dinov3_qkvb.lvd1689m",
+  "hf_revision": "f1476ea4e6ff556b5360f09a1921fd721a1b0b68",
+  "bundle": "dinov3-vitb16-timm-736.bundle",
+  "family": "dinov3",
+  "task": "image_features",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "dinov3-vitb16-timm-736",
+      "test_image": "data/test_img.jpeg",
+      "fixed_size_input": true,
+      "num_register_tokens": 4,
+      "runtime_timeout_s": 3600
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1,
+  "image_height": 736,
+  "image_width": 736
+}

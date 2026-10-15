@@ -52,8 +52,8 @@ class FakeDinov3Module final : public trtmc::ITrtModule {
     void forward_async(const trtmc::TensorMap&) override { ++forward_async_calls; }
     void sync() override {}
     cudaStream_t stream() const override { return nullptr; }
-    void enable_cuda_graph() override {}
-    bool cuda_graph_active() const override { return false; }
+    void enable_cuda_graph() override { cuda_graph_enabled = true; }
+    bool cuda_graph_active() const override { return cuda_graph_enabled; }
     bool cuda_graph_captured() const override { return false; }
     int32_t profile_idx() const override { return 0; }
     std::vector<trtmc::TensorInfo> input_info() const override {
@@ -113,6 +113,7 @@ class FakeDinov3Module final : public trtmc::ITrtModule {
     trtmc::DType input_dtype{trtmc::DType::kInt8};
     int forward_calls{0};
     int forward_async_calls{0};
+    bool cuda_graph_enabled{false};
 
   private:
     void require_known_name(const std::string& name) const {
@@ -190,8 +191,17 @@ void test_dynamic_engine_uses_runtime_shape_fallback() {
 
     check(module_ptr->forward_calls == 1, "DINOv3 dynamic engine uses synchronous fallback");
     check(module_ptr->forward_async_calls == 0, "DINOv3 dynamic engine skips direct output path");
+    check(!module_ptr->cuda_graph_enabled, "DINOv3 dynamic engine skips CUDA Graphs");
     check(result.pooler_output == std::vector<float>({7, 8}),
           "DINOv3 dynamic fallback preserves explicit pooler output");
+}
+
+void test_static_direct_output_enables_cuda_graph() {
+    auto module = std::make_unique<FakeDinov3Module>(true, true, false);
+    auto* module_ptr = module.get();
+    trtmc::Dinov3ImageFeaturePipeline pipeline(std::move(module), identity_config());
+
+    check(module_ptr->cuda_graph_enabled, "DINOv3 static direct output enables CUDA Graphs");
 }
 
 void test_image_feature_capability_is_opt_in() {
@@ -217,6 +227,7 @@ int main() {
     test_pipeline_returns_both_named_outputs_with_shapes();
     test_pipeline_requires_pooler_output();
     test_dynamic_engine_uses_runtime_shape_fallback();
+    test_static_direct_output_enables_cuda_graph();
     test_image_feature_capability_is_opt_in();
     test_pipeline_rejects_invalid_module();
 

@@ -12,14 +12,14 @@ import tensorrt as trt
 
 
 
-def new_network(verbose: bool):
+def new_network(verbose: bool, *, optimization_level: int = 1):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     )
     config = builder.create_builder_config()
-    config.builder_optimization_level = 1
+    config.builder_optimization_level = optimization_level
     config.avg_timing_iterations = 8
     config.max_aux_streams = 0
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
@@ -154,6 +154,44 @@ def _rotate_half(network, tensor, batch: int, heads: int, tokens: int, head_dim:
     return concat.get_output(0)
 
 
+def _rope_tables(
+    *,
+    num_prefix_tokens: int,
+    grid_h: int,
+    grid_w: int,
+    head_dim: int,
+    theta: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return full-sequence RoPE tables with identity prefix rows."""
+    num_patches = grid_h * grid_w
+    coords_h = (np.arange(grid_h, dtype=np.float32) + 0.5) / float(grid_h)
+    coords_w = (np.arange(grid_w, dtype=np.float32) + 0.5) / float(grid_w)
+    yy, xx = np.meshgrid(coords_h, coords_w, indexing="ij")
+    coords = np.stack([yy, xx], axis=-1).reshape(num_patches, 2)
+    coords = 2.0 * coords - 1.0
+    inv_freq = 1.0 / np.power(
+        np.float32(theta),
+        np.arange(0.0, 1.0, 4.0 / float(head_dim), dtype=np.float32),
+    )
+    angles = 2.0 * np.pi * coords[:, :, None] * inv_freq[None, None, :]
+    angles = np.tile(angles.reshape(num_patches, head_dim // 2), (1, 2))
+    cosine = np.concatenate(
+        [
+            np.ones((num_prefix_tokens, head_dim), dtype=np.float32),
+            np.cos(angles).astype(np.float32),
+        ],
+        axis=0,
+    )
+    sine = np.concatenate(
+        [
+            np.zeros((num_prefix_tokens, head_dim), dtype=np.float32),
+            np.sin(angles).astype(np.float32),
+        ],
+        axis=0,
+    )
+    return cosine, sine
+
+
 def apply_patch_rope(
     network,
     tensor,
@@ -166,49 +204,28 @@ def apply_patch_rope(
     theta: float,
     dtype: np.dtype,
 ):
-    """Apply HF DINOv3's axial 2D RoPE only to the patch-token suffix."""
+    """Apply HF DINOv3 axial 2D RoPE with an identity prefix transform."""
     batch = int(tensor.shape[0])
     num_patches = grid_h * grid_w
-    prefix = slice_tensor(
-        network,
-        tensor,
-        (0, 0, 0, 0),
-        (batch, num_heads, num_prefix_tokens, head_dim),
+    num_tokens = num_prefix_tokens + num_patches
+    cos_values, sin_values = _rope_tables(
+        num_prefix_tokens=num_prefix_tokens,
+        grid_h=grid_h,
+        grid_w=grid_w,
+        head_dim=head_dim,
+        theta=theta,
     )
-    patches = slice_tensor(
-        network,
-        tensor,
-        (0, 0, num_prefix_tokens, 0),
-        (batch, num_heads, num_patches, head_dim),
-    )
-
-    coords_h = (np.arange(grid_h, dtype=np.float32) + 0.5) / float(grid_h)
-    coords_w = (np.arange(grid_w, dtype=np.float32) + 0.5) / float(grid_w)
-    yy, xx = np.meshgrid(coords_h, coords_w, indexing="ij")
-    coords = np.stack([yy, xx], axis=-1).reshape(num_patches, 2)
-    coords = 2.0 * coords - 1.0
-    inv_freq = 1.0 / np.power(
-        np.float32(theta),
-        np.arange(0.0, 1.0, 4.0 / float(head_dim), dtype=np.float32),
-    )
-    angles = 2.0 * np.pi * coords[:, :, None] * inv_freq[None, None, :]
-    angles = np.tile(angles.reshape(num_patches, head_dim // 2), (1, 2))
-    cos_values = np.cos(angles).astype(np.float32)
-    sin_values = np.sin(angles).astype(np.float32)
-    rope_shape = (1, 1, num_patches, head_dim)
-    cos_tensor = cast(network, constant(network, cos_values, rope_shape, dtype), patches.dtype)
-    sin_tensor = cast(network, constant(network, sin_values, rope_shape, dtype), patches.dtype)
-    direct = _elementwise(network, patches, cos_tensor, trt.ElementWiseOperation.PROD)
+    rope_shape = (1, 1, num_tokens, head_dim)
+    cos_tensor = cast(network, constant(network, cos_values, rope_shape, dtype), tensor.dtype)
+    sin_tensor = cast(network, constant(network, sin_values, rope_shape, dtype), tensor.dtype)
+    direct = _elementwise(network, tensor, cos_tensor, trt.ElementWiseOperation.PROD)
     rotated = _elementwise(
         network,
-        _rotate_half(network, patches, batch, num_heads, num_patches, head_dim),
+        _rotate_half(network, tensor, batch, num_heads, num_tokens, head_dim),
         sin_tensor,
         trt.ElementWiseOperation.PROD,
     )
-    patches = _elementwise(network, direct, rotated, trt.ElementWiseOperation.SUM)
-    concat = network.add_concatenation([prefix, patches])
-    concat.axis = 2
-    return concat.get_output(0)
+    return _elementwise(network, direct, rotated, trt.ElementWiseOperation.SUM)
 
 
 def attention(network, q, k, v, head_dim: int, dtype: np.dtype):
@@ -223,10 +240,12 @@ def attention(network, q, k, v, head_dim: int, dtype: np.dtype):
     scores = network.add_matrix_multiply(
         q, trt.MatrixOperation.NONE, k, trt.MatrixOperation.TRANSPOSE
     ).get_output(0)
+    scores = cast(network, scores, trt.float32)
     probs_layer = network.add_softmax(scores)
     probs_layer.axes = 1 << 3
+    probabilities = cast(network, probs_layer.get_output(0), v.dtype)
     return network.add_matrix_multiply(
-        probs_layer.get_output(0),
+        probabilities,
         trt.MatrixOperation.NONE,
         v,
         trt.MatrixOperation.NONE,
