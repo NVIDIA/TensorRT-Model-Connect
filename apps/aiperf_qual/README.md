@@ -417,10 +417,11 @@ length/load sweeps, request-ID timing joins and an optional sequential
 native-reference comparison. It produces
 benchmark evidence independently of the qualification verdicts above.
 
-Qwen and GPT-2 prebuilt validation checks the builder-recorded immutable Hugging Face
-checkpoint identity and build settings against the selected pinned snapshot and family manifest.
-Bundles created before this metadata was added must be rebuilt for automated
-exact-bundle validation. Declaring a profile or revision in YAML is insufficient.
+Qwen and GPT-2 prebuilt validation reads the bundle's core build provenance with
+`trtmc inspect` and checks the recorded immutable Hugging Face checkpoint identity and
+build settings against the selected pinned snapshot and family manifest. Bundles built
+without core build provenance must be rebuilt for automated exact-bundle validation.
+Declaring a profile or revision in YAML is insufficient.
 
 
 ```bash

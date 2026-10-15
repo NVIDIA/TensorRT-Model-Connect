@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tensorrt_model_connect.provenance import checkpoint_identity
 
 
 _TEST_DIR = Path(__file__).resolve().parent
@@ -116,22 +117,66 @@ def _validation_revision(manifest: dict) -> str | None:
     return revision
 
 
-def _validation_bundle(manifest: dict, model_dir: Path, default: Path) -> Path:
+def _validation_bundle(manifest: dict, model_dir: Path, default: Path, binary: Path) -> Path:
     value = os.environ.get("TRTMC_E2E_BUNDLE")
     if value is None:
         with evidence_stage("build"):
             _build_bundle(manifest, model_dir, default)
         return default
-    _validation_revision(manifest)
+    revision = _validation_revision(manifest)
     assert manifest["task"] == "text_generation", "prebuilt validation supports text generation only"
     bundle = Path(value)
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
-    from ..bundle_provenance import validate_prebuilt_bundle
-
-    provenance = validate_prebuilt_bundle(bundle, model_dir, manifest, _validation_revision(manifest))
+    provenance = _prebuilt_provenance(binary, bundle, model_dir, manifest, revision)
     record_evidence("inputs", {"prebuilt_bundle": str(bundle.resolve()),
                                "bundle_build_provenance": provenance})
     return bundle
+
+
+def _inspect(binary: Path, bundle: Path) -> dict:
+    inspected = subprocess.run(
+        [str(binary), "inspect", str(bundle)], check=True, capture_output=True, text=True, timeout=30
+    )
+    return json.loads(inspected.stdout)
+
+
+def _prebuilt_provenance(
+    binary: Path, bundle: Path, model_dir: Path, manifest: dict, revision: str
+) -> dict:
+    """Compare the core build provenance with the selected, pinned HF snapshot."""
+    info = _inspect(binary, bundle)
+    assert (info.get("family"), info.get("task")) == (_FAMILY, "text_generation"), (
+        "prebuilt bundle has the wrong family or task"
+    )
+    provenance = info.get("provenance")
+    assert isinstance(provenance, dict), "prebuilt bundle lacks build provenance; rebuild it with TRTMC"
+    assert provenance.get("version") == 1, "unsupported prebuilt provenance version"
+    selected = {"hf_id": manifest["hf_id"], "revision": revision}
+    assert checkpoint_identity(model_dir) == selected, (
+        "prebuilt validation requires the selected immutable HF snapshot"
+    )
+    assert provenance.get("checkpoint") == selected, (
+        "prebuilt checkpoint provenance differs from the selected checkpoint"
+    )
+    expected = {
+        "precision": manifest["precision"],
+        "max_sequence_length": manifest["max_sequence_length"],
+        "tensor_parallel_size": manifest["tensor_parallel_size"],
+        "quantization": _quantization(manifest.get("quantization")),
+        "fp32_layers": list(manifest.get("fp32_layers", ())),
+    }
+    build = provenance.get("build")
+    assert isinstance(build, dict), "prebuilt build profile differs from the family manifest"
+    recorded = {key: build.get(key) for key in expected} | {
+        "quantization": _quantization(build.get("quantization"))
+    }
+    assert recorded == expected, "prebuilt build profile differs from the family manifest"
+    return provenance
+
+
+def _quantization(value: object) -> object:
+    # A build request may spell "no quantization" as None or "none".
+    return None if value == "none" else value
 
 
 def _checkpoint(manifest: dict) -> Path:
@@ -861,7 +906,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         return _embedding_e2e(manifest, case, model_dir, runtime_root, torch, tmp_path)
     prompt = _prompt(case)
     record_evidence("inputs", {"prompt": prompt})
-    bundle = _validation_bundle(manifest, model_dir, tmp_path / manifest["bundle"])
+    bundle = _validation_bundle(manifest, model_dir, tmp_path / manifest["bundle"], binary)
     with evidence_stage("compare"):
         _assert_rank_sections(binary, bundle, tp_size)
     with evidence_stage("native"):
