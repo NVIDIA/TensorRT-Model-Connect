@@ -15,12 +15,10 @@ int main() {
                   "vocab": {"[UNK]": 0, "chases": 42, "##s": 99}}
     })json";
     auto tokenizer = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
-    if (tokenizer->encode("chases") != std::vector<int32_t>{42}
-        || tokenizer->id_for_token("chases") != 42
-        || tokenizer->token_for_id(42) != "chases"
-        || tokenizer->decode({42}) != "chases"
-        || !tokenizer->token_for_id(1).empty()
-        || tokenizer->encode("unlisted") != std::vector<int32_t>{0}) {
+    if (tokenizer->encode("chases") != std::vector<int32_t>{42} ||
+        tokenizer->id_for_token("chases") != 42 || tokenizer->token_for_id(42) != "chases" ||
+        tokenizer->decode({42}) != "chases" || !tokenizer->token_for_id(1).empty() ||
+        tokenizer->encode("unlisted") != std::vector<int32_t>{0}) {
         std::cerr << "Sparse vocabulary IDs must survive encode and decode\n";
         return 1;
     }
