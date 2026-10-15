@@ -917,6 +917,19 @@ entries:
       reference_backend: hf_diffusers
       timing_scope: task-pipeline-call-wall
       output_contract: media-shape
+  - id: stable_diffusion.generate_image_xl
+    family: stable_diffusion
+    operation: generate_image
+    model: sdxl-turbo
+    workload:
+      testcase: sdxl-turbo
+    baseline:
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers
+      timing_scope: task-pipeline-call-wall
+      output_contract: media-shape
   - id: rt_detr_v2.detect
     family: rt_detr_v2
     operation: detect

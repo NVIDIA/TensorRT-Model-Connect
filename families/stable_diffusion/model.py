@@ -26,6 +26,10 @@ from . import text_encoder_builder, unet_builder, vae_builder
 _DEFAULT_LATENT = 64  # 512x512, the resolution SD 1.5 was trained at
 _DEFAULT_STEPS = 25
 _DEFAULT_GUIDANCE = 7.5
+# Turbo checkpoints are distilled for one to four steps and trained without
+# classifier-free guidance, so a scale above 1.0 degrades them.
+_DEFAULT_XL_STEPS = 1
+_DEFAULT_XL_GUIDANCE = 0.0
 
 
 def _load_component(model_dir: Path, component: str, filename: str) -> dict:
@@ -55,15 +59,23 @@ def _compile(populate, *, precision: str, verbose: bool) -> bytes:
     return bytes(plan)
 
 
-def build_text_encoder_engine(weights, cfg, *, precision, verbose=False) -> bytes:
+def build_text_encoder_engine(weights, cfg, *, precision, verbose=False,
+                              penultimate=False, pooled=False) -> bytes:
     def populate(network, work_np, work_trt):
         ids = network.add_input(
             "input_ids", trt.int32, (1, cfg["max_position_embeddings"]))
-        out = text_encoder_builder.build_text_encoder(network, ids, weights, cfg, work_np)
+        eos = network.add_input("eos_index", trt.int32, (1, 1)) if pooled else None
+        out, pool = text_encoder_builder.build_text_encoder(
+            network, ids, weights, cfg, work_np, penultimate=penultimate, eos_index=eos)
         if out.dtype != trt.float32:
             out = network.add_cast(out, trt.float32).get_output(0)
         out.name = "last_hidden_state"
         network.mark_output(out)
+        if pool is not None:
+            if pool.dtype != trt.float32:
+                pool = network.add_cast(pool, trt.float32).get_output(0)
+            pool.name = "pooled_output"
+            network.mark_output(pool)
     return _compile(populate, precision=precision, verbose=verbose)
 
 
@@ -89,14 +101,14 @@ def build_vae_engine(weights, cfg, latent_size, *, precision, verbose=False) -> 
     return _compile(populate, precision=precision, verbose=verbose)
 
 
-def _tokenizer_bytes(model_dir: Path) -> bytes:
+def _tokenizer_bytes(model_dir: Path, component: str = "tokenizer") -> bytes:
     """The runtime reads a fast-tokenizer JSON; SD 1.5 ships the legacy pair.
 
     Checkpoints that already carry ``tokenizer.json`` are used as-is. The older
     ``vocab.json`` plus ``merges.txt`` layout is converted here rather than in
     the runtime, so the bundle always holds one format.
     """
-    directory = Path(model_dir) / "tokenizer"
+    directory = Path(model_dir) / component
     path = directory / "tokenizer.json"
     if path.is_file():
         return path.read_bytes()
@@ -168,14 +180,29 @@ def build(request, writer) -> None:
     unet_weights = _load_component(model_dir, "unet", "diffusion_pytorch_model.safetensors")
     vae_weights = _load_component(model_dir, "vae", "diffusion_pytorch_model.safetensors")
 
+    # SDXL is the variant with a second text encoder; everything else about the
+    # bundle follows from that one fact.
+    xl = cfg["text_encoder_2"] is not None
+    # The SDXL decoder overflows in fp16 - every output element, not a few - so
+    # it is built in fp32 whatever the request asks for.
+    vae_precision = "fp32" if cfg["vae_force_upcast"] else precision
+
     writer.set_header(family="stable_diffusion", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.plan", build_text_encoder_engine(
-        text_weights, cfg["text_encoder"], precision=precision, verbose=verbose))
+        text_weights, cfg["text_encoder"], precision=precision, verbose=verbose,
+        penultimate=xl))
+    if xl:
+        second_weights = _load_component(model_dir, "text_encoder_2", "model.safetensors")
+        writer.add_bytes("text_encoder_2.plan", build_text_encoder_engine(
+            second_weights, cfg["text_encoder_2"], precision=precision, verbose=verbose,
+            penultimate=True, pooled=True))
     writer.add_bytes("unet.plan", build_unet_engine(
         unet_weights, cfg["unet"], precision=precision, verbose=verbose))
     writer.add_bytes("vae.plan", build_vae_engine(
-        vae_weights, cfg["vae"], latent, precision=precision, verbose=verbose))
+        vae_weights, cfg["vae"], latent, precision=vae_precision, verbose=verbose))
     writer.add_bytes("tokenizer.json", _tokenizer_bytes(model_dir))
+    if xl:
+        writer.add_bytes("tokenizer_2.json", _tokenizer_bytes(model_dir, "tokenizer_2"))
     writer.add_json(
         "runtime.json",
         {
@@ -187,8 +214,15 @@ def build(request, writer) -> None:
             "scaling_factor": cfg["scaling_factor"],
             "num_train_timesteps": cfg["num_train_timesteps"],
             "steps_offset": cfg["steps_offset"],
-            "default_num_steps": _DEFAULT_STEPS,
-            "default_guidance_scale": _DEFAULT_GUIDANCE,
+            "default_num_steps": _DEFAULT_XL_STEPS if xl else _DEFAULT_STEPS,
+            "default_guidance_scale": _DEFAULT_XL_GUIDANCE if xl else _DEFAULT_GUIDANCE,
+            # The runtime reads these rather than sniffing the section list.
+            "variant": "sdxl" if xl else "sd",
+            "scheduler": "euler_ancestral" if xl else "ddim",
+            "pooled_width": cfg["unet"]["pooled_projection_dim"],
+            "time_ids": cfg["unet"]["addition_time_ids"],
+            # tokenizer_2 pads with "!" (id 0), not with the end-of-text token.
+            "tokenizer_2_pad_id": 0,
             "alphas_cumprod": _alphas_cumprod(cfg),
         },
     )
