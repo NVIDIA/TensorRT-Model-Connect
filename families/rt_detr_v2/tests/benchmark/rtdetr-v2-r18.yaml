@@ -18,7 +18,7 @@ accuracy:
   - name: coco2017-object-detection
     benchmark: coco2017_object_detection
     samples: 100
-    label_space: coco-category-id
+    label_space: coco-contiguous-80
     request: &detection-request
       score_threshold: 0.3
     reference:
