@@ -21,6 +21,7 @@ namespace trtmc::lfm2 {
 namespace {
 
 constexpr const char* kSamplerMode = "philox_exponential_v1";
+constexpr const char* kW2Mode = "cublas_bf16_first_two_v1";
 
 struct RuntimeConfig {
     std::int32_t hidden_size;
@@ -38,6 +39,7 @@ struct RuntimeConfig {
     std::int32_t max_cache_length;
     std::string precision;
     std::string sampler_mode;
+    std::string w2_mode;
 };
 
 template <typename T>
@@ -73,12 +75,19 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     if (!json.is_object())
         throw std::runtime_error("lfm2 runtime.json must be an object");
     const bool has_sampler = json.contains("sampler_mode");
-    if (json.size() != (has_sampler ? 24U : 23U))
+    const bool has_w2 = json.contains("w2_mode");
+    if (has_w2 && !has_sampler)
+        throw std::runtime_error("lfm2 w2_mode requires the Philox sampler contract");
+    if (json.size() != 23U + static_cast<unsigned>(has_sampler) + static_cast<unsigned>(has_w2))
         throw std::runtime_error("lfm2 runtime.json has an unexpected field set");
     const std::string sampler_mode =
         has_sampler ? require_value<std::string>(json, "sampler_mode") : std::string{};
     if (has_sampler && sampler_mode != kSamplerMode)
         throw std::runtime_error("lfm2 runtime.json has an unsupported sampler_mode");
+    const std::string w2_mode =
+        has_w2 ? require_value<std::string>(json, "w2_mode") : std::string{};
+    if (has_w2 && w2_mode != kW2Mode)
+        throw std::runtime_error("lfm2 runtime.json has an unsupported w2_mode");
     const auto* sampler_plan = bundle.find_section("sampler.plan");
     if (has_sampler && (sampler_plan == nullptr || sampler_plan->length == 0))
         throw std::runtime_error("lfm2 sampler_mode requires a nonempty sampler.plan");
@@ -112,6 +121,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::int32_t>(json, "max_cache_length"),
         require_value<std::string>(json, "precision"),
         sampler_mode,
+        w2_mode,
     };
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 ||
@@ -128,6 +138,10 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (has_sampler && config.vocab_size != 128000)
         throw std::runtime_error("lfm2 Philox sampler requires a 128000-token vocabulary");
+    if (has_w2 &&
+        (config.precision != "bf16" || config.hidden_size != 2048 || intermediate_size != 10752 ||
+         config.num_layers != 30 || layer_types[0] != "conv" || layer_types[1] != "conv"))
+        throw std::runtime_error("lfm2 W2 mode requires its qualified BF16 model geometry");
     return config;
 }
 
@@ -166,6 +180,37 @@ void register_sampler() {
     (void)registered;
 }
 
+void register_w2() {
+    static void* const registered = [] {
+        Dl_info location{};
+        if (!dladdr(reinterpret_cast<void*>(&register_w2), &location) || !location.dli_fname)
+            throw std::runtime_error("lfm2 cannot locate its family runtime library");
+        const auto root = std::filesystem::absolute(location.dli_fname).parent_path();
+        const auto helper = root / "libtrtmc_lfm2_w2_byok.so";
+        const auto bridge = root / "libtrtmc_byok_tvm_ffi.so";
+        if (!std::filesystem::is_regular_file(helper) || !std::filesystem::is_regular_file(bridge))
+            throw std::runtime_error(
+                "lfm2 W2 mode requires adjacent family W2 and TVM-FFI libraries");
+        void* library = dlopen(bridge.c_str(), RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
+        if (library == nullptr)
+            throw std::runtime_error("lfm2 cannot load its adjacent TVM-FFI bridge: " +
+                                     std::string(dlerror()));
+        using LoadKernel = const char* (*)(const char*, const char*, const char*) noexcept;
+        const auto load = reinterpret_cast<LoadKernel>(dlsym(library, "trtmc_load_byok_kernel"));
+        if (load == nullptr) {
+            dlclose(library);
+            throw std::runtime_error("lfm2 TVM-FFI bridge has no kernel registration entrypoint");
+        }
+        if (const char* error = load(helper.c_str(), "run", "lfm2.w2.cublas_bf16_v1")) {
+            const std::string message(error);
+            dlclose(library);
+            throw std::runtime_error("lfm2 cannot register its W2 operation: " + message);
+        }
+        return library;
+    }();
+    (void)registered;
+}
+
 } // namespace
 
 ITask* create(const FamilyContext& context) {
@@ -176,6 +221,8 @@ ITask* create(const FamilyContext& context) {
             throw std::runtime_error("lfm2 Philox sampler requires the TensorRT backend");
         register_sampler();
     }
+    if (!config.w2_mode.empty())
+        register_w2();
     auto decoder = load_module(context.backend, require_section(context.reader, "engine.plan"));
     const cudaStream_t stream = decoder->stream();
     std::unique_ptr<ITrtModule> sampler;

@@ -15,7 +15,9 @@ from the repository root in an environment with the project's build dependencies
 
 The 128,000-token vocabulary uses a separate native sampler stage. Its build
 requires `libtrtmc_byok_tvm_ffi.so` and `libtrtmc_lfm2_sampler_byok.so` from the same
-installation. For a source checkout, first configure the native CMake build with
+installation. BF16 builds of the 30-layer, 2,048-hidden, 10,752-intermediate
+configuration whose first two layers are convolutional also require the adjacent
+`libtrtmc_lfm2_w2_byok.so`. For a source checkout, first configure the native CMake build with
 `TRTMC_ENABLE_BYOK=ON`, then build the owning family and select its output directory:
 
 ```bash
@@ -23,7 +25,7 @@ cmake --build build --target trtmc trtmc_backend_trt trtmc_model_lfm2
 export CMAKE_PREFIX_PATH="$PWD/build${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 ```
 
-The family target also builds the bridge and sampler library. Installed packages
+The family target also builds the bridge, sampler, and W2 libraries. Installed packages
 can instead use their adjacent `bin` directory or a standard `CMAKE_PREFIX_PATH`
 installation. A prefix may identify the library directory itself or an install
 prefix containing `bin`, `lib`, or `lib64`. A directory containing either sampler
@@ -32,6 +34,8 @@ are loaded rather than combining libraries from different installations.
 The owning E2E caller passes its selected native runtime directory through this
 standard prefix input for the build. The sampler library and its license notice
 are included in the CMake `sdk` and `runtime` install components.
+The W2 library is included in both components as well. An eligible build with a
+missing W2 library fails before loading checkpoint weights.
 
 ```bash
 python - <<'PY'
@@ -68,6 +72,22 @@ legacy bundle, or an unknown mode, missing/empty plan, or incompatible sampler
 I/O in a new bundle, is rejected. Older runtimes reject the new 24-field contract.
 The sampler-enabled build requires `backend="trt"`; TensorRT-RTX is not part of
 this sampler contract.
+
+Eligible BF16 builds add `w2_mode: "cublas_bf16_first_two_v1"`, yielding a
+25-field contract. This mode requires the sampler contract, batch one, vocabulary
+128,000, hidden width 2,048, intermediate width 10,752, 30 layers, and two initial
+convolutional layers. It offloads only those two layers' W2 projections through
+the family-owned TVM-FFI helper. The existing BF16 gated input and BF16 weight
+values feed `cublasGemmEx` with FP32 accumulation, BF16 output, default math and
+algorithm, and the vendor's default workspace. TensorRT supplies the execution
+stream. All other graph operations retain their existing construction.
+Existing 23-field and sampler-only 24-field bundles remain readable; FP16 and
+other model geometries retain their previous build path. Unknown W2 modes,
+missing sampler metadata, incompatible geometry, and missing adjacent helpers
+fail closed. A runtime that predates W2 support rejects the 25-field contract.
+Operator controls and a single completed response do not establish the full
+model-card matrix; model acceptance still uses the unchanged per-case semantics.
+
 This discovery and native-library installation path is currently Linux/POSIX;
 it does not establish Windows packaging or execution support.
 

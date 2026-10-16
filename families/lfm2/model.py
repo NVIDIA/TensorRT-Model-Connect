@@ -583,6 +583,7 @@ def _add_swiglu(
     config: DenseLfm2Config,
     storage_dtype: np.dtype,
     work_dtype: trt.DataType,
+    w2_bridge: Path | None = None,
 ) -> trt.ITensor:
     left = _matmul(
         network,
@@ -609,6 +610,8 @@ def _add_swiglu(
         right,
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
+    if w2_bridge is not None and prefix in {"layer.0", "layer.1"}:
+        return _add_w2(network, gated, weights[f"{prefix}.w2"], w2_bridge, prefix=prefix)
     return _matmul(
         network,
         gated,
@@ -619,6 +622,43 @@ def _add_swiglu(
         work_dtype=work_dtype,
         name=f"{prefix}.feed_forward.w2",
     )
+
+
+def _add_w2(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    weight: np.ndarray,
+    bridge: Path,
+    *,
+    prefix: str,
+) -> trt.ITensor:
+    from tensorrt_model_connect.byok import add_kernel
+
+    if tuple(tensor.shape) != (1, 10752) or tensor.dtype != trt.bfloat16:
+        raise ValueError("LFM2 W2 requires BF16 input shape [1, 10752]")
+    if tuple(np.asarray(weight).shape) != (10752, 2048):
+        raise ValueError("LFM2 W2 requires mapped weight shape [10752, 2048]")
+    rhs = _work_constant(
+        network,
+        (10752, 2048),
+        weight,
+        storage_dtype=np.dtype(np.float32),
+        work_dtype=trt.bfloat16,
+    )
+    transpose = network.add_shuffle(rhs)
+    transpose.name = f"{prefix}.feed_forward.w2_transpose"
+    transpose.first_transpose = (1, 0)
+    transpose.reshape_dims = (2048, 10752)
+    (output,) = add_kernel(
+        network,
+        plugin_library=bridge,
+        kernel_name=_W2_KERNEL,
+        inputs=[tensor, transpose.get_output(0)],
+        output_specs=[{"dims": [1, 2048], "dtype": "bfloat16"}],
+        workspace_bytes=0,
+    )
+    output.name = f"{prefix}.feed_forward.w2"
+    return output
 
 
 def _mark_debug_output(
@@ -656,10 +696,13 @@ def build_lfm2_engine(
     precision: str = "bf16",
     verbose: bool = False,
     debug_layer_outputs: bool = False,
+    w2_bridge: Path | None = None,
 ) -> bytes:
     """Build a static one-token LFM2 engine with native TensorRT KV updates."""
 
     cfg = validate_dense_lfm2_config(config)
+    if w2_bridge is not None and not _uses_w2(cfg, precision):
+        raise ValueError("LFM2 W2 requires the BF16 first-two-layer build contract")
     _validate_mapped_metadata(cfg, weights)
     if max_cache_length <= 0:
         raise ValueError("max_cache_length must be positive")
@@ -902,6 +945,7 @@ def build_lfm2_engine(
             config=cfg,
             storage_dtype=storage_dtype,
             work_dtype=work_dtype,
+            w2_bridge=w2_bridge,
         )
         hidden_state = network.add_elementwise(
             hidden_state,
@@ -1026,6 +1070,36 @@ def _positive_int(value: object, name: str) -> int:
 _SAMPLER_MODE = "philox_exponential_v1"
 _SAMPLER_KERNEL = "lfm2.sampler." + _SAMPLER_MODE
 _SAMPLER_VOCAB_SIZE = 128000
+_W2_MODE = "cublas_bf16_first_two_v1"
+_W2_KERNEL = "lfm2.w2.cublas_bf16_v1"
+
+
+def _uses_w2(config: DenseLfm2Config, precision: str) -> bool:
+    return (
+        precision == "bf16"
+        and config.vocab_size == 128000
+        and config.hidden_size == 2048
+        and config.intermediate_size == 10752
+        and config.num_hidden_layers == 30
+        and config.layer_types[:2] == ("conv", "conv")
+    )
+
+
+def _w2_library(bridge: Path) -> Path:
+    library = bridge.parent / "libtrtmc_lfm2_w2_byok.so"
+    if not library.is_file():
+        raise FileNotFoundError("LFM2 W2 installation is incomplete: " + str(library))
+    return library
+
+
+def _register_w2(extension: ctypes.CDLL, library: Path) -> None:
+    error = extension.trtmc_load_byok_kernel(
+        str(library).encode("utf-8"), b"run", _W2_KERNEL.encode("utf-8")
+    )
+    if error is not None:
+        raise RuntimeError(
+            "LFM2 W2 registration failed: " + error.decode("utf-8", errors="replace")
+        )
 
 
 def _sampler_libraries() -> tuple[Path, Path]:
@@ -1153,13 +1227,18 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     sampler_bridge = None
     sampler_extension = None
+    w2_bridge = None
     if resolved.vocab_size == _SAMPLER_VOCAB_SIZE:
         if request.backend != "trt":
             raise ValueError("LFM2 Philox sampling requires backend=trt")
         # The decoder emits FP32 logits for both supported model precisions.
         # Resolve and register dependencies before allocating checkpoint weights.
         sampler_bridge, sampler_library = _sampler_libraries()
+        w2_library = _w2_library(sampler_bridge) if _uses_w2(resolved, precision) else None
         sampler_extension = _register_sampler(sampler_bridge, sampler_library)
+        if w2_library is not None:
+            _register_w2(sampler_extension, w2_library)
+            w2_bridge = sampler_bridge
 
     weights = load_lfm2_weights(str(model_dir), config, precision=precision)
     plan = build_lfm2_engine(
@@ -1169,6 +1248,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=precision,
         verbose=bool(request.verbose),
         debug_layer_outputs=False,
+        w2_bridge=w2_bridge,
     )
 
     runtime_config = _runtime_config(
@@ -1182,6 +1262,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if sampler_bridge is not None:
         sampler_plan = build_lfm2_sampler_engine(sampler_bridge, verbose=bool(request.verbose))
         runtime_config["sampler_mode"] = _SAMPLER_MODE
+    if w2_bridge is not None:
+        runtime_config["w2_mode"] = _W2_MODE
     # Keep the registration library alive until both plans have been serialized.
     del sampler_extension
 

@@ -48,6 +48,21 @@ install(TARGETS trtmc_model_lfm2
 )
 
 if(TARGET trtmc_byok_tvm_ffi)
+  add_library(trtmc_lfm2_w2_byok SHARED w2_byok.cpp)
+  target_include_directories(trtmc_lfm2_w2_byok SYSTEM PRIVATE
+    ${CUDAToolkit_INCLUDE_DIRS}
+    ${TRTMC_TVM_FFI_INCLUDE_DIR}
+  )
+  target_link_libraries(trtmc_lfm2_w2_byok PRIVATE
+    CUDA::cublas
+    CUDA::cudart
+    ${TRTMC_TVM_FFI_LIBRARY}
+  )
+  set_target_properties(trtmc_lfm2_w2_byok PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH "\$ORIGIN;${TRTMC_TVM_FFI_LIBRARY_DIR}"
+    INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../tvm_ffi/lib;${TRTMC_TVM_FFI_LIBRARY_DIR};/usr/local/cuda/lib64"
+  )
   add_library(trtmc_lfm2_sampler_byok SHARED sampler_byok.cu)
   target_include_directories(trtmc_lfm2_sampler_byok SYSTEM PRIVATE
     ${CUDAToolkit_INCLUDE_DIRS}
@@ -66,10 +81,10 @@ if(TARGET trtmc_byok_tvm_ffi)
     BUILD_RPATH "\$ORIGIN;${TRTMC_TVM_FFI_LIBRARY_DIR}"
     INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../tvm_ffi/lib;${TRTMC_TVM_FFI_LIBRARY_DIR};/usr/local/cuda/lib64"
   )
-  add_dependencies(trtmc_model_lfm2 trtmc_lfm2_sampler_byok trtmc_byok_tvm_ffi)
+  add_dependencies(trtmc_model_lfm2 trtmc_lfm2_sampler_byok trtmc_lfm2_w2_byok trtmc_byok_tvm_ffi)
   # Wheels install the SDK component; native installations can select runtime.
   foreach(component IN ITEMS sdk runtime)
-    install(TARGETS trtmc_lfm2_sampler_byok
+    install(TARGETS trtmc_lfm2_sampler_byok trtmc_lfm2_w2_byok
       LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT ${component}
     )
     install(FILES sampler_byok.NOTICE

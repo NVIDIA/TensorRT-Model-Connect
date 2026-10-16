@@ -11,8 +11,10 @@ import os
 from pathlib import Path
 import struct
 import sys
+from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from tensorrt_model_connect.build import BuildRequest
@@ -21,6 +23,7 @@ from tensorrt_model_connect.bundle_writer import BundleWriter
 
 FAMILY = Path(__file__).resolve().parent.parent
 LIBRARIES = ("libtrtmc_byok_tvm_ffi.so", "libtrtmc_lfm2_sampler_byok.so")
+W2_LIBRARY = "libtrtmc_lfm2_w2_byok.so"
 
 
 @pytest.fixture
@@ -29,6 +32,7 @@ def model(monkeypatch, tmp_path):
     networks = []
     configurations = []
     plugins = []
+    decoder_calls = []
 
     class Network:
         def __init__(self):
@@ -80,6 +84,8 @@ def model(monkeypatch, tmp_path):
         BuilderFlag=SimpleNamespace(TF32="tf32"),
         MemoryPoolType=SimpleNamespace(WORKSPACE="workspace"),
         float32="fp32",
+        bfloat16="bf16",
+        float16="fp16",
         int32="int32",
         get_plugin_registry=lambda: registry,
     )
@@ -132,6 +138,7 @@ def model(monkeypatch, tmp_path):
 
     def decoder(*args, **kwargs):
         events.append("decoder")
+        decoder_calls.append(kwargs)
         return b"decoder plan"
 
     monkeypatch.setattr(module, "build_lfm2_engine", decoder)
@@ -146,13 +153,16 @@ def model(monkeypatch, tmp_path):
         build_core=build_core,
         original_prefixes=original_prefixes,
         register=register,
+        decoder_calls=decoder_calls,
     )
 
 
-def installation(directory):
+def installation(directory, *, w2=True):
     directory.mkdir(parents=True)
     for name in LIBRARIES:
         (directory / name).write_bytes(b"library fixture")
+    if w2:
+        (directory / W2_LIBRARY).write_bytes(b"W2 library fixture")
     return tuple(directory / name for name in LIBRARIES)
 
 
@@ -167,7 +177,7 @@ def request(tmp_path, vocab=128000, **updates):
         output_path=tmp_path / "model.bundle",
         family="lfm2",
         task="text_generation",
-        precision="bf16",
+        precision=updates.pop("precision", "bf16"),
         **updates,
     )
 
@@ -242,15 +252,18 @@ def test_eligible_build_registers_before_weights_and_writes_exact_sampler_contra
     monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
     sections = build(model, request(tmp_path))
     runtime = json.loads(sections["runtime.json"])
-    assert len(runtime) == 24 and runtime["sampler_mode"] == "philox_exponential_v1"
+    assert len(runtime) == 25 and runtime["sampler_mode"] == "philox_exponential_v1"
+    assert runtime["w2_mode"] == "cublas_bf16_first_two_v1"
     assert sections["engine.plan"] == b"decoder plan"
     assert sections["sampler.plan"] == b"sampler plan"
     assert model.events == [
         ("register", str(pair[1]).encode(), b"sample", b"lfm2.sampler.philox_exponential_v1"),
+        ("register", str(pair[0].parent / W2_LIBRARY).encode(), b"run", b"lfm2.w2.cublas_bf16_v1"),
         "weights",
         "decoder",
         "sampler",
     ]
+    assert model.decoder_calls[0]["w2_bridge"] == pair[0]
     (network,) = model.networks
     assert [(t.name, t.dtype, t.shape) for t in network.inputs] == [
         ("probabilities", "fp32", (1, 128000)),
@@ -358,3 +371,139 @@ def test_e2e_runtime_selection_reaches_real_public_build_prefix(model, monkeypat
     )
     assert os.environ["CMAKE_PREFIX_PATH"] == old_prefix
     assert request_value.output_path.is_file()
+
+
+def test_sampler_only_fp16_build_does_not_require_w2(model, monkeypatch, tmp_path):
+    pair = installation(tmp_path / "runtime", w2=False)
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", str(pair[0].parent))
+    monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
+    sections = build(model, request(tmp_path, precision="fp16"))
+    runtime = json.loads(sections["runtime.json"])
+    assert len(runtime) == 24 and "w2_mode" not in runtime
+    assert model.decoder_calls[0]["w2_bridge"] is None
+    assert len([event for event in model.events if isinstance(event, tuple)]) == 1
+
+
+def test_missing_w2_does_not_mix_installations_or_load_weights(model, monkeypatch, tmp_path):
+    pair = installation(tmp_path / "selected", w2=False)
+    installation(tmp_path / "alternate")
+    monkeypatch.setenv(
+        "CMAKE_PREFIX_PATH", os.pathsep.join([str(pair[0].parent), str(tmp_path / "alternate")])
+    )
+    monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
+    with pytest.raises(FileNotFoundError, match="W2 installation is incomplete"):
+        build(model, request(tmp_path))
+    assert model.events == []
+
+
+def test_w2_registration_failure_precedes_weights(model, monkeypatch, tmp_path):
+    pair = installation(tmp_path / "runtime")
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", str(pair[0].parent))
+    monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
+    monkeypatch.setattr(
+        type(model.register),
+        "__call__",
+        lambda self, library, function, kernel: b"missing W2" if function == b"run" else None,
+    )
+    with pytest.raises(RuntimeError, match="W2 registration failed"):
+        build(model, request(tmp_path))
+    assert "weights" not in model.events
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"vocab_size": 65536},
+        {"hidden_size": 1536},
+        {"intermediate_size": 8192},
+        {"num_hidden_layers": 16},
+        {"layer_types": ("full_attention", "conv")},
+    ],
+)
+def test_w2_eligibility_does_not_expand_to_other_model_geometry(model, tmp_path, updates):
+    config = model.module.validate_dense_lfm2_config(
+        model.module._load_config(request(tmp_path).model_dir)
+    )
+    assert model.module._uses_w2(config, "bf16")
+    assert not model.module._uses_w2(replace(config, **updates), "bf16")
+    assert not model.module._uses_w2(config, "fp16")
+
+
+def test_only_first_two_swiglu_outputs_use_w2_and_preserve_gated_input(model, monkeypatch):
+    config = SimpleNamespace(hidden_size=2048, intermediate_size=10752)
+    matrices, plugins, constants = [], [], []
+    gated = SimpleNamespace(dtype="bf16", shape=(1, 10752))
+    transpose_output = SimpleNamespace(dtype="bf16", shape=(2048, 10752))
+    shuffle = SimpleNamespace(get_output=lambda index: transpose_output)
+    network = SimpleNamespace(
+        add_elementwise=lambda left, right, op: SimpleNamespace(get_output=lambda index: gated),
+        add_shuffle=lambda tensor: shuffle,
+    )
+    monkeypatch.setattr(
+        model.module.trt, "ElementWiseOperation", SimpleNamespace(PROD="prod"), raising=False
+    )
+    monkeypatch.setattr(model.module, "_silu", lambda network, tensor: tensor)
+    monkeypatch.setattr(
+        model.module, "_matmul", lambda *args, **kwargs: matrices.append(kwargs["name"]) or gated
+    )
+
+    def constant(network, shape, values, **kwargs):
+        constants.append((shape, values, kwargs))
+        return SimpleNamespace(dtype="bf16", shape=shape)
+
+    monkeypatch.setattr(model.module, "_work_constant", constant)
+
+    def plugin(network, **kwargs):
+        plugins.append(kwargs)
+        return [SimpleNamespace(name="", dtype="bf16", shape=(1, 2048))]
+
+    monkeypatch.setattr(model.byok, "add_kernel", plugin)
+    weight = np.broadcast_to(np.float32(0), (10752, 2048))
+    for index in range(30):
+        prefix = f"layer.{index}"
+        result = model.module._add_swiglu(
+            network,
+            gated,
+            {f"{prefix}.{name}": weight for name in ("w1", "w2", "w3")},
+            prefix=prefix,
+            config=config,
+            storage_dtype=np.dtype(np.float32),
+            work_dtype="bf16",
+            w2_bridge=Path("/installed/bridge.so"),
+        )
+        if index < 2:
+            assert result.shape == (1, 2048) and result.dtype == "bf16"
+        else:
+            assert result is gated
+    assert len(plugins) == len(constants) == 2
+    assert [name for name in matrices if name.endswith(".w2")] == [
+        f"layer.{index}.feed_forward.w2" for index in range(2, 30)
+    ]
+    assert shuffle.first_transpose == (1, 0) and shuffle.reshape_dims == (2048, 10752)
+    for entry in plugins:
+        assert entry["inputs"] == [gated, transpose_output]
+        assert entry["kernel_name"] == "lfm2.w2.cublas_bf16_v1"
+        assert entry["workspace_bytes"] == 0
+        assert entry["output_specs"] == [{"dims": [1, 2048], "dtype": "bfloat16"}]
+    for shape, values, kwargs in constants:
+        assert shape == (10752, 2048) and values is weight
+        assert kwargs == {"storage_dtype": np.dtype(np.float32), "work_dtype": "bf16"}
+
+
+@pytest.mark.parametrize(
+    "shape,dtype,weight_shape",
+    [
+        ((17, 10752), "bf16", (10752, 2048)),
+        ((1, 10752), "fp16", (10752, 2048)),
+        ((1, 10752), "bf16", (2048, 10752)),
+    ],
+)
+def test_w2_rejects_unqualified_tensor_contract(model, shape, dtype, weight_shape):
+    with pytest.raises(ValueError, match="LFM2 W2 requires"):
+        model.module._add_w2(
+            None,
+            SimpleNamespace(shape=shape, dtype=dtype),
+            np.broadcast_to(np.float32(0), weight_shape),
+            Path("/bridge.so"),
+            prefix="layer.0",
+        )

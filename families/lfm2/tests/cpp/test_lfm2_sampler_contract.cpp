@@ -49,6 +49,25 @@ Json runtime_config() {
             {"decoder_engine_layout", "single"}};
 }
 
+Json w2_runtime_config() {
+    auto config = runtime_config();
+    config["sampler_mode"] = "philox_exponential_v1";
+    config["w2_mode"] = "cublas_bf16_first_two_v1";
+    config["hidden_size"] = 2048;
+    config["conv_dim"] = 2048;
+    config["intermediate_size"] = 10752;
+    config["num_hidden_layers"] = 30;
+    config["num_attention_heads"] = 32;
+    config["num_key_value_heads"] = 8;
+    config["head_dim"] = 64;
+    config["num_attention_layers"] = 8;
+    config["num_conv_layers"] = 22;
+    std::vector<std::string> layers(22, "conv");
+    layers.insert(layers.end(), 8, "full_attention");
+    config["layer_types"] = layers;
+    return config;
+}
+
 class Fixture {
   public:
     Fixture() {
@@ -134,13 +153,19 @@ void accepted_contracts(Fixture& fixture) {
     legacy["precision"] = "fp16";
     trtmc::BundleReader reader(fixture.write(legacy, -1).string());
     const auto parsed = trtmc::lfm2::parse_runtime_config(reader);
-    check(parsed.sampler_mode.empty() && parsed.vocab_size == 65536,
+    check(parsed.sampler_mode.empty() && parsed.w2_mode.empty() && parsed.vocab_size == 65536,
           "legacy 23-field bundle retains its vocabulary and sampler path");
     auto current = runtime_config();
     current["sampler_mode"] = "philox_exponential_v1";
     trtmc::BundleReader current_reader(fixture.write(current, 1).string());
     check(trtmc::lfm2::parse_runtime_config(current_reader).sampler_mode == "philox_exponential_v1",
           "new 24-field contract accepts its required sampler plan");
+    check(trtmc::lfm2::parse_runtime_config(current_reader).w2_mode.empty(),
+          "sampler-only 24-field contract requires no W2 helper");
+    trtmc::BundleReader w2_reader(fixture.write(w2_runtime_config(), 1).string());
+    const auto w2 = trtmc::lfm2::parse_runtime_config(w2_reader);
+    check(w2.w2_mode == "cublas_bf16_first_two_v1" && w2.sampler_mode == "philox_exponential_v1",
+          "25-field contract declares both W2 and sampler dependencies");
     FakeBackend legacy_backend("trt");
     try {
         (void)trtmc::lfm2::create({reader, legacy_backend});
@@ -158,6 +183,14 @@ void accepted_contracts(Fixture& fixture) {
     }
     check(rejected && other_backend.calls == 0,
           "new mode rejects an unqualified backend before helper/model loading");
+    rejected = false;
+    try {
+        (void)trtmc::lfm2::create({w2_reader, other_backend});
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("TensorRT backend") != std::string::npos;
+    }
+    check(rejected && other_backend.calls == 0,
+          "W2 mode rejects an unqualified backend before helper/model loading");
 }
 
 void rejected_contracts(Fixture& fixture) {
@@ -188,11 +221,58 @@ void rejected_contracts(Fixture& fixture) {
     check(fixture.rejected(changed, 1), "field count alone cannot replace required metadata");
 }
 
+void rejected_w2_contracts(Fixture& fixture) {
+    const auto current = w2_runtime_config();
+    auto changed = current;
+    changed.erase("sampler_mode");
+    check(fixture.rejected(changed, -1), "W2 mode cannot replace the sampler contract");
+    check(fixture.rejected(current, -1), "W2 contract still requires sampler.plan");
+    check(fixture.rejected(current, 0), "W2 contract rejects an empty sampler.plan");
+    changed = current;
+    changed["w2_mode"] = "unknown";
+    check(fixture.rejected(changed, 1), "unknown W2 mode cannot silently fall back");
+    changed["w2_mode"] = 1;
+    check(fixture.rejected(changed, 1), "W2 mode must be a string");
+    changed = current;
+    changed["unexpected"] = true;
+    check(fixture.rejected(changed, 1), "W2 contract remains exactly 25 fields");
+
+    const auto requires_w2_geometry = [&](Json config, const char* message) {
+        check(fixture.rejected(config, 1), message);
+        config.erase("w2_mode");
+        check(!fixture.rejected(config, 1), "sampler-only geometry remains accepted");
+    };
+    changed = current;
+    changed["precision"] = "fp16";
+    requires_w2_geometry(changed, "W2 mode requires BF16 arithmetic");
+    changed = current;
+    changed["hidden_size"] = 1024;
+    changed["conv_dim"] = 1024;
+    changed["head_dim"] = 32;
+    requires_w2_geometry(changed, "W2 mode requires the declared output width");
+    changed = current;
+    changed["intermediate_size"] = 8192;
+    requires_w2_geometry(changed, "W2 mode requires the declared input width");
+    changed = current;
+    changed["num_hidden_layers"] = 29;
+    changed["num_conv_layers"] = 21;
+    changed["layer_types"].erase(changed["layer_types"].begin());
+    requires_w2_geometry(changed, "W2 mode requires the qualified layer count");
+    for (int index : {0, 1}) {
+        changed = current;
+        changed["layer_types"][index] = "full_attention";
+        changed["num_attention_layers"] = 9;
+        changed["num_conv_layers"] = 21;
+        requires_w2_geometry(changed, "W2 mode requires two leading convolution layers");
+    }
+}
+
 } // namespace
 
 int main() {
     Fixture fixture;
     accepted_contracts(fixture);
     rejected_contracts(fixture);
+    rejected_w2_contracts(fixture);
     return failures;
 }
