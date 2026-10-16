@@ -104,6 +104,13 @@ use the existing [family CLI protocol](../extend/family-cli.md), not shared
 parser extensions. For a pair, add `--execution-variant dspark` or `dflash` and
 `--companion draft=/path/to/draft`.
 
+An ordinary build (no `--execution-variant`) of a checkpoint that carries MTP
+weights builds only the base engine. Add `--mtp-seq-len N` (N >= 2: one real
+token plus N-1 drafted tokens verified per round) to also build the embedded MTP
+engines and add them to the bundle; this option is separate from
+`--execution-variant mtp`. Without it the bundle holds no MTP engines and is
+about half the size, because every engine embeds its own copy of the weights.
+
 The adapter additionally maps uniform NVFP4/INT4-AWQ embedded MTP and INT4-AWQ
 DFlash2. These have Python/native contract-test coverage, not local model-engine
 or accuracy qualification. For MTP, use `--execution-variant mtp` without an

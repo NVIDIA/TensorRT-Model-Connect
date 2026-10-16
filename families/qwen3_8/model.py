@@ -98,6 +98,15 @@ def build(request, writer) -> None:
     edge_build(request, writer, _build_native)
 
 
+def _mtp_enabled(request, weights) -> bool:
+    """MTP engines are built only when the user asks for them with `--mtp-seq-len`."""
+    if request.mtp_seq_len is None:
+        return False
+    if "mtp_layer.fc" not in weights:
+        raise ValueError("--mtp-seq-len was given but the checkpoint has no MTP weights")
+    return True
+
+
 def _build_native(request, writer) -> None:
     """Preserve the original native graph and unsupported-request behavior."""
     if request.dynamic_kv_cache:
@@ -172,11 +181,11 @@ def _build_native(request, writer) -> None:
         debug_layer_outputs=False,
     )
 
-    has_mtp = "mtp_layer.fc" in weights
+    has_mtp = _mtp_enabled(request, weights)
     mtp_plan = None
     draft_chain_plan = None
     multi_token_plan = None
-    # mtp_seq_len = 1 real token + (mtp_seq_len-1) drafted tokens verified
+    # Built only with --mtp-seq-len. mtp_seq_len = 1 real token + (mtp_seq_len-1) drafted tokens verified
     # per speculative-decode round. Default of 2 (1 draft) matches the
     # only configuration validated end-to-end on real hardware so far;
     # larger values draft more tokens per round via build_mtp_draft_chain_engine's
