@@ -1,0 +1,249 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Community image maintenance
+run-name: >-
+  ${{ inputs.task == 'dependency-image-withdraw' && 'Withdraw reviewed dependency image' || inputs.task == 'dependency-image-access-check' && 'Verify private dependency image access' || 'Audit dependency image metadata' }}
+
+# Package operations are explicit maintainer actions, outside the PR test graph.
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Protected image maintenance operation
+        required: true
+        type: choice
+        default: dependency-image-audit
+        options: [dependency-image-audit, dependency-image-access-check, dependency-image-withdraw]
+      audit_family:
+        description: Project family package to inspect; use base for the shared image
+        required: false
+        default: nemotron_h
+        type: string
+      audit_digest:
+        description: Immutable sha256 digest to inspect
+        required: false
+        type: string
+
+permissions: {}
+concurrency:
+  group: community-image-maintenance-${{ inputs.task }}
+  cancel-in-progress: false
+
+jobs:
+  withdraw-dependency-image:
+    name: Withdraw reviewed publication
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image-withdraw' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Authorize withdrawal of the reviewed publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = NVIDIA/TensorRT-Model-Connect
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          case "$GITHUB_REF" in refs/heads/main|refs/heads/ci/developer) ;; *) exit 1 ;; esac
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUEST_ACTOR/permission" --jq '.role_name // .permission')
+          case "$role" in admin|maintain) ;; *) exit 1 ;; esac
+      - name: Check out only the protected withdrawal implementation
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Withdraw only the reviewed OCI index and child versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/withdraw_community_image.py
+      - name: Preserve confirmed withdrawal evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-image-withdrawal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/community-image-withdrawal.json
+          if-no-files-found: error
+          retention-days: 7
+
+  audit-dependency-image:
+    name: Audit dependency image metadata
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image-audit' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Authorize a protected metadata audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          if repo != "NVIDIA/TensorRT-Model-Connect":
+              raise SystemExit("The dependency audit belongs to the upstream repository")
+          if os.environ["GITHUB_EVENT_NAME"] != "workflow_dispatch":
+              raise SystemExit("Package auditing requires a manual dispatch")
+          if os.environ["GITHUB_REF"] not in {"refs/heads/main", "refs/heads/ci/developer"}:
+              raise SystemExit("Package auditing requires a protected source branch")
+          if not re.fullmatch(r"[0-9a-f]{40}", os.environ["GITHUB_SHA"]):
+              raise SystemExit("Package auditing requires an immutable source commit")
+          permission = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/{repo}/collaborators/{os.environ['REQUEST_ACTOR']}/permission"
+          ], text=True))
+          role = permission.get("role_name", permission.get("permission"))
+          if role not in {"admin", "maintain"}:
+              raise SystemExit("Package auditing requires maintain or admin permission")
+          PY
+      - name: Check out only the protected audit commit
+        timeout-minutes: 5
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reauthorize the current triggering actor before auditing
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUEST_ACTOR/permission" --jq '.role_name // .permission')
+          case "$role" in admin|maintain) ;; *) echo "::error::The triggering actor requires maintain or admin permission."; exit 1 ;; esac
+      - name: Inspect only the requested package metadata
+        timeout-minutes: 6
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUDIT_FAMILY: ${{ inputs.audit_family }}
+          AUDIT_DIGEST: ${{ inputs.audit_digest }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/community_dependency_image.py audit \
+            --family "$AUDIT_FAMILY" --digest "$AUDIT_DIGEST" \
+            --output "$RUNNER_TEMP/dependency-image-audit"
+      - name: Preserve the package audit evidence
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-dependency-image-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dependency-image-audit/dependency-image-audit.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  check-dependency-image-access:
+    name: Verify private image access
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'dependency-image-access-check' }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: gpu-ci-dispatch
+      deployment: false
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Authorize a protected negative access check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = NVIDIA/TensorRT-Model-Connect
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          case "$GITHUB_REF" in refs/heads/main|refs/heads/ci/developer) ;; *) exit 1 ;; esac
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUEST_ACTOR/permission" --jq '.role_name // .permission')
+          case "$role" in admin|maintain) ;; *) exit 1 ;; esac
+      - name: Check out only the protected access check
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check anonymous and public repository token denial
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ACTOR: ${{ github.triggering_actor }}
+          TRTMC_COMMUNITY_REGISTRY: ${{ secrets.TRTMC_COMMUNITY_REGISTRY }}
+          AUDIT_FAMILY: ${{ inputs.audit_family }}
+          AUDIT_DIGEST: ${{ inputs.audit_digest }}
+        run: |
+          set -euo pipefail
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$REQUEST_ACTOR/permission" --jq '.role_name // .permission')
+          case "$role" in admin|maintain) ;; *) exit 1 ;; esac
+          python3 .github/scripts/community_dependency_image.py access-check \
+            --family "$AUDIT_FAMILY" --digest "$AUDIT_DIGEST" \
+            --output "$RUNNER_TEMP/dependency-image-access-check"
+      - name: Preserve the access denial evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: community-dependency-image-access-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dependency-image-access-check/dependency-image-access-check.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Verify the dedicated reader for the same shared base
+        if: ${{ inputs.audit_family == 'base' }}
+        timeout-minutes: 3
+        env:
+          REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
+          REGISTRY_PREFIX: ${{ secrets.TRTMC_COMMUNITY_REGISTRY }}
+          PROTECTED_DEPENDENCY_CATALOG: ${{ secrets.TRTMC_COMMUNITY_DEPENDENCY_CATALOG }}
+          REQUESTED_DIGEST: ${{ inputs.audit_digest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import tempfile
+          from pathlib import Path
+          from tools import community_gpu_ci as ci
+          from tools import community_gpu_images as images
+
+          try:
+              with tempfile.TemporaryDirectory(prefix="private-base-reader-") as directory:
+                  root = Path(directory)
+                  source, catalog = root / "input.json", root / "catalog.json"
+                  source.write_text(os.environ["PROTECTED_DEPENDENCY_CATALOG"])
+                  source.chmod(0o600)
+                  ci.export_dependency_catalog(Path.cwd(), os.environ["GITHUB_SHA"], catalog, source)
+                  data = ci._dependency_catalog(catalog)
+                  reference = os.environ["REGISTRY_PREFIX"] + "/base@" + os.environ["REQUESTED_DIGEST"]
+                  if data["base"]["image"] != reference:
+                      raise images.ImagePreparationError("Access checks must use the same protected base")
+                  token = os.environ.get("REGISTRY_TOKEN", "").strip()
+                  username = images.registry_reader_login(token)
+                  failures = []
+                  try:
+                      images.require_private_package(data["registry_prefix"], token, data["base"].get("package_id"))
+                      print("Private package metadata: verified")
+                  except images.ImagePreparationError as error:
+                      failures.append(str(error))
+                      print("Private package metadata: " + str(error))
+                  config = root / "docker-auth"
+                  config.mkdir(mode=0o700)
+                  try:
+                      images.docker(["login", "ghcr.io", "--username", username, "--password-stdin"],
+                                    stdin=token, config=str(config), private=True, timeout=30)
+                      images.docker(["manifest", "inspect", reference],
+                                    config=str(config), private=True, timeout=60)
+                      print("Dedicated reader pinned manifest: accessible")
+                  except images.ImagePreparationError as error:
+                      failures.append(str(error))
+                      print("Dedicated reader pinned manifest: unavailable")
+                  if failures:
+                      raise images.ImagePreparationError("; ".join(failures))
+              print("Dedicated reader verified: private package metadata and pinned base manifest")
+          except (RuntimeError, OSError, ValueError) as error:
+              raise SystemExit("Private base reader preflight failed: " + str(error)) from None
+          PY

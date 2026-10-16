@@ -18,8 +18,7 @@ description: >-
 - Open a draft PR by default; omit `--draft` only when the user explicitly asks
   for a ready-for-review PR and the evidence supports that state.
 - Do not add labels, reviewers, milestones, projects, or auto-merge unless the
-  user explicitly requests them. The authorized Internal CI trigger is the
-  exception described below.
+  user explicitly requests them.
 - Do not merge from this skill. Use `$pr-babysitter` for monitoring and merge.
 - Use `$write-git-messages` for commit, PR, squash, and rebase text.
 
@@ -141,10 +140,18 @@ gh pr checks <number-or-url> \
 
 Queued, missing, skipped, or failed checks are not green.
 
-## 7. Start Exact-Head Premerge When Authorized
+## 7. Observe Exact-Head Stable CI
 
-Creating or pushing the PR does not start premerge. When CI execution is
-authorized, resolve the current PR API head before adding the one-shot trigger:
+Opening or pushing a PR targeting `main` automatically starts Stable Community
+CI. It runs CPU checks before GPU admission and selected family execution, and
+waits for confirmed resource cleanup before its final result. Do not start
+Internal premerge as part of the ordinary contribution flow. When explicitly
+authorized by a maintainer or administrator, the retained bridge can be requested
+with the one-shot `run-internal-ci` label or manual dispatch for optional
+diagnostics, including large PRs. Its `Optional Internal CI` result is not a
+merge gate and does not waive a Stable plan rejection or the small-PR policy.
+
+Resolve the current PR API head and inspect its aggregate status:
 
 ```bash
 REPOSITORY=NVIDIA/TensorRT-Model-Connect
@@ -155,29 +162,19 @@ test "$PR_HEAD_SHA" = "$PUSHED_SHA"
 
 gh api \
   "repos/$REPOSITORY/commits/$PR_HEAD_SHA/status" \
-  --jq '[.statuses[] |
-    select(.context == "TRTMC Internal CI / Automated premerge gate")][0]'
+  --jq '[.statuses[] | select(.context == "Stable Community GPU CI")][0]'
 ```
 
-If the exact head already has `PENDING` or `PASS` for
-`TRTMC Internal CI / Automated premerge gate`, do not trigger it again. Otherwise an actor with
-`maintain` or `admin` permission may run:
+A missing or pending status is not a pass. A historical `Stable Community CI`
+success may be CPU-only and cannot satisfy the new GPU context. Do not start a duplicate execution
+when one is already pending. A CPU-only result, dispatch success, optional Dev
+result or older head cannot satisfy the aggregate. Retry a failed unchanged head
+only when authorized.
 
-```bash
-gh pr edit "$PR_NUMBER" \
-  --repo "$REPOSITORY" \
-  --add-label run-internal-ci
-```
-
-If authorization fails and retains the label, remove `run-internal-ci` before
-adding it again after the reported prerequisite is satisfied. Re-adding an
-already-present label is a no-op and does not trigger the bridge.
-
-Never use the legacy `run-ci` label. The bridge consumes the trigger, verifies
-the exact head, and dispatches private Internal CI. A successful Source bridge
-run is not a passing premerge result: only `TRTMC Internal CI / Automated premerge gate=PASS` on
-the current head is a pass. Raw Internal CI logs, artifacts, packages, runner
-details, and URLs stay private and must not be copied to the Source PR.
+A successful `Stable Community GPU CI` status makes the PR CI-ready for review by an
+NVIDIA employee maintainer. It does not approve, merge or request a review.
+Private Nightly remains independent. Keep private logs, artifacts, packages,
+runner details and URLs out of the public PR.
 
 ## 8. Report And Hand Off
 

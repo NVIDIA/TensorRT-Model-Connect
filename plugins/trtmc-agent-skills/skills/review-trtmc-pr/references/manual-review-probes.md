@@ -140,8 +140,14 @@ advertised model behavior.
 
 - Verify status/check conclusions against the current PR head SHA.
 - Distinguish PR head tests from GitHub's exact merge-revision tests.
-- Do not treat a dispatched workflow, successful bridge, or visible source job
-  as the protected premerge result.
+- The current head's `Stable Community GPU CI` aggregate is the ordinary premerge
+  result; it includes CPU, admitted GPU coverage and confirmed resource cleanup.
+  A dispatch, CPU-only result, optional Dev pass or `Optional Internal CI` result
+  does not replace it. The retained Internal bridge is available only through
+  explicit maintainer authorization, including large-PR diagnostics; its result
+  does not waive Stable plan admission.
+- CI success means ready for NVIDIA employee maintainer review, not approval or
+  automatic merge. Private Nightly is independent of the ordinary gate.
 - Check that fork PR code cannot execute on a privileged self-hosted host before
   entering the intended isolated environment.
 - Third-party actions should be full-SHA pinned and permissions least-privilege.

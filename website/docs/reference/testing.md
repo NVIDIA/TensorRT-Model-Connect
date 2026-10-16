@@ -91,10 +91,23 @@ correct.
 
 ## Pull-request evidence
 
-Public GitHub workflows run CPU and metadata checks on pull requests. Protected
-GPU and legal validation is dispatched separately through the repository's
-authorized Internal CI bridge. Keep raw protected logs and private environment
-details out of public issues, pull requests, and documentation.
+Pull requests targeting `main` automatically run Stable Community GPU CI: CPU checks,
+GPU plan admission, selected family execution on an isolated VM, then confirmed
+resource cleanup. `Stable Community GPU CI` on the current PR head is the aggregate
+automated premerge gate. Documentation-only changes do not allocate a GPU.
+Ordinary plans admit at most five directly changed or added families; larger
+changes must be split into smaller PRs before allocation. Shared changes also
+run the five shared smoke families.
+
+CI preparation failures and failures after a family's test entry point are
+reported separately. A successful aggregate makes the PR ready for an NVIDIA
+employee maintainer's review; it does not grant human approval or merge the PR.
+Internal premerge remains available as optional qualification through a
+maintainer- or administrator-authorized `run-internal-ci` label or manual
+Internal CI Bridge dispatch. Its `Optional Internal CI` result is not a merge
+gate and cannot override a Stable plan rejection, including for large PRs.
+Private Nightly remains separate, and private logs and environment details must
+stay out of public issues, pull requests and documentation.
 
 The Pages workflow builds and publishes the documentation site from `main`;
 it is not a substitute for local or pull-request validation.

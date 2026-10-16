@@ -495,8 +495,18 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     # Each reviewed contract group remains a closed set: this convention does
     # not admit arbitrary new shared files or model-specific implementations.
     for group in (
-        "audio", "features", "numeric", "stream", "video", "perception",
-        "language", "tracking", "speech", "action", "recurrent", "structure",
+        "audio",
+        "features",
+        "numeric",
+        "stream",
+        "video",
+        "perception",
+        "language",
+        "tracking",
+        "speech",
+        "action",
+        "recurrent",
+        "structure",
     ):
         expected_api.update(
             {
@@ -514,6 +524,9 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/check_cyclomatic_complexity.py",
         "tools/community_ci.py",
         "tools/community_gpu_ci.py",
+        "tools/community_gpu_images.py",
+        "tools/community_gpu_lease.py",
+        "tools/community_gpu_report.py",
         "tools/e2e_evidence.py",
         "tools/e2e_report.py",
         "tools/legal_header_exceptions.toml",
@@ -538,9 +551,16 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     expected_tool_tests = {
         "tools/tests/__init__.py",
         "tools/tests/test_architecture.py",
+        "tools/tests/test_cmake_family_selection.py",
         "tools/tests/test_coderabbit_config.py",
         "tools/tests/test_community_ci.py",
         "tools/tests/test_community_gpu_ci.py",
+        "tools/tests/test_community_gpu_evidence.py",
+        "tools/tests/test_community_gpu_images.py",
+        "tools/tests/test_community_gpu_lease.py",
+        "tools/tests/test_community_gpu_report.py",
+        "tools/tests/test_community_gpu_plan.py",
+        "tools/tests/test_community_hf_cache.py",
         "tools/tests/test_devtoolkit.py",
         "tools/tests/test_devtoolkit_capabilities.py",
         "tools/tests/test_e2e_evidence.py",
@@ -552,6 +572,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_public_source_hygiene.py",
     }
     expected_cmake = {
+        "cmake/ModelFamilies.cmake",
         "cmake/trtmcConfig.cmake.in",
         "cmake/edge_llm/EdgeLLM.cmake",
         "cmake/edge_llm/CheckNative.cmake",
@@ -1685,7 +1706,7 @@ def _family_runtime_source(family: Path) -> str:
 
 def test_task_contract_inventory_recognizes_implemented_interfaces_not_mentions() -> None:
     declarations = _declared_task_interfaces(
-        '''
+        """
         class IModel { public: virtual void describe() = 0; };
         class ITextContinuation {
             public: static constexpr std::string_view kTask = "text_continuation";
@@ -1701,7 +1722,7 @@ def test_task_contract_inventory_recognizes_implemented_interfaces_not_mentions(
                                        "batch_recurrent_tokens_to_logits", step, Request, Result)
         // TRTMC_TRACK_FACTORY(PhantomTracks, "phantom_tracks", create, Input)
         // class IPhantom { static constexpr auto kTask = "phantom"; };
-        '''
+        """
     )
     assert declarations == {
         "ITextContinuation": "text_continuation",
@@ -1712,22 +1733,22 @@ def test_task_contract_inventory_recognizes_implemented_interfaces_not_mentions(
         "IBatchRecurrentTokensToLogits": "batch_recurrent_tokens_to_logits",
     }
     assert _implemented_task_ids(
-        '''
+        """
         class Family : public trtmc::internal::ITextContinuation,
                        public internal::ILatentReplayToText {};
         // public ITextGeneration is not an implementation.
         /* public ITextGeneration */
         ITextGeneration* pointer_only;
-        ''',
+        """,
         declarations,
     ) == {"text_continuation", "latent_replay_to_text"}
     assert _implemented_task_ids("class Family : public INotDefined {};", declarations) == set()
     assert _implemented_task_ids(
-        '''
+        """
         class Tracker : public trtmc::internal::IFramesBoxToMaskTracks {};
         class Recurrent : public internal::IRecurrentTokensToLogits,
                           public internal::IBatchRecurrentTokensToLogits {};
-        ''',
+        """,
         declarations,
     ) == {
         "frames_box_to_mask_tracks",
@@ -1993,7 +2014,7 @@ def test_manifests_contain_only_family_test_inputs_not_central_orchestration() -
             for index, case in enumerate(manifest.get("testcases", [])):
                 for field in sorted(forbidden & case.keys()):
                     violations.append(f"{path.relative_to(REPO)}:testcases[{index}]:{field}")
-                for field in sorted(case.keys() - consumed - {"premerge"}):
+                for field in sorted(case.keys() - consumed - {"premerge", "community_gpu"}):
                     violations.append(f"{path.relative_to(REPO)}:testcases[{index}]:unused:{field}")
     assert violations == []
 
