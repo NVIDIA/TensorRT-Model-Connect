@@ -178,22 +178,22 @@ def _build_native(request, writer) -> None:
 
     # Prompt tokens per multi-token prefill call. 0 keeps the old
     # one-decode-step-per-prompt-token prefill (no prefill_engine.plan).
-    prefill_seq_len = (
-        int(request.prefill_seq_len) if request.prefill_seq_len is not None
+    prefill_chunk_len = (
+        int(request.prefill_chunk_len) if request.prefill_chunk_len is not None
         else _DEFAULT_PREFILL_SEQ_LEN)
-    if prefill_seq_len > max_sequence_length:
+    if prefill_chunk_len > max_sequence_length:
         # Largest valid chunk that still fits the cache.
-        prefill_seq_len = (
+        prefill_chunk_len = (
             (max_sequence_length // 64) * 64 if max_sequence_length >= 64
             else 1 << (max_sequence_length.bit_length() - 1))
     prefill_plan = None
-    if prefill_seq_len >= 2:
+    if prefill_chunk_len >= 2:
         prefill_plan = model.build_engine_prefill(
-            config, weights, max_sequence_length, prefill_seq_len,
+            config, weights, max_sequence_length, prefill_chunk_len,
             precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
         )
     else:
-        prefill_seq_len = 0
+        prefill_chunk_len = 0
 
     has_mtp = "mtp_layer.fc" in weights
     mtp_plan = None
@@ -208,9 +208,9 @@ def _build_native(request, writer) -> None:
     # Qwen38MtpScheduler's class-level comment in mtp_scheduler.h).
     mtp_seq_len = int(request.mtp_seq_len) if request.mtp_seq_len is not None else 2
     mtp_prefill_plan = None
-    if has_mtp and prefill_seq_len >= 2:
+    if has_mtp and prefill_chunk_len >= 2:
         mtp_prefill_plan = model.build_mtp_prefill_engine(
-            config, weights, max_sequence_length, prefill_seq_len,
+            config, weights, max_sequence_length, prefill_chunk_len,
             precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
         )
     if has_mtp:
@@ -250,7 +250,7 @@ def _build_native(request, writer) -> None:
             decoder_engine_layout="single",
             has_mtp=has_mtp,
             mtp_num_draft_tokens=(mtp_seq_len - 1) if has_mtp else 0,
-            prefill_chunk_len=prefill_seq_len,
+            prefill_chunk_len=prefill_chunk_len,
         ),
     )
     for filename in _BUNDLE_FILES:

@@ -128,14 +128,14 @@ profile results do not imply registered CI or catalog-wide qualification.
 
 A native Qwen3.8 bundle ships a multi-token prefill engine
 (`prefill_engine.plan`) next to the one-token decode engine. The runtime feeds
-the prompt `--prefill-seq-len` tokens per call (default 128; the last chunk may
+the prompt `--prefill-chunk-len` tokens per call (default 128; the last chunk may
 be partial) instead of running one decoder step per prompt token. Projections,
 norms and MLPs run as GEMMs over the chunk, Gated DeltaNet layers use the chunked
 delta rule, and full-attention layers use one masked attention over the chunk.
 Bundles with an embedded MTP head also ship `mtp_prefill_engine.plan`, which
 warms the MTP cache for a whole chunk in one call.
 
-`--prefill-seq-len 0` builds the previous token-by-token prefill. Valid values
+`--prefill-chunk-len 0` builds the previous token-by-token prefill. Valid values
 are 0, a power of two below 64, or a multiple of 64. Each extra engine carries
 its own copy of the weights, so it adds to the bundle size and build time.
 Bundles built before this engine existed still load and prefill token by token.

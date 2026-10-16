@@ -118,9 +118,9 @@
           ]
         },
         {
-          "name": "prefill_seq_len",
+          "name": "prefill_chunk_len",
           "flags": [
-            "--prefill-seq-len"
+            "--prefill-chunk-len"
           ],
           "type": "int",
           "help": "Prompt tokens per multi-token prefill engine call (default 128; 0 = single-token prefill)"

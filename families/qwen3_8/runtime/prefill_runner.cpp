@@ -105,7 +105,7 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
         std::fill(row + max_len, row + max_len + i + 1, 0.0F);
     }
 
-    int32_t num_valid = n;
+    int32_t valid_len = n;
     TensorMap inputs;
     {
         Tensor t;
@@ -115,9 +115,9 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
         inputs["token_ids"] = t;
         t.data = positions_buf_.data();
         inputs["position_id"] = t;
-        t.data = &num_valid;
+        t.data = &valid_len;
         t.shape = {1};
-        inputs["num_valid"] = t;
+        inputs["valid_len"] = t;
         t.data = mask_buf_.data();
         t.shape = {chunk_len_, kv_len};
         t.dtype = DType::kFloat32;

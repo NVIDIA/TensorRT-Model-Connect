@@ -1752,38 +1752,38 @@ class Qwen38Model:
 
     def build_engine_prefill(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, seq_len: int, *, precision: str = "fp32",
+        max_cache_length: int, chunk_len: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
     ) -> bytes:
-        """Build the multi-token prefill engine: `seq_len` prompt tokens per call.
+        """Build the multi-token prefill engine: `chunk_len` prompt tokens per call.
 
-        Unlike `build_engine_multi_token` (which chains `seq_len` single-token
-        sub-steps and so still streams every weight `seq_len` times), every
-        projection / norm / MLP here is one GEMM over `[seq_len, hidden]` rows;
+        Unlike `build_engine_multi_token` (which chains `chunk_len` single-token
+        sub-steps and so still streams every weight `chunk_len` times), every
+        projection / norm / MLP here is one GEMM over `[chunk_len, hidden]` rows;
         DeltaNet uses the chunked delta rule and full attention one masked
-        `[seq_len, cache + seq_len]` attention. See `prefill_graph`.
+        `[chunk_len, cache + chunk_len]` attention. See `prefill_graph`.
 
-        A prompt is fed in chunks of `seq_len`; the last chunk may be partial.
-        `num_valid` (<= seq_len) says how many leading rows are real: padding
+        A prompt is fed in chunks of `chunk_len`; the last chunk may be partial.
+        `valid_len` (<= chunk_len) says how many leading rows are real: padding
         rows leave the DeltaNet state untouched and the runtime ignores their
         K/V rows.
 
         Inputs (names shared with the decode engine where they coincide):
-          - `token_ids` `(seq_len,)`, `position_id` `(seq_len,)`, `num_valid` `(1,)`
-          - `attention_mask` `(seq_len, max_cache_length + seq_len)`, additive
+          - `token_ids` `(chunk_len,)`, `position_id` `(chunk_len,)`, `valid_len` `(1,)`
+          - `attention_mask` `(chunk_len, max_cache_length + chunk_len)`, additive
           - `conv_state_{i}`, `ssm_state_{i}`, `cache_k_{i}`, `cache_v_{i}`
         Outputs:
-          - `logits` `(1, vocab)`: for row `num_valid - 1` only
-          - `hidden_states` `(seq_len, hidden)`: final-normed, fp32, every row
-          - `present_conv_{i}`, `present_ssm_{i}`: state after `num_valid` tokens
-          - `present_k_{i}`, `present_v_{i}` `(seq_len, kv_attention_size)`
+          - `logits` `(1, vocab)`: for row `valid_len - 1` only
+          - `hidden_states` `(chunk_len, hidden)`: final-normed, fp32, every row
+          - `present_conv_{i}`, `present_ssm_{i}`: state after `valid_len` tokens
+          - `present_k_{i}`, `present_v_{i}` `(chunk_len, kv_attention_size)`
         """
-        if seq_len < 2:
-            raise ValueError(f"prefill seq_len must be >= 2, got {seq_len}")
-        chunk = min(seq_len, 64)
-        if chunk & (chunk - 1) or seq_len % chunk:
+        if chunk_len < 2:
+            raise ValueError(f"prefill chunk_len must be >= 2, got {chunk_len}")
+        block_len = min(chunk_len, 64)
+        if block_len & (block_len - 1) or chunk_len % block_len:
             raise ValueError(
-                f"prefill seq_len must be a power of two (or a multiple of 64), got {seq_len}")
+                f"prefill chunk_len must be a power of two (or a multiple of 64), got {chunk_len}")
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -1846,11 +1846,11 @@ class Qwen38Model:
             trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # --- Inputs ---
-        token_ids = network.add_input("token_ids", trt.int32, (seq_len,))
-        position_ids = network.add_input("position_id", trt.int32, (seq_len,))
-        num_valid = network.add_input("num_valid", trt.int32, (1,))
+        token_ids = network.add_input("token_ids", trt.int32, (chunk_len,))
+        position_ids = network.add_input("position_id", trt.int32, (chunk_len,))
+        valid_len = network.add_input("valid_len", trt.int32, (1,))
         attention_mask = network.add_input(
-            "attention_mask", trt.float32, (seq_len, max_cache_length + seq_len))
+            "attention_mask", trt.float32, (chunk_len, max_cache_length + chunk_len))
 
         conv_state_inputs = []
         ssm_state_inputs = []
@@ -1892,8 +1892,8 @@ class Qwen38Model:
             np.array([config.rms_norm_eps], dtype=work_np_dtype),
             dtype=work_np_dtype)
 
-        # Positions reach at most max_cache_length + seq_len - 1.
-        table_len = max_cache_length + seq_len
+        # Positions reach at most max_cache_length + chunk_len - 1.
+        table_len = max_cache_length + chunk_len
         cos_half = graph_ops.make_rope_table_half_dim(
             table_len, head_dim, rope_theta,
             cosine=True, partial_rotary_factor=partial_rotary_factor)
@@ -1909,9 +1909,9 @@ class Qwen38Model:
             cos_half_tensor = network.add_cast(cos_half_tensor, work_trt_dtype).get_output(0)
             sin_half_tensor = network.add_cast(sin_half_tensor, work_trt_dtype).get_output(0)
 
-        valid_rows = prefill_graph.add_valid_row_mask(network, num_valid, seq_len)
+        valid_rows = prefill_graph.add_valid_row_mask(network, valid_len, chunk_len)
         conv_gather_index = prefill_graph.add_conv_state_gather_index(
-            network, num_valid, d_conv)
+            network, valid_len, d_conv)
 
         # --- Embedding ---
         hidden_state = network.add_gather(embedding_table, token_ids, 0).get_output(0)
@@ -1949,8 +1949,8 @@ class Qwen38Model:
                     conv_gather_index=conv_gather_index,
                     weights=weights,
                     prefix=prefix,
-                    seq_len=seq_len,
-                    chunk=chunk,
+                    chunk_len=chunk_len,
+                    block_len=block_len,
                     hidden_size=hidden,
                     d_inner=d_inner,
                     d_conv=d_conv,
@@ -1979,7 +1979,7 @@ class Qwen38Model:
                     eps_tensor=layer_cast(eps_tensor),
                     weights=weights,
                     prefix=prefix,
-                    seq_len=seq_len,
+                    chunk_len=chunk_len,
                     hidden_size=hidden,
                     attn_size=attn_size,
                     kv_attention_size=kv_attention_size,
@@ -2014,7 +2014,7 @@ class Qwen38Model:
 
         # --- LM head on the last valid row only ---
         last_row = network.add_elementwise(
-            num_valid,
+            valid_len,
             graph_ops.add_constant(network, (1,), np.array([1], dtype=np.int32), dtype=np.int32),
             trt.ElementWiseOperation.SUB).get_output(0)
         last_hidden = network.add_gather(hidden_state, last_row, 0).get_output(0)  # (1, hidden)
@@ -2054,7 +2054,7 @@ class Qwen38Model:
             network.mark_output(pv)
 
         if verbose:
-            print(f"[trtmc build] Building Qwen3.8 prefill ({seq_len}-token) TRT engine "
+            print(f"[trtmc build] Building Qwen3.8 prefill ({chunk_len}-token) TRT engine "
                   f"(hidden={hidden}, cache={max_cache_length}) ...", file=sys.stderr)
 
         plan = builder.build_serialized_network(network, trt_config)
@@ -2064,31 +2064,31 @@ class Qwen38Model:
 
     def build_mtp_prefill_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, seq_len: int, *, precision: str = "fp32",
+        max_cache_length: int, chunk_len: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
     ) -> bytes:
-        """Build the engine that warms MTP's KV cache for `seq_len` prompt tokens at once.
+        """Build the engine that warms MTP's KV cache for `chunk_len` prompt tokens at once.
 
         Prefill must leave MTP's own cache holding one K/V row per prompt
-        position, exactly as `seq_len` calls to `build_mtp_engine`'s engine
+        position, exactly as `chunk_len` calls to `build_mtp_engine`'s engine
         would. Those rows depend only on `fc(cat([norm(embed(token)),
         norm(hidden)]))` -> input_norm -> k_proj/v_proj -> k_norm -> RoPE, never
         on the attention output, so this engine stops there: no attention, MLP,
         or lm_head, and the draft logits are not produced.
 
         Inputs:
-          - `next_token_ids` `(seq_len,)`: token at each position
-          - `position_id` `(seq_len,)`: its absolute position (RoPE)
-          - `hidden_state` `(seq_len, hidden)` fp32: main-model hidden state of the
+          - `next_token_ids` `(chunk_len,)`: token at each position
+          - `position_id` `(chunk_len,)`: its absolute position (RoPE)
+          - `hidden_state` `(chunk_len, hidden)` fp32: main-model hidden state of the
             PREVIOUS position, paired with that token (as in `build_mtp_engine`)
-        Outputs: `mtp_present_k`, `mtp_present_v` `(seq_len, kv_attention_size)`.
+        Outputs: `mtp_present_k`, `mtp_present_v` `(chunk_len, kv_attention_size)`.
         Rows are independent, so padding rows are harmless.
         """
         if "mtp_layer.fc" not in weights:
             raise ValueError(
                 "weights has no MTP head -- checkpoint does not ship mtp.* tensors")
-        if seq_len < 1:
-            raise ValueError(f"seq_len must be >= 1, got {seq_len}")
+        if chunk_len < 1:
+            raise ValueError(f"chunk_len must be >= 1, got {chunk_len}")
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -2119,9 +2119,9 @@ class Qwen38Model:
         trt_config.builder_optimization_level = 1
         trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
-        token_ids = network.add_input("next_token_ids", trt.int32, (seq_len,))
-        position_ids = network.add_input("position_id", trt.int32, (seq_len,))
-        hidden_in = network.add_input("hidden_state", trt.float32, (seq_len, hidden))
+        token_ids = network.add_input("next_token_ids", trt.int32, (chunk_len,))
+        position_ids = network.add_input("position_id", trt.int32, (chunk_len,))
+        hidden_in = network.add_input("hidden_state", trt.float32, (chunk_len, hidden))
         if work_trt_dtype != trt.float32:
             hidden_in = network.add_cast(hidden_in, work_trt_dtype).get_output(0)
 
@@ -2174,10 +2174,10 @@ class Qwen38Model:
         if k_norm is not None:
             k = graph_ops.add_rms_norm_per_head(
                 network, k, num_kv_heads, head_dim, k_norm, eps_tensor,
-                dtype=work_np_dtype, sequence_length=seq_len)
+                dtype=work_np_dtype, sequence_length=chunk_len)
         k = graph_ops.add_apply_rope_native(
             network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
-            position_ids, rotary_embedding_dim, sequence_length=seq_len)
+            position_ids, rotary_embedding_dim, sequence_length=chunk_len)
 
         for tensor, name in ((k, "mtp_present_k"), (v, "mtp_present_v")):
             if tensor.dtype != work_trt_dtype:
@@ -2187,7 +2187,7 @@ class Qwen38Model:
             network.mark_output(tensor)
 
         if verbose:
-            print(f"[trtmc build] Building Qwen3.8 MTP prefill ({seq_len}-token) TRT engine ...",
+            print(f"[trtmc build] Building Qwen3.8 MTP prefill ({chunk_len}-token) TRT engine ...",
                   file=sys.stderr)
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:

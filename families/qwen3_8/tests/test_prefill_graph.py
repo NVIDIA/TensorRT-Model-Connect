@@ -6,7 +6,7 @@
 Each GPU test builds a tiny one-layer engine twice -- the existing single-token
 layer driven token by token, and the batched prefill layer driven once -- and
 compares outputs and persistent state, including a partial last chunk
-(``num_valid < seq_len``) and a chunk longer than the delta rule's inner chunk.
+(``valid_len < chunk_len``) and a chunk longer than the delta rule's inner block.
 """
 
 from __future__ import annotations
@@ -133,9 +133,9 @@ def _assert_close(actual, expected, tolerance, what) -> None:
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("precision,seq_len,tolerance",
+@pytest.mark.parametrize("precision,chunk_len,tolerance",
                          [("fp32", 16, 1e-5), ("fp32", 128, 1e-5), ("fp16", 128, 3e-2)])
-def test_deltanet_prefill_matches_single_token(precision, seq_len, tolerance) -> None:
+def test_deltanet_prefill_matches_single_token(precision, chunk_len, tolerance) -> None:
     _need_gpu()
     from families.qwen3_8 import engine_builder, graph_ops, prefill_graph
 
@@ -157,18 +157,18 @@ def test_deltanet_prefill_matches_single_token(precision, seq_len, tolerance) ->
     single_plan = single.build()
 
     batched = _Net(precision)
-    x = batched.network.add_input("x", batched.trt_dtype, (seq_len, HID))
+    x = batched.network.add_input("x", batched.trt_dtype, (chunk_len, HID))
     conv = batched.network.add_input("conv_state", trt.float32, (CONV_DIM, DCONV))
     ssm = batched.network.add_input("ssm_state", trt.float32, (H, D, D))
-    num_valid = batched.network.add_input("num_valid", trt.int32, (1,))
+    valid_len = batched.network.add_input("valid_len", trt.int32, (1,))
     eps = graph_ops.add_constant(batched.network, (1, 1), np.array([1e-6]), dtype=batched.np_dtype)
     out = prefill_graph.add_deltanet_layer_prefill(
         network=batched.network, hidden=x, conv_state_in=batched.cast_in(conv), ssm_state_in=ssm,
         eps_tensor=eps,
-        valid_rows=prefill_graph.add_valid_row_mask(batched.network, num_valid, seq_len),
+        valid_rows=prefill_graph.add_valid_row_mask(batched.network, valid_len, chunk_len),
         conv_gather_index=prefill_graph.add_conv_state_gather_index(
-            batched.network, num_valid, DCONV),
-        weights=weights, prefix="L", seq_len=seq_len, chunk=min(seq_len, 64), hidden_size=HID,
+            batched.network, valid_len, DCONV),
+        weights=weights, prefix="L", chunk_len=chunk_len, block_len=min(chunk_len, 64), hidden_size=HID,
         d_inner=D_INNER, d_conv=DCONV, conv_dim=CONV_DIM, num_heads=H, num_kv_heads=HK,
         head_dim=D, mlp_size=MLP, dtype=batched.np_dtype)
     batched.mark(hidden=out["hidden"], present_conv=out["present_conv"],
@@ -176,8 +176,8 @@ def test_deltanet_prefill_matches_single_token(precision, seq_len, tolerance) ->
     batched_plan = batched.build()
 
     names = ["hidden", "present_conv", "present_ssm"]
-    for valid in (seq_len, seq_len - 3, seq_len // 2 + 1, 1):
-        xs = torch.from_numpy(_rnd(rng, seq_len, HID, scale=1.0)).to(single.torch_dtype)
+    for valid in (chunk_len, chunk_len - 3, chunk_len // 2 + 1, 1):
+        xs = torch.from_numpy(_rnd(rng, chunk_len, HID, scale=1.0)).to(single.torch_dtype)
         conv0 = torch.from_numpy(_rnd(rng, CONV_DIM, DCONV, scale=0.5))
         ssm0 = torch.from_numpy(_rnd(rng, H, D, D, scale=0.3))
         conv_t, ssm_t, rows = conv0.clone(), ssm0.clone(), []
@@ -187,7 +187,7 @@ def test_deltanet_prefill_matches_single_token(precision, seq_len, tolerance) ->
             rows.append(step["hidden"])
             conv_t, ssm_t = step["present_conv"], step["present_ssm"]
         got = _run(batched_plan, {"x": xs, "conv_state": conv0, "ssm_state": ssm0,
-                                  "num_valid": torch.tensor([valid], dtype=torch.int32)}, names)
+                                  "valid_len": torch.tensor([valid], dtype=torch.int32)}, names)
         _assert_close(got["hidden"][:valid], torch.cat(rows), tolerance, f"hidden valid={valid}")
         _assert_close(got["present_conv"], conv_t, tolerance, f"conv valid={valid}")
         _assert_close(got["present_ssm"], ssm_t, tolerance, f"ssm valid={valid}")
@@ -199,13 +199,13 @@ def test_attention_prefill_matches_single_token(precision, tolerance) -> None:
     _need_gpu()
     from families.qwen3_8 import engine_builder, graph_ops, prefill_graph
 
-    seq_len, cached, max_cache = 16, 5, 24
+    chunk_len, cached, max_cache = 16, 5, 24
     rng = np.random.default_rng(1)
     weights = _attention_weights(rng, "L")
     cos = graph_ops.make_rope_table_half_dim(
-        max_cache + seq_len, ATT_D, 10000.0, cosine=True, partial_rotary_factor=ROT / ATT_D)
+        max_cache + chunk_len, ATT_D, 10000.0, cosine=True, partial_rotary_factor=ROT / ATT_D)
     sin = graph_ops.make_rope_table_half_dim(
-        max_cache + seq_len, ATT_D, 10000.0, cosine=False, partial_rotary_factor=ROT / ATT_D)
+        max_cache + chunk_len, ATT_D, 10000.0, cosine=False, partial_rotary_factor=ROT / ATT_D)
 
     def build(rows: int, single_token: bool) -> bytes:
         net = _Net(precision)
@@ -235,19 +235,19 @@ def test_attention_prefill_matches_single_token(precision, tolerance) -> None:
                 attention_mask=full.get_output(0), position_id=pos, **common)
         else:
             out = prefill_graph.add_full_attention_layer_prefill(
-                attention_mask=mask, position_ids=pos, seq_len=rows, **common)
+                attention_mask=mask, position_ids=pos, chunk_len=rows, **common)
         net.mark(hidden=out["hidden"], present_k=out["present_k"], present_v=out["present_v"])
         return net.build()
 
-    single_plan, batched_plan = build(1, True), build(seq_len, False)
+    single_plan, batched_plan = build(1, True), build(chunk_len, False)
     names = ["hidden", "present_k", "present_v"]
     dtype = torch.float32 if precision == "fp32" else torch.float16
-    xs = torch.from_numpy(_rnd(rng, seq_len, HID, scale=1.0)).to(dtype)
+    xs = torch.from_numpy(_rnd(rng, chunk_len, HID, scale=1.0)).to(dtype)
     base_k = torch.from_numpy(_rnd(rng, max_cache, KV_SIZE, scale=1.0)).to(dtype)
     base_v = torch.from_numpy(_rnd(rng, max_cache, KV_SIZE, scale=1.0)).to(dtype)
 
     cache_k, cache_v, rows, ks, vs = base_k.clone(), base_v.clone(), [], [], []
-    for t in range(seq_len):
+    for t in range(chunk_len):
         mask = torch.full((1, max_cache), -1e4)
         mask[:, :cached + t] = 0
         step = _run(single_plan, {"x": xs[t:t + 1], "pos": torch.tensor([cached + t], dtype=torch.int32),
@@ -258,11 +258,11 @@ def test_attention_prefill_matches_single_token(precision, tolerance) -> None:
         cache_k[cached + t] = step["present_k"][0].to(dtype)
         cache_v[cached + t] = step["present_v"][0].to(dtype)
 
-    mask = torch.full((seq_len, max_cache + seq_len), -1e4)
+    mask = torch.full((chunk_len, max_cache + chunk_len), -1e4)
     mask[:, :cached] = 0
-    for i in range(seq_len):
+    for i in range(chunk_len):
         mask[i, max_cache:max_cache + i + 1] = 0
-    got = _run(batched_plan, {"x": xs, "pos": torch.arange(cached, cached + seq_len, dtype=torch.int32),
+    got = _run(batched_plan, {"x": xs, "pos": torch.arange(cached, cached + chunk_len, dtype=torch.int32),
                               "mask": mask, "cache_k": base_k, "cache_v": base_v}, names)
     _assert_close(got["hidden"], torch.cat(rows), tolerance, "hidden")
     _assert_close(got["present_k"], torch.cat(ks), tolerance, "present_k")

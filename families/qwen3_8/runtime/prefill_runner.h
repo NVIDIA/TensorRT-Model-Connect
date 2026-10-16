@@ -17,7 +17,7 @@
 // the first n (valid) rows are appended to the cache.
 //
 // The last chunk of a prompt may be partial (n < chunk_len()). The engine
-// takes num_valid=n and keeps padding rows from touching the recurrent state,
+// takes valid_len=n and keeps padding rows from touching the recurrent state,
 // so no special handling is needed here beyond passing n.
 
 #include "families/qwen3_8/runtime/hybrid_state.h"

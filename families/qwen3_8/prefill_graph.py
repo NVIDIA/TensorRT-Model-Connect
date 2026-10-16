@@ -4,28 +4,28 @@
 """Batched multi-token (prefill) layers for the Qwen3.8 hybrid decoder.
 
 The decode engine handles one token per call. The prefill engine built from
-these layers handles ``seq_len`` tokens per call: every projection, norm and
-MLP runs as one GEMM over ``[seq_len, hidden]`` rows, so each weight matrix is
+these layers handles ``chunk_len`` tokens per call: every projection, norm and
+MLP runs as one GEMM over ``[chunk_len, hidden]`` rows, so each weight matrix is
 read once per chunk instead of once per token.
 
 Only the two token-mixing parts need sequence-aware rewrites:
 
   Gated DeltaNet
     - conv1d: causal depthwise conv over ``[conv_state | new tokens]``.
-    - delta rule: chunked (WY) form. Inside one chunk of ``C`` tokens the
+    - delta rule: chunked (WY) form. Inside one block of ``C`` tokens the
       sequential recurrence
           S <- exp(g_t) * S;  S <- S + k_t (x) beta_t * (v_t - S^T k_t)
       is rewritten with batched matmuls over ``[heads, C, C]`` tiles plus one
       unit-lower-triangular inverse, computed as a product of ``(I + N^(2^i))``
       factors (``N`` is strictly lower triangular, hence nilpotent).
   Full attention
-    - one ``[seq_len, cache + seq_len]`` masked attention instead of
-      ``seq_len`` single-row ones.
+    - one ``[chunk_len, cache + chunk_len]`` masked attention instead of
+      ``chunk_len`` single-row ones.
 
-Tokens past ``num_valid`` (padding of a partial last chunk) are made inert:
+Tokens past ``valid_len`` (padding of a partial last chunk) are made inert:
 ``g = 0`` and ``beta = 0`` leave the recurrent state untouched, and the conv
-state is gathered at ``num_valid`` instead of at the end of the chunk. Rows
-past ``num_valid`` in the K/V outputs and hidden states are garbage the
+state is gathered at ``valid_len`` instead of at the end of the chunk. Rows
+past ``valid_len`` in the K/V outputs and hidden states are garbage the
 runtime must ignore.
 
 The math is in fp32, like the decode engine's recurrent step.
@@ -89,28 +89,28 @@ def _mm(network, a, b, *, ta=False, tb=False) -> trt.ITensor:
     ).get_output(0)
 
 
-def add_valid_row_mask(network, num_valid: trt.ITensor, seq_len: int) -> trt.ITensor:
-    """fp32 ``[seq_len, 1]`` tensor: 1.0 for rows < num_valid, else 0.0.
+def add_valid_row_mask(network, valid_len: trt.ITensor, chunk_len: int) -> trt.ITensor:
+    """fp32 ``[chunk_len, 1]`` tensor: 1.0 for rows < valid_len, else 0.0.
 
-    ``num_valid`` is an int32 ``[1]`` network input.
+    ``valid_len`` is an int32 ``[1]`` network input.
     """
     iota = graph_ops.add_constant(
-        network, (seq_len, 1), np.arange(seq_len, dtype=np.int32).reshape(seq_len, 1),
+        network, (chunk_len, 1), np.arange(chunk_len, dtype=np.int32).reshape(chunk_len, 1),
         dtype=np.int32)
-    nv = _shuffle(network, num_valid, reshape=(1, 1))
+    nv = _shuffle(network, valid_len, reshape=(1, 1))
     less = _ew(network, iota, nv, trt.ElementWiseOperation.LESS)
     return network.add_cast(less, trt.float32).get_output(0)
 
 
-def add_conv_state_gather_index(network, num_valid: trt.ITensor, d_conv: int) -> trt.ITensor:
-    """int32 ``[d_conv]`` column indices ``num_valid + [0, d_conv)``.
+def add_conv_state_gather_index(network, valid_len: trt.ITensor, d_conv: int) -> trt.ITensor:
+    """int32 ``[d_conv]`` column indices ``valid_len + [0, d_conv)``.
 
-    Applied to ``[old conv state | seq_len new columns]`` it selects the
+    Applied to ``[old conv state | chunk_len new columns]`` it selects the
     ``d_conv`` most recent inputs as of the last valid token.
     """
     ramp = graph_ops.add_constant(
         network, (d_conv,), np.arange(d_conv, dtype=np.int32), dtype=np.int32)
-    return _ew(network, num_valid, ramp, trt.ElementWiseOperation.SUM)
+    return _ew(network, valid_len, ramp, trt.ElementWiseOperation.SUM)
 
 
 def _cumsum_last(network, x: trt.ITensor, length: int) -> trt.ITensor:
@@ -186,11 +186,11 @@ def add_delta_rule_chunk(
     beta: trt.ITensor,
     state: trt.ITensor,
     *,
-    chunk: int,
+    block_len: int,
     num_heads: int,
     head_dim: int,
 ) -> tuple[trt.ITensor, trt.ITensor]:
-    """Gated delta rule over one chunk of ``chunk`` tokens, all fp32.
+    """Gated delta rule over one block of ``block_len`` tokens, all fp32.
 
     Args:
         q, k: ``[H, C, D]``. ``q`` is already scaled by 1/sqrt(D); both are
@@ -204,9 +204,9 @@ def add_delta_rule_chunk(
         (out ``[H, C, D]``, new_state ``[H, D, D]``) -- identical to running
         the token-by-token recurrence ``C`` times.
     """
-    H, C = num_heads, chunk
+    H, C = num_heads, block_len
     if C < 2 or C & (C - 1):
-        raise ValueError(f"delta-rule chunk must be a power of two >= 2, got {C}")
+        raise ValueError(f"delta-rule block must be a power of two >= 2, got {C}")
 
     gc = _cumsum_last(network, g, C)  # [H, C] inclusive cumulative log decay
     gc_col = _shuffle(network, gc, reshape=(H, C, 1))
@@ -269,8 +269,8 @@ def add_deltanet_layer_prefill(
     conv_gather_index: trt.ITensor,
     weights,
     prefix: str,
-    seq_len: int,
-    chunk: int,
+    chunk_len: int,
+    block_len: int,
     hidden_size: int,
     d_inner: int,
     d_conv: int,
@@ -282,13 +282,13 @@ def add_deltanet_layer_prefill(
     dtype: np.dtype = np.float32,
     quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
-    """One Gated DeltaNet layer over ``seq_len`` tokens.
+    """One Gated DeltaNet layer over ``chunk_len`` tokens.
 
-    ``hidden`` is ``[seq_len, hidden_size]``. Returns the same
+    ``hidden`` is ``[chunk_len, hidden_size]``. Returns the same
     ``{hidden, present_conv, present_ssm}`` as the single-token layer, with
-    ``hidden`` being ``[seq_len, hidden_size]``.
+    ``hidden`` being ``[chunk_len, hidden_size]``.
     """
-    T = seq_len
+    T = chunk_len
     qk_dim = num_kv_heads * head_dim
     matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
 
@@ -390,19 +390,19 @@ def add_deltanet_layer_prefill(
     beta = _ew(network, _f32(network, beta), valid_rows, trt.ElementWiseOperation.PROD)
     beta_h = _shuffle(network, beta, first=(1, 0))  # [H, T]
 
-    # ===== delta rule, chunk by chunk =====
+    # ===== delta rule, block by block =====
     state = _f32(network, ssm_state_in)
     outs = []
-    for c in range(T // chunk):
-        s0 = c * chunk
+    for c in range(T // block_len):
+        s0 = c * block_len
         out_c, state = add_delta_rule_chunk(
             network,
-            _slice(network, q_h, (0, s0, 0), (num_heads, chunk, head_dim)),
-            _slice(network, k_h, (0, s0, 0), (num_heads, chunk, head_dim)),
-            _slice(network, v_h, (0, s0, 0), (num_heads, chunk, head_dim)),
-            _slice(network, g_h, (0, s0), (num_heads, chunk)),
-            _slice(network, beta_h, (0, s0), (num_heads, chunk)),
-            state, chunk=chunk, num_heads=num_heads, head_dim=head_dim)
+            _slice(network, q_h, (0, s0, 0), (num_heads, block_len, head_dim)),
+            _slice(network, k_h, (0, s0, 0), (num_heads, block_len, head_dim)),
+            _slice(network, v_h, (0, s0, 0), (num_heads, block_len, head_dim)),
+            _slice(network, g_h, (0, s0), (num_heads, block_len)),
+            _slice(network, beta_h, (0, s0), (num_heads, block_len)),
+            state, block_len=block_len, num_heads=num_heads, head_dim=head_dim)
         outs.append(out_c)
     present_ssm = state
     if len(outs) == 1:
@@ -466,7 +466,7 @@ def add_full_attention_layer_prefill(
     eps_tensor: trt.ITensor,
     weights,
     prefix: str,
-    seq_len: int,
+    chunk_len: int,
     hidden_size: int,
     attn_size: int,
     kv_attention_size: int,
@@ -479,15 +479,15 @@ def add_full_attention_layer_prefill(
     dtype: np.dtype = np.float32,
     quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
-    """One full self-attention layer over ``seq_len`` tokens.
+    """One full self-attention layer over ``chunk_len`` tokens.
 
-    ``attention_mask`` is the additive ``[seq_len, max_cache_length + seq_len]``
+    ``attention_mask`` is the additive ``[chunk_len, max_cache_length + chunk_len]``
     mask: the first ``max_cache_length`` columns select the valid cache prefix,
-    the last ``seq_len`` columns are causal over the new tokens.
+    the last ``chunk_len`` columns are causal over the new tokens.
     Returns ``{hidden, present_k, present_v}`` with ``present_*`` shaped
-    ``[seq_len, kv_attention_size]``.
+    ``[chunk_len, kv_attention_size]``.
     """
-    T = seq_len
+    T = chunk_len
     normed = graph_blocks.apply_norm(
         network, hidden, hidden_size, weights[f"{prefix}.input_norm"],
         weights.get(f"{prefix}.input_norm_beta"), eps_tensor, "rmsnorm", dtype=dtype)

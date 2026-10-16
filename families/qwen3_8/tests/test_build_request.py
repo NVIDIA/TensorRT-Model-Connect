@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""prefill_seq_len build input: validation and compatibility with the core request."""
+"""prefill_chunk_len build input: validation and compatibility with the core request."""
 
 from __future__ import annotations
 
@@ -19,18 +19,18 @@ def _request(**overrides) -> BuildRequest:
 
 
 @pytest.mark.parametrize("value", [None, 0, 2, 8, 32, 64, 128, 192])
-def test_prefill_seq_len_accepts_supported_values(value) -> None:
-    assert _request(prefill_seq_len=value).prefill_seq_len == value
+def test_prefill_chunk_len_accepts_supported_values(value) -> None:
+    assert _request(prefill_chunk_len=value).prefill_chunk_len == value
 
 
 @pytest.mark.parametrize("value", [1, 3, 48, 65, 100, -64])
-def test_prefill_seq_len_rejects_unsupported_values(value) -> None:
-    with pytest.raises(ValueError, match="prefill_seq_len"):
-        _request(prefill_seq_len=value)
+def test_prefill_chunk_len_rejects_unsupported_values(value) -> None:
+    with pytest.raises(ValueError, match="prefill_chunk_len"):
+        _request(prefill_chunk_len=value)
 
 
 def test_coerce_request_defaults_family_only_fields_for_core_requests() -> None:
-    """The shared core request has no prefill_seq_len; coercion must not require it."""
+    """The shared core request has no prefill_chunk_len; coercion must not require it."""
 
     class CoreRequest:
         model_dir = "m"
@@ -47,4 +47,4 @@ def test_coerce_request_defaults_family_only_fields_for_core_requests() -> None:
         verbose = False
         graph_transform = None
 
-    assert coerce_request(CoreRequest()).prefill_seq_len is None
+    assert coerce_request(CoreRequest()).prefill_chunk_len is None
