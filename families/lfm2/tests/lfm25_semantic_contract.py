@@ -461,6 +461,91 @@ def compare_organism_reproduction_claims(reference, native):
     }
 
 
+def organism_germ_cell_claims(text):
+    """Read direct, unqualified germ-cell presence/absence in organism answers.
+
+    Conditional, reported, stage/tissue-specific and other-organism claims are
+    left unclassified. This is a bounded phrase check, not coreference analysis.
+    """
+    value = normalized(text).replace("*", "").replace("c. elegans", "caenorhabditis elegans")
+    cells = r"germ(?:[ -]?line)?[ -]+cells?(?![ -]+(?:tumou?r|cancer)s?\b)"
+    quantity = r"(?:(?:some|a few|several|many|one|[1-9]\d*)\s+)?"
+    qualified = (
+        r"\b(?:if|unless|may|might|can|could|would|possibly|perhaps|sometimes|usually|only|or|"
+        r"mutants?|mutated|strains?|sterile|tissues?|brain|muscle|embryos?|larvae|larval|"
+        r"before|after|during|under|when|until|yet|normally|except|claims?|claimed|reports?|reported|"
+        r"statements?|false|falsely|untrue|unknown|unclear|whether)\b"
+        r"|\bnot\s+(?:all|always|necessarily|true|correct|accurate)\b|\bno longer\b"
+        r"|(?:\bnot|n['’]t)\s+(?:have|form|produce)\s+no\b"
+    )
+    other = r"\b(?:humans?|homo sapiens|mice|mouse|yeast|drosophila|flies|other organisms?)\b"
+    target_subject = (
+        r"\b(?:caenorhabditis elegans|(?:this|the) (?:worm|roundworm|nematode))\s+"
+        r"(?:has|have|contains?|forms?|produces?|possesses?|lacks?|does|doesn['’]t)\b"
+    )
+    negative = (
+        rf"\b(?:no|zero|not any)\s+{cells}\b"
+        r"(?:\s+(?:(?:are|is)\s+(?:formed|produced|present|found)|form|exist))?"
+        r"(?=\s*(?:$|[(),:]))",
+        rf"\b(?:lacks?|without)\s+(?:any\s+)?{cells}\b",
+        rf"\b(?:do(?:es)? not|doesn['’]t|don['’]t|cannot|can['’]t|never)\s+"
+        rf"(?:has|have|contains?|possesses?|forms?|produces?)\s+(?:any\s+)?{cells}\b",
+        rf"\b{cells}\s+(?:(?:is|are)\s+)?(?:absent|missing)\b",
+        rf"\b{cells}\s+(?:(?:is|are|do|does)\s+(?:not|never)|"
+        rf"isn['’]t|aren['’]t|don['’]t|doesn['’]t)\s+"
+        r"(?:present|formed|produced|found|form|exist)\b",
+    )
+    positive = (
+        rf"\b(?:plus|has|have|contains?|possesses?|forms?|produces?|with)\s+{quantity}{cells}\b",
+        rf"\bthere\s+(?:is|are)\s+{quantity}{cells}\b",
+        rf"\b{cells}\s+(?:(?:is|are)\s+)?(?:present|formed|produced|found|exist)\b",
+        rf"\b{cells}\s+(?:is|are)\s+not\s+(?:absent|missing)\b",
+    )
+
+    def unqualified(clause):
+        return not re.search(qualified, clause) and (
+            not re.search(other, clause) or re.search(target_subject, clause)
+        )
+
+    claims = set()
+    for sentence in re.split(r"[.!;|]", value):
+        if "?" in sentence or not unqualified(sentence):
+            continue
+        for clause in re.split(r",|\b(?:and|but|while|whereas)\b", sentence):
+            if not unqualified(clause):
+                continue
+            for claim, patterns in (("absent", negative), ("present", positive)):
+                for pattern in patterns:
+                    for match in re.finditer(pattern, clause):
+                        # Do not reinterpret a denied presence phrase (or a
+                        # denied absence phrase) as its affirmative form.
+                        if re.search(
+                            r"(?:\bnot|\bnever|\bno|\bcannot|n['’]t)\s*$",
+                            clause[: match.start()],
+                        ):
+                            continue
+                        if claim == "absent" and re.search(
+                            r"\b(?:some|a few|several|many|most)\s*$", clause[: match.start()]
+                        ):
+                            continue
+                        claims.add(claim)
+    return claims
+
+
+def compare_organism_germ_cell_claims(reference, native):
+    expected, actual = organism_germ_cell_claims(reference), organism_germ_cell_claims(native)
+    assert not (
+        ("present" in expected and "absent" in actual)
+        or ("absent" in expected and "present" in actual)
+    ), "native/reference explicit germ-cell presence claims conflict"
+    return {
+        "shared_property": bool(expected and actual),
+        "reference_claims": sorted(expected),
+        "native_claims": sorted(actual),
+        "scope": "Direct unqualified presence/absence only; omissions and qualified claims imply nothing.",
+    }
+
+
 def organism_numeric_claims(text):
     """Extract bounded, explicit final-answer claims, without judging their truth."""
     value = (
@@ -697,6 +782,9 @@ def evaluate(name, native, expected_parts, reference_ids, eos, request, input_co
             expected_text, actual_text
         )
         checks["explicit_reproduction_claims"] = compare_organism_reproduction_claims(
+            expected_text, actual_text
+        )
+        checks["explicit_germ_cell_claims"] = compare_organism_germ_cell_claims(
             expected_text, actual_text
         )
         if name == "sampled-answer-completion":

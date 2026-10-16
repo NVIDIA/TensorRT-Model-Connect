@@ -1035,3 +1035,113 @@ def test_larval_stage_exactly_modifier_preserves_scoped_denial():
     assert semantic.organism_numeric_claims("It has exactly four larval stages.")[
         "larval_stage_count"
     ] == {(4, 4, False)}
+
+
+@pytest.mark.parametrize(
+    "case", ("model-card-quickstart", "model-card-sampling", "sampled-answer-completion")
+)
+def test_visible_germ_cell_contradiction_is_rejected_even_at_budget(case):
+    reference = "An adult has exactly 959 somatic cells (plus a few germ cells)."
+    native = (
+        "Exactly 959 somatic cells in a fully mature adult (no germline cells are formed; "
+        "the germline is derived from the same cells that become somatic)."
+    )
+    for left, right in ((reference, native), (native, reference)):
+        with pytest.raises(AssertionError, match="germ-cell presence claims conflict"):
+            check(
+                case,
+                [text(ORGANISM_CORE + " " + left)],
+                [text(ORGANISM_CORE + " " + right)],
+                reference_ids=[1] * 512,
+                native_ids=[2] * 512,
+                limit=512,
+            )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Plus a few germ cells.",
+        "It has germline cells.",
+        "Germ cells are present.",
+        "Germ cells are formed.",
+        "There are some germ cells.",
+        "Germ cells are not absent.",
+        "Unlike humans, C. elegans has germ cells.",
+        "C. elegans has germ cells, humans have no germ cells.",
+        "No neurons are formed. It has germ cells.",
+    ],
+)
+def test_explicit_germ_cell_presence_paraphrases(value):
+    assert semantic.organism_germ_cell_claims(value) == {"present"}
+    semantic.compare_organism_germ_cell_claims("Plus a few germ cells.", value)
+    for left, right in (("No germline cells are formed.", value), (value, "It has no germ cells.")):
+        with pytest.raises(AssertionError, match="germ-cell presence claims conflict"):
+            semantic.compare_organism_germ_cell_claims(left, right)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "No germline cells are formed.",
+        "It has no germ cells.",
+        "It lacks germ cells.",
+        "Germ cells are absent.",
+        "Germ cells are not present.",
+        "It doesn't have germ cells.",
+        "It cannot have germ cells.",
+        "It never has germ cells.",
+        "Humans have germ cells, C. elegans has no germ cells.",
+    ],
+)
+def test_explicit_germ_cell_absence_paraphrases(value):
+    assert semantic.organism_germ_cell_claims(value) == {"absent"}
+    semantic.compare_organism_germ_cell_claims("No germline cells are formed.", value)
+    with pytest.raises(AssertionError, match="germ-cell presence claims conflict"):
+        semantic.compare_organism_germ_cell_claims("Plus a few germ cells.", value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "If the worm is sterile, no germ cells are formed.",
+        "Germ cells may be absent.",
+        "No germ cells are formed in mutants.",
+        "No germ cells are formed in somatic tissue.",
+        "No germ cells are formed yet.",
+        "Not all germ cells are present.",
+        "Germ cells are not always present.",
+        "The claim that no germ cells are formed is false.",
+        "It is not true that no germ cells are formed.",
+        "It does not lack germ cells.",
+        "It does not have no germ cells.",
+        "No germ cells are lost.",
+        "No germ cells are missing.",
+        "Some germ cells are absent.",
+        "Humans have no germ cells.",
+        "No germ cells are formed in mice.",
+        "Human germ cells are absent.",
+        "Other organisms have germ cells.",
+        "It has germ-cell tumors.",
+        "Does C. elegans have germ cells?",
+        "The worm is transparent.",
+    ],
+)
+def test_germ_cell_omissions_qualifiers_denials_and_other_subjects_imply_nothing(value):
+    assert semantic.organism_germ_cell_claims(value) == set()
+    for target in ("Plus a few germ cells.", "No germ cells are formed."):
+        for left, right in ((target, value), (value, target)):
+            assert not semantic.compare_organism_germ_cell_claims(left, right)["shared_property"]
+
+
+def test_germ_cell_claims_do_not_apply_to_reasoning_only_sampling_budget():
+    result = check(
+        "model-card-sampling",
+        [{"type": "reasoning", "text": ORGANISM_CORE + " Plus a few germ cells."}],
+        [{"type": "reasoning", "text": ORGANISM_CORE + " No germ cells are formed."}],
+        reference_ids=[1] * 512,
+        native_ids=[2] * 512,
+        limit=512,
+    )
+    assert result["completion_state"] == "reasoning_only_at_budget"
+    assert "explicit_germ_cell_claims" not in result
