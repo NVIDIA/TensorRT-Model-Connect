@@ -520,68 +520,8 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/legal_headers.py",
         "tools/model_ci.py",
         "tools/model_benchmark.py",
-        "tools/perf_matrix/__init__.py",
-        "tools/perf_matrix/__main__.py",
-        "tools/perf_matrix/cli.py",
-        "tools/perf_matrix/core.py",
-        "tools/perf_matrix/types.py",
         "tools/pr_metadata.py",
         "tools/test_impact.py",
-        "qualification_tests/benchmark_qualification/__init__.py",
-        "qualification_tests/benchmark_qualification/accuracy.py",
-        "qualification_tests/benchmark_qualification/benchmarks/audio_generation_model_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/audio_generation_pipeline_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/beans_image_feature_knn.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/embedding_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/encoder_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/etth1_forecast_parity.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/flores200_en_fr_seq2seq.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/flores200_en_fr_translation.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/humaneval_continuation.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/image_classification_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/image_features_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/imagenette_classification.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/coco2017_object_detection.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/imagenette_localization_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/imagenette_prompted_segmentation_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/imagenette_segmentation_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/imagenette_text_prompted_instance_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/imagenette_vision_language_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/librispeech_transcription.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/media_generation_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/metric_geometry_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/metric_geometry_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/mmlu_continuation.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/object_detection_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/ocrbench_v2_parity.yaml",
-                    "qualification_tests/benchmark_qualification/benchmarks/reranking_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/robot_action_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/robot_action_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/newstest2019_en_ru_translation.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/stsbenchmark_embedding_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/stsbenchmark_reranking_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/task_output_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/speech_nemo_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/speech_transformer_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/stereo_disparity_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/stereo_disparity_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/text_generation_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/text_prompted_segmentation_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/vision_language_pipeline_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/vision_language_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/semantic_segmentation_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/time_series_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/wikitext103_continuation.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/wmt14_en_de_translation.yaml",
-        "qualification_tests/benchmark_qualification/catalog.py",
-        "qualification_tests/benchmark_qualification/datasets.py",
-        "qualification_tests/benchmark_qualification/performance/qualification.py",
-            "qualification_tests/benchmark_qualification/references/hf_encoder.py",
-            "qualification_tests/benchmark_qualification/references/hf_text_generation.py",
-            "qualification_tests/benchmark_qualification/references/speech_io.py",
-            "qualification_tests/benchmark_qualification/references/timm_image_classification.py",
-        "qualification_tests/benchmark_qualification/runtime.py",
-        "tools/prepare_coco_detection_dataset.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",
         "tools/ci/container.py",
@@ -595,10 +535,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/ci/quality.py",
         "tools/ci/stage.py",
     }
-    migrated_qualification = {
-        path for path in expected_tools if path.startswith("qualification_tests/")
-    }
-    expected_tools -= migrated_qualification
     expected_tool_tests = {
         "tools/tests/__init__.py",
         "tools/tests/test_architecture.py",
@@ -614,39 +550,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_model_benchmark.py",
         "tools/tests/test_pr_metadata.py",
         "tools/tests/test_public_source_hygiene.py",
-    }
-    expected_qualification = migrated_qualification | {
-        "qualification_tests/__init__.py",
-        "qualification_tests/benchmark_qualification/__init__.py",
-        "qualification_tests/benchmark_qualification/performance/__init__.py",
-        "qualification_tests/benchmark_qualification/performance/__main__.py",
-        "qualification_tests/benchmark_qualification/performance/README.md",
-        "qualification_tests/benchmark_qualification/performance/config/environments/auto-thor.yaml",
-        "qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml",
-        "qualification_tests/benchmark_qualification/performance/config/environments/l4t-thor.yaml",
-        "qualification_tests/benchmark_qualification/performance/config/release.yaml",
-        "qualification_tests/benchmark_qualification/performance/config/requirements.txt",
-        "qualification_tests/benchmark_qualification/performance/matrix.py",
-        "qualification_tests/benchmark_qualification/performance/reference_harness.py",
-        "qualification_tests/benchmark_qualification/performance/reference_protocol.py",
-        "qualification_tests/benchmark_qualification/performance/reporting.py",
-        "qualification_tests/benchmark_qualification/performance/references/__init__.py",
-        "qualification_tests/benchmark_qualification/performance/references/audio_reference.py",
-        "qualification_tests/benchmark_qualification/performance/references/hf_transformers.py",
-        "qualification_tests/benchmark_qualification/performance/references/generic_reference.py",
-        "qualification_tests/benchmark_qualification/performance/references/timing_contracts.py",
-        "qualification_tests/benchmark_qualification/performance/runner.py",
-        "qualification_tests/benchmark_qualification/performance/stability.py",
-        "qualification_tests/benchmark_qualification/performance/types.py",
-        "qualification_tests/benchmark_qualification/performance/tests/__init__.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_diffusers_semantic_reference.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_family_performance.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_offline_speech_contract.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_perf_matrix.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_reference_protocol.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_reporting.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_structured_output_contracts.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_timing_contracts.py",
     }
     expected_cmake = {
         "cmake/trtmcConfig.cmake.in",
@@ -677,7 +580,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     tool_tests = {path for path in tool_files if path.startswith("tools/tests/")}
     assert tool_files - tool_tests == expected_tools
     assert tool_tests == expected_tool_tests
-    assert files("qualification_tests") == expected_qualification
     assert files("cmake") == expected_cmake
     assert files("third_party") == expected_third_party
 
@@ -728,9 +630,7 @@ def test_applications_depend_only_on_public_model_connect_surfaces() -> None:
         REPO / "apps",
         REPO / "examples",
     )
-    application_files = [path for root in application_roots for path in root.rglob("*")] + [
-        REPO / "qualification_tests/benchmark_qualification/performance/matrix.py"
-    ]
+    application_files = [path for root in application_roots for path in root.rglob("*")]
     for path in application_files:
         if not path.is_file() or "__pycache__" in path.parts:
             continue

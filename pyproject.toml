@@ -81,7 +81,6 @@ include = [
     "requirements",
     "third_party",
     "examples",
-    "qualification_tests/benchmark_qualification",
 ]
 exclude = [
     "__pycache__",
@@ -102,7 +101,6 @@ testpaths = [
     "examples/models/cosmos3/dual_spark/test_cosmos3_dual_spark_source.py",
     "examples/models/nemotron_voicechat/full_duplex/test_voicechat_full_duplex_source.py",
     "tools/tests",
-    "qualification_tests/benchmark_qualification",
 ]
 markers = [
     "gpu: tests requiring a CUDA GPU",

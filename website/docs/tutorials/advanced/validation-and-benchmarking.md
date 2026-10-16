@@ -48,18 +48,8 @@ trtmc-bench run \
   -o results/distilgpt2
 ```
 
-For release comparisons, validate and run the checked-in matrix:
-
-```bash
-python3 -m qualification_tests.benchmark_qualification.performance check \
-  qualification_tests/benchmark_qualification/performance/config/release.yaml \
-  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml
-
-python3 -m qualification_tests.benchmark_qualification.performance run \
-  qualification_tests/benchmark_qualification/performance/config/release.yaml \
-  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml \
-  --entry gpt2.generate
-```
+For release comparisons against the native model, use the AIPerf-based
+qualification in `apps/aiperf_qual` (`trtmc-aiperf-qual`).
 
 Bundle preparation and warmup are outside the candidate measurement. Reference
 runners execute in separate environments so their dependencies do not leak

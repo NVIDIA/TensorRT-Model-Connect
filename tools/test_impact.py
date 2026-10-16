@@ -23,9 +23,6 @@ DOC_FILES = {
     "CONTRIBUTING.md",
     "README.md",
 }
-MODEL_PROOF_NEUTRAL_FILES = {
-    "qualification_tests/benchmark_qualification/performance/config/release.yaml",
-}
 SHARED_PREFIXES = (
     ".github/",
     "apps/",
@@ -33,7 +30,6 @@ SHARED_PREFIXES = (
     "core/",
     "examples/",
     "plugins/",
-    "qualification_tests/",
     "requirements/",
     "third_party/",
     "tools/",
@@ -111,8 +107,6 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
             continue
         if path in DOC_FILES or path.startswith(DOC_PREFIXES):
             docs = True
-            continue
-        if path in MODEL_PROOF_NEUTRAL_FILES:
             continue
         if len(parts) == 1 and path.endswith(".py"):
             shared = True

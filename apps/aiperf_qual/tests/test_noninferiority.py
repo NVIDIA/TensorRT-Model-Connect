@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import re
-from pathlib import Path
-
 import pytest
 
 from trtmc_aiperf_qual import noninferiority
@@ -59,17 +56,3 @@ def test_relative_margins_and_their_zero_native_score():
     zero = noninferiority.bootstrap(lambda indices: (0.0, 0.0), [0, 1], {"margin": 0.0, "relative_margin": 0.01},
                                     False, 10)
     assert zero["outcome"] == "not-comparable"
-
-
-def test_the_harness_does_not_depend_on_benchmark_qualification():
-    """Decoupled from benchmark_qualification: no import of qualification_tests, no read of families/*/tests/benchmark."""
-    apps = Path(__file__).resolve().parents[2]
-    offenders = []
-    for root in (apps / "aiperf_qual", apps / "perf_serving"):
-        for path in root.rglob("*.py"):
-            if "tests" in path.relative_to(root).parts:
-                continue
-            text = path.read_text()
-            if re.search(r"qualification_tests|tests/benchmark", text):
-                offenders.append(str(path.relative_to(apps)))
-    assert offenders == []

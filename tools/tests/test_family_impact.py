@@ -44,20 +44,6 @@ def test_family_requirements_select_only_the_owner(tmp_path: Path) -> None:
     assert impact.families == ("alpha",)
 
 
-def test_release_performance_policy_does_not_expand_family_scope(tmp_path: Path) -> None:
-    repo = _repo(tmp_path)
-    impact = test_impact.classify(
-        repo,
-        [
-            "qualification_tests/benchmark_qualification/performance/config/release.yaml",
-            "families/alpha/model.py",
-        ],
-    )
-
-    assert impact.scope == "families"
-    assert impact.families == ("alpha",)
-
-
 def test_base_requirements_select_all_families(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     impact = test_impact.classify(repo, ["requirements/base.txt"])

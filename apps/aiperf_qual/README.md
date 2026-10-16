@@ -2,7 +2,6 @@
 
 Accuracy and performance qualification of every ready catalog model against its native
 (unconverted) Hugging Face / PyTorch model, driven by [AIPerf](https://github.com/ai-dynamo/aiperf).
-It does not use `qualification_tests/benchmark_qualification`.
 
 - **Acc**: TRTMC must be as accurate as the native model on the Task's workloads. Both sides answer the
   Task's gold-labelled benchmarks (`absolute`) and each benchmark is a paired non-inferiority decision

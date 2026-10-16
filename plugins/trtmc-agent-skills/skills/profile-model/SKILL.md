@@ -10,7 +10,7 @@ description: >-
 Choose the evidence level before running:
 
 - For one model or testcase, use `trtmc-bench`.
-- For a checked-in release comparison, use `python3 -m qualification_tests.benchmark_qualification.performance`.
+- For a release comparison against the native model, use `trtmc-aiperf-qual` (`apps/aiperf_qual`).
 
 The public benchmark boundary is `public_task_call_wall`. It excludes bundle
 building, process startup, warmup, report generation, and bundle loading.
@@ -36,14 +36,9 @@ Use the same bundle kind, hardware, input, seed, warmups, iterations, and
 runtime policy for before/after comparisons. If any differ, report the
 confounder instead of one causal speedup percentage.
 
-For release evidence, first check and then run the exact entry:
-
-```bash
-python3 -m qualification_tests.benchmark_qualification.performance check <suite> \
-  --environment <environment> --entry <entry>
-python3 -m qualification_tests.benchmark_qualification.performance run <suite> \
-  --environment <environment> --entry <entry>
-```
+For release evidence, run the exact profile with
+`trtmc-aiperf-qual run --profile <profile> --environment <environment> --out <result-dir>`
+(see `apps/aiperf_qual/README.md`).
 
 Lead the report with correctness and evidence level. Include exact commands,
 p50 and other suite-owned statistics, measurement scope, limitations, and any

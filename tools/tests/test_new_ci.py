@@ -36,7 +36,6 @@ from tools.ci.package import (
 from tools.ci.pipeline import CiPipeline
 from tools.ci.process import CiError
 from tools.ci.quality import SourceQualityChecks, UnitTestRunner
-from qualification_tests.benchmark_qualification.performance import matrix as perf_matrix
 
 
 class RecordingContext:
@@ -770,37 +769,6 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     assert "--header 'Content-Type: application/json'" in script
     assert '--data "$payload"' in script
     assert '"$SLACK_WEBHOOK_URL"' in script
-
-
-def test_performance_preflight_requires_executable_native_entrypoints(tmp_path: Path) -> None:
-    trtmc_bench = tmp_path / "trtmc-bench"
-    worker = tmp_path / "trtmc-worker"
-    hf_runner = tmp_path / "hf-runner.py"
-    task_runner = tmp_path / "task-runner.py"
-    for path in (trtmc_bench, worker, hf_runner, task_runner):
-        path.write_text("#!/bin/sh\n")
-    environment = perf_matrix.Environment(
-        name="test",
-        trtmc_bench=trtmc_bench,
-        worker=worker,
-        hf_runner=hf_runner,
-        task_runner=task_runner,
-        results_root=tmp_path / "results",
-        scratch_root=tmp_path / "scratch",
-        bundle_cache=tmp_path / "bundles",
-        bundle_roots=(),
-        runtime_root=tmp_path / "runtime",
-        bundle_retention="retain",
-        local_files_only=True,
-        timeout_seconds=1,
-        references={},
-    )
-
-    with pytest.raises(perf_matrix.PerfMatrixError, match="trtmc-bench is not executable"):
-        perf_matrix.preflight([], environment, require_runtime=False)
-
-    trtmc_bench.chmod(0o755)
-    assert perf_matrix.preflight([], environment, require_runtime=False) == []
 
 
 def test_dev_images_install_the_pinned_requirements_without_deleted_docs() -> None:
