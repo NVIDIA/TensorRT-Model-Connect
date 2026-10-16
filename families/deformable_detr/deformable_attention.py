@@ -35,7 +35,7 @@ def _shuffle(network, x, *, first=None, reshape=None, second=None):
     if first is not None:
         layer.first_transpose = first
     if reshape is not None:
-        layer.reshape_dims = reshape
+        layer.set_input(1, g.shape_vector(network, reshape))
     if second is not None:
         layer.second_transpose = second
     return layer.get_output(0)
@@ -43,7 +43,10 @@ def _shuffle(network, x, *, first=None, reshape=None, second=None):
 
 def _slice(network, x, start, size):
     stride = (1,) * len(start)
-    return network.add_slice(x, start, size, stride).get_output(0)
+    layer = network.add_slice(x, (0,) * len(start), stride, stride)
+    layer.set_input(1, g.shape_vector(network, start))
+    layer.set_input(2, g.shape_vector(network, size))
+    return layer.get_output(0)
 
 
 def build_deformable_attention(network, hidden, posed, reference, weights, prefix,
@@ -58,7 +61,7 @@ def build_deformable_attention(network, hidden, posed, reference, weights, prefi
     itself and leaves it unset; the decoder passes the encoder output, whose
     token count is the pyramid's, not the query count.
     """
-    queries = int(hidden.shape[1])
+    queries = g.shape_of(network, hidden, [1])
     width = int(hidden.shape[2])
     if value_source is None:
         value_source = hidden
@@ -83,11 +86,11 @@ def build_deformable_attention(network, hidden, posed, reference, weights, prefi
     scores = softmax.get_output(0)
 
     # offsets / (W, H) per level, then the grid convention: 2 * location - 1.
-    normaliser = np.empty((1, 1, levels, 1, 2), dtype=dtype)
-    for level, (height, level_width) in enumerate(shapes):
-        normaliser[0, 0, level, 0, 0] = level_width
-        normaliser[0, 0, level, 0, 1] = height
-    divisor = g.add_constant(network, normaliser.shape, normaliser, dtype)
+    normaliser = g.concat(network, [g.shape_indices(network, shape, [1, 0])
+                                    for shape in shapes], axis=0)
+    normaliser = network.add_cast(
+        normaliser, trt.float16 if dtype == np.float16 else trt.float32).get_output(0)
+    divisor = g.reshape(network, normaliser, (1, 1, levels, 1, 2))
     scaled = network.add_elementwise(offsets, divisor, trt.ElementWiseOperation.DIV).get_output(0)
 
     # reference is (1, queries, levels, 2); broadcast it over heads and points.
@@ -100,9 +103,12 @@ def build_deformable_attention(network, hidden, posed, reference, weights, prefi
 
     # value split per level and laid out as (heads, head_dim, H, W).
     sampled = []
-    start = 0
-    for level, (height, level_width) in enumerate(shapes):
-        count = height * level_width
+    start = g.add_constant(network, (1,), [0], np.int32)
+    for level, spatial_shape in enumerate(shapes):
+        height = g.shape_indices(network, spatial_shape, [0])
+        level_width = g.shape_indices(network, spatial_shape, [1])
+        count = network.add_elementwise(
+            height, level_width, trt.ElementWiseOperation.PROD).get_output(0)
         piece = _slice(network, value, (0, start, 0), (1, count, width))
         piece = _shuffle(network, piece, reshape=(count, heads, head_dim),
                          second=(1, 2, 0))
@@ -120,7 +126,7 @@ def build_deformable_attention(network, hidden, posed, reference, weights, prefi
         layer.sample_mode = trt.SampleMode.FILL
         layer.align_corners = False
         sampled.append(layer.get_output(0))
-        start += count
+        start = network.add_elementwise(start, count, trt.ElementWiseOperation.SUM).get_output(0)
 
     # (heads, head_dim, queries, points) per level -> (heads, head_dim, queries, levels*points)
     joined = g.concat(network, sampled, axis=3)

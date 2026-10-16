@@ -37,13 +37,26 @@ def reference_points(shapes, dtype=np.float32) -> np.ndarray:
     return np.tile(flat[None, :, None, :], (1, 1, len(shapes), 1)).astype(dtype)
 
 
+def dynamic_reference_points(network, shapes, dtype=np.float32):
+    """Actual feature-map centres, broadcast across the unpadded levels."""
+    references = []
+    for spatial_shape in shapes:
+        x = g.coordinate_grid(network, spatial_shape, 1, normalise=True)
+        y = g.coordinate_grid(network, spatial_shape, 0, normalise=True)
+        xy = g.concat(network, [g.reshape(network, x, (1, -1, 1, 1)),
+                                g.reshape(network, y, (1, -1, 1, 1))], axis=3)
+        references.append(xy)
+    reference = g.concat(network, references, axis=1)
+    reference = g.concat(network, [reference] * len(shapes), axis=2)
+    if dtype == np.float16:
+        reference = network.add_cast(reference, trt.float16).get_output(0)
+    return reference
+
+
 def build_encoder(network, hidden, position, weights, shapes, config,
                   prefix="model.encoder", dtype=np.float32):
     """Run the six encoder layers over the flattened pyramid."""
-    reference = g.add_constant(
-        network, (1, int(hidden.shape[1]), len(shapes), 2),
-        reference_points(shapes, dtype), dtype,
-    )
+    reference = dynamic_reference_points(network, shapes, dtype)
     for layer in range(config["encoder_layers"]):
         base = f"{prefix}.layers.{layer}"
         posed = network.add_elementwise(

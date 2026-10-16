@@ -39,6 +39,8 @@ DeformableDetrRuntimeConfig parse_config(const std::vector<char>& data) {
     DeformableDetrRuntimeConfig config;
     config.preprocess.input_image_h = json.at("input_image_h").get<std::int32_t>();
     config.preprocess.input_image_w = json.at("input_image_w").get<std::int32_t>();
+    config.resize_shortest_edge = json.at("resize_shortest_edge").get<std::int32_t>();
+    config.resize_longest_edge = json.at("resize_longest_edge").get<std::int32_t>();
     config.preprocess.do_normalize = json.at("do_normalize").get<bool>();
     config.preprocess.image_mean = read_triple(json, "image_mean", config.preprocess.image_mean);
     config.preprocess.image_std = read_triple(json, "image_std", config.preprocess.image_std);
@@ -48,7 +50,9 @@ DeformableDetrRuntimeConfig parse_config(const std::vector<char>& data) {
     if (json.contains("top_k"))
         config.top_k = json.at("top_k").get<std::int32_t>();
     if (config.preprocess.input_image_h <= 0 || config.preprocess.input_image_w <= 0 ||
-        config.num_queries <= 0 || config.num_labels <= 0 || config.top_k <= 0) {
+        config.resize_shortest_edge <= 0 ||
+        config.resize_longest_edge < config.resize_shortest_edge || config.num_queries <= 0 ||
+        config.num_labels <= 0 || config.top_k <= 0) {
         throw std::runtime_error("deformable_detr runtime.json does not match its contract");
     }
     return config;

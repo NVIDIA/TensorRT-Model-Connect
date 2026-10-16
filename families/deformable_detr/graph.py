@@ -14,6 +14,47 @@ def add_constant(network, shape, values, dtype=np.float32):
     return network.add_constant(shape, data).get_output(0)
 
 
+def shape_of(network, tensor, indices=None):
+    shape = network.add_shape(tensor).get_output(0)
+    shape = network.add_cast(shape, trt.int32).get_output(0)
+    return shape if indices is None else shape_indices(network, shape, indices)
+
+
+def shape_indices(network, shape, indices):
+    index = add_constant(network, (len(indices),), indices, np.int32)
+    return network.add_gather(shape, index, 0).get_output(0)
+
+
+def shape_vector(network, dimensions):
+    pieces = [add_constant(network, (1,), [value], np.int32)
+              if isinstance(value, (int, np.integer)) else value for value in dimensions]
+    return pieces[0] if len(pieces) == 1 else concat(network, pieces, axis=0)
+
+
+def reshape(network, tensor, dimensions):
+    layer = network.add_shuffle(tensor)
+    if all(isinstance(value, (int, np.integer)) for value in dimensions):
+        layer.reshape_dims = tuple(int(value) for value in dimensions)
+    else:
+        layer.set_input(1, shape_vector(network, dimensions))
+    return layer.get_output(0)
+
+
+def coordinate_grid(network, spatial_shape, axis, *, normalise=False):
+    """Half-pixel centres for an actual, unpadded feature map."""
+    layer = network.add_fill((1, 1), trt.FillOperation.LINSPACE)
+    layer.set_input(0, spatial_shape)
+    layer.set_input(1, add_constant(network, (), [0.5], np.float32))
+    layer.set_input(2, add_constant(network, (2,), [axis == 0, axis == 1], np.float32))
+    grid = layer.get_output(0)
+    if normalise:
+        extent = shape_indices(network, spatial_shape, [axis])
+        extent = network.add_cast(extent, trt.float32).get_output(0)
+        extent = reshape(network, extent, (1, 1))
+        grid = network.add_elementwise(grid, extent, trt.ElementWiseOperation.DIV).get_output(0)
+    return grid
+
+
 def fold_batch_norm(weight, gamma, beta, mean, variance, eps):
     """Fold a BatchNorm into the convolution that feeds it.
 
@@ -130,7 +171,7 @@ def spatial_to_tokens(network, x):
     """[1, C, H, W] -> [1, H*W, C]"""
     shape = tuple(int(v) for v in x.shape)
     flat = network.add_shuffle(x)
-    flat.reshape_dims = (shape[0], shape[1], shape[2] * shape[3])
+    flat.reshape_dims = (shape[0], shape[1], -1)
     flat.second_transpose = (0, 2, 1)
     return flat.get_output(0)
 
@@ -158,7 +199,7 @@ def add_group_norm(network, inp, gamma, beta, groups, eps, dtype=np.float32):
         raise ValueError("group_norm channels must divide into the group count")
 
     grouped = network.add_shuffle(inp)
-    grouped.reshape_dims = (shape[0], groups, channels // groups * shape[2] * shape[3])
+    grouped.reshape_dims = (shape[0], groups, -1)
     x = grouped.get_output(0)
 
     # Reduce over everything inside a group: axis 2 of (N, groups, rest).
@@ -177,7 +218,7 @@ def add_group_norm(network, inp, gamma, beta, groups, eps, dtype=np.float32):
         centred, deviation, trt.ElementWiseOperation.DIV).get_output(0)
 
     restored = network.add_shuffle(normed)
-    restored.reshape_dims = shape
+    restored.set_input(1, shape_of(network, inp))
     y = restored.get_output(0)
 
     # The affine term is per channel, not per group.

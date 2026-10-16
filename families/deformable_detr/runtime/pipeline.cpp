@@ -33,19 +33,23 @@ DeformableDetrObjectDetectionPipeline::DeformableDetrObjectDetectionPipeline(
 ObjectDetectionResult DeformableDetrObjectDetectionPipeline::detect(const float* pixels,
                                                                     std::int32_t height,
                                                                     std::int32_t width) {
-    auto prepared = preprocess_deformable_detr_image(pixels, height, width, config_.preprocess);
+    const auto resized = deformable_detr_resize_shape(height, width, config_.resize_shortest_edge,
+                                                      config_.resize_longest_edge);
+    auto preprocessing = config_.preprocess;
+    preprocessing.input_image_h = resized[0];
+    preprocessing.input_image_w = resized[1];
+    auto prepared = preprocess_deformable_detr_image(pixels, height, width, preprocessing);
 
     Tensor input;
     input.data = prepared.data();
-    input.shape = {1, 3, config_.preprocess.input_image_h, config_.preprocess.input_image_w};
+    input.shape = {1, 3, resized[0], resized[1]};
     input.dtype = DType::kFloat32;
     auto outputs = model_->forward({{"pixel_values", input}});
 
     const Tensor& logits = require_output(outputs, "logits");
     const Tensor& boxes = require_output(outputs, "boxes");
 
-    // Boxes come back normalised to the original image, not the square the
-    // network ran on, so the source size is what scales them.
+    // Restore coordinates in the original image after the aspect-preserving resize.
     const auto detections = decode_deformable_detr_boxes(
         static_cast<const float*>(logits.data), static_cast<const float*>(boxes.data),
         config_.num_queries, config_.num_labels, height, width, config_.score_threshold,
