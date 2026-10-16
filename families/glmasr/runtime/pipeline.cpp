@@ -110,8 +110,8 @@ GlmAsrPipeline::encode_audio_windows(const float* samples,
         if (mel.data.empty())
             throw std::runtime_error("GlmAsrPipeline: audio window produced no mel frames");
         const auto encoded = run_audio_encoder(mel.data);
-        const auto rows = static_cast<std::size_t>(
-            std::min(window.embeddings, config_.max_audio_embeddings));
+        const auto rows =
+            static_cast<std::size_t>(std::min(window.embeddings, config_.max_audio_embeddings));
         embeddings.insert(embeddings.end(), encoded.begin(),
                           encoded.begin() + static_cast<std::ptrdiff_t>(rows * hidden));
     }
@@ -242,8 +242,8 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
     // embeddings in order. Its placeholder count comes from the windows'
     // summed feature-mask frames, not from the centered STFT frame count.
     const auto windows = glmasr::plan_audio_windows(
-        sample_count, config_.mel_chunk_length, config_.mel_sampling_rate,
-        config_.mel_hop_length, config_.audio_merge_factor);
+        sample_count, config_.mel_chunk_length, config_.mel_sampling_rate, config_.mel_hop_length,
+        config_.audio_merge_factor);
     if (windows.empty())
         return TextResult{"", {}};
     const int32_t num_audio_embeddings =
@@ -269,8 +269,8 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
 
     // The prompt may only reference embeddings the encoder actually produced.
     GlmAsrConfig plan_config = config_;
-    plan_config.max_audio_embeddings =
-        static_cast<int32_t>(audio_embeds.size() / static_cast<std::size_t>(config_.audio_embedding_size));
+    plan_config.max_audio_embeddings = static_cast<int32_t>(
+        audio_embeds.size() / static_cast<std::size_t>(config_.audio_embedding_size));
     const auto plan =
         glmasr::build_prompt_plan(plan_config, tokenize_instruction(), num_audio_embeddings);
     stats_.prompt_tokens = static_cast<int32_t>(plan.input_ids.size());
@@ -291,9 +291,8 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
             "; rebuild with a larger max_sequence_length or shorten the audio");
     }
 
-    const std::vector<int32_t> generated =
-        run_decoder(plan.input_ids, audio_embeds, plan.audio_offset, plan.num_audio_embeddings,
-                    new_tokens);
+    const std::vector<int32_t> generated = run_decoder(
+        plan.input_ids, audio_embeds, plan.audio_offset, plan.num_audio_embeddings, new_tokens);
 
     // TRTMC_GLMASR_DEBUG reports how the audio mapped onto the prompt, which is
     // what to check first when a transcript comes back empty or truncated.
