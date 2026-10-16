@@ -47,6 +47,7 @@ install(TARGETS trtmc_model_lfm2
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+set(_lfm2_runtime_libraries "[]")
 if(TARGET trtmc_byok_tvm_ffi)
   add_library(trtmc_lfm2_w2_byok SHARED w2_byok.cpp)
   target_include_directories(trtmc_lfm2_w2_byok SYSTEM PRIVATE
@@ -82,6 +83,8 @@ if(TARGET trtmc_byok_tvm_ffi)
     INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../tvm_ffi/lib;${TRTMC_TVM_FFI_LIBRARY_DIR};/usr/local/cuda/lib64"
   )
   add_dependencies(trtmc_model_lfm2 trtmc_lfm2_sampler_byok trtmc_lfm2_w2_byok trtmc_byok_tvm_ffi)
+  set(_lfm2_runtime_libraries
+    "[\"$<TARGET_FILE_NAME:trtmc_lfm2_sampler_byok>\",\"$<TARGET_FILE_NAME:trtmc_lfm2_w2_byok>\",\"$<TARGET_FILE_NAME:trtmc_byok_tvm_ffi>\"]")
   # Wheels install the SDK component; native installations can select runtime.
   foreach(component IN ITEMS sdk runtime)
     install(TARGETS trtmc_lfm2_sampler_byok trtmc_lfm2_w2_byok
@@ -93,6 +96,15 @@ if(TARGET trtmc_byok_tvm_ffi)
     )
   endforeach()
 endif()
+
+set(_lfm2_runtime_manifest "${CMAKE_BINARY_DIR}/families/lfm2/runtime-libraries.json")
+file(GENERATE OUTPUT "${_lfm2_runtime_manifest}"
+  CONTENT "{\"schema_version\":1,\"libraries\":${_lfm2_runtime_libraries}}\n")
+foreach(component IN ITEMS sdk runtime)
+  install(FILES "${_lfm2_runtime_manifest}"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/families/lfm2 COMPONENT ${component}
+  )
+endforeach()
 
 if(TRTMC_BUILD_TESTS)
   if(TARGET trtmc_backend_trt)

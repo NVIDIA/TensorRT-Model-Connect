@@ -18,7 +18,7 @@ from pathlib import Path
 from tools import test_impact
 
 from .context import CiContext
-from .package import native_cli_library
+from .package import native_cli_library, native_runtime_libraries
 from .process import CiError
 
 
@@ -408,6 +408,23 @@ class E2ERunner:
                     if not (runtime_root / library).is_file():
                         raise CiError(f"TRTMC_RUNTIME_ROOT has no {library}")
                     (isolated / library).symlink_to((runtime_root / library).resolve())
+
+            # The selected DSO link identifies its compiled artifact directory.
+            # An outer runner may stage that DSO without its optional owner data.
+            native_declaration, libraries = native_runtime_libraries(
+                runtime_root / f"libtrtmc_model_{family}.so", family
+            )
+            if native_declaration is not None:
+                destination = isolated / "families" / family / "runtime-libraries.json"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.symlink_to(native_declaration)
+            for library in libraries:
+                destination = isolated / library.name
+                if destination.exists() or destination.is_symlink():
+                    if destination.resolve() != library.resolve():
+                        raise CiError(f"conflicting staged runtime library: {library.name}")
+                else:
+                    destination.symlink_to(library.resolve())
 
             # Preserve only non-family wheel dependencies expected by RUNPATH.
             site_packages = runtime_root.parent.parent

@@ -8,6 +8,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -30,6 +31,46 @@ def native_cli_library(declaration: Path) -> str | None:
     except (OSError, KeyError, TypeError, ValueError) as error:
         raise CiError(f"invalid CLI declaration {declaration}: {error}") from error
     return f"libtrtmc_cli_{declaration.parent.name}.so" if native else None
+
+
+def native_runtime_libraries(
+    family_library: Path, family: str
+) -> tuple[Path | None, tuple[Path, ...]]:
+    """Read one owner's declared library closure beside its selected artifact."""
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", family):
+        raise CiError("invalid runtime library family")
+    artifact_root = family_library.resolve(strict=True).parent
+    declaration = artifact_root / "families" / family / "runtime-libraries.json"
+    if not declaration.exists() and not declaration.is_symlink():
+        return None, ()
+    try:
+        if not declaration.is_file() or declaration.resolve().parent != declaration.parent:
+            raise ValueError("declaration must remain in its owning artifact directory")
+        data = json.loads(declaration.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or set(data) != {"schema_version", "libraries"}:
+            raise ValueError("expected schema_version and libraries")
+        if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+            raise ValueError("unsupported schema_version")
+        names = data["libraries"]
+        if not isinstance(names, list):
+            raise ValueError("libraries must be a list")
+        seen, libraries = set(), []
+        for name in names:
+            if (
+                not isinstance(name, str)
+                or not re.fullmatch(r"lib[A-Za-z0-9_+-]+\.so(?:\.[0-9]+)*", name)
+                or name.startswith(("libtrtmc_model_", "libtrtmc_cli_"))
+                or name in seen
+            ):
+                raise ValueError("invalid, duplicate, or model/CLI library entry")
+            seen.add(name)
+            library = artifact_root / name
+            if not library.is_file() or library.resolve().parent != artifact_root:
+                raise ValueError("declared library is missing or outside its artifact directory")
+            libraries.append(library)
+        return declaration, tuple(libraries)
+    except (OSError, TypeError, ValueError) as error:
+        raise CiError(f"invalid runtime library declaration {declaration}: {error}") from error
 
 
 def family_ids(repository: Path) -> tuple[str, ...]:
