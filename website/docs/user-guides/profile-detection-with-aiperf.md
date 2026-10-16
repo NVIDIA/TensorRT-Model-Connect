@@ -87,10 +87,10 @@ server uses the sole compatible detector. See the
 [model-group inventory](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#native-endpoint-group-coverage).
 
 For Deformable DETR, build the
-[Deformable DETR FP16 profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/deformable_detr/tests/benchmark/deformable-detr-r50.yaml)
+[Deformable DETR FP16 manifest](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/deformable_detr/tests/manifests/deformable-detr-r50.json)
 and use `deformable-detr-r50.bundle` with `--model-name SenseTime/deformable-detr`
 on the server and `--model SenseTime/deformable-detr` in AIPerf. Rebuild older
 Deformable DETR bundles: the family now preserves image aspect ratio using the
 checkpoint's shortest/longest-edge bounds and a dynamic TensorRT engine. The
-profile's 800x800 build settings select the 800-pixel resize target; they do
+manifest's 800x800 build settings select the 800-pixel resize target; they do
 not stretch every image to a square.
