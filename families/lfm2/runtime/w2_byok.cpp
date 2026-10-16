@@ -5,6 +5,7 @@
 
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
+#include <limits>
 #include <memory>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
@@ -69,17 +70,29 @@ void require_tensor(tvm::ffi::TensorView tensor, int device) {
             << "Expected contiguous rank2 BF16 tensors on the same CUDA device";
 }
 
-void run(tvm::ffi::TensorView x, tvm::ffi::TensorView weight, tvm::ffi::TensorView output) {
-    int device = -1;
-    if (cudaGetDevice(&device) != cudaSuccess)
-        TVM_FFI_THROW(RuntimeError) << "cudaGetDevice failed";
+int64_t validate_rows_contract(tvm::ffi::TensorView x, tvm::ffi::TensorView weight,
+                               tvm::ffi::TensorView shape_like, tvm::ffi::TensorView output,
+                               int device) {
     require_tensor(x, device);
     require_tensor(weight, device);
+    require_tensor(shape_like, device);
     require_tensor(output, device);
     const auto rows = x.size(0);
-    if (rows != 1 || x.size(1) != 10752 || weight.size(0) != 2048 || weight.size(1) != 10752 ||
-        output.size(0) != rows || output.size(1) != 2048)
-        TVM_FFI_THROW(ValueError) << "Expected LFM2 W2 shapes [1,10752], [2048,10752], [1,2048]";
+    if (rows < 1 || rows > std::numeric_limits<int>::max() || x.size(1) != 10752 ||
+        weight.size(0) != 2048 || weight.size(1) != 10752 || shape_like.size(0) != rows ||
+        shape_like.size(1) != 2048 || output.size(0) != rows || output.size(1) != 2048)
+        TVM_FFI_THROW(ValueError)
+            << "Expected LFM2 W2 shapes [R,10752], [2048,10752], [R,2048], [R,2048]";
+    // shape_like carries only the existing hidden-state shape. Its data is
+    // neither read nor copied and may alias any of the other operands.
+    if (!x.data_ptr() || !weight.data_ptr() || !output.data_ptr())
+        TVM_FFI_THROW(ValueError) << "LFM2 W2 data tensors must have non-null pointers";
+    return rows;
+}
+
+void execute(tvm::ffi::TensorView x, tvm::ffi::TensorView weight, tvm::ffi::TensorView output,
+             int device) {
+    const auto rows = x.size(0);
     auto& context = state(device);
     auto stream = reinterpret_cast<cudaStream_t>(TVMFFIEnvGetStream(kDLCUDA, context.device));
     check(cublasSetStream(context.handle, stream), "cublasSetStream");
@@ -94,6 +107,29 @@ void run(tvm::ffi::TensorView x, tvm::ffi::TensorView weight, tvm::ffi::TensorVi
           "cublasGemmEx");
 }
 
+void run(tvm::ffi::TensorView x, tvm::ffi::TensorView weight, tvm::ffi::TensorView output) {
+    int device = -1;
+    if (cudaGetDevice(&device) != cudaSuccess)
+        TVM_FFI_THROW(RuntimeError) << "cudaGetDevice failed";
+    require_tensor(x, device);
+    require_tensor(weight, device);
+    require_tensor(output, device);
+    if (x.size(0) != 1 || x.size(1) != 10752 || weight.size(0) != 2048 || weight.size(1) != 10752 ||
+        output.size(0) != 1 || output.size(1) != 2048)
+        TVM_FFI_THROW(ValueError) << "Expected LFM2 W2 shapes [1,10752], [2048,10752], [1,2048]";
+    execute(x, weight, output, device);
+}
+
+void run_rows(tvm::ffi::TensorView x, tvm::ffi::TensorView weight, tvm::ffi::TensorView shape_like,
+              tvm::ffi::TensorView output) {
+    int device = -1;
+    if (cudaGetDevice(&device) != cudaSuccess)
+        TVM_FFI_THROW(RuntimeError) << "cudaGetDevice failed";
+    validate_rows_contract(x, weight, shape_like, output, device);
+    execute(x, weight, output, device);
+}
+
 } // namespace
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(run, run);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(run_rows, run_rows);

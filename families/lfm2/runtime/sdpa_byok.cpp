@@ -103,6 +103,7 @@
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/function.h>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -140,6 +141,7 @@ void* pointer(tvm::ffi::TensorView value) {
 struct Geometry {
     int64_t length;
     int64_t capacity;
+    int64_t rows;
 };
 
 void require_device(tvm::ffi::TensorView value, int device) {
@@ -160,7 +162,7 @@ void require_bf16(tvm::ffi::TensorView value, const std::array<int64_t, 4>& shap
 
 Geometry validate_contract(tvm::ffi::TensorView query, tvm::ffi::TensorView key,
                            tvm::ffi::TensorView value, tvm::ffi::TensorView extent,
-                           tvm::ffi::TensorView output, int device) {
+                           tvm::ffi::TensorView output, int device, bool allow_rows = false) {
     require_device(extent, device);
     const auto dtype = extent.dtype();
     require(extent.ndim() == 1 && extent.IsContiguous() && dtype.code == kDLInt &&
@@ -173,16 +175,21 @@ Geometry validate_contract(tvm::ffi::TensorView query, tvm::ffi::TensorView key,
     const int64_t capacity = key.size(2);
     require(capacity > 0 && capacity <= kMaximumCapacity && length > 0 && length <= capacity,
             "LFM2 SDPA requires 1 <= active length <= capacity <= 131072");
-    require_bf16(query, {1, 32, 1, 64}, device);
+    require(query.ndim() == 4, "LFM2 SDPA query must have rank four");
+    const int64_t rows = query.size(2);
+    require(rows == 1 || (allow_rows && rows > 1 && rows == length),
+            "LFM2 SDPA requires one decode query or a complete initial prefill with R == T");
+    require_bf16(query, {1, 32, rows, 64}, device);
     require_bf16(key, {1, 8, capacity, 64}, device);
     require_bf16(value, {1, 8, capacity, 64}, device);
-    require_bf16(output, {1, 32, 1, 64}, device);
+    require_bf16(output, {1, 32, rows, 64}, device);
     const std::size_t cache_bytes = static_cast<std::size_t>(8 * capacity * 64 * 2);
+    const std::size_t query_bytes = static_cast<std::size_t>(32 * rows * 64 * 2);
     const std::array<std::pair<uintptr_t, std::size_t>, 4> ranges{{
-        {reinterpret_cast<uintptr_t>(pointer(query)), 4096},
+        {reinterpret_cast<uintptr_t>(pointer(query)), query_bytes},
         {reinterpret_cast<uintptr_t>(pointer(key)), cache_bytes},
         {reinterpret_cast<uintptr_t>(pointer(value)), cache_bytes},
-        {reinterpret_cast<uintptr_t>(pointer(output)), 4096},
+        {reinterpret_cast<uintptr_t>(pointer(output)), query_bytes},
     }};
     for (const auto& range : ranges)
         require(range.first <= std::numeric_limits<uintptr_t>::max() - range.second,
@@ -192,10 +199,19 @@ Geometry validate_contract(tvm::ffi::TensorView query, tvm::ffi::TensorView key,
             require(ranges[a].first + ranges[a].second <= ranges[b].first ||
                         ranges[b].first + ranges[b].second <= ranges[a].first,
                     "LFM2 SDPA data tensors must not overlap");
-    return {length, capacity};
+    return {length, capacity, rows};
 }
 
-std::unique_ptr<fe::graph::Graph> build_graph(cudnnHandle_t handle, int64_t length) {
+std::vector<int64_t> attention_strides(int64_t heads, int64_t rows, bool prefill) {
+    // Logical BHSD tensors use the original BSHD physical layout for prefill.
+    return prefill ? std::vector<int64_t>{heads * rows * 64, 64, heads * 64, 1}
+                   : std::vector<int64_t>{heads * rows * 64, rows * 64, 64, 1};
+}
+
+std::unique_ptr<fe::graph::Graph> build_graph(cudnnHandle_t handle, Geometry geometry) {
+    const auto length = geometry.length;
+    const auto rows = geometry.rows;
+    const bool prefill = rows > 1;
     auto graph = std::make_unique<fe::graph::Graph>();
     graph->set_io_data_type(fe::DataType_t::BFLOAT16)
         .set_intermediate_data_type(fe::DataType_t::FLOAT)
@@ -210,7 +226,7 @@ std::unique_ptr<fe::graph::Graph> build_graph(cudnnHandle_t handle, int64_t leng
     auto options = fe::graph::SDPA_attributes()
                        .set_name("CUDNN_SDPA")
                        .set_generate_stats(false)
-                       .set_causal_mask(false)
+                       .set_causal_mask(prefill)
                        .set_attn_scale(scale);
     auto query = graph->tensor(fe::graph::Tensor_attributes().set_uid(0).set_name("Q"));
     auto key = graph->tensor(fe::graph::Tensor_attributes().set_uid(1).set_name("K"));
@@ -218,10 +234,10 @@ std::unique_ptr<fe::graph::Graph> build_graph(cudnnHandle_t handle, int64_t leng
     auto [output, stats] = graph->sdpa(query, key, value, options);
     require(!stats, "LFM2 SDPA inference unexpectedly created a statistics tensor");
     output->set_uid(3).set_output(true);
-    query->set_dim({1, 32, 1, 64}).set_stride({2048, 64, 64, 1});
-    key->set_dim({1, 8, length, 64}).set_stride({8 * length * 64, length * 64, 64, 1});
-    value->set_dim({1, 8, length, 64}).set_stride({8 * length * 64, length * 64, 64, 1});
-    output->set_dim({1, 32, 1, 64}).set_stride({2048, 64, 64, 1});
+    query->set_dim({1, 32, rows, 64}).set_stride(attention_strides(32, rows, prefill));
+    key->set_dim({1, 8, length, 64}).set_stride(attention_strides(8, length, prefill));
+    value->set_dim({1, 8, length, 64}).set_stride(attention_strides(8, length, prefill));
+    output->set_dim({1, 32, rows, 64}).set_stride(attention_strides(32, rows, prefill));
     check(graph->validate(), "LFM2 SDPA validate");
     check(graph->build_operation_graph(handle), "LFM2 SDPA build operation graph");
     check(graph->create_execution_plans({fe::HeurMode_t::A}), "LFM2 SDPA create plans");
@@ -255,8 +271,10 @@ struct State {
     cudaStream_t stream = nullptr;
     bool pending = false;
     int64_t current_length = 0;
+    int64_t current_rows = 0;
     std::unique_ptr<fe::graph::Graph> graph;
     Buffer packed;
+    Buffer prefill_query_output;
     Buffer workspace;
 
     explicit State(int device_id) : device(device_id) {
@@ -283,6 +301,8 @@ struct State {
         graph.reset();
         if (packed.data)
             cudaFree(packed.data);
+        if (prefill_query_output.data)
+            cudaFree(prefill_query_output.data);
         if (workspace.data)
             cudaFree(workspace.data);
         cudnnDestroy(handle);
@@ -300,8 +320,12 @@ struct State {
 
     void prepare(Geometry geometry, cudaStream_t next_stream) {
         const auto packing_bytes = static_cast<std::size_t>(2 * 8 * geometry.capacity * 64 * 2);
+        const auto prefill_bytes = geometry.rows > 1
+                                       ? static_cast<std::size_t>(2 * 32 * geometry.rows * 64 * 2)
+                                       : std::size_t{0};
         if (stream != next_stream || current_length != geometry.length ||
-            packed.size < packing_bytes) {
+            current_rows != geometry.rows || packed.size < packing_bytes ||
+            prefill_query_output.size < prefill_bytes) {
             // The owned event remains valid even if the previous borrowed
             // stream has since been destroyed by its model owner.
             wait();
@@ -310,13 +334,15 @@ struct State {
                 stream = next_stream;
             }
         }
-        if (current_length == geometry.length) {
+        if (current_length == geometry.length && current_rows == geometry.rows) {
             packed.grow(packing_bytes);
+            prefill_query_output.grow(prefill_bytes);
             return;
         }
         graph.reset();
         current_length = 0;
-        auto next = build_graph(handle, geometry.length);
+        current_rows = 0;
+        auto next = build_graph(handle, geometry);
         int64_t bytes = 0;
         check(next->get_workspace_size(bytes), "LFM2 SDPA workspace size");
         require(bytes >= 0 && static_cast<uint64_t>(bytes) <= kWorkspaceLimit,
@@ -324,9 +350,13 @@ struct State {
         // Reserve the fixed bundle capacity once, rather than reallocating
         // for every successive token length. The graph still attends exact T.
         packed.grow(packing_bytes);
+        // One bounded high-water buffer, not a per-length allocation cache.
+        // At the declared capacity this is at most 1 GiB for Q and O together.
+        prefill_query_output.grow(prefill_bytes);
         workspace.grow(static_cast<std::size_t>(bytes));
         graph = std::move(next);
         current_length = geometry.length;
+        current_rows = geometry.rows;
     }
 
     void execute(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::TensorView value,
@@ -336,19 +366,57 @@ struct State {
             const std::size_t width = static_cast<std::size_t>(geometry.length * 64 * 2);
             const std::size_t pitch = static_cast<std::size_t>(geometry.capacity * 64 * 2);
             auto* packed_value = static_cast<unsigned char*>(packed.data) + 8 * width;
-            check(cudaMemcpy2DAsync(packed.data, width, pointer(key), pitch, width, 8,
-                                    cudaMemcpyDeviceToDevice, stream),
-                  "LFM2 SDPA pack active keys");
-            check(cudaMemcpy2DAsync(packed_value, width, pointer(value), pitch, width, 8,
-                                    cudaMemcpyDeviceToDevice, stream),
-                  "LFM2 SDPA pack active values");
+            void* graph_query = pointer(query);
+            void* graph_output = pointer(output);
+            if (geometry.rows == 1) {
+                check(cudaMemcpy2DAsync(packed.data, width, pointer(key), pitch, width, 8,
+                                        cudaMemcpyDeviceToDevice, stream),
+                      "LFM2 SDPA pack active keys");
+                check(cudaMemcpy2DAsync(packed_value, width, pointer(value), pitch, width, 8,
+                                        cudaMemcpyDeviceToDevice, stream),
+                      "LFM2 SDPA pack active values");
+            } else {
+                graph_query = prefill_query_output.data;
+                graph_output = static_cast<unsigned char*>(graph_query) + 32 * width;
+                // Each copy preserves one head's BF16 bytes while interleaving
+                // heads by sequence position, exactly matching BSHD strides.
+                for (std::size_t head = 0; head < 32; ++head)
+                    check(cudaMemcpy2DAsync(
+                              static_cast<unsigned char*>(graph_query) + head * 128, 32 * 128,
+                              static_cast<unsigned char*>(pointer(query)) + head * width, 128, 128,
+                              static_cast<std::size_t>(geometry.rows), cudaMemcpyDeviceToDevice,
+                              stream),
+                          "LFM2 SDPA pack prefill queries");
+                for (std::size_t head = 0; head < 8; ++head) {
+                    check(cudaMemcpy2DAsync(
+                              static_cast<unsigned char*>(packed.data) + head * 128, 8 * 128,
+                              static_cast<unsigned char*>(pointer(key)) + head * pitch, 128, 128,
+                              static_cast<std::size_t>(geometry.length), cudaMemcpyDeviceToDevice,
+                              stream),
+                          "LFM2 SDPA pack prefill keys");
+                    check(cudaMemcpy2DAsync(packed_value + head * 128, 8 * 128,
+                                            static_cast<unsigned char*>(pointer(value)) +
+                                                head * pitch,
+                                            128, 128, static_cast<std::size_t>(geometry.length),
+                                            cudaMemcpyDeviceToDevice, stream),
+                          "LFM2 SDPA pack prefill values");
+                }
+            }
             float scale = 0.125F;
-            std::unordered_map<int64_t, void*> pointers{{0, pointer(query)},
+            std::unordered_map<int64_t, void*> pointers{{0, graph_query},
                                                         {1, packed.data},
                                                         {2, packed_value},
-                                                        {3, pointer(output)},
+                                                        {3, graph_output},
                                                         {5, &scale}};
             check(graph->execute(handle, pointers, workspace.data), "LFM2 SDPA execute");
+            if (geometry.rows > 1)
+                for (std::size_t head = 0; head < 32; ++head)
+                    check(cudaMemcpy2DAsync(
+                              static_cast<unsigned char*>(pointer(output)) + head * width, 128,
+                              static_cast<unsigned char*>(graph_output) + head * 128, 32 * 128, 128,
+                              static_cast<std::size_t>(geometry.rows), cudaMemcpyDeviceToDevice,
+                              stream),
+                          "LFM2 SDPA unpack prefill output");
         } catch (...) {
             failure = std::current_exception();
         }
@@ -377,12 +445,13 @@ State& state(int device) {
     return *value;
 }
 
-void run(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::TensorView value,
-         tvm::ffi::TensorView active_length_extent, tvm::ffi::TensorView output) {
+void dispatch(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::TensorView value,
+              tvm::ffi::TensorView active_length_extent, tvm::ffi::TensorView output,
+              bool allow_rows) {
     int device = -1;
     check(cudaGetDevice(&device), "LFM2 SDPA current device");
     const auto geometry =
-        validate_contract(query, key, value, active_length_extent, output, device);
+        validate_contract(query, key, value, active_length_extent, output, device, allow_rows);
     auto stream = reinterpret_cast<cudaStream_t>(TVMFFIEnvGetStream(kDLCUDA, device));
     require(stream != nullptr, "LFM2 SDPA requires the inherited decoder stream");
     cudaStreamCaptureStatus capture;
@@ -394,6 +463,17 @@ void run(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::TensorV
     owner.execute(query, key, value, output, geometry);
 }
 
+void run(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::TensorView value,
+         tvm::ffi::TensorView active_length_extent, tvm::ffi::TensorView output) {
+    dispatch(query, key, value, active_length_extent, output, false);
+}
+
+void run_rows(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::TensorView value,
+              tvm::ffi::TensorView active_length_extent, tvm::ffi::TensorView output) {
+    dispatch(query, key, value, active_length_extent, output, true);
+}
+
 } // namespace
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(run, run);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(run_rows, run_rows);

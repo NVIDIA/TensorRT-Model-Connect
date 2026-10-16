@@ -25,6 +25,8 @@ constexpr const char* kSamplerMode = "philox_exponential_v1";
 constexpr const char* kW2Mode = "cublas_bf16_all_w2_v1";
 constexpr const char* kFirstTwoW2Mode = "cublas_bf16_first_two_v1";
 constexpr const char* kAttentionMode = "cudnn_bf16_dense_v1";
+constexpr const char* kBatchedW2Mode = "cublas_bf16_batched_w2_v1";
+constexpr const char* kBatchedAttentionMode = "cudnn_bf16_batched_v1";
 
 struct RuntimeConfig {
     std::int32_t hidden_size;
@@ -44,6 +46,7 @@ struct RuntimeConfig {
     std::string sampler_mode;
     std::string w2_mode;
     std::string attention_mode;
+    bool batched_prefill;
 };
 
 template <typename T>
@@ -94,11 +97,14 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         throw std::runtime_error("lfm2 runtime.json has an unsupported sampler_mode");
     const std::string w2_mode =
         has_w2 ? require_value<std::string>(json, "w2_mode") : std::string{};
-    if (has_w2 && w2_mode != kW2Mode && w2_mode != kFirstTwoW2Mode)
+    if (has_w2 && w2_mode != kW2Mode && w2_mode != kFirstTwoW2Mode && w2_mode != kBatchedW2Mode)
         throw std::runtime_error("lfm2 runtime.json has an unsupported w2_mode");
     const std::string attention_mode =
         has_attention ? require_value<std::string>(json, "attention_mode") : std::string{};
-    if (has_attention && (attention_mode != kAttentionMode || w2_mode != kW2Mode))
+    const bool batched_prefill = attention_mode == kBatchedAttentionMode;
+    if ((has_attention && !((attention_mode == kAttentionMode && w2_mode == kW2Mode) ||
+                            (batched_prefill && w2_mode == kBatchedW2Mode))) ||
+        (w2_mode == kBatchedW2Mode && !batched_prefill))
         throw std::runtime_error("lfm2 runtime.json has an unsupported attention contract");
     const auto* sampler_plan = bundle.find_section("sampler.plan");
     if (has_sampler && (sampler_plan == nullptr || sampler_plan->length == 0))
@@ -106,8 +112,9 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     if (!has_sampler && sampler_plan != nullptr)
         throw std::runtime_error("lfm2 legacy runtime contract cannot contain sampler.plan");
     if (!require_value<bool>(json, "native_kv_cache") ||
-        require_value<std::int32_t>(json, "native_kv_contract_version") !=
-            (has_attention ? 2 : 1)) {
+        require_value<std::int32_t>(json, "native_kv_contract_version") != (batched_prefill ? 3
+                                                                            : has_attention ? 2
+                                                                                            : 1)) {
         throw std::runtime_error(
             "lfm2 runtime.json has an incompatible native KV contract version");
     }
@@ -137,6 +144,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         sampler_mode,
         w2_mode,
         attention_mode,
+        batched_prefill,
     };
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 ||
@@ -147,7 +155,8 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         throw std::runtime_error("lfm2 runtime.json contains invalid geometry");
     }
     if (intermediate_size <= 0 || norm_eps <= 0.0F || rope_theta <= 0.0F ||
-        layer_types.size() != static_cast<std::size_t>(config.num_layers) || layout != "single" ||
+        layer_types.size() != static_cast<std::size_t>(config.num_layers) ||
+        layout != (batched_prefill ? "dual_profile" : "single") ||
         (config.precision != "fp16" && config.precision != "bf16")) {
         throw std::runtime_error("lfm2 runtime.json contains invalid model contract");
     }
@@ -199,8 +208,8 @@ void register_sampler() {
     (void)registered;
 }
 
-void register_w2() {
-    static void* const registered = [] {
+void register_w2(bool batched) {
+    const auto registration = [](bool rows) {
         Dl_info location{};
         if (!dladdr(reinterpret_cast<void*>(&register_w2), &location) || !location.dli_fname)
             throw std::runtime_error("lfm2 cannot locate its family runtime library");
@@ -220,18 +229,26 @@ void register_w2() {
             dlclose(library);
             throw std::runtime_error("lfm2 TVM-FFI bridge has no kernel registration entrypoint");
         }
-        if (const char* error = load(helper.c_str(), "run", "lfm2.w2.cublas_bf16_v1")) {
+        if (const char* error =
+                load(helper.c_str(), rows ? "run_rows" : "run",
+                     rows ? "lfm2.w2.cublas_bf16_rows_v1" : "lfm2.w2.cublas_bf16_v1")) {
             const std::string message(error);
             dlclose(library);
             throw std::runtime_error("lfm2 cannot register its W2 operation: " + message);
         }
         return library;
-    }();
-    (void)registered;
+    };
+    if (batched) {
+        static void* const registered = registration(true);
+        (void)registered;
+    } else {
+        static void* const registered = registration(false);
+        (void)registered;
+    }
 }
 
-void register_attention() {
-    static void* const registered = [] {
+void register_attention(bool batched) {
+    const auto registration = [](bool rows) {
         Dl_info location{};
         if (!dladdr(reinterpret_cast<void*>(&register_attention), &location) || !location.dli_fname)
             throw std::runtime_error("lfm2 cannot locate its family runtime library");
@@ -251,14 +268,22 @@ void register_attention() {
             dlclose(library);
             throw std::runtime_error("lfm2 TVM-FFI bridge has no kernel registration entrypoint");
         }
-        if (const char* error = load(helper.c_str(), "run", "lfm2.attention.cudnn_bf16_dense_v1")) {
+        if (const char* error = load(helper.c_str(), rows ? "run_rows" : "run",
+                                     rows ? "lfm2.attention.cudnn_bf16_batched_v1"
+                                          : "lfm2.attention.cudnn_bf16_dense_v1")) {
             const std::string message(error);
             dlclose(library);
             throw std::runtime_error("lfm2 cannot register its attention operation: " + message);
         }
         return library;
-    }();
-    (void)registered;
+    };
+    if (batched) {
+        static void* const registered = registration(true);
+        (void)registered;
+    } else {
+        static void* const registered = registration(false);
+        (void)registered;
+    }
 }
 
 } // namespace
@@ -272,10 +297,30 @@ ITask* create(const FamilyContext& context) {
         register_sampler();
     }
     if (!config.w2_mode.empty())
-        register_w2();
+        register_w2(config.batched_prefill);
     if (!config.attention_mode.empty())
-        register_attention();
-    auto decoder = load_module(context.backend, require_section(context.reader, "engine.plan"));
+        register_attention(config.batched_prefill);
+    std::unique_ptr<ITrtModule> decoder;
+    std::unique_ptr<ITrtModule> prefill;
+    {
+        const auto decoder_plan = require_section(context.reader, "engine.plan");
+        if (config.batched_prefill) {
+            auto modules = context.backend.create_dual_profile_modules(decoder_plan.data(),
+                                                                       decoder_plan.size(), {});
+            prefill = std::move(modules.prefill);
+            decoder = std::move(modules.decode);
+            if (!prefill || !decoder || !prefill->ok() || !decoder->ok() ||
+                prefill->stream() == nullptr || prefill->stream() != decoder->stream() ||
+                prefill->profile_idx() != 0 || decoder->profile_idx() != 1 ||
+                prefill->optimization_profile_count() != 2 ||
+                decoder->optimization_profile_count() != 2)
+                throw std::runtime_error("lfm2 requires two decoder profiles sharing one stream");
+            prefill->set_timing_label("lfm2 prefill");
+            decoder->set_timing_label("lfm2 decode");
+        } else {
+            decoder = load_module(context.backend, decoder_plan);
+        }
+    }
     const cudaStream_t stream = decoder->stream();
     std::unique_ptr<ITrtModule> sampler;
     if (!config.sampler_mode.empty()) {
@@ -294,6 +339,7 @@ ITask* create(const FamilyContext& context) {
     if (!config.attention_mode.empty()) {
         cache_names.key_value_lengths.clear();
         cache_names.active_length_extent = "active_length_extent";
+        cache_names.batched_prefill = config.batched_prefill;
     }
     auto kv = std::make_unique<Lfm2KvCache>(config.num_attention_layers, config.max_cache_length,
                                             config.num_key_value_heads, config.head_dim, stream,
@@ -314,7 +360,7 @@ ITask* create(const FamilyContext& context) {
 
     return new Lfm2TextGenerationPipeline(std::move(decoder), std::move(state),
                                           std::move(generation), stream, std::move(tokenizer),
-                                          std::string{}, std::move(sampler));
+                                          std::string{}, std::move(sampler), std::move(prefill));
 }
 
 } // namespace trtmc::lfm2

@@ -43,7 +43,14 @@ def model(monkeypatch, tmp_path):
             self.outputs = []
 
         def add_input(self, name, dtype, shape):
-            tensor = SimpleNamespace(name=name, dtype=dtype, shape=shape)
+            dimensions = {}
+            tensor = SimpleNamespace(
+                name=name,
+                dtype=dtype,
+                shape=shape,
+                dimension_names=dimensions,
+                set_dimension_name=lambda index, value: dimensions.__setitem__(index, value),
+            )
             self.inputs.append(tensor)
             return tensor
 
@@ -271,19 +278,25 @@ def test_eligible_build_registers_before_weights_and_writes_exact_sampler_contra
     sections = build(model, request(tmp_path))
     runtime = json.loads(sections["runtime.json"])
     assert len(runtime) == 26 and runtime["sampler_mode"] == "philox_exponential_v1"
-    assert runtime["w2_mode"] == "cublas_bf16_all_w2_v1"
-    assert runtime["attention_mode"] == "cudnn_bf16_dense_v1"
-    assert runtime["native_kv_contract_version"] == 2
+    assert runtime["w2_mode"] == "cublas_bf16_batched_w2_v1"
+    assert runtime["attention_mode"] == "cudnn_bf16_batched_v1"
+    assert runtime["native_kv_contract_version"] == 3
+    assert runtime["decoder_engine_layout"] == "dual_profile"
     assert sections["engine.plan"] == b"decoder plan"
     assert sections["sampler.plan"] == b"sampler plan"
     assert model.events == [
         ("register", str(pair[1]).encode(), b"sample", b"lfm2.sampler.philox_exponential_v1"),
-        ("register", str(pair[0].parent / W2_LIBRARY).encode(), b"run", b"lfm2.w2.cublas_bf16_v1"),
+        (
+            "register",
+            str(pair[0].parent / W2_LIBRARY).encode(),
+            b"run_rows",
+            b"lfm2.w2.cublas_bf16_rows_v1",
+        ),
         (
             "register",
             str(pair[0].parent / ATTENTION_LIBRARY).encode(),
-            b"run",
-            b"lfm2.attention.cudnn_bf16_dense_v1",
+            b"run_rows",
+            b"lfm2.attention.cudnn_bf16_batched_v1",
         ),
         "weights",
         "decoder",
@@ -431,7 +444,9 @@ def test_w2_registration_failure_precedes_weights(model, monkeypatch, tmp_path):
     monkeypatch.setattr(
         type(model.register),
         "__call__",
-        lambda self, library, function, kernel: b"missing W2" if function == b"run" else None,
+        lambda self, library, function, kernel: (
+            b"missing W2" if kernel == b"lfm2.w2.cublas_bf16_rows_v1" else None
+        ),
     )
     with pytest.raises(RuntimeError, match="W2 registration failed"):
         build(model, request(tmp_path))
@@ -461,7 +476,7 @@ def test_attention_registration_failure_precedes_weights(model, monkeypatch, tmp
         "__call__",
         lambda self, library, function, kernel: (
             b"vendor dependency missing"
-            if kernel == b"lfm2.attention.cudnn_bf16_dense_v1"
+            if kernel == b"lfm2.attention.cudnn_bf16_batched_v1"
             else None
         ),
     )
@@ -483,7 +498,15 @@ def test_w2_only_geometry_keeps_v1_contract_without_attention_dependency(
     path.write_text(json.dumps(raw))
     runtime = json.loads(build(model, req)["runtime.json"])
     assert len(runtime) == 25 and runtime["native_kv_contract_version"] == 1
+    assert runtime["decoder_engine_layout"] == "single"
     assert "attention_mode" not in runtime
+    assert runtime["w2_mode"] == "cublas_bf16_all_w2_v1"
+    assert model.events[1] == (
+        "register",
+        str(pair[0].parent / W2_LIBRARY).encode(),
+        b"run",
+        b"lfm2.w2.cublas_bf16_v1",
+    )
     assert model.decoder_calls[0]["attention_bridge"] is None
     assert model.decoder_calls[0]["w2_bridge"] == pair[0]
 
@@ -534,7 +557,7 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     module = model.module
     config = module._load_config(request(tmp_path).model_dir)
     cfg = module.validate_dense_lfm2_config(config)
-    updates, explicit, plugins = [], [], []
+    updates, explicit, plugins, conv_calls, last_rows = [], [], [], [], []
 
     def tensor(shape, dtype="bf16", name=""):
         return SimpleNamespace(shape=shape, dtype=dtype, name=name)
@@ -550,20 +573,44 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     monkeypatch.setattr(module, "_rms_norm", lambda network, value, *args, **kw: value)
     monkeypatch.setattr(module, "_per_head_rms_norm", lambda network, value, *args, **kw: value)
     monkeypatch.setattr(module, "_apply_rope", lambda network, value, *args, **kw: value)
-    monkeypatch.setattr(module, "_matmul", lambda *args, **kw: tensor((1, kw["rhs_width"])))
+    monkeypatch.setattr(
+        module,
+        "_matmul",
+        lambda network, value, *args, **kw: tensor((value.shape[0], kw["rhs_width"])),
+    )
     monkeypatch.setattr(module, "_add_swiglu", lambda network, value, *args, **kw: value)
     monkeypatch.setattr(
         module,
         "_add_conv_layer",
-        lambda network, value, state, *args, **kw: (value, tensor(state.shape)),
+        lambda network, value, state, *args, **kw: (
+            conv_calls.append(("legacy", value, state)) or value,
+            tensor(state.shape),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_add_batched_conv_layer",
+        lambda network, value, state, *args, **kw: (
+            conv_calls.append(("batched", value, state)) or value,
+            tensor(state.shape),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_last_row",
+        lambda network, value: last_rows.append(value) or tensor((1, value.shape[1])),
     )
     monkeypatch.setattr(
         module,
         "_reshape_rows_to_heads",
-        lambda network, value, *, num_heads, head_dim: tensor((1, num_heads, 1, head_dim)),
+        lambda network, value, *, num_heads, head_dim: tensor(
+            (1, num_heads, value.shape[0], head_dim)
+        ),
     )
     monkeypatch.setattr(
-        module, "_reshape_heads_to_rows", lambda network, value, *, width: tensor((1, width))
+        module,
+        "_reshape_heads_to_rows",
+        lambda network, value, *, width: tensor((value.shape[2], width)),
     )
     monkeypatch.setattr(module, "add_active_prefix_causal_masks", lambda *args: "legacy masks")
     monkeypatch.setattr(
@@ -582,7 +629,10 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
         raising=False,
     )
     monkeypatch.setattr(
-        model.network_class, "add_gather", lambda *args: layer(tensor((1, 2048))), raising=False
+        model.network_class,
+        "add_gather",
+        lambda self, data, indices, axis: layer(tensor((indices.shape[0], 2048))),
+        raising=False,
     )
 
     def update(self, cache, value, index, mode):
@@ -593,7 +643,7 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     monkeypatch.setattr(model.network_class, "add_kv_cache_update", update, raising=False)
 
     def plugin(network, **kwargs):
-        result = tensor((1, 32, 1, 64))
+        result = tensor(kwargs["inputs"][0].shape)
         plugins.append((kwargs, result))
         return [result]
 
@@ -610,6 +660,12 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     (network,) = model.networks
     inputs = {item.name: item for item in network.inputs}
     assert len(updates) == 16
+    assert len(conv_calls) == 22
+    assert {call[0] for call in conv_calls} == {"batched" if enabled else "legacy"}
+    assert all(call[1].shape == ((-1 if enabled else 1), 2048) for call in conv_calls)
+    assert all(call[2].shape == (2048, 3) for call in conv_calls)
+    assert [value.shape for value in last_rows] == ([(-1, 2048)] if enabled else [])
+    assert next(value for value in network.outputs if value.name == "logits").shape == (1, 128000)
     assert all(entry[0].shape == (1, 8, 131072, 64) for entry in updates)
     assert all(
         entry[2] is inputs["cache_write_indices"] and entry[3] == "linear" for entry in updates
@@ -620,20 +676,37 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
             inputs["active_length_extent"].shape == (-1,)
             and inputs["active_length_extent"].dtype == "int32"
         )
-        assert len(model.profiles) == 1
-        assert model.profiles[0].shapes == {"active_length_extent": ((1,), (131072,), (131072,))}
+        assert inputs["token_id"].shape == inputs["position_id"].shape == (-1,)
+        assert (
+            inputs["token_id"].dimension_names
+            == inputs["position_id"].dimension_names
+            == {0: "query_rows"}
+        )
+        assert len(model.profiles) == 2
+        extent = ((1,), (131072,), (131072,))
+        assert model.profiles[0].shapes == {
+            "token_id": extent,
+            "position_id": extent,
+            "active_length_extent": extent,
+        }
+        assert model.profiles[1].shapes == {
+            "token_id": ((1,), (1,), (1,)),
+            "position_id": ((1,), (1,), (1,)),
+            "active_length_extent": extent,
+        }
         assert len(plugins) == 8 and not explicit
         attention_layers = [i for i, kind in enumerate(cfg.layer_types) if kind == "full_attention"]
         for index, (entry, output) in enumerate(plugins):
             assert output.name == f"layer.{attention_layers[index]}.self_attn.context"
-            assert entry["kernel_name"] == "lfm2.attention.cudnn_bf16_dense_v1"
+            assert entry["kernel_name"] == "lfm2.attention.cudnn_bf16_batched_v1"
             assert entry["plugin_library"] == bridge and entry["workspace_bytes"] == 0
-            assert entry["output_specs"] == [{"dims": [1, 32, 1, 64], "dtype": "bfloat16"}]
-            assert entry["inputs"][0].shape == (1, 32, 1, 64)
+            assert entry["output_specs"] == [{"dims": "same_as_input_0", "dtype": "bfloat16"}]
+            assert entry["inputs"][0].shape == (1, 32, -1, 64)
             assert entry["inputs"][1] is updates[2 * index][4]
             assert entry["inputs"][2] is updates[2 * index + 1][4]
             assert entry["inputs"][3] is inputs["active_length_extent"]
     else:
+        assert inputs["token_id"].shape == inputs["position_id"].shape == (1,)
         assert "active_length_extent" not in inputs and inputs["key_value_lengths"].shape == (1,)
         assert not plugins and not model.profiles and len(explicit) == 8
         assert all(args[4] == "legacy masks" for args, _ in explicit)
@@ -659,12 +732,14 @@ def test_w2_eligibility_does_not_expand_to_other_model_geometry(model, tmp_path,
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("rows,batched", [(1, False), (1, True), (17, True), (-1, True)])
 def test_all_swiglu_outputs_use_w2_when_enabled_and_preserve_gated_input(
-    model, monkeypatch, enabled
+    model, monkeypatch, enabled, rows, batched
 ):
     config = SimpleNamespace(hidden_size=2048, intermediate_size=10752)
     matrices, plugins, constants = [], [], []
-    gated = SimpleNamespace(dtype="bf16", shape=(1, 10752))
+    normalized = SimpleNamespace(dtype="bf16", shape=(rows, 2048))
+    gated = SimpleNamespace(dtype="bf16", shape=(rows, 10752))
     transpose_output = SimpleNamespace(dtype="bf16", shape=(2048, 10752))
     shuffle = SimpleNamespace(get_output=lambda index: transpose_output)
     network = SimpleNamespace(
@@ -687,7 +762,7 @@ def test_all_swiglu_outputs_use_w2_when_enabled_and_preserve_gated_input(
 
     def plugin(network, **kwargs):
         plugins.append(kwargs)
-        return [SimpleNamespace(name="", dtype="bf16", shape=(1, 2048))]
+        return [SimpleNamespace(name="", dtype="bf16", shape=(rows, 2048))]
 
     monkeypatch.setattr(model.byok, "add_kernel", plugin)
     weights = []
@@ -697,16 +772,17 @@ def test_all_swiglu_outputs_use_w2_when_enabled_and_preserve_gated_input(
         prefix = f"layer.{index}"
         result = model.module._add_swiglu(
             network,
-            gated,
+            normalized,
             {f"{prefix}.{name}": weight for name in ("w1", "w2", "w3")},
             prefix=prefix,
             config=config,
             storage_dtype=np.dtype(np.float32),
             work_dtype="bf16",
             w2_bridge=Path("/installed/bridge.so") if enabled else None,
+            batched_prefill=batched,
         )
         if enabled:
-            assert result.shape == (1, 2048) and result.dtype == "bf16"
+            assert result.shape == (rows, 2048) and result.dtype == "bf16"
             assert result.name == f"{prefix}.feed_forward.w2"
         else:
             assert result is gated
@@ -719,10 +795,20 @@ def test_all_swiglu_outputs_use_w2_when_enabled_and_preserve_gated_input(
     if enabled:
         assert shuffle.first_transpose == (1, 0) and shuffle.reshape_dims == (2048, 10752)
     for entry in plugins:
-        assert entry["inputs"] == [gated, transpose_output]
-        assert entry["kernel_name"] == "lfm2.w2.cublas_bf16_v1"
+        assert entry["inputs"][0] is gated and entry["inputs"][1] is transpose_output
+        assert len(entry["inputs"]) == (3 if batched else 2)
+        if batched:
+            assert entry["inputs"][2] is normalized
+        assert entry["kernel_name"] == (
+            "lfm2.w2.cublas_bf16_rows_v1" if batched else "lfm2.w2.cublas_bf16_v1"
+        )
         assert entry["workspace_bytes"] == 0
-        assert entry["output_specs"] == [{"dims": [1, 2048], "dtype": "bfloat16"}]
+        assert entry["output_specs"] == [
+            {
+                "dims": "same_as_input_2" if batched else [1, 2048],
+                "dtype": "bfloat16",
+            }
+        ]
     for index, (shape, values, kwargs) in enumerate(constants):
         assert shape == (10752, 2048) and values is weights[index]
         assert kwargs == {"storage_dtype": np.dtype(np.float32), "work_dtype": "bf16"}
@@ -744,4 +830,26 @@ def test_w2_rejects_unqualified_tensor_contract(model, shape, dtype, weight_shap
             np.broadcast_to(np.float32(0), weight_shape),
             Path("/bridge.so"),
             prefix="layer.0",
+        )
+
+
+@pytest.mark.parametrize(
+    "rows,carrier_shape,carrier_dtype",
+    [
+        (17, (1, 2048), "bf16"),
+        (17, (17, 10752), "bf16"),
+        (17, (17, 2048), "fp16"),
+        (0, (0, 2048), "bf16"),
+        (-2, (-2, 2048), "bf16"),
+    ],
+)
+def test_batched_w2_rejects_invalid_output_shape_carrier(model, rows, carrier_shape, carrier_dtype):
+    with pytest.raises(ValueError, match="LFM2 W2 requires"):
+        model.module._add_w2(
+            None,
+            SimpleNamespace(shape=(rows, 10752), dtype="bf16"),
+            np.broadcast_to(np.float32(0), (10752, 2048)),
+            Path("/bridge.so"),
+            prefix="layer.0",
+            shape_like=SimpleNamespace(shape=carrier_shape, dtype=carrier_dtype),
         )

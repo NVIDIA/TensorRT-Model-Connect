@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pure TensorRT-Python fixed-step graph for dense LFM2 causal decoders."""
+"""Pure TensorRT-Python graphs for dense LFM2 causal decoders."""
 
 from __future__ import annotations
 
@@ -218,7 +218,7 @@ def _per_head_rms_norm(
     if tuple(np.asarray(gamma).shape) != (head_dim,):
         raise ValueError(f"mapped LFM2 QK norm must have shape ({head_dim},)")
     shaped = network.add_shuffle(tensor)
-    shaped.reshape_dims = (1, num_heads, head_dim)
+    shaped.reshape_dims = (-1, num_heads, head_dim)
     normalized = _rms_norm(
         network,
         shaped.get_output(0),
@@ -228,7 +228,7 @@ def _per_head_rms_norm(
         output_dtype=output_dtype,
     )
     flattened = network.add_shuffle(normalized)
-    flattened.reshape_dims = (1, num_heads * head_dim)
+    flattened.reshape_dims = (-1, num_heads * head_dim)
     return flattened.get_output(0)
 
 
@@ -261,7 +261,7 @@ def _active_rope_cache(
     )
     position = _cast(network, position_id, trt.float32)
     position_column = network.add_shuffle(position)
-    position_column.reshape_dims = (1, 1)
+    position_column.reshape_dims = (-1, 1)
     inverse = _constant(
         network,
         (1, head_dim // 2),
@@ -275,9 +275,9 @@ def _active_rope_cache(
     cos = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
     sin = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
     cos_3d = network.add_shuffle(cos)
-    cos_3d.reshape_dims = (1, 1, head_dim // 2)
+    cos_3d.reshape_dims = (1, -1, head_dim // 2)
     sin_3d = network.add_shuffle(sin)
-    sin_3d.reshape_dims = (1, 1, head_dim // 2)
+    sin_3d.reshape_dims = (1, -1, head_dim // 2)
     return (
         _cast(network, cos_3d.get_output(0), work_dtype),
         _cast(network, sin_3d.get_output(0), work_dtype),
@@ -292,7 +292,8 @@ def _reshape_rows_to_heads(
     head_dim: int,
 ) -> trt.ITensor:
     shaped = network.add_shuffle(tensor)
-    shaped.reshape_dims = (1, num_heads, 1, head_dim)
+    shaped.reshape_dims = (1, -1, num_heads, head_dim)
+    shaped.second_transpose = (0, 2, 1, 3)
     return shaped.get_output(0)
 
 
@@ -303,7 +304,8 @@ def _reshape_heads_to_rows(
     width: int,
 ) -> trt.ITensor:
     shaped = network.add_shuffle(tensor)
-    shaped.reshape_dims = (1, width)
+    shaped.first_transpose = (0, 2, 1, 3)
+    shaped.reshape_dims = (-1, width)
     return shaped.get_output(0)
 
 
@@ -325,11 +327,9 @@ def _apply_rope(
     # The reference rounds the cosine and sine products separately before
     # adding them. Keep native rotary operators, with a model-dtype boundary
     # for each component, instead of one fused multiply-add rounding.
-    zero = _cast(
-        network,
-        _constant(network, (1, 1, head_dim // 2), np.zeros((1, 1, head_dim // 2), np.float32)),
-        heads.dtype,
-    )
+    # RotaryEmbedding requires both caches to have the input sequence length;
+    # its cache inputs do not broadcast a single zero row across the prompt.
+    zero = network.add_elementwise(cos_cache, cos_cache, trt.ElementWiseOperation.SUB).get_output(0)
     cosine = network.add_rotary_embedding(heads, cos_cache, zero, False, head_dim)
     sine = network.add_rotary_embedding(heads, zero, sin_cache, False, head_dim)
     if cosine is None or sine is None:
@@ -420,7 +420,7 @@ def add_native_kv_attention(
             plugin_library=attention_bridge,
             kernel_name=_ATTENTION_KERNEL,
             inputs=[q_4d, present_k, present_v, active_length_extent],
-            output_specs=[{"dims": [1, 32, 1, 64], "dtype": "bfloat16"}],
+            output_specs=[{"dims": "same_as_input_0", "dtype": "bfloat16"}],
             workspace_bytes=0,
         )
         context_4d.name = f"{tag}.context"
@@ -449,6 +449,180 @@ def add_native_kv_attention(
         "present_k": present_k,
         "present_v": present_v,
     }
+
+
+def _row_count(network: trt.INetworkDefinition, tensor: trt.ITensor) -> trt.ITensor:
+    shape = network.add_shape(tensor).get_output(0)
+    return network.add_slice(shape, (0,), (1,), (1,)).get_output(0)
+
+
+def _last_row(network: trt.INetworkDefinition, tensor: trt.ITensor) -> trt.ITensor:
+    one = _constant(network, (1,), np.ones(1, np.int64), np_dtype=np.dtype(np.int64))
+    index = network.add_elementwise(
+        _row_count(network, tensor), one, trt.ElementWiseOperation.SUB
+    ).get_output(0)
+    return network.add_gather(tensor, index, 0).get_output(0)
+
+
+def _add_batched_conv_layer(
+    network: trt.INetworkDefinition,
+    hidden_state: trt.ITensor,
+    conv_state: trt.ITensor,
+    decode_phase: trt.ITensor,
+    weights: WeightDict,
+    *,
+    position_id: trt.ITensor,
+    prefix: str,
+    config: DenseLfm2Config,
+    storage_dtype: np.dtype,
+    work_dtype: trt.DataType,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Full causal prefill and the original cached single-row convolution."""
+    hidden, length = config.hidden_size, config.conv_l_cache
+    projected = _matmul(
+        network,
+        hidden_state,
+        weights[f"{prefix}.conv_in"],
+        lhs_width=hidden,
+        rhs_width=3 * hidden,
+        storage_dtype=storage_dtype,
+        work_dtype=work_dtype,
+        name=f"{prefix}.conv.in_proj",
+    )
+    projected = _bias(
+        network,
+        projected,
+        weights.get(f"{prefix}.conv_in_bias"),
+        width=3 * hidden,
+        storage_dtype=storage_dtype,
+        work_dtype=work_dtype,
+    )
+    parts = []
+    projected_shape = network.add_shape(projected).get_output(0)
+    rows = network.add_slice(projected_shape, (0,), (1,), (1,)).get_output(0)
+    width = _constant(network, (1,), np.array([hidden], np.int64), np_dtype=np.dtype(np.int64))
+    part_shape = network.add_concatenation([rows, width])
+    part_shape.axis = 0
+    for index in range(3):
+        part = network.add_slice(projected, (0, index * hidden), (1, hidden), (1, 1))
+        part.set_input(2, part_shape.get_output(0))
+        parts.append(part.get_output(0))
+    b_gate, c_gate, x_value = parts
+    bx = network.add_elementwise(b_gate, x_value, trt.ElementWiseOperation.PROD).get_output(0)
+    bx_columns = network.add_shuffle(bx)
+    bx_columns.first_transpose = (1, 0)
+    history = network.add_concatenation([conv_state, bx_columns.get_output(0)])
+    history.axis = 1
+
+    # Every row sees the preceding L-1 values and its own B*x. The initial
+    # zero state supplies left padding even when the whole prompt has <L rows.
+    first_position = network.add_slice(position_id, (0,), (1,), (1,)).get_output(0)
+    relative = network.add_elementwise(
+        position_id, first_position, trt.ElementWiseOperation.SUB
+    ).get_output(0)
+    relative_column = network.add_shuffle(relative)
+    relative_column.reshape_dims = (-1, 1)
+    taps = _constant(
+        network,
+        (1, length),
+        np.arange(1, length + 1, dtype=np.int32),
+        np_dtype=np.dtype(np.int32),
+    )
+    window_indices = network.add_elementwise(
+        relative_column.get_output(0), taps, trt.ElementWiseOperation.SUM
+    ).get_output(0)
+    windows = network.add_gather(history.get_output(0), window_indices, 1).get_output(0)
+    windows_rows = network.add_shuffle(windows)
+    windows_rows.first_transpose = (1, 0, 2)
+
+    # Compute a well-shaped cached branch for either profile. Only its first
+    # input row participates; the runtime permits decode exclusively at R=1.
+    first_bx = network.add_slice(bx, (0, 0), (1, hidden), (1, 1)).get_output(0)
+    first_bx_column = network.add_shuffle(first_bx)
+    first_bx_column.reshape_dims = (hidden, 1)
+    if length > 1:
+        prior = network.add_slice(conv_state, (0, 1), (hidden, length - 1), (1, 1)).get_output(0)
+        first = network.add_slice(conv_state, (0, 0), (hidden, 1), (1, 1)).get_output(0)
+        rolled = network.add_concatenation([prior, first])
+        rolled.axis = 1
+        position = network.add_shuffle(first_position)
+        position.reshape_dims = (1, 1)
+        last = _constant(
+            network, (1, 1), np.array([[length - 1]], np.int32), np_dtype=np.dtype(np.int32)
+        )
+        cached_index = network.add_elementwise(
+            position.get_output(0), last, trt.ElementWiseOperation.MIN
+        ).get_output(0)
+        columns = _constant(
+            network, (1, length), np.arange(length, dtype=np.int32), np_dtype=np.dtype(np.int32)
+        )
+        write_mask = network.add_elementwise(
+            columns, cached_index, trt.ElementWiseOperation.EQUAL
+        ).get_output(0)
+        decode_present = network.add_select(
+            write_mask, first_bx_column.get_output(0), rolled.get_output(0)
+        ).get_output(0)
+    else:
+        decode_present = first_bx_column.get_output(0)
+
+    tail_offsets = _constant(
+        network, (length,), np.arange(length, dtype=np.int64), np_dtype=np.dtype(np.int64)
+    )
+    tail_indices = network.add_elementwise(
+        rows, tail_offsets, trt.ElementWiseOperation.SUM
+    ).get_output(0)
+    prefill_present = network.add_gather(history.get_output(0), tail_indices, 1).get_output(0)
+    present = network.add_select(decode_phase, decode_present, prefill_present).get_output(0)
+    decode_window = network.add_shuffle(decode_present)
+    decode_window.reshape_dims = (1, hidden, length)
+    phase = network.add_shuffle(decode_phase)
+    phase.reshape_dims = (1, 1, 1)
+    active_windows = network.add_select(
+        phase.get_output(0), decode_window.get_output(0), windows_rows.get_output(0)
+    ).get_output(0)
+    conv_weights = _work_constant(
+        network,
+        (1, hidden, length),
+        weights[f"{prefix}.conv_weight"],
+        storage_dtype=storage_dtype,
+        work_dtype=work_dtype,
+    )
+    weighted = network.add_elementwise(
+        _cast(network, active_windows, trt.float32),
+        _cast(network, conv_weights, trt.float32),
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    rounded = _cast(network, _cast(network, weighted, work_dtype), trt.float32)
+    weighted = network.add_select(phase.get_output(0), rounded, weighted).get_output(0)
+    convolved = network.add_reduce(weighted, trt.ReduceOperation.SUM, 1 << 2, False).get_output(0)
+    convolved = _bias(
+        network,
+        _cast(network, convolved, work_dtype),
+        weights.get(f"{prefix}.conv_bias"),
+        width=hidden,
+        storage_dtype=storage_dtype,
+        work_dtype=work_dtype,
+    )
+    gated = network.add_elementwise(c_gate, convolved, trt.ElementWiseOperation.PROD).get_output(0)
+    output = _matmul(
+        network,
+        gated,
+        weights[f"{prefix}.conv_out"],
+        lhs_width=hidden,
+        rhs_width=hidden,
+        storage_dtype=storage_dtype,
+        work_dtype=work_dtype,
+        name=f"{prefix}.conv.out_proj",
+    )
+    output = _bias(
+        network,
+        output,
+        weights.get(f"{prefix}.conv_out_bias"),
+        width=hidden,
+        storage_dtype=storage_dtype,
+        work_dtype=work_dtype,
+    )
+    return output, present
 
 
 def _add_conv_layer(
@@ -609,6 +783,7 @@ def _add_swiglu(
     storage_dtype: np.dtype,
     work_dtype: trt.DataType,
     w2_bridge: Path | None = None,
+    batched_prefill: bool = False,
 ) -> trt.ITensor:
     left = _matmul(
         network,
@@ -636,7 +811,14 @@ def _add_swiglu(
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
     if w2_bridge is not None:
-        return _add_w2(network, gated, weights[f"{prefix}.w2"], w2_bridge, prefix=prefix)
+        return _add_w2(
+            network,
+            gated,
+            weights[f"{prefix}.w2"],
+            w2_bridge,
+            prefix=prefix,
+            shape_like=tensor if batched_prefill else None,
+        )
     return _matmul(
         network,
         gated,
@@ -656,11 +838,23 @@ def _add_w2(
     bridge: Path,
     *,
     prefix: str,
+    shape_like: trt.ITensor | None = None,
 ) -> trt.ITensor:
     from tensorrt_model_connect.byok import add_kernel
 
-    if tuple(tensor.shape) != (1, 10752) or tensor.dtype != trt.bfloat16:
-        raise ValueError("LFM2 W2 requires BF16 input shape [1, 10752]")
+    rows = tuple(tensor.shape)
+    if tensor.dtype != trt.bfloat16 or len(rows) != 2 or rows[1] != 10752:
+        raise ValueError("LFM2 W2 requires BF16 input shape [R, 10752]")
+    if shape_like is None:
+        if rows[0] != 1:
+            raise ValueError("LFM2 W2 requires one row without a batched shape carrier")
+    elif (
+        tuple(shape_like.shape) != (rows[0], 2048)
+        or shape_like.dtype != trt.bfloat16
+        or rows[0] == 0
+        or rows[0] < -1
+    ):
+        raise ValueError("LFM2 W2 requires a matching BF16 [R, 2048] shape carrier")
     if tuple(np.asarray(weight).shape) != (10752, 2048):
         raise ValueError("LFM2 W2 requires mapped weight shape [10752, 2048]")
     rhs = _work_constant(
@@ -677,9 +871,14 @@ def _add_w2(
     (output,) = add_kernel(
         network,
         plugin_library=bridge,
-        kernel_name=_W2_KERNEL,
-        inputs=[tensor, transpose.get_output(0)],
-        output_specs=[{"dims": [1, 2048], "dtype": "bfloat16"}],
+        kernel_name=_W2_ROWS_KERNEL if shape_like is not None else _W2_KERNEL,
+        inputs=[tensor, transpose.get_output(0)] + ([] if shape_like is None else [shape_like]),
+        output_specs=[
+            {
+                "dims": "same_as_input_2" if shape_like is not None else [1, 2048],
+                "dtype": "bfloat16",
+            }
+        ],
         workspace_bytes=0,
     )
     output.name = f"{prefix}.feed_forward.w2"
@@ -724,13 +923,15 @@ def build_lfm2_engine(
     w2_bridge: Path | None = None,
     attention_bridge: Path | None = None,
 ) -> bytes:
-    """Build a static one-token LFM2 engine with native TensorRT KV updates."""
+    """Build one native-KV engine, with batched prefill for the dense BF16 path."""
 
     cfg = validate_dense_lfm2_config(config)
     if w2_bridge is not None and not _uses_w2(cfg, precision):
         raise ValueError("LFM2 W2 requires its qualified BF16 model geometry")
     if attention_bridge is not None and not _uses_attention(cfg, precision):
         raise ValueError("LFM2 cuDNN attention requires its qualified BF16 model geometry")
+    if attention_bridge is not None and w2_bridge is None:
+        raise ValueError("LFM2 batched attention requires its batched W2 binding")
     _validate_mapped_metadata(cfg, weights)
     if max_cache_length <= 0:
         raise ValueError("max_cache_length must be positive")
@@ -758,8 +959,12 @@ def build_lfm2_engine(
     decode_phase = network.add_elementwise(
         decode_phase, zero, trt.ElementWiseOperation.GREATER
     ).get_output(0)
-    token_id = network.add_input("token_id", trt.int32, (1,))
-    position_id = network.add_input("position_id", trt.int32, (1,))
+    row_shape = (-1,) if attention_bridge is not None else (1,)
+    token_id = network.add_input("token_id", trt.int32, row_shape)
+    position_id = network.add_input("position_id", trt.int32, row_shape)
+    if attention_bridge is not None:
+        token_id.set_dimension_name(0, "query_rows")
+        position_id.set_dimension_name(0, "query_rows")
     cache_write_indices = network.add_input(
         "cache_write_indices",
         trt.int32,
@@ -771,16 +976,20 @@ def build_lfm2_engine(
         # Only the dimension carries the logical length. The native binding
         # never reads these values; K/V retain their full-capacity geometry.
         active_length_extent = network.add_input("active_length_extent", trt.int32, (-1,))
-        profile = builder.create_optimization_profile()
-        extent_shapes = ((1,), (max_cache_length,), (max_cache_length,))
-        profile.set_shape("active_length_extent", *extent_shapes)
-        if (
-            tuple(tuple(shape) for shape in profile.get_shape("active_length_extent"))
-            != extent_shapes
-        ):
-            raise RuntimeError("TensorRT rejected the LFM2 active-length profile")
-        if builder_config.add_optimization_profile(profile) < 0:
-            raise RuntimeError("TensorRT failed to add the LFM2 active-length profile")
+        for prefill in (True, False):
+            profile = builder.create_optimization_profile()
+            extent_shapes = ((1,), (max_cache_length,), (max_cache_length,))
+            row_shapes = extent_shapes if prefill else ((1,), (1,), (1,))
+            for name, shapes in (
+                ("token_id", row_shapes),
+                ("position_id", row_shapes),
+                ("active_length_extent", extent_shapes),
+            ):
+                profile.set_shape(name, *shapes)
+                if tuple(tuple(shape) for shape in profile.get_shape(name)) != shapes:
+                    raise RuntimeError(f"TensorRT rejected the LFM2 {name} profile")
+            if builder_config.add_optimization_profile(profile) < 0:
+                raise RuntimeError("TensorRT failed to add the LFM2 decoder profile")
     else:
         key_value_lengths = network.add_input("key_value_lengths", trt.int32, (1,))
         attention_masks = add_active_prefix_causal_masks(
@@ -859,7 +1068,10 @@ def build_lfm2_engine(
             output_dtype=work_dtype,
         )
         if layer_type == "conv":
-            operator_output, present_conv = _add_conv_layer(
+            conv_builder = (
+                _add_batched_conv_layer if attention_bridge is not None else _add_conv_layer
+            )
+            operator_output, present_conv = conv_builder(
                 network,
                 operator_input,
                 conv_state_inputs[conv_index],
@@ -991,6 +1203,7 @@ def build_lfm2_engine(
             storage_dtype=storage_dtype,
             work_dtype=work_dtype,
             w2_bridge=w2_bridge,
+            batched_prefill=attention_bridge is not None,
         )
         hidden_state = network.add_elementwise(
             hidden_state,
@@ -1015,6 +1228,8 @@ def build_lfm2_engine(
         epsilon=cfg.norm_eps,
         output_dtype=work_dtype,
     )
+    if attention_bridge is not None:
+        hidden_state = _last_row(network, hidden_state)
     logits = _matmul(
         network,
         hidden_state,
@@ -1117,7 +1332,9 @@ _SAMPLER_KERNEL = "lfm2.sampler." + _SAMPLER_MODE
 _SAMPLER_VOCAB_SIZE = 128000
 _W2_MODE = "cublas_bf16_all_w2_v1"
 _W2_KERNEL = "lfm2.w2.cublas_bf16_v1"
-_ATTENTION_MODE = "cudnn_bf16_dense_v1"
+_W2_ROWS_MODE = "cublas_bf16_batched_w2_v1"
+_W2_ROWS_KERNEL = "lfm2.w2.cublas_bf16_rows_v1"
+_ATTENTION_MODE = "cudnn_bf16_batched_v1"
 _ATTENTION_KERNEL = "lfm2.attention." + _ATTENTION_MODE
 
 
@@ -1158,7 +1375,7 @@ def _attention_library(bridge: Path) -> Path:
 
 def _register_attention(extension: ctypes.CDLL, library: Path) -> None:
     error = extension.trtmc_load_byok_kernel(
-        str(library).encode("utf-8"), b"run", _ATTENTION_KERNEL.encode("utf-8")
+        str(library).encode("utf-8"), b"run_rows", _ATTENTION_KERNEL.encode("utf-8")
     )
     if error is not None:
         raise RuntimeError(
@@ -1166,9 +1383,11 @@ def _register_attention(extension: ctypes.CDLL, library: Path) -> None:
         )
 
 
-def _register_w2(extension: ctypes.CDLL, library: Path) -> None:
+def _register_w2(extension: ctypes.CDLL, library: Path, *, batched_prefill: bool = False) -> None:
     error = extension.trtmc_load_byok_kernel(
-        str(library).encode("utf-8"), b"run", _W2_KERNEL.encode("utf-8")
+        str(library).encode("utf-8"),
+        b"run_rows" if batched_prefill else b"run",
+        (_W2_ROWS_KERNEL if batched_prefill else _W2_KERNEL).encode("utf-8"),
     )
     if error is not None:
         raise RuntimeError(
@@ -1317,7 +1536,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
         sampler_extension = _register_sampler(sampler_bridge, sampler_library)
         if w2_library is not None:
-            _register_w2(sampler_extension, w2_library)
+            _register_w2(
+                sampler_extension, w2_library, batched_prefill=attention_library is not None
+            )
             w2_bridge = sampler_bridge
         if attention_library is not None:
             _register_attention(sampler_extension, attention_library)
@@ -1340,17 +1561,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         resolved,
         precision=precision,
         max_cache_length=max_cache_length,
-        decoder_engine_layout="single",
+        decoder_engine_layout="dual_profile" if attention_bridge is not None else "single",
     )
     sampler_plan = None
     if sampler_bridge is not None:
         sampler_plan = build_lfm2_sampler_engine(sampler_bridge, verbose=bool(request.verbose))
         runtime_config["sampler_mode"] = _SAMPLER_MODE
     if w2_bridge is not None:
-        runtime_config["w2_mode"] = _W2_MODE
+        runtime_config["w2_mode"] = _W2_ROWS_MODE if attention_bridge is not None else _W2_MODE
     if attention_bridge is not None:
         runtime_config["attention_mode"] = _ATTENTION_MODE
-        runtime_config["native_kv_contract_version"] = 2
+        runtime_config["native_kv_contract_version"] = 3
     # Keep the registration library alive until both plans have been serialized.
     del sampler_extension
 

@@ -44,6 +44,11 @@ class Lfm2TextGenerationPipeline final : public ITextGeneration,
                                std::unique_ptr<Lfm2InferenceState> state, Lfm2TextGenConfig config,
                                cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
                                std::string model_id, std::unique_ptr<ITrtModule> sampler_module);
+    Lfm2TextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
+                               std::unique_ptr<Lfm2InferenceState> state, Lfm2TextGenConfig config,
+                               cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+                               std::string model_id, std::unique_ptr<ITrtModule> sampler_module,
+                               std::unique_ptr<ITrtModule> prefill_module);
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }
@@ -70,10 +75,14 @@ class Lfm2TextGenerationPipeline final : public ITextGeneration,
                                             int32_t max_new_tokens,
                                             const Lfm2SamplingParams& params);
     void run_step(int32_t token_id, std::vector<float>& logits, bool decode_phase = false);
+    void run_tokens(ITrtModule& module, const int32_t* token_ids, int32_t count,
+                    std::vector<float>& logits, bool decode_phase);
     std::vector<int32_t> encode_prompt(const std::string& prompt,
                                        const TextGenerationConfig& cfg) const;
 
     std::unique_ptr<ITrtModule> decoder_;
+    // Dual-profile modules share their engine and stream owner.
+    std::unique_ptr<ITrtModule> prefill_module_;
     // Destroy this borrowed-stream module before the decoder that owns the stream.
     std::unique_ptr<ITrtModule> sampler_module_;
     std::unique_ptr<Lfm2InferenceState> state_;

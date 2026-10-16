@@ -36,8 +36,9 @@ struct Inputs {
     View extent{0, {21}, {kDLInt, 32, 1}};
     View output{0x400000000ULL, {1, 32, 1, 64}, {kDLBfloat, 16, 1}};
 
-    Geometry validate() {
-        return validate_contract(q.get(), k.get(), v.get(), extent.get(), output.get(), 0);
+    Geometry validate(bool allow_rows = false) {
+        return validate_contract(q.get(), k.get(), v.get(), extent.get(), output.get(), 0,
+                                 allow_rows);
     }
 };
 
@@ -52,12 +53,12 @@ void expect(bool condition, const char* name) {
 }
 
 template <typename Mutation>
-void rejected(const char* name, Mutation mutation) {
+void rejected(const char* name, Mutation mutation, bool allow_rows = false) {
     Inputs inputs;
     mutation(inputs);
     bool caught = false;
     try {
-        (void)inputs.validate();
+        (void)inputs.validate(allow_rows);
     } catch (const std::exception&) {
         caught = true;
     }
@@ -111,6 +112,42 @@ int main() {
     int64_t extent_stride[1] = {2};
     rejected("noncontiguous extent descriptor",
              [&](Inputs& x) { x.extent.tensor.strides = extent_stride; });
+
+    Inputs batched;
+    expect(batched.validate(true).rows == 1, "rows export retains single-query decode");
+    batched.q.shape[2] = batched.output.shape[2] = batched.extent.shape[0] = 17;
+    expect(batched.validate(true).rows == 17, "full prefill row extent");
+    batched.extent.tensor.data = reinterpret_cast<void*>(uintptr_t{1});
+    expect(batched.validate(true).length == 17, "batched extent payload is never read");
+    batched.q.shape[2] = batched.output.shape[2] = batched.extent.shape[0] = kMaximumCapacity;
+    batched.k.shape[2] = batched.v.shape[2] = kMaximumCapacity;
+    expect(batched.validate(true).rows == kMaximumCapacity, "full-capacity prefill descriptor");
+    rejected("legacy export rejects batched prefill",
+             [](Inputs& x) { x.q.shape[2] = x.output.shape[2] = x.extent.shape[0] = 17; });
+    rejected(
+        "partial-prefix prefill is not supported",
+        [](Inputs& x) { x.q.shape[2] = x.output.shape[2] = 17; }, true);
+    rejected("zero query rows", [](Inputs& x) { x.q.shape[2] = 0; }, true);
+    rejected("negative query rows", [](Inputs& x) { x.q.shape[2] = -1; }, true);
+    rejected(
+        "batched output row mismatch", [](Inputs& x) { x.q.shape[2] = x.extent.shape[0] = 17; },
+        true);
+    rejected(
+        "batched query output overlap",
+        [](Inputs& x) {
+            x.q.shape[2] = x.output.shape[2] = x.extent.shape[0] = 17;
+            x.output.tensor.data =
+                reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(x.q.tensor.data) + 4096);
+        },
+        true);
+    expect(attention_strides(32, 17, true) == std::vector<int64_t>({34816, 64, 2048, 1}),
+           "original prefill query/output BSHD strides");
+    expect(attention_strides(8, 17, true) == std::vector<int64_t>({8704, 64, 512, 1}),
+           "original prefill key/value BSHD strides");
+    expect(attention_strides(32, 1, false) == std::vector<int64_t>({2048, 64, 64, 1}),
+           "unchanged single-query layout");
+    expect(attention_strides(8, 21, false) == std::vector<int64_t>({10752, 1344, 64, 1}),
+           "unchanged packed decode key/value layout");
     std::cout << checks << " CPU metadata checks; " << failures << " failures; no CUDA calls\n";
     return failures == 0 ? 0 : 1;
 }

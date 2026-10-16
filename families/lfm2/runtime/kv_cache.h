@@ -23,6 +23,7 @@ struct Lfm2KvCacheNames {
     std::string key_value_lengths{"key_value_lengths"};
     std::string active_length_extent;
     std::string position_id{"position_id"};
+    bool batched_prefill{false};
 };
 
 // Fixed-capacity cache for the attention layers in LFM2. The TensorRT

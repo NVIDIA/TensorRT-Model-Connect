@@ -75,6 +75,15 @@ Json attention_runtime_config() {
     return config;
 }
 
+Json batched_runtime_config() {
+    auto config = attention_runtime_config();
+    config["w2_mode"] = "cublas_bf16_batched_w2_v1";
+    config["attention_mode"] = "cudnn_bf16_batched_v1";
+    config["native_kv_contract_version"] = 3;
+    config["decoder_engine_layout"] = "dual_profile";
+    return config;
+}
+
 class Fixture {
   public:
     Fixture() {
@@ -161,7 +170,7 @@ void accepted_contracts(Fixture& fixture) {
     trtmc::BundleReader reader(fixture.write(legacy, -1).string());
     const auto parsed = trtmc::lfm2::parse_runtime_config(reader);
     check(parsed.sampler_mode.empty() && parsed.w2_mode.empty() && parsed.attention_mode.empty() &&
-              parsed.vocab_size == 65536,
+              !parsed.batched_prefill && parsed.vocab_size == 65536,
           "legacy 23-field bundle retains its vocabulary and sampler path");
     auto current = runtime_config();
     current["sampler_mode"] = "philox_exponential_v1";
@@ -218,7 +227,7 @@ void attention_contracts(Fixture& fixture) {
         check(parsed.attention_mode == "cudnn_bf16_dense_v1" &&
                   parsed.w2_mode == "cublas_bf16_all_w2_v1" &&
                   parsed.sampler_mode == "philox_exponential_v1" &&
-                  parsed.max_cache_length == capacity,
+                  parsed.max_cache_length == capacity && !parsed.batched_prefill,
               "26-field contract retains its declared attention mode and bounded capacity");
         FakeBackend backend("trt_rtx");
         bool rejected = false;
@@ -284,6 +293,60 @@ void attention_contracts(Fixture& fixture) {
     changed = current;
     changed["precision"] = "fp16";
     check(fixture.rejected(changed, 1), "cuDNN contract cannot silently change BF16 precision");
+}
+
+void batched_contracts(Fixture& fixture) {
+    const auto current = batched_runtime_config();
+    check(current.size() == 26, "v3 remains exactly 26 runtime fields");
+    for (int capacity : {1, 131072}) {
+        auto config = current;
+        config["max_cache_length"] = capacity;
+        trtmc::BundleReader reader(fixture.write(config, 1).string());
+        const auto parsed = trtmc::lfm2::parse_runtime_config(reader);
+        check(parsed.batched_prefill && parsed.attention_mode == "cudnn_bf16_batched_v1" &&
+                  parsed.w2_mode == "cublas_bf16_batched_w2_v1" &&
+                  parsed.max_cache_length == capacity,
+              "v3 modes select full-prompt prefill and preserve declared capacity");
+        FakeBackend backend("trt_rtx");
+        bool rejected = false;
+        try {
+            (void)trtmc::lfm2::create({reader, backend});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("TensorRT backend") != std::string::npos;
+        }
+        check(rejected && backend.calls == 0,
+              "batched mode rejects unsupported backend before loading");
+    }
+    for (const auto& change :
+         std::vector<std::pair<const char*, Json>>{{"native_kv_contract_version", 1},
+                                                   {"native_kv_contract_version", 2},
+                                                   {"decoder_engine_layout", "single"},
+                                                   {"decoder_engine_layout", "unknown"},
+                                                   {"w2_mode", "cublas_bf16_all_w2_v1"},
+                                                   {"w2_mode", "cublas_bf16_first_two_v1"},
+                                                   {"attention_mode", "cudnn_bf16_dense_v1"},
+                                                   {"attention_mode", "unknown"},
+                                                   {"precision", "fp16"},
+                                                   {"max_cache_length", 131073}}) {
+        auto changed = current;
+        changed[change.first] = change.second;
+        check(fixture.rejected(changed, 1),
+              "v3 rejects mixed layout/version/mode or unqualified geometry");
+    }
+    auto changed = current;
+    changed.erase("attention_mode");
+    changed["native_kv_contract_version"] = 1;
+    changed["decoder_engine_layout"] = "single";
+    check(fixture.rejected(changed, 1),
+          "batched W2 cannot silently appear in a legacy 25-field bundle");
+    changed = attention_runtime_config();
+    changed["decoder_engine_layout"] = "dual_profile";
+    check(fixture.rejected(changed, 1), "v2 cannot silently use dual-profile execution");
+    changed = current;
+    changed["unexpected"] = true;
+    check(fixture.rejected(changed, 1), "v3 rejects undeclared fields");
+    check(fixture.rejected(current, -1) && fixture.rejected(current, 0),
+          "v3 preserves the nonempty sampler-plan requirement");
 }
 
 void rejected_contracts(Fixture& fixture) {
@@ -369,5 +432,6 @@ int main() {
     rejected_w2_contracts(fixture, "cublas_bf16_all_w2_v1");
     rejected_w2_contracts(fixture, "cublas_bf16_first_two_v1");
     attention_contracts(fixture);
+    batched_contracts(fixture);
     return failures;
 }

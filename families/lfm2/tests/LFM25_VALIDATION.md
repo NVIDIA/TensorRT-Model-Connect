@@ -86,7 +86,8 @@ PY
 The context limit is 131,072 tokens including the prompt and reserved generated
 tokens. A shorter bundle can validate short cases, but cannot establish the
 model-card context limit. The default build capacity is 32,768 unless explicitly
-overridden. The native prefill currently advances one token at a time.
+overridden. Eligible BF16 builds use one full-prompt prefill followed by single-token
+decode. Earlier bundle contracts retain their original tokenwise prefill.
 
 New eligible bundles contain `sampler.plan` and the runtime field
 `sampler_mode: "philox_exponential_v1"`. The qualified sampler shape is batch one,
@@ -98,7 +99,7 @@ I/O in a new bundle, is rejected. Older runtimes reject the new 24-field contrac
 The sampler-enabled build requires `backend="trt"`; TensorRT-RTX is not part of
 this sampler contract.
 
-The W2 contract adds `w2_mode: "cublas_bf16_all_w2_v1"` to the sampler contract.
+The 25-field W2 contract adds `w2_mode: "cublas_bf16_all_w2_v1"` to the sampler contract.
 This mode requires batch one, vocabulary
 128,000, hidden width 2,048, intermediate width 10,752, 30 layers, and two initial
 convolutional layers. It offloads all 30 decoder layers' W2 projections through
@@ -116,32 +117,49 @@ Each W2 mode needs its own unchanged semantic matrix and full-capacity validatio
 earlier first-two results do not qualify the all-layer mode. Operator controls
 or a single completed response do not establish that validation.
 
-New eligible LFM2.5 BF16 bundles also add
-`attention_mode: "cudnn_bf16_dense_v1"`, yielding a 26-field runtime contract with
-`native_kv_contract_version: 2`. All eight attention layers use the same
+New eligible LFM2.5 BF16 bundles use `w2_mode: "cublas_bf16_batched_w2_v1"` and
+`attention_mode: "cudnn_bf16_batched_v1"`, yielding a 26-field runtime contract with
+`native_kv_contract_version: 3` and `decoder_engine_layout: "dual_profile"`. All 30 W2
+projections process the complete prompt matrix during prefill, using the same
+BF16 operands, FP32 accumulation and default cuBLAS policy as the single-row
+binding. An existing normalized hidden tensor supplies the output row shape;
+its values are not read by the W2 helper. The helper retains its earlier
+single-row export for existing plans.
+
+All eight attention layers use the same
 family-owned cuDNN TVM-FFI binding. The graph has BF16 Q/K/V and output, FP32
 intermediate and compute types, scale 0.125, grouped heads 32/8, and no dropout
-or statistics output. Each single query attends to its complete active prefix.
+or statistics output. Full-prompt prefill uses causal attention with BSHD physical
+strides; single-query decode attends to the complete active prefix. The one-token
+prompt is the single-query case. Same-stream copies preserve BF16 values when
+converting between the decoder's head-major tensors and the prefill layout.
 The binding uses the ordinary dense cuDNN graph and default heuristic-A plan
 selection, without a fixed engine identifier or autotuning search.
 
-The version-2 decoder replaces the device `key_value_lengths` scalar with
+The version-3 decoder retains the version-2
 `active_length_extent`, an INT32 dynamic input whose dimension carries the host
-cache length. The input values are neither uploaded nor read. Native KV tensors
-retain their full-capacity layout; same-stream copies pack each active K/V head
-without conversion before attention. The dimension profile spans 1 through the
-bundle capacity, with that capacity as its optimization shape. Previous
+cache length. The input values are neither uploaded nor read. One engine has
+two profiles: prefill permits 1 through the bundle capacity for both token and
+position rows, with capacity as its optimization shape; decode fixes those rows
+at one. Both profiles permit the complete active-length range. Token and position
+inputs share the `query_rows` dimension name. Native KV tensors retain their
+full-capacity layout. The convolution path builds the whole causal prompt history
+and preserves the cached single-row decode behavior; only the final prompt row
+feeds the LM head. Previous
 23/24/25-field bundles retain native KV contract version 1 and their original
-scalar binding.
+scalar binding. Existing 26-field `cudnn_bf16_dense_v1` bundles retain version 2,
+their single-profile execution, and the earlier helper export. Unknown or mixed
+W2/attention mode pairs are rejected.
 
-The attention binding retains one current-length graph and reusable buffers per
+The attention binding retains one current query/key-length graph and reusable buffers per
 host thread and CUDA device. Completion events protect resources when the graph,
 stream, or allocations change. Packed K/V storage is at most 256 MiB at 131,072
-positions; the metadata input allocation is at most 512 KiB. The selected plan's
+positions; prefill Q/output layout conversion additionally needs at most 1 GiB
+at that capacity. The metadata input allocation is at most 512 KiB. The selected plan's
 vendor workspace has an explicit 1 GiB allocation limit and fails cleanly if it
 exceeds that limit. CUDA graph capture is unsupported for this dynamic plan
 lifecycle; the family keeps its existing uncaptured execution path. Changing
-length can require a new cuDNN graph, so its cost must be measured separately.
+query or key length can require a new cuDNN graph, so its cost must be measured separately.
 
 The fixed-input operator and cache-transport controls do not qualify the new
 attention mode for model behavior. A fresh public build must pass the unchanged
