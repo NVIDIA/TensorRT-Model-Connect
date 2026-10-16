@@ -2996,9 +2996,14 @@ class Sam3VideoProcessorState {
         text_mask.data = text_input_.attention_mask.data();
         text_mask.shape = {1, static_cast<int64_t>(text_input_.attention_mask.size())};
         text_mask.dtype = DType::kInt32;
+        Tensor geometry_mask;
+        geometry_mask.data = geometry_prompt_mask_.data();
+        geometry_mask.shape = {1, 1};
+        geometry_mask.dtype = DType::kInt32;
         TensorMap core_inputs;
         core_inputs["sam3_text_features"] = text_features;
         core_inputs["sam3_text_attention_mask"] = text_mask;
+        core_inputs["sam3_geometry_prompt_mask"] = geometry_mask;
         return core_inputs;
     }
 
@@ -5196,6 +5201,8 @@ class Sam3VideoProcessorState {
     ITrtModule& hard_mask_resize_batch2_engine_;
     Sam3Config config_;
     Sam3VideoTextInput text_input_;
+    // Meta's video predictor keeps the empty-geometry CLS prompt for every detector call.
+    std::array<int32_t, 1> geometry_prompt_mask_{1};
     std::map<int32_t, TrackState> tracks_;
     std::unordered_set<int32_t> removed_object_ids_;
     std::map<std::pair<int32_t, int32_t>, std::vector<int32_t>> overlap_frames_;

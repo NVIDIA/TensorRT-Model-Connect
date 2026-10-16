@@ -605,10 +605,13 @@ class FakeSam3CoreModule final : public FakeModule {
         ++calls;
         const auto text_it = inputs.find("sam3_text_features");
         const auto mask_it = inputs.find("sam3_text_attention_mask");
-        if (text_it == inputs.end() || mask_it == inputs.end() || !text_it->second.data ||
-            !mask_it->second.data) {
+        const auto geometry_it = inputs.find("sam3_geometry_prompt_mask");
+        if (text_it == inputs.end() || mask_it == inputs.end() || geometry_it == inputs.end() ||
+            !text_it->second.data || !mask_it->second.data || !geometry_it->second.data ||
+            geometry_it->second.shape != std::vector<int64_t>({1, 1})) {
             throw std::runtime_error("missing SAM3 core text inputs");
         }
+        last_geometry_prompt_mask = *static_cast<const int32_t*>(geometry_it->second.data);
         saw_text_shape = text_it->second.shape == std::vector<int64_t>({1, 4, 1});
         const auto* mask = static_cast<const int32_t*>(mask_it->second.data);
         saw_mask = mask[0] == 1 && mask[1] == 1 && mask[2] == 0 && mask[3] == 0;
@@ -747,6 +750,7 @@ class FakeSam3CoreModule final : public FakeModule {
 
     bool saw_text_shape{false};
     bool saw_mask{false};
+    int32_t last_geometry_prompt_mask{-1};
     bool saw_vision_inputs{false};
     bool two_detections{false};
     bool three_detections{false};
@@ -1674,6 +1678,8 @@ void test_image_pcs_runs_native_preprocess_and_full_result() {
           "sam3 image PCS applies customer Meta image preprocessing");
     check(fixture.core->saw_text_shape && fixture.core->saw_mask,
           "sam3 image PCS passes the projected prompt to the core");
+    check(fixture.core->last_geometry_prompt_mask == 0,
+          "sam3 image PCS masks the empty-geometry prompt like Transformers' Sam3Model");
     check(fixture.core->saw_vision_inputs, "sam3 image PCS passes all FPN features to the core");
     check(result.num_masks == 1 && result.height == 2 && result.width == 4 &&
               result.masks == std::vector<float>({0.0F, 0.0F, 1.0F, 1.0F, 1.0F, 1.0F, 0.0F, 0.0F}),
@@ -1744,6 +1750,8 @@ void test_recurrent_tracker_bfloat16_state() {
               fixture.step->calls == 2 && fixture.hard_memory->calls == 1 &&
               fixture.memory->calls == 3,
           "sam3 recurrent B1 path initializes once and advances in temporal order");
+    check(fixture.core->last_geometry_prompt_mask == 1,
+          "sam3 video detector keeps Meta's empty-geometry prompt");
     check(
         fixture.step->last_memory_frame_values ==
                 std::vector<float>({rounded_first_feature, rounded_second_feature}) &&

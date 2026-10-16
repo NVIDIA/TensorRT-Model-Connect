@@ -396,9 +396,18 @@ PromptedSegmentationResult Sam3Pipeline::segment_prompted_text(const float* imag
     text_mask_tensor.shape = {1, config_.text_max_position_embeddings};
     text_mask_tensor.dtype = DType::kInt32;
 
+    // Transformers' Sam3Model runs a text-only image prompt without the geometry encoder, so the
+    // core engine's empty-geometry CLS prompt is masked out here.
+    std::array<int32_t, 1> geometry_prompt_mask{0};
+    Tensor geometry_mask_tensor;
+    geometry_mask_tensor.data = geometry_prompt_mask.data();
+    geometry_mask_tensor.shape = {1, 1};
+    geometry_mask_tensor.dtype = DType::kInt32;
+
     TensorMap core_inputs;
     core_inputs["sam3_text_features"] = text_features_tensor;
     core_inputs["sam3_text_attention_mask"] = text_mask_tensor;
+    core_inputs["sam3_geometry_prompt_mask"] = geometry_mask_tensor;
     add_required_vision_inputs(core_inputs, vision_outputs);
 
     return postprocess_sam3_raw_outputs(parse_sam3_raw_outputs(core_engine_->forward(core_inputs)),
