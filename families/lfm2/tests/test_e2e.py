@@ -294,6 +294,7 @@ def _hf_reference(
     torch,
 ) -> tuple:
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from families.lfm2.tests.lfm25_contract_validation import capture_reference_execution_identity
 
     trust_remote_code = bool(manifest.get("trust_remote_code", False))
     tokenizer = AutoTokenizer.from_pretrained(
@@ -321,6 +322,7 @@ def _hf_reference(
         .eval()
         .to("cuda")
     )
+    record_evidence("reference_execution", capture_reference_execution_identity(model, torch))
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:

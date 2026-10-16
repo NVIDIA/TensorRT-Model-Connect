@@ -222,7 +222,7 @@ and tool behavior carry the case-specific acceptance checks.
 
 Quickstart uses the card's 512-token cap. It requires identification as
 *Caenorhabditis elegans*, roundworm/nematode classification, and use as a biological
-research model; optional details and wording may vary. For deterministic cases, stop behavior must match
+research model; wording and the choice of optional details may vary. For deterministic cases, stop behavior must match
 the reference: EOS when the reference reaches EOS, or the full configured budget
 when it stops at that budget. Dense card generation is therefore allowed to
 reach its 512-token limit without EOS. Language cases require the correct Paris
@@ -230,6 +230,12 @@ answer and language-specific France/capital anchors. Tool-result replies must
 retain the returned temperature or candidate status, identity, position, and date
 without conflicting calls or values. Nonempty text alone is never an answer gate.
 Tokenizer-only language fixtures do not prove model-level multilingual generation.
+
+The `model-card-semantic-v2` policy also rejects conflicting shared sequencing
+years, gene counts, development durations, and reproduction modes. Its bounded
+extractors normalize numeric formats and units and compare explicit ranges.
+Unpaired claims and unrecognized wording still need review of the final answers;
+passing the automated checks does not establish complete factual agreement.
 
 The checks reject direct denials of required capital/organism facts, contradictory
 signed temperatures or units, and any tokens following the first EOS. The legacy
@@ -285,10 +291,13 @@ content identity. The CPU inspection still requires native/reference precision
 to agree. Add `--metadata-only` for inspection without inference; `--inspector`
 can select a newer inspection client while `--client` names the execution client.
 
-`reference-execution.json` records the loaded attention/expert implementation,
+`reference-execution.json` records the configured attention implementation,
 dtype, model-module filename/size, optional causal-convolution availability, and
-available Torch matmul/SDPA enable flags. These are configured choices, not proof
-of a selected kernel. Optional packages can change the reference path despite
+available Torch matmul/SDPA enable flags. E2E reports record the same information
+as `reference_execution` before generation, including already-loaded callable
+identities. Normal test failure finalization preserves this observation if
+generation raises; abrupt process termination is not covered. The observation
+explicitly sets `invocation_observed` to false. Optional packages can change the reference path despite
 identical package versions; a changed path needs fresh paired behavior validation.
 Exact pinned template content is checked directly against the family fixture.
 

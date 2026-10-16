@@ -245,6 +245,28 @@ def capture_reference_execution_identity(model, torch):
     source = getattr(module, "__file__", None)
     config = getattr(model, "config", None)
 
+    def loaded_member(owner, name):
+        # Reading an existing namespace must not invoke a lazy module loader.
+        try:
+            return vars(owner).get(name)
+        except TypeError:
+            return None
+
+    def callable_identity(value):
+        if not callable(value):
+            return None
+        return {"module": getattr(value, "__module__", None),
+                "qualname": getattr(value, "__qualname__", None)}
+
+    available_callables = {
+        "model_forward": getattr(type(model), "forward", None),
+        "eager_attention_forward": loaded_member(module, "eager_attention_forward"),
+        "sdpa_attention_forward": loaded_member(
+            sys.modules.get("transformers.integrations.sdpa_attention"), "sdpa_attention_forward"),
+        "causal_conv1d_fn": loaded_member(module, "causal_conv1d_fn"),
+        "causal_conv1d_update": loaded_member(module, "causal_conv1d_update"),
+    }
+
     def setting(path):
         value = torch
         for component in path.split("."):
@@ -268,6 +290,10 @@ def capture_reference_execution_identity(model, torch):
     )
     identity = {
         "model_class": module_name + "." + type(model).__qualname__,
+        "invocation_observed": False,
+        "selection_scope": "Configured names and already-loaded callable/API availability only; no dispatch resolution or invocation observation.",
+        "available_callables": {name: callable_identity(value)
+                                for name, value in available_callables.items()},
         "attention_implementation": getattr(config, "_attn_implementation", None),
         "experts_implementation": getattr(config, "_experts_implementation", None),
         "model_dtype": str(model.dtype) if hasattr(model, "dtype") else None,
@@ -282,7 +308,7 @@ def capture_reference_execution_identity(model, torch):
         },
         "torch_backend_flags": {name: setting(name) for name in flags},
         "backend_flag_scope": "Enabled settings and optional fast-path availability; these do not prove which kernel executed. Unavailable settings are null.",
-        "source_scope": "Model-module filename and size only; source content identity is collected externally.",
+        "source_scope": "Model-module filename and size only; this observation does not verify source content or loaded bytecode.",
     }
     return identity
 
