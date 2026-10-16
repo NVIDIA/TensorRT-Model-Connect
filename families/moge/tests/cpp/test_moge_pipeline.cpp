@@ -164,6 +164,13 @@ class FakeMogeModule final : public trtmc::ITrtModule {
         depth_ = affine_depth(points_);
         samples_ = focal_samples(points_, height_, width_);
     }
+    // A fronto-parallel plane: depth is constant, so shift and focal are
+    // exactly interchangeable and the shift solve has no curvature at all.
+    void use_constant_depth_scene() {
+        points_ = affine_points(height_, width_, 0.8F, 1.25F, 0.0F, 0.0F, 1.0F);
+        depth_ = affine_depth(points_);
+        samples_ = focal_samples(points_, height_, width_);
+    }
     void set_valid(int32_t y, int32_t x, bool value) {
         valid_.at(static_cast<std::size_t>(y) * width_ + x) = value ? uint16_t{0x3C00} : 0;
     }
@@ -272,6 +279,28 @@ void test_narrow_depth_scene_recovers_the_optimal_shift() {
     const float expected_depth = (1.0F + 0.002F * 11 + 0.001F * 7 + 1.25F) * 2.0F;
     check(close(result.depth[pixel], expected_depth),
           "MoGe recovers the optimal shift when depth barely varies");
+}
+
+void test_constant_depth_scene_still_recovers_geometry() {
+    constexpr int32_t height = 64;
+    constexpr int32_t width = 80;
+    auto module = std::make_unique<FakeMogeModule>(height, width);
+    module->use_constant_depth_scene();
+    trtmc::MogePipeline pipeline(std::move(module));
+    auto image = rgb_image(height, width);
+
+    bool recovered = true;
+    trtmc::GeometryResult result;
+    try {
+        result = pipeline.estimate_geometry(image.data(), height, width);
+    } catch (const std::exception&) {
+        recovered = false;
+    }
+
+    check(recovered, "MoGe recovers geometry for a constant-depth scene");
+    check(recovered && std::isfinite(result.intrinsics[0]) && result.intrinsics[0] > 0.0F &&
+              std::isfinite(result.depth[0]) && result.depth[0] > 0.0F,
+          "MoGe constant-depth geometry is finite and positive");
 }
 
 void test_invalid_mask_materializes_infinity() {
@@ -448,6 +477,7 @@ void test_focal_sampling_retains_complete_interior_neighborhoods() {
 int main() {
     test_pipeline_recovers_metric_geometry_from_hwc_input();
     test_narrow_depth_scene_recovers_the_optimal_shift();
+    test_constant_depth_scene_still_recovers_geometry();
     test_invalid_mask_materializes_infinity();
     test_legacy_int8_valid_contract_is_rejected();
     test_focal_recovery_failure_is_reported();

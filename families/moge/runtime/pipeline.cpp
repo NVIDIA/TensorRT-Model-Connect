@@ -124,6 +124,7 @@ struct FocalObjective {
     double cost{std::numeric_limits<double>::infinity()};
     double gradient{0.0};
     double curvature{0.0};
+    double shift_curvature{0.0};
     bool ok{false};
 };
 
@@ -154,7 +155,8 @@ bool estimate_focal(const std::vector<FocalSample>& samples, double shift, doubl
 
 bool valid_focal_objective(const FocalObjective& objective) {
     return std::isfinite(objective.cost) && std::isfinite(objective.gradient) &&
-           std::isfinite(objective.curvature) && objective.curvature > kDenominatorEpsilon;
+           std::isfinite(objective.curvature) && std::isfinite(objective.shift_curvature) &&
+           objective.shift_curvature > kDenominatorEpsilon;
 }
 
 FocalObjective accumulate_focal_objective(const std::vector<FocalSample>& samples, double shift,
@@ -188,8 +190,11 @@ FocalObjective accumulate_focal_objective(const std::vector<FocalSample>& sample
     // focal Jacobian (projected XY). When depth barely varies the two are
     // nearly parallel; the full shift curvature then overstates the reduced
     // one by orders of magnitude and the damped steps stall far from the
-    // optimum the official least-squares solve reaches.
-    result.curvature = shift_shift - shift_focal * shift_focal / focal_focal;
+    // optimum the official least-squares solve reaches. A constant-depth scene
+    // makes them exactly parallel; the reduced curvature is then zero up to
+    // rounding and the damping alone sizes the step.
+    result.shift_curvature = shift_shift;
+    result.curvature = std::max(0.0, shift_shift - shift_focal * shift_focal / focal_focal);
     result.ok = valid_focal_objective(result);
     return result;
 }
