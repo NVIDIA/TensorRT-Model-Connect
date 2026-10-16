@@ -899,3 +899,130 @@ def test_generation_turnover_extra_claim_remains_separate_from_shared_developmen
     assert result["reference_claims"]["egg_to_adult_days"] == [["3", "3", False]]
     assert result["native_claims"]["egg_to_adult_days"] == [["3", "3", False]]
     assert not semantic.compare_organism_reproduction_claims(reference, native)["shared_property"]
+
+
+@pytest.mark.parametrize(
+    "case", ("model-card-quickstart", "model-card-sampling", "sampled-answer-completion")
+)
+@pytest.mark.parametrize(
+    "reference,native",
+    [
+        (
+            "It has four larval stages (L1, L2, L3, L4) before reaching adulthood.",
+            "The worm goes through three distinct larval stages (L1, L2, L3) before becoming an adult.",
+        ),
+        ("4 larval stages.", "3 larval stages."),
+        ("Four larval stages.", "Not four larval stages."),
+        ("Four larval stages.", "It does not undergo four larval stages."),
+        ("Four larval stages.", "It does not have exactly four larval stages."),
+        ("Four larval stages.", "It doesn't go through four distinct larval stages."),
+        ("Four larval stages.", "It doesn’t have four larval stages."),
+    ],
+)
+def test_model_card_rejects_shared_larval_stage_conflicts(case, reference, native):
+    for left, right in ((reference, native), (native, reference)):
+        with pytest.raises(AssertionError, match="larval_stage_count claims conflict"):
+            check(case, [text(ORGANISM_CORE + " " + left)], [text(ORGANISM_CORE + " " + right)])
+
+
+@pytest.mark.parametrize(
+    "left,right,count",
+    [
+        ("Four larval stages.", "4 distinct larval stages (L1 through L4).", 4),
+        ("Four larval stages (L1–L4).", "4 larval stages (L1, L2, L3, L4).", 4),
+        ("Three larval stages.", "3 distinct larval stages.", 3),
+        ("One larval stage.", "1 larval stage.", 1),
+    ],
+)
+def test_larval_stage_count_spelling_and_labels(left, right, count):
+    for value in (left, right):
+        assert semantic.organism_numeric_claims(value)["larval_stage_count"] == {
+            (count, count, False)
+        }
+    for reference, native in ((left, right), (right, left)):
+        assert semantic.compare_organism_numeric_claims(reference, native)["shared_properties"] == [
+            "larval_stage_count"
+        ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Not three larval stages but four larval stages.",
+        "Not three but four larval stages.",
+        "It does not undergo three larval stages.",
+        "Not only four larval stages but also adulthood.",
+        "Adult lifespan is not three weeks. It has four larval stages.",
+    ],
+)
+def test_larval_stage_count_compatible_negation(value):
+    for reference, native in (("Four larval stages.", value), (value, "Four larval stages.")):
+        semantic.compare_organism_numeric_claims(reference, native)
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "Adult lifespan is two to three weeks.",
+        "From egg to adult in 3 days.",
+        "It has 302 neurons and 1000 cells.",
+        "The L4 larval stage lasts 3 days.",
+        "A four-day larval stage.",
+        "Humans have three larval stages.",
+        "Drosophila has three distinct larval stages.",
+    ],
+)
+def test_larval_stage_count_ignores_other_quantities_and_supported_subjects(other):
+    assert semantic.organism_numeric_claims(other)["larval_stage_count"] == set()
+    for value in ("Four larval stages. " + other, other + " Four larval stages."):
+        assert semantic.organism_numeric_claims(value)["larval_stage_count"] == {(4, 4, False)}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "It has larval stages, including L1 and L2.",
+        "The larval stages are L1, L2, L3, L4.",
+        "The larval stages run from L1 through L4.",
+    ],
+)
+def test_enumerated_only_larval_stages_do_not_infer_a_cardinal(value):
+    assert semantic.organism_numeric_claims(value)["larval_stage_count"] == set()
+    result = semantic.compare_organism_numeric_claims("Four larval stages.", value)
+    assert result["shared_properties"] == []
+
+
+def test_matching_larval_count_cannot_hide_an_extra_conflicting_count():
+    with pytest.raises(AssertionError, match="larval_stage_count claims conflict"):
+        semantic.compare_organism_numeric_claims(
+            "Four larval stages.", "Four larval stages. Three larval stages."
+        )
+
+
+@pytest.mark.parametrize(
+    "spelling,count", [("1,004", 1004), ("4,000", 4000), ("-1,004", -1004), ("+4.0", 4)]
+)
+def test_larval_stage_count_reads_complete_numeric_spelling(spelling, count):
+    value = f"It has {spelling} larval stages."
+    assert semantic.organism_numeric_claims(value)["larval_stage_count"] == {(count, count, False)}
+    if count != 4:
+        for reference, native in (("Four larval stages.", value), (value, "Four larval stages.")):
+            with pytest.raises(AssertionError, match="larval_stage_count claims conflict"):
+                semantic.compare_organism_numeric_claims(reference, native)
+
+
+@pytest.mark.parametrize("spelling", ["twenty-four", "twenty‑four"])
+def test_unsupported_compound_larval_count_does_not_become_its_suffix(spelling):
+    value = f"It has {spelling} larval stages."
+    for reference, native in (("Four larval stages.", value), (value, "Four larval stages.")):
+        with pytest.raises(AssertionError, match="unsupported compound larval-stage count"):
+            semantic.compare_organism_numeric_claims(reference, native)
+
+
+def test_larval_stage_exactly_modifier_preserves_scoped_denial():
+    assert semantic.organism_numeric_claims("It does not have exactly four larval stages.")[
+        "larval_stage_count"
+    ] == {(4, 4, True)}
+    assert semantic.organism_numeric_claims("It has exactly four larval stages.")[
+        "larval_stage_count"
+    ] == {(4, 4, False)}

@@ -232,8 +232,10 @@ without conflicting calls or values. Nonempty text alone is never an answer gate
 Tokenizer-only language fixtures do not prove model-level multilingual generation.
 
 The `model-card-semantic-v2` policy also rejects conflicting shared sequencing
-years, gene counts, development durations, and reproduction modes. Its bounded
-extractors normalize numeric formats and units and compare explicit ranges.
+years, gene counts, development durations, larval-stage counts, and reproduction
+modes. Its bounded extractors normalize numeric formats and units and compare
+explicit ranges. Larval-stage counts require an explicit number; stage labels
+alone do not imply a count.
 Unpaired claims and unrecognized wording still need review of the final answers;
 passing the automated checks does not establish complete factual agreement.
 

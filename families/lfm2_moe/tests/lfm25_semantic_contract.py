@@ -328,7 +328,7 @@ def literal_function_intents(text):
     return intents
 
 
-# These three English claims are scoped to the model-card organism answer.
+# These four English claims are scoped to the model-card organism answer.
 # Gene counts exclude cells/base pairs; development excludes lifespan and
 # generation turnover. Missing additional facts are not contradictions.
 _CLAIM_NUMBER = r"\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:thousand|million|k))?"
@@ -446,7 +446,12 @@ def organism_numeric_claims(text):
         .replace("*", "")
         .translate(str.maketrans({dash: "-" for dash in "‐‑‒–—﹣－"}))
     )
-    facts = {"sequencing_year": set(), "gene_count": set(), "egg_to_adult_days": set()}
+    facts = {
+        "sequencing_year": set(),
+        "gene_count": set(),
+        "egg_to_adult_days": set(),
+        "larval_stage_count": set(),
+    }
     year_patterns = (
         r"\bgenomes?\b[^.!?]{0,100}?\bsequenced\s*(?:(?:in|not)\s*){0,2}\(?\s*((?:19|20)\d{2})\b",
         r"\bgenome\s+sequenc(?:e|ing)\b[^.!?]{0,60}?\b(?:published|completed|released)"
@@ -481,6 +486,33 @@ def organism_numeric_claims(text):
             high = _claim_number(match["high"] or match["low"]) * scale
             assert low <= high, "organism duration has a reversed range"
             facts["egg_to_adult_days"].add((low, high, _claim_negated(match)))
+    count_words = {
+        word: Fraction(number)
+        for number, word in enumerate(
+            ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+        )
+    }
+    words = "|".join(count_words)
+    numeric_count = rf"[+-]?{_CLAIM_NUMBER}"
+    count = rf"{numeric_count}|(?:[a-z]+-)+(?:{words})|{words}"
+    for match in re.finditer(
+        rf"(?<![\w.,+-])(?P<count>{count})\s+(?:distinct\s+)?larval\s+stages?\b", value
+    ):
+        if _other_organism_claim(match):
+            continue
+        token = match["count"]
+        if token in count_words:
+            number = count_words[token]
+        else:
+            assert re.fullmatch(numeric_count, token), "unsupported compound larval-stage count"
+            number = _claim_number(token.lstrip("+-")) * (-1 if token.startswith("-") else 1)
+        denied = bool(
+            re.search(
+                r"(?:\bnot|\bnever|n['’]t)\s+(?:(?:have|contain|undergo|go(?:es)?\s+through)\s+)?(?:exactly\s+)?$",
+                value[: match.start()],
+            )
+        )
+        facts["larval_stage_count"].add((number, number, denied))
     return facts
 
 
