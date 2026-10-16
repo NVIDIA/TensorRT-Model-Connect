@@ -423,27 +423,36 @@ def test_preserved_reasoning_follows_reviewed_original_final_behavior():
             )
 
 
-def test_sampling_checks_each_stop_independently_and_requires_final_answer():
+@pytest.mark.parametrize("name", ["model-card-sampling", "sampled-answer-completion"])
+def test_sampling_matches_reference_stop_and_requires_final_answer(name):
     answer = text(
         "Caenorhabditis elegans is a roundworm and model organism for biological research."
     )
-    # Independent RNGs may give the reference a budget stop and native an EOS,
-    # or the reverse. Both stop reports and both final answers must be valid.
-    for reference_ids, native_ids in (([1] * 8, [2, 9]), ([1, 9], [2] * 8)):
+    # Different token IDs and EOS lengths are allowed; the stop reason must match.
+    for reference_ids, native_ids in (([1, 9], [2, 3, 9]), ([1] * 8, [2] * 8)):
         result = check(
-            "model-card-sampling",
+            name,
             [answer],
             [answer],
             reference_ids=reference_ids,
             native_ids=native_ids,
         )
-        assert result["reference_stop"] != result["native_stop"]
+        assert result["reference_stop"] == result["native_stop"]
         assert "probability distributions" in result["rng_scope"]
+    for reference_ids, native_ids in (([1] * 8, [2, 9]), ([1, 9], [2] * 8)):
+        with pytest.raises(AssertionError, match="EOS stop behavior differs"):
+            check(
+                name,
+                [answer],
+                [answer],
+                reference_ids=reference_ids,
+                native_ids=native_ids,
+            )
     with pytest.raises(AssertionError, match="before EOS or budget"):
-        check("model-card-sampling", [answer], [answer], reference_ids=[1] * 8, native_ids=[2] * 7)
+        check(name, [answer], [answer], reference_ids=[1] * 8, native_ids=[2] * 7)
     with pytest.raises(AssertionError, match="identification"):
         check(
-            "model-card-sampling",
+            name,
             [answer],
             [{"type": "reasoning", "text": answer["text"]}],
             reference_ids=[1] * 8,

@@ -136,9 +136,10 @@ python families/lfm2/tests/lfm25_contract_validation.py \
   --output validation/lfm2-sampled-completion --case sampled-answer-completion
 ```
 
-Each sampled completion must stop at EOS or its full budget, and the native typed
-finish reason must agree with its own output. Differences in model probabilities
-may produce different tokens, lengths, or EOS/budget outcomes despite equal seeds.
+Both sampled cases must match the reference stop reason: EOS when the reference
+reaches EOS, or the full configured budget when it stops at that budget. Token IDs
+and lengths may differ when both reach EOS. Each side must stop at EOS or its full
+budget, and the native typed finish reason must agree with its own output.
 The extra 2,048-token case does not replace or relabel the original card budget.
 Parameter/seed receipts and raw outputs remain available; coupled-uniform and
 probability-vector comparisons remain separate numerical diagnostics.
@@ -260,8 +261,8 @@ and tool behavior carry the case-specific acceptance checks.
 
 Quickstart uses the card's 512-token cap. It requires identification as
 *Caenorhabditis elegans*, roundworm/nematode classification, and use as a biological
-research model; wording and the choice of optional details may vary. For deterministic cases, stop behavior must match
-the reference: EOS when the reference reaches EOS, or the full configured budget
+research model; wording and the choice of optional details may vary. Stop behavior
+must match the reference: EOS when the reference reaches EOS, or the full configured budget
 when it stops at that budget. Dense card generation is therefore allowed to
 reach its 512-token limit without EOS. Language cases require the correct Paris
 answer and language-specific France/capital anchors. Tool-result replies must

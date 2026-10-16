@@ -599,6 +599,7 @@ def evaluate(name, native, expected_parts, reference_ids, eos, request, input_co
             assert ended or len(ids) == limit, (
                 label + " sampled generation stopped before EOS or budget"
             )
+        assert actual_eos == reference_eos, "native/reference EOS stop behavior differs"
     else:
         assert actual_eos == reference_eos, "native/reference EOS stop behavior differs"
         if not reference_eos:
