@@ -161,6 +161,12 @@ exceeds that limit. CUDA graph capture is unsupported for this dynamic plan
 lifecycle; the family keeps its existing uncaptured execution path. Changing
 query or key length can require a new cuDNN graph, so its cost must be measured separately.
 
+Dense-layer residual additions preserve each branch's model-dtype output before
+adding the branches in FP32 and casting back. The original reference rounds the
+projection and residual sum separately. The owning rounding tests cover BF16 and
+FP16 with inputs that distinguish this behavior from a single fused rounding,
+in both prefill and decode profiles.
+
 The fixed-input operator and cache-transport controls do not qualify the new
 attention mode for model behavior. A fresh public build must pass the unchanged
 semantic cases, repeated requests, legacy-bundle regression, and full-capacity

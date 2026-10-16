@@ -333,3 +333,110 @@ def test_short_prefix_cache_updates_match_original_four_decode_steps(gpu, cache_
             torch.testing.assert_close(result["actual"], expected[:, 0], rtol=0, atol=0)
             torch.testing.assert_close(result["present"], cache.conv_cache[0][0], rtol=0, atol=0)
             state = result["present"]
+
+
+def _projection_residual_fixture(precision, rows):
+    # Two nonzero products, both exactly representable. delta is half an ULP at 1.
+    delta = 2.0 ** (-8 if precision == "bf16" else -11)
+    sign = np.where(np.arange(rows) % 2, -1.0, 1.0).astype(np.float32)[:, None]
+    x = np.zeros((rows, 2048), np.float32)
+    x[:, :2] = sign * np.array([1, delta], np.float32)
+    w = np.zeros((2048, 2048), np.float32)  # owning matmul layout[in,out]
+    w[0] = np.tile([1, -1, 1, -1, 2, -2, 0, 1], 256)
+    w[1] = np.tile([1, -1, 1, -1, 2, -2, 1, 0], 256)
+    h = sign * np.tile(np.array([1, -1, -1, 1, 2, -2, 1, 1], np.float32) * delta, (rows, 256))
+    projection = sign * np.tile(np.array([1, -1, 1, -1, 2, -2, delta, 1], np.float32), (rows, 256))
+    # Literal dyadic oracles, independent of any graph or floating-point reducer.
+    # Channels 0/1/4/5 tie at an even lower significand after each separate rounding.
+    separate = sign * np.tile(
+        np.array([1, -1, 1 - delta, -1 + delta, 2, -2, 2 * delta, 1], np.float32), (rows, 256)
+    )
+    fused = sign * np.tile(
+        np.array(
+            [1 + 2 * delta, -1 - 2 * delta, 1, -1, 2 + 4 * delta, -2 - 4 * delta, 2 * delta, 1],
+            np.float32,
+        ),
+        (rows, 256),
+    )
+    assert np.count_nonzero(separate != fused) == rows * 1536
+    # Channel 6 agrees and is nonzero while channel 0 differs: not uniform scaling.
+    assert np.all(separate[:, 6] == fused[:, 6]) and np.all(separate[:, 6] != 0)
+    assert np.all(separate[:, 0] != fused[:, 0])
+    return x, w, h, projection, separate, fused
+
+
+def _projection_residual_torch_oracle(torch, precision, rows, device):
+    dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+    x, w, h, projection, expected, fused = _projection_residual_fixture(precision, rows)
+    tx, tw, th = [torch.tensor(a, dtype=dtype, device=device) for a in (x, w, h)]
+    for tensor, values in [(tx, x), (tw, w), (th, h)]:
+        assert np.array_equal(tensor.float().cpu().numpy(), values), (
+            "operands must be exactly representable"
+        )
+    actual_projection = torch.nn.functional.linear(tx, tw.T.contiguous())
+    actual = actual_projection + th
+    assert np.array_equal(actual_projection.float().cpu().numpy(), projection)
+    assert np.array_equal(actual.float().cpu().numpy(), expected)
+    return tx, th, expected, fused
+
+
+def _check_projection_residual_graph(gpu, precision):
+    """Two profiles, one graph; no tactic selection or checkpoint dependency."""
+    torch, trt, model = gpu
+    work_dtype = trt.bfloat16 if precision == "bf16" else trt.float16
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    x = network.add_input("input", work_dtype, (-1, 2048))
+    h = network.add_input("residual", work_dtype, (-1, 2048))
+    w = _projection_residual_fixture(precision, 1)[1]
+    projected = model._matmul(
+        network,
+        x,
+        w,
+        lhs_width=2048,
+        rhs_width=2048,
+        storage_dtype=np.dtype(np.float32),
+        work_dtype=work_dtype,
+        name="projection",
+    )
+    result = model._residual_sum(network, projected, h)
+    assert result.dtype == work_dtype
+    result.name = "actual"
+    network.mark_output(result)
+    config = builder.create_builder_config()
+    config.builder_optimization_level = 1
+    for sizes in [(1, 17, 17), (1, 1, 1)]:
+        profile = builder.create_optimization_profile()
+        for name in ("input", "residual"):
+            shapes = tuple((r, 2048) for r in sizes)
+            profile.set_shape(name, *shapes)
+            assert tuple(tuple(v) for v in profile.get_shape(name)) == shapes
+        assert config.add_optimization_profile(profile) >= 0
+    plan = builder.build_serialized_network(network, config)
+    assert plan is not None
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan)
+    assert engine is not None
+    stream = torch.cuda.current_stream().cuda_stream
+    for profile_index, rows in [(0, 17), (1, 1)]:
+        context = engine.create_execution_context()
+        assert context is not None and context.set_optimization_profile_async(profile_index, stream)
+        tx, th, expected, fused = _projection_residual_torch_oracle(torch, precision, rows, "cuda")
+        assert context.set_input_shape("input", tuple(tx.shape))
+        assert context.set_input_shape("residual", tuple(th.shape))
+        output = torch.empty_like(th)
+        for name, value in [("input", tx), ("residual", th), ("actual", output)]:
+            assert context.set_tensor_address(name, value.data_ptr())
+        assert context.execute_async_v3(stream)
+        torch.cuda.synchronize()
+        actual = output.float().cpu().numpy()
+        assert np.array_equal(actual, expected), (
+            f"{precision} profile{profile_index} lost the model-dtype projection rounding"
+        )
+        assert not np.array_equal(actual, fused), "fixture must reject one-rounding fusion"
+
+
+@pytest.mark.parametrize("precision", ["bf16", "fp16"])
+def test_projection_is_rounded_before_residual(gpu, precision):
+    _check_projection_residual_graph(gpu, precision)

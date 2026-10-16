@@ -53,6 +53,24 @@ def _cast(
     return network.add_cast(tensor, dtype).get_output(0)
 
 
+def _residual_sum(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    rhs: trt.ITensor,
+) -> trt.ITensor:
+    if lhs.dtype != rhs.dtype:
+        raise ValueError("dense LFM2 residual operands must have matching dtypes")
+    # Each branch is already rounded to the model dtype. Preserve that boundary
+    # before addition instead of consuming an unrounded projection accumulator.
+    dtype = lhs.dtype
+    summed = network.add_elementwise(
+        _cast(network, lhs, trt.float32),
+        _cast(network, rhs, trt.float32),
+        trt.ElementWiseOperation.SUM,
+    ).get_output(0)
+    return _cast(network, summed, dtype)
+
+
 def _constant(
     network: trt.INetworkDefinition,
     shape: tuple[int, ...],
@@ -1181,11 +1199,7 @@ def build_lfm2_engine(
             present_v_outputs.append(native["present_v"])
             attention_index += 1
 
-        hidden_state = network.add_elementwise(
-            hidden_state,
-            operator_output,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
+        hidden_state = _residual_sum(network, hidden_state, operator_output)
         ffn_input = _rms_norm(
             network,
             hidden_state,
@@ -1205,11 +1219,7 @@ def build_lfm2_engine(
             w2_bridge=w2_bridge,
             batched_prefill=attention_bridge is not None,
         )
-        hidden_state = network.add_elementwise(
-            hidden_state,
-            ffn_output,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
+        hidden_state = _residual_sum(network, hidden_state, ffn_output)
         if debug_layer_outputs:
             _mark_debug_output(
                 network,
