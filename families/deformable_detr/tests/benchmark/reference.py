@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run the official Transformers DETR reference for Accuracy qualification."""
+"""Run the official Transformers Deformable DETR reference for accuracy qualification."""
 
 from __future__ import annotations
 
@@ -11,8 +11,6 @@ import json
 from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
-
-from qualification_tests.benchmark_qualification.performance import reference_harness
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -91,7 +89,9 @@ def _performance_session(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
     _options: Mapping[str, Any],
-) -> reference_harness.Session:
+) -> Any:
+    from qualification_tests.benchmark_qualification.performance import reference_harness
+
     import torch
     from PIL import Image
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
@@ -149,6 +149,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     if "--request" in values:
         return _accuracy(values)
+    from qualification_tests.benchmark_qualification.performance import reference_harness
+
     return reference_harness.run(values, description=__doc__, load=_performance_session)
 
 

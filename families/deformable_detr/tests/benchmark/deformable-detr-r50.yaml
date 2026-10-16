@@ -4,14 +4,14 @@ schema_version: trtmc.qualification/v1
 model: deformable-detr-r50
 candidate:
   family: deformable_detr
-  checkpoint: PekingU/rtdetr_v2_r18vd
-  revision: 5650961749fa93567c0d46fc7f43ea4f9e914107
+  checkpoint: SenseTime/deformable-detr
+  revision: 83ecd26945199939cb82806f988debdb71e6f43e
   task: object_detection
   precision: fp16
   bundle: deformable-detr-r50.bundle
   build:
-    image_height: 640
-    image_width: 640
+    image_height: 800
+    image_width: 800
 reference_environment:
   requirements: ../../requirements.txt
 accuracy:
