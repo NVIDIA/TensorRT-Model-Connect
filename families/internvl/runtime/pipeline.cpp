@@ -6,6 +6,7 @@
 #include "families/internvl/runtime/pipeline.h"
 
 #include "families/internvl/runtime/image_preprocessor.h"
+#include "families/internvl/runtime/internvl_generation_budget.h"
 #include "families/internvl/runtime/tensor_names.h"
 
 #include <algorithm>
@@ -416,6 +417,10 @@ TextResult InternVlPipeline::generate(const std::string& prompt, const float* im
     auto input_ids =
         tokenizer_->encode(internvl_format_prompt(prompt, vl_preprocess_, preprocessed.num_tiles));
     auto [max_new, eos] = resolve_gen_limits(cfg);
+    // Up to max_image_tiles tiles of placeholders make the prompt long; stop
+    // generation at the dense cache instead of sliding it over image tokens.
+    max_new = internvl::generation_budget(static_cast<int32_t>(input_ids.size()), max_new,
+                                          state_ ? state_->max_length() : 0);
     auto sp_vl = internvl_sampling_params_from_config(cfg, eos);
     auto out =
         generate_vl_from_ids(input_ids, features, deepstack_features, nf, dim, max_new, sp_vl);

@@ -8,9 +8,11 @@
 // tiles and 1..12 patches.
 
 #include "families/internvl/runtime/image_preprocessor.h"
+#include "families/internvl/runtime/internvl_generation_budget.h"
 
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -88,10 +90,27 @@ void test_prompt_has_256_pads_per_tile() {
 
 } // namespace
 
+// A 13-tile prompt fits the 4096-row cache, but its generation budget must
+// stop at the cache rather than slide over image tokens.
+void test_generation_budget_respects_the_cache() {
+    using trtmc::internvl::generation_budget;
+    check(generation_budget(3400, 128, 4096) == 128, "short generation keeps its request");
+    check(generation_budget(3400, 4096, 4096) == 696, "generation stops at the KV cache");
+    check(generation_budget(100, 64, 0) == 64, "unknown cache length keeps the request");
+    bool rejected = false;
+    try {
+        generation_budget(4096, 1, 4096);
+    } catch (const std::invalid_argument& error) {
+        rejected = std::string(error.what()).find("KV cache") != std::string::npos;
+    }
+    check(rejected, "a prompt the KV cache cannot hold is rejected");
+}
+
 int main() {
     test_tile_grid_matches_processor();
     test_tiles_and_thumbnail();
     test_prompt_has_256_pads_per_tile();
+    test_generation_budget_respects_the_cache();
     if (g_failures != 0) {
         std::cerr << g_failures << " internvl tiling test(s) failed\n";
         return 1;
