@@ -47,4 +47,21 @@ install(TARGETS trtmc_model_internvl
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_internvl_image_normalization
+    ${PROJECT_SOURCE_DIR}/families/internvl/tests/cpp/test_image_normalization.cpp
+    image_preprocessor.cpp
+  )
+  target_include_directories(test_internvl_image_normalization PRIVATE ${PROJECT_SOURCE_DIR})
+  target_include_directories(test_internvl_image_normalization SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_link_libraries(test_internvl_image_normalization PRIVATE
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+  )
+  target_compile_options(test_internvl_image_normalization PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME internvl_image_normalization COMMAND test_internvl_image_normalization)
+endif()
+
 include(edge_llm/Adapter.cmake)
