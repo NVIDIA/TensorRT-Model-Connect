@@ -50,7 +50,8 @@ if(TRTMC_BUILD_TESTS)
       test_qwen_image_batch_utils
       test_qwen_image_cfg_renorm
       test_qwen_image_resample
-      test_qwen_image_scheduler)
+      test_qwen_image_scheduler
+      test_qwen_image_vision_layout)
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/qwen_image/tests/cpp/${test_name}.cpp
     )

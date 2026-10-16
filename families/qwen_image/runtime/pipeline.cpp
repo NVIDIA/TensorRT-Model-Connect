@@ -15,6 +15,7 @@
 #include "families/qwen_image/runtime/qwen_image_batch_utils.h"
 #include "families/qwen_image/runtime/qwen_image_resample.h"
 #include "families/qwen_image/runtime/qwen_image_scheduler.h"
+#include "families/qwen_image/runtime/qwen_image_vision_layout.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1240,9 +1241,13 @@ QwenImagePipeline::vision_encode_edit_condition(const EditInputTensors& edit_inp
     const auto dims = resolve_vision_encode_dims(config_);
     validate_vision_encode_dims(dims);
 
-    auto pixel_values = resize_hwc_unit_to_qwen_vl_pixel_values(
-        edit_inputs.condition_pixels_hwc, edit_inputs.plan.condition_height,
-        edit_inputs.plan.condition_width, dims.height, dims.width);
+    // The engine groups consecutive raster patches into merge groups, so the
+    // pixels follow Qwen2VLImageProcessor's merge-group patch order.
+    auto pixel_values = qwen_image::to_merge_group_patch_order(
+        resize_hwc_unit_to_qwen_vl_pixel_values(
+            edit_inputs.condition_pixels_hwc, edit_inputs.plan.condition_height,
+            edit_inputs.plan.condition_width, dims.height, dims.width),
+        6, dims.height, dims.width, dims.patch, dims.merge);
 
     TensorMap inputs;
     inputs["pixel_values"] =
