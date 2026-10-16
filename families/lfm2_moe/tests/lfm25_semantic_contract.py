@@ -255,7 +255,7 @@ def denies_temperature_action(text):
         r"(?:cabin )?temperature"
         r"(?: (?:change|adjustment|setting))?|it"
     )
-    denial = r"(?:not|never|hasn't|haven't|isn't|wasn't|won't|don't)"
+    denial = r"(?:not|never|hasn't|haven't|isn't|wasn't|won't|don't|doesn't|didn't)"
     action = r"(?:set|adjusted|changed|completed|done)"
     span = r"(?:(?!\b(?:and|but|while)\b)[^.!?;,]){0,25}"
     negated_action = rf"\b{denial}\b{span}\b{action}\b"

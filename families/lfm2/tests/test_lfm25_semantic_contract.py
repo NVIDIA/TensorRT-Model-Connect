@@ -284,6 +284,51 @@ def test_temperature_result_rejects_wrong_value_denial_and_extra_call():
             check("tool-result", expected, actual)
 
 
+@pytest.mark.parametrize(
+    "case", ["tool-result", "parallel-tools", "strip-prior-reasoning", "preserve-prior-reasoning"]
+)
+@pytest.mark.parametrize(
+    "denial",
+    [
+        "I didn't set the temperature.",
+        "I didn’t set the temperature.",
+        "the temperature doesn't get set.",
+        "the temperature doesn’t get set.",
+    ],
+)
+def test_contracted_temperature_denial_rejects_contradictory_acknowledgements(case, denial):
+    temperature = 23 if case in {"strip-prior-reasoning", "preserve-prior-reasoning"} else 22
+    expected = text(f"The cabin temperature is set to {temperature}°C.")
+    response = f"I set the cabin temperature to {temperature}°C, but {denial}"
+    with pytest.raises(AssertionError, match="temperature action was denied"):
+        semantic.temperature_ack(response, temperature)
+    with pytest.raises(AssertionError, match="temperature action was denied"):
+        check(case, [expected], [text(response)])
+    with pytest.raises(AssertionError, match="temperature action was denied"):
+        check(case, [text(response)], [expected])
+
+
+@pytest.mark.parametrize(
+    "case", ["tool-result", "parallel-tools", "strip-prior-reasoning", "preserve-prior-reasoning"]
+)
+@pytest.mark.parametrize(
+    "unrelated",
+    [
+        "I didn't set the music.",
+        "I didn’t set the cabin music.",
+        "the music doesn't get changed.",
+        "the cabin music doesn’t get changed.",
+    ],
+)
+def test_contracted_music_denial_preserves_temperature_acknowledgement(case, unrelated):
+    temperature = 23 if case in {"strip-prior-reasoning", "preserve-prior-reasoning"} else 22
+    expected = text(f"The cabin temperature is set to {temperature}°C.")
+    response = f"I set the cabin temperature to {temperature}°C, but {unrelated}"
+    semantic.temperature_ack(response, temperature)
+    check(case, [expected], [text(response)])
+    check(case, [text(response)], [expected])
+
+
 def test_candidate_result_requires_returned_entities_and_date():
     expected = [
         text(
