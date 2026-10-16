@@ -316,6 +316,39 @@ def _work_types(precision: str) -> tuple[np.dtype, trt.DataType]:
     return dtype, trt.float16 if dtype == np.dtype(np.float16) else trt.float32
 
 
+def _add_patch_embedding(
+    network,
+    pixel_values,
+    weights: WeightDict,
+    *,
+    hidden_size: int,
+    patch_size: int,
+    work_dtype: np.dtype,
+    work_trt_dtype: trt.DataType,
+):
+    """Patch embedding with PyTorch's reduced-precision convolution numerics.
+
+    A half-precision PyTorch convolution rounds its input and weights to FP16
+    but accumulates each 3 x P x P dot product in FP32. An FP16 TensorRT
+    convolution may accumulate in FP16, which on high-detail patches costs
+    about 2% of the final hidden state. So the rounded values are convolved in
+    FP32 and only the output is rounded.
+    """
+    pixels = graph_ops.cast(network, pixel_values, work_trt_dtype)
+    pixels = graph_ops.cast(network, pixels, trt.float32)
+    kernel = np.asarray(weights["patch.weight"], dtype=work_dtype).astype(np.float32)
+    bias = np.asarray(weights["patch.bias"], dtype=work_dtype).astype(np.float32)
+    patch = network.add_convolution_nd(
+        pixels,
+        hidden_size,
+        (patch_size, patch_size),
+        trt.Weights(np.ascontiguousarray(kernel)),
+        trt.Weights(np.ascontiguousarray(bias)),
+    )
+    patch.stride_nd = (patch_size, patch_size)
+    return graph_ops.cast(network, patch.get_output(0), work_trt_dtype)
+
+
 def build_vit_engine(
     config: ModelConfig,
     weights: WeightDict,
@@ -351,18 +384,18 @@ def build_vit_engine(
         )
 
     pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
-    pixels = graph_ops.cast(network, pixel_values, work_trt_dtype)
-    patch = network.add_convolution_nd(
-        pixels,
-        hidden_size,
-        (patch_size, patch_size),
-        trt.Weights(np.ascontiguousarray(weights["patch.weight"], dtype=work_dtype)),
-        trt.Weights(np.ascontiguousarray(weights["patch.bias"], dtype=work_dtype)),
+    patch = _add_patch_embedding(
+        network,
+        pixel_values,
+        weights,
+        hidden_size=hidden_size,
+        patch_size=patch_size,
+        work_dtype=work_dtype,
+        work_trt_dtype=work_trt_dtype,
     )
-    patch.stride_nd = (patch_size, patch_size)
     patch_tokens = graph_ops.shuffle(
         network,
-        patch.get_output(0),
+        patch,
         first_transpose=(0, 2, 3, 1),
         reshape_dims=(1, num_patches, hidden_size),
     )

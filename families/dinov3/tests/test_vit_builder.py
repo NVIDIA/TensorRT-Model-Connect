@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import types
 from pathlib import Path
 
 import numpy as np
@@ -290,3 +291,60 @@ def test_vit_config_and_bundle_metadata_preserve_hf_contract(tmp_path: Path) -> 
     assert metadata["image_mean"] == [0.485, 0.456, 0.406]
     assert metadata["image_std"] == [0.229, 0.224, 0.225]
     assert dinov3_model._Dinov3Model().default_max_cache_length(config) == 1
+
+
+class _Tensor:
+    def __init__(self, dtype, origin):
+        self.dtype = dtype
+        self.origin = origin
+
+
+class _Layer:
+    def __init__(self, output):
+        self.output = output
+
+    def get_output(self, index):
+        assert index == 0
+        return self.output
+
+
+class _PatchNetwork:
+    def __init__(self):
+        self.convolution = None
+
+    def add_cast(self, tensor, dtype):
+        return _Layer(_Tensor(dtype, ("cast", tensor.origin)))
+
+    def add_convolution_nd(self, tensor, channels, kernel, weights, bias):
+        self.convolution = {"input": tensor, "kernel": weights, "bias": bias}
+        return _Layer(_Tensor("float32", "conv"))
+
+
+def test_patch_embedding_accumulates_rounded_fp16_values_in_fp32(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PyTorch's half convolution: FP16 input and weights, FP32 accumulation,
+    # FP16 output.
+    fake_trt = types.SimpleNamespace(Weights=lambda value: value, float32="float32")
+    monkeypatch.setattr(dinov3_model, "trt", fake_trt)
+    weight = np.full((2, 3, 4, 4), 0.1, dtype=np.float16)
+    weights = {"patch.weight": weight, "patch.bias": np.full(2, 0.3, dtype=np.float16)}
+    network = _PatchNetwork()
+
+    output = dinov3_model._add_patch_embedding(
+        network,
+        _Tensor("float32", "pixel_values"),
+        weights,
+        hidden_size=2,
+        patch_size=4,
+        work_dtype=np.dtype(np.float16),
+        work_trt_dtype="float16",
+    )
+
+    conv = network.convolution
+    assert conv["input"].dtype == "float32"
+    assert conv["input"].origin == ("cast", ("cast", "pixel_values"))
+    assert conv["kernel"].dtype == np.float32
+    np.testing.assert_array_equal(conv["kernel"], weight.astype(np.float32))
+    assert conv["bias"].dtype == np.float32
+    assert output.dtype == "float16" and output.origin == ("cast", "conv")
