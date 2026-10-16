@@ -368,6 +368,8 @@ static InternVlPreprocessedImage preprocess_patchify_chw(const LoadedImage& load
 
 // ---------------------------------------------------------------------------
 // Dynamic tiling (GotOcr2 / InternVL crop_to_patches)
+// The grid selection follows get_optimal_tiled_canvas in Hugging Face
+// Transformers' GotOcr2 image processor (Apache-2.0).
 // ---------------------------------------------------------------------------
 
 std::pair<int32_t, int32_t> internvl_tile_grid(int32_t height, int32_t width, int32_t tile_size,

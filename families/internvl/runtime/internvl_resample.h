@@ -9,6 +9,12 @@
 // GotOcr2 fast processor resizes uint8 tensors with PyTorch's antialiased
 // bicubic interpolation, a separable fixed-point filter that rounds to 8 bits
 // after the width pass and after the height pass.
+//
+// The tap and int16 weight-precision computation is adapted from PyTorch
+// v2.12.0, aten/src/ATen/native/cpu/UpSampleKernel.cpp
+// (_compute_indices_min_size_weights_aa and _compute_index_ranges_int16_weights),
+// BSD-3-Clause. PyTorch derives that code from Pillow-SIMD's Resample.c
+// (MIT-CMU License). The notices are reproduced in families/internvl/NOTICE.
 
 #include <algorithm>
 #include <cmath>
