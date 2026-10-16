@@ -215,9 +215,69 @@ def final_text(parts):
 
 
 def refusal(text):
+    value = normalized(text).replace("’", "'")
     return bool(
         re.search(
-            r"\b(cannot|can't|unable|don't have access|do not have access)\b", normalized(text)
+            r"\bi(?:'m| am)? (?:cannot|can't|(?:unable|not able) to) "
+            r"(?:directly )?(?:change|set|adjust|control) "
+            r"(?:(?:the|a|your) )?(?:cabin )?temperature\b",
+            value,
+        )
+        or re.search(
+            r"\bi (?:don't|do not) have access to (?:a|the|any) (?:tool|system|control) "
+            r"that (?:can )?(?:sets?|changes?|adjusts?|controls?) "
+            r"(?:the )?(?:cabin )?temperature\b",
+            value,
+        )
+    )
+
+
+def claims_temperature_action(text):
+    """Recognize bounded completed-action claims, excluding conditional advice."""
+    value = normalized(text).replace("’", "'")
+    patterns = (
+        r"\b(?P<claim>i(?:'ve| have)? (?:already |successfully )?(?:set|changed|adjusted|updated) "
+        r"(?:(?:the|a|your) )?(?:(?:cabin )?temperature|it)\b)",
+        r"(?:^|[.!?;,]|\bbut\b)\s*(?P<claim>(?:(?:the|a|your) )?(?:cabin )?temperature "
+        r"(?:has been |was |is now |is )?(?:already |successfully )?"
+        r"(?:set|changed|adjusted|updated)\b)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, value):
+            start = max(value.rfind(mark, 0, match.start("claim")) for mark in ".!?;") + 1
+            if not re.search(r"\b(?:if|unless)\b", value[start : match.start("claim")]):
+                return True
+    return False
+
+
+def denies_temperature_action(text):
+    """Bind explicit action denials to temperature or its local result pronoun."""
+    value = normalized(text).replace("’", "'")
+    negative = (
+        r"(?:not|never|cannot|can't|hasn't|haven't|isn't|wasn't|weren't|won't|don't|doesn't|didn't)"
+    )
+    temperature = (
+        r"(?:(?:the|a|your) )?(?:(?:requested|desired|target) )?(?:cabin )?temperature"
+        r"(?: (?:change|adjustment|setting|update))?"
+    )
+    cabin = r"(?:(?:the|a|your) )?cabin"
+    subject = rf"(?:{temperature}|it|{cabin}(?= (?:has|have|had|is|was|were|will|{negative})\b))"
+    target = rf"(?:{temperature}|it|{cabin}(?= (?:to|at)\b|[.!?;,]|$))"
+    # Preserve bounded modifiers while stopping at a separate coordinated clause.
+    span = r"(?:(?!\b(?:and|but|or|while|whereas)\b)[^.!?;,]){0,25}"
+    action = r"(?:set|adjusted|changed|updated|completed|done)"
+    return bool(
+        re.search(
+            rf"\b{subject}\b{span}\b{negative}\b{span}\b{action}\b",
+            value,
+        )
+        or re.search(
+            rf"\b{negative}\b{span}\b{action} {target}\b",
+            value,
+        )
+        or re.search(
+            rf"(?:^|[.!?;])\s*{negative}\b{span}\b{action}(?: yet)?\s*(?:[.!?;]|$)",
+            value,
         )
     )
 
@@ -228,10 +288,9 @@ def temperature_ack(text, temperature, *, short_ack=False):
     value = normalized(text).translate(str.maketrans({sign: "-" for sign in "−‐‑‒–—﹣－"}))
     value = re.sub(r"(?<!\w)([+-])\s+(?=\d)", r"\1", value)
     value = re.sub(r"\b(?:minus|negative)\s*(?=\d)", "-", value)
-    assert not refusal(value) and not re.search(
-        r"\b(?:not|never|hasn't|haven't|isn't|wasn't|won't|don't)\b[^.!?]{0,25}\b(?:set|adjusted|changed|completed)\b",
-        value,
-    ), "temperature action was denied"
+    assert not refusal(value) and not denies_temperature_action(value), (
+        "temperature action was denied"
+    )
     assert re.search(r"\b(set|adjusted|changed|done|completed)\b", value), (
         "missing action acknowledgement"
     )
@@ -664,6 +723,7 @@ def evaluate(name, native, expected_parts, reference_ids, eos, request, input_co
                 assert refusal(text) and "temperature" in normalized(text), (
                     "reference refusal/no-call behavior was not preserved"
                 )
+                assert not claims_temperature_action(text), "contradictory temperature action"
         checks["tool_surface_scope"] = (
             "Compare parsed original call behavior; JSON/Pythonic surface spelling is diagnostic."
         )

@@ -248,16 +248,43 @@ def claims_temperature_action(text):
     )
 
 
+def denies_temperature_action(text):
+    value = normalized(text).replace("’", "'")
+    temperature = (
+        r"(?:(?:the|your) )?(?:(?:requested|desired|target) )?"
+        r"(?:cabin )?temperature"
+        r"(?: (?:change|adjustment|setting))?|it"
+    )
+    denial = r"(?:not|never|hasn't|haven't|isn't|wasn't|won't|don't)"
+    action = r"(?:set|adjusted|changed|completed|done)"
+    span = r"(?:(?!\b(?:and|but|while)\b)[^.!?;,]){0,25}"
+    negated_action = rf"\b{denial}\b{span}\b{action}\b"
+    cabin_subject = (
+        rf"(?:(?:the|your) )?cabin(?= (?:has|have|had|is|was|were|will|{denial})\b)"
+    )
+    cabin_object = r"(?:(?:the|your) )?cabin(?= (?:to|at)\b|[.!?;,]|$)"
+    return bool(
+        re.search(
+            rf"\b(?:{temperature}|{cabin_subject})\b{span}{negated_action}",
+            value,
+        )
+        or re.search(rf"{negated_action} (?:{temperature}|{cabin_object})\b", value)
+        or re.search(
+            rf"(?:^|[.!?;] )(?:(?:it is|it's) )?{negated_action}(?: yet)?(?=$|[.!?;])",
+            value,
+        )
+    )
+
+
 def temperature_ack(text, temperature, *, short_ack=False):
     from decimal import Decimal
 
     value = normalized(text).translate(str.maketrans({sign: "-" for sign in "−‐‑‒–—﹣－"}))
     value = re.sub(r"(?<!\w)([+-])\s+(?=\d)", r"\1", value)
     value = re.sub(r"\b(?:minus|negative)\s*(?=\d)", "-", value)
-    assert not refusal(value) and not re.search(
-        r"\b(?:not|never|hasn't|haven't|isn't|wasn't|won't|don't)\b[^.!?]{0,25}\b(?:set|adjusted|changed|completed)\b",
-        value,
-    ), "temperature action was denied"
+    assert not refusal(value) and not denies_temperature_action(value), (
+        "temperature action was denied"
+    )
     assert re.search(r"\b(set|adjusted|changed|done|completed)\b", value), (
         "missing action acknowledgement"
     )

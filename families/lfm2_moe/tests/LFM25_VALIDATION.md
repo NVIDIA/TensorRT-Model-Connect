@@ -196,8 +196,8 @@ python families/lfm2_moe/tests/lfm25_contract_validation.py \
   --runtime-root build --client ./lfm25_sdk_client --output validation/lfm25-8b-a1b
 ```
 
-This selects greedy and model-card sampled answers, conversations, Pythonic/JSON
-tool requests, tool-result follow-up,
+This selects the greedy cases and `model-card-sampling`, covering conversations,
+Pythonic/JSON tool requests, tool-result follow-up,
 prior reasoning behavior, and the advertised language prompts. It records native
 and original reference outputs in `semantic-parity.json`; exact generated token
 IDs remain a diagnostic. Typed tool names, parsed arguments, and completion

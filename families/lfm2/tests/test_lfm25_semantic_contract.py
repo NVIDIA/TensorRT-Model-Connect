@@ -101,6 +101,137 @@ def test_weak_tool_fixture_preserves_reference_refusal_and_no_call():
         check("system-tools", expected, [text("The cabin temperature is set to 22.")])
 
 
+@pytest.mark.parametrize("case", ["system-tools", "json-tool-request", "single-user"])
+@pytest.mark.parametrize(
+    "response",
+    [
+        "I cannot change the music. The cabin temperature is set to 22°C.",
+        "I am unable to adjust the music. I have set the cabin temperature to 22°C.",
+        "I am able to change the cabin temperature.",
+    ],
+)
+def test_refusal_must_describe_temperature_capability(case, response):
+    expected = [text("I cannot change the cabin temperature.")]
+    with pytest.raises(AssertionError, match="refusal/no-call"):
+        check(case, expected, [text(response)])
+
+
+@pytest.mark.parametrize("case", ["system-tools", "json-tool-request", "single-user"])
+@pytest.mark.parametrize(
+    "response",
+    [
+        "I’m not able to directly change the temperature of a cabin for you.",
+        "I am unable to adjust the cabin temperature directly.",
+        "I don't have access to a tool that can set cabin temperature.",
+    ],
+)
+def test_temperature_capability_refusals_remain_accepted(case, response):
+    check(case, [text("I cannot change the cabin temperature.")], [text(response)])
+
+
+@pytest.mark.parametrize("case", ["system-tools", "json-tool-request", "single-user"])
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "I have set the cabin temperature to 22°C.",
+        "I’ve adjusted it to 22°C.",
+        "The cabin temperature has been set to 22°C.",
+        "Cabin temperature set to 22°C.",
+        "I have set the cabin temperature to 22°C, if that helps.",
+    ],
+)
+def test_temperature_refusal_cannot_hide_a_completed_action(case, claim):
+    refusal = "I cannot change the cabin temperature."
+    for response in (refusal + " " + claim, claim + " " + refusal):
+        with pytest.raises(AssertionError, match="contradictory temperature action"):
+            check(case, [text(refusal)], [text(response)])
+
+
+@pytest.mark.parametrize("case", ["system-tools", "json-tool-request", "single-user"])
+@pytest.mark.parametrize(
+    "advice",
+    [
+        "You can set the cabin temperature to 22°C using the controls.",
+        "You can get the temperature set to 22°C using the controls.",
+        "If I set the temperature to 22°C, it would be more comfortable.",
+        "I have not set the cabin temperature to 22°C.",
+    ],
+)
+def test_temperature_refusal_advice_is_not_a_completed_action(case, advice):
+    refusal = "I cannot change the cabin temperature."
+    check(case, [text(refusal)], [text(refusal + " " + advice)])
+
+
+@pytest.mark.parametrize(
+    "case,temperature", [("tool-result", 22), ("parallel-tools", 22), ("strip-prior-reasoning", 23)]
+)
+@pytest.mark.parametrize(
+    "unrelated",
+    [
+        "I cannot change the music.",
+        "I have not changed the music.",
+        "The music hasn’t changed.",
+        "I have not completed the music setup.",
+        "I have not changed the cabin music.",
+    ],
+)
+def test_temperature_acknowledgement_ignores_unrelated_refusal_and_denial(
+    case, temperature, unrelated
+):
+    acknowledgement = f"The cabin temperature is set to {temperature}°C."
+    for response in (unrelated + " " + acknowledgement, acknowledgement + " " + unrelated):
+        check(case, [text(acknowledgement)], [text(response)])
+        check(case, [text(response)], [text(acknowledgement)])
+
+
+@pytest.mark.parametrize(
+    "case,temperature", [("tool-result", 22), ("parallel-tools", 22), ("strip-prior-reasoning", 23)]
+)
+@pytest.mark.parametrize(
+    "denial",
+    [
+        "Cabin temperature hasn't been set to {temperature}°C.",
+        "The cabin temperature is {temperature}°C. It hasn't been set.",
+        "Cabin temperature set to {temperature}°C. I have not set it.",
+        "The cabin temperature is {temperature}°C. I have not set the cabin to {temperature}°C.",
+        "Cabin temperature set to {temperature}°C. I can't set it.",
+        "The cabin temperature is {temperature}°C. It has not really been set.",
+        "The cabin temperature is {temperature}°C. It has not actually yet been set.",
+        "The cabin temperature is {temperature}°C. I have not set the requested temperature.",
+        "The cabin temperature is {temperature}°C. The temperature has still not been changed.",
+        "I have not changed the cabin temperature to {temperature}°C. I have completed the music setup.",
+    ],
+)
+def test_temperature_denial_is_not_hidden_by_an_unrelated_completed_action(
+    case, temperature, denial
+):
+    expected = [text(f"The cabin temperature is set to {temperature}°C.")]
+    with pytest.raises(AssertionError, match="temperature action was denied"):
+        check(case, expected, [text(denial.format(temperature=temperature))])
+
+
+def test_short_acknowledgement_scope_preserves_completion():
+    check("preserve-prior-reasoning", [text("Done.")], [text("Completed.")])
+
+
+@pytest.mark.parametrize(
+    "denied",
+    [
+        "Not done.",
+        "Not completed.",
+        "It hasn't been set.",
+        "Not set.",
+        "Not adjusted.",
+        "Not changed.",
+        "Not set yet.",
+    ],
+)
+def test_short_temperature_acknowledgement_denial_is_rejected_on_either_side(denied):
+    for reference, native in (("Done.", denied), (denied, "Done.")):
+        with pytest.raises(AssertionError, match="temperature action was denied"):
+            check("preserve-prior-reasoning", [text(reference)], [text(native)])
+
+
 def test_quickstart_matches_budget_stop_without_mandatory_eos():
     answer = text(
         "Caenorhabditis elegans is a nematode and a model organism in biological research."

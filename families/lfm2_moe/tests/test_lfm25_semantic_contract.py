@@ -228,6 +228,78 @@ def test_temperature_result_rejects_wrong_value_denial_and_extra_call():
             check("tool-result", expected, actual)
 
 
+@pytest.mark.parametrize("case", ["tool-result", "parallel-tools", "strip-prior-reasoning"])
+@pytest.mark.parametrize(
+    "unrelated",
+    [
+        "I have not changed the music.",
+        "The music hasn’t changed.",
+        "I have not completed the music setup.",
+        "I cannot change the music.",
+        "I have not changed the cabin music.",
+        "The cabin music has not changed.",
+    ],
+)
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_temperature_ack_ignores_unrelated_music_negation(case, unrelated, position):
+    temperature = 23 if case == "strip-prior-reasoning" else 22
+    acknowledgement = f"The cabin temperature is set to {temperature}°C."
+    response = (
+        unrelated + " " + acknowledgement
+        if position == "before"
+        else acknowledgement + " " + unrelated
+    )
+    check(case, [text(acknowledgement)], [text(response)])
+    check(case, [text(response)], [text(acknowledgement)])
+
+
+@pytest.mark.parametrize("case", ["tool-result", "parallel-tools", "strip-prior-reasoning"])
+@pytest.mark.parametrize(
+    "denial",
+    [
+        "I have not changed the cabin temperature.",
+        "The cabin temperature hasn't been set.",
+        "The cabin temperature change is not completed.",
+        "I haven't adjusted it.",
+        "I have not set the cabin.",
+        "It has not really been set.",
+        "I have not set the requested temperature.",
+        "The temperature has still not been changed.",
+        "It has not fully been set.",
+    ],
+)
+def test_temperature_ack_rejects_real_denial_despite_other_completed_actions(case, denial):
+    temperature = 23 if case == "strip-prior-reasoning" else 22
+    acknowledgement = f"The cabin temperature is set to {temperature}°C."
+    for response in (
+        f"{denial} The requested temperature is {temperature}°C. I changed the music.",
+        acknowledgement + " " + denial,
+    ):
+        with pytest.raises(AssertionError, match="temperature action was denied"):
+            check(case, [text(acknowledgement)], [text(response)])
+        with pytest.raises(AssertionError, match="temperature action was denied"):
+            check(case, [text(response)], [text(acknowledgement)])
+
+
+def test_temperature_ack_helper_preserves_subject_and_short_ack_scope():
+    semantic.temperature_ack(
+        "The cabin temperature is set to 22°C. I have not completed the music setup.", 22
+    )
+    semantic.temperature_ack("Done.", 23, short_ack=True)
+    for response in (
+        "The cabin temperature has not been set to 22°C. I have changed the music.",
+        "The cabin temperature is set to 22°C. It has not been changed.",
+        "The cabin temperature is 22°C. It hasn't been set.",
+        "Cabin temperature set to 22°C. I have not set it.",
+        "The cabin temperature is 22°C. I have not set the cabin to 22°C.",
+    ):
+        with pytest.raises(AssertionError, match="temperature action was denied"):
+            semantic.temperature_ack(response, 22)
+    for response in ("Not completed.", "Not set.", "Not adjusted.", "Not changed.", "Not set yet."):
+        with pytest.raises(AssertionError, match="temperature action was denied"):
+            semantic.temperature_ack(response, 23, short_ack=True)
+
+
 def test_candidate_result_requires_returned_entities_and_date():
     expected = [
         text(

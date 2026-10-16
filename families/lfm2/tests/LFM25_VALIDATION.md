@@ -81,7 +81,7 @@ python families/lfm2/tests/lfm25_contract_validation.py \
 
 At the original 512-token cap and seed 42, the reviewed original and native
 outputs both exhaust the budget inside reasoning, without a final answer. This
-case checks that paired reasoning-only typed-part state, the full 512-token
+case checks the paired reasoning-only typed-part state, the full 512-token
 budget, and topical/core C. elegans concepts. Its receipt explicitly labels this
 **not completed-answer proof**; raw reasoning and incidental claims remain
 available for quality review. The earlier failed answer-gate receipt is preserved.
