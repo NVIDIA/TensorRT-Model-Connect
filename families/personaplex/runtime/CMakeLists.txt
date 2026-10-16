@@ -63,6 +63,18 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME test_personaplex_decode_runtime COMMAND test_personaplex_decode_runtime)
 
+  add_executable(test_personaplex_speech_resampler
+    ${PROJECT_SOURCE_DIR}/families/personaplex/tests/cpp/test_speech_resampler.cpp
+    ${PROJECT_SOURCE_DIR}/families/personaplex/runtime/resampler.cpp
+  )
+  target_include_directories(test_personaplex_speech_resampler PRIVATE
+    ${PROJECT_SOURCE_DIR}
+  )
+  target_compile_options(test_personaplex_speech_resampler PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME test_personaplex_speech_resampler COMMAND test_personaplex_speech_resampler)
+
   foreach(test_name IN ITEMS
       test_personaplex_speech_decode_stop_policy
       test_personaplex_speech_depth_plan
