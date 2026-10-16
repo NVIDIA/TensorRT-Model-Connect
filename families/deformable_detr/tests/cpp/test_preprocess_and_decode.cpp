@@ -47,6 +47,15 @@ void test_resize_preserves_aspect_ratio_and_the_checkpoint_bounds() {
         threw = true;
     }
     check(threw, "resize rejects empty dimensions");
+    // The processor's already-sized short-edge shortcut can leave an extreme
+    // aspect ratio outside the engine profile. Reject it before inference.
+    threw = false;
+    try {
+        (void)trtmc::deformable_detr_resize_shape(1, 2000, 800, 1333);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "resize rejects a result outside the dynamic engine bounds");
 }
 
 void test_preprocess_normalises_with_the_configured_statistics() {

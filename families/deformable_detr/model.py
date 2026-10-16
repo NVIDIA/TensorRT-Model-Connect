@@ -82,12 +82,12 @@ def build_detector_engine(weights, cfg, *, precision, verbose=False) -> bytes:
         network.mark_output(out)
 
     config = builder.create_builder_config()
+    config.builder_optimization_level = 3
     profile = builder.create_optimization_profile()
     maximum = cfg["resize_longest_edge"]
     profile.set_shape("pixel_values", (1, 3, 1, 1), (1, 3, size, size),
                       (1, 3, maximum, maximum))
     config.add_optimization_profile(profile)
-    config.builder_optimization_level = 3
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("deformable_detr engine build failed")
