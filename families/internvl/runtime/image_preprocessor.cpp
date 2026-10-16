@@ -5,17 +5,21 @@
 
 #include "families/internvl/runtime/image_preprocessor.h"
 
+#include "families/internvl/runtime/internvl_resample.h"
 #include "image_transform_helper.h"
 #define STB_IMAGE_RESIZE_STATIC
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace trtmc {
 
@@ -363,6 +367,83 @@ static InternVlPreprocessedImage preprocess_patchify_chw(const LoadedImage& load
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic tiling (GotOcr2 / InternVL crop_to_patches)
+// ---------------------------------------------------------------------------
+
+std::pair<int32_t, int32_t> internvl_tile_grid(int32_t height, int32_t width, int32_t tile_size,
+                                               int32_t min_tiles, int32_t max_tiles) {
+    std::vector<std::pair<int32_t, int32_t>> grids;
+    for (int32_t columns = 1; columns <= max_tiles; ++columns)
+        for (int32_t rows = 1; rows <= max_tiles; ++rows)
+            if (columns * rows <= max_tiles && columns * rows >= min_tiles)
+                grids.emplace_back(columns, rows);
+    std::stable_sort(grids.begin(), grids.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.first * lhs.second < rhs.first * rhs.second;
+    });
+    const double aspect = static_cast<double>(width) / static_cast<double>(height);
+    const double area = static_cast<double>(width) * static_cast<double>(height);
+    double best_difference = std::numeric_limits<double>::infinity();
+    std::pair<int32_t, int32_t> best{1, 1};
+    for (const auto& grid : grids) {
+        const double difference =
+            std::abs(aspect - static_cast<double>(grid.first) / static_cast<double>(grid.second));
+        if (difference < best_difference) {
+            best_difference = difference;
+            best = grid;
+        } else if (difference == best_difference &&
+                   area > 0.5 * tile_size * tile_size * grid.first * grid.second) {
+            best = grid;
+        }
+    }
+    return best;
+}
+
+// The processor resizes the image to the tile grid, splits it row by row,
+// and appends a whole-image thumbnail when there is more than one tile.
+static InternVlPreprocessedImage
+preprocess_dynamic_tiles(const runtime::adapters::io::DecodedImage& image,
+                         const InternVlPreprocessConfig& config) {
+    InternVlPreprocessedImage result;
+    if (image.empty() || image.channels != 3)
+        return result;
+    const int32_t tile = config.fixed_image_size;
+    const auto [columns, rows] = internvl_tile_grid(image.height, image.width, tile,
+                                                    config.min_image_tiles, config.max_image_tiles);
+    const auto canvas = internvl::torch_aa_bicubic_resize_rgb(
+        image.pixels, image.height, image.width, rows * tile, columns * tile);
+    std::vector<std::vector<unsigned char>> tiles;
+    for (int32_t index = 0; index < columns * rows; ++index) {
+        const int32_t column = index % columns;
+        const int32_t row = index / columns;
+        std::vector<unsigned char> crop(static_cast<std::size_t>(tile) * tile * 3);
+        for (int32_t y = 0; y < tile; ++y) {
+            const auto* source = canvas.data() + ((static_cast<std::size_t>(row) * tile + y) *
+                                                      static_cast<std::size_t>(columns) * tile +
+                                                  static_cast<std::size_t>(column) * tile) *
+                                                     3;
+            std::memcpy(crop.data() + static_cast<std::size_t>(y) * tile * 3, source,
+                        static_cast<std::size_t>(tile) * 3);
+        }
+        tiles.push_back(std::move(crop));
+    }
+    if (config.use_thumbnail && tiles.size() != 1)
+        tiles.push_back(internvl::torch_aa_bicubic_resize_rgb(image.pixels, image.height,
+                                                              image.width, tile, tile));
+    for (const auto& pixels : tiles) {
+        std::vector<float> chw;
+        if (!normalize_to_chw(pixels, tile, config, chw))
+            return InternVlPreprocessedImage{};
+        result.pixel_values.insert(result.pixel_values.end(), chw.begin(), chw.end());
+    }
+    result.num_tiles = static_cast<int32_t>(tiles.size());
+    result.channels = config.in_channels;
+    result.height = tile;
+    result.width = tile;
+    result.ok = true;
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
 
@@ -408,6 +489,8 @@ run_preprocess_dispatch(const runtime::adapters::io::DecodedImage& image,
 InternVlPreprocessedImage
 internvl_preprocess_decoded_image(const runtime::adapters::io::DecodedImage& image,
                                   const InternVlPreprocessConfig& config) {
+    if (config.preprocessor_type == "dynamic_tiles_chw")
+        return preprocess_dynamic_tiles(image, config);
     const auto dispatch = resolve_preprocess_dispatch(config.preprocessor_type);
     if (dispatch.warn_unknown_type) {
         std::cerr << "[trtmc] WARNING: Unknown preprocessor_type \"" << config.preprocessor_type
@@ -419,11 +502,16 @@ internvl_preprocess_decoded_image(const runtime::adapters::io::DecodedImage& ima
 
 std::string internvl_format_prompt(const std::string& user_prompt,
                                    const InternVlPreprocessConfig& config) {
-    // Build image_pads string: repeat image_token_str num_image_pad_tokens times
+    return internvl_format_prompt(user_prompt, config, 1);
+}
+
+std::string internvl_format_prompt(const std::string& user_prompt,
+                                   const InternVlPreprocessConfig& config, int32_t num_tiles) {
+    // Build image_pads string: image_token_str num_image_pad_tokens times per tile
+    const int32_t pad_count = config.num_image_pad_tokens * std::max(num_tiles, 1);
     std::string image_pads;
-    image_pads.reserve(static_cast<std::size_t>(config.num_image_pad_tokens) *
-                       config.image_token_str.size());
-    for (int32_t i = 0; i < config.num_image_pad_tokens; ++i) {
+    image_pads.reserve(static_cast<std::size_t>(pad_count) * config.image_token_str.size());
+    for (int32_t i = 0; i < pad_count; ++i) {
         image_pads += config.image_token_str;
     }
 
@@ -515,6 +603,11 @@ InternVlPreprocessConfig internvl_parse_preprocess_config(const std::string& con
     cfg.interpolation = require_preprocess_string(document, "interpolation");
     require_preprocess_triplet(document, "image_mean", cfg.image_mean);
     require_preprocess_triplet(document, "image_std", cfg.image_std);
+    cfg.min_image_tiles = document.value("min_image_tiles", cfg.min_image_tiles);
+    cfg.max_image_tiles = document.value("max_image_tiles", cfg.max_image_tiles);
+    cfg.use_thumbnail = document.value("use_thumbnail", cfg.use_thumbnail);
+    if (cfg.min_image_tiles <= 0 || cfg.max_image_tiles < cfg.min_image_tiles)
+        throw std::runtime_error("runtime.json has invalid image tile limits");
     if (cfg.fixed_image_size <= 0 || cfg.patch_size <= 0 || cfg.merge_size <= 0 ||
         cfg.temporal_patch_size <= 0 || cfg.vision_output_dim <= 0)
         throw std::runtime_error("runtime.json has invalid preprocessing geometry");

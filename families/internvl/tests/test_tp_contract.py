@@ -122,6 +122,8 @@ def test_build_emits_one_dual_profile_plan_per_rank(monkeypatch, tmp_path) -> No
     assert "engine.plan" not in writer.sections
     assert "prefill.plan" not in writer.sections
     assert writer.sections["runtime.json"]["tensor_parallel_size"] == 2
+    assert writer.sections["runtime.json"]["preprocessor_type"] == "simple_chw"
+    assert writer.sections["runtime.json"]["max_image_tiles"] == 1
     assert writer.sections["vision.plan"] == b"vision"
 
     ranks.clear()

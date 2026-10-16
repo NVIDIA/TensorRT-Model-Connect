@@ -383,8 +383,29 @@ TextResult InternVlPipeline::generate(const std::string& prompt, const float* im
 
     std::vector<float> features;
     std::vector<std::vector<float>> deepstack_features;
-    if (!run_vision_encoder(preprocessed, features, &deepstack_features))
+    if (preprocessed.num_tiles > 1) {
+        // Dynamic tiling: encode every tile on its own and splice the
+        // features in tile order, as the reference model does.
+        const std::size_t tile_values =
+            preprocessed.pixel_values.size() / static_cast<std::size_t>(preprocessed.num_tiles);
+        for (int32_t tile = 0; tile < preprocessed.num_tiles; ++tile) {
+            InternVlPreprocessedImage tile_image = preprocessed;
+            tile_image.num_tiles = 1;
+            const auto first =
+                preprocessed.pixel_values.begin() + static_cast<std::ptrdiff_t>(tile * tile_values);
+            tile_image.pixel_values.assign(first, first + static_cast<std::ptrdiff_t>(tile_values));
+            std::vector<float> tile_features;
+            std::vector<std::vector<float>> tile_deepstack;
+            if (!run_vision_encoder(tile_image, tile_features, &tile_deepstack))
+                throw std::runtime_error("InternVlPipeline: vision encoder failed");
+            if (!tile_deepstack.empty())
+                throw std::runtime_error(
+                    "InternVlPipeline: dynamic image tiles do not support deepstack features");
+            features.insert(features.end(), tile_features.begin(), tile_features.end());
+        }
+    } else if (!run_vision_encoder(preprocessed, features, &deepstack_features)) {
         throw std::runtime_error("InternVlPipeline: vision encoder failed");
+    }
 
     int32_t dim = infer_feature_dim(*vision_encoder_, config_.vision_output_dim);
     if (dim <= 0)
@@ -392,7 +413,8 @@ TextResult InternVlPipeline::generate(const std::string& prompt, const float* im
     int32_t nf = static_cast<int32_t>(features.size() / static_cast<std::size_t>(dim));
 
     // Format prompt, tokenize, generate with vision features
-    auto input_ids = tokenizer_->encode(internvl_format_prompt(prompt, vl_preprocess_));
+    auto input_ids =
+        tokenizer_->encode(internvl_format_prompt(prompt, vl_preprocess_, preprocessed.num_tiles));
     auto [max_new, eos] = resolve_gen_limits(cfg);
     auto sp_vl = internvl_sampling_params_from_config(cfg, eos);
     auto out =

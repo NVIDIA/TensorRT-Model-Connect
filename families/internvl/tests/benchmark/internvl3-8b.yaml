@@ -11,7 +11,7 @@ candidate:
   precision: fp16
   bundle: internvl3-8b-vl.bundle
   build:
-    max_sequence_length: 384
+    max_sequence_length: 4096
 
 reference_environment:
   requirements: ../../requirements.txt

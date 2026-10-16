@@ -48,3 +48,23 @@ install(TARGETS trtmc_model_internvl
 )
 
 include(edge_llm/Adapter.cmake)
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_internvl_tiling
+    ${PROJECT_SOURCE_DIR}/families/internvl/tests/cpp/test_internvl_tiling.cpp
+    image_preprocessor.cpp
+  )
+  set_source_files_properties(image_preprocessor.cpp TARGET_DIRECTORY test_internvl_tiling PROPERTIES
+    COMPILE_OPTIONS "-Wno-missing-field-initializers;-Wno-pedantic;-Wno-unused-function"
+  )
+  target_include_directories(test_internvl_tiling PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+  target_include_directories(test_internvl_tiling SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_link_libraries(test_internvl_tiling PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME internvl_tiling COMMAND test_internvl_tiling)
+  set_tests_properties(internvl_tiling PROPERTIES LABELS "cpu")
+endif()
