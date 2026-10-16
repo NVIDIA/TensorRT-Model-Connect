@@ -27,3 +27,9 @@ path = "families/lfm2/runtime/sampler_byok.cu"
 reason = "Family-owned adaptation of upstream CUDA sampling; preserve the combined license identifier and retained BSD copyright, conditions, and disclaimer."
 license = "Apache-2.0 AND BSD-3-Clause"
 source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cuda/DistributionTemplates.h"
+
+[[exceptions]]
+path = "families/lfm2/runtime/sampler_byok.NOTICE"
+reason = "Packaged third-party notice; preserve the complete upstream BSD copyright, conditions, and disclaimer alongside the NVIDIA contribution license."
+license = "Apache-2.0 AND BSD-3-Clause"
+source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/LICENSE"
