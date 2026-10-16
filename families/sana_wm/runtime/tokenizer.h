@@ -23,8 +23,10 @@ class ITokenizer {
     virtual std::string token_for_id(std::int32_t id) const = 0;
 };
 
-std::unique_ptr<ITokenizer> CreateSanaWmBpeTokenizer(const char* tokenizer_json_data,
-                                                     std::size_t tokenizer_json_size,
-                                                     bool add_special_tokens);
+// Both SANA-WM text encoders frame prompts with their checkpoint tokenizer's
+// post-processor (the Gemma template prepends <bos>), so the family always
+// applies it.
+std::unique_ptr<ITokenizer> CreateSanaWmCheckpointTokenizer(const char* tokenizer_json_data,
+                                                            std::size_t tokenizer_json_size);
 
 } // namespace trtmc

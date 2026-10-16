@@ -71,3 +71,14 @@ set_target_properties(trtmc_model_sana_wm PROPERTIES
 install(TARGETS trtmc_model_sana_wm
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_sana_wm_checkpoint_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/sana_wm/tests/cpp/test_checkpoint_tokenizer.cpp
+    sana_wm_bpe_tokenizer.cpp
+  )
+  target_include_directories(test_sana_wm_checkpoint_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_sana_wm_checkpoint_tokenizer PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_sana_wm_checkpoint_tokenizer PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME sana_wm_checkpoint_tokenizer COMMAND test_sana_wm_checkpoint_tokenizer)
+endif()

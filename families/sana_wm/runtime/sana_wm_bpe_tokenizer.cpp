@@ -1480,10 +1480,9 @@ class BpeTokenizer final : public ITokenizer {
 
 } // namespace
 
-std::unique_ptr<ITokenizer> CreateSanaWmBpeTokenizer(const char* tokenizer_json_data,
-                                                     std::size_t tokenizer_json_size,
-                                                     bool add_special_tokens) {
-    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
+std::unique_ptr<ITokenizer> CreateSanaWmCheckpointTokenizer(const char* tokenizer_json_data,
+                                                            std::size_t tokenizer_json_size) {
+    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, true);
 }
 
 } // namespace trtmc
