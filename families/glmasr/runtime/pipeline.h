@@ -18,6 +18,7 @@
 // deliberately absent rather than present and unexercised.
 
 #include "families/glmasr/runtime/glmasr_config.h"
+#include "families/glmasr/runtime/glmasr_prompt_plan.h"
 #include "families/glmasr/runtime/inference_state.h"
 #include "families/glmasr/runtime/kv_cache.h"
 #include "families/glmasr/runtime/plugin_helpers.h"
@@ -58,6 +59,10 @@ class GlmAsrPipeline final : public ITranscription {
   private:
     // Run the encoder over one padded mel chunk and return [max_audio_embeddings, size].
     std::vector<float> run_audio_encoder(const std::vector<float>& mel);
+
+    // Encode every window and splice its valid embeddings: [sum(embeddings), size].
+    std::vector<float> encode_audio_windows(const float* samples,
+                                            const std::vector<glmasr::AudioWindow>& windows);
 
     // Prompt token ids the decoder consumes, with placeholders for the audio.
     std::vector<int32_t> tokenize_instruction() const;

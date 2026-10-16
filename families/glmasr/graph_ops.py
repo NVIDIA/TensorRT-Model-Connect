@@ -1266,6 +1266,64 @@ def add_attention_from_rows(
         tag=None if tag is None else tag + ".ctx")
 
 
+def add_masked_decode_attention_from_rows(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k: trt.ITensor,
+    v: trt.ITensor,
+    mask: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    kv_seq: int,
+    scale: float,
+) -> trt.ITensor:
+    """One query row attending over ``kv_seq`` cached rows under an additive mask.
+
+    Written as matmul, FP32 masked softmax, matmul. On TensorRT 11.2 (GB300)
+    a single-query IAttention with a mask attends to masked keys once the key
+    length exceeds 512, so the decoder cannot use it at its cache capacity.
+
+    Args:
+        q:    [1, num_heads * head_dim] rows.
+        k, v: [kv_seq, num_kv_heads * head_dim] rows.
+        mask: additive [1, 1, 1, kv_seq] mask.
+
+    Returns:
+        Context rows [1, num_heads * head_dim].
+    """
+    group = num_heads // num_kv_heads
+    q_4d = network.add_shuffle(q)
+    q_4d.reshape_dims = (1, num_kv_heads, group, head_dim)
+    scale_np_dtype = np.float16 if q.dtype == trt.float16 else np.float32
+    scale_t = add_constant(
+        network, (1, 1, 1, 1), np.array([[[[scale]]]]), dtype=scale_np_dtype)
+    if q.dtype == trt.bfloat16:
+        scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
+    q_scaled = network.add_elementwise(
+        q_4d.get_output(0), scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+    k_4d = reshape_rows_to_heads_4d(network, k, num_kv_heads, head_dim, kv_seq)
+    v_4d = reshape_rows_to_heads_4d(network, v, num_kv_heads, head_dim, kv_seq)
+    scores = network.add_matrix_multiply(
+        q_scaled, trt.MatrixOperation.NONE, k_4d, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    if scores.dtype != trt.float32:
+        scores = network.add_cast(scores, trt.float32).get_output(0)
+    if mask.dtype != trt.float32:
+        mask = network.add_cast(mask, trt.float32).get_output(0)
+    scores = network.add_elementwise(scores, mask, trt.ElementWiseOperation.SUM).get_output(0)
+    softmax = network.add_softmax(scores)
+    softmax.axes = 1 << 3
+    probabilities = softmax.get_output(0)
+    if probabilities.dtype != v_4d.dtype:
+        probabilities = network.add_cast(probabilities, v_4d.dtype).get_output(0)
+    context = network.add_matrix_multiply(
+        probabilities, trt.MatrixOperation.NONE, v_4d, trt.MatrixOperation.NONE).get_output(0)
+    rows = network.add_shuffle(context)
+    rows.reshape_dims = (1, num_heads * head_dim)
+    return rows.get_output(0)
+
+
 # Backward-compatible name used by existing tests and call sites.
 _add_attention_core = add_attention_core
 

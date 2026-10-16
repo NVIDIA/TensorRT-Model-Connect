@@ -66,6 +66,51 @@ inline int32_t mel_frames_for_samples(int32_t num_samples, int32_t hop_length, i
     return 1 + (n_fft / 2 + valid_audio - 1) / hop_length;
 }
 
+// Feature frames GlmAsrProcessor counts for one window: the Whisper feature
+// extractor's sample mask taken every hop, so ceil(samples / hop). This, not
+// the centered STFT frame count above, decides the placeholder count.
+inline int32_t processor_frames_for_samples(int32_t num_samples, int32_t hop_length) {
+    if (num_samples <= 0 || hop_length <= 0)
+        return 0;
+    return static_cast<int32_t>((static_cast<int64_t>(num_samples) + hop_length - 1) / hop_length);
+}
+
+// One chunk_length-second slice of the audio. GlmAsrProcessor encodes every
+// window separately and splices the windows' valid embeddings in order.
+struct AudioWindow {
+    int32_t offset{0};
+    int32_t samples{0};
+    int32_t frames{0};     // processor frames of this window
+    int32_t embeddings{0}; // valid embeddings the encoder emits for it
+};
+
+inline std::vector<AudioWindow> plan_audio_windows(int32_t num_samples, int32_t chunk_length_s,
+                                                   int32_t sample_rate, int32_t hop_length,
+                                                   int32_t merge_factor) {
+    std::vector<AudioWindow> windows;
+    const int32_t window_samples = chunk_length_s * sample_rate;
+    if (num_samples <= 0 || window_samples <= 0)
+        return windows;
+    for (int32_t offset = 0; offset < num_samples; offset += window_samples) {
+        AudioWindow window;
+        window.offset = offset;
+        window.samples = std::min(window_samples, num_samples - offset);
+        window.frames = processor_frames_for_samples(window.samples, hop_length);
+        window.embeddings = audio_embedding_count(window.frames, merge_factor);
+        windows.push_back(window);
+    }
+    return windows;
+}
+
+// Placeholders GlmAsrProcessor inserts: one count over all windows' frames.
+inline int32_t audio_placeholder_count(const std::vector<AudioWindow>& windows,
+                                       int32_t merge_factor) {
+    int32_t frames = 0;
+    for (const auto& window : windows)
+        frames += window.frames;
+    return audio_embedding_count(frames, merge_factor);
+}
+
 struct PromptPlan {
     std::vector<int32_t> input_ids;
     // Index of the first audio placeholder in input_ids.
