@@ -136,6 +136,20 @@ converting between the decoder's head-major tensors and the prefill layout.
 The binding uses the ordinary dense cuDNN graph and default heuristic-A plan
 selection, without a fixed engine identifier or autotuning search.
 
+For this batched BF16 route, Q/K normalization computes FP32 squares in the
+graph and reduces each 64-value head through the family mean64 TVM-FFI binding,
+using the pinned Torch CUDA reduction order. The existing attention library
+exports this operation alongside `run_rows`; both exports are required before
+loading checkpoint weights or the native decoder. A last-axis one-element Gather
+supplies the dynamic output shape, and the helper does not read its values.
+The epsilon, normalization, BF16 rounding, gamma and RoPE graph remain unchanged.
+The 2048-wide norms and legacy build paths retain their existing reductions.
+No runtime field or KV contract changes. Older plans remain loadable with the
+updated paired runtime and helper; new plans require the mean64 export and do
+not fall back to a different reduction when it is missing. Rebuilt helper binaries
+and new model plans require their own qualification; prior binary evidence does
+not automatically qualify them.
+
 The version-3 decoder retains the version-2
 `active_length_extent`, an INT32 dynamic input whose dimension carries the host
 cache length. The input values are neither uploaded nor read. One engine has

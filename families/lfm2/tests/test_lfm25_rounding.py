@@ -440,3 +440,33 @@ def _check_projection_residual_graph(gpu, precision):
 @pytest.mark.parametrize("precision", ["bf16", "fp16"])
 def test_projection_is_rounded_before_residual(gpu, precision):
     _check_projection_residual_graph(gpu, precision)
+
+
+@pytest.mark.parametrize("heads", [8, 32])
+def test_qk_mean64_matches_torch_for_decode_prefill_and_tail_rows(gpu, heads):
+    torch, trt, model = gpu
+    bridge, sampler = model._sampler_libraries()
+    extension = model._register_sampler(bridge, sampler)
+    model._register_attention(extension, model._attention_library(bridge))
+
+    def define(network):
+        squares = network.add_input("squares", trt.float32, (-1, heads, 64))
+        _output(network, model._mean64(network, squares, bridge), "actual")
+
+    engine = TinyEngine(
+        torch,
+        trt,
+        define,
+        {"squares": ((1, heads, 64), (17, heads, 64), (20, heads, 64))},
+    )
+    for rows in (1, 3, 17, 20):
+        # BF16 values with varied exponents exercise FP32 accumulation rounding.
+        # R3/H8 and R17/H8 leave a partial final reduction block.
+        index = torch.arange(rows * heads * 64, device="cuda", dtype=torch.int64)
+        mantissa = 1 + (index % 7).float() / 8
+        exponent = ((index // 7) % 25 - 12).to(torch.int32)
+        values = torch.ldexp(mantissa, exponent).reshape(rows, heads, 64).bfloat16()
+        squares = values.float().square()
+        expected = squares.mean(dim=-1, keepdim=True)
+        actual = engine({"squares": squares})["actual"]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)

@@ -298,6 +298,12 @@ def test_eligible_build_registers_before_weights_and_writes_exact_sampler_contra
             b"run_rows",
             b"lfm2.attention.cudnn_bf16_batched_v1",
         ),
+        (
+            "register",
+            str(pair[0].parent / ATTENTION_LIBRARY).encode(),
+            b"mean64",
+            b"lfm2.attention.mean64_fp32_v1",
+        ),
         "weights",
         "decoder",
         "sampler",
@@ -557,7 +563,7 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     module = model.module
     config = module._load_config(request(tmp_path).model_dir)
     cfg = module.validate_dense_lfm2_config(config)
-    updates, explicit, plugins, conv_calls, last_rows = [], [], [], [], []
+    updates, explicit, plugins, conv_calls, last_rows, qk_norms = [], [], [], [], [], []
 
     def tensor(shape, dtype="bf16", name=""):
         return SimpleNamespace(shape=shape, dtype=dtype, name=name)
@@ -571,7 +577,11 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     monkeypatch.setattr(module, "_cast", lambda network, value, dtype: tensor(value.shape, dtype))
     monkeypatch.setattr(module, "_active_rope_cache", lambda *args, **kwargs: (None, None))
     monkeypatch.setattr(module, "_rms_norm", lambda network, value, *args, **kw: value)
-    monkeypatch.setattr(module, "_per_head_rms_norm", lambda network, value, *args, **kw: value)
+    monkeypatch.setattr(
+        module,
+        "_per_head_rms_norm",
+        lambda network, value, *args, **kw: qk_norms.append(kw) or value,
+    )
     monkeypatch.setattr(module, "_apply_rope", lambda network, value, *args, **kw: value)
     monkeypatch.setattr(
         module,
@@ -660,6 +670,10 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     (network,) = model.networks
     inputs = {item.name: item for item in network.inputs}
     assert len(updates) == 16
+    assert len(qk_norms) == 16
+    assert [norm["num_heads"] for norm in qk_norms] == [32, 8] * 8
+    assert all(norm["head_dim"] == 64 and norm["output_dtype"] == "bf16" for norm in qk_norms)
+    assert all(norm["mean64_bridge"] == (bridge if enabled else None) for norm in qk_norms)
     assert len(conv_calls) == 22
     assert {call[0] for call in conv_calls} == {"batched" if enabled else "legacy"}
     assert all(call[1].shape == ((-1 if enabled else 1), 2048) for call in conv_calls)
@@ -852,4 +866,97 @@ def test_batched_w2_rejects_invalid_output_shape_carrier(model, rows, carrier_sh
             Path("/bridge.so"),
             prefix="layer.0",
             shape_like=SimpleNamespace(shape=carrier_shape, dtype=carrier_dtype),
+        )
+
+
+def test_missing_mean64_export_fails_before_weights(model, monkeypatch, tmp_path):
+    pair = installation(tmp_path / "runtime")
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", str(pair[0].parent))
+    monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
+    calls = []
+
+    def register(self, library, function, kernel):
+        calls.append((library, function, kernel))
+        return b"function mean64 not found" if function == b"mean64" else None
+
+    monkeypatch.setattr(type(model.register), "__call__", register)
+    with pytest.raises(
+        RuntimeError, match="Q/K mean64 registration failed: function mean64 not found"
+    ):
+        build(model, request(tmp_path))
+    assert calls[-2][1] == b"run_rows"
+    assert calls[-1] == (
+        str(pair[0].parent / ATTENTION_LIBRARY).encode(),
+        b"mean64",
+        b"lfm2.attention.mean64_fp32_v1",
+    )
+    assert "weights" not in model.events and "decoder" not in model.events
+
+
+@pytest.mark.parametrize("rows,heads", [(-1, 8), (-1, 32), (1, 8), (20, 32)])
+def test_mean64_uses_gather_shape_without_duplicate_reduction(model, monkeypatch, rows, heads):
+    squared = SimpleNamespace(shape=(rows, heads, 64), dtype="fp32")
+    carrier = SimpleNamespace(shape=(rows, heads, 1), dtype="fp32")
+    output = SimpleNamespace(shape=carrier.shape, dtype="fp32")
+    constants, gathers, bindings = [], [], []
+
+    def constant(network, shape, values, *, np_dtype):
+        assert shape == (1,) and np_dtype == np.int32
+        assert values.dtype == np.int32 and values.tolist() == [0]
+        constants.append(values)
+        return SimpleNamespace(shape=shape, dtype="int32")
+
+    def gather(value, indices, axis):
+        assert value is squared and axis == 2 and indices.shape == (1,)
+        gathers.append((value, indices, axis))
+        return SimpleNamespace(get_output=lambda index: carrier)
+
+    network = SimpleNamespace(add_gather=gather)
+    monkeypatch.setattr(model.module, "_constant", constant)
+    monkeypatch.setattr(
+        model.byok,
+        "add_kernel",
+        lambda actual_network, **kw: bindings.append((actual_network, kw)) or [output],
+    )
+    bridge = Path("/installed/bridge.so")
+    assert model.module._mean64(network, squared, bridge) is output
+    assert len(constants) == len(gathers) == len(bindings) == 1
+    actual_network, binding = bindings[0]
+    assert actual_network is network
+    assert binding == {
+        "plugin_library": bridge,
+        "kernel_name": "lfm2.attention.mean64_fp32_v1",
+        "inputs": [squared, carrier],
+        "output_specs": [{"dims": "same_as_input_1", "dtype": "float32"}],
+        "workspace_bytes": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "shape,dtype",
+    [
+        ((20, 8, 64), "bf16"),
+        ((20, 4, 64), "fp32"),
+        ((20, 8, 32), "fp32"),
+        ((0, 8, 64), "fp32"),
+        ((131073, 8, 64), "fp32"),
+        ((20, 64), "fp32"),
+    ],
+)
+def test_mean64_rejects_unsupported_geometry(model, shape, dtype):
+    with pytest.raises(ValueError, match="Q/K mean64 requires FP32"):
+        model.module._mean64(object(), SimpleNamespace(shape=shape, dtype=dtype), Path("bridge.so"))
+
+
+@pytest.mark.parametrize("width,dtype", [(2048, "bf16"), (64, "fp16")])
+def test_mean64_cannot_replace_wide_or_fp16_norm(model, width, dtype):
+    with pytest.raises(ValueError, match="limited to BF16 Q/K normalization"):
+        model.module._rms_norm(
+            object(),
+            object(),
+            np.ones(width),
+            width=width,
+            epsilon=1e-5,
+            output_dtype=dtype,
+            mean64_bridge=Path("bridge.so"),
         )

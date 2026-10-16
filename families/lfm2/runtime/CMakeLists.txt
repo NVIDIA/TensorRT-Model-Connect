@@ -51,14 +51,17 @@ set(_lfm2_runtime_libraries "[]")
 if(TARGET trtmc_byok_tvm_ffi)
   include("${CMAKE_CURRENT_LIST_DIR}/cudnn.cmake")
   if(TARGET lfm2_cudnn)
-    add_library(trtmc_lfm2_sdpa_byok SHARED sdpa_byok.cpp)
+    add_library(trtmc_lfm2_sdpa_byok SHARED sdpa_byok.cpp mean64_byok.cu)
     target_include_directories(trtmc_lfm2_sdpa_byok SYSTEM PRIVATE
       ${LFM2_CUDNN_FRONTEND_INCLUDE_DIR} ${LFM2_CUDNN_INCLUDE_DIR}
       ${CUDAToolkit_INCLUDE_DIRS} ${TRTMC_TVM_FFI_INCLUDE_DIR})
     target_link_libraries(trtmc_lfm2_sdpa_byok PRIVATE
       lfm2_cudnn CUDA::cudart CUDA::nvrtc ${TRTMC_TVM_FFI_LIBRARY} ${CMAKE_DL_LIBS} Threads::Threads)
     add_dependencies(trtmc_lfm2_sdpa_byok lfm2_cudnn_frontend_source lfm2_cudnn_stage)
+    target_compile_options(trtmc_lfm2_sdpa_byok PRIVATE
+      "$<$<COMPILE_LANGUAGE:CUDA>:-O2;--ftz=false;--prec-div=true;--fmad=true>")
     set_target_properties(trtmc_lfm2_sdpa_byok PROPERTIES
+      CUDA_RUNTIME_LIBRARY Shared
       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
       BUILD_RPATH "\$ORIGIN;${TRTMC_TVM_FFI_LIBRARY_DIR}"
       INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../tvm_ffi/lib;${TRTMC_TVM_FFI_LIBRARY_DIR};/usr/local/cuda/lib64")
@@ -173,6 +176,18 @@ if(TRTMC_BUILD_TESTS)
     set_target_properties(test_lfm2_sdpa_contract PROPERTIES
       BUILD_RPATH "${CMAKE_BINARY_DIR};${TRTMC_TVM_FFI_LIBRARY_DIR}")
     add_test(NAME test_lfm2_sdpa_contract COMMAND test_lfm2_sdpa_contract)
+    add_executable(test_lfm2_mean64_contract
+      ${PROJECT_SOURCE_DIR}/families/lfm2/tests/cpp/test_lfm2_mean64_contract.cu)
+    target_include_directories(test_lfm2_mean64_contract PRIVATE ${PROJECT_SOURCE_DIR})
+    target_include_directories(test_lfm2_mean64_contract SYSTEM PRIVATE
+      ${CUDAToolkit_INCLUDE_DIRS} ${TRTMC_TVM_FFI_INCLUDE_DIR})
+    target_link_libraries(test_lfm2_mean64_contract PRIVATE CUDA::cudart ${TRTMC_TVM_FFI_LIBRARY})
+    target_compile_options(test_lfm2_mean64_contract PRIVATE
+      "$<$<COMPILE_LANGUAGE:CUDA>:-O2;--ftz=false;--prec-div=true;--fmad=true>")
+    set_target_properties(test_lfm2_mean64_contract PROPERTIES
+      CUDA_RUNTIME_LIBRARY Shared
+      BUILD_RPATH "${CMAKE_BINARY_DIR};${TRTMC_TVM_FFI_LIBRARY_DIR}")
+    add_test(NAME test_lfm2_mean64_contract COMMAND test_lfm2_mean64_contract)
   endif()
   if(TARGET trtmc_backend_trt)
     add_executable(lfm2_logits_probe

@@ -157,6 +157,34 @@ def _bias(
     ).get_output(0)
 
 
+def _mean64(
+    network: trt.INetworkDefinition,
+    squared: trt.ITensor,
+    bridge: Path,
+) -> trt.ITensor:
+    from tensorrt_model_connect.byok import add_kernel
+
+    shape = tuple(squared.shape)
+    if (
+        squared.dtype != trt.float32
+        or len(shape) != 3
+        or shape[1] not in {8, 32}
+        or shape[2] != 64
+        or (shape[0] != -1 and not 1 <= shape[0] <= 131072)
+    ):
+        raise ValueError("LFM2 Q/K mean64 requires FP32 [R,8|32,64] squares")
+    index = _constant(network, (1,), np.zeros((1,), dtype=np.int32), np_dtype=np.int32)
+    shape_like = network.add_gather(squared, index, 2).get_output(0)
+    return add_kernel(
+        network,
+        plugin_library=bridge,
+        kernel_name=_MEAN64_KERNEL,
+        inputs=[squared, shape_like],
+        output_specs=[{"dims": "same_as_input_1", "dtype": "float32"}],
+        workspace_bytes=0,
+    )[0]
+
+
 def _rms_norm(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -165,7 +193,10 @@ def _rms_norm(
     width: int,
     epsilon: float,
     output_dtype: trt.DataType,
+    mean64_bridge: Path | None = None,
 ) -> trt.ITensor:
+    if mean64_bridge is not None and (width != 64 or output_dtype != trt.bfloat16):
+        raise ValueError("LFM2 mean64 is limited to BF16 Q/K normalization")
     if tuple(np.asarray(gamma).shape) != (width,):
         raise ValueError(f"mapped LFM2 RMSNorm weight must have shape ({width},)")
     fp32 = _cast(network, tensor, trt.float32)
@@ -176,12 +207,11 @@ def _rms_norm(
         fp32,
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
-    mean = network.add_reduce(
-        squared,
-        trt.ReduceOperation.AVG,
-        axes,
-        True,
-    ).get_output(0)
+    mean = (
+        _mean64(network, squared, mean64_bridge)
+        if mean64_bridge is not None
+        else network.add_reduce(squared, trt.ReduceOperation.AVG, axes, True).get_output(0)
+    )
     eps_shape = (1,) * rank
     eps = _constant(
         network,
@@ -232,6 +262,7 @@ def _per_head_rms_norm(
     head_dim: int,
     epsilon: float,
     output_dtype: trt.DataType,
+    mean64_bridge: Path | None = None,
 ) -> trt.ITensor:
     if tuple(np.asarray(gamma).shape) != (head_dim,):
         raise ValueError(f"mapped LFM2 QK norm must have shape ({head_dim},)")
@@ -244,6 +275,7 @@ def _per_head_rms_norm(
         width=head_dim,
         epsilon=epsilon,
         output_dtype=output_dtype,
+        mean64_bridge=mean64_bridge,
     )
     flattened = network.add_shuffle(normalized)
     flattened.reshape_dims = (-1, num_heads * head_dim)
@@ -1142,6 +1174,7 @@ def build_lfm2_engine(
                 head_dim=cfg.head_dim,
                 epsilon=cfg.norm_eps,
                 output_dtype=work_dtype,
+                mean64_bridge=attention_bridge,
             )
             k = _per_head_rms_norm(
                 network,
@@ -1151,6 +1184,7 @@ def build_lfm2_engine(
                 head_dim=cfg.head_dim,
                 epsilon=cfg.norm_eps,
                 output_dtype=work_dtype,
+                mean64_bridge=attention_bridge,
             )
             q = _apply_rope(
                 network,
@@ -1346,6 +1380,7 @@ _W2_ROWS_MODE = "cublas_bf16_batched_w2_v1"
 _W2_ROWS_KERNEL = "lfm2.w2.cublas_bf16_rows_v1"
 _ATTENTION_MODE = "cudnn_bf16_batched_v1"
 _ATTENTION_KERNEL = "lfm2.attention." + _ATTENTION_MODE
+_MEAN64_KERNEL = "lfm2.attention.mean64_fp32_v1"
 
 
 def _uses_w2(config: DenseLfm2Config, precision: str) -> bool:
@@ -1390,6 +1425,14 @@ def _register_attention(extension: ctypes.CDLL, library: Path) -> None:
     if error is not None:
         raise RuntimeError(
             "LFM2 cuDNN attention registration failed: " + error.decode("utf-8", errors="replace")
+        )
+
+    error = extension.trtmc_load_byok_kernel(
+        str(library).encode("utf-8"), b"mean64", _MEAN64_KERNEL.encode("utf-8")
+    )
+    if error is not None:
+        raise RuntimeError(
+            "LFM2 Q/K mean64 registration failed: " + error.decode("utf-8", errors="replace")
         )
 
 

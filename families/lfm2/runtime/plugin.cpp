@@ -275,6 +275,15 @@ void register_attention(bool batched) {
             dlclose(library);
             throw std::runtime_error("lfm2 cannot register its attention operation: " + message);
         }
+        if (rows) {
+            if (const char* error =
+                    load(helper.c_str(), "mean64", "lfm2.attention.mean64_fp32_v1")) {
+                const std::string message(error);
+                dlclose(library);
+                throw std::runtime_error("lfm2 cannot register its Q/K mean64 operation: " +
+                                         message);
+            }
+        }
         return library;
     };
     if (batched) {
