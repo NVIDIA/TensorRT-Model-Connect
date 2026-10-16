@@ -40,6 +40,10 @@ class Lfm2TextGenerationPipeline final : public ITextGeneration,
                                std::unique_ptr<Lfm2InferenceState> state, Lfm2TextGenConfig config,
                                cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
                                std::string model_id = "");
+    Lfm2TextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
+                               std::unique_ptr<Lfm2InferenceState> state, Lfm2TextGenConfig config,
+                               cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+                               std::string model_id, std::unique_ptr<ITrtModule> sampler_module);
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }
@@ -70,6 +74,8 @@ class Lfm2TextGenerationPipeline final : public ITextGeneration,
                                        const TextGenerationConfig& cfg) const;
 
     std::unique_ptr<ITrtModule> decoder_;
+    // Destroy this borrowed-stream module before the decoder that owns the stream.
+    std::unique_ptr<ITrtModule> sampler_module_;
     std::unique_ptr<Lfm2InferenceState> state_;
     Lfm2TextGenConfig config_;
     cudaStream_t stream_{nullptr};

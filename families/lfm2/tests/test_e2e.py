@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -128,23 +129,30 @@ def _prompt(case: dict) -> str:
     )
 
 
-def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
+def _build_bundle(manifest: dict, model_dir: Path, bundle: Path, runtime_root: Path) -> None:
     quantization = manifest.get("quantization")
     assert quantization is None or isinstance(quantization, str)
     fp32_layers = tuple(manifest.get("fp32_layers", ()))
-    build(
-        BuildRequest(
-            model_dir=model_dir,
-            output_path=bundle,
-            family=_FAMILY,
-            task="text_generation",
-            precision=manifest["precision"],
-            max_sequence_length=manifest["max_sequence_length"],
-            tensor_parallel_size=manifest["tensor_parallel_size"],
-            quantization=quantization,
-            fp32_layers=fp32_layers,
+    # The native runtime directory is an explicit standard library-search prefix
+    # for this build, without adding a family-specific builder environment input.
+    prefixes = [str(runtime_root)]
+    previous = os.environ.get("CMAKE_PREFIX_PATH")
+    if previous:
+        prefixes.append(previous)
+    with patch.dict(os.environ, {"CMAKE_PREFIX_PATH": os.pathsep.join(prefixes)}):
+        build(
+            BuildRequest(
+                model_dir=model_dir,
+                output_path=bundle,
+                family=_FAMILY,
+                task="text_generation",
+                precision=manifest["precision"],
+                max_sequence_length=manifest["max_sequence_length"],
+                tensor_parallel_size=manifest["tensor_parallel_size"],
+                quantization=quantization,
+                fp32_layers=fp32_layers,
+            )
         )
-    )
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
 
 
@@ -459,7 +467,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     bundle = tmp_path / manifest["bundle"]
 
     with evidence_stage("build"):
-        _build_bundle(manifest, model_dir, bundle)
+        _build_bundle(manifest, model_dir, bundle, runtime_root)
     with evidence_stage("compare"):
         _assert_rank_sections(binary, bundle, tp_size)
     with evidence_stage("native"):

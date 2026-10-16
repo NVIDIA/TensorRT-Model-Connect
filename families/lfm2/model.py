@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import sys
 from pathlib import Path
@@ -1022,6 +1023,87 @@ def _positive_int(value: object, name: str) -> int:
     return result
 
 
+_SAMPLER_MODE = "philox_exponential_v1"
+_SAMPLER_KERNEL = "lfm2.sampler." + _SAMPLER_MODE
+_SAMPLER_VOCAB_SIZE = 128000
+
+
+def _sampler_libraries() -> tuple[Path, Path]:
+    from tensorrt_model_connect.build import cmake_prefixes
+    import tensorrt_model_connect.byok as byok
+
+    names = ("libtrtmc_byok_tvm_ffi.so", "libtrtmc_lfm2_sampler_byok.so")
+
+    def require_pair(directory: Path) -> tuple[Path, Path]:
+        directory = directory.resolve()
+        pair = (directory / names[0], directory / names[1])
+        missing = [str(path) for path in pair if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(
+                "LFM2 sampler installation is incomplete: " + ", ".join(missing)
+            )
+        return pair
+
+    directories = [
+        prefix / libdir for prefix in cmake_prefixes() for libdir in ("", "bin", "lib", "lib64")
+    ]
+    directories.append(Path(byok.__file__).resolve().parent / "bin")
+    for directory in directories:
+        if any((directory / name).exists() for name in names):
+            return require_pair(directory)
+    raise FileNotFoundError(
+        "LFM2 sampling requires the installed BYOK bridge and LFM2 sampler library; "
+        "set CMAKE_PREFIX_PATH to their shared directory or installation prefix"
+    )
+
+
+def _register_sampler(bridge: Path, library: Path) -> ctypes.CDLL:
+    extension = ctypes.CDLL(str(bridge), mode=ctypes.RTLD_GLOBAL)
+    register = extension.trtmc_load_byok_kernel
+    register.argtypes = [ctypes.c_char_p] * 3
+    register.restype = ctypes.c_char_p
+    error = register(str(library).encode("utf-8"), b"sample", _SAMPLER_KERNEL.encode("utf-8"))
+    if error is not None:
+        raise RuntimeError(
+            "LFM2 sampler registration failed: " + error.decode("utf-8", errors="replace")
+        )
+    if trt.get_plugin_registry().get_creator("TvmFfiKernel", "1", "") is None:
+        raise RuntimeError("LFM2 sampler installation did not register TvmFfiKernel version 1")
+    return extension
+
+
+def build_lfm2_sampler_engine(bridge: Path, *, verbose: bool = False) -> bytes:
+    from tensorrt_model_connect.byok import add_kernel
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    config = builder.create_builder_config()
+    config.builder_optimization_level = 1
+    config.clear_flag(trt.BuilderFlag.TF32)
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 32 << 20)
+    probabilities = network.add_input("probabilities", trt.float32, (1, _SAMPLER_VOCAB_SIZE))
+    state = network.add_input("rng_state", trt.int32, (4,))
+    outputs = add_kernel(
+        network,
+        plugin_library=bridge,
+        kernel_name=_SAMPLER_KERNEL,
+        inputs=[probabilities, state],
+        output_specs=[{"dims": [1], "dtype": "int32"}, {"dims": [4], "dtype": "int32"}],
+        workspace_bytes=_SAMPLER_VOCAB_SIZE * 8,
+    )
+    for tensor, name in zip(outputs, ("token_id", "next_state"), strict=True):
+        tensor.name = name
+        network.mark_output(tensor)
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("TensorRT failed to build the LFM2 sampler engine")
+    data = bytes(plan)
+    if not data:
+        raise RuntimeError("TensorRT returned an empty LFM2 sampler engine")
+    return data
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one dense LFM2 bundle without shared model orchestration."""
     if request.dynamic_kv_cache:
@@ -1069,6 +1151,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.mtp_seq_len is not None:
         raise NotImplementedError("dense LFM2 does not support MTP speculative decoding")
 
+    sampler_bridge = None
+    sampler_extension = None
+    if resolved.vocab_size == _SAMPLER_VOCAB_SIZE:
+        if request.backend != "trt":
+            raise ValueError("LFM2 Philox sampling requires backend=trt")
+        # The decoder emits FP32 logits for both supported model precisions.
+        # Resolve and register dependencies before allocating checkpoint weights.
+        sampler_bridge, sampler_library = _sampler_libraries()
+        sampler_extension = _register_sampler(sampler_bridge, sampler_library)
+
     weights = load_lfm2_weights(str(model_dir), config, precision=precision)
     plan = build_lfm2_engine(
         config,
@@ -1086,9 +1178,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         max_cache_length=max_cache_length,
         decoder_engine_layout="single",
     )
+    sampler_plan = None
+    if sampler_bridge is not None:
+        sampler_plan = build_lfm2_sampler_engine(sampler_bridge, verbose=bool(request.verbose))
+        runtime_config["sampler_mode"] = _SAMPLER_MODE
+    # Keep the registration library alive until both plans have been serialized.
+    del sampler_extension
 
     writer.set_header(family="lfm2", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
+    if sampler_plan is not None:
+        writer.add_bytes("sampler.plan", sampler_plan)
     writer.add_json("runtime.json", runtime_config)
     for filename in _BUNDLE_FILES:
         path = model_dir / filename

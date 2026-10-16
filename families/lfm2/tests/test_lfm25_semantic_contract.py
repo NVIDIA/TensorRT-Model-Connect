@@ -438,7 +438,7 @@ def test_sampling_checks_each_stop_independently_and_requires_final_answer():
             native_ids=native_ids,
         )
         assert result["reference_stop"] != result["native_stop"]
-        assert "independent random" in result["rng_scope"]
+        assert "probability distributions" in result["rng_scope"]
     with pytest.raises(AssertionError, match="before EOS or budget"):
         check("model-card-sampling", [answer], [answer], reference_ids=[1] * 8, native_ids=[2] * 7)
     with pytest.raises(AssertionError, match="identification"):

@@ -13,6 +13,26 @@ point values remain diagnostics, rather than generation acceptance gates.
 Download the pinned checkpoint, then build a BF16 bundle. Run these commands
 from the repository root in an environment with the project's build dependencies:
 
+The 128,000-token vocabulary uses a separate native sampler stage. Its build
+requires `libtrtmc_byok_tvm_ffi.so` and `libtrtmc_lfm2_sampler_byok.so` from the same
+installation. For a source checkout, first configure the native CMake build with
+`TRTMC_ENABLE_BYOK=ON`, then build the owning family and select its output directory:
+
+```bash
+cmake --build build --target trtmc trtmc_backend_trt trtmc_model_lfm2
+export CMAKE_PREFIX_PATH="$PWD/build${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+```
+
+The family target also builds the bridge and sampler library. Installed packages
+can instead use their adjacent `bin` directory or a standard `CMAKE_PREFIX_PATH`
+installation. A prefix may identify the library directory itself or an install
+prefix containing `bin`, `lib`, or `lib64`. A directory containing either sampler
+dependency must provide both; an incomplete pair fails before checkpoint weights
+are loaded rather than combining libraries from different installations.
+The owning E2E caller passes its selected native runtime directory through this
+standard prefix input for the build. The sampler library and its license notice
+are included in the CMake `sdk` and `runtime` install components.
+
 ```bash
 python - <<'PY'
 from huggingface_hub import snapshot_download
@@ -39,6 +59,18 @@ tokens. A shorter bundle can validate short cases, but cannot establish the
 model-card context limit. The default build capacity is 32,768 unless explicitly
 overridden. The native prefill currently advances one token at a time.
 
+New eligible bundles contain `sampler.plan` and the runtime field
+`sampler_mode: "philox_exponential_v1"`. The qualified sampler shape is batch one,
+FP32 probabilities with vocabulary size 128,000. Other vocabulary sizes retain
+the legacy bundle and sampler path; they do not gain arbitrary-size Philox
+support. Existing 23-field bundles remain readable. A stray sampler plan in a
+legacy bundle, or an unknown mode, missing/empty plan, or incompatible sampler
+I/O in a new bundle, is rejected. Older runtimes reject the new 24-field contract.
+The sampler-enabled build requires `backend="trt"`; TensorRT-RTX is not part of
+this sampler contract.
+This discovery and native-library installation path is currently Linux/POSIX;
+it does not establish Windows packaging or execution support.
+
 ## Raw text and sampling
 
 The legacy CLI accepts a raw prompt or a single user chat prompt:
@@ -56,15 +88,20 @@ The official template supplies the opening `<think>` token. Reasoning is always
 enabled for this checkpoint; `preserve_thinking` controls earlier conversation
 turns, not whether the model reasons on its next turn.
 
-Native and PyTorch samplers have different random generators. Equal seeds do not
-promise equal sampled sequences. The CPU sampler tests compare the complete
-filtered probability vectors and exact candidate masks against the actual
-Transformers processors. They then couple both distributions with the same
-uniform draw and require equal selected IDs. Model-level sampling proof must
-add native/reference logits from identical token histories and preserve this
-shared draw coupling as a numerical diagnostic. Sampled generation must satisfy the
-case-specific behavior contract; equal sampled IDs are not required. Greedy
-behavior alone does not establish sampling behavior.
+Legacy bundles retain the xorshift/inverse-CDF sampler. The new sampler stage
+uses Philox exponential-race selection on the complete vocabulary probability
+vector, with explicit seed and offset state reset for each request. It runs
+through TensorRT and the family-owned TVM-FFI binding without Python or LibTorch
+in the runtime. CPU temperature, repetition, top-k, top-p, and min-p processing
+remain unchanged, as does greedy selection.
+
+Equal seeds still do not promise equal generated sequences: native/reference
+logits and probabilities can differ. CPU tests compare filtered distributions
+against the actual Transformers processors; coupled-uniform controls exercise
+the legacy categorical path. They do not replace real TensorRT sampler-stage
+tests of the full probability vector, seed/offset transitions, and selected ID.
+Sampled generation must also satisfy the case-specific behavior contract;
+operator-level agreement and greedy behavior alone do not establish that result.
 
 The separate `model-card-sampling` case runs the original `model.generate` with
 `do_sample=True` and the native public SDK with temperature `0.1`, top-k `50`,
@@ -79,8 +116,9 @@ python families/lfm2/tests/lfm25_contract_validation.py \
   --output validation/lfm2-sampled --case model-card-sampling
 ```
 
-At the original 512-token cap and seed 42, the reviewed original and native
-outputs both exhaust the budget inside reasoning, without a final answer. This
+In earlier legacy-bundle validation at the original 512-token cap and seed 42,
+the original and native outputs both exhausted the budget inside reasoning,
+without a final answer. That observation does not qualify the new sampler stage. This
 case checks the paired reasoning-only typed-part state, the full 512-token
 budget, and topical/core C. elegans concepts. Its receipt explicitly labels this
 **not completed-answer proof**; raw reasoning and incidental claims remain
@@ -99,8 +137,8 @@ python families/lfm2/tests/lfm25_contract_validation.py \
 ```
 
 Each sampled completion must stop at EOS or its full budget, and the native typed
-finish reason must agree with its own output. Independent random generators may
-choose different tokens, lengths, or EOS/budget outcomes despite equal seeds.
+finish reason must agree with its own output. Differences in model probabilities
+may produce different tokens, lengths, or EOS/budget outcomes despite equal seeds.
 The extra 2,048-token case does not replace or relabel the original card budget.
 Parameter/seed receipts and raw outputs remain available; coupled-uniform and
 probability-vector comparisons remain separate numerical diagnostics.

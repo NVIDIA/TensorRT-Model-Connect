@@ -308,4 +308,8 @@ std::unique_ptr<Lfm2ISampler> create_lfm2_sampler(const Lfm2SamplingParams& para
     return std::make_unique<Lfm2DistributionSampler>(seed);
 }
 
+bool lfm2_sampling_uses_distribution(const Lfm2SamplingParams& params) {
+    return distribution_sampling_enabled(params);
+}
+
 } // namespace trtmc

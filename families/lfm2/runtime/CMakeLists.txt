@@ -16,6 +16,7 @@ add_library(trtmc_model_lfm2 SHARED
   plugin_helpers.cpp
   pretokenizer.cpp
   sampler.cpp
+  sampler_module.cpp
 )
 
 target_include_directories(trtmc_model_lfm2
@@ -31,6 +32,7 @@ target_link_libraries(trtmc_model_lfm2 PRIVATE
   ICU::uc
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_lfm2 PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -44,6 +46,38 @@ set_target_properties(trtmc_model_lfm2 PROPERTIES
 install(TARGETS trtmc_model_lfm2
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TARGET trtmc_byok_tvm_ffi)
+  add_library(trtmc_lfm2_sampler_byok SHARED sampler_byok.cu)
+  target_include_directories(trtmc_lfm2_sampler_byok SYSTEM PRIVATE
+    ${CUDAToolkit_INCLUDE_DIRS}
+    ${TRTMC_TVM_FFI_INCLUDE_DIR}
+  )
+  target_link_libraries(trtmc_lfm2_sampler_byok PRIVATE
+    CUDA::cudart
+    ${TRTMC_TVM_FFI_LIBRARY}
+  )
+  target_compile_options(trtmc_lfm2_sampler_byok PRIVATE
+    "$<$<COMPILE_LANGUAGE:CUDA>:-O2;--ftz=false;--prec-div=true;--fmad=true>"
+  )
+  set_target_properties(trtmc_lfm2_sampler_byok PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    CUDA_RUNTIME_LIBRARY Shared
+    BUILD_RPATH "\$ORIGIN;${TRTMC_TVM_FFI_LIBRARY_DIR}"
+    INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../tvm_ffi/lib;${TRTMC_TVM_FFI_LIBRARY_DIR};/usr/local/cuda/lib64"
+  )
+  add_dependencies(trtmc_model_lfm2 trtmc_lfm2_sampler_byok trtmc_byok_tvm_ffi)
+  # Wheels install the SDK component; native installations can select runtime.
+  foreach(component IN ITEMS sdk runtime)
+    install(TARGETS trtmc_lfm2_sampler_byok
+      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT ${component}
+    )
+    install(FILES sampler_byok.NOTICE
+      DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/trtmc_lfm2_sampler_byok
+      COMPONENT ${component}
+    )
+  endforeach()
+endif()
 
 if(TRTMC_BUILD_TESTS)
   if(TARGET trtmc_backend_trt)
@@ -95,4 +129,12 @@ if(TRTMC_BUILD_TESTS)
     ${PROJECT_SOURCE_DIR}/families/lfm2/tests/fixtures/lfm25-tokenizer.json --token-ids)
   set_tests_properties(test_lfm25_tokenizer_ids PROPERTIES SKIP_RETURN_CODE 77)
   set_tests_properties(test_lfm2_runtime PROPERTIES SKIP_RETURN_CODE 77)
+  add_executable(test_lfm2_sampler_contract
+    ${PROJECT_SOURCE_DIR}/families/lfm2/tests/cpp/test_lfm2_sampler_contract.cpp)
+  target_include_directories(test_lfm2_sampler_contract PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_lfm2_sampler_contract PRIVATE
+    trtmc_model_lfm2 trtmc_core nlohmann_json::nlohmann_json
+    ${TRTMC_CUDART_LIBRARY} ${CMAKE_DL_LIBS})
+  add_test(NAME test_lfm2_sampler_contract COMMAND test_lfm2_sampler_contract)
 endif()

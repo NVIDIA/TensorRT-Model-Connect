@@ -130,8 +130,16 @@ Lfm2TextGenerationPipeline::Lfm2TextGenerationPipeline(std::unique_ptr<ITrtModul
                                                        cudaStream_t stream,
                                                        std::shared_ptr<ITokenizer> tokenizer,
                                                        std::string model_id)
-    : decoder_(std::move(decoder)), state_(std::move(state)), config_(std::move(config)),
-      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id)) {
+    : Lfm2TextGenerationPipeline(std::move(decoder), std::move(state), std::move(config), stream,
+                                 std::move(tokenizer), std::move(model_id), nullptr) {}
+
+Lfm2TextGenerationPipeline::Lfm2TextGenerationPipeline(
+    std::unique_ptr<ITrtModule> decoder, std::unique_ptr<Lfm2InferenceState> state,
+    Lfm2TextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+    std::string model_id, std::unique_ptr<ITrtModule> sampler_module)
+    : decoder_(std::move(decoder)), sampler_module_(std::move(sampler_module)),
+      state_(std::move(state)), config_(std::move(config)), stream_(stream),
+      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id)) {
     normalize_eos_ids(config_);
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error("Lfm2TextGenerationPipeline: invalid decoder module");
@@ -141,6 +149,12 @@ Lfm2TextGenerationPipeline::Lfm2TextGenerationPipeline(std::unique_ptr<ITrtModul
         throw std::invalid_argument("Lfm2TextGenerationPipeline: invalid vocabulary size");
     if (stream_ == nullptr || decoder_->stream() != stream_)
         throw std::invalid_argument("Lfm2TextGenerationPipeline: stream mismatch");
+    if (sampler_module_) {
+        if (config_.vocab_size != 128000 || sampler_module_->stream() != stream_)
+            throw std::invalid_argument(
+                "Lfm2TextGenerationPipeline: sampler vocabulary/stream mismatch");
+        lfm2_validate_sampler_module(*sampler_module_);
+    }
     state_->bind_to(*decoder_);
 }
 
@@ -281,13 +295,16 @@ Lfm2TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_
             "LFM2 prompt and generation exceed the fixed native KV cache capacity");
     }
 
-    auto local_sampler = create_lfm2_sampler(params);
+    auto local_sampler = sampler_module_ ? create_lfm2_sampler(params, *sampler_module_)
+                                         : create_lfm2_sampler(params);
     auto* active_sampler = local_sampler.get();
     active_sampler->reset();
 
     const auto setup_start = Clock::now();
     state_->reset();
     decoder_->reset_execution_context();
+    if (sampler_module_)
+        sampler_module_->reset_execution_context();
     state_->bind_to(*decoder_);
     logits_device_ptr_ = nullptr;
     const auto setup_end = Clock::now();

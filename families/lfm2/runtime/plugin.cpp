@@ -9,6 +9,8 @@
 #include "trtmc/runtime/family_factory.h"
 
 #include <cstdint>
+#include <dlfcn.h>
+#include <filesystem>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -17,6 +19,8 @@
 namespace trtmc::lfm2 {
 
 namespace {
+
+constexpr const char* kSamplerMode = "philox_exponential_v1";
 
 struct RuntimeConfig {
     std::int32_t hidden_size;
@@ -33,6 +37,7 @@ struct RuntimeConfig {
     std::vector<std::int32_t> eos_token_ids;
     std::int32_t max_cache_length;
     std::string precision;
+    std::string sampler_mode;
 };
 
 template <typename T>
@@ -67,8 +72,18 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (!json.is_object())
         throw std::runtime_error("lfm2 runtime.json must be an object");
-    if (json.size() != 23)
+    const bool has_sampler = json.contains("sampler_mode");
+    if (json.size() != (has_sampler ? 24U : 23U))
         throw std::runtime_error("lfm2 runtime.json has an unexpected field set");
+    const std::string sampler_mode =
+        has_sampler ? require_value<std::string>(json, "sampler_mode") : std::string{};
+    if (has_sampler && sampler_mode != kSamplerMode)
+        throw std::runtime_error("lfm2 runtime.json has an unsupported sampler_mode");
+    const auto* sampler_plan = bundle.find_section("sampler.plan");
+    if (has_sampler && (sampler_plan == nullptr || sampler_plan->length == 0))
+        throw std::runtime_error("lfm2 sampler_mode requires a nonempty sampler.plan");
+    if (!has_sampler && sampler_plan != nullptr)
+        throw std::runtime_error("lfm2 legacy runtime contract cannot contain sampler.plan");
     if (!require_value<bool>(json, "native_kv_cache") ||
         require_value<std::int32_t>(json, "native_kv_contract_version") != 1) {
         throw std::runtime_error("lfm2 runtime.json requires native KV contract version 1");
@@ -96,6 +111,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_eos_ids(json),
         require_value<std::int32_t>(json, "max_cache_length"),
         require_value<std::string>(json, "precision"),
+        sampler_mode,
     };
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 ||
@@ -110,15 +126,69 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         (config.precision != "fp16" && config.precision != "bf16")) {
         throw std::runtime_error("lfm2 runtime.json contains invalid model contract");
     }
+    if (has_sampler && config.vocab_size != 128000)
+        throw std::runtime_error("lfm2 Philox sampler requires a 128000-token vocabulary");
     return config;
+}
+
+void register_sampler() {
+    // Failed initialization is retryable; a successful registration is retained
+    // once per loaded family library, including concurrent pipeline creation.
+    static void* const registered = [] {
+        Dl_info location{};
+        if (!dladdr(reinterpret_cast<void*>(&register_sampler), &location) || !location.dli_fname)
+            throw std::runtime_error("lfm2 cannot locate its family runtime library");
+        const auto root = std::filesystem::absolute(location.dli_fname).parent_path();
+        const auto helper = root / "libtrtmc_lfm2_sampler_byok.so";
+        const auto bridge = root / "libtrtmc_byok_tvm_ffi.so";
+        if (!std::filesystem::is_regular_file(helper) || !std::filesystem::is_regular_file(bridge))
+            throw std::runtime_error(
+                "lfm2 Philox sampler requires adjacent family sampler and TVM-FFI libraries");
+        void* library = dlopen(bridge.c_str(), RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
+        if (library == nullptr)
+            throw std::runtime_error("lfm2 cannot load its adjacent TVM-FFI bridge: " +
+                                     std::string(dlerror()));
+        using LoadKernel = const char* (*)(const char*, const char*, const char*) noexcept;
+        const auto load = reinterpret_cast<LoadKernel>(dlsym(library, "trtmc_load_byok_kernel"));
+        if (load == nullptr) {
+            dlclose(library);
+            throw std::runtime_error("lfm2 TVM-FFI bridge has no kernel registration entrypoint");
+        }
+        if (const char* error =
+                load(helper.c_str(), "sample", "lfm2.sampler.philox_exponential_v1")) {
+            const std::string message(error);
+            dlclose(library);
+            throw std::runtime_error("lfm2 cannot register its sampler: " + message);
+        }
+        // Registration stores callable pointers; retain this successful handle.
+        return library;
+    }();
+    (void)registered;
 }
 
 } // namespace
 
 ITask* create(const FamilyContext& context) {
     const RuntimeConfig config = parse_runtime_config(context.reader);
+    if (!config.sampler_mode.empty()) {
+        const char* backend = context.backend.name();
+        if (backend == nullptr || std::string(backend) != "trt")
+            throw std::runtime_error("lfm2 Philox sampler requires the TensorRT backend");
+        register_sampler();
+    }
     auto decoder = load_module(context.backend, require_section(context.reader, "engine.plan"));
     const cudaStream_t stream = decoder->stream();
+    std::unique_ptr<ITrtModule> sampler;
+    if (!config.sampler_mode.empty()) {
+        const auto plan = require_section(context.reader, "sampler.plan");
+        ModuleCreateOptions options;
+        options.stream = stream;
+        sampler = context.backend.create_module(plan.data(), plan.size(), options);
+        if (!sampler || !sampler->ok() || sampler->stream() != stream)
+            throw std::runtime_error("lfm2 failed to load sampler.plan on the decoder stream");
+        lfm2_validate_sampler_module(*sampler);
+        sampler->set_timing_label("lfm2 sampler");
+    }
     const DType dtype = state_dtype(config.precision);
 
     auto kv = std::make_unique<Lfm2KvCache>(config.num_attention_layers, config.max_cache_length,
@@ -136,10 +206,11 @@ ITask* create(const FamilyContext& context) {
     generation.id_eos = config.eos_token_ids.front();
     generation.id_eos_ids = config.eos_token_ids;
     apply_chat_template(context.reader, generation);
+    auto tokenizer = create_tokenizer(context.reader);
 
     return new Lfm2TextGenerationPipeline(std::move(decoder), std::move(state),
-                                          std::move(generation), stream,
-                                          create_tokenizer(context.reader), std::string{});
+                                          std::move(generation), stream, std::move(tokenizer),
+                                          std::string{}, std::move(sampler));
 }
 
 } // namespace trtmc::lfm2

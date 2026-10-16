@@ -630,7 +630,7 @@ def evaluate(name, native, expected_parts, reference_ids, eos, request, input_co
     if stochastic:
         checks["generation_config"] = request["config"]
         checks["rng_scope"] = (
-            "Native and Torch use independent random generators; equal seeds do not imply equal draws, tokens, or EOS/budget outcomes."
+            "Equal seeds alone do not guarantee equal generated text; probability distributions and sampling execution policy also affect tokens and EOS/budget outcomes."
         )
     if name == "single-token-continuation":
         assert input_count == 1 and request.get("prompt") == "Hello", "singleton input changed"

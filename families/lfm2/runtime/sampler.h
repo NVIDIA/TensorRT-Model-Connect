@@ -12,6 +12,7 @@
 namespace trtmc {
 
 struct TextGenerationConfig;
+class ITrtModule;
 
 struct Lfm2SamplingParams {
     float temperature{1.0F};
@@ -66,5 +67,11 @@ std::vector<float> lfm2_apply_repetition_penalty(const float* logits, int32_t vo
 int32_t lfm2_resolve_top_k(const Lfm2SamplingParams& params);
 bool lfm2_is_eos_token(const Lfm2SamplingParams& params, int32_t token_id);
 std::unique_ptr<Lfm2ISampler> create_lfm2_sampler(const Lfm2SamplingParams& params);
+bool lfm2_sampling_uses_distribution(const Lfm2SamplingParams& params);
+// The module is pipeline-owned; each returned sampler owns only its request's
+// seed/offset and preserves the same CPU probability processors.
+void lfm2_validate_sampler_module(const ITrtModule& module);
+std::unique_ptr<Lfm2ISampler> create_lfm2_sampler(const Lfm2SamplingParams& params,
+                                                  ITrtModule& module);
 
 } // namespace trtmc
