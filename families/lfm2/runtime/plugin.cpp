@@ -21,7 +21,8 @@ namespace trtmc::lfm2 {
 namespace {
 
 constexpr const char* kSamplerMode = "philox_exponential_v1";
-constexpr const char* kW2Mode = "cublas_bf16_first_two_v1";
+constexpr const char* kW2Mode = "cublas_bf16_all_w2_v1";
+constexpr const char* kFirstTwoW2Mode = "cublas_bf16_first_two_v1";
 
 struct RuntimeConfig {
     std::int32_t hidden_size;
@@ -86,7 +87,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         throw std::runtime_error("lfm2 runtime.json has an unsupported sampler_mode");
     const std::string w2_mode =
         has_w2 ? require_value<std::string>(json, "w2_mode") : std::string{};
-    if (has_w2 && w2_mode != kW2Mode)
+    if (has_w2 && w2_mode != kW2Mode && w2_mode != kFirstTwoW2Mode)
         throw std::runtime_error("lfm2 runtime.json has an unsupported w2_mode");
     const auto* sampler_plan = bundle.find_section("sampler.plan");
     if (has_sampler && (sampler_plan == nullptr || sampler_plan->length == 0))

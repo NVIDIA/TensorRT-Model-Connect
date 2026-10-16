@@ -610,7 +610,7 @@ def _add_swiglu(
         right,
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
-    if w2_bridge is not None and prefix in {"layer.0", "layer.1"}:
+    if w2_bridge is not None:
         return _add_w2(network, gated, weights[f"{prefix}.w2"], w2_bridge, prefix=prefix)
     return _matmul(
         network,
@@ -702,7 +702,7 @@ def build_lfm2_engine(
 
     cfg = validate_dense_lfm2_config(config)
     if w2_bridge is not None and not _uses_w2(cfg, precision):
-        raise ValueError("LFM2 W2 requires the BF16 first-two-layer build contract")
+        raise ValueError("LFM2 W2 requires its qualified BF16 model geometry")
     _validate_mapped_metadata(cfg, weights)
     if max_cache_length <= 0:
         raise ValueError("max_cache_length must be positive")
@@ -1070,7 +1070,7 @@ def _positive_int(value: object, name: str) -> int:
 _SAMPLER_MODE = "philox_exponential_v1"
 _SAMPLER_KERNEL = "lfm2.sampler." + _SAMPLER_MODE
 _SAMPLER_VOCAB_SIZE = 128000
-_W2_MODE = "cublas_bf16_first_two_v1"
+_W2_MODE = "cublas_bf16_all_w2_v1"
 _W2_KERNEL = "lfm2.w2.cublas_bf16_v1"
 
 

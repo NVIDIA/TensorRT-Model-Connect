@@ -253,7 +253,7 @@ def test_eligible_build_registers_before_weights_and_writes_exact_sampler_contra
     sections = build(model, request(tmp_path))
     runtime = json.loads(sections["runtime.json"])
     assert len(runtime) == 25 and runtime["sampler_mode"] == "philox_exponential_v1"
-    assert runtime["w2_mode"] == "cublas_bf16_first_two_v1"
+    assert runtime["w2_mode"] == "cublas_bf16_all_w2_v1"
     assert sections["engine.plan"] == b"decoder plan"
     assert sections["sampler.plan"] == b"sampler plan"
     assert model.events == [
@@ -429,7 +429,10 @@ def test_w2_eligibility_does_not_expand_to_other_model_geometry(model, tmp_path,
     assert not model.module._uses_w2(config, "fp16")
 
 
-def test_only_first_two_swiglu_outputs_use_w2_and_preserve_gated_input(model, monkeypatch):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_all_swiglu_outputs_use_w2_when_enabled_and_preserve_gated_input(
+    model, monkeypatch, enabled
+):
     config = SimpleNamespace(hidden_size=2048, intermediate_size=10752)
     matrices, plugins, constants = [], [], []
     gated = SimpleNamespace(dtype="bf16", shape=(1, 10752))
@@ -458,8 +461,10 @@ def test_only_first_two_swiglu_outputs_use_w2_and_preserve_gated_input(model, mo
         return [SimpleNamespace(name="", dtype="bf16", shape=(1, 2048))]
 
     monkeypatch.setattr(model.byok, "add_kernel", plugin)
-    weight = np.broadcast_to(np.float32(0), (10752, 2048))
+    weights = []
     for index in range(30):
+        weight = np.broadcast_to(np.float32(index), (10752, 2048))
+        weights.append(weight)
         prefix = f"layer.{index}"
         result = model.module._add_swiglu(
             network,
@@ -469,24 +474,28 @@ def test_only_first_two_swiglu_outputs_use_w2_and_preserve_gated_input(model, mo
             config=config,
             storage_dtype=np.dtype(np.float32),
             work_dtype="bf16",
-            w2_bridge=Path("/installed/bridge.so"),
+            w2_bridge=Path("/installed/bridge.so") if enabled else None,
         )
-        if index < 2:
+        if enabled:
             assert result.shape == (1, 2048) and result.dtype == "bf16"
+            assert result.name == f"{prefix}.feed_forward.w2"
         else:
             assert result is gated
-    assert len(plugins) == len(constants) == 2
-    assert [name for name in matrices if name.endswith(".w2")] == [
-        f"layer.{index}.feed_forward.w2" for index in range(2, 30)
+    assert len(plugins) == len(constants) == (30 if enabled else 0)
+    assert matrices == [
+        f"layer.{index}.feed_forward.{projection}"
+        for index in range(30)
+        for projection in (("w1", "w3") if enabled else ("w1", "w3", "w2"))
     ]
-    assert shuffle.first_transpose == (1, 0) and shuffle.reshape_dims == (2048, 10752)
+    if enabled:
+        assert shuffle.first_transpose == (1, 0) and shuffle.reshape_dims == (2048, 10752)
     for entry in plugins:
         assert entry["inputs"] == [gated, transpose_output]
         assert entry["kernel_name"] == "lfm2.w2.cublas_bf16_v1"
         assert entry["workspace_bytes"] == 0
         assert entry["output_specs"] == [{"dims": [1, 2048], "dtype": "bfloat16"}]
-    for shape, values, kwargs in constants:
-        assert shape == (10752, 2048) and values is weight
+    for index, (shape, values, kwargs) in enumerate(constants):
+        assert shape == (10752, 2048) and values is weights[index]
         assert kwargs == {"storage_dtype": np.dtype(np.float32), "work_dtype": "bf16"}
 
 

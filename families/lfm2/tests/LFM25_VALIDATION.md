@@ -73,20 +73,23 @@ I/O in a new bundle, is rejected. Older runtimes reject the new 24-field contrac
 The sampler-enabled build requires `backend="trt"`; TensorRT-RTX is not part of
 this sampler contract.
 
-Eligible BF16 builds add `w2_mode: "cublas_bf16_first_two_v1"`, yielding a
+Eligible BF16 builds add `w2_mode: "cublas_bf16_all_w2_v1"`, yielding a
 25-field contract. This mode requires the sampler contract, batch one, vocabulary
 128,000, hidden width 2,048, intermediate width 10,752, 30 layers, and two initial
-convolutional layers. It offloads only those two layers' W2 projections through
-the family-owned TVM-FFI helper. The existing BF16 gated input and BF16 weight
+convolutional layers. It offloads all 30 decoder layers' W2 projections through
+the same family-owned TVM-FFI helper. The existing BF16 gated input and BF16 weight
 values feed `cublasGemmEx` with FP32 accumulation, BF16 output, default math and
 algorithm, and the vendor's default workspace. TensorRT supplies the execution
 stream. All other graph operations retain their existing construction.
-Existing 23-field and sampler-only 24-field bundles remain readable; FP16 and
-other model geometries retain their previous build path. Unknown W2 modes,
+Existing 23-field and sampler-only 24-field bundles remain readable, as do
+25-field `cublas_bf16_first_two_v1` bundles with their original two-projection
+plans. FP16 and other model geometries retain their previous build path. Unknown W2 modes,
 missing sampler metadata, incompatible geometry, and missing adjacent helpers
-fail closed. A runtime that predates W2 support rejects the 25-field contract.
-Operator controls and a single completed response do not establish the full
-model-card matrix; model acceptance still uses the unchanged per-case semantics.
+fail closed. Runtimes that predate W2 support reject the 25-field contract.
+Runtimes that recognize only the first-two mode also reject the new all-layer mode.
+Each W2 mode needs its own unchanged semantic matrix and full-capacity validation;
+earlier first-two results do not qualify the all-layer mode. Operator controls
+or a single completed response do not establish that validation.
 
 This discovery and native-library installation path is currently Linux/POSIX;
 it does not establish Windows packaging or execution support.

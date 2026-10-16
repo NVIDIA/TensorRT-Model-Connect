@@ -49,10 +49,10 @@ Json runtime_config() {
             {"decoder_engine_layout", "single"}};
 }
 
-Json w2_runtime_config() {
+Json w2_runtime_config(const char* mode) {
     auto config = runtime_config();
     config["sampler_mode"] = "philox_exponential_v1";
-    config["w2_mode"] = "cublas_bf16_first_two_v1";
+    config["w2_mode"] = mode;
     config["hidden_size"] = 2048;
     config["conv_dim"] = 2048;
     config["intermediate_size"] = 10752;
@@ -162,10 +162,21 @@ void accepted_contracts(Fixture& fixture) {
           "new 24-field contract accepts its required sampler plan");
     check(trtmc::lfm2::parse_runtime_config(current_reader).w2_mode.empty(),
           "sampler-only 24-field contract requires no W2 helper");
-    trtmc::BundleReader w2_reader(fixture.write(w2_runtime_config(), 1).string());
-    const auto w2 = trtmc::lfm2::parse_runtime_config(w2_reader);
-    check(w2.w2_mode == "cublas_bf16_first_two_v1" && w2.sampler_mode == "philox_exponential_v1",
-          "25-field contract declares both W2 and sampler dependencies");
+    for (const char* mode : {"cublas_bf16_all_w2_v1", "cublas_bf16_first_two_v1"}) {
+        trtmc::BundleReader w2_reader(fixture.write(w2_runtime_config(mode), 1).string());
+        const auto w2 = trtmc::lfm2::parse_runtime_config(w2_reader);
+        check(w2.w2_mode == mode && w2.sampler_mode == "philox_exponential_v1",
+              "25-field contract preserves each W2 mode and its sampler dependency");
+        FakeBackend other_backend("trt_rtx");
+        bool rejected = false;
+        try {
+            (void)trtmc::lfm2::create({w2_reader, other_backend});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("TensorRT backend") != std::string::npos;
+        }
+        check(rejected && other_backend.calls == 0,
+              "each W2 mode rejects an unqualified backend before helper/model loading");
+    }
     FakeBackend legacy_backend("trt");
     try {
         (void)trtmc::lfm2::create({reader, legacy_backend});
@@ -183,14 +194,6 @@ void accepted_contracts(Fixture& fixture) {
     }
     check(rejected && other_backend.calls == 0,
           "new mode rejects an unqualified backend before helper/model loading");
-    rejected = false;
-    try {
-        (void)trtmc::lfm2::create({w2_reader, other_backend});
-    } catch (const std::runtime_error& error) {
-        rejected = std::string(error.what()).find("TensorRT backend") != std::string::npos;
-    }
-    check(rejected && other_backend.calls == 0,
-          "W2 mode rejects an unqualified backend before helper/model loading");
 }
 
 void rejected_contracts(Fixture& fixture) {
@@ -221,8 +224,8 @@ void rejected_contracts(Fixture& fixture) {
     check(fixture.rejected(changed, 1), "field count alone cannot replace required metadata");
 }
 
-void rejected_w2_contracts(Fixture& fixture) {
-    const auto current = w2_runtime_config();
+void rejected_w2_contracts(Fixture& fixture, const char* mode) {
+    const auto current = w2_runtime_config(mode);
     auto changed = current;
     changed.erase("sampler_mode");
     check(fixture.rejected(changed, -1), "W2 mode cannot replace the sampler contract");
@@ -273,6 +276,7 @@ int main() {
     Fixture fixture;
     accepted_contracts(fixture);
     rejected_contracts(fixture);
-    rejected_w2_contracts(fixture);
+    rejected_w2_contracts(fixture, "cublas_bf16_all_w2_v1");
+    rejected_w2_contracts(fixture, "cublas_bf16_first_two_v1");
     return failures;
 }
