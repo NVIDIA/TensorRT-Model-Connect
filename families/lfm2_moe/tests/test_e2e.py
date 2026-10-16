@@ -315,6 +315,7 @@ def _hf_reference(
     prompt: str,
     actual_ids: list[int],
     torch,
+    diagnostic=None,
 ) -> tuple:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from families.lfm2_moe.tests.lfm25_contract_validation import capture_reference_execution_identity
@@ -361,8 +362,14 @@ def _hf_reference(
     if generation_options["do_sample"]:
         generation_options.setdefault("top_p", 1.0)
         torch.manual_seed(int(case["seed"]))
-    with torch.inference_mode():
-        generated = model.generate(**inputs, **generation_options)
+    if diagnostic is not None:
+        diagnostic.attach(model)
+    try:
+        with torch.inference_mode():
+            generated = model.generate(**inputs, **generation_options)
+    finally:
+        if diagnostic is not None:
+            diagnostic.finish(prompt_ids)
     reference_ids = generated[0, inputs["input_ids"].shape[1] :].tolist()
     reference_text = tokenizer.decode(reference_ids, skip_special_tokens=True).strip()
 
@@ -528,6 +535,10 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         with evidence_stage("compare"):
             assert repeated["text"] == payload["text"]
 
+    from families.lfm2_moe.tests.lfm25_row88_diagnostics import capture_for, collect_native
+
+    diagnostic = capture_for(manifest, case)
+    options = {"diagnostic": diagnostic} if diagnostic is not None else {}
     with evidence_stage("reference"):
         reference = _hf_reference(
             model_dir,
@@ -536,6 +547,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             prompt,
             payload["token_ids"],
             torch,
+            **options,
         )
     record_evidence(
         "reference",
@@ -545,6 +557,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             "actual_decoded": reference[2],
         },
     )
+    collect_native(diagnostic, bundle, prompt, payload["token_ids"], reference[0], tmp_path)
     if not _is_sampling(case):
         _record_text_diagnostics(payload["token_ids"], reference[0])
     with evidence_stage("compare"):

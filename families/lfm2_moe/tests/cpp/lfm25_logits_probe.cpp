@@ -5,6 +5,7 @@
 
 // Reference validation only: replay token IDs through the production native
 // decoder and state, exporting its logits without introducing another sampler.
+#include "families/lfm2_moe/runtime/chat_templates.h"
 #include "families/lfm2_moe/runtime/hybrid_state.h"
 #include "families/lfm2_moe/runtime/plugin_helpers.h"
 
@@ -18,11 +19,31 @@
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 2)
-            throw std::invalid_argument("usage: lfm25_moe_logits_probe bundle");
-        trtmc::BundleReader bundle(argv[1]);
+        const bool encode_only = argc == 4 && std::string(argv[1]) == "--encode-prompt";
+        if (argc != 2 && !encode_only)
+            throw std::invalid_argument(
+                "usage: lfm25_moe_logits_probe [--encode-prompt] bundle [prompt]");
+        trtmc::BundleReader bundle(argv[encode_only ? 2 : 1]);
         const auto cfg =
             nlohmann::json::parse(trtmc::lfm2_moe::require_text_section(bundle, "runtime.json"));
+        if (encode_only) {
+            trtmc::Lfm2MoeTextGenConfig generation;
+            generation.id_bos = cfg.at("bos_token_id");
+            trtmc::lfm2_moe::apply_chat_template(bundle, generation);
+            auto tokenizer = trtmc::lfm2_moe::create_tokenizer(bundle);
+            std::string rendered = argv[3];
+            if (!generation.chat_template_format.empty())
+                rendered =
+                    trtmc::lfm2_moe_apply_chat_template(generation.chat_template_format, rendered);
+            auto ids = tokenizer->encode(rendered);
+            if (ids.size() >= 2 && generation.id_bos >= 0 && ids[0] == generation.id_bos &&
+                ids[1] == generation.id_bos)
+                ids.erase(ids.begin());
+            if (ids.empty() && generation.id_bos >= 0)
+                ids.push_back(generation.id_bos);
+            std::cout << nlohmann::json({{"prompt_ids", ids}}).dump() << std::endl;
+            return 0;
+        }
         std::unique_ptr<trtmc::IBackend, decltype(&trtmc_destroy_backend)> backend(
             trtmc_create_backend(), trtmc_destroy_backend);
         auto module = trtmc::lfm2_moe::load_module(
