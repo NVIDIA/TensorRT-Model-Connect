@@ -41,7 +41,7 @@ def build(
     max_sequence_length: int | None = None, tensor_parallel_size: int = 1,
     verbose: bool = False,
     fp32_layers: list[int] | tuple[int, ...] = (),
-    quantization: str | None = None,
+    quantization: str | None = None, mtp_seq_len: int | None = None,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
     prefill_chunk_len: int | None = None,
 ) -> int:
@@ -59,6 +59,7 @@ def build(
         fp32_layers=tuple(fp32_layers),
         quantization=quantization,
         prefill_chunk_len=prefill_chunk_len,
+        mtp_seq_len=mtp_seq_len,
     )
     if execution is not None:
         request = with_execution(request, execution)
