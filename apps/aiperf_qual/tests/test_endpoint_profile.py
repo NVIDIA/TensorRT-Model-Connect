@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from trtmc_aiperf_qual.endpoint_profile import check_output, input_key
+from trtmc_aiperf_qual.endpoint_profile import check_output, input_key, samples
 from trtmc_aiperf_qual.config import ConfigError, Environment
 
 
@@ -29,6 +30,23 @@ def test_singleton_embedding_wire_forms_keep_the_same_input_identity():
     assert input_key("embeddings", {"input": "hello"}) == input_key("embeddings", {"input": ["hello"]})
     with pytest.raises(ValueError):
         input_key("embeddings", {"input": ["hello", "second input"]})
+
+
+def test_unicode_separators_inside_json_strings_do_not_split_corpus_records(tmp_path):
+    text = "first\u2028second\u0085third"
+    rows = {
+        "embeddings": {"texts": [text]},
+        "reranking": {"texts": [{"name": "query", "contents": [text]},
+                                  {"name": "passages", "contents": ["document"]}]},
+    }
+    for group, row in rows.items():
+        path = tmp_path / f"{group}.jsonl"
+        path.write_text(json.dumps(row, ensure_ascii=False) + "\n\n")
+        record, = samples(group, path, "model", 120)
+        if group == "embeddings":
+            assert record["payload"]["input"] == record["request"]["prompt"] == text
+        else:
+            assert record["payload"]["query"]["text"] == record["request"]["query"] == text
 
 
 def test_media_identity_uses_original_bytes():

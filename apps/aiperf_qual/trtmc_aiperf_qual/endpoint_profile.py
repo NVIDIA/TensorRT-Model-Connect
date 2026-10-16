@@ -52,7 +52,7 @@ def input_key(group: str, payload: dict[str, Any]) -> str:
 
 def samples(group: str, inputs: Path, model: str, token_limit: int) -> list[dict[str, Any]]:
     result = []
-    for line in inputs.read_text().splitlines():
+    for line in inputs.read_text().split("\n"):
         if not line.strip():
             continue
         row = json.loads(line)
@@ -213,7 +213,8 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
                              command_prefix=[client, "-m", "aiperf"], timeout_s=1800)
             if run.exit_code:
                 raise RuntimeError(f"AIPerf failed with exit code {run.exit_code}")
-            records = [json.loads(line) for line in server["records"].read_text().splitlines()]
+            records = [json.loads(line) for line in server["records"].read_text().split("\n")
+                       if line.strip()]
             joined = join_records(run, records)
         (out / "joined-records.json").write_text(json.dumps(joined, indent=2) + "\n")
         if len(joined) != 55 or not all(r["joined"] and r["metrics_joined"] and not r["client_error"] and
