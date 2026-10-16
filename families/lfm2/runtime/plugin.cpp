@@ -283,6 +283,12 @@ void register_attention(bool batched) {
                 throw std::runtime_error("lfm2 cannot register its Q/K mean64 operation: " +
                                          message);
             }
+            if (const char* error = load(helper.c_str(), "rsqrt", "lfm2.attention.rsqrt_fp32_v1")) {
+                const std::string message(error);
+                dlclose(library);
+                throw std::runtime_error("lfm2 cannot register its Q/K rsqrt operation: " +
+                                         message);
+            }
         }
         return library;
     };

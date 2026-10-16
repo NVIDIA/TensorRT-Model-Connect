@@ -43,7 +43,8 @@ source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51
 [[exceptions]]
 path = "families/lfm2/runtime/mean64_byok.cu"
 # Upstream license: https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/LICENSE
-reason = "Family-owned adaptation of the upstream CUDA mean reduction; preserve the combined license identifier and retained BSD copyright, conditions, and disclaimer."
+# Reciprocal square root: https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cuda/UnaryOpsKernel.cu
+reason = "Family-owned adaptation of the upstream CUDA mean and reciprocal square root operations; preserve the combined license identifier and retained BSD copyright, conditions, and disclaimer."
 license = "Apache-2.0 AND BSD-3-Clause"
 source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cuda/Reduce.cuh"
 

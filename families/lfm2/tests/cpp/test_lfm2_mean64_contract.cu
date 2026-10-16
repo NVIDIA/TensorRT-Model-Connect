@@ -67,6 +67,123 @@ void rejected(const char* message, Mutation mutation) {
     expect(caught, message);
 }
 
+struct RsqrtInputs {
+    View input{0x100000000ULL, {17, 32, 1}};
+    View output{0x200000000ULL, {17, 32, 1}};
+
+    void geometry(int64_t rows, int64_t heads) {
+        for (auto* view : {&input, &output}) {
+            view->shape[0] = rows;
+            view->shape[1] = heads;
+        }
+    }
+    RsqrtContract validate() { return validate_rsqrt_contract(input.get(), output.get()); }
+};
+
+template <typename Mutation>
+void rsqrt_rejected(const char* message, Mutation mutation) {
+    RsqrtInputs input;
+    mutation(input);
+    bool caught = false;
+    try {
+        (void)input.validate();
+    } catch (const std::exception&) {
+        caught = true;
+    }
+    expect(caught, message);
+}
+
+void test_rsqrt_contract() {
+    RsqrtInputs input;
+    for (const int64_t rows : {int64_t{1}, int64_t{17}, kMaximumRows}) {
+        for (const int64_t heads : {8, 32}) {
+            input.geometry(rows, heads);
+            const auto contract = input.validate();
+            expect(contract.elements == rows * heads &&
+                       contract.bytes == static_cast<size_t>(rows * heads) * sizeof(float) &&
+                       contract.grid_x == static_cast<uint32_t>((rows * heads + 255) / 256),
+                   "rsqrt bounded geometry and capacities with null strides");
+        }
+    }
+    bool full_profile_covered = true;
+    for (const int64_t heads : {8, 32}) {
+        for (int64_t rows = 1; rows <= kMaximumRows; ++rows) {
+            input.geometry(rows, heads);
+            const auto contract = input.validate();
+            const auto covered = static_cast<int64_t>(contract.grid_x) * 256;
+            full_profile_covered =
+                full_profile_covered && covered >= rows * heads && covered - 256 < rows * heads;
+        }
+    }
+    expect(full_profile_covered, "every rsqrt profile shape has a minimally covering launch");
+    input.geometry(17, 32);
+    int64_t strides[3] = {32, 1, 1};
+    input.input.tensor.strides = strides;
+    input.output.tensor.strides = strides;
+    expect(input.validate().elements == 544, "rsqrt explicit contiguous strides");
+    input.input.tensor.byte_offset = 16;
+    input.output.tensor.byte_offset = 32;
+    const auto contract = input.validate();
+    expect(reinterpret_cast<uintptr_t>(contract.input) == 0x100000010ULL &&
+               reinterpret_cast<uintptr_t>(contract.output) == 0x200000020ULL,
+           "rsqrt aligned offsets are applied once");
+
+    rsqrt_rejected("rsqrt zero rows", [](RsqrtInputs& x) { x.geometry(0, 8); });
+    rsqrt_rejected("rsqrt negative rows", [](RsqrtInputs& x) { x.geometry(-1, 8); });
+    rsqrt_rejected("rsqrt rows exceed profile",
+                   [](RsqrtInputs& x) { x.geometry(kMaximumRows + 1, 8); });
+    RsqrtInputs unbounded;
+    unbounded.geometry(std::numeric_limits<int64_t>::max(), 32);
+    int64_t huge_strides[3] = {std::numeric_limits<int64_t>::max(), 1, 1};
+    unbounded.input.tensor.strides = huge_strides;
+    bool bounded_before_strides = false;
+    try {
+        (void)unbounded.validate();
+    } catch (const std::exception& error) {
+        bounded_before_strides =
+            std::string(error.what()).find("row count is outside its profile") != std::string::npos;
+    }
+    expect(bounded_before_strides, "rsqrt row bound precedes explicit stride inspection");
+    rsqrt_rejected("rsqrt unsupported heads", [](RsqrtInputs& x) { x.geometry(17, 16); });
+    rsqrt_rejected("rsqrt input last dimension", [](RsqrtInputs& x) { x.input.shape[2] = 2; });
+    rsqrt_rejected("rsqrt output row mismatch", [](RsqrtInputs& x) { x.output.shape[0] = 18; });
+    rsqrt_rejected("rsqrt output head mismatch", [](RsqrtInputs& x) { x.output.shape[1] = 8; });
+    rsqrt_rejected("rsqrt output last dimension", [](RsqrtInputs& x) { x.output.shape[2] = 2; });
+    rsqrt_rejected("rsqrt input rank", [](RsqrtInputs& x) { x.input.tensor.ndim = 2; });
+    rsqrt_rejected("rsqrt output rank", [](RsqrtInputs& x) { x.output.tensor.ndim = 2; });
+    rsqrt_rejected("rsqrt input dtype",
+                   [](RsqrtInputs& x) { x.input.tensor.dtype = {kDLBfloat, 16, 1}; });
+    rsqrt_rejected("rsqrt output dtype", [](RsqrtInputs& x) { x.output.tensor.dtype.bits = 64; });
+    rsqrt_rejected("rsqrt vector lanes", [](RsqrtInputs& x) { x.input.tensor.dtype.lanes = 2; });
+    rsqrt_rejected("rsqrt CPU input",
+                   [](RsqrtInputs& x) { x.input.tensor.device.device_type = kDLCPU; });
+    rsqrt_rejected("rsqrt negative device",
+                   [](RsqrtInputs& x) { x.input.tensor.device.device_id = -1; });
+    rsqrt_rejected("rsqrt different devices",
+                   [](RsqrtInputs& x) { x.output.tensor.device.device_id = 1; });
+    rsqrt_rejected("rsqrt null input", [](RsqrtInputs& x) { x.input.tensor.data = nullptr; });
+    rsqrt_rejected("rsqrt null output", [](RsqrtInputs& x) { x.output.tensor.data = nullptr; });
+    rsqrt_rejected("rsqrt unaligned input", [](RsqrtInputs& x) { x.input.tensor.byte_offset = 1; });
+    rsqrt_rejected("rsqrt unaligned output",
+                   [](RsqrtInputs& x) { x.output.tensor.byte_offset = 1; });
+    rsqrt_rejected("rsqrt input offset overflow", [](RsqrtInputs& x) {
+        x.input.tensor.byte_offset = std::numeric_limits<uint64_t>::max();
+    });
+    rsqrt_rejected("rsqrt output range overflow", [](RsqrtInputs& x) {
+        x.output.tensor.data = reinterpret_cast<void*>(std::numeric_limits<uintptr_t>::max() - 3);
+    });
+    rsqrt_rejected("rsqrt input output alias",
+                   [](RsqrtInputs& x) { x.output.tensor.data = x.input.tensor.data; });
+    rsqrt_rejected("rsqrt partial storage overlap", [](RsqrtInputs& x) {
+        x.output.tensor.data = reinterpret_cast<void*>(uintptr_t{0x100000004ULL});
+    });
+    int64_t bad_strides[3] = {33, 1, 1};
+    rsqrt_rejected("rsqrt noncontiguous input",
+                   [&](RsqrtInputs& x) { x.input.tensor.strides = bad_strides; });
+    rsqrt_rejected("rsqrt noncontiguous output",
+                   [&](RsqrtInputs& x) { x.output.tensor.strides = bad_strides; });
+}
+
 } // namespace
 
 int main() {
@@ -187,6 +304,7 @@ int main() {
     rejected("noncontiguous carrier", [&](Inputs& x) { x.carrier.tensor.strides = bad_ys; });
     rejected("noncontiguous output", [&](Inputs& x) { x.output.tensor.strides = bad_ys; });
 
+    test_rsqrt_contract();
     std::cout << checks << " CPU metadata checks; " << failures << " failures; no CUDA calls\n";
     return failures == 0 ? 0 : 1;
 }

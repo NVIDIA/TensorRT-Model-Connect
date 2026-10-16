@@ -6,6 +6,8 @@
  * 7661cd9c6b841b62b7f411aa52ec51f05457263b, specifically MeanOps in
  * aten/src/ATen/native/SharedReduceOps.h and thread_reduce_impl, block_x_reduce,
  * and setReduceConfig in aten/src/ATen/native/cuda/Reduce.cuh.
+ * The FP32 reciprocal square root follows rsqrt_wrapper in the same commit's
+ * aten/src/ATen/native/cuda/UnaryOpsKernel.cu: CUDA ::rsqrt(float), or ::rsqrtf.
  */
 
 /*
@@ -251,6 +253,67 @@ void mean64(tvm::ffi::TensorView squares, tvm::ffi::TensorView shape_like,
         TVM_FFI_THROW(RuntimeError) << cudaGetErrorString(error);
 }
 
+struct RsqrtContract {
+    int elements;
+    int device;
+    const float* input;
+    float* output;
+    size_t bytes;
+    uint32_t grid_x;
+};
+
+RsqrtContract validate_rsqrt_contract(tvm::ffi::TensorView input, tvm::ffi::TensorView output) {
+    require_metadata(input);
+    require_metadata(output);
+    const int64_t rows = input.size(0);
+    const int64_t heads = input.size(1);
+    require(rows >= 1 && rows <= kMaximumRows, "LFM2 rsqrt row count is outside its profile");
+    require(heads == 8 || heads == 32, "LFM2 rsqrt requires eight or thirty-two heads");
+    require(input.size(2) == 1, "LFM2 rsqrt input must have shape [R, H, 1]");
+    require(output.size(0) == rows && output.size(1) == heads && output.size(2) == 1,
+            "LFM2 rsqrt input and output must have the same shape [R, H, 1]");
+    require(output.device().device_id == input.device().device_id,
+            "LFM2 rsqrt tensors must use the same CUDA device");
+    // Bound all dimensions before inspecting potentially explicit strides.
+    require(input.IsContiguous() && output.IsContiguous(),
+            "LFM2 rsqrt requires contiguous tensors");
+    const int elements = static_cast<int>(rows * heads);
+    const size_t bytes = static_cast<size_t>(elements) * sizeof(float);
+    const uintptr_t source = storage_address(input, bytes);
+    const uintptr_t target = storage_address(output, bytes);
+    require(source + bytes <= target || target + bytes <= source,
+            "LFM2 rsqrt input and output storage must not overlap");
+    return {elements,
+            input.device().device_id,
+            reinterpret_cast<const float*>(source),
+            reinterpret_cast<float*>(target),
+            bytes,
+            static_cast<uint32_t>((elements + 255) / 256)};
+}
+
+__global__ void rsqrt_kernel(const float* input, float* output, int elements) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < elements)
+        output[index] = ::rsqrtf(input[index]);
+}
+
+void rsqrt_fp32(tvm::ffi::TensorView input, tvm::ffi::TensorView output) {
+    const auto contract = validate_rsqrt_contract(input, output);
+    int device = -1;
+    auto error = cudaGetDevice(&device);
+    if (error != cudaSuccess)
+        TVM_FFI_THROW(RuntimeError) << cudaGetErrorString(error);
+    require(device == contract.device, "LFM2 rsqrt tensor device is not the active CUDA device");
+    // Preserve CUDA's valid default stream as well as an inherited nonzero stream.
+    const auto stream = reinterpret_cast<cudaStream_t>(TVMFFIEnvGetStream(kDLCUDA, device));
+    rsqrt_kernel<<<contract.grid_x, 256, 0, stream>>>(contract.input, contract.output,
+                                                      contract.elements);
+    error = cudaGetLastError();
+    if (error != cudaSuccess)
+        TVM_FFI_THROW(RuntimeError) << cudaGetErrorString(error);
+}
+
 } // namespace
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mean64, mean64);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(rsqrt, rsqrt_fp32);

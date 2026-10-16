@@ -304,6 +304,12 @@ def test_eligible_build_registers_before_weights_and_writes_exact_sampler_contra
             b"mean64",
             b"lfm2.attention.mean64_fp32_v1",
         ),
+        (
+            "register",
+            str(pair[0].parent / ATTENTION_LIBRARY).encode(),
+            b"rsqrt",
+            b"lfm2.attention.rsqrt_fp32_v1",
+        ),
         "weights",
         "decoder",
         "sampler",
@@ -869,7 +875,8 @@ def test_batched_w2_rejects_invalid_output_shape_carrier(model, rows, carrier_sh
         )
 
 
-def test_missing_mean64_export_fails_before_weights(model, monkeypatch, tmp_path):
+@pytest.mark.parametrize("missing", ["mean64", "rsqrt"])
+def test_missing_qk_export_fails_before_weights(model, monkeypatch, tmp_path, missing):
     pair = installation(tmp_path / "runtime")
     monkeypatch.setenv("CMAKE_PREFIX_PATH", str(pair[0].parent))
     monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
@@ -877,18 +884,18 @@ def test_missing_mean64_export_fails_before_weights(model, monkeypatch, tmp_path
 
     def register(self, library, function, kernel):
         calls.append((library, function, kernel))
-        return b"function mean64 not found" if function == b"mean64" else None
+        return f"function {missing} not found".encode() if function == missing.encode() else None
 
     monkeypatch.setattr(type(model.register), "__call__", register)
     with pytest.raises(
-        RuntimeError, match="Q/K mean64 registration failed: function mean64 not found"
+        RuntimeError, match=f"Q/K {missing} registration failed: function {missing} not found"
     ):
         build(model, request(tmp_path))
-    assert calls[-2][1] == b"run_rows"
+    assert calls[-2][1] == (b"run_rows" if missing == "mean64" else b"mean64")
     assert calls[-1] == (
         str(pair[0].parent / ATTENTION_LIBRARY).encode(),
-        b"mean64",
-        b"lfm2.attention.mean64_fp32_v1",
+        missing.encode(),
+        f"lfm2.attention.{missing}_fp32_v1".encode(),
     )
     assert "weights" not in model.events and "decoder" not in model.events
 
@@ -960,3 +967,127 @@ def test_mean64_cannot_replace_wide_or_fp16_norm(model, width, dtype):
             output_dtype=dtype,
             mean64_bridge=Path("bridge.so"),
         )
+
+
+@pytest.mark.parametrize("rows,heads", [(-1, 8), (-1, 32), (1, 8), (17, 32), (131072, 32)])
+def test_rsqrt_preserves_variance_shape(model, monkeypatch, rows, heads):
+    variance = SimpleNamespace(shape=(rows, heads, 1), dtype="fp32")
+    output = SimpleNamespace(shape=variance.shape, dtype="fp32")
+    bindings = []
+    network = object()
+    bridge = Path("/installed/bridge.so")
+    monkeypatch.setattr(
+        model.byok,
+        "add_kernel",
+        lambda actual_network, **kw: bindings.append((actual_network, kw)) or [output],
+    )
+    assert model.module._rsqrt(network, variance, bridge) is output
+    assert bindings == [
+        (
+            network,
+            {
+                "plugin_library": bridge,
+                "kernel_name": "lfm2.attention.rsqrt_fp32_v1",
+                "inputs": [variance],
+                "output_specs": [{"dims": "same_as_input_0", "dtype": "float32"}],
+                "workspace_bytes": 0,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "shape,dtype",
+    [
+        ((17, 8, 1), "bf16"),
+        ((17, 4, 1), "fp32"),
+        ((17, 8, 64), "fp32"),
+        ((0, 8, 1), "fp32"),
+        ((-2, 8, 1), "fp32"),
+        ((131073, 8, 1), "fp32"),
+        ((17, 8), "fp32"),
+        ((1, 17, 8, 1), "fp32"),
+    ],
+)
+def test_rsqrt_rejects_unsupported_geometry(model, shape, dtype):
+    with pytest.raises(ValueError, match="Q/K rsqrt requires FP32"):
+        model.module._rsqrt(object(), SimpleNamespace(shape=shape, dtype=dtype), Path("bridge.so"))
+
+
+@pytest.mark.parametrize(
+    "width,dtype,enabled",
+    [
+        (64, "bf16", True),
+        (64, "bf16", False),
+        (2048, "bf16", False),
+        (64, "fp16", False),
+    ],
+)
+def test_rms_norm_routes_only_enabled_qk_through_rsqrt(model, monkeypatch, width, dtype, enabled):
+    module = model.module
+    for name, values in [
+        ("ElementWiseOperation", {"PROD": "prod", "SUM": "sum"}),
+        ("UnaryOperation", {"SQRT": "sqrt", "RECIP": "recip"}),
+        ("ReduceOperation", {"AVG": "avg"}),
+    ]:
+        monkeypatch.setattr(module.trt, name, SimpleNamespace(**values), raising=False)
+    events = []
+    shape = (17, 8, width)
+    tensor = SimpleNamespace(shape=shape, dtype=dtype)
+    gamma = np.ones(width, np.float32)
+    bridge = Path("bridge.so") if enabled else None
+
+    def result(shape, dtype="fp32"):
+        return SimpleNamespace(shape=shape, dtype=dtype)
+
+    def layer(output):
+        return SimpleNamespace(get_output=lambda index: output)
+
+    def elementwise(left, right, operation):
+        events.append((operation, left, right))
+        return layer(result(left.shape, left.dtype))
+
+    def reduce(value, operation, axes, keepdims):
+        events.append(("reduce", operation, axes, keepdims))
+        return layer(result((17, 8, 1)))
+
+    def unary(value, operation):
+        events.append(("unary", operation))
+        return layer(result(value.shape))
+
+    network = SimpleNamespace(add_elementwise=elementwise, add_reduce=reduce, add_unary=unary)
+
+    def mean64(actual_network, squared, actual_bridge):
+        assert actual_network is network and actual_bridge == bridge
+        events.append(("mean64", squared))
+        return result((17, 8, 1))
+
+    def rsqrt(actual_network, variance, actual_bridge):
+        assert actual_network is network and actual_bridge == bridge
+        assert variance.shape == (17, 8, 1) and variance.dtype == "fp32"
+        events.append(("rsqrt", variance))
+        return result(variance.shape)
+
+    monkeypatch.setattr(module, "_mean64", mean64)
+    monkeypatch.setattr(module, "_rsqrt", rsqrt)
+    monkeypatch.setattr(
+        module, "_cast", lambda net, value, output_dtype: result(value.shape, output_dtype)
+    )
+    monkeypatch.setattr(module, "_constant", lambda net, dims, values: result(dims))
+    monkeypatch.setattr(
+        module,
+        "_work_constant",
+        lambda net, dims, values, **kwargs: result(dims, kwargs["work_dtype"]),
+    )
+    output = module._rms_norm(
+        network, tensor, gamma, width=width, epsilon=1e-5, output_dtype=dtype, mean64_bridge=bridge
+    )
+    assert output.shape == shape and output.dtype == dtype
+    names = [event[0] for event in events]
+    if enabled:
+        assert names == ["prod", "mean64", "sum", "rsqrt", "prod", "prod"]
+    else:
+        assert names == ["prod", "reduce", "sum", "unary", "unary", "prod", "prod"]
+        assert [event[1] for event in events if event[0] == "unary"] == ["sqrt", "recip"]
+    # Gamma multiplication still receives the explicitly model-dtype activation.
+    assert events[-1][1].dtype == events[-1][2].dtype == dtype

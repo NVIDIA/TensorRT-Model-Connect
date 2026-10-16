@@ -2,6 +2,8 @@ LFM2 cuDNN SDPA graph construction is adapted from PyTorch commit
 7661cd9c6b841b62b7f411aa52ec51f05457263b (aten/src/ATen/native/cudnn/MHA.cpp).
 The Q/K mean64 CUDA reduction is adapted from the same commit
 (aten/src/ATen/native/cuda/Reduce.cuh and aten/src/ATen/native/SharedReduceOps.h).
+The Q/K FP32 reciprocal square root follows the same commit
+(aten/src/ATen/native/cuda/UnaryOpsKernel.cu), using CUDA float rsqrt.
 
 From PyTorch:
 

@@ -470,3 +470,39 @@ def test_qk_mean64_matches_torch_for_decode_prefill_and_tail_rows(gpu, heads):
         expected = squares.mean(dim=-1, keepdim=True)
         actual = engine({"squares": squares})["actual"]
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("heads", [8, 32])
+def test_qk_rsqrt_preserves_torch_fp32_rounding(gpu, heads):
+    torch, trt, model = gpu
+    bridge, sampler = model._sampler_libraries()
+    extension = model._register_sampler(bridge, sampler)
+    model._register_attention(extension, model._attention_library(bridge))
+
+    def define(network):
+        variance = network.add_input("variance", trt.float32, (-1, heads, 1))
+        _output(network, model._rsqrt(network, variance, bridge), "actual")
+
+    engine = TinyEngine(
+        torch,
+        trt,
+        define,
+        {"variance": ((1, heads, 1), (17, heads, 1), (20, heads, 1))},
+    )
+    # This positive variance exposes a BF16 rounding boundary after the FP32
+    # normalization product. The oracle remains the actual Torch CUDA operator.
+    witness = np.array([0x3A500D46], dtype=np.uint32).view(np.float32)[0]
+    witness = np.float32(witness + np.float32(1e-5))
+    distinguishes_split_operations = False
+    for rows in (1, 3, 17, 20):
+        index = torch.arange(rows * heads, dtype=torch.int32, device="cuda")
+        mantissa = 1 + (index % 23).float() / 32
+        exponent = (index // 23) % 21 - 10
+        variance = torch.ldexp(mantissa, exponent).reshape(rows, heads, 1)
+        variance[0, 0, 0] = float(witness)
+        expected = torch.rsqrt(variance)
+        split_operations = torch.reciprocal(torch.sqrt(variance))
+        distinguishes_split_operations |= bool(torch.any(expected != split_operations))
+        actual = engine({"variance": variance})["actual"]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert distinguishes_split_operations, "fixture must distinguish the reference operator"

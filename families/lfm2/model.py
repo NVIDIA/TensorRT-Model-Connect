@@ -185,6 +185,32 @@ def _mean64(
     )[0]
 
 
+def _rsqrt(
+    network: trt.INetworkDefinition,
+    variance: trt.ITensor,
+    bridge: Path,
+) -> trt.ITensor:
+    from tensorrt_model_connect.byok import add_kernel
+
+    shape = tuple(variance.shape)
+    if (
+        variance.dtype != trt.float32
+        or len(shape) != 3
+        or shape[1] not in {8, 32}
+        or shape[2] != 1
+        or (shape[0] != -1 and not 1 <= shape[0] <= 131072)
+    ):
+        raise ValueError("LFM2 Q/K rsqrt requires FP32 [R,8|32,1] variance")
+    return add_kernel(
+        network,
+        plugin_library=bridge,
+        kernel_name=_RSQRT_KERNEL,
+        inputs=[variance],
+        output_specs=[{"dims": "same_as_input_0", "dtype": "float32"}],
+        workspace_bytes=0,
+    )[0]
+
+
 def _rms_norm(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -223,8 +249,11 @@ def _rms_norm(
         eps,
         trt.ElementWiseOperation.SUM,
     ).get_output(0)
-    root = network.add_unary(variance, trt.UnaryOperation.SQRT).get_output(0)
-    reciprocal = network.add_unary(root, trt.UnaryOperation.RECIP).get_output(0)
+    if mean64_bridge is not None:
+        reciprocal = _rsqrt(network, variance, mean64_bridge)
+    else:
+        root = network.add_unary(variance, trt.UnaryOperation.SQRT).get_output(0)
+        reciprocal = network.add_unary(root, trt.UnaryOperation.RECIP).get_output(0)
     normalized = network.add_elementwise(
         fp32,
         reciprocal,
@@ -1381,6 +1410,7 @@ _W2_ROWS_KERNEL = "lfm2.w2.cublas_bf16_rows_v1"
 _ATTENTION_MODE = "cudnn_bf16_batched_v1"
 _ATTENTION_KERNEL = "lfm2.attention." + _ATTENTION_MODE
 _MEAN64_KERNEL = "lfm2.attention.mean64_fp32_v1"
+_RSQRT_KERNEL = "lfm2.attention.rsqrt_fp32_v1"
 
 
 def _uses_w2(config: DenseLfm2Config, precision: str) -> bool:
@@ -1433,6 +1463,14 @@ def _register_attention(extension: ctypes.CDLL, library: Path) -> None:
     if error is not None:
         raise RuntimeError(
             "LFM2 Q/K mean64 registration failed: " + error.decode("utf-8", errors="replace")
+        )
+
+    error = extension.trtmc_load_byok_kernel(
+        str(library).encode("utf-8"), b"rsqrt", _RSQRT_KERNEL.encode("utf-8")
+    )
+    if error is not None:
+        raise RuntimeError(
+            "LFM2 Q/K rsqrt registration failed: " + error.decode("utf-8", errors="replace")
         )
 
 
