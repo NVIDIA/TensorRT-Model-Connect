@@ -240,12 +240,12 @@ def _make_qwen25vl_mrope_full_tables(
     freqs = position_ids[:, :, None].astype(np.float64) * inv_freq[None, None, :]
     emb = np.concatenate([freqs, freqs], axis=-1)
 
-    section = [int(v) * 2 for v in mrope_section]
-    starts = np.cumsum([0] + section[:-1])
-    parts = [
-        emb[axis, :, start : start + width]
-        for axis, (start, width) in enumerate(zip(starts, section))
-    ]
+    # HF apply_multimodal_rotary_pos_emb splits the full-dim table by
+    # mrope_section * 2 and takes chunk i from axis i % 3, so each rotate-half
+    # half carries its own temporal/height/width bands.
+    sections = [int(v) for v in mrope_section] * 2
+    bounds = np.cumsum([0] + sections)
+    parts = [emb[index % 3, :, bounds[index] : bounds[index + 1]] for index in range(len(sections))]
     full = np.concatenate(parts, axis=-1)
     return np.cos(full).astype(np.float32), np.sin(full).astype(np.float32)
 
