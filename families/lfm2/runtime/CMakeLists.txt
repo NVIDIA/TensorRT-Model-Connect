@@ -49,6 +49,39 @@ install(TARGETS trtmc_model_lfm2
 
 set(_lfm2_runtime_libraries "[]")
 if(TARGET trtmc_byok_tvm_ffi)
+  include("${CMAKE_CURRENT_LIST_DIR}/cudnn.cmake")
+  if(TARGET lfm2_cudnn)
+    add_library(trtmc_lfm2_sdpa_byok SHARED sdpa_byok.cpp)
+    target_include_directories(trtmc_lfm2_sdpa_byok SYSTEM PRIVATE
+      ${LFM2_CUDNN_FRONTEND_INCLUDE_DIR} ${LFM2_CUDNN_INCLUDE_DIR}
+      ${CUDAToolkit_INCLUDE_DIRS} ${TRTMC_TVM_FFI_INCLUDE_DIR})
+    target_link_libraries(trtmc_lfm2_sdpa_byok PRIVATE
+      lfm2_cudnn CUDA::cudart CUDA::nvrtc ${TRTMC_TVM_FFI_LIBRARY} ${CMAKE_DL_LIBS} Threads::Threads)
+    add_dependencies(trtmc_lfm2_sdpa_byok lfm2_cudnn_frontend_source lfm2_cudnn_stage)
+    set_target_properties(trtmc_lfm2_sdpa_byok PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+      BUILD_RPATH "\$ORIGIN;${TRTMC_TVM_FFI_LIBRARY_DIR}"
+      INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../tvm_ffi/lib;${TRTMC_TVM_FFI_LIBRARY_DIR};/usr/local/cuda/lib64")
+    add_dependencies(trtmc_model_lfm2 trtmc_lfm2_sdpa_byok)
+    foreach(component IN ITEMS sdk runtime)
+      install(TARGETS trtmc_lfm2_sdpa_byok
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT ${component})
+      install(FILES ${LFM2_CUDNN_STAGED_LIBRARIES}
+        DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT ${component})
+      install(FILES sdpa_byok.NOTICE
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/trtmc_lfm2_sdpa_byok
+        COMPONENT ${component})
+      install(FILES "${LFM2_CUDNN_STAGED_LICENSE}"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/trtmc_lfm2_sdpa_byok/cudnn
+        RENAME LICENSE.txt COMPONENT ${component})
+      install(FILES "${LFM2_CUDNN_FRONTEND_SOURCE_DIR}/LICENSE.txt"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/trtmc_lfm2_sdpa_byok/frontend
+        COMPONENT ${component})
+      install(FILES "${LFM2_CUDNN_FRONTEND_SOURCE_DIR}/include/cudnn_frontend/thirdparty/nlohmann/LICENSE.MIT"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/trtmc_lfm2_sdpa_byok/frontend/nlohmann
+        COMPONENT ${component})
+    endforeach()
+  endif()
   add_library(trtmc_lfm2_w2_byok SHARED w2_byok.cpp)
   target_include_directories(trtmc_lfm2_w2_byok SYSTEM PRIVATE
     ${CUDAToolkit_INCLUDE_DIRS}
@@ -83,8 +116,16 @@ if(TARGET trtmc_byok_tvm_ffi)
     INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../tvm_ffi/lib;${TRTMC_TVM_FFI_LIBRARY_DIR};/usr/local/cuda/lib64"
   )
   add_dependencies(trtmc_model_lfm2 trtmc_lfm2_sampler_byok trtmc_lfm2_w2_byok trtmc_byok_tvm_ffi)
-  set(_lfm2_runtime_libraries
-    "[\"$<TARGET_FILE_NAME:trtmc_lfm2_sampler_byok>\",\"$<TARGET_FILE_NAME:trtmc_lfm2_w2_byok>\",\"$<TARGET_FILE_NAME:trtmc_byok_tvm_ffi>\"]")
+  set(_lfm2_runtime_library_names
+    "$<TARGET_FILE_NAME:trtmc_lfm2_sampler_byok>"
+    "$<TARGET_FILE_NAME:trtmc_lfm2_w2_byok>"
+    "$<TARGET_FILE_NAME:trtmc_byok_tvm_ffi>")
+  if(TARGET trtmc_lfm2_sdpa_byok)
+    list(APPEND _lfm2_runtime_library_names
+      "$<TARGET_FILE_NAME:trtmc_lfm2_sdpa_byok>" ${LFM2_CUDNN_RUNTIME_NAMES})
+  endif()
+  string(JOIN "\",\"" _lfm2_runtime_libraries ${_lfm2_runtime_library_names})
+  set(_lfm2_runtime_libraries "[\"${_lfm2_runtime_libraries}\"]")
   # Wheels install the SDK component; native installations can select runtime.
   foreach(component IN ITEMS sdk runtime)
     install(TARGETS trtmc_lfm2_sampler_byok trtmc_lfm2_w2_byok
@@ -107,6 +148,20 @@ foreach(component IN ITEMS sdk runtime)
 endforeach()
 
 if(TRTMC_BUILD_TESTS)
+  if(TARGET trtmc_lfm2_sdpa_byok)
+    add_executable(test_lfm2_sdpa_contract
+      ${PROJECT_SOURCE_DIR}/families/lfm2/tests/cpp/test_lfm2_sdpa_contract.cpp)
+    target_include_directories(test_lfm2_sdpa_contract PRIVATE ${PROJECT_SOURCE_DIR})
+    target_include_directories(test_lfm2_sdpa_contract SYSTEM PRIVATE
+      ${LFM2_CUDNN_FRONTEND_INCLUDE_DIR} ${LFM2_CUDNN_INCLUDE_DIR}
+      ${CUDAToolkit_INCLUDE_DIRS} ${TRTMC_TVM_FFI_INCLUDE_DIR})
+    target_link_libraries(test_lfm2_sdpa_contract PRIVATE
+      lfm2_cudnn CUDA::cudart CUDA::nvrtc ${TRTMC_TVM_FFI_LIBRARY} ${CMAKE_DL_LIBS} Threads::Threads)
+    add_dependencies(test_lfm2_sdpa_contract lfm2_cudnn_frontend_source lfm2_cudnn_stage)
+    set_target_properties(test_lfm2_sdpa_contract PROPERTIES
+      BUILD_RPATH "${CMAKE_BINARY_DIR};${TRTMC_TVM_FFI_LIBRARY_DIR}")
+    add_test(NAME test_lfm2_sdpa_contract COMMAND test_lfm2_sdpa_contract)
+  endif()
   if(TARGET trtmc_backend_trt)
     add_executable(lfm2_logits_probe
       ${PROJECT_SOURCE_DIR}/families/lfm2/tests/cpp/lfm25_logits_probe.cpp)

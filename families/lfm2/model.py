@@ -354,13 +354,15 @@ def add_native_kv_attention(
     cache_k: trt.ITensor,
     cache_v: trt.ITensor,
     cache_write_indices: trt.ITensor,
-    attention_masks: NativeKvMasks,
+    attention_masks: NativeKvMasks | None,
     *,
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
     work_dtype: trt.DataType,
     tag: str,
+    attention_bridge: Path | None = None,
+    active_length_extent: trt.ITensor | None = None,
 ) -> dict[str, trt.ITensor]:
     """Use TensorRT's in-place KV update and explicit masked attention."""
 
@@ -404,18 +406,39 @@ def add_native_kv_attention(
         num_heads=num_heads,
         head_dim=head_dim,
     )
-    context_4d = add_explicit_masked_grouped_query_attention(
-        network,
-        q_4d,
-        present_k,
-        present_v,
-        attention_masks,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        scale=float(1.0 / np.sqrt(head_dim)),
-        tag=tag,
-    )
+    if attention_bridge is not None:
+        from tensorrt_model_connect.byok import add_kernel
+
+        if (
+            active_length_extent is None
+            or work_dtype != trt.bfloat16
+            or (num_heads, num_kv_heads, head_dim) != (32, 8, 64)
+        ):
+            raise ValueError("LFM2 cuDNN attention requires BF16 GQA 32/8/64 and active length")
+        (context_4d,) = add_kernel(
+            network,
+            plugin_library=attention_bridge,
+            kernel_name=_ATTENTION_KERNEL,
+            inputs=[q_4d, present_k, present_v, active_length_extent],
+            output_specs=[{"dims": [1, 32, 1, 64], "dtype": "bfloat16"}],
+            workspace_bytes=0,
+        )
+        context_4d.name = f"{tag}.context"
+    else:
+        if attention_masks is None or active_length_extent is not None:
+            raise ValueError("LFM2 explicit attention requires its active-prefix masks")
+        context_4d = add_explicit_masked_grouped_query_attention(
+            network,
+            q_4d,
+            present_k,
+            present_v,
+            attention_masks,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            scale=float(1.0 / np.sqrt(head_dim)),
+            tag=tag,
+        )
     context = _reshape_heads_to_rows(
         network,
         context_4d,
@@ -485,15 +508,15 @@ def _add_conv_layer(
             (hidden, config.conv_l_cache - 1),
             (1, 1),
         ).get_output(0)
-        first = network.add_slice(
-            conv_state, (0, 0), (hidden, 1), (1, 1)
-        ).get_output(0)
+        first = network.add_slice(conv_state, (0, 0), (hidden, 1), (1, 1)).get_output(0)
         rolled = network.add_concatenation([prior, first])
         rolled.axis = 1
         position = network.add_shuffle(position_id)
         position.reshape_dims = (1, 1)
         last = _constant(
-            network, (1, 1), np.array([[config.conv_l_cache - 1]], dtype=np.int32),
+            network,
+            (1, 1),
+            np.array([[config.conv_l_cache - 1]], dtype=np.int32),
             np_dtype=np.dtype(np.int32),
         )
         cached_index = network.add_elementwise(
@@ -504,7 +527,9 @@ def _add_conv_layer(
         # Prefill remains an append at the last column.
         write_index = network.add_select(decode_phase, cached_index, last).get_output(0)
         columns = _constant(
-            network, (1, config.conv_l_cache), np.arange(config.conv_l_cache, dtype=np.int32),
+            network,
+            (1, config.conv_l_cache),
+            np.arange(config.conv_l_cache, dtype=np.int32),
             np_dtype=np.dtype(np.int32),
         )
         write_mask = network.add_elementwise(
@@ -697,12 +722,15 @@ def build_lfm2_engine(
     verbose: bool = False,
     debug_layer_outputs: bool = False,
     w2_bridge: Path | None = None,
+    attention_bridge: Path | None = None,
 ) -> bytes:
     """Build a static one-token LFM2 engine with native TensorRT KV updates."""
 
     cfg = validate_dense_lfm2_config(config)
     if w2_bridge is not None and not _uses_w2(cfg, precision):
         raise ValueError("LFM2 W2 requires its qualified BF16 model geometry")
+    if attention_bridge is not None and not _uses_attention(cfg, precision):
+        raise ValueError("LFM2 cuDNN attention requires its qualified BF16 model geometry")
     _validate_mapped_metadata(cfg, weights)
     if max_cache_length <= 0:
         raise ValueError("max_cache_length must be positive")
@@ -710,6 +738,8 @@ def build_lfm2_engine(
         raise ValueError(
             f"max_cache_length exceeds LFM2 max_position_embeddings ({cfg.max_position_embeddings})"
         )
+    if attention_bridge is not None and max_cache_length > 131072:
+        raise ValueError("LFM2 cuDNN attention supports at most 131072 cached positions")
     storage_dtype, work_dtype = _precision_dtypes(precision)
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -735,18 +765,31 @@ def build_lfm2_engine(
         trt.int32,
         (1,),
     )
-    key_value_lengths = network.add_input(
-        "key_value_lengths",
-        trt.int32,
-        (1,),
-    )
-    attention_masks = add_active_prefix_causal_masks(
-        network,
-        token_id,
-        cache_write_indices,
-        key_value_lengths,
-        max_cache_length,
-    )
+    active_length_extent = None
+    attention_masks = None
+    if attention_bridge is not None:
+        # Only the dimension carries the logical length. The native binding
+        # never reads these values; K/V retain their full-capacity geometry.
+        active_length_extent = network.add_input("active_length_extent", trt.int32, (-1,))
+        profile = builder.create_optimization_profile()
+        extent_shapes = ((1,), (max_cache_length,), (max_cache_length,))
+        profile.set_shape("active_length_extent", *extent_shapes)
+        if (
+            tuple(tuple(shape) for shape in profile.get_shape("active_length_extent"))
+            != extent_shapes
+        ):
+            raise RuntimeError("TensorRT rejected the LFM2 active-length profile")
+        if builder_config.add_optimization_profile(profile) < 0:
+            raise RuntimeError("TensorRT failed to add the LFM2 active-length profile")
+    else:
+        key_value_lengths = network.add_input("key_value_lengths", trt.int32, (1,))
+        attention_masks = add_active_prefix_causal_masks(
+            network,
+            token_id,
+            cache_write_indices,
+            key_value_lengths,
+            max_cache_length,
+        )
 
     cache_shape = (
         1,
@@ -909,6 +952,8 @@ def build_lfm2_engine(
                 head_dim=cfg.head_dim,
                 work_dtype=work_dtype,
                 tag=f"{prefix}.self_attn",
+                attention_bridge=attention_bridge,
+                active_length_extent=active_length_extent,
             )
             operator_output = _matmul(
                 network,
@@ -1072,6 +1117,8 @@ _SAMPLER_KERNEL = "lfm2.sampler." + _SAMPLER_MODE
 _SAMPLER_VOCAB_SIZE = 128000
 _W2_MODE = "cublas_bf16_all_w2_v1"
 _W2_KERNEL = "lfm2.w2.cublas_bf16_v1"
+_ATTENTION_MODE = "cudnn_bf16_dense_v1"
+_ATTENTION_KERNEL = "lfm2.attention." + _ATTENTION_MODE
 
 
 def _uses_w2(config: DenseLfm2Config, precision: str) -> bool:
@@ -1090,6 +1137,33 @@ def _w2_library(bridge: Path) -> Path:
     if not library.is_file():
         raise FileNotFoundError("LFM2 W2 installation is incomplete: " + str(library))
     return library
+
+
+def _uses_attention(config: DenseLfm2Config, precision: str) -> bool:
+    return (
+        _uses_w2(config, precision)
+        and config.num_attention_heads == 32
+        and config.num_key_value_heads == 8
+        and config.head_dim == 64
+        and config.num_attention_layers == 8
+    )
+
+
+def _attention_library(bridge: Path) -> Path:
+    library = bridge.parent / "libtrtmc_lfm2_sdpa_byok.so"
+    if not library.is_file():
+        raise FileNotFoundError("LFM2 cuDNN attention installation is incomplete: " + str(library))
+    return library
+
+
+def _register_attention(extension: ctypes.CDLL, library: Path) -> None:
+    error = extension.trtmc_load_byok_kernel(
+        str(library).encode("utf-8"), b"run", _ATTENTION_KERNEL.encode("utf-8")
+    )
+    if error is not None:
+        raise RuntimeError(
+            "LFM2 cuDNN attention registration failed: " + error.decode("utf-8", errors="replace")
+        )
 
 
 def _register_w2(extension: ctypes.CDLL, library: Path) -> None:
@@ -1216,6 +1290,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "max_cache_length exceeds the checkpoint context capacity: "
             f"{max_cache_length} > {resolved.max_position_embeddings}"
         )
+    if _uses_attention(resolved, precision) and max_cache_length > 131072:
+        raise ValueError("LFM2 cuDNN attention supports at most 131072 cached positions")
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("dense LFM2 does not support tensor-parallel builds")
     if request.quantization not in {None, "none"}:
@@ -1228,6 +1304,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     sampler_bridge = None
     sampler_extension = None
     w2_bridge = None
+    attention_bridge = None
     if resolved.vocab_size == _SAMPLER_VOCAB_SIZE:
         if request.backend != "trt":
             raise ValueError("LFM2 Philox sampling requires backend=trt")
@@ -1235,10 +1312,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         # Resolve and register dependencies before allocating checkpoint weights.
         sampler_bridge, sampler_library = _sampler_libraries()
         w2_library = _w2_library(sampler_bridge) if _uses_w2(resolved, precision) else None
+        attention_library = (
+            _attention_library(sampler_bridge) if _uses_attention(resolved, precision) else None
+        )
         sampler_extension = _register_sampler(sampler_bridge, sampler_library)
         if w2_library is not None:
             _register_w2(sampler_extension, w2_library)
             w2_bridge = sampler_bridge
+        if attention_library is not None:
+            _register_attention(sampler_extension, attention_library)
+            attention_bridge = sampler_bridge
 
     weights = load_lfm2_weights(str(model_dir), config, precision=precision)
     plan = build_lfm2_engine(
@@ -1249,6 +1332,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         verbose=bool(request.verbose),
         debug_layer_outputs=False,
         w2_bridge=w2_bridge,
+        attention_bridge=attention_bridge,
     )
 
     runtime_config = _runtime_config(
@@ -1264,6 +1348,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         runtime_config["sampler_mode"] = _SAMPLER_MODE
     if w2_bridge is not None:
         runtime_config["w2_mode"] = _W2_MODE
+    if attention_bridge is not None:
+        runtime_config["attention_mode"] = _ATTENTION_MODE
+        runtime_config["native_kv_contract_version"] = 2
     # Keep the registration library alive until both plans have been serialized.
     del sampler_extension
 

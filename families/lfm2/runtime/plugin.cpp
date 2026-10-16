@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace trtmc::lfm2 {
@@ -23,6 +24,7 @@ namespace {
 constexpr const char* kSamplerMode = "philox_exponential_v1";
 constexpr const char* kW2Mode = "cublas_bf16_all_w2_v1";
 constexpr const char* kFirstTwoW2Mode = "cublas_bf16_first_two_v1";
+constexpr const char* kAttentionMode = "cudnn_bf16_dense_v1";
 
 struct RuntimeConfig {
     std::int32_t hidden_size;
@@ -41,6 +43,7 @@ struct RuntimeConfig {
     std::string precision;
     std::string sampler_mode;
     std::string w2_mode;
+    std::string attention_mode;
 };
 
 template <typename T>
@@ -77,9 +80,13 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         throw std::runtime_error("lfm2 runtime.json must be an object");
     const bool has_sampler = json.contains("sampler_mode");
     const bool has_w2 = json.contains("w2_mode");
+    const bool has_attention = json.contains("attention_mode");
     if (has_w2 && !has_sampler)
         throw std::runtime_error("lfm2 w2_mode requires the Philox sampler contract");
-    if (json.size() != 23U + static_cast<unsigned>(has_sampler) + static_cast<unsigned>(has_w2))
+    if (has_attention && !has_w2)
+        throw std::runtime_error("lfm2 attention_mode requires the W2 and Philox contracts");
+    if (json.size() != 23U + static_cast<unsigned>(has_sampler) + static_cast<unsigned>(has_w2) +
+                           static_cast<unsigned>(has_attention))
         throw std::runtime_error("lfm2 runtime.json has an unexpected field set");
     const std::string sampler_mode =
         has_sampler ? require_value<std::string>(json, "sampler_mode") : std::string{};
@@ -89,14 +96,20 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         has_w2 ? require_value<std::string>(json, "w2_mode") : std::string{};
     if (has_w2 && w2_mode != kW2Mode && w2_mode != kFirstTwoW2Mode)
         throw std::runtime_error("lfm2 runtime.json has an unsupported w2_mode");
+    const std::string attention_mode =
+        has_attention ? require_value<std::string>(json, "attention_mode") : std::string{};
+    if (has_attention && (attention_mode != kAttentionMode || w2_mode != kW2Mode))
+        throw std::runtime_error("lfm2 runtime.json has an unsupported attention contract");
     const auto* sampler_plan = bundle.find_section("sampler.plan");
     if (has_sampler && (sampler_plan == nullptr || sampler_plan->length == 0))
         throw std::runtime_error("lfm2 sampler_mode requires a nonempty sampler.plan");
     if (!has_sampler && sampler_plan != nullptr)
         throw std::runtime_error("lfm2 legacy runtime contract cannot contain sampler.plan");
     if (!require_value<bool>(json, "native_kv_cache") ||
-        require_value<std::int32_t>(json, "native_kv_contract_version") != 1) {
-        throw std::runtime_error("lfm2 runtime.json requires native KV contract version 1");
+        require_value<std::int32_t>(json, "native_kv_contract_version") !=
+            (has_attention ? 2 : 1)) {
+        throw std::runtime_error(
+            "lfm2 runtime.json has an incompatible native KV contract version");
     }
     const std::int32_t intermediate_size = require_value<std::int32_t>(json, "intermediate_size");
     const float norm_eps = require_value<float>(json, "norm_eps");
@@ -123,6 +136,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::string>(json, "precision"),
         sampler_mode,
         w2_mode,
+        attention_mode,
     };
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 ||
@@ -143,6 +157,10 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         (config.precision != "bf16" || config.hidden_size != 2048 || intermediate_size != 10752 ||
          config.num_layers != 30 || layer_types[0] != "conv" || layer_types[1] != "conv"))
         throw std::runtime_error("lfm2 W2 mode requires its qualified BF16 model geometry");
+    if (has_attention && (config.num_attention_heads != 32 || config.num_key_value_heads != 8 ||
+                          config.head_dim != 64 || config.num_attention_layers != 8 ||
+                          config.max_cache_length > 131072))
+        throw std::runtime_error("lfm2 cuDNN attention requires its qualified BF16 model geometry");
     return config;
 }
 
@@ -212,6 +230,37 @@ void register_w2() {
     (void)registered;
 }
 
+void register_attention() {
+    static void* const registered = [] {
+        Dl_info location{};
+        if (!dladdr(reinterpret_cast<void*>(&register_attention), &location) || !location.dli_fname)
+            throw std::runtime_error("lfm2 cannot locate its family runtime library");
+        const auto root = std::filesystem::absolute(location.dli_fname).parent_path();
+        const auto helper = root / "libtrtmc_lfm2_sdpa_byok.so";
+        const auto bridge = root / "libtrtmc_byok_tvm_ffi.so";
+        if (!std::filesystem::is_regular_file(helper) || !std::filesystem::is_regular_file(bridge))
+            throw std::runtime_error(
+                "lfm2 cuDNN attention requires adjacent SDPA and TVM-FFI libraries");
+        void* library = dlopen(bridge.c_str(), RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
+        if (library == nullptr)
+            throw std::runtime_error("lfm2 cannot load its adjacent TVM-FFI bridge: " +
+                                     std::string(dlerror()));
+        using LoadKernel = const char* (*)(const char*, const char*, const char*) noexcept;
+        const auto load = reinterpret_cast<LoadKernel>(dlsym(library, "trtmc_load_byok_kernel"));
+        if (load == nullptr) {
+            dlclose(library);
+            throw std::runtime_error("lfm2 TVM-FFI bridge has no kernel registration entrypoint");
+        }
+        if (const char* error = load(helper.c_str(), "run", "lfm2.attention.cudnn_bf16_dense_v1")) {
+            const std::string message(error);
+            dlclose(library);
+            throw std::runtime_error("lfm2 cannot register its attention operation: " + message);
+        }
+        return library;
+    }();
+    (void)registered;
+}
+
 } // namespace
 
 ITask* create(const FamilyContext& context) {
@@ -224,6 +273,8 @@ ITask* create(const FamilyContext& context) {
     }
     if (!config.w2_mode.empty())
         register_w2();
+    if (!config.attention_mode.empty())
+        register_attention();
     auto decoder = load_module(context.backend, require_section(context.reader, "engine.plan"));
     const cudaStream_t stream = decoder->stream();
     std::unique_ptr<ITrtModule> sampler;
@@ -239,9 +290,14 @@ ITask* create(const FamilyContext& context) {
     }
     const DType dtype = state_dtype(config.precision);
 
+    auto cache_names = kv_names(config.num_attention_layers);
+    if (!config.attention_mode.empty()) {
+        cache_names.key_value_lengths.clear();
+        cache_names.active_length_extent = "active_length_extent";
+    }
     auto kv = std::make_unique<Lfm2KvCache>(config.num_attention_layers, config.max_cache_length,
                                             config.num_key_value_heads, config.head_dim, stream,
-                                            dtype, kv_names(config.num_attention_layers));
+                                            dtype, std::move(cache_names));
     auto conv = std::make_unique<Lfm2ConvState>(config.num_conv_layers, config.conv_state_dim,
                                                 config.conv_cache_length, stream, dtype);
     auto state = std::make_unique<Lfm2HybridState>(std::move(kv), std::move(conv));

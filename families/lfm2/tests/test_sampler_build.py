@@ -12,6 +12,7 @@ from pathlib import Path
 import struct
 import sys
 from dataclasses import replace
+from collections import defaultdict
 from types import SimpleNamespace
 
 import numpy as np
@@ -24,6 +25,7 @@ from tensorrt_model_connect.bundle_writer import BundleWriter
 FAMILY = Path(__file__).resolve().parent.parent
 LIBRARIES = ("libtrtmc_byok_tvm_ffi.so", "libtrtmc_lfm2_sampler_byok.so")
 W2_LIBRARY = "libtrtmc_lfm2_w2_byok.so"
+ATTENTION_LIBRARY = "libtrtmc_lfm2_sdpa_byok.so"
 
 
 @pytest.fixture
@@ -33,6 +35,7 @@ def model(monkeypatch, tmp_path):
     configurations = []
     plugins = []
     decoder_calls = []
+    profiles = []
 
     class Network:
         def __init__(self):
@@ -61,9 +64,18 @@ def model(monkeypatch, tmp_path):
             config = SimpleNamespace(
                 clear_flag=lambda flag: configurations.append(("clear", flag)),
                 set_memory_pool_limit=lambda pool, size: configurations.append((pool, size)),
+                add_optimization_profile=lambda profile: profiles.append(profile) or 0,
             )
             configurations.append(config)
             return config
+
+        def create_optimization_profile(self):
+            shapes = {}
+            return SimpleNamespace(
+                set_shape=lambda name, *dims: shapes.__setitem__(name, dims),
+                get_shape=lambda name: shapes[name],
+                shapes=shapes,
+            )
 
         def build_serialized_network(self, network, config):
             assert config.builder_optimization_level == 1
@@ -141,6 +153,7 @@ def model(monkeypatch, tmp_path):
         decoder_calls.append(kwargs)
         return b"decoder plan"
 
+    actual_decoder = module.build_lfm2_engine
     monkeypatch.setattr(module, "build_lfm2_engine", decoder)
     return SimpleNamespace(
         module=module,
@@ -154,15 +167,20 @@ def model(monkeypatch, tmp_path):
         original_prefixes=original_prefixes,
         register=register,
         decoder_calls=decoder_calls,
+        actual_decoder=actual_decoder,
+        network_class=Network,
+        profiles=profiles,
     )
 
 
-def installation(directory, *, w2=True):
+def installation(directory, *, w2=True, attention=True):
     directory.mkdir(parents=True)
     for name in LIBRARIES:
         (directory / name).write_bytes(b"library fixture")
     if w2:
         (directory / W2_LIBRARY).write_bytes(b"W2 library fixture")
+    if attention:
+        (directory / ATTENTION_LIBRARY).write_bytes(b"attention library fixture")
     return tuple(directory / name for name in LIBRARIES)
 
 
@@ -252,18 +270,27 @@ def test_eligible_build_registers_before_weights_and_writes_exact_sampler_contra
     monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
     sections = build(model, request(tmp_path))
     runtime = json.loads(sections["runtime.json"])
-    assert len(runtime) == 25 and runtime["sampler_mode"] == "philox_exponential_v1"
+    assert len(runtime) == 26 and runtime["sampler_mode"] == "philox_exponential_v1"
     assert runtime["w2_mode"] == "cublas_bf16_all_w2_v1"
+    assert runtime["attention_mode"] == "cudnn_bf16_dense_v1"
+    assert runtime["native_kv_contract_version"] == 2
     assert sections["engine.plan"] == b"decoder plan"
     assert sections["sampler.plan"] == b"sampler plan"
     assert model.events == [
         ("register", str(pair[1]).encode(), b"sample", b"lfm2.sampler.philox_exponential_v1"),
         ("register", str(pair[0].parent / W2_LIBRARY).encode(), b"run", b"lfm2.w2.cublas_bf16_v1"),
+        (
+            "register",
+            str(pair[0].parent / ATTENTION_LIBRARY).encode(),
+            b"run",
+            b"lfm2.attention.cudnn_bf16_dense_v1",
+        ),
         "weights",
         "decoder",
         "sampler",
     ]
     assert model.decoder_calls[0]["w2_bridge"] == pair[0]
+    assert model.decoder_calls[0]["attention_bridge"] == pair[0]
     (network,) = model.networks
     assert [(t.name, t.dtype, t.shape) for t in network.inputs] == [
         ("probabilities", "fp32", (1, 128000)),
@@ -374,13 +401,14 @@ def test_e2e_runtime_selection_reaches_real_public_build_prefix(model, monkeypat
 
 
 def test_sampler_only_fp16_build_does_not_require_w2(model, monkeypatch, tmp_path):
-    pair = installation(tmp_path / "runtime", w2=False)
+    pair = installation(tmp_path / "runtime", w2=False, attention=False)
     monkeypatch.setenv("CMAKE_PREFIX_PATH", str(pair[0].parent))
     monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
     sections = build(model, request(tmp_path, precision="fp16"))
     runtime = json.loads(sections["runtime.json"])
     assert len(runtime) == 24 and "w2_mode" not in runtime
     assert model.decoder_calls[0]["w2_bridge"] is None
+    assert model.decoder_calls[0]["attention_bridge"] is None
     assert len([event for event in model.events if isinstance(event, tuple)]) == 1
 
 
@@ -408,6 +436,207 @@ def test_w2_registration_failure_precedes_weights(model, monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="W2 registration failed"):
         build(model, request(tmp_path))
     assert "weights" not in model.events
+
+
+def test_missing_attention_dependency_does_not_mix_prefixes_or_load_weights(
+    model, monkeypatch, tmp_path
+):
+    selected = installation(tmp_path / "selected", attention=False)
+    installation(tmp_path / "alternate")
+    monkeypatch.setenv(
+        "CMAKE_PREFIX_PATH", os.pathsep.join([str(selected[0].parent), str(tmp_path / "alternate")])
+    )
+    monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
+    with pytest.raises(FileNotFoundError, match="cuDNN attention installation is incomplete"):
+        build(model, request(tmp_path))
+    assert model.events == []
+
+
+def test_attention_registration_failure_precedes_weights(model, monkeypatch, tmp_path):
+    pair = installation(tmp_path / "runtime")
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", str(pair[0].parent))
+    monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
+    monkeypatch.setattr(
+        type(model.register),
+        "__call__",
+        lambda self, library, function, kernel: (
+            b"vendor dependency missing"
+            if kernel == b"lfm2.attention.cudnn_bf16_dense_v1"
+            else None
+        ),
+    )
+    with pytest.raises(RuntimeError, match="cuDNN attention registration failed"):
+        build(model, request(tmp_path))
+    assert "weights" not in model.events
+
+
+def test_w2_only_geometry_keeps_v1_contract_without_attention_dependency(
+    model, monkeypatch, tmp_path
+):
+    pair = installation(tmp_path / "runtime", attention=False)
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", str(pair[0].parent))
+    monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
+    req = request(tmp_path)
+    path = req.model_dir / "config.json"
+    raw = json.loads(path.read_text())
+    raw["num_key_value_heads"] = 4
+    path.write_text(json.dumps(raw))
+    runtime = json.loads(build(model, req)["runtime.json"])
+    assert len(runtime) == 25 and runtime["native_kv_contract_version"] == 1
+    assert "attention_mode" not in runtime
+    assert model.decoder_calls[0]["attention_bridge"] is None
+    assert model.decoder_calls[0]["w2_bridge"] == pair[0]
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"num_attention_heads": 16},
+        {"num_key_value_heads": 4},
+        {"head_dim": 128},
+        {"layer_types": ("conv",) * 23 + ("full_attention",) * 7},
+    ],
+)
+def test_attention_eligibility_is_narrower_than_w2(model, tmp_path, updates):
+    config = model.module.validate_dense_lfm2_config(
+        model.module._load_config(request(tmp_path).model_dir)
+    )
+    assert model.module._uses_attention(config, "bf16")
+    changed = replace(config, **updates)
+    assert model.module._uses_w2(changed, "bf16")
+    assert not model.module._uses_attention(changed, "bf16")
+    assert not model.module._uses_attention(config, "fp16")
+
+
+def test_attention_capacity_rejected_before_weight_loading(model, tmp_path):
+    with pytest.raises(ValueError, match="max"):
+        build(model, request(tmp_path, max_sequence_length=131073))
+    assert model.events == []
+
+
+def test_attention_capacity_preflight_is_independent_of_checkpoint_context(model, tmp_path):
+    req = request(tmp_path, max_sequence_length=131073)
+    path = req.model_dir / "config.json"
+    raw = json.loads(path.read_text())
+    raw["max_position_embeddings"] = 262144
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="cuDNN attention supports at most 131072"):
+        build(model, req)
+    assert model.events == []
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
+    model, monkeypatch, tmp_path, enabled
+):
+    # Keep the actual decoder loop, KV update wiring, and attention dispatcher.
+    # Unrelated dense arithmetic is replaced by shape-only CPU tensors.
+    module = model.module
+    config = module._load_config(request(tmp_path).model_dir)
+    cfg = module.validate_dense_lfm2_config(config)
+    updates, explicit, plugins = [], [], []
+
+    def tensor(shape, dtype="bf16", name=""):
+        return SimpleNamespace(shape=shape, dtype=dtype, name=name)
+
+    def layer(output):
+        return SimpleNamespace(get_output=lambda index: output)
+
+    monkeypatch.setattr(module, "_validate_mapped_metadata", lambda *args: None)
+    monkeypatch.setattr(module, "_constant", lambda network, shape, *args, **kw: tensor(shape))
+    monkeypatch.setattr(module, "_work_constant", lambda network, shape, *args, **kw: tensor(shape))
+    monkeypatch.setattr(module, "_cast", lambda network, value, dtype: tensor(value.shape, dtype))
+    monkeypatch.setattr(module, "_active_rope_cache", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(module, "_rms_norm", lambda network, value, *args, **kw: value)
+    monkeypatch.setattr(module, "_per_head_rms_norm", lambda network, value, *args, **kw: value)
+    monkeypatch.setattr(module, "_apply_rope", lambda network, value, *args, **kw: value)
+    monkeypatch.setattr(module, "_matmul", lambda *args, **kw: tensor((1, kw["rhs_width"])))
+    monkeypatch.setattr(module, "_add_swiglu", lambda network, value, *args, **kw: value)
+    monkeypatch.setattr(
+        module,
+        "_add_conv_layer",
+        lambda network, value, state, *args, **kw: (value, tensor(state.shape)),
+    )
+    monkeypatch.setattr(
+        module,
+        "_reshape_rows_to_heads",
+        lambda network, value, *, num_heads, head_dim: tensor((1, num_heads, 1, head_dim)),
+    )
+    monkeypatch.setattr(
+        module, "_reshape_heads_to_rows", lambda network, value, *, width: tensor((1, width))
+    )
+    monkeypatch.setattr(module, "add_active_prefix_causal_masks", lambda *args: "legacy masks")
+    monkeypatch.setattr(
+        module,
+        "add_explicit_masked_grouped_query_attention",
+        lambda *args, **kw: explicit.append((args, kw)) or tensor((1, 32, 1, 64)),
+    )
+    monkeypatch.setattr(
+        module.trt, "ElementWiseOperation", SimpleNamespace(GREATER="gt", SUM="sum"), raising=False
+    )
+    monkeypatch.setattr(module.trt, "KVCacheMode", SimpleNamespace(LINEAR="linear"), raising=False)
+    monkeypatch.setattr(
+        model.network_class,
+        "add_elementwise",
+        lambda self, a, b, op: layer(tensor(a.shape)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        model.network_class, "add_gather", lambda *args: layer(tensor((1, 2048))), raising=False
+    )
+
+    def update(self, cache, value, index, mode):
+        result = tensor(cache.shape)
+        updates.append((cache, value, index, mode, result))
+        return layer(result)
+
+    monkeypatch.setattr(model.network_class, "add_kv_cache_update", update, raising=False)
+
+    def plugin(network, **kwargs):
+        result = tensor((1, 32, 1, 64))
+        plugins.append((kwargs, result))
+        return [result]
+
+    monkeypatch.setattr(model.byok, "add_kernel", plugin)
+    bridge = Path("/installed/bridge.so")
+    model.actual_decoder(
+        config,
+        defaultdict(lambda: None),
+        131072,
+        precision="bf16",
+        w2_bridge=bridge,
+        attention_bridge=bridge if enabled else None,
+    )
+    (network,) = model.networks
+    inputs = {item.name: item for item in network.inputs}
+    assert len(updates) == 16
+    assert all(entry[0].shape == (1, 8, 131072, 64) for entry in updates)
+    assert all(
+        entry[2] is inputs["cache_write_indices"] and entry[3] == "linear" for entry in updates
+    )
+    if enabled:
+        assert "key_value_lengths" not in inputs
+        assert (
+            inputs["active_length_extent"].shape == (-1,)
+            and inputs["active_length_extent"].dtype == "int32"
+        )
+        assert len(model.profiles) == 1
+        assert model.profiles[0].shapes == {"active_length_extent": ((1,), (131072,), (131072,))}
+        assert len(plugins) == 8 and not explicit
+        attention_layers = [i for i, kind in enumerate(cfg.layer_types) if kind == "full_attention"]
+        for index, (entry, output) in enumerate(plugins):
+            assert output.name == f"layer.{attention_layers[index]}.self_attn.context"
+            assert entry["kernel_name"] == "lfm2.attention.cudnn_bf16_dense_v1"
+            assert entry["plugin_library"] == bridge and entry["workspace_bytes"] == 0
+            assert entry["output_specs"] == [{"dims": [1, 32, 1, 64], "dtype": "bfloat16"}]
+            assert entry["inputs"][0].shape == (1, 32, 1, 64)
+            assert entry["inputs"][1] is updates[2 * index][4]
+            assert entry["inputs"][2] is updates[2 * index + 1][4]
+            assert entry["inputs"][3] is inputs["active_length_extent"]
+    else:
+        assert "active_length_extent" not in inputs and inputs["key_value_lengths"].shape == (1,)
+        assert not plugins and not model.profiles and len(explicit) == 8
+        assert all(args[4] == "legacy masks" for args, _ in explicit)
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,7 @@ struct Lfm2KvCacheNames {
     std::vector<std::string> present_v;
     std::string cache_write_indices{"cache_write_indices"};
     std::string key_value_lengths{"key_value_lengths"};
+    std::string active_length_extent;
     std::string position_id{"position_id"};
 };
 

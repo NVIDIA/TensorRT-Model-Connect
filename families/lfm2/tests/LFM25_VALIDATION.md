@@ -17,7 +17,9 @@ The 128,000-token vocabulary uses a separate native sampler stage. Its build
 requires `libtrtmc_byok_tvm_ffi.so` and `libtrtmc_lfm2_sampler_byok.so` from the same
 installation. BF16 builds of the 30-layer, 2,048-hidden, 10,752-intermediate
 configuration whose first two layers are convolutional also require the adjacent
-`libtrtmc_lfm2_w2_byok.so`. For a source checkout, first configure the native CMake build with
+`libtrtmc_lfm2_w2_byok.so`. The 32-query-head, 8-KV-head, head-width-64 configuration
+also requires `libtrtmc_lfm2_sdpa_byok.so` and its cuDNN runtime dependencies.
+For a source checkout, first configure the native CMake build with
 `TRTMC_ENABLE_BYOK=ON`, then build the owning family and select its output directory:
 
 ```bash
@@ -25,7 +27,7 @@ cmake --build build --target trtmc trtmc_backend_trt trtmc_model_lfm2
 export CMAKE_PREFIX_PATH="$PWD/build${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 ```
 
-The family target also builds the bridge, sampler, and W2 libraries. Installed packages
+The family target also builds the bridge, sampler, W2, and attention libraries. Installed packages
 can instead use their adjacent `bin` directory or a standard `CMAKE_PREFIX_PATH`
 installation. A prefix may identify the library directory itself or an install
 prefix containing `bin`, `lib`, or `lib64`. A directory containing either sampler
@@ -35,7 +37,30 @@ The owning E2E caller passes its selected native runtime directory through this
 standard prefix input for the build. The sampler library and its license notice
 are included in the CMake `sdk` and `runtime` install components.
 The W2 library is included in both components as well. An eligible build with a
-missing W2 library fails before loading checkpoint weights.
+missing W2 or attention library fails before loading checkpoint weights.
+
+The cuDNN binding currently targets Linux with CUDA 13. Its family CMake rules
+pin cuDNN 9.20.0.48 and frontend 1.22.1. Without an explicit SDK root, building
+the helper downloads the pinned native SDK and frontend archives into the build
+tree. Offline builds can set `LFM2_CUDNN_ARCHIVE` and
+`LFM2_CUDNN_FRONTEND_ARCHIVE` to copies of those exact archives; their hashes
+remain mandatory. To use an existing complete SDK instead, configure with
+`LFM2_CUDNN_ROOT` and, when its license is outside that root,
+`LFM2_CUDNN_LICENSE_FILE`. Headers and all eight runtime libraries must belong
+to the selected SDK. A partial SDK is an error and does not trigger a search
+for libraries in other installations. This build path imports no Torch package.
+
+The helper, eight cuDNN shared libraries, and their notices are installed in
+both native package components. The runtime libraries sit beside the helper
+and appear in the family library manifest, including for isolated E2E staging.
+This adds the cuDNN runtime payload to the installed package. CUDA toolkit
+libraries, including NVRTC, remain runtime prerequisites.
+
+`LFM2_ENABLE_CUDNN_SDPA=OFF` retains the existing sampler/W2 build without these
+dependencies; it cannot build or load the new attention contract. The binding
+defaults off outside Linux/CUDA 13, while explicitly enabling it there fails
+with the unsupported build scope. `TRTMC_ENABLE_BYOK=OFF` skips the entire
+cuDNN/frontend dependency path and retains the legacy native build.
 
 ```bash
 python - <<'PY'
@@ -73,14 +98,14 @@ I/O in a new bundle, is rejected. Older runtimes reject the new 24-field contrac
 The sampler-enabled build requires `backend="trt"`; TensorRT-RTX is not part of
 this sampler contract.
 
-Eligible BF16 builds add `w2_mode: "cublas_bf16_all_w2_v1"`, yielding a
-25-field contract. This mode requires the sampler contract, batch one, vocabulary
+The W2 contract adds `w2_mode: "cublas_bf16_all_w2_v1"` to the sampler contract.
+This mode requires batch one, vocabulary
 128,000, hidden width 2,048, intermediate width 10,752, 30 layers, and two initial
 convolutional layers. It offloads all 30 decoder layers' W2 projections through
 the same family-owned TVM-FFI helper. The existing BF16 gated input and BF16 weight
 values feed `cublasGemmEx` with FP32 accumulation, BF16 output, default math and
 algorithm, and the vendor's default workspace. TensorRT supplies the execution
-stream. All other graph operations retain their existing construction.
+stream.
 Existing 23-field and sampler-only 24-field bundles remain readable, as do
 25-field `cublas_bf16_first_two_v1` bundles with their original two-projection
 plans. FP16 and other model geometries retain their previous build path. Unknown W2 modes,
@@ -90,6 +115,38 @@ Runtimes that recognize only the first-two mode also reject the new all-layer mo
 Each W2 mode needs its own unchanged semantic matrix and full-capacity validation;
 earlier first-two results do not qualify the all-layer mode. Operator controls
 or a single completed response do not establish that validation.
+
+New eligible LFM2.5 BF16 bundles also add
+`attention_mode: "cudnn_bf16_dense_v1"`, yielding a 26-field runtime contract with
+`native_kv_contract_version: 2`. All eight attention layers use the same
+family-owned cuDNN TVM-FFI binding. The graph has BF16 Q/K/V and output, FP32
+intermediate and compute types, scale 0.125, grouped heads 32/8, and no dropout
+or statistics output. Each single query attends to its complete active prefix.
+The binding uses the ordinary dense cuDNN graph and default heuristic-A plan
+selection, without a fixed engine identifier or autotuning search.
+
+The version-2 decoder replaces the device `key_value_lengths` scalar with
+`active_length_extent`, an INT32 dynamic input whose dimension carries the host
+cache length. The input values are neither uploaded nor read. Native KV tensors
+retain their full-capacity layout; same-stream copies pack each active K/V head
+without conversion before attention. The dimension profile spans 1 through the
+bundle capacity, with that capacity as its optimization shape. Previous
+23/24/25-field bundles retain native KV contract version 1 and their original
+scalar binding.
+
+The attention binding retains one current-length graph and reusable buffers per
+host thread and CUDA device. Completion events protect resources when the graph,
+stream, or allocations change. Packed K/V storage is at most 256 MiB at 131,072
+positions; the metadata input allocation is at most 512 KiB. The selected plan's
+vendor workspace has an explicit 1 GiB allocation limit and fails cleanly if it
+exceeds that limit. CUDA graph capture is unsupported for this dynamic plan
+lifecycle; the family keeps its existing uncaptured execution path. Changing
+length can require a new cuDNN graph, so its cost must be measured separately.
+
+The fixed-input operator and cache-transport controls do not qualify the new
+attention mode for model behavior. A fresh public build must pass the unchanged
+semantic cases, repeated requests, legacy-bundle regression, and full-capacity
+validation before that mode is considered qualified.
 
 This discovery and native-library installation path is currently Linux/POSIX;
 it does not establish Windows packaging or execution support.

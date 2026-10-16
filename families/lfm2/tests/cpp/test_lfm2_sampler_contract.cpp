@@ -68,6 +68,13 @@ Json w2_runtime_config(const char* mode) {
     return config;
 }
 
+Json attention_runtime_config() {
+    auto config = w2_runtime_config("cublas_bf16_all_w2_v1");
+    config["attention_mode"] = "cudnn_bf16_dense_v1";
+    config["native_kv_contract_version"] = 2;
+    return config;
+}
+
 class Fixture {
   public:
     Fixture() {
@@ -153,7 +160,8 @@ void accepted_contracts(Fixture& fixture) {
     legacy["precision"] = "fp16";
     trtmc::BundleReader reader(fixture.write(legacy, -1).string());
     const auto parsed = trtmc::lfm2::parse_runtime_config(reader);
-    check(parsed.sampler_mode.empty() && parsed.w2_mode.empty() && parsed.vocab_size == 65536,
+    check(parsed.sampler_mode.empty() && parsed.w2_mode.empty() && parsed.attention_mode.empty() &&
+              parsed.vocab_size == 65536,
           "legacy 23-field bundle retains its vocabulary and sampler path");
     auto current = runtime_config();
     current["sampler_mode"] = "philox_exponential_v1";
@@ -162,10 +170,13 @@ void accepted_contracts(Fixture& fixture) {
           "new 24-field contract accepts its required sampler plan");
     check(trtmc::lfm2::parse_runtime_config(current_reader).w2_mode.empty(),
           "sampler-only 24-field contract requires no W2 helper");
+    check(trtmc::lfm2::parse_runtime_config(current_reader).attention_mode.empty(),
+          "sampler-only 24-field contract retains its scalar length input");
     for (const char* mode : {"cublas_bf16_all_w2_v1", "cublas_bf16_first_two_v1"}) {
         trtmc::BundleReader w2_reader(fixture.write(w2_runtime_config(mode), 1).string());
         const auto w2 = trtmc::lfm2::parse_runtime_config(w2_reader);
-        check(w2.w2_mode == mode && w2.sampler_mode == "philox_exponential_v1",
+        check(w2.w2_mode == mode && w2.sampler_mode == "philox_exponential_v1" &&
+                  w2.attention_mode.empty(),
               "25-field contract preserves each W2 mode and its sampler dependency");
         FakeBackend other_backend("trt_rtx");
         bool rejected = false;
@@ -194,6 +205,85 @@ void accepted_contracts(Fixture& fixture) {
     }
     check(rejected && other_backend.calls == 0,
           "new mode rejects an unqualified backend before helper/model loading");
+}
+
+void attention_contracts(Fixture& fixture) {
+    const auto current = attention_runtime_config();
+    check(current.size() == 26, "attention fixture has exactly 26 fields");
+    for (int capacity : {1, 131072}) {
+        auto config = current;
+        config["max_cache_length"] = capacity;
+        trtmc::BundleReader reader(fixture.write(config, 1).string());
+        const auto parsed = trtmc::lfm2::parse_runtime_config(reader);
+        check(parsed.attention_mode == "cudnn_bf16_dense_v1" &&
+                  parsed.w2_mode == "cublas_bf16_all_w2_v1" &&
+                  parsed.sampler_mode == "philox_exponential_v1" &&
+                  parsed.max_cache_length == capacity,
+              "26-field contract retains its declared attention mode and bounded capacity");
+        FakeBackend backend("trt_rtx");
+        bool rejected = false;
+        try {
+            (void)trtmc::lfm2::create({reader, backend});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("TensorRT backend") != std::string::npos;
+        }
+        check(rejected && backend.calls == 0,
+              "cuDNN mode rejects non-TensorRT backends before helper or decoder loading");
+    }
+    check(fixture.rejected(current, -1) && fixture.rejected(current, 0),
+          "attention mode requires nonempty sampler bytes");
+    for (const char* field : {"sampler_mode", "w2_mode"}) {
+        auto changed = current;
+        changed.erase(field);
+        check(fixture.rejected(changed, 1), "attention cannot omit a prerequisite mode");
+    }
+    auto changed = current;
+    changed["attention_mode"] = "unknown";
+    check(fixture.rejected(changed, 1), "unknown attention mode fails closed");
+    changed["attention_mode"] = 1;
+    check(fixture.rejected(changed, 1), "attention mode requires a string");
+    changed = current;
+    changed["w2_mode"] = "cublas_bf16_first_two_v1";
+    check(fixture.rejected(changed, 1), "attention requires the uniform all-W2 mode");
+    changed = current;
+    changed["native_kv_contract_version"] = 1;
+    check(fixture.rejected(changed, 1), "attention cannot use the scalar-length KV version");
+    changed = w2_runtime_config("cublas_bf16_all_w2_v1");
+    changed["native_kv_contract_version"] = 2;
+    check(fixture.rejected(changed, 1),
+          "legacy W2 metadata cannot silently adopt the extent contract");
+    changed = current;
+    changed.erase("norm_eps");
+    changed["unexpected"] = 1;
+    check(fixture.rejected(changed, 1), "26 fields do not replace a missing required field");
+    changed = current;
+    changed["unexpected"] = 1;
+    check(fixture.rejected(changed, 1), "attention metadata rejects extra fields");
+
+    const auto attention_geometry = [&](Json config, const char* message) {
+        check(fixture.rejected(config, 1), message);
+        config.erase("attention_mode");
+        config["native_kv_contract_version"] = 1;
+        check(!fixture.rejected(config, 1),
+              "existing W2 contract retains its prior geometry acceptance");
+    };
+    for (const auto& field_value :
+         std::vector<std::pair<const char*, int>>{{"num_attention_heads", 16},
+                                                  {"num_key_value_heads", 4},
+                                                  {"head_dim", 32},
+                                                  {"max_cache_length", 131073}}) {
+        changed = current;
+        changed[field_value.first] = field_value.second;
+        attention_geometry(changed, "attention rejects unqualified head geometry or capacity");
+    }
+    changed = current;
+    changed["num_attention_layers"] = 7;
+    changed["num_conv_layers"] = 23;
+    changed["layer_types"][22] = "conv";
+    attention_geometry(changed, "attention requires eight attention layers");
+    changed = current;
+    changed["precision"] = "fp16";
+    check(fixture.rejected(changed, 1), "cuDNN contract cannot silently change BF16 precision");
 }
 
 void rejected_contracts(Fixture& fixture) {
@@ -278,5 +368,6 @@ int main() {
     rejected_contracts(fixture);
     rejected_w2_contracts(fixture, "cublas_bf16_all_w2_v1");
     rejected_w2_contracts(fixture, "cublas_bf16_first_two_v1");
+    attention_contracts(fixture);
     return failures;
 }
