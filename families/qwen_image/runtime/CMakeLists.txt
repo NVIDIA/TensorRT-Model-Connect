@@ -49,6 +49,7 @@ if(TRTMC_BUILD_TESTS)
   foreach(test_name IN ITEMS
       test_qwen_image_batch_utils
       test_qwen_image_cfg_renorm
+      test_qwen_image_resample
       test_qwen_image_scheduler)
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/qwen_image/tests/cpp/${test_name}.cpp
