@@ -398,10 +398,10 @@ PYTHONPATH=apps/aiperf_qual:apps/benchmark:core/builder:. \
 ```
 
 Groups are `embeddings`, `reranking`, `transcription`, and `detection`.
-Each checkpoint has one normal full-model profile, with precision and parallel
-variants listed separately. Partial/distributed-only checkpoints remain explicit
-gaps. Discovery reports `unverified`; it does not claim correctness or AIPerf
-qualification. An encoder bundle is not counted as a reranker merely because
+The inventory selects a normal full-model profile when one is available, with
+precision and parallel variants listed separately. Checkpoints without one
+remain explicit gaps. Discovery reports `unverified`; it does not claim
+correctness or AIPerf qualification. An encoder bundle is not counted as a reranker merely because
 the family implementation inherits both interfaces. Streaming-oriented ASR
 checkpoints with a whole-clip Task belong to the recorded-clip workload; this
 does not establish streaming HTTP support.
@@ -433,9 +433,9 @@ PYTHONPATH=apps/aiperf_qual:apps/benchmark:apps/perf_serving:core/builder:. \
 Use the existing sentence/ranking examples or prepared audio/image JSONL from
 the guides below. The command verifies every corpus input against native output,
 then checks all 55 complete responses from five warmups and 50 measured requests,
-including original media bytes, complete vectors/transcripts/boxes, native class
-IDs or passage indices, and every request/timing join. Results separate HTTP
-latency from public Task time. Build/load/startup, native/HTTP verification and
+including SHA-256 hashes of media bytes, complete vectors/transcripts/boxes,
+native class IDs or passage indices, and every request/timing join. Results
+separate HTTP latency from public Task time. Build/load/startup, native/HTTP verification and
 warmup are excluded from measured throughput. This transport verification is
 separate from the owning family's numerical/quality criteria. It establishes
 no capacity or performance regression gate. The client is AIPerf 0.13.0 from
