@@ -54,14 +54,15 @@ def add_kernel(
     }
     if extra_args:
         spec["extra_args"] = extra_args
+    # The collection borrows payloads without retaining the Python field objects.
+    kernel_name_bytes = kernel_name.encode("utf-8")
+    shape_spec_bytes = json.dumps(spec, separators=(",", ":")).encode("utf-8")
     fields = trt.PluginFieldCollection(
         [
-            trt.PluginField(
-                "kernel_name", kernel_name.encode("utf-8"), trt.PluginFieldType.CHAR
-            ),
+            trt.PluginField("kernel_name", kernel_name_bytes, trt.PluginFieldType.CHAR),
             trt.PluginField(
                 "shape_spec",
-                json.dumps(spec, separators=(",", ":")).encode("utf-8"),
+                shape_spec_bytes,
                 trt.PluginFieldType.CHAR,
             ),
         ]
