@@ -23,20 +23,22 @@ def probe(tmp_path_factory):
     if compiler is None:
         pytest.skip("CPU DSP test requires a C++17 compiler")
     output = tmp_path_factory.mktemp("lfm2-audio-dsp") / "probe"
-    subprocess.run(
-        [
-            compiler,
-            "-std=c++17",
-            "-O3",
-            "-I",
-            str(ROOT),
-            str(TESTS / "cpp/dsp_probe.cpp"),
-            str(TESTS.parent / "runtime/audio_dsp.cpp"),
-            "-o",
-            str(output),
-        ],
-        check=True,
-    )
+    command = [
+        compiler,
+        "-std=c++17",
+        "-O3",
+        "-I",
+        str(ROOT),
+        str(TESTS / "cpp/dsp_probe.cpp"),
+        str(TESTS.parent / "runtime/audio_dsp.cpp"),
+        "-o",
+        str(output),
+    ]
+    subprocess.run(command, check=True)
+    try:
+        output.with_suffix(".build.json").write_text(json.dumps(command))
+    except Exception:
+        pass  # Missing diagnostic metadata must not change normal DSP tests.
     return output
 
 
@@ -146,6 +148,12 @@ def test_mel_reference(probe, reference, tmp_path, name):
                 )
             except Exception:
                 pass  # Never replace the unchanged assertion with an observation failure.
+            try:
+                from .dsp_native_observation import report_failure
+
+                report_failure(probe, tmp_path, result)
+            except Exception:
+                pass  # Native source replay must preserve the same assertion failure too.
         raise
 
 
@@ -259,6 +267,170 @@ def test_normalization_observation_preserves_active_cprofile(reference):
     assert len(calls) == 1 and calls[0].callcount == 1
     assert not observation.profile_installed and not observation.mode_installed
     assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
+
+
+def test_native_observation_source_insertions_and_unique_anchors():
+    from .dsp_native_observation import instrument
+
+    source = (TESTS.parent / "runtime/audio_dsp.cpp").read_text()
+    observed = instrument(source)
+    retained = "".join(
+        line
+        for line in observed.splitlines(keepends=True)
+        if "lfm2_audio_dsp_observation::" not in line and "dsp_normalization_observer.h" not in line
+    )
+    assert retained == source
+    with pytest.raises(ValueError, match="anchor"):
+        instrument(source.replace("    return total;", "    return float(total);"))
+    with pytest.raises(ValueError, match="anchor"):
+        instrument(source + "    return total;\n")
+
+
+def test_native_observation_build_metadata_cannot_break_baseline(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(shutil, "which", lambda _: "/compiler")
+    monkeypatch.setattr(
+        subprocess, "run", lambda command, **kwargs: calls.append((command, kwargs))
+    )
+    monkeypatch.setattr(
+        Path, "write_text", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("unavailable"))
+    )
+    factory = SimpleNamespace(mktemp=lambda _: tmp_path)
+    assert probe.__wrapped__(factory) == tmp_path / "probe"
+    assert calls[0][0][1:3] == ["-std=c++17", "-O3"] and calls[0][1] == {"check": True}
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: (_ for _ in ()).throw(subprocess.CalledProcessError(1, command)),
+    )
+    with pytest.raises(subprocess.CalledProcessError):
+        probe.__wrapped__(factory)
+
+
+def test_native_observation_positional_words_and_unavailable_bound(tmp_path):
+    compiler = shutil.which("c++")
+    if compiler is None:
+        pytest.skip("CPU observation control requires a C++17 compiler")
+    source = tmp_path / "encoding.cpp"
+    source.write_text(
+        '#include "families/lfm2_audio/tests/cpp/dsp_normalization_observer.h"\n'
+        "#include <iostream>\n"
+        "int main() {\n"
+        "  lfm2_audio_dsp_observation::ChannelValues words;\n"
+        "  words.observe({-0.0F, 0.0F, -0.0F}, 0);\n"
+        "  words.observe({-0.0F, 0.0F, -0.0F}, 1);\n"
+        '  words.write(std::cout); std::cout << "\\n";\n'
+        "  words.observe({0.0F, 0.0F, -0.0F}, 2);\n"
+        '  words.write(std::cout); std::cout << "\\n";\n'
+        "  lfm2_audio_dsp_observation::ChannelValues varied;\n"
+        "  std::vector<float> values;\n"
+        "  for (int i=0; i<40; ++i) values.push_back(float(i));\n"
+        "  varied.observe(values, 0); varied.write(std::cout);\n"
+        "}\n"
+    )
+    binary = tmp_path / "encoding"
+    subprocess.run(
+        [compiler, "-std=c++17", "-O3", "-I", str(ROOT), str(source), "-o", str(binary)],
+        check=True,
+    )
+    output = subprocess.check_output([str(binary)], text=True)
+    exact, changed, bounded = [json.loads(line) for line in output.splitlines()]
+    assert exact["rle"] == [
+        {"start": 0, "length": 1, "bits": 0x80000000},
+        {"start": 1, "length": 1, "bits": 0},
+        {"start": 2, "length": 1, "bits": 0x80000000},
+    ]
+    assert changed["payload"] == bounded["payload"] == "bounded_unavailable"
+    assert changed["all_channels_bit_identical"] is False
+
+
+def test_native_observation_actual_source_replay(probe, tmp_path):
+    from .dsp_native_observation import replay
+
+    filters = np.zeros(128 * 257, dtype=np.float32)
+    baseline, values = invoke(probe, tmp_path, "mel", np.zeros(1280), filters=filters)
+    assert baseline.returncode == 0
+    report = replay(probe, tmp_path, baseline)
+    assert report["status"] == "admitted_observed_source_replay"
+    assert report["full_final_output_bits_identical"]
+    assert report["input"] == {
+        "sample_count": 1280,
+        "sample_rate": 16000,
+        "filter_float_count": 128 * 257,
+    }
+    assert report["intermediate_inputs_lossless"]
+    trace = report["observation"]
+    assert trace["frames"] == 9 and trace["valid_frames"] == 8
+    assert trace["sum_calls"] == 256
+    assert trace["features_before_normalization"]["per_channel_source_stride"] == [128]
+    assert trace["mean_reduction_input"]["per_channel_source_stride"] == [1]
+    assert trace["mean_reduction_input"]["rle"][-1] == {"start": 8, "length": 1, "bits": 0}
+    assert trace["features_before_normalization"]["all_channels_bit_identical"]
+    assert trace["variance_sum_words"] == [0] * 128
+    assert values.size == 1152
+
+
+@pytest.mark.parametrize("failure", ["signed_zero", "incomplete"])
+def test_native_observation_rejects_nontransparent_or_incomplete_trace(failure):
+    from types import SimpleNamespace
+
+    from .dsp_native_observation import _admit
+
+    baseline = SimpleNamespace(returncode=0, stdout="9\n")
+    words = np.zeros(9 * 128, dtype=np.uint32)
+    expected = words.tobytes()
+    trace = {
+        "schema_version": 1,
+        "complete": True,
+        "frames": 9,
+        "valid_frames": 8,
+        "sum_calls": 256,
+        "mean_locals": 128,
+        "sigma_locals": 128,
+        **{
+            key: [0] * 128
+            for key in (
+                "mean_sum_words",
+                "variance_sum_words",
+                "mean_words",
+                "sigma_after_epsilon_words",
+            )
+        },
+    }
+    if failure == "signed_zero":
+        words[-1] = 0x80000000
+    else:
+        trace["sum_calls"] = 255
+    with pytest.raises(ValueError):
+        _admit(baseline, baseline, words.tobytes(), expected, trace)
+
+
+def test_native_observation_diagnostic_errors_preserve_failure(monkeypatch, capsys):
+    from . import dsp_native_observation as observation
+
+    monkeypatch.setattr(
+        observation, "replay", lambda *args: (_ for _ in ()).throw(RuntimeError("private path"))
+    )
+    with pytest.raises(AssertionError, match="original assertion"):
+        try:
+            raise AssertionError("original assertion")
+        except AssertionError:
+            observation.report_failure(None, None, None)
+            raise
+    line = capsys.readouterr().out
+    assert "RuntimeError" in line and "private path" not in line
+    monkeypatch.setattr(
+        observation.json, "dumps", lambda *args, **kwargs: (_ for _ in ()).throw(TypeError())
+    )
+    with pytest.raises(AssertionError, match="original assertion"):
+        try:
+            raise AssertionError("original assertion")
+        except AssertionError:
+            observation.report_failure(None, None, None)
+            raise
+    assert "emission_error" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("frames", [1, 2, 6, 12, 36])
