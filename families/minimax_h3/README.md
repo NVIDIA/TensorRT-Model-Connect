@@ -112,7 +112,7 @@ geometry, precision, frames, steps, or model topology.
 | Capacity | Maximum text rows, including visual tokens | DiT condition-video min/opt/max rows |
 | --- | --- | --- |
 | `standard` (default) | 32,768 | 4,096 / 5,504 / 16,384 |
-| `six_portrait` (experimental; trained build/inference not yet run) | 65,536 | 4,096 / 43,776 / 49,152 |
+| `six_portrait` (experimental; trained bundle built, six-image inference not yet run) | 65,536 | 4,096 / 43,776 / 49,152 |
 
 Original preparation maps a 9:16 image to 3648x2048. Each such image contributes
 7,296 rows to **each** conditioning stream; six contribute 43,776 before prompt
@@ -131,12 +131,28 @@ metadata or merely increasing a client's reference-count setting does not
 expand those engines. Legacy default metadata remains unchanged; expanded
 metadata has an explicit capacity label and all budgets must agree.
 
-The expanded path currently has CPU build-wiring, metadata and native preflight
-tests only. It has no measured trained bundle size, generation latency or
-memory peak and does not waive existing trained numerical/quality gates. The
-119.7-GiB and build-RSS observations above apply to the earlier standard build,
-not this new capacity. Larger profiles can change tactics and memory use; no
-numerical equivalence or single-device fit is claimed before actual validation.
+The expanded `minimal` profile was built on one GB300 from source
+`6c83ec236c9d00ed1b0652cae1c275ff641d3f4c`, using the pinned original
+checkpoint and BF16 build request with the unchanged 1344x768, 124-frame,
+50-grid recipe. Its
+complete eight-plan bundle is 128,527,457,708 bytes (119.7 GiB). Every section
+and the complete retained bundle were SHA-256 verified; publication preserved
+the single spool's inode. The instrumented build, staging, payload readback
+and hash-verification interval was 614.4 seconds, and the builder process's
+maximum RSS was 104,779,648 KiB (approximately 100 GiB). These are observations
+for this expanded build, separate from the earlier standard-profile figures.
+
+The matching ARM64 family DSO and public SDK/CLI also compiled at that
+source revision. Both owning metadata/preflight CTests
+passed with CUDA hidden. This is native binary and CPU-contract evidence,
+not trained inference.
+
+Six-image generation has **not** been executed. Generation latency, inference
+RAM/VRAM peaks, numerical equivalence and single-device inference fit remain
+unqualified. Neither build RSS nor container memory counters establish minimum
+RAM/VRAM requirements. Larger profiles can change tactics and memory use;
+these build results do not waive the existing trained numerical, serialized
+video-plan storage or quality gates.
 
 ## Bundle composition
 
