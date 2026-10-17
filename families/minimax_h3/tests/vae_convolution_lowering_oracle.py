@@ -9,6 +9,7 @@ full-prefix, full-video or Ref2VA qualification. No production math is patched.
 """
 
 import argparse
+import inspect
 import json
 from pathlib import Path
 
@@ -187,6 +188,7 @@ def main():
         executions=[],
         source_operands_report_sha256=OPERANDS_SHA,
         source_native_report_sha256=RETAINED_SHA,
+        production_builder_sha256=sha(inspect.getfile(production)),
         prefix_only=True,
         production_math_modified=False,
         extra_outputs_can_change_tactics=True,

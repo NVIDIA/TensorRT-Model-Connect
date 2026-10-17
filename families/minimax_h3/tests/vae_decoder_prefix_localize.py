@@ -30,8 +30,8 @@ from families.minimax_h3.tests.test_trained_video_decoder import _ATOL, _RTOL, _
 from families.minimax_h3.tests.vae_encoder_checkpoint_oracle import CONFIG_SHA256, REVISION
 
 
-# Isolate intermediate half rounding from the fused biased-Conv3d baseline.
-BASELINE_SHA = "dbcf62336c3add495edfc5c1f554de3bc4021dbe5f5a79589e17fb4baf2ce341"
+# Isolate float accumulation from the separate-bias half-convolution baseline.
+BASELINE_SHA = "b1a639ae59b14cffc62c58faa0dde7c624d77f823e94ad382d0544b073b68476"
 ROWS_SHA = "c9d0c8c9403e95ba3b80ca5f4d4fbfc433aa713e3a25142763524eaebd5eed27"
 UPSTREAM_SHA = "4c3c9745ee27d16ff343c4998244bad41cd8f4213f0029cf7ce11ebb6d72ca1b"
 KEYS = (

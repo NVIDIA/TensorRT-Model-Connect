@@ -130,7 +130,7 @@ def test_video_decoder_preserves_fp32_registers_before_first_residual(monkeypatc
 
 
 @pytest.mark.parametrize("batch", [1, 28])
-def test_video_post_quantization_rounds_half_convolution_before_bias(batch):
+def test_video_post_quantization_preserves_half_operands_float_accumulation_and_bias(batch):
     # Original trained parameter shapes and autocast dtypes; no GPU or model
     # math is supplied by this graph-contract fixture.
     recorded = {}
@@ -151,6 +151,12 @@ def test_video_post_quantization_rounds_half_convolution_before_bias(batch):
             if value is source:
                 assert dtype == vae.trt.float16
                 label = "half-input"
+            elif value.label == "half-input":
+                assert dtype == vae.trt.float32
+                label = "float-input"
+            elif value.label == "float-convolution":
+                assert dtype == vae.trt.float16
+                label = "half-convolution"
             elif value.label == "half-convolution":
                 assert dtype == vae.trt.float32
                 label = "wide-convolution"
@@ -160,14 +166,15 @@ def test_video_post_quantization_rounds_half_convolution_before_bias(batch):
             return SimpleNamespace(get_output=lambda _index: tensor(dtype, label))
 
         def add_convolution_nd(self, value, channels, kernel_shape, kernel, bias):
-            assert value.dtype == vae.trt.float16 and value.shape == source.shape
+            assert value.dtype == vae.trt.float32 and value.shape == source.shape
+            assert value.label == "float-input"
             assert channels == 24 and kernel_shape == (1, 1, 1)
-            assert kernel.dtype == np.float16 and kernel.flags.c_contiguous
-            assert isinstance(bias, vae.trt.Weights) and bias.dtype == vae.trt.float16
+            assert kernel.dtype == np.float32 and kernel.flags.c_contiguous
+            assert isinstance(bias, vae.trt.Weights) and bias.dtype == vae.trt.float32
             assert bias.size == 0, "bias must follow the half-rounded convolution"
             recorded.update(kernel=kernel, bias=bias)
             recorded["layer"] = SimpleNamespace(
-                get_output=lambda _index: tensor(vae.trt.float16, "half-convolution")
+                get_output=lambda _index: tensor(vae.trt.float32, "float-convolution")
             )
             return recorded["layer"]
 
@@ -204,7 +211,8 @@ def test_video_post_quantization_rounds_half_convolution_before_bias(batch):
             0,
         )
         np.testing.assert_array_equal(
-            recorded["kernel"], weights["post_quant_conv.weight"].astype(np.float16)
+            recorded["kernel"],
+            weights["post_quant_conv.weight"].astype(np.float16).astype(np.float32),
         )
         for name in ("kernel", "bias_constant"):
             assert any(
@@ -216,7 +224,12 @@ def test_video_post_quantization_rounds_half_convolution_before_bias(batch):
 
 def test_video_post_quantization_rejected_convolution_does_not_retain_buffers():
     source = SimpleNamespace(shape=(1, 24, 7, 16, 16), dtype=vae.trt.float16)
-    network = SimpleNamespace(add_convolution_nd=lambda *_args: None)
+    network = SimpleNamespace(
+        add_convolution_nd=lambda *_args: None,
+        add_cast=lambda value, dtype: SimpleNamespace(
+            get_output=lambda _index: SimpleNamespace(shape=value.shape, dtype=dtype)
+        ),
+    )
     weights = {
         "post_quant_conv.weight": np.zeros((24, 24, 1, 1, 1), np.float32),
         "post_quant_conv.bias": np.zeros(24, np.float32),
