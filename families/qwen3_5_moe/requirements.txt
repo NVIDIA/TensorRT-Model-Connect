@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Exact official CPU oracle used by the family checkpoint E2E.
+gptqmodel==7.4.0
+transformers==5.14.1

@@ -214,6 +214,27 @@ qualified by this route. Existing quality gates are unchanged.
 See the [family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_5/edge_llm/README.md)
 for exact revisions, paired execution, and replay gaps.
 
+### Optional Qwen3.5/3.6 MoE Edge execution
+
+`trtmc qwen3_5_moe build MODEL -o model.bundle` owns the GPTQ Qwen3.5 35B-A3B
+and NVFP4 Qwen3.6 35B-A3B routes. Its family-local options select explicit
+DFlash companions, greedy DDTree, or the documented embedded NVFP4 MTP recipe.
+Visual bundles map the existing image and video Task interfaces directly to
+Edge preprocessing and runtime APIs. Shared model selection remains unchanged.
+
+The native SDK is pinned to official Edge-LLM 0.11.0. Compatible PyPI Python
+tools are discovered automatically; a source-built installation also works,
+and matching native headers, libraries and plugins remain required.
+Builds preserve each source checkpoint's quantization recipe, with FP16
+compute and single-device execution. Larger/original checkpoints outside the
+measured memory admission are not advertised as qualified configurations.
+
+Runtime availability is not an accuracy claim: speculative decoding and NVFP4
+repeatability have recorded quality failures. Those routes remain executable
+with unchanged validation gates. See the
+[family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_5_moe/edge_llm/README.md)
+for exact recipes, commands, Task boundaries and qualification limitations.
+
 ## Optional Llama Edge execution
 
 Use `trtmc llama build MODEL -o model.bundle` with the owning

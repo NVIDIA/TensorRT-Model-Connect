@@ -1,0 +1,17 @@
+{
+  "name": "qwen35-moe-gptq-edge",
+  "family": "qwen3_5_moe",
+  "task": "vision_language_generation",
+  "hf_id": "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4",
+  "hf_revision": "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b",
+  "precision": "fp16",
+  "max_sequence_length": 1024,
+  "testcases": [
+    {
+      "name": "qwen35-moe-gptq-edge-vlm",
+      "premerge": true
+    }
+  ],
+  "bundle": "qwen35-moe-gptq-edge.bundle",
+  "tensor_parallel_size": 1
+}
