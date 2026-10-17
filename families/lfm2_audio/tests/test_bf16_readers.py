@@ -82,3 +82,149 @@ def test_mapper_reads_bf16_checkpoint_layouts(tmp_path, stem, indexed):
             json.dumps({"weight_map": {name: filename for name in EXPECTED}})
         )
     assert run_reader(tmp_path, direct=False) == EXPECTED
+
+
+def test_build_materializes_only_consumed_weights_and_releases_detokenizer(monkeypatch, tmp_path):
+    import gc
+    from types import ModuleType
+    import weakref
+
+    import ml_dtypes
+    import numpy as np
+
+    from families.lfm2_audio import model
+
+    fixtures = Path(__file__).parent / "fixtures"
+    raw = json.loads((fixtures / "config.json").read_text())
+    detok_raw = json.loads((fixtures / "detokenizer_config.json").read_text())
+    monkeypatch.setattr(model, "load_config", lambda _: (raw, detok_raw))
+    names = [
+        "lfm.embed_tokens.weight",
+        "audio_embedding.embedding.weight",
+        "conformer.pre_encode.out.weight",
+        "audio_adapter.model.0.weight",
+        "depth_linear.weight",
+        "depthformer.layers.0.ffn_norm.weight",
+        "future_non_backbone.weight",
+        *(f"depth_embeddings.{i}.embedding.weight" for i in range(8)),
+    ]
+    values, expected = {}, {}
+    for index, name in enumerate([*names, "emb.emb.weight"]):
+        bits = np.array([0x3F80 + index, 0xC020, 0x8000, 0x3F00], dtype=np.uint16).reshape(2, 2)
+        values[name] = bits.view(ml_dtypes.bfloat16)
+        expected[name] = bits.astype(np.uint32) << 16
+    values["conformer.pre_encode.out.weight"] = (
+        np.array([0x3E000000, 0xC0E00000, 0x80000000, 0x3F800000], dtype=np.uint32)
+        .reshape(2, 2)
+        .view(np.float32)
+    )
+    expected["conformer.pre_encode.out.weight"] = (
+        values["conformer.pre_encode.out.weight"].view(np.uint32).copy()
+    )
+    loaded, mapped, stages = {"root": [], "detokenizer": []}, {}, []
+
+    class Reader:
+        def __init__(self, which):
+            self.which = which
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def keys(self):
+            return (
+                ["lfm.layers.0.feed_forward.w1.weight", *names, "lfm.embedding_norm.weight"]
+                if self.which == "root"
+                else ["lin.weight", "emb.emb.weight", "lfm.layers.0.feed_forward.w1.weight"]
+            )
+
+        def get_tensor(self, name):
+            allowed = names if self.which == "root" else ["emb.emb.weight"]
+            assert name in allowed, f"unused tensor materialized: {name}"
+            loaded[self.which].append(name)
+            return values[name]
+
+    def open_weights(path, *, framework):
+        assert framework == "numpy"
+        which = "detokenizer" if Path(path).parent.name == "audio_detokenizer" else "root"
+        if which == "detokenizer":
+            gc.collect()
+            assert mapped["detokenizer"]() is None, "serialized detokenizer weights still live"
+        return Reader(which)
+
+    monkeypatch.setattr(model, "safe_open", open_weights)
+
+    class WeightMap(dict):
+        pass
+
+    def map_weights(path, *_args, **_kwargs):
+        which = "detokenizer" if Path(path).name == "audio_detokenizer" else "backbone"
+        weights = WeightMap(which=which)
+        mapped[which] = weakref.ref(weights)
+        return weights
+
+    def engine(_config, weights, _length, **_kwargs):
+        stages.append(weights["which"])
+        return weights["which"].encode()
+
+    def consume(stage, weights, *_args, **_kwargs):
+        assert mapped["backbone"]() is None
+        assert set(weights) == set(names)
+        for name, value in weights.items():
+            assert value.dtype == np.float32
+            np.testing.assert_array_equal(value.view(np.uint32), expected[name])
+        stages.append(stage)
+        return stage.encode()
+
+    for module_name, function_name, function in (
+        ("backbone", "build_lfm2_engine", engine),
+        ("checkpoint_mapper", "load_lfm2_weights", map_weights),
+        ("conformer", "build_encoder", lambda *args, **kwargs: consume("encoder", *args, **kwargs)),
+        (
+            "depthformer",
+            "build_depthformer",
+            lambda *args, **kwargs: consume("depthformer", *args, **kwargs),
+        ),
+    ):
+        module = ModuleType(f"families.lfm2_audio.{module_name}")
+        setattr(module, function_name, function)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    class Writer:
+        def __init__(self):
+            self.outputs = {}
+
+        def set_header(self, **_kwargs):
+            pass
+
+        def add_bytes(self, name, data):
+            self.outputs[name] = data
+
+        def add_json(self, name, data):
+            self.outputs[name] = data
+
+    for name in (
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "chat_template.jinja",
+    ):
+        (tmp_path / name).write_text(name)
+    writer = Writer()
+    model.build(model.BuildRequest(tmp_path, max_sequence_length=16), writer)
+    assert loaded == {"root": names, "detokenizer": ["emb.emb.weight"]}
+    assert stages == ["backbone", "encoder", "depthformer", "detokenizer"]
+    for output, name in (
+        ("text_embeddings.f32", "lfm.embed_tokens.weight"),
+        ("audio_embeddings.f32", "audio_embedding.embedding.weight"),
+        ("detokenizer_embeddings.f32", "emb.emb.weight"),
+    ):
+        assert writer.outputs[output] == expected[name].astype("<u4").tobytes()
+    assert (
+        writer.outputs["depth_embeddings.f32"]
+        == np.stack([expected[f"depth_embeddings.{i}.embedding.weight"] for i in range(8)])
+        .astype("<u4")
+        .tobytes()
+    )

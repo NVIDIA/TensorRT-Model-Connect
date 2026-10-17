@@ -113,10 +113,12 @@ def backbone_config(raw):
     return SimpleNamespace(raw=raw)
 
 
-def read_weights(path):
+def read_weights(path, *, keep=None):
     with safe_open(str(path), framework="numpy") as reader:
         return {
-            name: np.asarray(reader.get_tensor(name), dtype=np.float32) for name in reader.keys()
+            name: np.asarray(reader.get_tensor(name), dtype=np.float32)
+            for name in reader.keys()
+            if keep is None or keep(name)
         }
 
 
@@ -173,7 +175,10 @@ def build(request, writer):
     detok_config = backbone_config(detok_raw)
     resolved = validate_dense_lfm2_config(lfm_config)
     detok_resolved = validate_dense_lfm2_config(detok_config)
-    weights = read_weights(root / "model.safetensors")
+    weights = read_weights(
+        root / "model.safetensors",
+        keep=lambda name: not name.startswith("lfm.") or name == "lfm.embed_tokens.weight",
+    )
     writer.set_header(family="lfm2_audio", task=request.task, backend=request.backend)
     backbone_weights = load_lfm2_weights(str(root), lfm_config)
     writer.add_bytes(
@@ -213,6 +218,7 @@ def build(request, writer):
             verbose=request.verbose,
         ),
     )
+    del detok_weights
     writer.add_bytes(
         "text_embeddings.f32", weights["lfm.embed_tokens.weight"].astype("<f4").tobytes()
     )
@@ -223,7 +229,9 @@ def build(request, writer):
         [weights[f"depth_embeddings.{i}.embedding.weight"] for i in range(8)]
     )
     writer.add_bytes("depth_embeddings.f32", depth_embeddings.astype("<f4").tobytes())
-    detok = read_weights(root / "audio_detokenizer/model.safetensors")
+    detok = read_weights(
+        root / "audio_detokenizer/model.safetensors", keep=lambda name: name == "emb.emb.weight"
+    )
     writer.add_bytes("detokenizer_embeddings.f32", detok["emb.emb.weight"].astype("<f4").tobytes())
     writer.add_bytes("mel_filters.f32", mel_filters().astype("<f4").tobytes())
     runtime = {
