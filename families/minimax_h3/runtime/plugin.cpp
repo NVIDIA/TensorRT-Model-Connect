@@ -5,6 +5,7 @@
 
 #include "families/minimax_h3/runtime/pipeline.h"
 #include "families/minimax_h3/runtime/plan_loader.h"
+#include "families/minimax_h3/runtime/reference_bundle.h"
 #include "families/minimax_h3/runtime/tokenizer.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
@@ -44,6 +45,13 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto source = std::make_shared<MiniMaxH3PlanSource>(context.reader);
     const auto runtime = source->read_required("runtime.json");
     const auto config = nlohmann::json::parse(runtime.begin(), runtime.end());
+    if (context.reader.info().task == "references_text_to_audio_video") {
+        const auto reference = minimax_h3::parse_image_reference_config(config);
+        return new minimax_h3::ImageReferencePipeline(
+            make_minimax_h3_plan_loader(context.backend, source,
+                                        minimax_h3::image_reference_plan_names()),
+            minimax_h3_factory::load_tokenizer(*source), reference);
+    }
     if (config.at("context_parallel_size").get<std::int32_t>() != 1 ||
         config.at("padded_sequence_length").get<std::int32_t>() != 38247 ||
         config.at("vae_tile_batch").get<std::int32_t>() != 28) {

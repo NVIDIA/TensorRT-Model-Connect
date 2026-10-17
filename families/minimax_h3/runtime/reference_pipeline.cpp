@@ -46,8 +46,11 @@ void preflight(const internal::ReferencesTextToAudioVideoRequest& request,
     }
     const auto presentation = make_qwen_image_presentation(tokenizer, std::string(request.prompt),
                                                            grids, config.max_text_rows);
-    (void)make_image_reference_layout(presentation.h3_token_tags, latent_shapes,
-                                      config.denoiser.target, config.denoiser.max_sequence_rows);
+    const auto layout =
+        make_image_reference_layout(presentation.h3_token_tags, latent_shapes,
+                                    config.denoiser.target, config.denoiser.max_sequence_rows);
+    if (layout.condition_video_rows > config.max_condition_video_rows)
+        throw std::length_error("MiniMax-H3 reference images exceed their own DiT operand profile");
 }
 } // namespace
 
@@ -91,7 +94,8 @@ ImageReferencePipeline::ImageReferencePipeline(ReferenceModuleLoader loader,
                                                ReferencePipelineConfig config, cudaStream_t stream)
     : loader_(std::move(loader)), tokenizer_(std::move(tokenizer)), config_(std::move(config)),
       stream_(stream) {
-    if (!loader_ || !tokenizer_ || config_.denoiser.layers != 50 ||
+    if (!loader_ || !tokenizer_ || config_.max_condition_video_rows <= 0 ||
+        config_.max_condition_video_rows > 16384 || config_.denoiser.layers != 50 ||
         config_.denoiser.hidden_size != 5376 || config_.denoiser.text_width != 5120 ||
         config_.denoiser.target.frames != 37 || config_.denoiser.target.audio_latents != 207 ||
         (config_.memory != ReferenceMemoryPreset::Minimal &&

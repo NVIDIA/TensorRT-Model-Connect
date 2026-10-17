@@ -140,6 +140,15 @@ void exercise(ReferenceMemoryPreset preset) {
         (void)dit_limited.run({{references.data(), references.size()}, "prompt"}, {});
     });
     require(loads == 0, "Qwen and Ref2VA packed caps must fail before allocation/inference");
+    cap = configuration(preset);
+    cap.denoiser.max_sequence_rows = 86862;
+    ImageReferencePipeline reference_limited(loader, std::make_unique<Tokenizer>(), cap, stream);
+    references.assign(5, image);
+    rejects<std::length_error>([&] {
+        (void)reference_limited.run({{references.data(), references.size()}, "prompt"}, {});
+    });
+    require(loads == 0, "per-reference operand cap is stricter than the combined sequence cap");
+    references.assign(1, image);
 
     // Real preparation reaches the actual conditioner with the original 2048
     // short edge. No TensorRT plan, model oracle or full generation is faked.

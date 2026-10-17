@@ -10,6 +10,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   plugin.cpp
   qwen_reference.cpp
   reference_conditioner.cpp
+  reference_bundle.cpp
   reference_denoiser.cpp
   reference_image.cpp
   reference_layout.cpp
@@ -56,6 +57,18 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_reference_bundle
+    reference_bundle.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_bundle.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_bundle PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_reference_bundle SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_minimax_h3_reference_bundle PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_minimax_h3_reference_bundle PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_bundle COMMAND test_minimax_h3_reference_bundle)
+
   add_executable(test_minimax_h3_reference_pipeline
     reference_pipeline.cpp reference_conditioner.cpp reference_visual_encoder.cpp
     reference_denoiser.cpp reference_image.cpp reference_layout.cpp qwen_reference.cpp

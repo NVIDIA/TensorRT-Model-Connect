@@ -268,7 +268,13 @@ class _MiniMaxH3Model:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one MiniMax-H3 image-generation bundle."""
+    """Build an H3 bundle; image Ref2VA remains explicit and experimental."""
+    if request.task == "references_text_to_audio_video":
+        # Explicit experimental request only. Automatic capability discovery
+        # stays unchanged until the complete trained reference path qualifies.
+        from .reference_build import build as build_reference
+
+        return build_reference(request, writer)
     if request.dynamic_kv_cache:
         raise NotImplementedError("minimax_h3 does not support dynamic_kv_cache")
 

@@ -17,6 +17,7 @@ struct ReferencePipelineConfig {
     ReferenceDenoiserConfig denoiser;
     ReferenceLatentNormalization normalization;
     int32_t max_text_rows{0};
+    int32_t max_condition_video_rows{16384};
     ReferenceMemoryPreset memory{ReferenceMemoryPreset::Minimal};
 };
 
