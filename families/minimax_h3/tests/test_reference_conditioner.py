@@ -6,8 +6,15 @@
 import numpy as np
 import pytest
 
-from families.minimax_h3.checkpoint import numpy_state
 from families.minimax_h3 import text_encoder_builder as text
+from families.minimax_h3.tests.reference_language_case import (
+    ATOL,
+    RTOL,
+    ROW_COUNTS,
+    make_reference_language_case,
+    reference_language_expected,
+    reference_language_inputs,
+)
 
 
 def test_reference_conditioner_shapes_do_not_use_text_only_position_layout():
@@ -66,52 +73,8 @@ def test_reference_language_injects_visual_features_and_deepstack_before_hidden_
     import json
     import tensorrt as trt
     import torch
-    from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig
-    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
 
-    # The original stack is deliberately one layer longer: hidden_states[4]
-    # must be a pre-final-norm state, just like H3's hidden_states[50] of 64.
-    values = dict(
-        HIDDEN_SIZE=16,
-        NUM_LAYERS=4,
-        NUM_HEADS=2,
-        NUM_KV_HEADS=1,
-        HEAD_DIM=8,
-        INTERMEDIATE_SIZE=32,
-        VOCAB_SIZE=128,
-        MROPE_SECTION=(2, 1, 1),
-    )
-    for name, value in values.items():
-        monkeypatch.setattr(text, name, value)
-    torch.manual_seed(491)
-    config = Qwen3VLTextConfig(
-        hidden_size=16,
-        num_hidden_layers=5,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=8,
-        intermediate_size=32,
-        vocab_size=128,
-        use_cache=False,
-        rope_parameters=dict(
-            rope_type="default",
-            rope_theta=text.ROPE_THETA,
-            mrope_section=[2, 1, 1],
-            mrope_interleaved=True,
-        ),
-    )
-    config._attn_implementation = "sdpa"
-    original = Qwen3VLTextModel(config).eval()
-    with torch.no_grad():
-        for name, value in original.named_parameters():
-            if name.endswith("norm.weight"):
-                value.copy_(torch.linspace(0.6, 1.4, value.numel()).reshape_as(value))
-    rotary_frequency = original.rotary_emb.inv_freq.clone()
-    original.to(dtype=torch.bfloat16)
-    original.rotary_emb.inv_freq = rotary_frequency
-    state = original.state_dict()
-    prefix = "model.language_model."
-    weights = numpy_state({name: state[name[len(prefix) :]] for name in text.checkpoint_keys()})
+    original, weights = make_reference_language_case(monkeypatch)
     plan = text.build_text_encoder_engine(
         weights, sequence_length=16, reference=True, workspace_bytes=1 << 30
     )
@@ -126,39 +89,9 @@ def test_reference_language_injects_visual_features_and_deepstack_before_hidden_
     stream = torch.cuda.current_stream()
     results = []
     with torch.no_grad():
-        for rows in (4, 7, 11):
-            ids = torch.randint(0, 128, (rows,), dtype=torch.int32, device="cuda")
-            positions = torch.arange(rows, dtype=torch.int32, device="cuda").expand(3, -1).clone()
-            # Nonidentical T/H/W coordinates expose a one-axis RoPE shortcut.
-            positions[1] *= 3
-            positions[2] *= 7
-            mask = torch.zeros(rows, 1, device="cuda", dtype=torch.bool)
-            mask[1:3] = True
-            visual = torch.randn(rows, 16, device="cuda", dtype=torch.bfloat16)
-            deepstack = [
-                torch.randn(rows, 16, device="cuda", dtype=torch.bfloat16) * 0.03 for _ in range(3)
-            ]
-            for value in deepstack:
-                value[~mask[:, 0]] = 127
-            embeds = original.embed_tokens(ids.long()[None])
-            embeds = torch.where(mask[None], visual[None], embeds)
-            expected = original(
-                inputs_embeds=embeds,
-                position_ids=positions.long()[:, None],
-                attention_mask=torch.ones(1, rows, device="cuda", dtype=torch.long),
-                visual_pos_masks=mask[:, 0][None],
-                deepstack_visual_embeds=[value[mask[:, 0]] for value in deepstack],
-                use_cache=False,
-                output_hidden_states=True,
-                return_dict=True,
-            ).hidden_states[4][0]
-            inputs = dict(
-                input_ids=ids,
-                position_ids=positions,
-                visual_mask=mask.int(),
-                visual_features=visual,
-                **{f"deepstack_features_{i}": value for i, value in enumerate(deepstack)},
-            )
+        for rows in ROW_COUNTS:
+            inputs = reference_language_inputs(rows)
+            expected = reference_language_expected(original, inputs)
             for name, value in inputs.items():
                 assert context.set_input_shape(name, tuple(value.shape))
                 assert context.set_tensor_address(name, value.data_ptr())
@@ -169,5 +102,5 @@ def test_reference_language_injects_visual_features_and_deepstack_before_hidden_
             stream.synchronize()
             error = (actual - expected.float()).abs()
             results.append(dict(rows=rows, max_abs_error=error.max().item()))
-            torch.testing.assert_close(actual, expected.float(), rtol=0.016, atol=1e-5)
+            torch.testing.assert_close(actual, expected.float(), rtol=RTOL, atol=ATOL)
     record_property("reference_language_comparisons", json.dumps(results, allow_nan=False))
