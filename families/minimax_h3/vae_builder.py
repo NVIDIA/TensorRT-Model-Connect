@@ -139,6 +139,7 @@ def _fused_qkv(network, hidden, weights, prefix: str):
         np.concatenate([weights[f"{prefix}.to_{name}.weight"] for name in ("q", "k", "v")], axis=0),
         np.concatenate([weights[f"{prefix}.to_{name}.bias"] for name in ("q", "k", "v")], axis=0),
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
     )
     return tuple(
         network.add_slice(
@@ -155,6 +156,7 @@ def _swiglu(network, hidden, weights, prefix: str):
         weights[f"{prefix}.net.0.proj.weight"],
         weights[f"{prefix}.net.0.proj.bias"],
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
     )
     value = network.add_slice(
         projected, (0, 0, 0), (hidden.shape[0], SEQUENCE, FFN_DIM), (1, 1, 1)
@@ -170,6 +172,7 @@ def _swiglu(network, hidden, weights, prefix: str):
         weights[f"{prefix}.net.2.weight"],
         weights[f"{prefix}.net.2.bias"],
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
     )
 
 
@@ -257,12 +260,17 @@ def build_vae_tile_decoder_engine(
         "latent_tiles", trt.float32, (batch_size, CHANNELS, FRAMES, HEIGHT, WIDTH)
     )
     hidden = _post_quant_conv(network, latent, weights)
+    # Upstream permutes channel-first Conv3d output to noncontiguous patch
+    # rows. ATen linear therefore uses matmul followed by a separate bias
+    # addition, unlike the contiguous block projections' fused bias epilogue.
     hidden = op.linear(
         network,
         hidden,
         weights["decoder.proj_in.weight"],
         weights["decoder.proj_in.bias"],
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
+        round_before_bias=True,
     )
     # Upstream autocasts proj_in, not the learned FP32 register parameter.
     # torch.cat promotes the complete initial residual sequence to FP32; an
@@ -307,6 +315,7 @@ def build_vae_tile_decoder_engine(
             weights[f"{prefix}.attn.to_out.0.weight"],
             weights[f"{prefix}.attn.to_out.0.bias"],
             compute_dtype=trt.float16,
+            accumulation_dtype=trt.float32,
         )
         update = op.cast(network, update, trt.float32)
         scale1 = op.weight_constant(network, weights[f"{prefix}.scale1"].reshape(1, 1, DIM))
@@ -340,6 +349,7 @@ def build_vae_tile_decoder_engine(
         weights["decoder.proj_out.weight"],
         weights["decoder.proj_out.bias"],
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
     )
     pixels = network.add_slice(
         pixels, (0, 0, 0), (batch_size, TOKENS, OUT_CHANNELS * PATCH_T * PATCH * PATCH), (1, 1, 1)

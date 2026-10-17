@@ -100,7 +100,11 @@ def test_video_decoder_preserves_fp32_registers_before_first_residual(monkeypatc
 
     calls = []
 
-    def linear(_network, _value, _weight, _bias, *, compute_dtype):
+    def linear(
+        _network, _value, _weight, _bias, *, compute_dtype, accumulation_dtype, round_before_bias
+    ):
+        assert accumulation_dtype == vae.trt.float32
+        assert round_before_bias is True
         calls.append(compute_dtype)
         return tensor((batch, 1792, 2048), compute_dtype)
 
