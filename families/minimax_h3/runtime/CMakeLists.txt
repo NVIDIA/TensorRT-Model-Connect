@@ -7,6 +7,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   plugin.cpp
   qwen_reference.cpp
   reference_conditioner.cpp
+  reference_image.cpp
   visual_reference.cpp
   torch_cuda_normal.cu
 )
@@ -41,8 +42,19 @@ set_target_properties(trtmc_model_minimax_h3 PROPERTIES
 install(TARGETS trtmc_model_minimax_h3
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/trtmc_model_minimax_h3
+)
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_reference_image
+    reference_image.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_image.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_image PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_minimax_h3_reference_image PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_image COMMAND test_minimax_h3_reference_image)
+
   add_executable(test_minimax_h3_reference_conditioner
     qwen_reference.cpp
     reference_conditioner.cpp

@@ -34,8 +34,9 @@ struct ReferenceImageConditioning {
 };
 
 // Executes the family-owned vision -> language plan composition through the
-// native backend contract. Caller supplies exactly resized Qwen RGB images;
-// original-reference LANCZOS setup and any processor smart-resize are separate.
+// native backend contract. Caller supplies exactly resized Qwen RGB images.
+// prepare_reference_image produces the released H3 image geometry: 32-aligned
+// with area 2048^2..2048*8192, so Qwen's pinned smart-resize leaves it unchanged.
 // This component does not expose a public Ref2VA task or run a denoiser.
 class ReferenceImageConditioner {
   public:
