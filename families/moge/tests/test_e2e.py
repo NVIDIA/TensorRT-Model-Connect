@@ -107,15 +107,15 @@ def _required_environment() -> tuple[Path, Path, Path]:
 
 
 def _checkpoint(manifest: dict) -> Path:
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download
 
     path = Path(
-        snapshot_download(
+        hf_hub_download(
             repo_id=manifest["hf_id"],
             revision=manifest["hf_revision"],
-            allow_patterns=["model.pt"],
+            filename="model.pt",
         )
-    )
+    ).parent
     assert (path / "model.pt").is_file(), path
     return path
 

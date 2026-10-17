@@ -1,4 +1,6 @@
-huggingface-hub==0.29.1
-numpy==1.26.4
+# Keep the family layer compatible with the shared Community GPU environment.
+huggingface-hub==1.33.0
+numpy==2.4.6
 Pillow==12.2.0
-scipy==1.12.0
+# Preserve the LM defaults used by the pinned official MoGe reference.
+scipy==1.15.3
