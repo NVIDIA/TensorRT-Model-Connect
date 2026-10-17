@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import gc
 import json
 from dataclasses import replace
@@ -103,6 +104,7 @@ class _MiniMaxH3Model:
         *,
         precision: str = "bf16",
         verbose: bool = False,
+        on_plan: Callable[[str, bytes], None] | None = None,
     ) -> dict:
         del model_dir
         if precision.lower() != "bf16":
@@ -170,6 +172,17 @@ class _MiniMaxH3Model:
             )
         validate_component_key_partition(weights["_transformer_dir"], checkpoint_groups)
 
+        plans = {}
+
+        def emit(name, data):
+            if on_plan is None:
+                plans[name] = data
+            else:
+                # The public builder stages this section immediately. Do not
+                # retain completed serialized engines while building the next
+                # multi-GB component. The legacy private return mode is kept.
+                on_plan(name, data)
+
         text_state = load_selected_component_state_dict(
             weights["_text_encoder_dir"], text_encoder_checkpoint_keys()
         )
@@ -184,6 +197,8 @@ class _MiniMaxH3Model:
         )
         del text_weights
         gc.collect()
+        emit("text_encoder", text_encoder_plan)
+        del text_encoder_plan
 
         adaln_state = load_selected_component_state_dict(
             weights["_transformer_dir"], adaln_checkpoint_keys(profile)
@@ -199,8 +214,9 @@ class _MiniMaxH3Model:
         )
         del adaln_weights
         gc.collect()
+        emit("adaln_precompute", adaln_plan)
+        del adaln_plan
 
-        denoiser_components = {}
         for component_name, filename, denoiser_builder, selected_keys in denoiser_specs:
             dit_state = load_selected_component_state_dict(
                 weights["_transformer_dir"], selected_keys
@@ -216,7 +232,8 @@ class _MiniMaxH3Model:
             )
             del dit_weights
             gc.collect()
-            denoiser_components[component_name] = denoiser_plan
+            emit(component_name, denoiser_plan)
+            del denoiser_plan
 
         from .vae_builder import (
             build_vae_tile_decoder_engine,
@@ -232,13 +249,14 @@ class _MiniMaxH3Model:
             consume_weights=True,
             workspace_bytes=workspace_limits["vae_tile_decoder.plan"],
         )
+        del vae_weights
+        gc.collect()
+        emit("vae_decoder", vae_decoder_plan)
+        del vae_decoder_plan
         tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
 
         return {
-            "text_encoder": text_encoder_plan,
-            "adaln_precompute": adaln_plan,
-            **denoiser_components,
-            "vae_decoder": vae_decoder_plan,
+            **plans,
             "profile": profile,
             # Text/VAE paths remain explicit so follow-on native component
             # builders cannot silently substitute a different checkpoint.
@@ -283,22 +301,31 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model_dir = Path(request.model_dir)
     model = _MiniMaxH3Model()
     weights = model.load_weights(str(model_dir), config)
+    writer.set_header(family="minimax_h3", task=request.task, backend=request.backend)
+    section_names = {
+        "text_encoder": "text_encoder.plan",
+        "adaln_precompute": "adaln.plan",
+        "denoiser": "denoiser.plan",
+        "vae_decoder": "vae.plan",
+    }
+
+    def stage_plan(name, data):
+        if name not in section_names:
+            raise RuntimeError(f"Unexpected MiniMax-H3 bundle component: {name}")
+        writer.add_bytes(section_names[name], data)
+
     components = model.build_components(
         str(model_dir),
         config,
         weights,
         precision=request.precision,
         verbose=request.verbose,
+        on_plan=stage_plan,
     )
     profile = components["profile"]
     if profile.first_block_cache:
         raise RuntimeError("MiniMax-H3 minimal build uses the monolithic denoiser profile")
 
-    writer.set_header(family="minimax_h3", task=request.task, backend=request.backend)
-    writer.add_bytes("text_encoder.plan", components["text_encoder"])
-    writer.add_bytes("adaln.plan", components["adaln_precompute"])
-    writer.add_bytes("denoiser.plan", components["denoiser"])
-    writer.add_bytes("vae.plan", components["vae_decoder"])
     writer.add_bytes("tokenizer.json", components["tokenizer_json"])
     writer.add_json(
         "runtime.json",
