@@ -321,8 +321,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {"encoding", "embedding", "reranking"}:
-        raise ValueError("roberta task must be encoding, embedding, or reranking")
+    if request.task not in {"encoding", "embedding"}:
+        raise ValueError("roberta task must be encoding or embedding")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() not in {"roberta", "xlm-roberta", "camembert"}:
