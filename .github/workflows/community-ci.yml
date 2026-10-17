@@ -3,11 +3,13 @@
 
 name: Community CI
 
+# Community CI GPU promotion v1
+
 run-name: >-
   ${{ (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
 
-# Stable keeps the existing pull_request pipeline. Trusted metadata jobs pair
-# its immutable snapshot with the optional Dev execution of this same workflow.
+# Keep the legacy pull_request CPU check compatible with existing consumers.
+# Trusted metadata pins one source snapshot for protected execution lanes.
 # PR Metadata handles ready_for_review without rerunning Community CI.
 on:
   pull_request_target:
@@ -18,15 +20,33 @@ on:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
+      task:
+        description: Compatibility input for PR test dispatches
+        required: false
+        type: choice
+        default: test
+        options: [test]
       pr_number:
         description: Open pull request number to test
-        required: true
+        required: false
         type: string
       run_gpu_smoke:
         description: Manually enable the experimental GPU smoke test
         required: false
         default: false
         type: boolean
+      gpu_provider:
+        description: Dev GPU provider for manual qualification
+        required: false
+        default: auto
+        type: choice
+        options: [auto, aws, nebius]
+      gpu_profile:
+        description: Manual Dev qualification capacity (large uses one AWS L40S with 128 GiB RAM)
+        required: false
+        default: standard
+        type: choice
+        options: [standard, large]
       ci_lane:
         description: Select dev for a manual Dev-only run; stable follows the dual-run switch
         required: false
@@ -44,22 +64,24 @@ on:
 
 permissions: {}
 
-# Promote GPU policy through a reviewed commit; stable retains the current default.
+# Promote GPU policy through a reviewed commit; legacy CPU remains until that promotion.
 env:
-  COMMUNITY_GPU_EXECUTION_ENABLED: "false"
+  COMMUNITY_GPU_EXECUTION_ENABLED: "true"
 
 concurrency:
   group: community-ci-${{ inputs.source_snapshot != '' && inputs.ci_lane || github.event_name == 'pull_request' && 'stable-pr' || (github.event_name == 'workflow_dispatch' && inputs.ci_lane == 'dev') && 'start-dev' || 'start-main' }}-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: true
+  # A newer push must not terminate a run that still owns a cloud instance.
+  cancel-in-progress: false
 
 jobs:
   snapshot:
-    name: Capture the Community CI snapshot
+    name: Resolve PR test revision
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
-      github.ref == 'refs/heads/main' &&
+      (github.ref == 'refs/heads/main' ||
+       (github.ref == 'refs/heads/ci/developer' && github.event_name == 'workflow_dispatch' && inputs.ci_lane == 'dev')) &&
       (github.event_name == 'pull_request_target' ||
-       (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task == 'test' && inputs.source_snapshot == ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -77,19 +99,24 @@ jobs:
       - name: Select the Community CI branches
         id: lanes
         env:
-          DUAL_RUN: ${{ vars.TRTMC_COMMUNITY_CI_DUAL_RUN }}
           CI_ENTRY_REF: ${{ github.ref }}
           EVENT_NAME: ${{ github.event_name }}
           REQUESTED_LANE: ${{ inputs.ci_lane }}
         run: |
           set -euo pipefail
-          test "$CI_ENTRY_REF" = refs/heads/main
-          lanes='["stable"]'
-          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$REQUESTED_LANE" = dev ]; then
-            lanes='["dev"]'
-          elif [ "$DUAL_RUN" = true ]; then
-            lanes='["stable","dev"]'
-          fi
+          case "$CI_ENTRY_REF:$EVENT_NAME" in
+            refs/heads/main:pull_request_target|refs/heads/main:workflow_dispatch)
+              lanes='["stable"]'
+              if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$REQUESTED_LANE" = dev ]; then
+                lanes='["dev"]'
+              fi ;;
+            refs/heads/ci/developer:workflow_dispatch)
+              test "$REQUESTED_LANE" = dev
+              # The protected Dev entry qualifies its own observer only.
+              # Ordinary PRs use Stable only; Dev is an explicit manual lane.
+              lanes='["dev"]' ;;
+            *) echo "::error::Unapproved Community CI coordinator"; exit 1 ;;
+          esac
           echo "lanes=$lanes" >> "$GITHUB_OUTPUT"
 
       - name: Authorize a manual request
@@ -97,6 +124,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
+          CI_LANE: ${{ inputs.ci_lane }}
+          GPU_PROFILE: ${{ inputs.gpu_profile || 'standard' }}
+          GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
         run: |
           set -euo pipefail
           role="$(gh api "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq '.role_name')"
@@ -104,47 +134,15 @@ jobs:
             maintain|admin) ;;
             *) echo "::error::Only maintain or admin may dispatch Community CI."; exit 1 ;;
           esac
-
-      - name: Find the existing Stable PR snapshot
-        id: stable
-        if: ${{ github.event_name == 'pull_request_target' || inputs.ci_lane == 'dev' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
-          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
-          pull="$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
-          head="$(jq -er '.head.sha' <<< "$pull")"
-          [[ "$head" =~ ^[0-9a-f]{40}$ ]]
-          if [ -n "$EVENT_HEAD_SHA" ]; then test "$head" = "$EVENT_HEAD_SHA"; fi
-          prefix="PR #$PR_NUMBER · community CI · head $head · merge "
-          # Reuse the existing PR pipeline, without rerunning Stable or changing
-          # the event/job contract consumed by the unchanged Internal CI bridge.
-          for attempt in $(seq 1 24); do
-            runs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request&head_sha=$head&per_page=100")"
-            candidate="$(jq -c --arg head "$head" --arg prefix "$prefix" '
-              [.workflow_runs[]
-               | select(.event == "pull_request" and .head_sha == $head)
-               | select(.path == ".github/workflows/community-ci.yml")
-               | select(.display_title | startswith($prefix))]
-              | max_by(.id) // empty' <<< "$runs")"
-            if [ -n "$candidate" ]; then
-              run_id="$(jq -er '.id' <<< "$candidate")"
-              merge_sha="$(jq -er --arg prefix "$prefix" '.display_title | ltrimstr($prefix)' <<< "$candidate")"
-              [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
-              [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
-              {
-                echo "run_id=$run_id"
-                echo "merge_sha=$merge_sha"
-              } >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            if [ "$attempt" -lt 24 ]; then sleep 5; fi
-          done
-          echo "::error::No Stable PR snapshot is available for this head."
-          exit 1
+          case "${GPU_PROFILE:-standard}" in
+            standard) ;;
+            large)
+              test "${CI_LANE:-}" = dev
+              case "${GPU_PROVIDER:-auto}" in auto|aws) ;;
+                *) echo "::error::The large Dev profile requires AWS."; exit 1 ;;
+              esac ;;
+            *) echo "::error::Unknown GPU qualification profile."; exit 1 ;;
+          esac
 
       # Trigger metadata only: all validation belongs to each complete CI run.
       - name: Capture the exact pull-request snapshot
@@ -153,12 +151,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          STABLE_MERGE_SHA: ${{ steps.stable.outputs.merge_sha }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
           pr_number="$PR_NUMBER"
           merge_sha=""
+          requested_head="$EVENT_HEAD_SHA"
           for attempt in 1 2 3 4 5 6; do
             pull="$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$pr_number")"
             jq -e --arg repo "$GITHUB_REPOSITORY" \
@@ -166,11 +164,12 @@ jobs:
               <<< "$pull" > /dev/null
             head_sha="$(jq -er '.head.sha' <<< "$pull")"
             [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
-            if [ -n "$EVENT_HEAD_SHA" ]; then
-              test "$head_sha" = "$EVENT_HEAD_SHA"
-            fi
+            if [ -z "$requested_head" ]; then requested_head="$head_sha"; fi
+            test "$head_sha" = "$requested_head"
             echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-            merge_sha="${STABLE_MERGE_SHA:-$(jq -r '.merge_commit_sha // empty' <<< "$pull")}"
+            # Only GitHub's PR metadata can choose the source commit. A PR
+            # controls its workflow run-name, including any apparent merge SHA.
+            merge_sha="$(jq -r '.merge_commit_sha // empty' <<< "$pull")"
             if [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]; then break; fi
             if [ "$attempt" -lt 6 ]; then sleep 5; fi
           done
@@ -183,6 +182,21 @@ jobs:
           tree="$(jq -er '.tree.sha' <<< "$merge")"
           [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$tree" =~ ^[0-9a-f]{40}$ ]]
+          # PR REST base.sha can lag a regenerated merge. Its first parent must
+          # instead be the protected main tip or a verified ancestor of that tip.
+          protected_main="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main")"
+          main_sha="$(jq -er 'select(.ref == "refs/heads/main" and .object.type == "commit") | .object.sha' <<< "$protected_main")"
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$base_sha" != "$main_sha" ]; then
+            comparison="$(gh api "/repos/$GITHUB_REPOSITORY/compare/$base_sha...$main_sha?per_page=1")"
+            if ! jq -e --arg base "$base_sha" \
+              '.status == "ahead" and .merge_base_commit.sha == $base' \
+              <<< "$comparison" > /dev/null; then
+              echo "::error::The PR merge base is not in protected main history."
+              exit 1
+            fi
+          fi
+          echo "Captured PR merge $merge_sha with base $base_sha in protected main history at $main_sha."
           snapshot="$(jq -cn --arg head "$head_sha" --arg base "$base_sha" \
             --arg merge "$merge_sha" --arg tree "$tree" \
             '{head_sha:$head,base_sha:$base,merge_sha:$merge,source_tree:$tree}')"
@@ -191,12 +205,50 @@ jobs:
             echo "source_snapshot=$snapshot"
           } >> "$GITHUB_OUTPUT"
 
+      # The promoted GPU lane never depends on a PR-controlled workflow title.
+      # This lookup is retained only for the CPU-only compatibility observer;
+      # it may find a run for the authenticated snapshot, never choose a source.
+      - name: Find the existing Stable PR snapshot
+        id: stable
+        if: ${{ github.event_name == 'pull_request_target' && env.COMMUNITY_GPU_EXECUTION_ENABLED != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.snapshot.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
+          SOURCE_SNAPSHOT: ${{ steps.snapshot.outputs.source_snapshot }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          merge_sha="$(jq -er '.merge_sha' <<< "$SOURCE_SNAPSHOT")"
+          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
+          test "$(jq -er '.head_sha' <<< "$SOURCE_SNAPSHOT")" = "$HEAD_SHA"
+          expected_title="PR #$PR_NUMBER · community CI · head $HEAD_SHA · merge $merge_sha"
+          for attempt in $(seq 1 24); do
+            runs="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100")"
+            candidate="$(jq -c --arg head "$HEAD_SHA" --arg title "$expected_title" '
+              [.workflow_runs[]
+               | select(.event == "pull_request" and .head_sha == $head)
+               | select(.path == ".github/workflows/community-ci.yml")
+               | select(.display_title == $title)]
+              | max_by(.id) // empty' <<< "$runs")"
+            if [ -n "$candidate" ]; then
+              run_id="$(jq -er '.id' <<< "$candidate")"
+              [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$attempt" -lt 24 ]; then sleep 5; fi
+          done
+          echo "::error::No Stable PR snapshot is available for this authenticated source."
+          exit 1
+
       - name: Report a failed snapshot
         if: ${{ failure() }}
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
-          STATUS_CONTEXT: ${{ steps.lanes.outputs.lanes == '["dev"]' && 'Dev Community CI' || 'Stable Community CI' }}
+          STATUS_CONTEXT: ${{ steps.lanes.outputs.lanes == '["dev"]' && 'Dev Community CI' || 'Stable Community GPU CI' }}
         run: |
           set -euo pipefail
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 0
@@ -209,7 +261,7 @@ jobs:
   dispatch:
     name: Start ${{ matrix.lane }} Community CI
     needs: snapshot
-    if: ${{ needs.snapshot.result == 'success' && github.ref == 'refs/heads/main' }}
+    if: ${{ needs.snapshot.result == 'success' && (github.ref == 'refs/heads/main' || (github.ref == 'refs/heads/ci/developer' && github.event_name == 'workflow_dispatch' && inputs.ci_lane == 'dev')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -225,58 +277,61 @@ jobs:
       actions: write
       statuses: write
     env:
-      STATUS_CONTEXT: ${{ matrix.lane == 'stable' && 'Stable Community CI' || 'Dev Community CI' }}
+      STATUS_CONTEXT: ${{ matrix.lane == 'stable' && 'Stable Community GPU CI' || 'Dev Community CI' }}
     steps:
       - name: Authorize the result publisher
         id: publisher
         env:
           LANE: ${{ matrix.lane }}
           CI_ENTRY_REF: ${{ github.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_LANE: ${{ inputs.ci_lane }}
         run: |
           set -euo pipefail
-          if [ "$CI_ENTRY_REF" != refs/heads/main ]; then
-            echo "::error::Community CI coordination must run from main."
-            exit 1
-          fi
+          case "$CI_ENTRY_REF:$LANE" in
+            refs/heads/main:stable|refs/heads/main:dev) ;;
+            refs/heads/ci/developer:dev)
+              test "$EVENT_NAME" = workflow_dispatch
+              test "$REQUESTED_LANE" = dev ;;
+            *) echo "::error::Unapproved Community CI publisher"; exit 1 ;;
+          esac
           case "$LANE" in
             stable)
-              test "$STATUS_CONTEXT" = 'Stable Community CI'
+              test "$STATUS_CONTEXT" = 'Stable Community GPU CI'
               ;;
             dev) test "$STATUS_CONTEXT" = 'Dev Community CI' ;;
             *) echo "::error::Unknown Community CI publisher."; exit 1 ;;
           esac
           echo "authorized=true" >> "$GITHUB_OUTPUT"
 
-      - name: Mark the selected CI pending
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state=pending -f context="$STATUS_CONTEXT" \
-            -f description="Community CI is starting" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-
       - name: Dispatch the selected Community CI implementation
         id: execution
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.snapshot.outputs.pr_number }}
-          CI_REF: ${{ matrix.lane == 'stable' && 'main' || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}
+          CI_REF: ${{ matrix.lane == 'stable' && 'main' || github.ref == 'refs/heads/ci/developer' && 'ci/developer' || vars.TRTMC_COMMUNITY_CI_DEV_REF || 'main' }}
           LANE: ${{ matrix.lane }}
           SOURCE_SNAPSHOT: ${{ needs.snapshot.outputs.source_snapshot }}
           HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
           STABLE_RUN_ID: ${{ needs.snapshot.outputs.stable_run_id }}
+          CI_ENTRY_BRANCH: ${{ github.ref_name }}
+          AUTOMATIC_GPU: ${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}
           RUN_GPU_SMOKE: ${{ inputs.run_gpu_smoke || false }}
+          GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
+          GPU_PROFILE: ${{ inputs.gpu_profile || 'standard' }}
         run: |
           set -euo pipefail
           case "$LANE:$CI_REF" in
             stable:main|dev:main|dev:ci/developer) ;;
             *) echo "::error::The CI implementation must use an approved main or ci/developer branch."; exit 1 ;;
           esac
-          if [ "$LANE" = stable ] && [ -n "${STABLE_RUN_ID:-}" ]; then
+          case "${GPU_PROFILE:-standard}" in
+            standard) ;;
+            large) test "$LANE" = dev ;;
+            *) echo "::error::Unknown GPU qualification profile."; exit 1 ;;
+          esac
+          if [ "$LANE" = stable ] && [ -n "${STABLE_RUN_ID:-}" ] \
+            && { [ "${CI_ENTRY_BRANCH:-}" != main ] || [ "${AUTOMATIC_GPU:-false}" != true ]; }; then
             [[ "$STABLE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             echo "run_id=$STABLE_RUN_ID" >> "$GITHUB_OUTPUT"
             echo "ci_ref=main" >> "$GITHUB_OUTPUT"
@@ -295,6 +350,8 @@ jobs:
             --arg lane "$LANE" \
             --arg snapshot "$SOURCE_SNAPSHOT" \
             --arg dispatch_nonce "$dispatch_nonce" \
+            --arg gpu_provider "${GPU_PROVIDER:-auto}" \
+            --arg gpu_profile "${GPU_PROFILE:-standard}" \
             --argjson run_gpu_smoke "${RUN_GPU_SMOKE:-false}" \
             '{
               ref: $ref,
@@ -306,7 +363,10 @@ jobs:
                 request_id: $dispatch_nonce,
                 run_gpu_smoke: $run_gpu_smoke
               }
-            }' > "$payload"
+            } | if $lane == "dev" and $gpu_provider != "auto"
+                then .inputs.gpu_provider = $gpu_provider else . end
+              | if $lane == "dev" and $gpu_profile != "standard"
+                then .inputs.gpu_profile = $gpu_profile else . end' > "$payload"
           dispatched="$(gh api --method POST \
             -H 'X-GitHub-Api-Version: 2026-03-10' \
             "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/dispatches" \
@@ -315,11 +375,21 @@ jobs:
           [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "ci_ref=$CI_REF" >> "$GITHUB_OUTPUT"
+          # Each trusted execution owns all status updates after dispatch.
+
+      - name: Mark the selected CI pending
+        if: ${{ steps.execution.outputs.existing_stable == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
+        run: |
+          set -euo pipefail
           gh api --silent --method POST \
             "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
             -f state=pending -f context="$STATUS_CONTEXT" \
-            -f description="Community CI is running" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+            -f description="Community CI is starting" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
 
       # Follow the exact run returned by GitHub, so every stage in that CI
       # branch contributes to the verdict, including newly added Dev stages.
@@ -347,7 +417,11 @@ jobs:
           fi
           deadline=$((SECONDS + 18000))
           while [ "$SECONDS" -lt "$deadline" ]; do
-            run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID")"
+            if ! run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID")"; then
+              echo "::warning::Community CI observation is unavailable; the existing run is still authoritative."
+              sleep 30
+              continue
+            fi
             if [ "$(jq -r '.status' <<< "$run")" = completed ]; then
               # GitHub may return a placeholder title while a newly dispatched
               # run is initializing. Verify identity before publishing its result.
@@ -363,17 +437,24 @@ jobs:
               fi
               state=failure
               if [ "$(jq -r '.conclusion' <<< "$run")" = success ]; then state=success; fi
-              gh api --silent --method POST \
-                "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-                -f state="$state" -f context="$STATUS_CONTEXT" \
-                -f description="Complete Community CI: $state" \
-                -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID"
+              if [ "${EXISTING_STABLE:-}" = true ]; then
+                gh api --silent --method POST \
+                  "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+                  -f state="$state" -f context="$STATUS_CONTEXT" \
+                  -f description="Complete Community CI: $state" \
+                  -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID"
+              fi
               echo "reported=true" >> "$GITHUB_OUTPUT"
               test "$state" = success
               exit 0
             fi
             sleep 30
           done
+          if [ "${EXISTING_STABLE:-}" != true ]; then
+            echo "::warning::Observation ended after five hours; the inner run will publish after release."
+            echo "reported=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           echo "::error::Community CI did not complete within five hours."
           exit 1
 
@@ -382,8 +463,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.snapshot.outputs.head_sha }}
+          EXISTING_STABLE: ${{ steps.execution.outputs.existing_stable }}
         run: |
           set -euo pipefail
+          if [ "${EXISTING_STABLE:-}" != true ]; then
+            echo "::warning::The request or observer failed; no legacy CPU result is owned here."
+            exit 0
+          fi
           gh api --silent --method POST \
             "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
             -f state=failure -f context="$STATUS_CONTEXT" \
@@ -395,18 +481,20 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (github.event_name == 'pull_request' ||
-       (github.event_name == 'workflow_dispatch' && inputs.source_snapshot != ''))
+       (github.event_name == 'workflow_dispatch' && inputs.task == 'test' && inputs.source_snapshot != ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
+      statuses: write
     outputs:
       pr_number: ${{ steps.snapshot.outputs.pr_number }}
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
       base_sha: ${{ steps.snapshot.outputs.base_sha }}
       merge_sha: ${{ steps.snapshot.outputs.merge_sha }}
       enabled: ${{ steps.snapshot.outputs.enabled }}
+      reuse_stable_cpu: ${{ steps.snapshot.outputs.reuse_stable_cpu }}
 
     steps:
       # This job consumes trusted GitHub metadata only. It pins the PR head,
@@ -425,9 +513,22 @@ jobs:
           CI_LANE: ${{ inputs.ci_lane }}
           CI_REF: ${{ github.ref }}
           ACTOR: ${{ github.actor }}
+          GPU_PROFILE: ${{ inputs.gpu_profile || 'standard' }}
+          GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+
+          case "${GPU_PROFILE:-standard}" in
+            standard) ;;
+            large)
+              test "$EVENT_NAME" = workflow_dispatch
+              test "$CI_LANE" = dev
+              case "${GPU_PROVIDER:-auto}" in auto|aws) ;;
+                *) echo "::error::The large Dev profile requires AWS."; exit 1 ;;
+              esac ;;
+            *) echo "::error::Unknown GPU qualification profile."; exit 1 ;;
+          esac
 
           if [ "$EVENT_NAME" = workflow_dispatch ]; then
             if [ "$ACTOR" != 'github-actions[bot]' ]; then
@@ -439,7 +540,10 @@ jobs:
             fi
             case "$CI_LANE" in
               stable) test "$CI_REF" = refs/heads/main ;;
-              dev) ;;
+              dev)
+                case "$CI_REF" in refs/heads/main|refs/heads/ci/developer) ;;
+                  *) echo "::error::Unknown Community CI implementation ref"; exit 1 ;;
+                esac ;;
               *) echo "::error::Unknown Community CI lane"; exit 1 ;;
             esac
           fi
@@ -485,13 +589,46 @@ jobs:
             test "$(jq -er '.tree.sha' <<< "$merge")" = "$approved_tree"
           fi
 
+          reuse_stable_cpu=false
+          if [ "$EVENT_NAME" = pull_request ]; then
+            # Enable the compatibility view only after promotion is in the
+            # trusted base. The promotion PR itself still runs normal CPU CI.
+            base_workflow="$(gh api "/repos/$GITHUB_REPOSITORY/contents/.github/workflows/community-ci.yml?ref=$base_sha" --jq '.content' | base64 --decode)"
+            if grep -Fxq '# Community CI GPU promotion v1' <<< "$base_workflow" \
+              && grep -Fxq '  COMMUNITY_GPU_EXECUTION_ENABLED: "true"' <<< "$base_workflow"; then
+              reuse_stable_cpu=true
+            fi
+          fi
+
           {
             echo "enabled=true"
+            echo "reuse_stable_cpu=$reuse_stable_cpu"
             echo "pr_number=$PR_NUMBER"
             echo "head_sha=$head_sha"
             echo "base_sha=$base_sha"
             echo "merge_sha=$merge_sha"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Mark the trusted execution pending
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.snapshot.outputs.head_sha }}
+          CI_LANE: ${{ inputs.ci_lane }}
+          CI_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          case "$CI_LANE:$CI_REF" in
+            stable:refs/heads/main) context='Stable Community GPU CI' ;;
+            dev:refs/heads/main|dev:refs/heads/ci/developer) context='Dev Community CI' ;;
+            *) echo "::error::Invalid trusted Community CI publisher"; exit 1 ;;
+          esac
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=pending -f context="$context" \
+            -f description="Community CI is running" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   # These jobs intentionally execute untrusted PR code. Each receives only a
   # read-only token and no repository/environment secret, and every job runs on
@@ -499,6 +636,7 @@ jobs:
   source-quality:
     name: Community CPU / Source quality
     needs: authorize
+    if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -527,6 +665,7 @@ jobs:
   docs:
     name: Community CPU / Docs
     needs: authorize
+    if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -562,6 +701,7 @@ jobs:
   ownership-impact:
     name: Community CPU / Ownership and impact
     needs: authorize
+    if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -588,6 +728,7 @@ jobs:
   unit:
     name: Community CPU / Unit / C++ and Python
     needs: authorize
+    if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -605,12 +746,38 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Use the official NVIDIA source for the pinned CUDA base
+        run: |
+          set -euo pipefail
+          docker buildx version
+          python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          # Both registries serve the same immutable NVIDIA manifest. Keep the
+          # PR Dockerfile and test commands intact while avoiding Hub's shared
+          # anonymous pull quota on hosted runners. Only this exact pin matches.
+          reference = "nvidia/cuda:13.3.0-base-ubuntu24.04@sha256:bcf7d05f0b13b9bbb86d9a4cd039d331894b8f1145ad009d1af75023bcd1dc5c"
+          policy = Path(os.environ["RUNNER_TEMP"]) / "community-cpu-source-policy.json"
+          policy.write_text(json.dumps({
+              "rules": [{
+                  "action": "CONVERT",
+                  "selector": {"identifier": "docker-image://docker.io/" + reference, "matchType": "EXACT"},
+                  "updates": {"identifier": "docker-image://nvcr.io/" + reference},
+              }],
+          }) + "\n")
+          with Path(os.environ["GITHUB_ENV"]).open("a") as environment:
+              environment.write("DOCKER_BUILDKIT=1\n")
+              environment.write("EXPERIMENTAL_BUILDKIT_SOURCE_POLICY=" + str(policy) + "\n")
+          PY
+
       - name: Run hardened source-only units
         run: python3 -m tools.community_ci unit
 
   required:
     name: Community CPU / Required
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot != '')) }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.task == 'test' && inputs.source_snapshot != '')) }}
     needs:
       - authorize
       - source-quality
@@ -618,10 +785,77 @@ jobs:
       - ownership-impact
       - unit
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
+    timeout-minutes: 360
+    permissions:
+      actions: read
     steps:
+      - name: Read the promoted Stable CPU result
+        # A same-PR execution can queue behind its previous allocation owner.
+        # Leave time to report an observation error before the hosted job cap.
+        timeout-minutes: 358
+        if: ${{ needs.authorize.outputs.reuse_stable_cpu == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          expected_title="Stable Community CI · PR #$PR_NUMBER · head $HEAD_SHA · merge $MERGE_SHA"
+          # Observe one trusted execution without repeating CPU tests. The
+          # 355-minute wall-clock budget includes queueing as well as the
+          # 45-minute CPU job; two bounded reads and a sleep fit before the
+          # step's 358-minute limit and the hosted job's six-hour cap.
+          deadline=$((SECONDS + 21300))
+          run_id=""
+          observation="no matching trusted execution was observed"
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if [ -z "$run_id" ]; then
+              if runs="$(timeout 45s gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=workflow_dispatch&branch=main&per_page=100")"; then
+                candidate="$(jq -r --arg title "$expected_title" '
+                  [.workflow_runs[]
+                   | select(.event == "workflow_dispatch" and .head_branch == "main")
+                   | select(.path == ".github/workflows/community-ci.yml" and .display_title == $title)]
+                  | max_by(.id) | .id // empty' <<< "$runs")" || candidate=""
+                if [[ "$candidate" =~ ^[1-9][0-9]*$ ]]; then
+                  # Pin the first identified child. A later request for this
+                  # same source cannot replace the execution being observed.
+                  run_id="$candidate"
+                  echo "Observing promoted Stable CPU run $run_id"
+                fi
+              else
+                observation="GitHub execution discovery is unavailable"
+                echo "::warning::$observation; waiting for the existing request."
+              fi
+            fi
+            if [ -n "$run_id" ]; then
+              if job="$(timeout 45s gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100" \
+                --jq '[.jobs[] | select(.name == "Community CPU / Required")] | last // {}')"; then
+                status="$(jq -r '.status // empty' <<< "$job")" || status=""
+                if [ "$status" = completed ]; then
+                  conclusion="$(jq -r '.conclusion // empty' <<< "$job")" || conclusion=""
+                  case "$conclusion" in
+                    success)
+                      echo "Stable CPU result: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+                      exit 0 ;;
+                    failure|cancelled|timed_out|action_required|neutral|skipped|stale)
+                      echo "::error::The promoted Stable CPU gate completed with $conclusion (run $run_id)."
+                      exit 1 ;;
+                  esac
+                fi
+                observation="the CPU gate has no terminal result (status: ${status:-not available})"
+              else
+                observation="GitHub CPU job observation is unavailable"
+                echo "::warning::$observation; continuing to observe run $run_id."
+              fi
+            fi
+            sleep 30
+          done
+          echo "::error::Infrastructure observation budget exhausted before a promoted Stable CPU result was confirmed (run ${run_id:-unresolved}): $observation. The existing execution remains authoritative and was not restarted or cancelled."
+          exit 75
+
       - name: Require every public CPU stage
+        if: ${{ needs.authorize.outputs.reuse_stable_cpu != 'true' }}
         env:
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           DOCS_RESULT: ${{ needs.docs.result }}
@@ -642,7 +876,7 @@ jobs:
   gpu-authorize:
     name: Community GPU / Authorize
     needs: [authorize, required]
-    if: ${{ always() && needs.authorize.result == 'success' && needs.required.result == 'success' }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && needs.authorize.result == 'success' && needs.required.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -687,23 +921,34 @@ jobs:
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
           GPU_EXECUTION_ENABLED: ${{ env.COMMUNITY_GPU_EXECUTION_ENABLED }}
-          MANUAL_GPU_EXECUTION_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.run_gpu_smoke || false }}
+          MANUAL_GPU_EXECUTION_ENABLED: ${{ inputs.run_gpu_smoke || false }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          python3 -m tools.test_impact --base "$BASE_SHA" --head "$HEAD_SHA" \
-            | tee "$RUNNER_TEMP/trtmc-gpu-impact.json"
           python3 - <<'PY'
           import json
           import os
           import re
           import subprocess
+          from dataclasses import asdict
           from pathlib import Path
           from pathlib import PurePosixPath
+          from tools.test_impact import classify
 
-          summary = json.loads(
-              (Path(os.environ["RUNNER_TEMP"]) / "trtmc-gpu-impact.json").read_text()
+          merge_base = subprocess.check_output(
+              ["git", "merge-base", os.environ["BASE_SHA"], os.environ["HEAD_SHA"]],
+              text=True,
+          ).strip()
+          # Rename detection lists only the destination with --name-only.
+          # Include both endpoints so moving shared code cannot hide its impact.
+          changed = subprocess.check_output(
+              [
+                  "git", "diff", "--no-renames", "--name-only", "--diff-filter=ACMRTD",
+                  "-z", merge_base, os.environ["HEAD_SHA"], "--",
+              ],
+              text=True,
           )
+          summary = asdict(classify(Path.cwd(), [path for path in changed.split("\0") if path]))
           gpu_enabled = os.environ["GPU_EXECUTION_ENABLED"].lower() == "true"
           manual_gpu_enabled = (
               os.environ["EVENT_NAME"] == "workflow_dispatch"
@@ -729,6 +974,28 @@ jobs:
                   ).returncode == 0
                   if exists:
                       added_families.add(family)
+          if added_families:
+              # New owners are absent from the trusted checkout, so the generic
+              # classifier conservatively treats their paths as shared changes.
+              # Reclassify only the remaining paths with that same trusted code:
+              # adding an owner alone must not select unrelated baseline models.
+              remaining_paths = [
+                  path for path in summary["changed_files"]
+                  if not (
+                      len(PurePosixPath(path).parts) >= 2
+                      and PurePosixPath(path).parts[0] == "families"
+                      and PurePosixPath(path).parts[1] in added_families
+                  )
+              ]
+              remaining = classify(Path.cwd(), remaining_paths)
+              if remaining.scope != "all":
+                  summary["scope"] = "families"
+                  summary["families"] = summary["direct_families"]
+          serialized = json.dumps(summary)
+          (Path(os.environ["RUNNER_TEMP"]) / "trtmc-gpu-impact.json").write_text(
+              serialized + "\n"
+          )
+          print(serialized)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(
                   "families="
@@ -812,89 +1079,120 @@ jobs:
               raise SystemExit("added-family selection must be sorted and unique")
           if set(added_families) & set(families):
               raise SystemExit("added families must not be in the trusted family inventory")
-          if scope != "all" and added_families:
-              raise SystemExit("only all scope may select added families")
-          if scope == "families" and (not families or direct_families != families):
+          if scope == "families" and (
+              not (families or added_families) or direct_families != families
+          ):
               raise SystemExit("family scope requires its directly changed families")
-          if scope in {"docs", "none"} and (families or direct_families):
+          if scope in {"docs", "none"} and (families or direct_families or added_families):
               raise SystemExit(f"{scope} scope must not select families")
           PY
 
-      - name: Report the GPU execution policy
-        env:
-          GPU_ENABLED: ${{ steps.impact.outputs.gpu_enabled }}
-          RUN_GPU: ${{ steps.impact.outputs.run_gpu }}
-          SCOPE: ${{ steps.impact.outputs.scope }}
-          FAMILIES: ${{ steps.impact.outputs.families }}
-          DIRECT_FAMILIES: ${{ steps.impact.outputs.direct_families }}
-        run: |
-          set -euo pipefail
-          if [ "$GPU_ENABLED" = "false" ]; then
-            message="Automatic Community GPU execution is disabled and is not a merge gate."
-            echo "::notice::$message"
-            printf '## Community GPU\n\n%s\n\nImpact scope: `%s`; directly changed families: `%s`.\n' \
-              "$message" "$SCOPE" "$DIRECT_FAMILIES" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          message="Experimental Community GPU smoke was manually enabled; it is not a merge gate."
-          echo "::notice::$message"
-          printf '## Community GPU\n\n%s\n\nRun decision: `%s`.\n' \
-            "$message" "$RUN_GPU" >> "$GITHUB_STEP_SUMMARY"
-
-  announce:
-    name: Community GPU / Publish pending result
-    needs: gpu-authorize
-    if: ${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      statuses: write
-
-    steps:
-      - name: Publish the pending automated status
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.gpu-authorize.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state=pending \
-            -f context="TRTMC Community GPU CI / Smoke test" \
-            -f description="Reserving a GPU and running the smoke test" \
-            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-
   provision-and-test:
     name: Community GPU / Provision and test
-    needs: [gpu-authorize, announce]
-    if: >-
-      ${{ always() && needs.gpu-authorize.result == 'success' &&
-      needs.gpu-authorize.outputs.run_gpu == 'true' &&
-      needs.announce.result == 'success' }}
+    needs: gpu-authorize
+    if: ${{ needs.gpu-authorize.outputs.run_gpu == 'true' }}
     runs-on: ubuntu-24.04
     environment:
       name: gpu-ci-dispatch
       deployment: false
-    # Upper runtime bound for one externally reserved GPU instance. The
-    # separate cleanup job remains eligible if this job times out.
-    timeout-minutes: 60
+    # Leave the hosted runner's full budget available for blocking final cleanup.
+    # External runner termination remains outside the helper's control.
+    timeout-minutes: 360
     concurrency:
-      # Scoped per PR so independent pull requests each lease their own
-      # Brev GPU instance and run in parallel; a new push on the same PR
-      # still cancels that PR's own stale, already-queued or in-flight run.
-      group: trtmc-community-gpu-${{ needs.gpu-authorize.outputs.pr_number }}
-      cancel-in-progress: true
+      group: trtmc-community-gpu-${{ inputs.ci_lane }}-${{ needs.gpu-authorize.outputs.pr_number }}
+      cancel-in-progress: false
     permissions:
       contents: read
+      actions: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
+      failure_class: ${{ steps.classification.outputs.failure_class }}
+      plan_rejected: ${{ steps.host_profile.outputs.plan_rejected }}
+      instance_name: ${{ steps.prepare.outputs.instance_name }}
+      lease_artifact_name: ${{ steps.prepare.outputs.lease_artifact_name }}
+      instance_type: ${{ steps.prepare.outputs.instance_type }}
+      organization_id: ${{ steps.prepare.outputs.organization_id }}
+      allocation_requested: ${{ steps.reserve.outputs.allocation_requested }}
+      reserve_outcome: ${{ steps.reserve.outcome }}
+      report_uploaded: ${{ steps.report_upload.outcome == 'success' && steps.report_upload.outputs.artifact-id != '' }}
+      report_upload_outcome: ${{ steps.report_upload.outcome }}
+      no_allocation_confirmed: ${{ steps.no_allocation.outputs.no_allocation_confirmed }}
+      cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
 
     steps:
       - name: Check out trusted GPU orchestration
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.gpu-authorize.outputs.base_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Select the qualified host RAM profile
+        id: host_profile
+        timeout-minutes: 2
+        env:
+          TRTMC_GPU_SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
+          TRTMC_GPU_FAMILIES: ${{ needs.gpu-authorize.outputs.families }}
+          TRTMC_GPU_DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
+          TRTMC_GPU_ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
+          SOURCE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
+          PROTECTED_DEPENDENCY_CATALOG: ${{ secrets.TRTMC_COMMUNITY_DEPENDENCY_CATALOG }}
+          REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/trtmc-gpu-plan.json"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth 2 origin "$SOURCE_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$SOURCE_SHA"
+          plan_rc=0
+          python3 -m tools.community_gpu_ci --export-gpu-plan "$plan" \
+            --repository "$GITHUB_WORKSPACE" --source-sha "$SOURCE_SHA" || plan_rc=$?
+          if [ "$plan_rc" -ne 0 ]; then
+            if [ "$plan_rc" -eq 2 ]; then
+              echo "plan_rejected=true" >> "$GITHUB_OUTPUT"
+            fi
+            {
+              if [ "$plan_rc" -eq 2 ]; then
+                echo '### GPU plan rejected before allocation'
+                echo ''
+                echo 'Split this PR into smaller PRs: at most five directly changed or added families per PR.'
+              else
+                echo '### GPU plan preparation failed before allocation'
+                echo ''
+                echo 'CI preparation failed (infra_failure). See the plan error above.'
+              fi
+              echo ''
+              echo 'No GPU instance was requested. GPU tests did not run.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$plan_rc"
+          fi
+          catalog="$RUNNER_TEMP/trtmc-gpu-host-profiles.json"
+          protected_catalog=$(mktemp "$RUNNER_TEMP/trtmc-protected-dependency-catalog.XXXXXX")
+          trap 'rm -f "$protected_catalog"' EXIT
+          catalog_args=()
+          if [ -z "${PROTECTED_DEPENDENCY_CATALOG:-}" ]; then
+            echo "::error::Configure the protected shared base catalog before allocation."
+            exit 1
+          fi
+          printf '%s' "$PROTECTED_DEPENDENCY_CATALOG" > "$protected_catalog"
+          catalog_args+=(--protected-dependency-catalog "$protected_catalog")
+          unset PROTECTED_DEPENDENCY_CATALOG
+          python3 -m tools.community_gpu_ci \
+            --export-dependency-catalog "$catalog" \
+            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA" "${catalog_args[@]}"
+          registry_username="$(python3 -m tools.community_gpu_ci \
+            --require-shared-base --dependency-catalog "$catalog")"
+          hub_requirement="$(python3 -m tools.community_gpu_ci --staging-hub-requirement \
+            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
+          unset REGISTRY_TOKEN
+          dependency_images=$(python3 -c \
+            'import json,sys; print("true" if json.load(open(sys.argv[1]))["families"] else "false")' "$catalog")
+          ram="$(python3 -m tools.community_gpu_ci \
+            --required-host-ram-gib --dependency-catalog "$catalog" --plan-file "$plan" \
+            --repository "$GITHUB_WORKSPACE" --ci-sha "$GITHUB_SHA")"
+          echo "registry_username=$registry_username" >> "$GITHUB_OUTPUT"
+          echo "host_ram_gib=$ram" >> "$GITHUB_OUTPUT"
+          echo "hub_requirement=$hub_requirement" >> "$GITHUB_OUTPUT"
+          echo "dependency_images=$dependency_images" >> "$GITHUB_OUTPUT"
 
       - name: Install the Brev CLI
         env:
@@ -917,18 +1215,128 @@ jobs:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
         run: brev login --api-key "$BREV_API_KEY"
 
-      - name: Reserve a GPU instance
-        id: reserve
+      - name: Release every earlier allocation attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.community_gpu_lease --cleanup-prior \
+            --lease-directory "$RUNNER_TEMP/gpu-ci-prior-leases"
+
+      - name: Prepare the GPU allocation intent
+        id: prepare
+        env:
+          GPU_PROVIDER: ${{ inputs.gpu_provider || 'auto' }}
+          HOST_RAM_GIB: ${{ steps.host_profile.outputs.host_ram_gib }}
+          GPU_PROFILE: ${{ inputs.gpu_profile || 'standard' }}
+          CI_LANE: ${{ inputs.ci_lane }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           instance_name="trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          # Publish the deterministic name before creation so a timeout after
-          # allocation cannot suppress best-effort cleanup.
+          lease_file="$RUNNER_TEMP/trtmc-gpu-ci-lease.json"
+          gpu_provider="${GPU_PROVIDER:-auto}"
+          case "$gpu_provider" in
+            auto) gpu_provider=aws ;;
+            aws|nebius) ;;
+            *) echo "::error::Unknown GPU provider for qualification."; exit 1 ;;
+          esac
+          host_ram_gib="${HOST_RAM_GIB:?The trusted host RAM profile is unavailable}"
+          case "$host_ram_gib" in
+            64|128) ;;
+            *) echo "::error::Unknown qualified host RAM profile."; exit 1 ;;
+          esac
+          qualification_type=""
+          allocation_args=(--host-ram-gib "$host_ram_gib")
+          case "${GPU_PROFILE:-standard}" in
+            standard) ;;
+            large)
+              test "$EVENT_NAME" = workflow_dispatch
+              test "$CI_LANE" = dev
+              test "$gpu_provider" = aws
+              # Increase capacity without changing the selected test contract.
+              qualification_type=g6e.4xlarge
+              allocation_args=(--instance-type "$qualification_type") ;;
+            *) echo "::error::Unknown GPU qualification profile."; exit 1 ;;
+          esac
+          # This step reads the catalog and ownership scope but cannot create.
+          # Its conservative intent must be uploaded before Reserve can run.
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
-          brev create "$instance_name" -g L40 --timeout 600
+          echo "lease_artifact_name=gpu-ci-lease-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "gpu_provider=$gpu_provider" >> "$GITHUB_OUTPUT"
+          echo "qualification_type=$qualification_type" >> "$GITHUB_OUTPUT"
+          python3 -m tools.brev_exec provision --prepare-only \
+            --instance "$instance_name" \
+            --provider "$gpu_provider" "${allocation_args[@]}" \
+            --disk-gb 500 \
+            --min-free-disk-gb 200 \
+            --lease-file "$lease_file" \
+            --timeout 2700 \
+            --attempts 1
 
-      - name: Build the GPU image, check out the exact PR merge, and run the smoke test
+      - name: Preserve the GPU allocation intent before creation
+        id: intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gpu-ci-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
+          if-no-files-found: error
+          # Preserve ownership through GitHub's 30-day rerun window.
+          retention-days: 35
+
+      - name: Reserve a GPU instance
+        id: reserve
+        if: ${{ success() && steps.intent.outcome == 'success' && steps.intent.outputs.artifact-id != '' }}
+        env:
+          INSTANCE_NAME: ${{ steps.prepare.outputs.instance_name }}
+          GPU_PROVIDER: ${{ steps.prepare.outputs.gpu_provider }}
+          HOST_RAM_GIB: ${{ steps.host_profile.outputs.host_ram_gib }}
+          QUALIFICATION_TYPE: ${{ steps.prepare.outputs.qualification_type }}
+        run: |
+          set -euo pipefail
+          allocation_args=(--host-ram-gib "$HOST_RAM_GIB")
+          case "${QUALIFICATION_TYPE:-}" in
+            "") ;;
+            g6e.4xlarge)
+              test "$GPU_PROVIDER" = aws
+              allocation_args=(--instance-type "$QUALIFICATION_TYPE") ;;
+            *) echo "::error::Unknown GPU qualification instance type."; exit 1 ;;
+          esac
+          python3 -m tools.brev_exec provision --from-intent \
+            --instance "$INSTANCE_NAME" \
+            --provider "$GPU_PROVIDER" "${allocation_args[@]}" \
+            --disk-gb 500 --min-free-disk-gb 200 \
+            --lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" \
+            --timeout 2700 --attempts 1
+
+      - name: Confirm that reservation was skipped
+        id: no_allocation
+        if: ${{ always() && steps.reserve.outcome == 'skipped' }}
+        run: |
+          set -euo pipefail
+          echo "Reservation was skipped; no allocation was requested."
+          echo "no_allocation_confirmed=true" >> "$GITHUB_OUTPUT"
+          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo '### GPU allocation'
+            echo ''
+            echo 'Creation was not requested. Admission or preparation stopped before allocation.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve the GPU instance lease
+        if: ${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.prepare.outputs.lease_artifact_name }}
+          path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
+          if-no-files-found: error
+          retention-days: 35
+
+      - name: Build the GPU image and validate the exact PR merge
         id: test
+        # Bound setup + validation separately from the 360-minute job so the
+        # blocking release step retains at least an hour after provisioning.
+        timeout-minutes: 240
         env:
           INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
           MERGE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
@@ -937,40 +1345,260 @@ jobs:
           DIRECT_FAMILIES: ${{ needs.gpu-authorize.outputs.direct_families }}
           ADDED_FAMILIES: ${{ needs.gpu-authorize.outputs.added_families }}
           SCOPE: ${{ needs.gpu-authorize.outputs.scope }}
+          CUDA_ARCHITECTURES: ${{ vars.TRTMC_COMMUNITY_CUDA_ARCHITECTURES || '89' }}
+          CI_SHA: ${{ github.sha }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.TRTMC_COMMUNITY_REGISTRY_READ_TOKEN }}
+          REGISTRY_USERNAME: ${{ steps.host_profile.outputs.registry_username }}
+          DEPENDENCY_IMAGES: ${{ steps.host_profile.outputs.dependency_images }}
+          HUB_REQUIREMENT: ${{ steps.host_profile.outputs.hub_requirement }}
         run: |
           set -euo pipefail
-          brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git remote add origin https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin refs/pull/$PR_NUMBER/merge && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA"
-          # A freshly created instance's SSH session may not have its Docker
-          # group membership yet. The first live GPU run reached this point
-          # and failed on docker.sock, so do not depend on propagation timing.
-          brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && sudo docker build -f Dockerfile.dev.x86-gpu -t trtmc-quickstart-gpu requirements"
+          # Never place the token in remote command arguments or build context.
+          # Brev exec consumes stdin as instance names, so use its file transport.
+          checkpoint_instance=""
+          remote_auth="/tmp/trtmc-checkpoint-auth-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup_checkpoint_token() {
+            if [ -n "$checkpoint_instance" ]; then
+              # Keep cleanup bounded if SSH fails. VM teardown remains the
+              # fallback, including when a partial copy preceded a failure.
+              if timeout 30s brev exec "$checkpoint_instance" \
+                "rm -f -- '$remote_auth/token' '$remote_auth/registry-token' '$remote_auth/dependency-catalog.json' '$remote_auth/gpu-plan.json' && rmdir -- '$remote_auth'"; then
+                checkpoint_instance=""
+              else
+                echo "::warning::Could not remove the checkpoint token from $checkpoint_instance; VM teardown is still required." >&2
+              fi
+            fi
+          }
+          checkpoint_token=$(mktemp "$RUNNER_TEMP/trtmc-checkpoint-token.XXXXXX")
+          registry_token=$(mktemp "$RUNNER_TEMP/trtmc-registry-token.XXXXXX")
+          trap 'rm -f "$checkpoint_token" "$registry_token"; cleanup_checkpoint_token' EXIT
+          printf '%s' "$HF_TOKEN" > "$checkpoint_token"
+          unset HF_TOKEN
+          # Provisioning has already verified this VM. Retry setup transfers
+          # on the same VM; model validation below executes once.
+          retry() {
+            local attempts=3 delay=20 n=1
+            until "$@"; do
+              if [ "$n" -ge "$attempts" ]; then
+                echo "::error::Command failed after $attempts attempts: $*" >&2
+                return 1
+              fi
+              echo "Attempt $n/$attempts failed, retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              n=$((n + 1))
+            done
+          }
 
-          # The isolated runner builds the native binary, TensorRT backend,
-          # selected family DSOs, and configured CTest tree. It then stages
-          # checkpoint revisions and uses E2ERunner's explicit premerge case
-          # selection plus JUnit validation, which rejects skips and omissions.
-          # HF_TOKEN: some premerge checkpoints (e.g. sam3) are gated and
-          # fail to download without authorization. huggingface_hub reads
-          # HF_TOKEN from the environment automatically (verified directly
-          # against huggingface_hub.get_token()); no code change is needed
-          # in tools.community_gpu_ci to consume it. GitHub Actions masks
-          # the secret value everywhere it appears, including here.
+          # Allow bounded backoff for remote dependency setup on this VM.
+          retry_backoff() {
+            local attempts=6 delay=20 max_delay=160 n=1
+            until "$@"; do
+              if [ "$n" -ge "$attempts" ]; then
+                echo "::error::Command failed after $attempts attempts: $*" >&2
+                return 1
+              fi
+              echo "Attempt $n/$attempts failed, retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              n=$((n + 1))
+              delay=$((delay * 2))
+              if [ "$delay" -gt "$max_delay" ]; then
+                delay=$max_delay
+              fi
+            done
+          }
+
+          # The intermittent "git fetch hangs on an otherwise-reachable
+          # instance" failure has never been reproduced in isolated manual
+          # testing (SSH works, network checks pass, git fetch succeeds
+          # every time outside of real CI). Capture live diagnostics from
+          # the instance automatically the next time this happens in
+          # production instead of guessing further.
+          capture_git_fetch_diagnostics() {
+            echo "::group::git fetch failure diagnostics ($INSTANCE_NAME)"
+            brev exec "$INSTANCE_NAME" "
+              echo '--- ip link (interface MTU) ---'
+              ip link show
+              echo '--- DNS resolution for github.com ---'
+              getent ahosts github.com || true
+              echo '--- curl timing breakdown to github.com ---'
+              curl -sS -o /dev/null -w 'connect=%{time_connect}s tls=%{time_appconnect}s total=%{time_total}s http_code=%{http_code}\n' --max-time 15 https://github.com || true
+              echo '--- top CPU/network processes (contention check) ---'
+              ps aux --sort=-%cpu | head -20
+              echo '--- memory and disk ---'
+              free -h
+              df -h /tmp
+            " || echo "(diagnostic capture itself failed -- instance may be fully unreachable now)"
+            echo "::endgroup::"
+          }
+
+          # Setup and family failures stay on this single reserved instance.
+          retry_backoff brev exec "$INSTANCE_NAME" "git init /tmp/model_connect && cd /tmp/model_connect && git config remote.origin.url https://github.com/$GITHUB_REPOSITORY.git && git fetch --depth 2 origin $MERGE_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $MERGE_SHA && git checkout --detach $MERGE_SHA" || { capture_git_fetch_diagnostics; exit 1; }
+          # The host coordinator and container entrypoint belong to the chosen
+          # CI commit. Neither imports contributor code outside the container.
+          [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          retry_backoff brev exec "$INSTANCE_NAME" "cd /tmp/model_connect && git fetch --depth 1 origin $CI_SHA && test \"\$(git rev-parse FETCH_HEAD)\" = $CI_SHA && git show $CI_SHA:tools/community_gpu_ci.py > /tmp/community_gpu_ci.py && git show $CI_SHA:tools/community_gpu_images.py > /tmp/community_gpu_images.py" || { capture_git_fetch_diagnostics; exit 1; }
+          # Checkpoints are downloaded by the trusted coordinator before the
+          # family container switches Hugging Face into offline mode.
+          # Ubuntu host images do not ship ensurepip by default, so the
+          # staging venv needs python3-venv installed before creation.
+          retry_backoff brev exec "$INSTANCE_NAME" "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-venv" || exit 1
+          retry_backoff brev exec "$INSTANCE_NAME" "python3 -m venv /tmp/trtmc-community-stage-venv && /tmp/trtmc-community-stage-venv/bin/python -m pip install --disable-pip-version-check '$HUB_REQUIREMENT'" || exit 1
+
+          # Copy into a private directory outside source and checkpoint mounts.
+          # The trusted coordinator consumes and unlinks the token before any
+          # contributor container starts; VM teardown also covers failed copies.
+          retry brev exec "$INSTANCE_NAME" "install -d -m 0700 $remote_auth" || exit 1
+          checkpoint_instance="$INSTANCE_NAME"
+          retry brev copy "$checkpoint_token" "$INSTANCE_NAME:$remote_auth/token" || exit 1
+          # The hosted trusted step stamps protected owner locks and recipes.
+          # Keep private registry coordinates outside source and all mounts.
+          dependency_catalog="$remote_auth/dependency-catalog.json"
+          retry brev copy "$RUNNER_TEMP/trtmc-gpu-host-profiles.json" "$INSTANCE_NAME:$dependency_catalog" || exit 1
+          plan_file="$remote_auth/gpu-plan.json"
+          retry brev copy "$RUNNER_TEMP/trtmc-gpu-plan.json" "$INSTANCE_NAME:$plan_file" || exit 1
+          printf '%s' "$REGISTRY_TOKEN" > "$registry_token"
+          unset REGISTRY_TOKEN
+          pull_shared_base() {
+            # The helper erases its token on every attempt. Restore only the
+            # dedicated read credential before repeating the existing retry.
+            retry brev copy "$registry_token" "$INSTANCE_NAME:$remote_auth/registry-token" || return 1
+            brev exec "$INSTANCE_NAME" "sudo python3 -I /tmp/community_gpu_images.py --pull-base --catalog '$dependency_catalog' --token-file '$remote_auth/registry-token' --username '$REGISTRY_USERNAME' --tag trtmc-quickstart-gpu"
+          }
+          retry_backoff pull_shared_base || exit 1
+
+          # Each selected family gets a fresh container on this one VM. The
+          # coordinator waits for its removal before starting the next family,
+          # and aggregates failures after all families have been attempted.
+          # Repository credentials are not forwarded to contributor code.
+          # tools.brev_exec preserves the remote application's real result.
+          # The workflow does not retry or replace the VM for that result.
           echo "Directly changed families: $DIRECT_FAMILIES; added families: $ADDED_FAMILIES (scope: $SCOPE)"
+          execution_budget="$(env \
+            "TRTMC_GPU_SCOPE=$SCOPE" \
+            "TRTMC_GPU_FAMILIES=$FAMILIES" \
+            "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
+            "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            python3 -m tools.community_gpu_ci --execution-budget --plan-file "$RUNNER_TEMP/trtmc-gpu-plan.json")"
+          echo "Selected-family execution budget: ${execution_budget}s"
           python3 -m tools.brev_exec \
             --instance "$INSTANCE_NAME" \
             --log /tmp/gpu-ci-output.log \
             --result-file "/tmp/trtmc-community-gpu-result-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            -- sudo docker run --rm --gpus all --shm-size 16g \
-            -v /tmp/model_connect:/src -w /src \
-            -e "TRTMC_GPU_SCOPE=$SCOPE" \
-            -e "TRTMC_GPU_FAMILIES=$FAMILIES" \
-            -e "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
-            -e "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
-            -e "HF_TOKEN=$HF_TOKEN" \
-            -e CMAKE_CUDA_ARCHITECTURES=89 \
-            trtmc-quickstart-gpu python3.12 -m tools.community_gpu_ci
+            --timeout "$((execution_budget + 120))" \
+            -- sudo env \
+            "TRTMC_GPU_SCOPE=$SCOPE" \
+            "TRTMC_GPU_FAMILIES=$FAMILIES" \
+            "TRTMC_GPU_DIRECT_FAMILIES=$DIRECT_FAMILIES" \
+            "TRTMC_GPU_ADDED_FAMILIES=$ADDED_FAMILIES" \
+            "TRTMC_GPU_RESULTS_DIR=/tmp/trtmc-community-results-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "TRTMC_E2E_WORKFLOW_RUN_ID=$GITHUB_RUN_ID" \
+            "TRTMC_E2E_WORKFLOW_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "CMAKE_CUDA_ARCHITECTURES=$CUDA_ARCHITECTURES" \
+            /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --containers --repository /tmp/model_connect --checkpoint-token-file "$remote_auth/token" \
+            --dependency-catalog "$dependency_catalog" --plan-file "$plan_file" --registry-token-file "$remote_auth/registry-token" --registry-username "$REGISTRY_USERNAME"
+          cleanup_checkpoint_token
           echo "conclusion=success" >> "$GITHUB_OUTPUT"
+
+      - name: Collect bounded family report evidence
+        id: report_evidence
+        if: ${{ always() && steps.test.outcome != 'skipped' && steps.reserve.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
+        run: |
+          set -euo pipefail
+          # This executes the trusted coordinator copied before PR containers.
+          # It exports bounded regular data files only, never PR-generated HTML.
+          remote="/tmp/trtmc-community-report-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          timeout 90s brev exec "$INSTANCE_NAME" \
+            "sudo /tmp/trtmc-community-stage-venv/bin/python -I /tmp/community_gpu_ci.py --export-report-archive '$remote' --results-directory '/tmp/trtmc-community-results-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' && sudo chmod 0644 '$remote'"
+          timeout 60s brev copy "$INSTANCE_NAME:$remote" "$RUNNER_TEMP/community-evidence.tar.gz"
+
+      - name: Summarize every selected GPU family
+        if: ${{ always() && steps.host_profile.outputs.plan_rejected != 'true' }}
+        timeout-minutes: 1
+        run: |
+          python3 -m tools.community_gpu_ci \
+            --summarize-log /tmp/gpu-ci-output.log \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            > "$RUNNER_TEMP/trtmc-community-gpu-summary.json"
+
+      - name: Classify the GPU result
+        if: ${{ always() && steps.host_profile.outputs.plan_rejected != 'true' }}
+        id: classification
+        timeout-minutes: 1
+        env:
+          SUMMARY_FILE: ${{ runner.temp }}/trtmc-community-gpu-summary.json
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from tools.community_gpu_ci import _checked_summary
+
+          # Only a validated terminal coordinator receipt can attribute a
+          # failure to the PR. Provision/setup failures have no such receipt.
+          category = "infra_failure"
+          try:
+              path = Path(os.environ["SUMMARY_FILE"])
+              if path.stat().st_size > 4 * 1024 * 1024:
+                  raise ValueError("oversized GPU summary")
+              summary = _checked_summary(json.loads(path.read_text()))
+              if summary is not None:
+                  active = [row for row in summary["families"] if row["status"] != "deferred"]
+                  failures = [row for row in active if row["status"] != "passed"]
+                  valid_passes = all(
+                      row.get("entrypoint_started") is True
+                      and row.get("failure_class") is None
+                      and bool(row["cases"])
+                      and all(value == "passed" for value in row["cases"].values())
+                      for row in active if row["status"] == "passed"
+                  )
+                  if summary["passed"] and summary["complete"] and valid_passes:
+                      category = "none"
+                  elif failures and valid_passes and all(
+                      row["status"] == "failed"
+                      and row.get("entrypoint_started") is True
+                      and row.get("failure_class") == "pr_failure"
+                      for row in failures
+                  ):
+                      category = "pr_failure"
+          except (OSError, ValueError, TypeError, RecursionError):
+              pass
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"failure_class={category}\n")
+          PY
+
+      # Preserve local execution evidence before blocking deletion. Diagnostic
+      # failures cannot skip release, and final status still waits for release.
+      - name: Upload the smoke-test log
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gpu-ci-output-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/gpu-ci-output.log
+            ${{ runner.temp }}/trtmc-community-gpu-summary.json
+            ${{ runner.temp }}/community-evidence.tar.gz
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Always tear down the GPU instance
+        id: release
+        if: ${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}
+        env:
+          INSTANCE_NAME: ${{ steps.prepare.outputs.instance_name }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.brev_exec cleanup \
+            --instance "$INSTANCE_NAME" \
+            --lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" \
+            --until-deleted
+          echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
         if: always()
@@ -979,6 +1607,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           TEST_OUTCOME: ${{ steps.test.outcome }}
           TEST_CONCLUSION: ${{ steps.test.outputs.conclusion }}
+          CLEANUP_CONFIRMED: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
         run: |
           set -euo pipefail
           conclusion=failure
@@ -986,42 +1615,175 @@ jobs:
             conclusion=cancelled
           elif [ "$JOB_STATUS" = "success" ] \
             && [ "$TEST_OUTCOME" = "success" ] \
-            && [ "$TEST_CONCLUSION" = "success" ]; then
+            && [ "$TEST_CONCLUSION" = "success" ] \
+            && [ "$CLEANUP_CONFIRMED" = "true" ]; then
             conclusion=success
           fi
           echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
 
-      - name: Always tear down the GPU instance
-        if: ${{ always() && steps.reserve.outputs.instance_name != '' }}
-        env:
-          INSTANCE_NAME: ${{ steps.reserve.outputs.instance_name }}
-        run: brev delete "$INSTANCE_NAME" || true
-
-      - name: Upload the smoke-test log
-        if: always()
-        continue-on-error: true
+      - name: Preserve the final GPU instance lease
+        if: ${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: gpu-ci-output-${{ needs.gpu-authorize.outputs.pr_number }}
-          path: /tmp/gpu-ci-output.log
-          if-no-files-found: ignore
-          retention-days: 7
+          name: gpu-ci-lease-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trtmc-gpu-ci-lease.json
+          if-no-files-found: error
+          retention-days: 35
+
+      - name: Summarize GPU resource release
+        if: always()
+        env:
+          RELEASE_CONFIRMED: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
+          NO_ALLOCATION: ${{ steps.no_allocation.outputs.no_allocation_confirmed }}
+          FAILURE_CLASS: ${{ steps.classification.outputs.failure_class }}
+          GPU_PLAN_REJECTED: ${{ steps.host_profile.outputs.plan_rejected }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          no_allocation = os.environ.get("NO_ALLOCATION") == "true"
+          released = os.environ.get("RELEASE_CONFIRMED") == "true"
+          category = os.environ.get("FAILURE_CLASS", "")
+          if category not in {"none", "infra_failure", "pr_failure"}:
+              category = "infra_failure"
+          if os.environ.get("GPU_PLAN_REJECTED") == "true" and no_allocation:
+              category = "plan_rejected"
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as output:
+              output.write("\n### GPU resource release\n\n")
+              output.write("No allocation was requested.\n" if no_allocation else
+                           "Owner cleanup is confirmed; the final result also waits for the recovery check.\n" if released else
+                           "Cleanup is not yet confirmed. CI cannot report success; recovery remains required.\n")
+              output.write(f"\nExecution classification: `{category}`.\n")
+              if category == "plan_rejected":
+                  output.write("Split this PR into smaller PRs with at most five directly changed or added families. GPU tests did not run.\n")
+              elif category == "infra_failure":
+                  output.write("Check admission, provisioning, environment and recovery evidence before changing model assertions.\n")
+              elif category == "pr_failure":
+                  output.write("Check the failed family's execution evidence; this phase label does not prove the PR introduced the defect.\n")
+          PY
+
+      - name: Prepare the final report metadata
+        id: report_metadata
+        if: always()
+        timeout-minutes: 1
+        env:
+          SOURCE_SHA: ${{ needs.gpu-authorize.outputs.merge_sha }}
+          HEAD_SHA: ${{ needs.gpu-authorize.outputs.head_sha }}
+          BASE_SHA: ${{ needs.gpu-authorize.outputs.base_sha }}
+          PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
+          CI_LANE: ${{ inputs.ci_lane }}
+          FAILURE_CLASS: ${{ steps.classification.outputs.failure_class }}
+          PLAN_REJECTED: ${{ steps.host_profile.outputs.plan_rejected }}
+          RELEASE_CONFIRMED: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
+          NO_ALLOCATION: ${{ steps.no_allocation.outputs.no_allocation_confirmed }}
+        run: |
+          python3 - <<'PYREPORT'
+          import json
+          import os
+          from pathlib import Path
+          from tools.brev_exec import _load_lease
+          from tools.community_gpu_lease import validate_report_receipt
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          run, attempt = int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"])
+          repository, workflow_sha = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+          no_allocation = os.environ.get("NO_ALLOCATION") == "true"
+          lease = _load_lease(root / "trtmc-gpu-ci-lease.json", f"trtmc-gpu-ci-{run}-{attempt}")
+          # A conservative prepare-only intent is unnecessary when GitHub
+          # proved Reserve skipped; otherwise retain the exact owner journal.
+          receipt = {"schema_version": 1, "repository": repository, "run_id": run,
+                     "run_attempt": attempt, "workflow_sha": workflow_sha,
+                     "leases": [] if no_allocation or lease is None else [lease]}
+          validate_report_receipt(receipt, repository, run, attempt, workflow_sha)
+          category = os.environ.get("FAILURE_CLASS") or "infra_failure"
+          if os.environ.get("PLAN_REJECTED") == "true" and no_allocation:
+              category = "plan_rejected"
+          metadata = {"repository": repository, "run_id": run, "run_attempt": attempt,
+                      "workflow_sha": workflow_sha, "source_sha": os.environ["SOURCE_SHA"],
+                      "head_sha": os.environ["HEAD_SHA"], "base_sha": os.environ["BASE_SHA"],
+                      "pr_number": int(os.environ["PR_NUMBER"]), "lane": os.environ["CI_LANE"],
+                      "cpu_status": "success", "failure_class": category,
+                      "cleanup_confirmed": os.environ.get("RELEASE_CONFIRMED") == "true",
+                      "no_allocation": no_allocation}
+          (root / "community-report-metadata.json").write_text(json.dumps(metadata))
+          (root / "community-report-recovery.json").write_text(json.dumps(receipt))
+          PYREPORT
+
+      - name: Render the human-readable GPU report
+        id: report
+        if: ${{ always() && steps.report_metadata.outcome == 'success' }}
+        timeout-minutes: 2
+        run: |
+          python3 -m tools.community_gpu_report \
+            --summary "$RUNNER_TEMP/trtmc-community-gpu-summary.json" \
+            --execution-log /tmp/gpu-ci-output.log \
+            --run-metadata "$RUNNER_TEMP/community-report-metadata.json" \
+            --evidence-archive "$RUNNER_TEMP/community-evidence.tar.gz" \
+            --recovery-receipt "$RUNNER_TEMP/community-report-recovery.json" \
+            --output "$RUNNER_TEMP/community-report/report.html"
+
+      - name: Publish the HTML report
+        id: report_upload
+        if: ${{ always() && steps.report.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: community-gpu-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/community-report/report.html
+          if-no-files-found: error
+          # The HTML also preserves the original recovery journal for reruns.
+          retention-days: 35
+
+      - name: Link the HTML report
+        if: ${{ always() && steps.report_upload.outcome == 'success' }}
+        env:
+          REPORT_URL: ${{ steps.report_upload.outputs.artifact-url }}
+        run: |
+          printf '\n### GPU test report\n\n[Download report.html](%s) and open it in a browser. The file includes the family/case results and recorded evidence.\n' "$REPORT_URL" >> "$GITHUB_STEP_SUMMARY"
 
   cleanup:
     name: Community GPU / Cleanup
     needs: [gpu-authorize, provision-and-test]
     if: >-
-      ${{ always() && needs.gpu-authorize.result == 'success' &&
-      needs.gpu-authorize.outputs.run_gpu == 'true' }}
+      ${{ always() && ((needs.gpu-authorize.result == 'success' &&
+      needs.gpu-authorize.outputs.run_gpu == 'true') ||
+      (github.event_name == 'workflow_dispatch' && github.run_attempt > 1 &&
+      inputs.source_snapshot != '' && inputs.task == 'test' &&
+      (github.ref == 'refs/heads/ci/developer' || github.ref == 'refs/heads/main'))) }}
     runs-on: ubuntu-24.04
     environment:
       name: gpu-ci-dispatch
       deployment: false
-    timeout-minutes: 10
-    permissions: {}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
 
     steps:
+      - name: Confirm an initial skipped allocation
+        id: no_allocation
+        env:
+          RESERVE_OUTCOME: ${{ needs.provision-and-test.outputs.reserve_outcome }}
+          NO_ALLOCATION_CONFIRMED: ${{ needs.provision-and-test.outputs.no_allocation_confirmed }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_RUN_ATTEMPT" = 1 ] \
+            && [ "$RESERVE_OUTCOME" = skipped ] \
+            && [ "$NO_ALLOCATION_CONFIRMED" = true ]; then
+            echo "The initial reservation was skipped; no allocation exists in this workflow."
+            echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out trusted GPU cleanup
+        id: cleanup-checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - name: Install the pinned Brev CLI
+        if: ${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}
         env:
           BREV_VERSION: 0.6.335
           BREV_ARCHIVE_SHA256: 89d778e6f1e5e52495f3e0f10393f1666a1b16d180001b13faec6f906955e6f8
@@ -1038,54 +1800,279 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Log in to Brev
+        id: cleanup-login
+        if: ${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}
         env:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
         run: brev login --api-key "$BREV_API_KEY"
 
-      - name: Delete the deterministic GPU instance
-        run: brev delete "trtmc-gpu-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" || true
+      - name: Delete every original GPU allocation
+        id: release
+        if: ${{ always() && steps.no_allocation.outputs.cleanup_confirmed != 'true' && steps.cleanup-checkout.outcome == 'success' && steps.cleanup-login.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Original producer metadata and immutable artifacts remain available
+          # when outputs disappear. Reconcile every attempt, never only the last.
+          python3 -m tools.community_gpu_lease --cleanup-all \
+            --lease-directory "$RUNNER_TEMP/gpu-ci-all-leases"
+
+      - name: Keep the verified HTML as the final artifact
+        if: ${{ always() && steps.cleanup-checkout.outcome == 'success' && (steps.release.outputs.cleanup_confirmed == 'true' || steps.no_allocation.outputs.cleanup_confirmed == 'true') }}
+        timeout-minutes: 5
+        # Artifact housekeeping must not invalidate confirmed VM recovery.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Delete operational artifacts only after confirmed VM release and
+          # a verified immutable HTML upload containing the original journal.
+          # Interrupted reporting leaves the recovery artifacts untouched.
+          python3 -m tools.community_gpu_lease --prune-reported-artifacts
 
   publish:
-    name: Community GPU / Result
-    needs: [authorize, gpu-authorize, announce, provision-and-test, cleanup]
-    if: >-
-      ${{ always() && needs.authorize.result == 'success' &&
-      needs.gpu-authorize.result == 'success' &&
-      needs.gpu-authorize.outputs.gpu_enabled == 'true' }}
+    name: ${{ github.event_name == 'pull_request' && 'Community CPU compatibility (CPU-only)' || inputs.ci_lane == 'dev' && 'Dev Community CI' || 'Stable Community GPU CI' }} result
+    needs: [authorize, required, gpu-authorize, provision-and-test, cleanup]
+    if: ${{ always() && needs.authorize.outputs.enabled == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     permissions:
+      contents: read
+      actions: read
       statuses: write
-
     steps:
-      - name: Publish the terminal status
+      - name: Check out the trusted fallback report renderer
+        id: report_checkout
+        if: ${{ github.event_name == 'workflow_dispatch' && (needs.provision-and-test.result == 'skipped' || needs.provision-and-test.outputs.report_uploaded != 'true') }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check for an existing original owner report
+        id: report_state
+        if: ${{ always() && steps.report_checkout.outcome == 'success' && needs.provision-and-test.result != 'skipped' }}
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Cancellation may discard job outputs after a successful upload.
+          # Verify the original report before creating a diagnostic fallback.
+          python3 -m tools.community_gpu_lease --check-report
+
+      - name: Report why GPU tests did not start
+        id: no_gpu_report
+        if: ${{ always() && steps.report_checkout.outcome == 'success' && needs.provision-and-test.result == 'skipped' }}
+        env:
+          SOURCE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          CI_LANE: ${{ inputs.ci_lane }}
+          CPU_STATUS: ${{ needs.required.result }}
+          RUN_GPU: ${{ needs.gpu-authorize.outputs.run_gpu }}
+          BACKSTOP_RELEASE_CONFIRMED: ${{ needs.cleanup.outputs.cleanup_confirmed }}
+        run: |
+          python3 - <<'PYREPORT'
+          import json
+          import os
+          from pathlib import Path
+          from tools.community_gpu_report import render_report
+          run, attempt = int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"])
+          repository, sha = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+          cpu = os.environ.get("CPU_STATUS", "unknown")
+          not_required = cpu == "success" and os.environ.get("RUN_GPU") == "false"
+          receipt = {"schema_version": 1, "repository": repository, "run_id": run,
+                     "run_attempt": attempt, "workflow_sha": sha, "leases": []}
+          metadata = {"repository": repository, "run_id": run, "run_attempt": attempt,
+                      "workflow_sha": sha, "source_sha": os.environ["SOURCE_SHA"],
+                      "head_sha": os.environ["HEAD_SHA"], "base_sha": os.environ["BASE_SHA"],
+                      "pr_number": int(os.environ["PR_NUMBER"]), "lane": os.environ["CI_LANE"],
+                      "cpu_status": cpu, "gpu_status": "not_required" if not_required else "not_started",
+                      "failure_class": "none" if not_required else "cpu_failure" if cpu != "success" else "infra_failure",
+                      "cleanup_confirmed": attempt == 1 or os.environ.get("BACKSTOP_RELEASE_CONFIRMED") == "true",
+                      "no_allocation": True}
+          destination = Path(os.environ["RUNNER_TEMP"]) / "community-report" / "report.html"
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_text(render_report(None, metadata, None, receipt), encoding="utf-8")
+          PYREPORT
+
+      - name: Publish the report for skipped GPU execution
+        id: no_gpu_report_upload
+        if: ${{ always() && steps.no_gpu_report.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: community-gpu-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/community-report/report.html
+          if-no-files-found: error
+          retention-days: 35
+
+      - name: Link the skipped GPU report
+        if: ${{ always() && steps.no_gpu_report_upload.outcome == 'success' }}
+        env:
+          REPORT_URL: ${{ steps.no_gpu_report_upload.outputs.artifact-url }}
+        run: |
+          printf '\n[Download report.html](%s) to see why GPU execution did not start.\n' "$REPORT_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Explain an incomplete GPU report
+        id: diagnostic_report
+        if: ${{ always() && steps.report_checkout.outcome == 'success' && needs.provision-and-test.result != 'skipped' && steps.report_state.outputs.report_available != 'true' }}
+        timeout-minutes: 1
+        env:
+          SOURCE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          CI_LANE: ${{ inputs.ci_lane }}
+          CPU_STATUS: ${{ needs.required.result }}
+          OWNER_RESULT: ${{ needs.provision-and-test.result }}
+          REPORT_UPLOAD_RESULT: ${{ needs.provision-and-test.outputs.report_upload_outcome }}
+          RECOVERY_RESULT: ${{ needs.cleanup.result }}
+          BACKSTOP_RELEASE_CONFIRMED: ${{ needs.cleanup.outputs.cleanup_confirmed }}
+          NO_ALLOCATION_CONFIRMED: ${{ needs.provision-and-test.outputs.no_allocation_confirmed }}
+        run: |
+          python3 - <<'PYREPORT'
+          import os
+          from pathlib import Path
+          from tools.community_gpu_report import render_report
+          metadata = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "workflow_sha": os.environ["GITHUB_SHA"],
+              "source_sha": os.environ["SOURCE_SHA"], "head_sha": os.environ["HEAD_SHA"],
+              "base_sha": os.environ["BASE_SHA"], "pr_number": int(os.environ["PR_NUMBER"]),
+              "lane": os.environ["CI_LANE"], "cpu_status": os.environ["CPU_STATUS"],
+              "failure_class": "infra_failure", "diagnostic_only": True,
+              "owner_result": os.environ["OWNER_RESULT"],
+              "report_upload_result": os.environ.get("REPORT_UPLOAD_RESULT") or "unknown",
+              "recovery_result": os.environ.get("RECOVERY_RESULT") or "unknown",
+              "cleanup_confirmed": os.environ.get("BACKSTOP_RELEASE_CONFIRMED") == "true",
+              "no_allocation": os.environ.get("NO_ALLOCATION_CONFIRMED") == "true",
+          }
+          # Missing owner evidence is never proof that allocation did not occur.
+          # This diagnostic contains no recovery receipt; keep the journals.
+          destination = Path(os.environ["RUNNER_TEMP"]) / "community-diagnostic" / "report.html"
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_text(render_report(None, metadata, None, None), encoding="utf-8")
+          PYREPORT
+
+      - name: Publish the diagnostic HTML
+        id: diagnostic_upload
+        if: ${{ always() && steps.diagnostic_report.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # A diagnostic must never replace the original owner's recovery report.
+          name: community-gpu-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/community-diagnostic/report.html
+          if-no-files-found: error
+          retention-days: 35
+
+      - name: Link the diagnostic report
+        if: ${{ always() && steps.diagnostic_upload.outcome == 'success' }}
+        env:
+          REPORT_URL: ${{ steps.diagnostic_upload.outputs.artifact-url }}
+        run: |
+          printf '\n[Download the diagnostic report](%s). The normal GPU report is unavailable or unverified; allocation journals are retained for recovery.\n' "$REPORT_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require the complete Community CI result
+        id: complete
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_GPU: ${{ needs.gpu-authorize.outputs.run_gpu }}
+          AUTHORIZED_RESULT: ${{ needs.authorize.result }}
+          CPU_RESULT: ${{ needs.required.result }}
+          GPU_AUTHORIZED: ${{ needs.gpu-authorize.result }}
+          GPU_RESULT: ${{ needs.provision-and-test.result }}
+          TEST_RESULT: ${{ needs.provision-and-test.outputs.conclusion }}
+          GPU_FAILURE_CLASS: ${{ needs.provision-and-test.outputs.failure_class }}
+          GPU_PLAN_REJECTED: ${{ needs.provision-and-test.outputs.plan_rejected }}
+          CLEANUP_RESULT: ${{ needs.cleanup.result }}
+          BACKSTOP_RELEASE_CONFIRMED: ${{ needs.cleanup.outputs.cleanup_confirmed }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$AUTHORIZED_RESULT" = success
+          test "$CPU_RESULT" = success
+          if [ "$EVENT_NAME" = pull_request ]; then
+            # Preserve the existing PR CPU contract during Dev qualification.
+            exit 0
+          fi
+          test "$GPU_AUTHORIZED" = success
+          test "${GPU_PLAN_REJECTED:-}" != true
+          if [ "$RUN_GPU" = false ]; then
+            test "$GPU_RESULT" = skipped
+            if [ "$ORIGINAL_RUN_ATTEMPT" -gt 1 ]; then
+              test "$CLEANUP_RESULT" = success
+              test "$BACKSTOP_RELEASE_CONFIRMED" = true
+            else
+              test "$CLEANUP_RESULT" = skipped
+            fi
+          else
+            test "$RUN_GPU" = true
+            test "$GPU_RESULT" = success
+            test "$TEST_RESULT" = success
+            test "$GPU_FAILURE_CLASS" = none
+            test "$CLEANUP_RESULT" = success
+            test "$BACKSTOP_RELEASE_CONFIRMED" = true
+          fi
+
+      - name: Publish the released workflow conclusion
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          CI_LANE: ${{ inputs.ci_lane }}
+          CI_REF: ${{ github.ref }}
+          CPU_RESULT: ${{ needs.required.result }}
           RUN_GPU: ${{ needs.gpu-authorize.outputs.run_gpu }}
-          CONCLUSION: ${{ needs.provision-and-test.outputs.conclusion }}
-          JOB_RESULT: ${{ needs.provision-and-test.result }}
-          CLEANUP_RESULT: ${{ needs.cleanup.result }}
+          GPU_RESULT: ${{ needs.provision-and-test.result }}
+          GPU_FAILURE_CLASS: ${{ needs.provision-and-test.outputs.failure_class }}
+          GPU_PLAN_REJECTED: ${{ needs.provision-and-test.outputs.plan_rejected }}
+          OWNER_RELEASE_CONFIRMED: ${{ needs.provision-and-test.outputs.cleanup_confirmed }}
+          BACKSTOP_RELEASE_CONFIRMED: ${{ needs.cleanup.outputs.cleanup_confirmed }}
+          ORIGINAL_RUN_ATTEMPT: ${{ github.run_attempt }}
+          NO_ALLOCATION_CONFIRMED: ${{ needs.provision-and-test.outputs.no_allocation_confirmed }}
+          COMPLETE_RESULT: ${{ steps.complete.outcome }}
         run: |
           set -euo pipefail
+          case "$CI_LANE:$CI_REF" in
+            stable:refs/heads/main) context='Stable Community GPU CI' ;;
+            dev:refs/heads/main|dev:refs/heads/ci/developer) context='Dev Community CI' ;;
+            *) echo "::error::Invalid trusted Community CI publisher"; exit 1 ;;
+          esac
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           state=failure
-          description="GPU smoke test did not complete"
-          if [ "$RUN_GPU" = "false" ] \
-            && [ "$JOB_RESULT" = "skipped" ] \
-            && [ "$CLEANUP_RESULT" = "skipped" ]; then
+          description="Complete Community CI: failure"
+          # The current owner cannot certify an older rerun allocation. Only
+          # the backstop reconciles every original producer in this workflow.
+          if { [ "$RUN_GPU" = true ] || [ "$ORIGINAL_RUN_ATTEMPT" -gt 1 ]; } \
+            && [ "$BACKSTOP_RELEASE_CONFIRMED" != true ]; then
+            state=pending
+            description="Community CI release remains unconfirmed"
+          elif [ "$CPU_RESULT" = success ] && [ "$RUN_GPU" = true ] \
+            && [ "${GPU_PLAN_REJECTED:-}" = true ] \
+            && [ "${NO_ALLOCATION_CONFIRMED:-}" = true ]; then
+            state=failure
+            description="Community GPU plan rejected: split PR into at most 5 changed families"
+          elif [ "$COMPLETE_RESULT" = success ] \
+            && { [ "$RUN_GPU" != true ] || [ "$GPU_FAILURE_CLASS" = none ]; }; then
             state=success
-            description="No GPU-impacting changes; GPU test not required"
-          elif [ "$RUN_GPU" = "true" ] \
-            && [ "$JOB_RESULT" = "success" ] \
-            && [ "$CONCLUSION" = "success" ] \
-            && [ "$CLEANUP_RESULT" = "success" ]; then
-            state=success
-            description="GPU smoke test passed"
+            description="Complete Community CI: success"
+          elif [ "$CPU_RESULT" = success ] && [ "$RUN_GPU" = true ]; then
+            # Missing, malformed or interrupted GPU receipts must not blame
+            # the PR for a failure before its entry point was reached.
+            state=error
+            description="Complete Community CI: infra_failure"
+            if [ "$GPU_FAILURE_CLASS" = pr_failure ] \
+              && [ "${NO_ALLOCATION_CONFIRMED:-}" != true ]; then
+              state=failure
+              description="Complete Community CI: pr_failure"
+            fi
           fi
           gh api --silent --method POST \
             "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state="$state" \
-            -f context="TRTMC Community GPU CI / Smoke test" \
+            -f state="$state" -f context="$context" \
             -f description="$description" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          test "$state" = success

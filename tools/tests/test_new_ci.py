@@ -481,8 +481,13 @@ def test_isolated_family_runtime_preserves_only_owner_cli(tmp_path: Path, state:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     for name in (
-        "libtrtmc_core.so", "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1",
-        "libtrtmc_backend_trt.so", "libtrtmc_model_alpha.so", "libtrtmc_cli_beta.so",
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_alpha.so",
+        "libtrtmc_cli_beta.so",
     ):
         (runtime / name).write_bytes(b"native")
     source = tmp_path / "families/alpha/cli.json"
@@ -499,7 +504,11 @@ def test_isolated_family_runtime_preserves_only_owner_cli(tmp_path: Path, state:
         declaration.write_bytes(source.read_bytes())
     runner = E2ERunner(RecordingContext(tmp_path, {}))
     if state.startswith("missing_"):
-        message = "no CLI declaration for alpha" if state == "missing_declaration" else "libtrtmc_cli_alpha.so"
+        message = (
+            "no CLI declaration for alpha"
+            if state == "missing_declaration"
+            else "libtrtmc_cli_alpha.so"
+        )
         with pytest.raises(CiError, match=message):
             with runner._isolated_runtime_root(runtime, "alpha"):
                 pytest.fail("declared family CLI must be installed")
@@ -619,156 +628,45 @@ def test_retired_central_ci_modules_are_absent() -> None:
     assert not (repository / "scripts/schedule_e2e.py").exists()
 
 
-def test_internal_bridge_waits_for_the_exact_run_until_the_job_timeout() -> None:
-    workflow = Path(__file__).resolve().parents[2] / ".github/workflows/internal-ci-bridge.yml"
-    source = workflow.read_text(encoding="utf-8")
-    assert "timeout-minutes: 360" in source
-    wait = source.split("- name: Wait for the exact Internal CI result", 1)[1].split(
-        "\n  publish:", 1
-    )[0]
-    assert "while true; do" in wait
-    assert "sleep 15" in wait
-    assert "seq " not in wait
-    assert "gh run download" not in source
-    assert "tools.public_failure" not in source
-    assert "policy_sha" not in source
-    assert "Protected failure details are not transferred to the public repository." in source
-
-
-def test_internal_bridge_remains_a_one_shot_maintainer_label_trigger() -> None:
-    workflow = Path(__file__).resolve().parents[2] / ".github/workflows/internal-ci-bridge.yml"
-    source = workflow.read_text(encoding="utf-8")
-
-    assert "\n  pull_request_target:\n" in source
-    assert "types: [labeled]" in source
-    assert "github.event.label.name == 'run-internal-ci'" in source
-    assert "maintain|admin" in source
-    assert "issues/$PR_NUMBER/labels/run-internal-ci" in source
-    assert "workflow_run:" not in source
-    assert "Community CPU / Required must pass" in source
-    assert "/actions/runs/$candidate_run/jobs?filter=latest&per_page=100" in source
-    assert 'name == "Community CPU / Required"' in source
-    assert '[ "$cpu_status" = "completed" ] && [ "$cpu_conclusion" = "success" ]' in source
-    assert "/compare/$candidate_base...$base_sha?per_page=1" in source
-    assert '.status == "ahead" and .merge_base_commit.sha == $base' in source
-    assert '[ "$candidate_base" = "$base_sha" ]' in source
-    assert '[ "$candidate_head" != "$head_sha" ]' in source
-    assert '[ "$candidate_tree" = "$merge_tree" ] || continue' in source
-    assert "Community CI must pass" not in source
-
-
 def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     path = (
         Path(__file__).resolve().parents[2] / ".github/workflows/community-activity-slack-alert.yml"
     )
     source = path.read_text(encoding="utf-8")
     workflow = yaml.safe_load(source)
-    ready = workflow["jobs"]["notify-ready-pr"]
-    merge_ready = workflow["jobs"]["notify-merge-ready-pr"]
-    activity = workflow["jobs"]["notify-activity"]
-
     events = workflow.get("on", workflow.get(True))
-    assert events["workflow_run"]["workflows"] == [
-        "Community CI",
-        "PR Metadata",
-        "TensorRT-Model-Connect Internal CI Bridge",
-    ]
-    assert "schedule" in events
-    assert "workflow_dispatch" in events
+    assert events["workflow_run"]["workflows"] == ["Community CI"]
+    assert "schedule" in events and "workflow_dispatch" in events
     assert workflow["permissions"] == {}
-    assert "github.event.workflow_run.name == 'Community CI'" in ready["if"]
-    assert "github.event.workflow_run.event == 'pull_request'" in ready["if"]
-    assert "merge_revision_matches_tested" in source
-    assert '[ "$current_base_sha" = "$tested_base_sha" ]' in source
-    assert '[ "$current_head_sha" = "$HEAD_SHA" ]' in source
-    assert '[ "$current_tree_sha" = "$tested_tree_sha" ]' in source
-    assert '[ "$current_merge_sha" != "$MERGE_SHA" ]' not in source
-    assert ready["permissions"] == {
-        "actions": "read",
-        "checks": "read",
-        "contents": "read",
-        "pull-requests": "read",
-    }
-    assert activity["permissions"] == {}
-    assert ready["timeout-minutes"] == 7
-    assert merge_ready["timeout-minutes"] == 10
-    assert merge_ready["permissions"] == {
-        "checks": "read",
-        "pull-requests": "read",
-        "statuses": "write",
-    }
-    assert merge_ready["concurrency"] == {
-        "group": "slack-merge-ready-alerts",
-        "cancel-in-progress": False,
-    }
-    merge_ready_script = merge_ready["steps"][0]["run"]
-    for trusted in ("OWNER", "MEMBER", "COLLABORATOR"):
-        assert f'.author_association != "{trusted}"' in merge_ready_script
-    assert activity["timeout-minutes"] == 5
-    assert all(
-        "uses" not in step for job in (ready, merge_ready, activity) for step in job["steps"]
-    )
+    assert "notify-ready-pr" not in workflow["jobs"]
+    ready = workflow["jobs"]["notify-merge-ready-pr"]
+    activity = workflow["jobs"]["notify-activity"]
+    assert ready["permissions"] == {"pull-requests": "read", "statuses": "write"}
+    assert ready["concurrency"]["cancel-in-progress"] is False
+    assert ready["timeout-minutes"] == 10
+    assert activity["permissions"] == {} and activity["timeout-minutes"] == 5
     assert "actions/checkout" not in source
-
-    condition = activity["if"]
-    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in condition
-    assert "github.event.sender.type != 'Bot'" in condition
-    association_fields = {
-        "issues": "github.event.issue.author_association",
-        "issue_comment": "github.event.comment.author_association",
-        "discussion": "github.event.discussion.author_association",
-        "discussion_comment": "github.event.comment.author_association",
-    }
-    for event_name, association in association_fields.items():
-        assert f"github.event_name == '{event_name}'" in condition
-        for trusted in ("OWNER", "MEMBER", "COLLABORATOR"):
-            assert f"{association} != '{trusted}'" in condition
-
+    assert all("uses" not in step for job in (ready, activity) for step in job["steps"])
+    script = ready["steps"][0]["run"]
+    assert "Stable Community GPU CI" in script
+    assert "TRTMC Internal CI / Automated premerge gate" not in script
+    assert "Community CPU / Required" not in script
+    assert '.mergeable_state != "dirty"' in script
+    assert '.mergeable_state == "clean"' not in script
+    assert "author_association" not in script
+    assert "NVIDIA employee review; CI success is not review approval" in script
+    assert 'marker="Slack / Review-ready alert #$number"' in script
+    assert ".head.sha == $head and .base.sha == $base" in script
+    assert 'if [ "$DRY_RUN" = "true" ]; then' in script
+    for phrase in ('gsub("&"', 'gsub("<"', 'gsub(">"'):
+        assert phrase in script
     assert set(re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", source)) == {
         "SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL"
     }
     post = activity["steps"][0]
-    assert post["env"]["SLACK_WEBHOOK_URL"] == (
-        "${{ secrets.SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL }}"
-    )
-
-    script = post["run"]
-    assert "${{" not in script
-    assert "External maintainer request" in script
-
-    ready_script = ready["steps"][0]["run"]
-    assert "· community CI · head" in ready_script
-    assert "· merge" in ready_script
-    assert "Unexpected Community CI run name" in ready_script
-    assert "for attempt in {1..30}; do" in ready_script
-    assert "sleep 10" in ready_script
-    assert (
-        ready_script.count(
-            'current_merge_sha="$(jq -r ".merge_commit_sha // empty" <<<"$pr_json")"'
-        )
-        == 2
-    )
-    for check in ("Community CPU / Required", "PR Metadata / Required", "DCO"):
-        assert check in ready_script
-    assert "sort_by(.started_at) | last" in ready_script
-    assert "External PR ready for maintainer" in ready_script
-    merge_ready_script = merge_ready["steps"][0]["run"]
-    assert "pulls?state=open&base=main" in merge_ready_script
-    assert 'marker="Slack / Merge-ready alert #$number"' in merge_ready_script
-    assert 'and .mergeable_state == "clean"' in merge_ready_script
-    assert "TRTMC Internal CI / Automated premerge gate" in merge_ready_script
-    assert "✅ PASS · PR ready to merge" in merge_ready_script
-    assert "Merge-ready Slack notification delivered" in merge_ready_script
-    assert 'if [ -z "$SLACK_WEBHOOK_URL" ]; then' in script
-    assert 'gsub("&"; "&amp;")' in script
-    assert 'gsub("<"; "&lt;")' in script
-    assert 'gsub(">"; "&gt;")' in script
-    assert "($title | slack_escape)" in script
-    assert '" + $title +' not in script
-    assert "curl --fail-with-body --silent --show-error" in script
-    assert "--header 'Content-Type: application/json'" in script
-    assert '--data "$payload"' in script
-    assert '"$SLACK_WEBHOOK_URL"' in script
+    assert "${{" not in post["run"]
+    assert "curl --fail-with-body --silent --show-error" in post["run"]
+    assert '"$SLACK_WEBHOOK_URL"' in post["run"]
 
 
 def test_dev_images_install_the_pinned_requirements_without_deleted_docs() -> None:
@@ -843,7 +741,9 @@ def test_premerge_adds_physical_family_support_tests_without_expanding_runtime_s
     context = RecordingContext(tmp_path, {"TRTMC_CORE_BUILD_DIR": str(tmp_path / "core-build")})
     runner = UnitTestRunner(context)
     runner.premerge()
-    python_commands = [command for command, _ in context.calls if command[:3] == ["python", "-m", "pytest"]]
+    python_commands = [
+        command for command, _ in context.calls if command[:3] == ["python", "-m", "pytest"]
+    ]
     assert len(python_commands) == 1
     command = python_commands[0]
     assert command[9:11] == sorted(support_paths)
@@ -854,9 +754,13 @@ def test_premerge_adds_physical_family_support_tests_without_expanding_runtime_s
 
     new_path = tmp_path / "families/new_owner/tests/test_support.py"
     new_path.parent.mkdir(parents=True)
-    new_path.write_text("# A new family is discovered without editing CI lists.\n", encoding="utf-8")
+    new_path.write_text(
+        "# A new family is discovered without editing CI lists.\n", encoding="utf-8"
+    )
     runner.premerge()
-    python_commands = [command for command, _ in context.calls if command[:3] == ["python", "-m", "pytest"]]
+    python_commands = [
+        command for command, _ in context.calls if command[:3] == ["python", "-m", "pytest"]
+    ]
     assert len(python_commands) == 2  # Still exactly one pytest invocation per premerge.
     assert python_commands[1][9:12] == sorted([*support_paths, str(new_path.relative_to(tmp_path))])
     assert python_commands[1][python_commands[1].index("-m", 3) + 1] == "not gpu and not trt"
@@ -1047,12 +951,17 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path, executor: s
     for name, payload, message in (
         ("package-0.1.data/scripts/trtmc", "native", "must not be duplicated"),
         ("package-0.1.data/scripts/libtrtmc_c.so.1", "library", "must not be duplicated"),
-        ("package-0.1.dist-info/entry_points.txt",
-         "[console_scripts]\ntrtmc-bench = trtmc_benchmark.cli:main\n",
-         "trtmc console entrypoint is missing"),
-        ("package-0.1.dist-info/entry_points.txt",
-         "[console_scripts]\ntrtmc = other_module:main\n"
-         "trtmc-bench = trtmc_benchmark.cli:main\n", "trtmc console entrypoint is missing"),
+        (
+            "package-0.1.dist-info/entry_points.txt",
+            "[console_scripts]\ntrtmc-bench = trtmc_benchmark.cli:main\n",
+            "trtmc console entrypoint is missing",
+        ),
+        (
+            "package-0.1.dist-info/entry_points.txt",
+            "[console_scripts]\ntrtmc = other_module:main\n"
+            "trtmc-bench = trtmc_benchmark.cli:main\n",
+            "trtmc console entrypoint is missing",
+        ),
     ):
         invalid = tmp_path / "invalid-entrypoint.whl"
         with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(invalid, "w") as output:
@@ -1118,7 +1027,10 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path, executor: s
         archive.writestr("tensorrt_model_connect/bin/libtrtmc_cli_beta.so", "unexpected")
     with pytest.raises(CiError, match="family CLI adapter set does not match"):
         WheelArchiveValidator(CiContext(tmp_path, {})).validate([unexpected_cli])
-    for changed in ("families/alpha/cli.json", "tensorrt_model_connect/bin/families/alpha/cli.json"):
+    for changed in (
+        "families/alpha/cli.json",
+        "tensorrt_model_connect/bin/families/alpha/cli.json",
+    ):
         corrupt_cli = tmp_path / "corrupt-cli.whl"
         with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(corrupt_cli, "w") as output:
             for entry in source.infolist():
@@ -1194,7 +1106,9 @@ def test_sdk_package_component_configuration(tmp_path: Path) -> None:
     )
     subprocess.run(
         ["cmake", "-S", str(producer), "-B", str(tmp_path / "producer-build")],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     for component in ("", "sdk", "unknown"):
         consumer = tmp_path / (component or "default")
@@ -1209,9 +1123,18 @@ def test_sdk_package_component_configuration(tmp_path: Path) -> None:
             "endif()\n"
         )
         completed = subprocess.run(
-            ["cmake", "-S", str(consumer), "-B", str(consumer / "build"),
-             f"-DCMAKE_PREFIX_PATH={prefix}", "-DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE"],
-            check=False, capture_output=True, text=True,
+            [
+                "cmake",
+                "-S",
+                str(consumer),
+                "-B",
+                str(consumer / "build"),
+                f"-DCMAKE_PREFIX_PATH={prefix}",
+                "-DCMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=TRUE",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
         )
         if component == "unknown":
             assert completed.returncode != 0

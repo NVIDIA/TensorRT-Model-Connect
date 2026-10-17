@@ -5,16 +5,669 @@
 
 from __future__ import annotations
 
+import shlex
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
+import time
+from tools import brev_exec as brev_provision
+
 import json
+import os
+import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tools import community_gpu_ci
-from tools.ci.process import CiError
+from tools.ci.process import CiError as RemoteTaskError
+from tools.community_gpu_ci import CommunityGpuError as CiError
+from tools.ci import context as ci_context, e2e as ci_e2e
+
+
+def _untracked_impact(command: list[str], repository: Path) -> subprocess.CompletedProcess:
+    """Model Git's exact reserved-input check without accepting arbitrary host commands."""
+    assert command == [
+        "git",
+        "-c",
+        f"safe.directory={repository}",
+        "-C",
+        str(repository),
+        "ls-files",
+        "--error-unmatch",
+        "impact.json",
+    ]
+    return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"untracked input")
+
+
+def _dependency_entry(repository: Path, family: str, digest: str = "a") -> dict:
+    """A fake provider receipt with real physical dependency inputs."""
+    paths = {
+        "base_dockerfile_sha256": "Dockerfile.dev.x86-gpu",
+        "base_requirements_sha256": "requirements/community-ci.txt",
+        "family_requirements_sha256": f"families/{family}/requirements.txt",
+    }
+    inputs = {}
+    for field, relative in paths.items():
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(f"# {relative}\n")
+        inputs[field] = hashlib.sha256(path.read_bytes()).hexdigest()
+    recipe = repository / f"families/{family}/ci/Dockerfile.dependencies"
+    recipe.parent.mkdir(parents=True, exist_ok=True)
+    recipe.write_text("FROM ${BASE_IMAGE}\n")
+    recipe_hash = hashlib.sha256(recipe.read_bytes()).hexdigest()
+    dependencies = ["torch==2.12.0+cu130", "tensorrt==11.1.0.106"]
+    return {
+        "trusted_recipe_sha256": recipe_hash,
+        "lock": {
+            "schema_version": 1,
+            "family": family,
+            "image": f"{community_gpu_ci.DEPENDENCY_REGISTRY}/{family}@sha256:{digest * 64}",
+            "platform": "linux/amd64",
+            "registry_visibility": "private",
+            "source_sha": "1" * 40,
+            "producer_source_sha": "2" * 40,
+            "native_byok_passed": True,
+            "family_e2e_passed": True,
+            "dependency_recipe_sha256": recipe_hash,
+            **inputs,
+            "resolved_dependencies_sha256": hashlib.sha256(
+                json.dumps(dependencies, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "abi": {
+                "resolved_dependencies": dependencies,
+                "platform": "linux/amd64",
+                "python_abi": "cp312",
+                "torch": "2.12.0+cu130",
+                "cuda": "13.0",
+                "tensorrt": "11.1.0.106",
+                "apache_tvm_ffi": "0.1.12",
+                "cxx11abi": True,
+            },
+        },
+    }
+
+
+def test_dependency_export_ignores_the_pr_lock_and_recipe(tmp_path):
+    """Changing working-tree image selectors cannot replace the trusted Git blobs."""
+    entry = _dependency_entry(tmp_path, "alpha")
+    lock = tmp_path / "families/alpha/ci/dependency-image.json"
+    lock.write_text(json.dumps(entry["lock"]))
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
+
+    git("init", "-q")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.test", "add", ".")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "-qm",
+        "trusted inputs",
+    )
+    trusted = git("rev-parse", "HEAD")
+    lock.write_text('{"image":"attacker.example/alpha:latest"}')
+    (tmp_path / "families/alpha/ci/Dockerfile.dependencies").write_text("PR-owned replacement\n")
+    catalog = tmp_path / "catalog.json"
+    community_gpu_ci.export_dependency_catalog(tmp_path, trusted, catalog)
+    value = json.loads(catalog.read_text())
+    assert value["ci_sha"] == trusted and value["families"]["alpha"] == entry
+    assert (
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", value["families"]["alpha"])
+        == entry["lock"]["image"]
+    )
+
+
+def _trusted_dependency_inputs(repository):
+    entry = _dependency_entry(repository, "alpha")
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "trusted dependency inputs",
+        ],
+        check=True,
+    )
+    sha = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    return entry, sha
+
+
+def test_protected_catalog_stamps_ci_and_ignores_untrusted_recipe_hash(tmp_path):
+    entry, sha = _trusted_dependency_inputs(tmp_path)
+    prefix = "ghcr.io/test-owner/private-dependencies"
+    entry["lock"]["image"] = f"{prefix}/alpha@sha256:{'a' * 64}"
+    original_hash = entry["trusted_recipe_sha256"]
+    entry["trusted_recipe_sha256"] = "f" * 64
+    protected = tmp_path / "protected.json"
+    protected.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "ci_sha": "forged stamp",
+                "registry_prefix": prefix,
+                "families": {"alpha": entry},
+            }
+        )
+    )
+    # A recipe in the working tree cannot authorize a different cached image.
+    (tmp_path / "families/alpha/ci/Dockerfile.dependencies").write_text("PR replacement")
+    exported = tmp_path / "private-catalog.json"
+    community_gpu_ci.export_dependency_catalog(tmp_path, sha, exported, protected)
+    catalog = community_gpu_ci._dependency_catalog(exported)
+    assert catalog["ci_sha"] == sha and catalog["registry_prefix"] == prefix
+    assert catalog["families"]["alpha"]["trusted_recipe_sha256"] == original_hash
+    assert exported.stat().st_mode & 0o777 == 0o600
+    assert (
+        community_gpu_ci._dependency_reference(
+            tmp_path, "alpha", catalog["families"]["alpha"], prefix
+        )
+        == entry["lock"]["image"]
+    )
+    with pytest.raises(CiError):
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", catalog["families"]["alpha"])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"schema_version":1,"families":{},"families":{}}',
+        '{"schema_version":1,"families":[]}',
+        "null",
+        "not-json",
+        '{"schema_version":1,"families":{"alpha":{"lock":{"image":"fake:latest"}}}}',
+    ],
+)
+def test_malformed_protected_catalog_cannot_export_or_select_capacity(tmp_path, content, capsys):
+    _, sha = _trusted_dependency_inputs(tmp_path)
+    protected = tmp_path / "protected.json"
+    protected.write_text(content)
+    exported = tmp_path / "exported.json"
+    with pytest.raises(CiError):
+        community_gpu_ci.export_dependency_catalog(tmp_path, sha, exported, protected)
+    assert not exported.exists()
+    assert content not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "https://ghcr.io/test-owner",
+        "ghcr.io/test-owner?token=sensitive-token",
+        "ghcr.io/user:password@test-owner",
+        "ghcr.io:443/test-owner",
+        "ghcr.io/test-owner/../elsewhere",
+        "ghcrXio/test-owner",
+        "ghcr.io/TestOwner",
+        "ghcr.io/test-owner/",
+        "ghcr.io/test-owner%2fother",
+    ],
+)
+def test_protected_registry_prefix_cannot_redirect_credentials(tmp_path, prefix):
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "ci_sha": "a" * 40,
+                "registry_prefix": prefix,
+                "families": {},
+            }
+        )
+    )
+    with pytest.raises(CiError, match="Invalid trusted dependency registry prefix") as error:
+        community_gpu_ci._dependency_catalog(path)
+    assert prefix not in str(error.value) and "sensitive-token" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "field,relative",
+    [
+        ("dependency_constraints_sha256", "families/alpha/ci/constraints-linux-amd64.txt"),
+        ("dependency_build_helper_sha256", "families/alpha/ci/build-dependencies.sh"),
+        ("base_environment_lock_sha256", "requirements/community-gpu-linux-amd64.lock"),
+        ("family_environment_lock_sha256", "families/alpha/ci/environment-linux-amd64.lock"),
+        ("environment_recorder_sha256", "requirements/image-environment.py"),
+        ("base_environment_receipt_sha256", "requirements/community-gpu-linux-amd64.json"),
+        ("family_environment_receipt_sha256", "families/alpha/ci/environment-linux-amd64.json"),
+    ],
+)
+def test_public_dependency_lock_or_helper_changes_require_cold_install(tmp_path, field, relative):
+    entry = _dependency_entry(tmp_path, "alpha")
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("original public dependency input\n")
+    entry["lock"][field] = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
+    path.write_text("changed public dependency input\n")
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry) is None
+    # A legacy receipt lacking this optional field retains its original behavior.
+    entry["lock"].pop(field)
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
+    entry["lock"][field] = "invalid hash"
+    with pytest.raises(CiError, match="invalid input hash"):
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "environment_recorder_sha256",
+        "base_environment_receipt_sha256",
+        "family_environment_receipt_sha256",
+    ],
+)
+def test_new_public_input_hashes_are_preserved_without_private_coordinates(tmp_path, field):
+    entry = _dependency_entry(tmp_path, "alpha")
+    entry["lock"][field] = "f" * 64
+    entry["lock"]["private_note"] = "private-location-sensitive-token"
+    path = tmp_path / "catalog.json"
+    value = {"schema_version": 1, "ci_sha": "a" * 40, "families": {"alpha": entry}}
+    path.write_text(json.dumps(value))
+    provenance = community_gpu_ci._dependency_provenance(path, "alpha")
+    assert provenance[field] == "f" * 64 and "sensitive-token" not in json.dumps(provenance)
+    entry["lock"][field] = "ghcr.io/test-owner/private-cache?sensitive-token"
+    path.write_text(json.dumps(value))
+    provenance = community_gpu_ci._dependency_provenance(path, "alpha")
+    assert field not in provenance and "ghcr.io" not in json.dumps(provenance)
+
+
+def test_public_provenance_never_exports_private_coordinates_or_metadata(tmp_path):
+    entry = _dependency_entry(tmp_path, "alpha")
+    entry["lock"]["internal_note"] = "private-registry-location-sensitive-token"
+    entry["lock"]["abi"]["torch"] = "private-registry-location-sensitive-token"
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "ci_sha": "a" * 40,
+                "families": {"alpha": entry},
+            }
+        )
+    )
+    provenance = community_gpu_ci._dependency_provenance(path, "alpha")
+    assert provenance["source_sha"] == entry["lock"]["source_sha"]
+    assert provenance["base_dockerfile_sha256"] == entry["lock"]["base_dockerfile_sha256"]
+    assert "ghcr.io" not in json.dumps(provenance) and "sensitive-token" not in json.dumps(
+        provenance
+    )
+    assert "image" not in provenance and "abi" not in provenance
+
+
+@pytest.mark.parametrize(
+    "mutation", ["mutable", "other_family", "other_registry", "profile", "unqualified"]
+)
+def test_corrupt_dependency_receipt_cannot_select_an_image(tmp_path, mutation):
+    entry = _dependency_entry(tmp_path, "alpha")
+    if mutation == "mutable":
+        entry["lock"]["image"] = f"{community_gpu_ci.DEPENDENCY_REGISTRY}/alpha:latest"
+    elif mutation == "other_family":
+        entry["lock"]["family"] = "beta"
+    elif mutation == "other_registry":
+        entry["lock"]["image"] = entry["lock"]["image"].replace("ghcr.io", "ghcrXio")
+    elif mutation == "profile":
+        entry["lock"]["abi"]["resolved_dependencies"].append("unexpected==9")
+    else:
+        entry["lock"]["family_e2e_passed"] = False
+    with pytest.raises(CiError):
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", entry)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    ["Dockerfile.dev.x86-gpu", "requirements/community-ci.txt", "families/alpha/requirements.txt"],
+)
+def test_real_dependency_update_is_a_cache_miss(tmp_path, changed):
+    entry = _dependency_entry(tmp_path, "alpha")
+    (tmp_path / changed).write_text("updated dependency input\n")
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry) is None
+
+
+def _host_profile_catalog(repository, family="alpha", *, ram=128, proof=True):
+    entry = _dependency_entry(repository, family)
+    entry["lock"]["resources"] = {"host_ram_gib": ram}
+    if proof:
+        entry["lock"]["qualification_host"] = {
+            "ram_gib": 128,
+            "gpu_count": 1,
+            "arch": "x86_64",
+            "run_id": "12345",
+        }
+    path = repository / "host-catalog.json"
+    path.write_text(
+        json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": {family: entry}})
+    )
+    return path, entry
+
+
+def test_host_profile_without_a_catalog_keeps_the_64_gib_default(tmp_path):
+    catalog = tmp_path / "empty-catalog.json"
+    catalog.write_text(json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": {}}))
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+        == 64
+    )
+
+
+def test_host_profile_uses_maximum_selected_owner_and_keeps_it_on_cache_miss(tmp_path):
+    catalog, entry = _host_profile_catalog(tmp_path)
+    value = json.loads(catalog.read_text())
+    value["families"]["beta"] = _dependency_entry(tmp_path, "beta")
+    catalog.write_text(json.dumps(value))
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha", "beta"), catalog, "3" * 40
+        )
+        == 128
+    )
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("beta"), catalog, "3" * 40
+        )
+        == 64
+    )
+    (tmp_path / "families/alpha/requirements.txt").write_text("new dependency input\n")
+    assert community_gpu_ci._dependency_reference(tmp_path, "alpha", entry) is None
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+        == 128
+    )
+
+
+@pytest.mark.parametrize("ram", [True, "128", 0, 96, 256, 128.0])
+def test_host_profile_rejects_invalid_ram_before_allocation(tmp_path, ram):
+    catalog, _ = _host_profile_catalog(tmp_path, ram=ram)
+    with pytest.raises(CiError):
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid", ["missing", "ram", "gpus", "arch", "run", "unqualified", "mutable"]
+)
+def test_128_gib_profile_requires_real_complete_single_gpu_qualification(tmp_path, invalid):
+    catalog, _ = _host_profile_catalog(tmp_path)
+    value = json.loads(catalog.read_text())
+    lock = value["families"]["alpha"]["lock"]
+    if invalid == "missing":
+        lock.pop("qualification_host")
+    elif invalid == "ram":
+        lock["qualification_host"]["ram_gib"] = 64
+    elif invalid == "gpus":
+        lock["qualification_host"]["gpu_count"] = 2
+    elif invalid == "arch":
+        lock["qualification_host"]["arch"] = "aarch64"
+    elif invalid == "run":
+        lock["qualification_host"]["run_id"] = "0"
+    elif invalid == "unqualified":
+        lock["family_e2e_passed"] = False
+    else:
+        lock["image"] = f"{community_gpu_ci.DEPENDENCY_REGISTRY}/alpha:latest"
+    catalog.write_text(json.dumps(value))
+    with pytest.raises(CiError):
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+
+
+def test_host_profile_rejects_catalog_from_another_ci_snapshot(tmp_path):
+    catalog, _ = _host_profile_catalog(tmp_path)
+    with pytest.raises(CiError):
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "4" * 40
+        )
+
+
+def test_legacy_64_gib_lock_error_remains_isolated_to_its_owner(tmp_path):
+    catalog, _ = _host_profile_catalog(tmp_path, ram=64, proof=False)
+    value = json.loads(catalog.read_text())
+    value["families"]["alpha"]["lock"]["image"] += ":latest"
+    catalog.write_text(json.dumps(value))
+    assert (
+        community_gpu_ci.required_host_ram_gib(
+            tmp_path, _gpu_environment("alpha"), catalog, "3" * 40
+        )
+        == 64
+    )
+    with pytest.raises(CiError):
+        community_gpu_ci._dependency_reference(tmp_path, "alpha", value["families"]["alpha"])
+
+
+@pytest.mark.parametrize("kind", ["duplicate", "oversize", "fifo", "symlink"])
+def test_dependency_catalog_reads_are_bounded_and_regular(tmp_path, kind):
+    path = tmp_path / "catalog"
+    if kind == "duplicate":
+        path.write_text('{"families":{},"families":{}}')
+    elif kind == "oversize":
+        with path.open("wb") as stream:
+            stream.truncate(community_gpu_ci.MAX_DEPENDENCY_CATALOG_BYTES + 1)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        target = tmp_path / "target"
+        target.write_text("{}")
+        path.symlink_to(target)
+    start = time.monotonic()
+    with pytest.raises((CiError, OSError)):
+        community_gpu_ci._dependency_json(community_gpu_ci._dependency_bytes(path))
+    assert time.monotonic() - start < 1
+
+
+@pytest.mark.parametrize("alpha_state", ["qualified", "changed", "corrupt"])
+def test_dependency_images_keep_owner_isolation_and_scrub_auth_before_pr_code(
+    tmp_path,
+    monkeypatch,
+    alpha_state,
+):
+    """Orchestration selects immutable prepared images only after reader auth is erased."""
+    _planned_owners(tmp_path, "alpha", "beta", "gamma")
+    entries = {
+        family: _dependency_entry(tmp_path, family, digest)
+        for family, digest in (("alpha", "a"), ("gamma", "c"))
+    }
+    if alpha_state == "changed":
+        (tmp_path / "families/alpha/requirements.txt").write_text("new-package==2\n")
+    elif alpha_state == "corrupt":
+        entries["alpha"]["lock"]["image"] += ":latest"
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": entries}))
+    token = tmp_path / "read-token"
+    token.write_text("private-registry-secret")
+    base = "sha256:" + "b" * 64
+    ids = {family: "sha256:" + digest * 64 for family, digest in (("alpha", "1"), ("gamma", "3"))}
+    config_paths, pulls, runs, prepared = [], [], [], []
+    prepared_alpha = "sha256:" + "d" * 64
+    real_preparation = community_gpu_ci._image_preparation()
+
+    def prepare(repository, family, base_image_id, deadline):
+        assert repository == tmp_path and base_image_id == base
+        assert deadline > time.monotonic()
+        assert (
+            not token.exists() and config_paths and all(not path.exists() for path in config_paths)
+        )
+        prepared.append(family)
+        if family == "alpha":
+            assert alpha_state == "changed"
+            assert (
+                repository / "families/alpha/requirements.txt"
+            ).read_text() == "new-package==2\n"
+            return prepared_alpha
+        assert family == "beta"
+        return real_preparation.ensure_family_image(repository, family, base_image_id, deadline)
+
+    monkeypatch.setattr(
+        community_gpu_ci,
+        "_image_preparation",
+        lambda: SimpleNamespace(ensure_family_image=prepare),
+    )
+
+    def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        assert "private-registry-secret" not in " ".join(map(str, command))
+        if "--config" in command:
+            config = Path(command[command.index("--config") + 1])
+            if "login" in command:
+                assert kwargs["input"] == "private-registry-secret" and not token.exists()
+                (config / "config.json").write_text("private-registry-secret")
+                config_paths.append(config)
+            if "pull" in command:
+                pulls.append(command[-1])
+            identity = ids[command[-1].split("/")[-1].split("@")[0]] if "inspect" in command else ""
+            return subprocess.CompletedProcess(command, 0, stdout=identity)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout=base)
+        if "--stage-family" in command or command[:2] == ["docker", "run"]:
+            assert not token.exists() and config_paths and all(not p.exists() for p in config_paths)
+            assert "docker.sock" not in " ".join(map(str, command))
+            assert "REGISTRY_TOKEN" not in str(kwargs.get("env", {}))
+            if command[:2] == ["docker", "run"]:
+                family = command[-1]
+                runs.append((family, next(v for v in command if str(v).startswith("sha256:"))))
+                _container_receipt(command)
+            return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        assert command[:3] == ["docker", "rm", "--force"]
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {
+        **_gpu_environment("alpha", "beta", "gamma"),
+        "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results"),
+    }
+    if alpha_state == "corrupt":
+        with pytest.raises(CiError, match="alpha"):
+            community_gpu_ci.run_containers(
+                tmp_path, env, "base", dependency_catalog=catalog, registry_token_file=token
+            )
+    else:
+        community_gpu_ci.run_containers(
+            tmp_path, env, "base", dependency_catalog=catalog, registry_token_file=token
+        )
+    assert runs == (
+        [("alpha", ids["alpha"] if alpha_state == "qualified" else prepared_alpha)]
+        if alpha_state != "corrupt"
+        else []
+    ) + [("beta", base), ("gamma", ids["gamma"])]
+    assert prepared == (["alpha"] if alpha_state == "changed" else []) + ["beta"]
+    assert pulls == ([entries["alpha"]["lock"]["image"]] if alpha_state == "qualified" else []) + [
+        entries["gamma"]["lock"]["image"]
+    ]
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    outcomes = {row["family"]: row for row in summary["families"]}
+    assert outcomes["beta"]["cases"] == {"beta": "passed"} and outcomes["gamma"]["cases"] == {
+        "gamma": "passed"
+    }
+    if alpha_state == "changed":
+        assert outcomes["alpha"]["dependency_image_id"] == prepared_alpha
+        assert outcomes["alpha"]["base_image_id"] == base
+        assert outcomes["alpha"]["dependency_cache"] == "input_mismatch" and outcomes["alpha"][
+            "cases"
+        ] == {"alpha": "passed"}
+    elif alpha_state == "corrupt":
+        assert outcomes["alpha"]["failure_class"] == "infra_failure" and outcomes["alpha"][
+            "cases"
+        ] == {"alpha": "not_run"}
+    assert community_gpu_ci._checked_summary(summary)["families"] == summary["families"]
+
+
+def test_registry_failure_cleans_auth_and_never_reports_its_secret(tmp_path, monkeypatch, capsys):
+    entry = _dependency_entry(tmp_path, "alpha")
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(
+        json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": {"alpha": entry}})
+    )
+    token = tmp_path / "read-token"
+    token.write_text("registry-secret")
+    configs = []
+
+    def docker(command, **kwargs):
+        assert "login" in command and kwargs["input"] == "registry-secret"
+        assert not token.exists() and "registry-secret" not in str(command)
+        config = Path(command[command.index("--config") + 1])
+        configs.append(config)
+        (config / "config.json").write_text("registry-secret")
+        return subprocess.CompletedProcess(
+            command, 1, stdout="registry-secret", stderr="registry-secret"
+        )
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    images, errors, misses = community_gpu_ci._dependency_image_ids(
+        tmp_path, ("alpha",), catalog, token, "test-user", time.monotonic() + 30
+    )
+    assert not images and not misses and errors == {"alpha": "Dependency registry login failed"}
+    assert not token.exists() and all(not p.exists() for p in configs)
+    captured = capsys.readouterr()
+    assert "registry-secret" not in captured.out + captured.err + json.dumps(errors)
+
+
+def test_missing_registry_token_fails_cached_owner_but_runs_unlisted_owner(tmp_path, monkeypatch):
+    # The public repository token never substitutes for the protected reader.
+    monkeypatch.setenv("GITHUB_TOKEN", "public-repository-token")
+    monkeypatch.setenv("REGISTRY_TOKEN", "public-repository-token")
+    _planned_owners(tmp_path, "alpha", "beta")
+    entry = _dependency_entry(tmp_path, "alpha")
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(
+        json.dumps({"schema_version": 1, "ci_sha": "3" * 40, "families": {"alpha": entry}})
+    )
+    started = []
+
+    def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        assert "--config" not in command
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
+        if "--stage-family" in command:
+            assert command[command.index("--stage-family") + 1] == "beta"
+        elif command[:2] == ["docker", "run"]:
+            started.append(command[-1])
+            _container_receipt(command)
+        elif command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        else:
+            assert command[:3] == ["docker", "rm", "--force"]
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="read credential is missing"):
+        community_gpu_ci.run_containers(tmp_path, env, "base", dependency_catalog=catalog)
+    assert started == ["beta"]
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    results = {r["family"]: r for r in summary["families"]}
+    assert results["alpha"]["failure_class"] == "infra_failure" and results["alpha"]["cases"] == {
+        "alpha": "not_run"
+    }
+    assert results["beta"]["cases"] == {"beta": "passed"} and not summary["passed"]
 
 
 def _family(repository: Path, name: str, manifests: list[dict[str, object]]) -> Path:
@@ -42,12 +695,20 @@ def test_shared_gpu_plan_includes_direct_and_new_families() -> None:
     )
 
 
+@pytest.mark.parametrize("existing", [[], ["llama"]])
+def test_family_only_gpu_plan_keeps_new_owners_without_unrelated_baselines(existing) -> None:
+    selected = community_gpu_ci.selected_families(
+        "families", json.dumps(existing), json.dumps(existing), '["new_family"]'
+    )
+    assert selected == tuple(sorted([*existing, "new_family"]))
+
+
 @pytest.mark.parametrize(
     ("scope", "families", "direct", "added"),
     [
         ("docs", "[]", "[]", "[]"),
         ("families", "[]", "[]", "[]"),
-        ("families", '["bert"]', '["bert"]', '["new_family"]'),
+        ("families", '["bert"]', "[]", '["new_family"]'),
         ("families", '["bert"]', "[]", "[]"),
         ("all", '["bert"]', '["bert"]', '["bert"]'),
         ("all", '["bert"]', '["gpt2"]', "[]"),
@@ -76,6 +737,7 @@ def test_family_plan_selects_only_explicit_premerge_cases(tmp_path: Path) -> Non
                 "family": "alpha",
                 "hf_id": "example/alpha",
                 "hf_revision": "a" * 40,
+                "hf_dependencies": [{"repo_id": "example/dependency", "revision": "b" * 40}],
                 "testcases": [
                     {"name": "alpha-smoke", "premerge": True},
                     {"name": "alpha-nightly", "premerge": False},
@@ -92,7 +754,10 @@ def test_family_plan_selects_only_explicit_premerge_cases(tmp_path: Path) -> Non
 
     assert plan.family == "alpha"
     assert plan.testcases == ("alpha-local", "alpha-smoke")
-    assert plan.checkpoints == (("example/alpha", "a" * 40),)
+    assert plan.checkpoints == (
+        ("example/alpha", "a" * 40),
+        ("example/dependency", "b" * 40),
+    )
 
 
 @pytest.mark.parametrize(
@@ -105,6 +770,22 @@ def test_family_plan_selects_only_explicit_premerge_cases(tmp_path: Path) -> Non
                 "testcases": [
                     {"name": "duplicate", "premerge": True},
                     {"name": "duplicate", "premerge": True},
+                ],
+            }
+        ],
+        [
+            {
+                "family": "alpha",
+                "hf_dependencies": [{"repo_id": "example/dependency", "revision": ""}],
+                "testcases": [{"name": "invalid-dependency", "premerge": True}],
+            }
+        ],
+        [
+            {
+                "family": "alpha",
+                "testcases": [
+                    {"name": "valid", "premerge": True},
+                    {"name": "invalid-deferred", "premerge": "true", "community_gpu": False},
                 ],
             }
         ],
@@ -121,9 +802,9 @@ def test_family_plan_rejects_missing_or_duplicate_premerge_cases(
         community_gpu_ci.family_plan(tmp_path, "alpha")
 
 
-@pytest.mark.parametrize("missing", [None, "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1"])
-def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, missing: str | None) -> None:
-    """The E2E runtime tree contains core, backend, and the selected family DSO."""
+@pytest.mark.parametrize("with_byok", [False, True])
+def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, with_byok: bool) -> None:
+    """The staged native tree must satisfy the real E2E runtime consumer."""
     build = tmp_path / "build"
     build.mkdir()
     plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
@@ -136,27 +817,54 @@ def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, missin
         "libtrtmc_model_alpha.so",
     )
     for name in required:
+        (build / name).write_bytes(b"native")
+
+    if with_byok:
+        (build / "libtrtmc_byok_tvm_ffi.so").write_bytes(b"native")
+    runtime = community_gpu_ci._runtime_root(build, plan)
+    runner = ci_e2e.E2ERunner(ci_context.CiContext(tmp_path, {}))
+    with runner._isolated_runtime_root(runtime, plan.family) as isolated:
+        for name in required:
+            assert (isolated / name).resolve() == (build / name).resolve()
+        assert (isolated / "libtrtmc_byok_tvm_ffi.so").is_file() is with_byok
+
+
+@pytest.mark.parametrize("missing", ["libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1"])
+def test_runtime_root_rejects_missing_public_runtime_libraries(
+    tmp_path: Path, missing: str
+) -> None:
+    """Incomplete public runtime artifacts cannot reach family E2E execution."""
+    build = tmp_path / "build"
+    build.mkdir()
+    for name in (
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_alpha.so",
+    ):
         if name != missing:
             (build / name).write_bytes(b"native")
-
-    if missing:
-        with pytest.raises(CiError, match=missing):
-            community_gpu_ci._runtime_root(build, plan)
-        return
-
-    runtime = community_gpu_ci._runtime_root(build, plan)
-
-    assert all((runtime / name).is_symlink() for name in required)
+    plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
+    with pytest.raises(CiError, match=missing):
+        community_gpu_ci._runtime_root(build, plan)
 
 
 @pytest.mark.parametrize("state", ["python", "native", "missing_declaration", "missing_adapter"])
-def test_runtime_root_preserves_only_selected_family_cli(tmp_path: Path, state: str) -> None:
+def test_runtime_root_preserves_selected_family_cli(tmp_path: Path, state: str) -> None:
+    """A family CLI declaration and its optional native adapter reach E2E."""
     build = tmp_path / "build"
     build.mkdir()
     plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
     for name in (
-        "libtrtmc_core.so", "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1",
-        "libtrtmc_backend_trt.so", "libtrtmc_model_alpha.so", "libtrtmc_cli_beta.so",
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_alpha.so",
+        "libtrtmc_cli_beta.so",
     ):
         (build / name).write_bytes(b"native")
     source = tmp_path / "families/alpha/cli.json"
@@ -171,11 +879,17 @@ def test_runtime_root_preserves_only_selected_family_cli(tmp_path: Path, state: 
         declaration = build / "families" / family / "cli.json"
         declaration.parent.mkdir(parents=True)
         declaration.write_bytes(source.read_bytes())
+
     if state.startswith("missing_"):
-        message = "no CLI declaration for alpha" if state == "missing_declaration" else "libtrtmc_cli_alpha.so"
+        message = (
+            "no CLI declaration for alpha"
+            if state == "missing_declaration"
+            else "libtrtmc_cli_alpha.so"
+        )
         with pytest.raises(CiError, match=message):
             community_gpu_ci._runtime_root(build, plan, tmp_path)
         return
+
     runtime = community_gpu_ci._runtime_root(build, plan, tmp_path)
     assert (runtime / "families/alpha/cli.json").read_bytes() == source.read_bytes()
     assert not (runtime / "families/beta").exists()
@@ -187,29 +901,45 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A moving or incomplete checkpoint cannot enter offline E2E execution."""
+    """A moving checkpoint cannot enter offline E2E execution."""
     revision = "a" * 40
     snapshot = tmp_path / revision
     snapshot.mkdir()
-    (snapshot / "config.json").write_text("{}\n", encoding="utf-8")
-    calls: list[tuple[str, str | None, Path]] = []
+    (snapshot / "checkpoint.pt").write_bytes(b"weights")
+    calls = []
 
     class FakeApi:
         """Return one immutable revision for the requested model."""
 
-        def model_info(self, _repo_id: str, revision: str | None):
-            assert revision is None
-            return SimpleNamespace(sha=revision_value)
+        def __init__(self, *, token):
+            assert token is False
 
-    def download(*, repo_id: str, revision: str | None, cache_dir: Path) -> str:
-        calls.append((repo_id, revision, cache_dir))
+        def model_info(self, _repo_id: str, revision: str | None, *, token):
+            assert token is False
+            assert revision is None
+            return SimpleNamespace(sha=revision_value, private=False, gated=False)
+
+        def resolve_revision(self, _repo_id, *, revision, cache_dir, token):
+            assert token is False
+            return SimpleNamespace(resolved=revision_value, initial=revision)
+
+    def download(*, repo_id: str, revision, cache_dir: Path, token, local_files_only=False) -> str:
+        assert token is False
+        observed_revision = revision if local_files_only else revision.resolved
+        calls.append(("snapshot", repo_id, observed_revision, cache_dir, local_files_only))
         return str(snapshot)
+
+    def cached_tree(repo_id: str, *, revision: str, cache_dir: Path):
+        calls.append(("tree", repo_id, revision, cache_dir))
+        return [SimpleNamespace(path="checkpoint.pt")]
 
     revision_value = revision
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(HfApi=FakeApi, snapshot_download=download),
+        SimpleNamespace(
+            HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download
+        ),
     )
     plan = community_gpu_ci.FamilyPlan(
         "alpha",
@@ -219,11 +949,250 @@ def test_checkpoint_staging_verifies_the_resolved_revision(
 
     community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
 
-    assert calls == [("example/alpha", None, tmp_path / "cache")]
+    assert calls == [
+        ("snapshot", "example/alpha", revision, tmp_path / "cache", False),
+        ("tree", "example/alpha", revision, tmp_path / "cache"),
+        ("snapshot", "example/alpha", None, tmp_path / "cache", True),
+    ]
 
     revision_value = "b" * 40
     with pytest.raises(CiError, match="revision changed"):
         community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
+
+
+@pytest.mark.parametrize("failure", ["tree_missing", "snapshot_incomplete", "revision_changed"])
+def test_checkpoint_staging_rejects_unusable_offline_cache(tmp_path, monkeypatch, failure):
+    """A successful online download is insufficient evidence for offline entry."""
+    revision = "a" * 40
+    snapshot = tmp_path / revision
+    snapshot.mkdir()
+
+    class FakeApi:
+        def __init__(self, *, token):
+            assert token is False
+
+        def model_info(self, _repo_id, revision, *, token):
+            assert token is False
+            return SimpleNamespace(sha="a" * 40, private=False, gated=False)
+
+        def resolve_revision(self, _repo_id, *, revision, cache_dir, token):
+            assert token is False
+            return SimpleNamespace(resolved="a" * 40, initial=revision)
+
+    def cached_tree(*_args, **_kwargs):
+        if failure == "tree_missing":
+            raise ValueError("repository tree metadata missing")
+        return [SimpleNamespace(path="checkpoint.pt")]
+
+    def download(**kwargs):
+        if kwargs.get("local_files_only"):
+            if failure == "snapshot_incomplete":
+                raise ValueError("cached snapshot is incomplete")
+            if failure == "revision_changed":
+                return str(tmp_path / ("b" * 40))
+        return str(snapshot)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(
+            HfApi=FakeApi, get_cached_repo_tree=cached_tree, snapshot_download=download
+        ),
+    )
+    plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), (("example/alpha", revision),))
+    with pytest.raises((ValueError, CiError), match="missing|incomplete|differs"):
+        community_gpu_ci._stage_checkpoints((plan,), tmp_path / "cache")
+
+
+@pytest.fixture
+def trusted_checkpoint_repository(tmp_path):
+    repository = tmp_path / "source"
+    for family in ("alpha", "beta"):
+        _family(
+            repository,
+            family,
+            [
+                {
+                    "family": family,
+                    "hf_id": "example/" + family,
+                    "testcases": [{"name": "required", "premerge": True}],
+                }
+            ],
+        )
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "trusted checkpoint fixture",
+        ],
+        check=True,
+    )
+    sha = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    return repository, sha
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_token", "failure"),
+    [
+        ("approved_public", "dummy-hf-token", None),
+        ("approved_gated", "dummy-hf-token", None),
+        ("new_public", False, None),
+        ("new_family_public", False, None),
+        ("existing_without_coverage_public", False, None),
+        ("existing_deferred_public", False, None),
+        ("private", None, "publicly visible"),
+        ("unknown_visibility", None, "publicly visible"),
+        ("unknown_policy", None, "access policy"),
+        ("new_gated", None, "matching declaration"),
+        ("another_family_gated", None, "matching declaration"),
+        ("changed_revision_gated", None, "matching declaration"),
+        ("new_family_gated", None, "matching declaration"),
+        ("anonymous_404", None, "anonymous metadata denied"),
+        ("moving_revision", None, "changed before staging"),
+        ("missing_token_gated", None, "requires an HF credential"),
+        ("missing_policy_gated", None, "matching declaration"),
+    ],
+)
+def test_checkpoint_access_stays_with_trusted_owner_before_authenticated_download(
+    tmp_path, monkeypatch, trusted_checkpoint_repository, scenario, expected_token, failure
+):
+    repository, ci_sha = trusted_checkpoint_repository
+    if scenario.startswith("existing_"):
+        manifest = repository / "families/alpha/tests/manifests/0.json"
+        if scenario == "existing_without_coverage_public":
+            manifest.unlink()
+            (repository / "families/alpha/tests/test_e2e.py").unlink()
+        else:
+            payload = json.loads(manifest.read_text())
+            payload["testcases"][0]["community_gpu"] = False
+            manifest.write_text(json.dumps(payload))
+        subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "owner without active checkpoint grant",
+            ],
+            check=True,
+        )
+        ci_sha = subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+        ).strip()
+    family = "new_family" if scenario.startswith("new_family") else "alpha"
+    repo_id = (
+        "example/new"
+        if scenario.startswith("new_")
+        else "example/beta"
+        if scenario == "another_family_gated"
+        else "example/alpha"
+    )
+    requested = "new-branch" if scenario == "changed_revision_gated" else None
+    revision = "a" * 40
+    snapshot = tmp_path / "cache" / revision
+    snapshot.mkdir(parents=True)
+    monkeypatch.setenv("HF_TOKEN", "dummy-hf-token")
+    if scenario == "missing_token_gated":
+        monkeypatch.delenv("HF_TOKEN")
+    # Mutating the checked-out PR declaration cannot change the Git-object grant.
+    (repository / "families/alpha/tests/manifests/0.json").write_text(
+        json.dumps(
+            {
+                "family": "alpha",
+                "hf_id": repo_id,
+                "hf_revision": requested,
+                "testcases": [{"name": "required", "premerge": True}],
+            }
+        )
+    )
+    calls = []
+
+    class FakeApi:
+        def __init__(self, *, token):
+            assert token is False
+
+        def model_info(self, observed_repo, *, revision, token):
+            assert observed_repo == repo_id and revision == requested and token is False
+            calls.append("anonymous_metadata")
+            if scenario == "anonymous_404":
+                raise ValueError("anonymous metadata denied")
+            return SimpleNamespace(
+                sha="a" * 40,
+                private=True
+                if scenario == "private"
+                else None
+                if scenario == "unknown_visibility"
+                else False,
+                gated=None
+                if scenario == "unknown_policy"
+                else "manual"
+                if "gated" in scenario
+                else False,
+            )
+
+        def resolve_revision(self, observed_repo, *, revision, cache_dir, token):
+            assert observed_repo == repo_id and revision == requested and token is False
+            calls.append("anonymous_resolution")
+            return SimpleNamespace(
+                resolved="b" * 40 if scenario == "moving_revision" else "a" * 40,
+                initial=requested,
+            )
+
+    def download(*, repo_id, revision, cache_dir, token, local_files_only=False):
+        if local_files_only:
+            assert token is False and revision == requested
+            calls.append("offline")
+        else:
+            assert token == expected_token
+            assert revision.resolved == "a" * 40 and revision.initial == requested
+            calls.append("download")
+        return str(snapshot)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(
+            HfApi=FakeApi,
+            snapshot_download=download,
+            get_cached_repo_tree=lambda *a, **k: [],
+        ),
+    )
+    plan = community_gpu_ci.FamilyPlan(family, ("required",), ((repo_id, requested),))
+    if failure:
+        with pytest.raises((CiError, ValueError), match=failure):
+            community_gpu_ci._stage_checkpoints(
+                (plan,),
+                tmp_path / "cache",
+                repository=repository,
+                ci_sha=None if scenario == "missing_policy_gated" else ci_sha,
+            )
+        assert "download" not in calls and "offline" not in calls
+    else:
+        community_gpu_ci._stage_checkpoints(
+            (plan,), tmp_path / "cache", repository=repository, ci_sha=ci_sha
+        )
+        assert calls == ["anonymous_metadata", "anonymous_resolution", "download", "offline"]
 
 
 @pytest.mark.parametrize("executor", [None, "python", "native"])
@@ -247,32 +1216,22 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     other.write_text('{"version":1,"commands":[{"executor":"native"}]}')
     build = Path("/tmp") / f"{tmp_path.name}-native-build"
     commands: list[list[str]] = []
-    e2e_calls: list[tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]] = []
+    e2e_calls: list[dict[str, str]] = []
+    destination = tmp_path / "result.json"
+    (tmp_path / "impact.json").write_text(
+        json.dumps({"families": ["alpha"], "testcases": ["alpha-smoke"]})
+    )
 
-    class FakeContext:
-        """Record orchestration without requiring CUDA or a compiler."""
+    def command(repository, env, argv, **_kwargs):
+        rendered = [str(argument) for argument in argv]
+        commands.append(rendered)
+        if rendered[:2] == ["cmake", "-S"]:
+            assert Path(str(destination) + ".entrypoint").read_text() == "alpha\n"
+            assert "-DTRTMC_FAMILIES=alpha" in rendered
+        if rendered[1:] == ["-m", "tools.ci", "pipeline", "selective-e2e"]:
+            e2e_calls.append(env)
 
-        def __init__(self, repository: Path, env: dict[str, str]):
-            self.repository = repository
-            self.env = env
-
-        def run(self, command, **_kwargs) -> subprocess.CompletedProcess[str]:
-            commands.append([str(argument) for argument in command])
-            return subprocess.CompletedProcess(command, 0)
-
-    class FakeE2ERunner:
-        """Capture the exact family and testcase contract passed by the entrypoint."""
-
-        def __init__(self, context: FakeContext):
-            self.context = context
-
-        def _run(self, families: tuple[str, ...], testcases: tuple[str, ...]) -> None:
-            e2e_calls.append((self.context.env, families, testcases))
-
-    monkeypatch.setattr(community_gpu_ci, "CiContext", FakeContext)
-    monkeypatch.setattr(community_gpu_ci, "E2ERunner", FakeE2ERunner)
-    monkeypatch.setattr(community_gpu_ci, "_install_family_requirements", lambda *_args: None)
-    monkeypatch.setattr(community_gpu_ci, "_stage_checkpoints", lambda *_args: None)
+    monkeypatch.setattr(community_gpu_ci, "_family_command", command)
     monkeypatch.setattr(
         community_gpu_ci,
         "_runtime_root",
@@ -287,99 +1246,926 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
             "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
             "TRTMC_GPU_ADDED_FAMILIES": "[]",
             "TRTMC_NATIVE_BUILD_DIR": str(build),
+            "TRTMC_CHECKPOINTS_PRESTAGED": "1",
+            "TRTMC_GPU_RESULT_FILE": str(destination),
         },
+        "alpha",
     )
 
     assert any(command[:2] == ["cmake", "-S"] for command in commands)
+    icu_probe = ["pkg-config", "--exists", "icu-uc", "icu-i18n"]
+    assert commands.index(icu_probe) < next(
+        index for index, command in enumerate(commands) if command[:2] == ["cmake", "-S"]
+    )
     native_builds = [command for command in commands if command[:2] == ["cmake", "--build"]]
     assert "trtmc" in native_builds[0]
     assert "trtmc_backend_trt" in native_builds[0]
+    assert "trtmc_runtime" in native_builds[0]
+    assert "trtmc_c" in native_builds[0]
     expected_targets = ["trtmc_model_alpha"]
     if executor == "native":
         expected_targets.append("trtmc_cli_alpha")
-    assert native_builds[1][native_builds[1].index("--target") + 1:] == expected_targets
+    assert native_builds[1][native_builds[1].index("--target") + 1 :] == expected_targets
     assert len(e2e_calls) == 1
-    runtime, families, testcases = e2e_calls[0]
-    assert families == ("alpha",)
-    assert testcases == ("alpha-smoke",)
+    runtime = e2e_calls[0]
+    assert json.loads((tmp_path / "impact.json").read_text()) == {
+        "families": ["alpha"],
+        "testcases": ["alpha-smoke"],
+    }
     assert runtime["TRTMC_BINARY"] == str(build / "trtmc")
     assert runtime["TRTMC_RUNTIME_ROOT"] == str(build / "runtime")
     assert runtime["TRTMC_NATIVE_BUILD_DIR"] == str(build)
     assert runtime["HF_HUB_OFFLINE"] == "1"
 
 
-def test_gpu_run_continues_after_one_family_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One family failure is aggregated only after every selected family ran."""
-    for family in ("alpha", "beta"):
+@pytest.fixture
+def gpu_native_build_dir():
+    # Hosted CPU tests put pytest's tmp_path under /work/tmp. The GPU entrypoint
+    # deliberately accepts build directories only under /tmp, so this fixture
+    # must use that same contract regardless of the CPU runner's TMPDIR.
+    with tempfile.TemporaryDirectory(prefix="trtmc-gpu-entry-test-", dir="/tmp") as directory:
+        yield Path(directory) / "build"
+
+
+@pytest.mark.parametrize("failure", ["probe", "icu", "configure", "test", ""])
+def test_actual_pr_cli_starts_only_after_preparation(
+    tmp_path, gpu_native_build_dir, monkeypatch, failure
+):
+    """Execute fake native tools and the repository's real Python CLI process."""
+    _family(
+        tmp_path,
+        "alpha",
+        [{"family": "alpha", "testcases": [{"name": "alpha-smoke", "premerge": True}]}],
+    )
+    (tmp_path / "impact.json").write_text(
+        json.dumps({"families": ["alpha"], "testcases": ["alpha-smoke"]})
+    )
+    package = tmp_path / "tools/ci"
+    package.mkdir(parents=True)
+    (package.parent / "__init__.py").write_text("")
+    (package / "__init__.py").write_text("")
+    (package / "context.py").write_text("raise RuntimeError('PR helper imported during prep')\n")
+    (package / "__main__.py").write_text(
+        "import json,os,sys\nfrom pathlib import Path\n"
+        "p=Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "assert Path(str(p)+'.entrypoint').read_text()=='alpha\\n'\n"
+        "assert sys.argv[1:]==['pipeline','selective-e2e']\n"
+        "assert json.loads(Path('impact.json').read_text())['testcases']==['alpha-smoke']\n"
+        "with Path(os.environ['BOUNDARY_EVENTS']).open('a') as s: s.write('pr-cli\\n')\n"
+        "if os.environ['BOUNDARY_FAILURE']=='test': raise SystemExit(17)\n"
+        "build=Path(os.environ['TRTMC_NATIVE_BUILD_DIR'])\n"
+        "assert Path(os.environ['TRTMC_BINARY']).is_file()\n"
+        "assert Path(os.environ['TRTMC_RUNTIME_ROOT']).is_dir()\n"
+        "(build/'trtmc-alpha-e2e-junit.xml').write_text('<testsuites><testsuite>'"
+        "+'<testcase name=\"test_official_checkpoint_e2e[alpha-smoke]\"/>'"
+        "+'</testsuite></testsuites>')\n"
+    )
+    tools = tmp_path / "fake-bin"
+    tools.mkdir()
+    cmake = tools / "cmake"
+    cmake.write_text(
+        f"#!{sys.executable}\nimport os,sys\nfrom pathlib import Path\n"
+        "p=Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "assert Path(str(p)+'.entrypoint').read_text()=='alpha\\n'\n"
+        "with Path(os.environ['BOUNDARY_EVENTS']).open('a') as s: s.write('cmake\\n')\n"
+        "if '-S' in sys.argv and os.environ['BOUNDARY_FAILURE']=='configure': raise SystemExit(13)\n"
+        "build=Path(os.environ['TRTMC_NATIVE_BUILD_DIR']); build.mkdir(exist_ok=True)\n"
+        "for name in ('trtmc','libtrtmc_core.so','libtrtmc_runtime.so','libtrtmc_c.so',"
+        "'libtrtmc_c.so.1','libtrtmc_backend_trt.so','libtrtmc_model_alpha.so'):\n"
+        " (build/name).touch()\n"
+    )
+    cmake.chmod(0o755)
+    pkg_config = tools / "pkg-config"
+    pkg_config.write_text(
+        f"#!{sys.executable}\nimport json,os,sys\nfrom pathlib import Path\n"
+        "p=Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "assert not Path(str(p)+'.entrypoint').exists()\n"
+        "assert sys.argv[1:]==['--exists','icu-uc','icu-i18n']\n"
+        "report=json.loads(p.read_text())\n"
+        "assert report['phase']=='environment' and report['failure_class']=='infra_failure'\n"
+        "with Path(os.environ['BOUNDARY_EVENTS']).open('a') as s: s.write('icu-probe\\n')\n"
+        "if os.environ['BOUNDARY_FAILURE']=='icu': raise SystemExit(1)\n"
+    )
+    pkg_config.chmod(0o755)
+    destination = tmp_path / "result.json"
+    events = tmp_path / "events"
+    env = {
+        **os.environ,
+        "PATH": f"{tools}:{os.environ['PATH']}",
+        "TRTMC_CHECKPOINTS_PRESTAGED": "1",
+        "TRTMC_NATIVE_BUILD_DIR": str(gpu_native_build_dir),
+        "TRTMC_GPU_RESULT_FILE": str(destination),
+        "BOUNDARY_EVENTS": str(events),
+        "BOUNDARY_FAILURE": failure,
+    }
+    original = community_gpu_ci._family_command
+
+    def run(repository, environment, argv, **options):
+        if "-I" in argv:
+            assert not events.exists()
+            assert not Path(str(destination) + ".entrypoint").exists()
+            if failure == "probe":
+                raise subprocess.CalledProcessError(7, argv)
+            return
+        original(repository, environment, argv, **options)
+
+    monkeypatch.setattr(community_gpu_ci, "_family_command", run)
+    if failure:
+        with pytest.raises(subprocess.CalledProcessError):
+            community_gpu_ci.run(tmp_path, env, "alpha")
+    else:
+        community_gpu_ci.run(tmp_path, env, "alpha")
+    result = json.loads(destination.read_text())
+    entered = failure not in {"probe", "icu"}
+    assert result["entrypoint_started"] is entered
+    assert Path(str(destination) + ".entrypoint").exists() is entered
+    if failure:
+        assert result["failure_class"] == ("pr_failure" if entered else "infra_failure")
+        if failure == "icu":
+            assert result["phase"] == "environment"
+            assert result["cases"] == {"alpha-smoke": "not_run"}
+            assert "icu-uc" in result["evidence"] and "icu-i18n" in result["evidence"]
+        elif failure == "configure":
+            assert result["phase"] == "configure"
+    else:
+        assert result["status"] == "passed" and result["cases"] == {"alpha-smoke": "passed"}
+    observed = events.read_text().splitlines() if events.exists() else []
+    assert observed == (
+        []
+        if failure == "probe"
+        else ["icu-probe"]
+        if failure == "icu"
+        else ["icu-probe", "cmake"]
+        if failure == "configure"
+        else ["icu-probe", "cmake", "cmake", "cmake", "pr-cli"]
+    )
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_prepared_selection_never_overwrites_a_tracked_pr_input(tmp_path, tracked):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    impact = tmp_path / "impact.json"
+    impact.write_text('{"contributor":"input"}')
+    if tracked:
+        subprocess.run(["git", "-C", str(tmp_path), "add", "impact.json"], check=True)
+        with pytest.raises(CiError, match="tracks the reserved"):
+            community_gpu_ci.prepare_family_impact(
+                tmp_path, community_gpu_ci.FamilyPlan("alpha", ("required",), ())
+            )
+        assert impact.read_text() == '{"contributor":"input"}'
+    else:
+        community_gpu_ci.prepare_family_impact(
+            tmp_path, community_gpu_ci.FamilyPlan("alpha", ("required",), ())
+        )
+        assert json.loads(impact.read_text()) == {"families": ["alpha"], "testcases": ["required"]}
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_atomic_json_does_not_follow_predictable_temporary_symlink(tmp_path, private):
+    victim = tmp_path / "host-file"
+    victim.write_text("host contents")
+    destination = tmp_path / "receipt.json"
+    stale_temporary = tmp_path / "receipt.json.tmp"
+    stale_temporary.symlink_to(victim)
+
+    community_gpu_ci._save_json(destination, {"safe": True}, private=private)
+
+    assert victim.read_text() == "host contents"
+    assert stale_temporary.is_symlink()
+    assert not destination.is_symlink()
+    assert json.loads(destination.read_text()) == {"safe": True}
+    assert destination.stat().st_mode & 0o777 == (0o600 if private else 0o644)
+    assert not list(tmp_path.glob(".receipt.json.*.tmp"))
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_atomic_json_failure_preserves_previous_receipt_and_removes_temporary(tmp_path, private):
+    destination = tmp_path / "receipt.json"
+    destination.write_text('{"previous": true}\n')
+    with pytest.raises(TypeError):
+        community_gpu_ci._save_json(destination, {"invalid": object()}, private=private)
+    assert json.loads(destination.read_text()) == {"previous": True}
+    assert not list(tmp_path.glob(".receipt.json.*.tmp"))
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_frozen_plan_cannot_turn_reserved_temporary_symlink_into_host_write(tmp_path, tracked):
+    repository = tmp_path / "repo"
+    owner = repository / "families/alpha"
+    (owner / "tests/manifests").mkdir(parents=True)
+    (owner / "model.py").touch()
+    (owner / "tests/test_e2e.py").touch()
+    (owner / "tests/manifests/smoke.json").write_text(
+        json.dumps({"family": "alpha", "testcases": [{"name": "required", "premerge": True}]})
+    )
+    victim = tmp_path / "host-rc"
+    victim.write_text("host contents")
+    temporary = repository / "impact.json.tmp"
+    if tracked:
+        temporary.symlink_to(victim)
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "security fixture",
+        ],
+        check=True,
+    )
+    sha = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    env = {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": '["alpha"]',
+        "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+    }
+    frozen = tmp_path / "plan.json"
+    if tracked:
+        with pytest.raises(CiError, match="reserved Community impact"):
+            community_gpu_ci.export_gpu_plan(repository, sha, env, frozen)
+        assert not frozen.exists()
+    else:
+        community_gpu_ci.export_gpu_plan(repository, sha, env, frozen)
+        temporary.symlink_to(victim)
+        plans, _ = community_gpu_ci.verify_gpu_plan(repository, env, frozen)
+        with pytest.raises(CiError, match="reserved Community impact temporary"):
+            community_gpu_ci.prepare_family_impact(repository, plans["alpha"])
+    assert victim.read_text() == "host contents"
+    assert temporary.is_symlink()
+    assert not (repository / "impact.json").exists()
+
+
+@pytest.mark.parametrize("corrupt_result", [False, True])
+def test_post_entry_failure_stays_pr_failure_with_missing_or_invalid_receipt(
+    tmp_path, corrupt_result
+):
+    path = tmp_path / "result.json"
+    Path(str(path) + ".entrypoint").write_text("alpha\n")
+    if corrupt_result:
+        path.write_text("invalid JSON")
+    result = community_gpu_ci._container_result(path, "alpha", 17, {}, ("required",))
+    assert result["failure_class"] == "pr_failure"
+    assert result["entrypoint_started"] is True and result["status"] == "failed"
+    assert result["cases"] == {"required": "not_run"}
+
+
+def _container_receipt(command: list[str], failed: bool = False) -> None:
+    """Emulate a completed container, including its selected E2E evidence."""
+    cache = next(value for value in command if value.endswith(":/tmp/trtmc-community-huggingface"))
+    family = command[-1]
+    (Path(cache.rsplit(":", 1)[0]) / "result.json.entrypoint").write_text(family + "\n")
+    (Path(cache.rsplit(":", 1)[0]) / "result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "family": family,
+                "status": "failed" if failed else "passed",
+                "phase": "validation" if failed else "complete",
+                "failure_class": "validation" if failed else None,
+                "requested_cases": [family],
+                "cases": {family: "failed" if failed else "passed"},
+            }
+        )
+    )
+
+
+def _planned_owners(repository: Path, *families: str) -> None:
+    for family in families:
         _family(
-            tmp_path,
+            repository,
             family,
             [
                 {
                     "family": family,
-                    "testcases": [{"name": f"{family}-smoke", "premerge": True}],
+                    "testcases": [
+                        {"name": family, "premerge": True},
+                    ],
                 }
             ],
         )
-    build = Path("/tmp") / f"{tmp_path.name}-isolated-native-build"
-    commands: list[list[str]] = []
-    e2e_calls: list[str] = []
 
-    class FakeContext:
-        def __init__(self, repository: Path, env: dict[str, str]):
-            self.repository = repository
-            self.env = env
 
-        def run(self, command, **_kwargs) -> subprocess.CompletedProcess[str]:
-            commands.append([str(argument) for argument in command])
-            return subprocess.CompletedProcess(command, 0)
-
-    class FakeE2ERunner:
-        def __init__(self, context: FakeContext):
-            self.context = context
-
-        def _run(self, families: tuple[str, ...], _testcases: tuple[str, ...]) -> None:
-            family = families[0]
-            e2e_calls.append(family)
-            if family == "alpha":
-                raise CiError("alpha exploded")
-
-    monkeypatch.setattr(community_gpu_ci, "CiContext", FakeContext)
-    monkeypatch.setattr(community_gpu_ci, "E2ERunner", FakeE2ERunner)
-    monkeypatch.setattr(community_gpu_ci, "_install_family_requirements", lambda *_args: None)
-    monkeypatch.setattr(community_gpu_ci, "_stage_checkpoints", lambda *_args: None)
+def test_wrong_shared_base_cannot_reach_preparation_or_pr(tmp_path, monkeypatch):
+    _planned_owners(tmp_path, "alpha")
+    expected, wrong = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    reference = "ghcr.io/example/private-ci/base@" + expected
     monkeypatch.setattr(
         community_gpu_ci,
-        "_runtime_root",
-        lambda native_build, plan, _repository: native_build / plan.family / "runtime",
+        "_dependency_catalog",
+        lambda _: {
+            "base": {"local_image_id": expected, "image": reference},
+            "ci_sha": "a" * 40,
+        },
     )
 
-    with pytest.raises(CiError, match="alpha: alpha exploded"):
-        community_gpu_ci.run(
-            tmp_path,
-            {
-                "TRTMC_GPU_SCOPE": "families",
-                "TRTMC_GPU_FAMILIES": '["alpha","beta"]',
-                "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta"]',
-                "TRTMC_GPU_ADDED_FAMILIES": "[]",
-                "TRTMC_NATIVE_BUILD_DIR": str(build),
-            },
+    def pinned_image(value, *, private):
+        assert value == reference and private
+        return {"Id": expected}
+
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(inspect=pinned_image)
+    )
+
+    def inspect_only(command, **kwargs):
+        assert command == ["docker", "image", "inspect", "--format", "{{.Id}}", "base"]
+        return subprocess.CompletedProcess(command, 0, stdout=wrong)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", inspect_only)
+    with pytest.raises(CiError, match="does not match the verified shared base"):
+        community_gpu_ci.run_containers(
+            tmp_path, _gpu_environment("alpha"), "base", dependency_catalog=tmp_path / "catalog"
         )
 
-    assert e2e_calls == ["alpha", "beta"]
-    family_builds = [
-        command
-        for command in commands
-        if command[:2] == ["cmake", "--build"]
-        and any(argument.startswith("trtmc_model_") for argument in command)
+
+@pytest.mark.parametrize("checkpoint_ci_sha", ["b" * 40, "main"])
+def test_explicit_checkpoint_authority_cannot_override_the_protected_catalog(
+    tmp_path, monkeypatch, checkpoint_ci_sha
+):
+    _planned_owners(tmp_path, "alpha")
+    monkeypatch.setattr(community_gpu_ci, "_dependency_catalog", lambda _: {"ci_sha": "a" * 40})
+    calls = []
+
+    def inspect_only(command, **kwargs):
+        calls.append(command)
+        assert command == ["docker", "image", "inspect", "--format", "{{.Id}}", "base"]
+        return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", inspect_only)
+    with pytest.raises(CiError, match="Checkpoint authorization"):
+        community_gpu_ci.run_containers(
+            tmp_path,
+            _gpu_environment("alpha"),
+            "base",
+            dependency_catalog=tmp_path / "catalog",
+            checkpoint_ci_sha=checkpoint_ci_sha,
+        )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failed_family", [None, "alpha"])
+@pytest.mark.parametrize("shared_store", [None, "classic", "containerd"])
+def test_containers_are_sequential_and_failures_do_not_skip_families(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_family: str | None,
+    shared_store: str | None,
+) -> None:
+    """Each execution is removed before the next family starts, including failures."""
+    events = []
+    staged = []
+    _planned_owners(tmp_path, "alpha", "beta", "gamma")
+    image = "sha256:" + "a" * 64
+    catalog = None
+    if shared_store is not None:
+        catalog = tmp_path / "catalog"
+        reference = "ghcr.io/example/private-ci/base@sha256:" + "c" * 64
+        config_id = image if shared_store == "classic" else "sha256:" + "b" * 64
+        monkeypatch.setattr(
+            community_gpu_ci,
+            "_dependency_catalog",
+            lambda _: {
+                "base": {"image": reference, "local_image_id": config_id},
+                "ci_sha": "a" * 40,
+            },
+        )
+        preparation = community_gpu_ci._image_preparation()
+
+        def pinned_image(value, *, private):
+            assert value == reference and private
+            return {"Id": image}
+
+        monkeypatch.setattr(preparation, "inspect", pinned_image)
+        monkeypatch.setattr(community_gpu_ci, "_image_preparation", lambda: preparation)
+
+    def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
+        if "--stage-family" in command:
+            family = command[command.index("--stage-family") + 1]
+            assert command[:2] == [sys.executable, str(Path(community_gpu_ci.__file__).resolve())]
+            assert command[command.index("--repository") + 1] == str(tmp_path)
+            if shared_store is not None:
+                assert command[command.index("--ci-sha") + 1] == "a" * 40
+            else:
+                assert "--ci-sha" not in command
+            assert kwargs["env"] == {}
+            staged.append(family)
+            return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "run"]:
+            family = command[-1]
+            assert command[-2] == "--family"
+            assert image in command
+            # Retain exit/OOM state until inspection, then explicitly remove it.
+            assert "--rm" not in command
+            assert "--memory" in command and "--memory-swap" in command
+            assert f"{tmp_path}:/src:ro" in command
+            assert (
+                f"{Path(community_gpu_ci.__file__).resolve()}:/opt/community_gpu_ci.py:ro"
+                in command
+            )
+            assert "PYTHONPATH=/src" in command
+            assert command[-5:] == [
+                "python3.12",
+                "-I",
+                "/opt/community_gpu_ci.py",
+                "--family",
+                family,
+            ]
+            assert not any("HF_TOKEN" in value or "docker.sock" in value for value in command)
+            events.append(("start", family, command[command.index("--name") + 1]))
+            _container_receipt(command, family == failed_family)
+            return subprocess.CompletedProcess(command, 17 if family == failed_family else 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        assert command[:3] == ["docker", "rm", "--force"]
+        assert command[-1] == events[-1][2]
+        events.append(("remove", events[-1][1], command[-1]))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": '["alpha","beta","gamma"]',
+        "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta","gamma"]',
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+    }
+    if failed_family:
+        with pytest.raises(CiError, match="alpha: container exited 17"):
+            community_gpu_ci.run_containers(tmp_path, env, "test-image", dependency_catalog=catalog)
+    else:
+        community_gpu_ci.run_containers(tmp_path, env, "test-image", dependency_catalog=catalog)
+    assert [(kind, family) for kind, family, _ in events] == [
+        (kind, family) for family in ("alpha", "beta", "gamma") for kind in ("start", "remove")
     ]
-    assert [command[-1] for command in family_builds] == [
-        "trtmc_model_alpha",
-        "trtmc_model_beta",
+    assert staged == ["alpha", "beta", "gamma"]
+    assert len({name for kind, _, name in events if kind == "start"}) == 3
+
+
+@pytest.mark.parametrize("failure", ["dependencies", "checkpoints", "pr"])
+def test_preparation_failures_and_pr_failures_keep_distinct_phases_and_cleanup(
+    tmp_path, monkeypatch, failure
+):
+    _planned_owners(tmp_path, "alpha", "beta")
+    base = "sha256:" + "a" * 64
+    images = {family: "sha256:" + digest * 64 for family, digest in (("alpha", "b"), ("beta", "c"))}
+    events = []
+
+    def prepare(repository, family, base_image_id, deadline):
+        assert repository == tmp_path and base_image_id == base
+        assert deadline > time.monotonic()
+        assert json.loads((repository / "impact.json").read_text()) == {
+            "families": [family],
+            "testcases": [family],
+        }
+        events.append(("prepare", family))
+        if family == "alpha" and failure == "dependencies":
+            raise RuntimeError("dependency build failed")
+        return images[family]
+
+    def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout=base)
+        if "--stage-family" in command:
+            family = command[command.index("--stage-family") + 1]
+            events.append(("stage", family))
+            return subprocess.CompletedProcess(
+                command, 7 if family == "alpha" and failure == "checkpoints" else 0
+            )
+        if command[:2] == ["docker", "run"]:
+            family = command[-1]
+            assert images[family] in command
+            events.append(("run", family))
+            failed = family == "alpha" and failure == "pr"
+            _container_receipt(command, failed)
+            return subprocess.CompletedProcess(command, 17 if failed else 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        assert command[:3] == ["docker", "rm", "--force"]
+        family = command[-1].rsplit("-", 1)[1]
+        events.append(("remove", family))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(ensure_family_image=prepare)
+    )
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="alpha"):
+        community_gpu_ci.run_containers(tmp_path, env, "base")
+    alpha_events = [("prepare", "alpha")]
+    if failure != "dependencies":
+        alpha_events.append(("stage", "alpha"))
+    if failure == "pr":
+        alpha_events.extend([("run", "alpha"), ("remove", "alpha")])
+    assert events == alpha_events + [
+        (phase, "beta") for phase in ("prepare", "stage", "run", "remove")
     ]
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    rows = {row["family"]: row for row in summary["families"]}
+    alpha = rows["alpha"]
+    assert alpha["status"] == "failed"
+    assert alpha["failure_class"] == ("pr_failure" if failure == "pr" else "infra_failure")
+    assert alpha["entrypoint_started"] is (failure == "pr")
+    if failure != "pr":
+        assert alpha["phase"] == ("environment" if failure == "dependencies" else "checkpoints")
+    assert alpha["cases"] == {"alpha": "failed" if failure == "pr" else "not_run"}
+    assert rows["beta"]["cases"] == {"beta": "passed"}
+    assert rows["beta"]["dependency_cache"] == "prepared"
+    assert not summary["passed"]
+
+
+def test_preparation_exhausting_budget_never_starts_checkpoints_or_pr(tmp_path, monkeypatch):
+    _planned_owners(tmp_path, "alpha", "beta")
+    clock = [0.0]
+    prepared = []
+    base = "sha256:" + "a" * 64
+
+    def prepare(repository, family, base_image_id, deadline):
+        assert repository == tmp_path and base_image_id == base
+        prepared.append(family)
+        clock[0] = deadline + 1
+        return base
+
+    def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        assert command[:3] == ["docker", "image", "inspect"]
+        return subprocess.CompletedProcess(command, 0, stdout=base)
+
+    monkeypatch.setattr(community_gpu_ci.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(ensure_family_image=prepare)
+    )
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="budget exhausted"):
+        community_gpu_ci.run_containers(tmp_path, env, "base")
+    assert prepared == ["alpha"]
+    report = json.loads((tmp_path / "results/summary.json").read_text())
+    assert not report["passed"] and not report["complete"]
+    alpha, beta = report["families"]
+    assert alpha["family"] == "alpha" and alpha["status"] == "failed"
+    assert alpha["entrypoint_started"] is False and alpha["exit_code"] == 124
+    assert beta["family"] == "beta" and beta["status"] == "not_run"
+    assert all(row["failure_class"] == "infra_failure" for row in report["families"])
+    assert all(row["cases"] == {row["family"]: "not_run"} for row in report["families"])
+
+
+@pytest.mark.parametrize("token_from_file", [False, True])
+@pytest.mark.parametrize("checkpoint_ci_sha", [None, "c" * 40])
+def test_checkpoint_staging_forwards_only_network_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    token_from_file: bool,
+    checkpoint_ci_sha: str | None,
+) -> None:
+    """Only trusted staging receives credentials, never contributor containers."""
+    image = "sha256:" + "c" * 64
+    runs: list[tuple[list[str], dict]] = []
+    token_file = tmp_path / "checkpoint-token"
+    _planned_owners(tmp_path, "alpha")
+
+    def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout=image + "\n")
+        if "--stage-family" in command or command[:2] == ["docker", "run"]:
+            assert not token_file.exists()
+            if token_from_file:
+                assert "HF_TOKEN" not in os.environ
+            runs.append((command, kwargs))
+            if command[:2] == ["docker", "run"]:
+                _container_receipt(command)
+            return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        assert command[:3] == ["docker", "rm", "--force"]
+        return subprocess.CompletedProcess(command, 1, stderr=f"No such container: {command[-1]}")
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": '["alpha"]',
+        "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        "HTTPS_PROXY": "https://proxy.example",
+        "UNRELATED_SECRET": "secret-value",
+    }
+    if token_from_file:
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        for key in (
+            "HF_TOKEN",
+            "HF_ENDPOINT",
+            "HTTP_PROXY",
+            "NO_PROXY",
+            "REQUESTS_CA_BUNDLE",
+            "SSL_CERT_FILE",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        token_file.write_text("checkpoint-secret", encoding="utf-8")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "community_gpu_ci.py",
+                "--containers",
+                "--repository",
+                str(tmp_path),
+                "--checkpoint-token-file",
+                str(token_file),
+                *(["--ci-sha", checkpoint_ci_sha] if checkpoint_ci_sha else []),
+            ],
+        )
+        assert community_gpu_ci.main() == 0
+        assert not token_file.exists()
+    else:
+        env["HF_TOKEN"] = "checkpoint-secret"
+        community_gpu_ci.run_containers(
+            tmp_path, env, "test-image", checkpoint_ci_sha=checkpoint_ci_sha
+        )
+
+    assert len(runs) == 2
+    (stage, stage_options), (family, family_options) = runs
+    assert stage[:2] == [sys.executable, str(Path(community_gpu_ci.__file__).resolve())]
+    assert "--stage-family" in stage
+    if checkpoint_ci_sha:
+        assert stage[stage.index("--ci-sha") + 1] == checkpoint_ci_sha
+    else:
+        assert "--ci-sha" not in stage
+    assert "secret-value" not in stage
+    assert stage_options["env"] == {
+        "HTTPS_PROXY": "https://proxy.example",
+        "HF_TOKEN": "checkpoint-secret",
+    }
+    assert "checkpoint-secret" not in str(stage)
+    assert "--family" in family
+    assert "env" not in family_options
+    assert not any("UNRELATED_SECRET" in value or "secret-value" in value for value in family)
+    assert "HF_TOKEN" not in str(family)
+    assert "checkpoint-secret" not in str(family)
+    assert str(token_file) not in str(family)
+    assert "TRTMC_CHECKPOINTS_PRESTAGED=1" in family
+    stage_cache = str(Path(stage[stage.index("--cache-dir") + 1]).parent)
+    family_cache = next(
+        value for value in family if value.endswith(":/tmp/trtmc-community-huggingface")
+    ).split(":", 1)[0]
+    assert family_cache == stage_cache
+
+
+def test_dependency_build_uses_the_family_container_environment(tmp_path: Path) -> None:
+    """Native package build hooks can import the base image's existing torch."""
+    root = _family(tmp_path, "alpha", [])
+    (root / "requirements.txt").write_text("example==1.0\n")
+    calls = []
+    context = SimpleNamespace(
+        repository=tmp_path, run=lambda command, **kwargs: calls.append(command)
+    )
+    community_gpu_ci._install_family_requirements(
+        context, (community_gpu_ci.FamilyPlan("alpha", (), ()),)
+    )
+    assert len(calls) == 1
+    assert "--no-build-isolation" in calls[0]
+    assert calls[0][-1] == root / "requirements.txt"
+
+
+@pytest.mark.parametrize("already_removed", [False, True])
+def test_cleanup_failure_cannot_leave_overlapping_families(tmp_path, monkeypatch, already_removed):
+    """Only confirmed absence may ignore a failed explicit container removal."""
+    started = []
+    _planned_owners(tmp_path, "alpha", "beta")
+
+    def docker(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "b" * 64)
+        if "--stage-family" in command:
+            return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "run"]:
+            started.append(command[-1])
+            _container_receipt(command)
+            return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        error = f"No such container: {command[-1]}" if already_removed else "daemon unavailable"
+        return subprocess.CompletedProcess(command, 1, stderr=error)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", docker)
+    env = {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": '["alpha","beta"]',
+        "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta"]',
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results"),
+    }
+    if already_removed:
+        community_gpu_ci.run_containers(tmp_path, env, "image")
+        assert started == ["alpha", "beta"]
+    else:
+        with pytest.raises(CiError, match="Cannot remove.*daemon unavailable"):
+            community_gpu_ci.run_containers(tmp_path, env, "image")
+        assert started == ["alpha"]
+        summary = json.loads((tmp_path / "results/summary.json").read_text())
+        alpha, beta = summary["families"]
+        assert alpha["phase"] == "cleanup" and alpha["failure_class"] == "infra_failure"
+        assert alpha["entrypoint_started"] is True and alpha["status"] == "failed"
+        assert beta["status"] == "not_run" and beta["cases"] == {"beta": "not_run"}
+        assert not summary["passed"] and not summary["complete"]
+
+
+def test_wrapper_imports_ignore_pr_pythonpath_before_entry(tmp_path):
+    (tmp_path / "json.py").write_text("raise RuntimeError('PR_STDLIB_SHADOW')\n")
+    runner = str(Path(community_gpu_ci.__file__).resolve())
+    env = {**os.environ, "PYTHONPATH": str(tmp_path)}
+    unsafe = subprocess.run(
+        [sys.executable, runner, "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert unsafe.returncode != 0 and "PR_STDLIB_SHADOW" in unsafe.stderr
+    isolated = subprocess.run(
+        [sys.executable, "-I", runner, "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert isolated.returncode == 0, isolated.stderr
+
+
+def test_host_coordinator_does_not_import_source_code(tmp_path: Path) -> None:
+    """An untrusted tools package cannot execute in the VM coordinator."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    _family(
+        tmp_path,
+        "alpha",
+        [{"family": "alpha", "testcases": [{"name": "alpha", "premerge": True}]}],
+    )
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    sentinel = tmp_path / "imported"
+    (tools / "__init__.py").write_text(
+        f"from pathlib import Path; Path({str(sentinel)!r}).touch(); raise RuntimeError('untrusted')\n"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(
+        "#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\n"
+        "if sys.argv[1] == 'image': print('sha256:' + 'a' * 64)\n"
+        "elif sys.argv[1] == 'inspect': print('{}')\n"
+        "elif sys.argv[1] == 'run':\n"
+        "    cache = next(v for v in sys.argv if v.endswith(':/tmp/trtmc-community-huggingface'))\n"
+        "    (Path(cache.rsplit(':', 1)[0]) / 'result.json.entrypoint').write_text('alpha\\n')\n"
+        "    (Path(cache.rsplit(':', 1)[0]) / 'result.json').write_text(json.dumps({\n"
+        "        'schema_version': 1, 'family': 'alpha', 'status': 'passed',\n"
+        "        'phase': 'complete', 'failure_class': None,\n"
+        "        'requested_cases': ['alpha'], 'cases': {'alpha': 'passed'}}))\n"
+    )
+    docker.chmod(0o755)
+    result = subprocess.run(
+        [sys.executable, community_gpu_ci.__file__, "--containers", "--repository", str(tmp_path)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "PYTHONPATH": str(tmp_path),
+            "TRTMC_GPU_SCOPE": "families",
+            "TRTMC_GPU_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
+            "TRTMC_GPU_ADDED_FAMILIES": "[]",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not sentinel.exists()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("TRTMC_COMMUNITY_CONTAINER_TEST_IMAGE"),
+    reason="requires an explicitly selected local Docker image",
+)
+def test_real_containers_do_not_share_family_state(tmp_path: Path, monkeypatch) -> None:
+    """A failed family cannot contaminate later families' packages, builds, or cache."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    owners = community_gpu_ci.SHARED_SMOKE_FAMILIES
+    _planned_owners(tmp_path, *owners)
+    trusted_runner = str(Path(community_gpu_ci.__file__).resolve())
+    preparation = community_gpu_ci._image_preparation()
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import json, os, pathlib, sys, sysconfig\n"
+        "if '--stage-family' in sys.argv:\n"
+        # No fixture owner has a checkpoint; keep the real trusted staging path.
+        f"    os.execv(sys.executable, [sys.executable, {trusted_runner!r}, *sys.argv[1:]])\n"
+        "family = sys.argv[-1]\n"
+        "selection = json.loads(pathlib.Path('/src/impact.json').read_text())\n"
+        "assert selection == {'families':[family], 'testcases':[family]}\n"
+        "result = pathlib.Path(os.environ['TRTMC_GPU_RESULT_FILE'])\n"
+        "pathlib.Path(str(result) + '.entrypoint').write_text(family + '\\n')\n"
+        "paths = [pathlib.Path(sysconfig.get_paths()['purelib']) / 'trtmc_isolation_probe.py', "
+        "pathlib.Path('/tmp/trtmc-community-gpu-build/probe'), "
+        "pathlib.Path('/tmp/trtmc-community-huggingface/probe')]\n"
+        "for path in paths:\n"
+        "    assert not path.exists(), f'{family} inherited {path}'\n"
+        "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    path.write_text(family)\n"
+        "assert not pathlib.Path('/src/should-not-exist').exists()\n"
+        "try:\n"
+        "    pathlib.Path('/src/should-not-exist').touch()\n"
+        "except OSError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('Source mount is writable')\n"
+        "print(f'{family}: fresh Python environment, build, cache, and read-only source', flush=True)\n"
+        "failed = family == 'bert'\n"
+        "result.write_text(json.dumps({'schema_version':1, 'family':family,\n"
+        "    'status':'failed' if failed else 'passed', 'phase':'complete',\n"
+        "    'failure_class':'pr_failure' if failed else None, 'entrypoint_started':True,\n"
+        "    'requested_cases':[family], 'cases':{family:'failed' if failed else 'passed'}}))\n"
+        "sys.exit(17 if failed else 0)\n"
+    )
+    original_run = subprocess.run
+    events, names = [], []
+
+    def run(command, **kwargs):
+        if command[:2] == ["docker", "run"]:
+            name = command[command.index("--name") + 1]
+            names.append(name)
+            events.append(("start", command[-1]))
+            assert len(events) == len(names) * 2 - 1
+        result = original_run(command, **kwargs)
+        if command[:3] == ["docker", "rm", "--force"]:
+            name = command[-1]
+            assert name == names[-1]
+            absent = original_run(
+                ["docker", "inspect", name], capture_output=True, text=True, timeout=30
+            )
+            assert absent.returncode != 0 and f"No such object: {name}" in absent.stderr
+            events.append(("remove", name.rsplit("-", 1)[1]))
+        return result
+
+    # Only replace the container payload. The real coordinator still prepares
+    # its trusted sibling, stages manifests, runs Docker, and confirms removal.
+    monkeypatch.setattr(community_gpu_ci, "__file__", str(probe))
+    monkeypatch.setattr(community_gpu_ci, "_image_preparation", lambda: preparation)
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", run)
+    try:
+        with pytest.raises(CiError) as error:
+            community_gpu_ci.run_containers(
+                tmp_path,
+                {
+                    "TRTMC_GPU_SCOPE": "all",
+                    "TRTMC_GPU_FAMILIES": "[]",
+                    "TRTMC_GPU_DIRECT_FAMILIES": "[]",
+                    "TRTMC_GPU_ADDED_FAMILIES": "[]",
+                    "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results"),
+                },
+                os.environ["TRTMC_COMMUNITY_CONTAINER_TEST_IMAGE"],
+            )
+        assert str(error.value) == (
+            "Community GPU family failures: bert: container exited 17 (pr_failure)"
+        )
+        assert events == [(phase, family) for family in owners for phase in ("start", "remove")]
+        assert len(set(names)) == len(owners)
+        summary = json.loads((tmp_path / "results/summary.json").read_text())
+        assert summary["complete"] and not summary["passed"]
+        assert [row["family"] for row in summary["families"]] == list(owners)
+        for row in summary["families"]:
+            family = row["family"]
+            expected = "failed" if family == "bert" else "passed"
+            assert row["status"] == expected and row["cases"] == {family: expected}
+            assert row["entrypoint_started"] is True
+            assert row["failure_class"] == ("pr_failure" if family == "bert" else None)
+            assert row["exit_code"] == (17 if family == "bert" else 0)
+        assert not (tmp_path / "should-not-exist").exists()
+    finally:
+        # A failing assertion must also leave no containers from this fixture.
+        for name in names:
+            original_run(["docker", "rm", "--force", name], capture_output=True, timeout=30)
 
 
 def test_brev_wrapper_caches_application_failure_without_retry(tmp_path: Path) -> None:
@@ -412,3 +2198,3244 @@ def test_eagle_vlm_declares_remote_processor_http_dependency() -> None:
     )
 
     assert "requests==2.32.5" in requirements.splitlines()
+
+
+def _row(name: str, **changes: str) -> dict[str, str]:
+    row = {
+        "name": name,
+        "id": f"allocation-{name}",
+        "status": "RUNNING",
+        "build_status": "COMPLETED",
+        "shell_status": "READY",
+        "health_status": "HEALTHY",
+        "instance_type": brev_provision.DEFAULT_INSTANCE_TYPE,
+    }
+    row.update(changes)
+    return row
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        assert seconds >= 0
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    result = FakeClock()
+    monkeypatch.setattr(brev_provision.time, "monotonic", result.monotonic)
+    monkeypatch.setattr(brev_provision.time, "sleep", result.sleep)
+    return result
+
+
+class FakeBrev:
+    """Exercise lifecycle decisions without a cloud allocation or remote command."""
+
+    def __init__(self, directory):
+        self.output = directory / "github-output"
+        self.lease = directory / "lease.json"
+        self.name = None
+        self.sku = brev_provision.DEFAULT_INSTANCE_TYPE
+        self.commands = []
+        self.command_times = []
+        self.events = []
+        self.creates = []
+        self.states = []
+        self.probe_results = []
+        self.delete_failures = 0
+        self.delete_succeeds = True
+        self.inventory_result = None
+        self.create_code = 0
+        self.native_ready = False
+        self.catalog = [
+            {"type": sku, "provider": provider, "disk_min_gb": 50, "disk_max_gb": 2560}
+            for sku, provider in (
+                (brev_provision.DEFAULT_INSTANCE_TYPE, "aws"),
+                ("g6e.2xlarge", "aws"),
+                (brev_provision.NEBIUS_INSTANCE_TYPE, "nebius"),
+            )
+        ]
+
+    def provision(self, **options):
+        return brev_provision.provision("gpu", lease_file=self.lease, **options)
+
+    def __call__(self, command, deadline, cap=brev_provision.CLI_TIMEOUT, *, input_text=None):
+        assert deadline > brev_provision.time.monotonic()
+        assert cap > 0
+        self.commands.append(command)
+        self.command_times.append((command, brev_provision.time.monotonic()))
+        action = command[1]
+        code, stdout = 0, ""
+        if action == "search":
+            stdout = json.dumps(self.catalog)
+        elif action == "create":
+            name = command[2]
+            lease = json.loads(self.lease.read_text())
+            assert lease["name"] == name and lease["phase"] == "creating"
+            assert lease["organization_id"] == "org-test"
+            assert lease["allocation_pending"] and lease["instance_id"] is None
+            assert command[3:] == ["--detached", "--mode", "vm"]
+            specs = json.loads(input_text)
+            assert len(specs) == 1 and specs[0]["target_disk_gb"] == 500
+            published = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+            assert published["instance_name"] == name
+            assert published["instance_type"] == specs[0]["type"]
+            assert published["allocation_requested"] == "true"
+            self.name, self.sku = name, specs[0]["type"]
+            self.creates.append(name)
+            self.events.append("create")
+            code = self.create_code
+        elif action == "ls":
+            if self.inventory_result is not None:
+                stdout = self.inventory_result
+            else:
+                rows = []
+                if self.name is not None:
+                    row = self.states[0] if self.states else _row(self.name)
+                    if len(self.states) > 1:
+                        self.states.pop(0)
+                    row = {**row, "name": self.name, "instance_type": self.sku}
+                    self.native_ready = (
+                        row["status"] == "RUNNING"
+                        and row["build_status"] == "COMPLETED"
+                        and row["shell_status"] == "READY"
+                        and row["health_status"] not in {"UNHEALTHY", "UNAVAILABLE"}
+                    )
+                    rows.append(row)
+                    self.events.append("inventory:" + row["build_status"])
+                else:
+                    self.events.append("inventory:absent")
+                stdout = json.dumps({"workspaces": rows})
+        elif action == "refresh":
+            assert self.native_ready, "SSH configuration changed before native readiness"
+            self.events.append("refresh")
+        elif action == "exec":
+            assert self.native_ready, "host command executed before native readiness"
+            script = command[-1]
+            if "TRTMC_DIAG_" in script:
+                self.events.append("diagnostic")
+                stdout = "TRTMC_DIAG_CLOUD_STATE=done\nTRTMC_DIAG_HOST_GPU_EXIT=0\n"
+            else:
+                assert not any(
+                    mutation in script
+                    for mutation in ("reset-failed", "daemon-reload", "systemctl restart")
+                ), "provisioning mutated host services"
+                self.events.append("probe")
+                outcome = self.probe_results.pop(0) if self.probe_results else "ready"
+                marker = shlex.split(script.splitlines()[-1])[-1]
+                stdout = "\n".join(
+                    f"TRTMC_PHASE_{phase}=0"
+                    for phase in ("sudo", "docker", "disk_headroom", "host_gpu", "container_gpu")
+                )
+                stdout += (
+                    "\nTRTMC_PHASE_cloud_init=1\nTRTMC_DISK_AVAILABLE_BYTES="
+                    + str(450 * 1024**3)
+                    + "\n"
+                )
+                if outcome == "missing-marker":
+                    pass
+                elif outcome == "marker-only":
+                    stdout = marker + "\n"
+                elif outcome == "disk-small":
+                    stdout = stdout.replace(str(450 * 1024**3), str(100 * 1024**3)) + marker + "\n"
+                elif outcome == "duplicate-marker":
+                    stdout += marker + "\n" + marker + "\n"
+                elif outcome == "ready":
+                    stdout += marker + "\n"
+                else:
+                    code = 1
+        elif action == "delete":
+            self.events.append("delete:" + command[2])
+            if self.delete_failures:
+                self.delete_failures -= 1
+                code = 1
+            elif self.delete_succeeds:
+                self.name, self.states = None, []
+            else:
+                code = 1
+        else:
+            raise AssertionError(action)
+        return subprocess.CompletedProcess(command, code, stdout, "private-cli-token")
+
+
+class FakeCleanupAPI:
+    """An independent provider boundary: delete acceptance and visibility differ."""
+
+    def __init__(self, brev):
+        self.brev = brev
+        self.requests = []
+        self.responses = {"GET": [], "DELETE": [], "AUTH": [], "LIST": []}
+        self.body_changes = {}
+        self.auth = (200, {"id": "org-test"})
+        self.outage_until = 0
+
+    def workspace(self):
+        row = self.brev.states[0] if self.brev.states else _row("gpu")
+        return {
+            "id": row["id"],
+            "name": self.brev.name or "gpu",
+            "organizationId": "org-test",
+            "instanceType": self.brev.sku,
+            "status": "RUNNING",
+            **self.body_changes,
+        }
+
+    def __call__(self, method, identity, deadline):
+        assert method in {"GET", "DELETE", "AUTH", "LIST"}
+        assert deadline is None or deadline > brev_provision.time.monotonic()
+        self.requests.append((method, identity, deadline, brev_provision.time.monotonic()))
+        if brev_provision.time.monotonic() < self.outage_until:
+            raise brev_provision.InventoryError("private-api-token temporary outage")
+        if self.responses[method]:
+            reply = self.responses[method].pop(0)
+            if callable(reply):
+                return reply()
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+        if method == "AUTH":
+            return self.auth
+        if method == "GET":
+            return (200, self.workspace()) if self.brev.name is not None else (404, None)
+        if method == "LIST":
+            return 200, {"items": [self.workspace()] if self.brev.name is not None else []}
+        self.brev.events.append("delete:" + identity)
+        if self.brev.delete_failures:
+            self.brev.delete_failures -= 1
+            return 503, None
+        if not self.brev.delete_succeeds:
+            return 503, None
+        body = self.workspace()
+        self.brev.name, self.brev.states = None, []
+        return 202, body
+
+
+@pytest.fixture
+def fake(monkeypatch, tmp_path, clock):
+    result = FakeBrev(tmp_path)
+    result.api = FakeCleanupAPI(result)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(result.output))
+    monkeypatch.setattr(brev_provision, "_run", result)
+    monkeypatch.setattr(brev_provision, "_cleanup_request", result.api)
+    monkeypatch.setattr(brev_provision, "_allocation_organization", lambda deadline: "org-test")
+    return result
+
+
+def test_exact_catalog_json_disk_and_default_vm_are_used(fake):
+    assert fake.provision() == "gpu"
+    assert fake.creates == ["gpu"]
+    assert fake.events.index("refresh") < fake.events.index("probe")
+    lease = json.loads(fake.lease.read_text())
+    assert lease["sku"] == "g6.4xlarge" and lease["requested_disk_gb"] == 500
+    assert lease["phase"] == "ready" and lease["instance_id"] == "allocation-gpu"
+    assert lease["metadata_ready_elapsed_seconds"] <= lease["ready_elapsed_seconds"]
+    assert lease["disk_available_bytes"] >= 200 * 1024**3
+    assert lease["phases"]["cloud_init"] == "1"
+    assert not any(command[1] == "delete" for command in fake.commands)
+
+
+@pytest.mark.parametrize(
+    "provider,ram,sku",
+    [
+        ("aws", 64, "g6.4xlarge"),
+        ("aws", 128, "g6.8xlarge"),
+        ("nebius", 64, "gpu-l40s-a.1gpu-16vcpu-64gb"),
+        ("nebius", 128, "gpu-l40s-a.1gpu-32vcpu-128gb"),
+    ],
+)
+def test_host_profile_reserves_the_exact_qualified_single_gpu_sku(fake, provider, ram, sku):
+    fake.catalog = [
+        {
+            "type": sku,
+            "provider": provider,
+            "disk_min_gb": 50,
+            "disk_max_gb": 2560,
+            "ram_gb": ram,
+            "arch": "x86_64",
+            "gpu_count": 1,
+        }
+    ]
+    assert fake.provision(provider=provider, host_ram_gib=ram) == "gpu"
+    assert fake.creates == ["gpu"] and fake.sku == sku
+    lease = json.loads(fake.lease.read_text())
+    assert lease["host_ram_gib"] == ram and lease["sku"] == sku
+
+
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        {"ram_gb": 64},
+        {"arch": "aarch64"},
+        {"gpu_count": 2},
+        {"gpu_count": 1.0},
+    ],
+)
+def test_128_gib_profile_never_falls_back_to_a_smaller_or_different_catalog_host(fake, wrong):
+    fake.catalog = [
+        {
+            "type": "g6.8xlarge",
+            "provider": "aws",
+            "disk_min_gb": 50,
+            "disk_max_gb": 2560,
+            "ram_gb": 128,
+            "arch": "x86_64",
+            "gpu_count": 1,
+            **wrong,
+        }
+    ]
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision(host_ram_gib=128)
+    assert not fake.creates
+
+
+@pytest.mark.parametrize("ram", [True, "128", 96, 128.0])
+def test_invalid_or_conflicting_host_profile_never_creates(fake, ram):
+    with pytest.raises(ValueError):
+        fake.provision(host_ram_gib=ram)
+    assert not fake.creates
+    with pytest.raises(ValueError):
+        fake.provision(host_ram_gib=128, instance_type="g6.4xlarge")
+    assert not fake.creates
+
+
+@pytest.mark.parametrize(
+    "catalog", [[], [{"type": "other"}], [{"type": "g6.4xlarge"}, {"type": "g6.4xlarge"}]]
+)
+def test_invalid_or_ambiguous_catalog_never_creates(fake, catalog):
+    fake.catalog = catalog
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision()
+    assert not fake.creates
+    lease = json.loads(fake.lease.read_text())
+    assert not lease["create_started"] and not lease["allocation_pending"]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert not any(command[1] == "delete" for command in fake.commands)
+
+
+def test_insufficient_disk_catalog_never_allocates(fake):
+    fake.catalog[0]["disk_max_gb"] = 120
+    with pytest.raises(brev_provision.ProvisionError, match="requested disk"):
+        fake.provision()
+    assert not fake.creates
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"status": "FAILURE", "build_status": "PENDING"},
+        {"build_status": "CREATE_FAILED"},
+    ],
+)
+def test_create_exit_zero_then_terminal_failure_retains_lease_without_replacement(fake, state):
+    fake.states = [_row("gpu", **state)]
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision()
+    assert fake.creates == ["gpu"] and "probe" not in fake.events
+    assert fake.name == "gpu" and json.loads(fake.lease.read_text())["phase"] == "provision_failed"
+    assert not any(command[1] == "delete" for command in fake.commands)
+    assert not any(command[1] in {"refresh", "exec"} for command in fake.commands)
+
+
+def test_building_is_gated_before_actual_probe(fake, clock):
+    fake.states = [_row("gpu", build_status="BUILDING", shell_status="NOT READY"), _row("gpu")]
+    assert fake.provision() == "gpu"
+    assert "diagnostic" not in fake.events
+    assert fake.events.index("inventory:COMPLETED") < fake.events.index("refresh")
+    assert clock.now == brev_provision.POLL_INTERVAL
+
+
+@pytest.mark.parametrize("health", ["UNAVAILABLE", "UNHEALTHY"])
+def test_initial_health_sync_waits_without_an_extra_vm(fake, health):
+    fake.states = [_row("gpu", status="STARTING", health_status=health), _row("gpu")]
+    assert fake.provision() == "gpu"
+    assert fake.creates == ["gpu"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "SSH failure",
+        "Docker failure",
+        "GPU failure",
+        "missing-marker",
+        "marker-only",
+        "duplicate-marker",
+        "disk-small",
+    ],
+)
+def test_probe_failure_and_false_receipts_retry_only_the_same_vm(fake, outcome):
+    fake.probe_results = [outcome, "ready"]
+    assert fake.provision() == "gpu"
+    assert fake.creates == ["gpu"] and fake.events.count("probe") == 2
+
+
+def test_failed_create_records_partial_allocation_id_for_cleanup(fake):
+    fake.create_code = 1
+    with pytest.raises(brev_provision.ProvisionError, match="create failed"):
+        fake.provision()
+    lease = json.loads(fake.lease.read_text())
+    assert lease["instance_id"] == "allocation-gpu" and not lease["allocation_pending"]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert "delete:allocation-gpu" in fake.events
+    assert json.loads(fake.lease.read_text())["phase"] == "deleted"
+
+
+def test_failed_delete_is_retried_and_cannot_claim_success_while_visible(fake, clock):
+    assert fake.provision() == "gpu"
+    fake.delete_succeeds = False
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert clock.now <= 130 and fake.name == "gpu" and fake.creates == ["gpu"]
+
+
+def test_delete_requires_two_valid_absence_reads_and_persists_confirmation(fake):
+    assert fake.provision() == "gpu"
+    fake.delete_failures = 2
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert fake.events.count("delete:allocation-gpu") == 3
+    deletion = next(i for i, request in enumerate(fake.api.requests) if request[0] == "DELETE")
+    assert [r[0] for r in fake.api.requests[deletion + 1 :]].count("AUTH") >= 2
+    assert [r[0] for r in fake.api.requests[deletion + 1 :]].count("LIST") >= 2
+    lease = json.loads(fake.lease.read_text())
+    assert lease["cleanup_confirmed"] and lease["phase"] == "deleted"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+
+
+def test_missing_lease_absence_does_not_hide_a_late_allocation(fake, clock):
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert clock.now <= 130 and not fake.creates
+    lease = json.loads(fake.lease.read_text())
+    assert lease["allocation_pending"] and not lease["cleanup_confirmed"]
+
+
+def test_missing_owned_lease_does_not_authorize_a_same_name_vm(fake, tmp_path):
+    fake.name = "gpu"
+    path = tmp_path / "missing-artifact" / "nested" / "lease.json"
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=path, timeout=130)
+    assert path.is_file() and not fake.api.requests
+    assert fake.name == "gpu" and not any(event.startswith("delete:") for event in fake.events)
+
+
+def test_original_unknown_id_creation_is_reconciled_before_direct_deletion(fake, tmp_path):
+    fake.name = "gpu"
+    path = tmp_path / "original-owned-lease.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "gpu",
+                "sku": "g6.4xlarge",
+                "instance_id": None,
+                "create_started": True,
+                "organization_id": "org-test",
+                "allocation_pending": True,
+            }
+        )
+    )
+    assert brev_provision.cleanup("gpu", lease_file=path) == "gpu"
+    assert "delete:allocation-gpu" in fake.events
+    assert json.loads(path.read_text())["cleanup_confirmed"]
+
+
+def test_unknown_id_cannot_bind_foreign_inventory_when_original_org_auth_is_denied(fake, clock):
+    fake.name = "gpu"
+    fake.lease.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "gpu",
+                "sku": "g6.4xlarge",
+                "instance_id": None,
+                "create_started": True,
+                "allocation_pending": True,
+                "organization_id": "org-original",
+            }
+        )
+    )
+    fake.api.auth = (403, None)
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not fake.commands
+    assert all(
+        request[0] == "AUTH" and request[1] == "org-original" for request in fake.api.requests
+    )
+    assert json.loads(fake.lease.read_text())["instance_id"] is None
+    assert fake.name == "gpu" and clock.now <= 130
+
+
+def test_unknown_id_without_original_org_never_discovers_foreign_same_name_instance(
+    fake, monkeypatch
+):
+    fake.name = "gpu"
+    fake.lease.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "gpu",
+                "sku": "g6.4xlarge",
+                "instance_id": None,
+                "create_started": True,
+                "allocation_pending": True,
+            }
+        )
+    )
+    fake.api.auth = (200, {"id": "org-foreign"})
+    monkeypatch.setattr(
+        brev_provision,
+        "_instance",
+        lambda *args, **kwargs: pytest.fail(
+            "missing original scope must block inventory discovery"
+        ),
+    )
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not fake.commands and not fake.api.requests
+    assert fake.name == "gpu" and json.loads(fake.lease.read_text())["instance_id"] is None
+
+
+def test_ready_lease_initial_absence_still_requests_deletion_by_id(fake, monkeypatch):
+    assert fake.provision() == "gpu"
+    fake.name = None
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert "delete:allocation-gpu" in fake.events
+
+
+def test_other_cleanup_can_delete_the_same_leased_id_idempotently(fake, monkeypatch):
+    assert fake.provision() == "gpu"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    deletes = [r for r in fake.api.requests if r[0] == "DELETE"]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert [r for r in fake.api.requests if r[0] == "DELETE"] == deletes
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("change", [{"name": "other"}, {"instance_id": "other"}, {"sku": "other"}])
+def test_cleanup_identity_mismatch_never_deletes(fake, change):
+    assert fake.provision() == "gpu"
+    lease = json.loads(fake.lease.read_text())
+    lease.update(change)
+    fake.lease.write_text(json.dumps(lease))
+    with pytest.raises(brev_provision.ProvisionError):
+        brev_provision.cleanup("gpu", lease_file=fake.lease)
+    assert not any(r[0] == "DELETE" for r in fake.api.requests)
+
+
+def test_cleanup_inventory_errors_cannot_count_as_absence(fake, clock, monkeypatch):
+    assert fake.provision() == "gpu"
+
+    def unavailable(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        return subprocess.CompletedProcess(command, 1, "", "private-token")
+
+    monkeypatch.setattr(brev_provision, "_run", unavailable)
+    fake.api.outage_until = clock.now + 300
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=120)
+    assert clock.now <= 120
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_known_owned_id_is_deleted_even_when_full_inventory_is_unavailable(fake, monkeypatch):
+    assert fake.provision() == "gpu"
+
+    def blocked(*args, **kwargs):
+        raise AssertionError("known-ID cleanup must not depend on CLI inventory or CLI delete")
+
+    monkeypatch.setattr(brev_provision, "_run", blocked)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert [
+        (method, identity) for method, identity, _, _ in fake.api.requests if method == "DELETE"
+    ] == [("DELETE", "allocation-gpu")]
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("get_status", [500, 503, 401, 403])
+def test_unavailable_id_read_can_use_two_authenticated_post_delete_org_lists(
+    fake, monkeypatch, get_status
+):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(get_status, None)] * 100
+
+    def no_cli(*args, **kwargs):
+        pytest.fail("known-ID deletion must not require CLI inventory or CLI delete")
+
+    monkeypatch.setattr(brev_provision, "_run", no_cli)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    requests = fake.api.requests
+    deletion = next(i for i, request in enumerate(requests) if request[0] == "DELETE")
+    lists = [(i, request) for i, request in enumerate(requests) if request[0] == "LIST"]
+    assert len([r for r in requests if r[0] == "DELETE"]) == 1
+    assert len(lists) == 2 and all(i > deletion for i, _ in lists)
+    assert all(request[1] == "org-test" for _, request in lists)
+    assert lists[1][1][3] - lists[0][1][3] >= 2
+    assert [r[0] for r in requests[deletion + 1 :]].count("AUTH") >= 2
+    lease = json.loads(fake.lease.read_text())
+    assert lease["phase"] == "deleted" and lease["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("listed_status", ["RUNNING", "DELETING", "STOPPED"])
+def test_accepted_delete_waits_for_owned_instance_to_disappear_from_org_list(fake, listed_status):
+    assert fake.provision() == "gpu"
+    body = {**fake.api.workspace(), "status": listed_status}
+    fake.api.responses["GET"] = [(500, None)] * 100
+
+    def still_visible():
+        assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
+        return 200, {"items": [body]}
+
+    fake.api.responses["LIST"] = [
+        still_visible,
+        still_visible,
+        (200, {"items": []}),
+        (200, {"items": []}),
+    ]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert len([r for r in fake.api.requests if r[0] == "DELETE"]) == 1
+    lists = [r for r in fake.api.requests if r[0] == "LIST"]
+    assert len(lists) == 4 and lists[-1][3] - lists[-2][3] >= 2
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        (500, None),
+        (401, None),
+        (403, None),
+        (200, None),
+        (200, {}),
+        (200, {"items": {}}),
+        (200, {"items": [{}]}),
+    ],
+)
+def test_invalid_org_list_resets_consecutive_absence_proof(fake, invalid):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.responses["LIST"] = [
+        (200, {"items": []}),
+        invalid,
+        (200, {"items": []}),
+        (200, {"items": []}),
+    ]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert len([r for r in fake.api.requests if r[0] == "LIST"]) == 4
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("auth", [(401, None), (403, None), (200, {}), (200, {"id": "org-other"})])
+def test_empty_list_does_not_confirm_when_original_org_cannot_be_authenticated(fake, auth):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.auth = auth
+    fake.api.responses["LIST"] = [(200, {"items": []})] * 100
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert any(r[0] == "DELETE" for r in fake.api.requests)
+    assert not any(r[0] == "LIST" for r in fake.api.requests)
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"organizationId": "org-other"},
+        {"id": "other-id"},
+        {"name": "other-name"},
+        {"instanceType": "other-sku"},
+    ],
+)
+def test_org_list_identity_conflict_cannot_be_treated_as_owned_instance_absence(fake, change):
+    assert fake.provision() == "gpu"
+    conflicting = {**fake.api.workspace(), **change}
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.responses["LIST"] = [(200, {"items": [conflicting]})] * 100
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+    assert all(r[1] == "allocation-gpu" for r in fake.api.requests if r[0] == "DELETE")
+
+
+def test_visible_direct_owned_instance_cannot_be_overruled_by_empty_org_list(fake):
+    assert fake.provision() == "gpu"
+    body = fake.api.workspace()
+    fake.api.responses["GET"] = [(200, body)] * 100
+    fake.api.responses["LIST"] = [(200, {"items": []})] * 100
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not any(r[0] == "LIST" for r in fake.api.requests)
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_lost_delete_ack_and_broken_id_route_can_confirm_using_original_org_list(fake):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(500, None)] * 100
+
+    def accepted_but_lost():
+        fake.name = None
+        raise brev_provision.InventoryError("delete acknowledgement lost")
+
+    fake.api.responses["DELETE"] = [accepted_but_lost, (404, None)]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    requests = fake.api.requests
+    deletion = next(i for i, request in enumerate(requests) if request[0] == "DELETE")
+    lists = [(i, r) for i, r in enumerate(requests) if r[0] == "LIST"]
+    assert len(lists) == 2 and all(i > deletion and r[1] == "org-test" for i, r in lists)
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_failed_delete_is_retried_before_org_list_outage_recovers(fake):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.responses["DELETE"] = [(503, None)]
+    fake.api.responses["LIST"] = [(503, None)] * 4
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    requests = fake.api.requests
+    deletes = [r for r in requests if r[0] == "DELETE"]
+    assert len(deletes) == 2 and deletes[1][3] <= 180
+    lists = [r for r in requests if r[0] == "LIST"]
+    assert len(lists) == 6 and deletes[1][3] < lists[4][3]
+    assert fake.name is None and json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_accepted_delete_is_not_confirmation_while_the_instance_remains_visible(fake):
+    assert fake.provision() == "gpu"
+    body = fake.api.workspace()
+    fake.api.responses["GET"] = [(200, body), (200, body)]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert len([r for r in fake.api.requests if r[0] == "DELETE"]) == 1
+    deletion = next(i for i, request in enumerate(fake.api.requests) if request[0] == "DELETE")
+    assert [r[0] for r in fake.api.requests[deletion + 1 :]].count("AUTH") >= 2
+    assert [r[0] for r in fake.api.requests[deletion + 1 :]].count("LIST") >= 2
+
+
+def test_pre_delete_notfound_read_does_not_replace_two_post_delete_reads(fake):
+    assert fake.provision() == "gpu"
+    fake.name = None
+    fake.api.responses["DELETE"] = [(202, fake.api.workspace())]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    methods = [r[0] for r in fake.api.requests]
+    deletion = methods.index("DELETE")
+    assert methods[:deletion] == ["GET"]
+    assert methods[deletion + 1 :].count("LIST") == 2
+    assert methods[deletion + 1 :].count("AUTH") >= 2
+
+
+def test_until_deleted_outlasts_old_900_second_budget_and_retries_the_same_id(fake, clock):
+    assert fake.provision() == "gpu"
+    started = clock.now
+    fake.api.outage_until = clock.now + 1080
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, until_deleted=True) == "gpu"
+    assert clock.now - started > 900
+    assert fake.creates == ["gpu"] and fake.name is None
+    assert all(deadline is None for _, _, deadline, _ in fake.api.requests)
+    assert all(
+        identity == "allocation-gpu"
+        for method, identity, _, _ in fake.api.requests
+        if method in {"GET", "DELETE"}
+    )
+    assert all(
+        identity == "org-test" for method, identity, _, _ in fake.api.requests if method == "LIST"
+    )
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_errors_and_masked_notfound_cannot_confirm_cleanup(fake, clock, status):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(404, None)] * 10
+    fake.api.responses["DELETE"] = [(status, None)] * 10
+    fake.api.auth = (status, None)
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert fake.name == "gpu" and clock.now <= 130
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_notfound_without_owned_scope_or_accepted_delete_is_ambiguous(fake, clock):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(404, None)] * 10
+    fake.api.responses["DELETE"] = [(404, None)] * 10
+    fake.api.auth = (200, {})
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert fake.name == "gpu" and clock.now <= 130
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_legacy_lease_without_original_org_cannot_use_wrong_org_notfound_as_absence(fake, clock):
+    assert fake.provision() == "gpu"
+    lease = json.loads(fake.lease.read_text())
+    lease.pop("organization_id")
+    fake.lease.write_text(json.dumps(lease))
+    fake.api.responses["GET"] = [(404, None)] * 10
+    fake.api.responses["DELETE"] = [(404, None)] * 10
+    fake.api.auth = (200, {"id": "org-other"})
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert fake.name == "gpu" and clock.now <= 130
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_legacy_lease_without_original_org_cannot_bind_scope_from_empty_list(fake):
+    assert fake.provision() == "gpu"
+    lease = json.loads(fake.lease.read_text())
+    lease.pop("organization_id")
+    fake.lease.write_text(json.dumps(lease))
+    fake.api.responses["GET"] = [(500, None)] * 100
+    fake.api.responses["DELETE"] = [(404, None)] * 100
+    fake.api.responses["LIST"] = [(200, {"items": []})] * 100
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not any(r[0] == "LIST" for r in fake.api.requests)
+    lease = json.loads(fake.lease.read_text())
+    assert not lease["cleanup_confirmed"] and "organization_id" not in lease
+
+
+def test_legacy_no_org_lease_cannot_confirm_without_positive_owned_response(fake, clock):
+    assert fake.provision() == "gpu"
+    lease = json.loads(fake.lease.read_text())
+    lease.pop("organization_id")
+    fake.lease.write_text(json.dumps(lease))
+    fake.api.outage_until = clock.now + 300
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert fake.name == "gpu"
+    current = json.loads(fake.lease.read_text())
+    assert not current["cleanup_confirmed"] and "organization_id" not in current
+
+
+def test_malformed_direct_get_does_not_block_known_owned_id_delete(fake):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(200, {"name": "gpu"})]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert any(r[0] == "DELETE" for r in fake.api.requests)
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("body", [{"id": "a-different-instance"}, {"name": "someone-else"}])
+def test_explicit_identity_conflict_blocks_delete_even_when_other_fields_are_missing(fake, body):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [(200, body)] * 10
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not any(r[0] == "DELETE" for r in fake.api.requests)
+    assert fake.name == "gpu"
+
+
+def test_absence_requires_authenticated_original_organization(fake):
+    assert fake.provision() == "gpu"
+    fake.api.auth = (200, {"id": "a-different-organization"})
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+def test_lost_delete_ack_can_recover_from_prior_owned_read_and_authenticated_absence(fake):
+    assert fake.provision() == "gpu"
+
+    def accepted_but_lost():
+        fake.name = None
+        raise brev_provision.InventoryError("delete acknowledgement lost")
+
+    fake.api.responses["DELETE"] = [accepted_but_lost, (404, None)]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert fake.name is None and json.loads(fake.lease.read_text())["cleanup_confirmed"]
+    methods = [r[0] for r in fake.api.requests]
+    first_delete = methods.index("DELETE")
+    assert methods[first_delete + 1 :].count("LIST") >= 2
+    assert methods[first_delete + 1 :].count("AUTH") >= 2
+
+
+def test_lost_delete_ack_with_first_get_unavailable_uses_the_trusted_original_lease(fake):
+    assert fake.provision() == "gpu"
+    fake.api.responses["GET"] = [brev_provision.InventoryError("direct GET unavailable")]
+
+    def accepted_but_lost():
+        fake.name = None
+        raise brev_provision.InventoryError("delete acknowledgement lost")
+
+    fake.api.responses["DELETE"] = [accepted_but_lost, (404, None)]
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    lease = json.loads(fake.lease.read_text())
+    assert lease["cleanup_confirmed"] and lease["organization_id"] == "org-test"
+    methods = [r[0] for r in fake.api.requests]
+    first_delete = methods.index("DELETE")
+    assert methods[first_delete + 1 :].count("LIST") >= 2
+    assert methods[first_delete + 1 :].count("AUTH") >= 2
+
+
+@pytest.mark.parametrize("change", [{"id": "wrong"}, {"name": "other"}, {"instanceType": "other"}])
+def test_direct_workspace_identity_mismatch_never_requests_deletion(fake, change):
+    assert fake.provision() == "gpu"
+    fake.api.body_changes = change
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not any(r[0] == "DELETE" for r in fake.api.requests)
+    assert fake.name == "gpu"
+
+
+@pytest.mark.parametrize("malformed_saved", [False, True])
+def test_cleanup_environment_key_precedes_saved_credentials(monkeypatch, tmp_path, malformed_saved):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    credentials = tmp_path / ".brev/credentials.json"
+    credentials.parent.mkdir()
+    credentials.write_text(
+        "invalid-json"
+        if malformed_saved
+        else json.dumps(
+            {"api_key": "bak-saved", "access_token": "oauth-saved", "api_key_org_id": "org-test"}
+        )
+    )
+    monkeypatch.setenv("BREV_API_KEY", "bak-environment")
+    token, org = brev_provision._cleanup_credentials()
+    assert token == "bak-environment"
+    assert org == ("" if malformed_saved else "org-test")
+
+
+def test_wrong_scope_credentials_cannot_start_an_allocation(monkeypatch, tmp_path):
+    cli = FakeBrev(tmp_path)
+    api_calls = []
+
+    def denied(method, identity, deadline):
+        api_calls.append((method, identity))
+        return 403, None
+
+    monkeypatch.setattr(brev_provision, "_run", cli)
+    monkeypatch.setattr(
+        brev_provision, "_cleanup_credentials", lambda: ("bak-other-org-key", "org-original")
+    )
+    monkeypatch.setattr(brev_provision, "_cleanup_request", denied)
+    with pytest.raises(brev_provision.ProvisionError):
+        brev_provision.provision("gpu", lease_file=tmp_path / "lease.json")
+    assert not cli.creates
+    assert api_calls == [("AUTH", "org-original")]
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://brevapi.us-west-2-prod.control-plane.brev.dev",
+        "https://untrusted.example",
+        "https://brevapi.us-west-2-prod.control-plane.brev.dev/private",
+    ],
+)
+def test_cleanup_credentials_are_never_sent_to_an_untrusted_origin(monkeypatch, origin):
+    import urllib.request
+
+    monkeypatch.setenv("BREV_API_URL", origin)
+    monkeypatch.setattr(brev_provision, "_cleanup_credentials", lambda: ("bak-private", "org-test"))
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *args: pytest.fail("origin must be rejected before opening HTTP"),
+    )
+    with pytest.raises(brev_provision.InventoryError, match="official HTTPS"):
+        brev_provision._cleanup_http("DELETE", "allocation-gpu")
+
+
+def test_direct_http_uses_official_origin_bounded_timeout_and_no_credential_redirect(monkeypatch):
+    import urllib.request
+
+    monkeypatch.delenv("BREV_API_URL", raising=False)
+    monkeypatch.setattr(brev_provision, "_cleanup_credentials", lambda: ("bak-private", "org-test"))
+
+    class Response:
+        status = 202
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, bound):
+            assert bound == 1024 * 1024 + 1
+            return json.dumps(
+                {
+                    "id": "allocation-gpu",
+                    "name": "gpu",
+                    "organizationId": "org-test",
+                    "instanceType": "g6.4xlarge",
+                    "status": "DELETING",
+                    "token": "private-response-token",
+                }
+            ).encode()
+
+    class Opener:
+        def open(self, request, timeout):
+            assert (
+                request.full_url
+                == "https://brevapi.us-west-2-prod.control-plane.brev.dev/api/workspaces/allocation-gpu"
+            )
+            assert request.get_method() == "DELETE"
+            assert request.get_header("Authorization") == "Bearer bak-private"
+            assert timeout == 30
+            return Response()
+
+    def opener(handler):
+        assert (
+            handler.redirect_request(None, None, 302, "redirect", {}, "https://untrusted.example")
+            is None
+        )
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", opener)
+    status, body = brev_provision._cleanup_http("DELETE", "allocation-gpu")
+    assert status == 202 and body["organizationId"] == "org-test"
+    assert "private-response-token" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("credential", [("bak-private", "org-test"), ("oauth-private", "")])
+def test_org_list_http_preserves_full_native_and_legacy_scope_and_filters_secrets(
+    monkeypatch, credential
+):
+    import urllib.request
+
+    monkeypatch.delenv("BREV_API_URL", raising=False)
+    monkeypatch.setattr(brev_provision, "_cleanup_credentials", lambda: credential)
+    records = [
+        {
+            "id": "allocation-gpu",
+            "name": "gpu",
+            "organizationId": "org-test",
+            "instanceType": "g6.4xlarge",
+            "status": "DELETING",
+            "createdByUserId": "current-user",
+            "workspaceClassId": "native",
+            "password": "private-password",
+        },
+        {
+            "id": "another-user-instance",
+            "name": "another-name",
+            "organizationId": "org-test",
+            "instanceType": "g6e.2xlarge",
+            "status": "RUNNING",
+            "createdByUserId": "another-user",
+            "workspaceClassId": "legacy",
+            "startupScript": "private-userdata",
+        },
+    ]
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, bound):
+            assert bound == 1024 * 1024 + 1
+            return json.dumps(records).encode()
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == (
+                "https://brevapi.us-west-2-prod.control-plane.brev.dev"
+                "/api/organizations/org-test/workspaces"
+            )
+            assert request.get_method() == "GET"
+            assert request.get_header("Authorization") == "Bearer " + credential[0]
+            assert timeout == 30
+            return Response()
+
+    def opener(handler):
+        assert (
+            handler.redirect_request(None, None, 302, "redirect", {}, "https://untrusted.example")
+            is None
+        )
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", opener)
+    status, body = brev_provision._cleanup_http("LIST", "org-test")
+    assert status == 200
+    assert [row["id"] for row in body["items"]] == ["allocation-gpu", "another-user-instance"]
+    assert all(set(row) == {"id", "name", "organizationId"} for row in body["items"])
+    assert "private" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("document", [{"workspaces": []}, None, [None]])
+def test_org_list_http_rejects_a_non_array_or_invalid_workspace_element(monkeypatch, document):
+    import urllib.request
+
+    monkeypatch.delenv("BREV_API_URL", raising=False)
+    monkeypatch.setattr(brev_provision, "_cleanup_credentials", lambda: ("bak-private", "org-test"))
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, bound):
+            return json.dumps(document).encode()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *args: SimpleNamespace(open=lambda *args, **kwargs: Response()),
+    )
+    with pytest.raises(brev_provision.InventoryError):
+        brev_provision._cleanup_http("LIST", "org-test")
+
+
+@pytest.mark.parametrize("returned_org", ["org-test", "org-other"])
+def test_authenticated_http_organization_response_is_validated(monkeypatch, returned_org):
+    import urllib.request
+
+    monkeypatch.delenv("BREV_API_URL", raising=False)
+    monkeypatch.setattr(brev_provision, "_cleanup_credentials", lambda: ("bak-private", "org-test"))
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, bound):
+            return json.dumps({"id": returned_org, "token": "private-token"}).encode()
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url.endswith("/api/organizations/org-test")
+            return Response()
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: Opener())
+    if returned_org == "org-test":
+        assert brev_provision._cleanup_http("AUTH", "") == (200, {"id": "org-test"})
+    else:
+        with pytest.raises(brev_provision.InventoryError, match="organization is invalid"):
+            brev_provision._cleanup_http("AUTH", "")
+
+
+def test_cleanup_child_argv_and_failed_request_never_disclose_credentials(monkeypatch):
+    token = "bak-private-api-token"
+    monkeypatch.setenv("BREV_API_KEY", token)
+    monkeypatch.setattr(brev_provision.time, "monotonic", lambda: 10)
+
+    def failure(command, deadline, *args, **kwargs):
+        assert token not in " ".join(command)
+        assert deadline == 40
+        raise brev_provision.ProvisionError("upstream error includes " + token)
+
+    monkeypatch.setattr(brev_provision, "_run", failure)
+    with pytest.raises(brev_provision.InventoryError) as error:
+        brev_provision._cleanup_request("DELETE", "allocation-gpu", None)
+    assert token not in str(error.value)
+
+
+def test_uncertain_create_absence_never_confirms_cleanup(fake, clock):
+    fake.lease.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "gpu",
+                "sku": "g6.4xlarge",
+                "instance_id": None,
+                "allocation_pending": True,
+                "create_started": True,
+                "organization_id": "org-test",
+            }
+        )
+    )
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert clock.now <= 130
+    assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
+
+
+@pytest.mark.parametrize("completion", ["returned", "timeout", "interrupted", "io_error"])
+def test_create_failure_retains_safe_evidence_without_claiming_absence(
+    fake, clock, monkeypatch, capsys, completion
+):
+    token = "bak-do-not-publish-this-value"
+    upstream = f"rate limit exceeded: account-private https://private.example/{token}"
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] != "create":
+            return fake(command, deadline, cap, **kwargs)
+        if completion == "timeout":
+            raise brev_provision.CommandTimeout("create exceeded its wait", "", upstream)
+        if completion == "interrupted":
+            raise KeyboardInterrupt()
+        if completion == "io_error":
+            raise OSError(upstream)
+        return subprocess.CompletedProcess(command, 1, "", upstream)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    with pytest.raises((brev_provision.ProvisionError, OSError, KeyboardInterrupt)):
+        fake.provision()
+    lease = json.loads(fake.lease.read_text())
+    receipt = lease["create_diagnostics"]
+    assert receipt["completion"] == completion
+    assert receipt["returncode"] == (1 if completion == "returned" else None)
+    assert receipt["signals"] == (["rate_limit"] if completion in {"returned", "timeout"} else [])
+    assert lease["allocation_pending"] and lease["instance_id"] is None
+    assert lease["create_started"] and not lease["create_accepted"]
+    evidence = fake.lease.read_text() + capsys.readouterr().err
+    assert all(value not in evidence for value in (token, "account-private", "private.example"))
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
+
+
+def test_create_success_records_receipt_before_waiting_for_readiness(fake):
+    assert fake.provision() == "gpu"
+    receipt = json.loads(fake.lease.read_text())["create_diagnostics"]
+    assert receipt["completion"] == "returned" and receipt["returncode"] == 0
+
+
+def test_create_diagnostics_disambiguate_http_status_without_publishing_upstream_body():
+    token = "bak-private-value"
+    prefix = (
+        "https://brevapi.us-west-2-prod.control-plane.brev.dev/"
+        "api/organizations/private-org/workspaces?local=true "
+    )
+    receipts = []
+    for status in (429, 500):
+        text = prefix + str(status) + ' Error {"errors":[{"message":"rate limit exceeded ' + token
+        receipt = brev_provision._create_diagnostics("", text, 1, "returned")
+        assert receipt["workspace_http_statuses"] == [status]
+        assert receipt["signals"] == ["rate_limit"]
+        assert "private-org" not in json.dumps(receipt) and token not in json.dumps(receipt)
+        receipts.append(receipt)
+    assert receipts[0] != receipts[1]
+
+
+def test_create_debug_formatting_is_scoped_to_captured_child(monkeypatch):
+    environments = []
+
+    class Process:
+        returncode = 1
+
+        def communicate(self, input_text, timeout):
+            return "", "upstream error"
+
+    def popen(command, **kwargs):
+        assert kwargs["stdout"] == subprocess.PIPE and kwargs["stderr"] == subprocess.PIPE
+        environments.append(kwargs["env"])
+        return Process()
+
+    monkeypatch.delenv("BREV_FEATURE_DEBUG", raising=False)
+    monkeypatch.setattr(brev_provision.subprocess, "Popen", popen)
+    deadline = brev_provision.time.monotonic() + 30
+    brev_provision._run(["brev", "create", "gpu"], deadline)
+    brev_provision._run(["brev", "ls", "--json"], deadline)
+    assert environments[0]["BREV_FEATURE_DEBUG"] == "true"
+    assert environments[1] is None and "BREV_FEATURE_DEBUG" not in os.environ
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_complete_catalog_skip_has_no_allocation_to_delete(fake, monkeypatch, unavailable):
+    reason = (
+        "is currently unavailable (no capacity); try again later or run 'brev search' to find another type"
+        if unavailable
+        else "is not a recognized type; run 'brev search' to see available types"
+    )
+    output = (
+        "Attempting to create 1 instance(s) with 1 parallel attempts\n"
+        "Instance types to try: g6.4xlarge (500GB disk)\n\n"
+        "Trying g6.4xlarge for 1 instance(s)...\n"
+        f'Skipping: instance type "g6.4xlarge" {reason}\n\n'
+        "Type g6.4xlarge had failures, trying next type...\n\n\n"
+        "Warning: Only created 0/1 instances\ncould only create 0/1 instances\n"
+    )
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] == "create":
+            return subprocess.CompletedProcess(command, 1, "", output)
+        return fake(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    with pytest.raises(brev_provision.ProvisionError, match="create failed"):
+        fake.provision()
+    lease = json.loads(fake.lease.read_text())
+    assert not lease["create_started"] and not lease["allocation_pending"]
+    assert lease["create_submission"] == "not_submitted_catalog_rejection"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+    assert not any(event.startswith("delete") for event in fake.events)
+
+    # Similar errors cannot establish rejection after a worker may have submitted
+    # a request, with multiple candidates, or with incomplete process output.
+    for mutated in (
+        output + "[Worker 1] Trying g6.4xlarge for instance 'gpu'...\n",
+        output.replace("1 parallel", "2 parallel"),
+        output.replace("g6.4xlarge", "g6.8xlarge"),
+        output.removesuffix("could only create 0/1 instances\n"),
+        output + "rate limit exceeded\n",
+    ):
+        result = subprocess.CompletedProcess(["brev", "create", "gpu"], 1, "", mutated)
+        assert not brev_provision._create_was_skipped(result, "g6.4xlarge", 500)
+    for code, stdout in ((0, ""), (-9, ""), (1, "partial response")):
+        result = subprocess.CompletedProcess(["brev", "create", "gpu"], code, stdout, output)
+        assert not brev_provision._create_was_skipped(result, "g6.4xlarge", 500)
+
+
+@pytest.mark.parametrize("point", ["initial", "before_probe", "after_probe"])
+@pytest.mark.parametrize("bad_json", [False, True])
+def test_inventory_errors_preserve_the_same_allocation(fake, monkeypatch, point, bad_json, capsys):
+    failed = False
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        nonlocal failed
+        reached = {
+            "initial": fake.name is None,
+            "before_probe": fake.name is not None and "probe" not in fake.events,
+            "after_probe": "probe" in fake.events,
+        }[point]
+        if command[1] == "ls" and reached and not failed:
+            failed = True
+            return subprocess.CompletedProcess(
+                command, 0 if bad_json else 1, "private-token-invalid-json", "private-token"
+            )
+        return fake(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert fake.provision() == "gpu" and failed and fake.creates == ["gpu"]
+    assert "private-token" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("action", ["refresh", "exec"])
+def test_transient_ssh_stage_timeout_retries_the_same_vm(fake, monkeypatch, action):
+    failed = False
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        nonlocal failed
+        if command[1] == action and not failed:
+            failed = True
+            raise brev_provision.ProvisionError("bounded wait")
+        return fake(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert fake.provision() == "gpu" and failed and fake.creates == ["gpu"]
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "banner\n{}",
+        "[]",
+        "{}",
+        '{"workspaces": {}}',
+        '{"workspaces": [{}]}',
+        '{"workspaces":[],"workspaces":[]}',
+    ],
+)
+def test_invalid_inventory_is_never_absence(fake, document):
+    fake.inventory_result = document
+    with pytest.raises(brev_provision.InventoryError):
+        brev_provision._instance("gpu", 10)
+
+
+def test_existing_exact_name_is_not_reused_or_deleted(fake):
+    fake.name = "gpu"
+    with pytest.raises(brev_provision.ProvisionError, match="already exists"):
+        fake.provision()
+    assert not fake.creates and not any(
+        command[1] in {"exec", "delete"} for command in fake.commands
+    )
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert fake.name == "gpu"
+    assert not any(command[1] == "delete" for command in fake.commands)
+
+
+def test_replaced_instance_id_cannot_inherit_probe_or_be_deleted(fake):
+    fake.states = [_row("gpu"), _row("gpu", id="different-allocation")]
+    with pytest.raises(brev_provision.ProvisionError, match="ID changed"):
+        fake.provision()
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease)
+    assert not any(command[1] == "delete" for command in fake.commands)
+
+
+def test_ambiguous_inventory_never_deletes(fake):
+    fake.inventory_result = json.dumps({"workspaces": [_row("gpu"), _row("gpu", id="other")]})
+    fake.lease.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "gpu",
+                "sku": "g6.4xlarge",
+                "instance_id": None,
+                "create_started": True,
+                "organization_id": "org-test",
+                "allocation_pending": True,
+            }
+        )
+    )
+    with pytest.raises(brev_provision.ProvisionError):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert all(request[0] == "AUTH" for request in fake.api.requests)
+
+
+def test_probe_deadline_keeps_lease_without_reallocation(fake, clock):
+    fake.probe_results = ["GPU failure"] * 30
+    with pytest.raises(brev_provision.ProvisionError, match="deadline"):
+        fake.provision(timeout=120)
+    assert clock.now <= 120 and fake.creates == ["gpu"] and fake.name == "gpu"
+    assert json.loads(fake.lease.read_text())["instance_id"] == "allocation-gpu"
+
+
+def test_interruption_retains_lease_and_never_creates_a_replacement(fake, monkeypatch):
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] == "exec":
+            raise KeyboardInterrupt
+        return fake(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    with pytest.raises(KeyboardInterrupt):
+        fake.provision()
+    assert fake.creates == ["gpu"] and fake.name == "gpu"
+    assert json.loads(fake.lease.read_text())["phase"] == "interrupted"
+
+
+@pytest.mark.parametrize("provider", ["aws", "nebius"])
+@pytest.mark.parametrize("ready_after", [720, 1260, 2640])
+def test_slow_native_bootstrap_waits_passively_on_one_allocation(
+    fake, clock, provider, ready_after
+):
+    pending_reads = ready_after // brev_provision.POLL_INTERVAL
+    fake.states = [
+        _row("gpu", build_status="BUILDING", shell_status="NOT READY")
+        for _ in range(int(pending_reads))
+    ] + [_row("gpu")]
+    assert fake.provision(provider=provider) == "gpu"
+    assert clock.now == ready_after and fake.creates == ["gpu"]
+    assert fake.events.count("refresh") == 1 and fake.events.count("probe") == 1
+    assert "diagnostic" not in fake.events
+    assert all(
+        timestamp >= ready_after
+        for command, timestamp in fake.command_times
+        if command[1] in {"refresh", "exec"}
+    )
+    assert all(
+        command[1] in {"ls", "search", "create", "refresh", "exec"} for command in fake.commands
+    )
+    lease = json.loads(fake.lease.read_text())
+    assert lease["metadata_ready_elapsed_seconds"] == ready_after
+    assert lease["phase"] == "ready" and lease["instance_id"] == "allocation-gpu"
+
+
+@pytest.mark.parametrize("provider", ["aws", "nebius"])
+@pytest.mark.parametrize(
+    "not_ready",
+    [
+        {"status": "STARTING"},
+        {"status": "FUTURE_STATE"},
+        {"build_status": "BUILDING"},
+        {"build_status": "PENDING"},
+        {"build_status": "FUTURE_BUILD_STATE"},
+        {"shell_status": "NOT READY"},
+        {"health_status": "UNAVAILABLE"},
+        {"health_status": "UNHEALTHY"},
+    ],
+)
+def test_every_native_admission_field_prevents_early_host_commands(
+    fake, clock, provider, not_ready
+):
+    fake.states = [_row("gpu", **not_ready), _row("gpu")]
+    assert fake.provision(provider=provider) == "gpu"
+    assert fake.creates == ["gpu"] and "diagnostic" not in fake.events
+    assert all(
+        timestamp >= brev_provision.POLL_INTERVAL
+        for command, timestamp in fake.command_times
+        if command[1] in {"refresh", "exec"}
+    )
+    assert clock.now == brev_provision.POLL_INTERVAL
+
+
+@pytest.mark.parametrize("provider", ["aws", "nebius"])
+def test_passive_bootstrap_timeout_retains_one_vm_for_confirmed_cleanup(fake, clock, provider):
+    fake.states = [_row("gpu", build_status="BUILDING", shell_status="NOT READY")]
+    with pytest.raises(brev_provision.ProvisionError, match="deadline"):
+        fake.provision(provider=provider, timeout=660)
+    assert clock.now == 660 and fake.creates == ["gpu"]
+    assert not any(command[1] in {"refresh", "exec", "delete"} for command in fake.commands)
+    lease = json.loads(fake.lease.read_text())
+    assert lease["phase"] == "provision_failed" and lease["instance_id"] == "allocation-gpu"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert fake.creates == ["gpu"] and fake.name is None
+    assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize("bad_json", [False, True])
+def test_api_transient_during_slow_bootstrap_retains_vm_without_early_ssh(
+    fake, clock, monkeypatch, bad_json
+):
+    fake.states = [
+        _row("gpu", build_status="BUILDING", shell_status="NOT READY") for _ in range(12)
+    ] + [_row("gpu")]
+    failed = False
+
+    def read(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        nonlocal failed
+        if command[1] == "ls" and fake.name is not None and clock.now >= 300 and not failed:
+            failed = True
+            return subprocess.CompletedProcess(
+                command, 0 if bad_json else 1, "private-invalid-json", "private-api-token"
+            )
+        return fake(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", read)
+    assert fake.provision() == "gpu" and failed and fake.creates == ["gpu"]
+    assert clock.now >= 720 and "diagnostic" not in fake.events
+    assert all(
+        timestamp >= 720
+        for command, timestamp in fake.command_times
+        if command[1] in {"refresh", "exec"}
+    )
+    assert not any(command[1] == "delete" for command in fake.commands)
+
+
+def test_provision_cli_defaults_to_one_45_minute_allocation(monkeypatch, tmp_path):
+    captured = {}
+
+    def provision(**options):
+        captured.update(options)
+        return "gpu"
+
+    monkeypatch.setattr(brev_provision, "provision", provision)
+    assert (
+        brev_provision.main(
+            ["provision", "--instance", "gpu", "--lease-file", str(tmp_path / "lease.json")]
+        )
+        == 0
+    )
+    assert captured["timeout"] == 2700 and captured["attempts"] == 1
+
+
+def test_removed_recovery_option_cannot_allocate(fake):
+    with pytest.raises(SystemExit) as error:
+        brev_provision.main(
+            [
+                "provision",
+                "--instance",
+                "gpu",
+                "--lease-file",
+                str(fake.lease),
+                "--recover-nebius-start-limit",
+            ]
+        )
+    assert error.value.code == 2 and not fake.creates and not fake.commands
+
+
+@pytest.mark.parametrize("phase", ["sudo", "docker", "host_gpu", "container_gpu", "disk_headroom"])
+def test_actual_probe_cannot_hide_functional_failure(phase):
+    stubs = r"""
+cloud-init() { printf 'private-probe-token\n'; return 1; }
+sudo() { shift; if [ "$FAIL_PHASE" = sudo ]; then return 13; fi; "$@"; }
+docker() { printf 'private-probe-token\n'; if [ "$FAIL_PHASE" = docker ] && [ "$1" = info ]; then return 3; fi; if [ "$FAIL_PHASE" = container_gpu ] && [ "$1" = run ]; then return 4; fi; }
+nvidia-smi() { printf 'private-probe-token\n'; test "$FAIL_PHASE" != host_gpu || return 14; }
+python3() { if [ "$FAIL_PHASE" = disk_headroom ]; then printf '0\n'; else printf '500000000000\n'; fi; }
+"""
+    result = subprocess.run(
+        ["bash", "-c", stubs + brev_provision._probe("image", "ready")],
+        env={**os.environ, "FAIL_PHASE": phase},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0 and "ready" not in result.stdout.splitlines()
+    assert "private-probe-token" not in result.stdout + result.stderr
+
+
+def test_actual_probe_accepts_historical_cloud_init_error_but_checks_workload():
+    stubs = r"""
+cloud-init() { return 1; }
+sudo() { shift; "$@"; }
+docker() { return 0; }
+nvidia-smi() { return 0; }
+python3() { printf '500000000000\n'; }
+"""
+    result = subprocess.run(
+        ["bash", "-c", stubs + brev_provision._probe("image", "ready")],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0
+    receipt = brev_provision._probe_receipt(result.stdout, "ready", 200)
+    assert receipt and receipt["phases"]["cloud_init"] == "1"
+
+
+def test_public_receipt_fields_filter_private_diagnostic_content():
+    stdout = "password=private-token\nTRTMC_DIAG_CLOUD_STATE=done\nTRTMC_DIAG_CLOUD_EXIT=1\nTRTMC_DIAG_UNIT_docker_ActiveState=active\nTRTMC_DIAG_UNIT_instance-oneshot_Environment=private-token\n"
+    lines = list(brev_provision._safe_lines(stdout))
+    assert lines == [
+        "TRTMC_DIAG_CLOUD_STATE=done",
+        "TRTMC_DIAG_CLOUD_EXIT=1",
+        "TRTMC_DIAG_UNIT_docker_ActiveState=active",
+    ]
+    assert "private-token" not in "\n".join(lines)
+
+
+@pytest.mark.parametrize("value", [None, 42, "private\ntoken"])
+def test_optional_metadata_cannot_inject_logs(value):
+    assert (
+        json.loads(brev_provision._state(_row("gpu", instance_type=value)))["instance_type"]
+        == "UNKNOWN"
+    )
+
+
+def test_cli_failure_and_interruption_are_nonzero(monkeypatch, tmp_path):
+    args = ["provision", "--instance", "gpu", "--lease-file", str(tmp_path / "lease.json")]
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(brev_provision, "provision", interrupted)
+    assert brev_provision.main(args) == 130
+
+    def failed(*args, **kwargs):
+        raise brev_provision.ProvisionError("not ready")
+
+    monkeypatch.setattr(brev_provision, "provision", failed)
+    assert brev_provision.main(args) == 75
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/proc").exists(), reason="Linux process groups required"
+)
+def test_hung_cli_and_ssh_child_are_killed_at_subprocess_deadline(tmp_path: Path) -> None:
+    child_pid = tmp_path / "child-pid"
+    fake_cli = tmp_path / "hung_brev.py"
+    fake_cli.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    start = time.monotonic()
+
+    with pytest.raises(brev_provision.ProvisionError, match="bounded wait"):
+        brev_provision._run([sys.executable, str(fake_cli)], start + 0.5)
+
+    assert time.monotonic() - start < 2
+    child_stat = Path(f"/proc/{child_pid.read_text(encoding='utf-8')}/stat")
+    # SIGKILL delivery is asynchronous; retain the original total termination bound.
+    while child_stat.exists() and time.monotonic() < start + 2:
+        if child_stat.read_text(encoding="utf-8").split()[2] == "Z":
+            break
+        time.sleep(0.005)
+    if child_stat.exists():
+        assert child_stat.read_text(encoding="utf-8").split()[2] == "Z"
+    assert time.monotonic() - start < 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process sessions required")
+def test_timeout_does_not_wait_for_escaped_child_holding_pipes(tmp_path):
+    child_pid = tmp_path / "escaped-pid"
+    cli = tmp_path / "escaped_cli.py"
+    cli.write_text(
+        "import subprocess,sys,time\nfrom pathlib import Path\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'], "
+        "start_new_session=True)\n"
+        f"Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(brev_provision.ProvisionError, match="bounded wait"):
+            brev_provision._run([sys.executable, str(cli)], started + 0.5)
+        assert time.monotonic() - started < 2
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.fixture
+def local_transport(monkeypatch, tmp_path):
+    config = tmp_path / ".brev/ssh_config"
+    config.parent.mkdir()
+    config.touch()
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+
+    def transport(instance, script, deadline):
+        assert instance == "gpu"
+        assert deadline > time.monotonic()
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=5)
+
+    monkeypatch.setattr(brev_provision, "_ssh", transport)
+    return transport
+
+
+def _task_command(counter: Path, *, status: int = 0, delay: float = 0.05, output: str = "hello\n"):
+    program = (
+        "import pathlib,sys,time; "
+        "p=pathlib.Path(sys.argv[1]); p.write_text(p.read_text()+'run\\n' if p.exists() else 'run\\n'); "
+        "time.sleep(float(sys.argv[2])); sys.stdout.write(sys.argv[3]); sys.exit(int(sys.argv[4]))"
+    )
+    return [sys.executable, "-c", program, str(counter), str(delay), output, str(status)]
+
+
+@pytest.mark.parametrize("status", [0, 17])
+def test_application_result_is_cached_without_rerun(local_transport, tmp_path, status):
+    counter = tmp_path / "counter"
+    argv = _task_command(counter, status=status)
+    result = tmp_path / "result"
+    log = tmp_path / "output.log"
+    assert brev_provision.execute("gpu", argv, log, result, 5, 0.02) == status
+    assert brev_provision.execute("gpu", argv, log, result, 5, 0.02) == status
+    assert counter.read_text() == "run\n"
+    assert log.read_text() == "hello\n"
+
+
+def test_lost_launch_acknowledgment_does_not_duplicate_work(local_transport, monkeypatch, tmp_path):
+    calls = 0
+
+    def dropped_ack(instance, script, deadline):
+        nonlocal calls
+        response = local_transport(instance, script, deadline)
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess([], 255, "", "connection lost")
+        return response
+
+    monkeypatch.setattr(brev_provision, "_ssh", dropped_ack)
+    counter = tmp_path / "counter"
+    assert (
+        brev_provision.execute(
+            "gpu",
+            _task_command(counter, status=17, delay=0.15),
+            tmp_path / "log",
+            tmp_path / "result",
+            5,
+            0.02,
+        )
+        == 17
+    )
+    assert counter.read_text() == "run\n"
+
+
+def test_concurrent_launches_only_execute_once(local_transport, tmp_path):
+    counter = tmp_path / "counter"
+    result = tmp_path / "result"
+    payload = brev_provision._payload(_task_command(counter, status=17, delay=0.2), result, 5)
+    marker = "receipt="
+    script = brev_provision.launch_script(payload, marker)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        responses = list(
+            pool.map(lambda _: local_transport("gpu", script, time.monotonic() + 5), range(6))
+        )
+    assert all(
+        brev_provision._record(response.stdout, marker)["state"] == "accepted"
+        for response in responses
+    )
+    deadline = time.monotonic() + 5
+    while not result.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert result.read_text() == "17\n"
+    assert counter.read_text() == "run\n"
+
+
+def test_completed_command_cannot_be_replaced(local_transport, tmp_path):
+    counter = tmp_path / "counter"
+    result = tmp_path / "result"
+    assert (
+        brev_provision.execute("gpu", _task_command(counter), tmp_path / "log", result, 5, 0.02)
+        == 0
+    )
+    with pytest.raises(RemoteTaskError, match="different task"):
+        brev_provision.execute(
+            "gpu", _task_command(counter, status=17), tmp_path / "log", result, 5, 0.02
+        )
+    assert counter.read_text() == "run\n"
+
+
+def test_large_remote_log_is_fully_drained(local_transport, tmp_path, capsys):
+    content = "0123456789\n" * 15000
+    # Keep argv within Linux's per-argument limit while producing >2 log chunks.
+    argv = [sys.executable, "-c", "print('0123456789\\n' * 15000, end='')"]
+    log = tmp_path / "log"
+    assert brev_provision.execute("gpu", argv, log, tmp_path / "result", 5, 0.02) == 0
+    assert log.read_text() == content
+    assert capsys.readouterr().out == content
+
+
+def test_remote_timeout_has_one_persisted_application_result(local_transport, tmp_path):
+    counter = tmp_path / "counter"
+    result = tmp_path / "result"
+    assert (
+        brev_provision.execute(
+            "gpu", _task_command(counter, delay=10), tmp_path / "log", result, 0.15, 0.02
+        )
+        == 124
+    )
+    assert result.read_text() == "124\n"
+    assert counter.read_text() == "run\n"
+
+
+def test_lost_worker_is_not_relaunched(local_transport, tmp_path):
+    counter = tmp_path / "counter"
+    argv = _task_command(counter)
+    result = tmp_path / "result"
+    payload = brev_provision._payload(argv, result, 5)
+    root = Path(payload["directory"])
+    root.mkdir()
+    (root / "fingerprint").write_text(payload["fingerprint"])
+    (root / "started").write_text("started\n")
+    with pytest.raises(RemoteTaskError, match="no trustworthy result.*lost"):
+        brev_provision.execute("gpu", argv, tmp_path / "log", result, 5, 0.02)
+    assert not counter.exists()
+
+
+def test_invalid_existing_exit_status_cannot_pass(local_transport, tmp_path):
+    counter = tmp_path / "counter"
+    argv = _task_command(counter)
+    result = tmp_path / "result"
+    assert brev_provision.execute("gpu", argv, tmp_path / "log", result, 5, 0.02) == 0
+    result.write_text("success\n")
+    with pytest.raises(RemoteTaskError, match="no trustworthy result.*invalid"):
+        brev_provision.execute("gpu", argv, tmp_path / "log", result, 5, 0.02)
+    assert counter.read_text() == "run\n"
+
+
+def _gpu_environment(*families: str) -> dict[str, str]:
+    owners = json.dumps(sorted(families))
+    return {
+        "TRTMC_GPU_SCOPE": "families",
+        "TRTMC_GPU_FAMILIES": owners,
+        "TRTMC_GPU_DIRECT_FAMILIES": owners,
+        "TRTMC_GPU_ADDED_FAMILIES": "[]",
+    }
+
+
+def test_execution_budget_includes_preparation_within_the_existing_global_cap():
+    assert community_gpu_ci.FAMILY_PREPARATION_SECONDS == 7200
+    assert community_gpu_ci.STAGING_TIMEOUT_SECONDS == 900
+    assert community_gpu_ci.FAMILY_TIMEOUT_SECONDS == 2700
+    assert community_gpu_ci.MAX_EXECUTION_SECONDS == 10800
+    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha")) == 10800
+    assert community_gpu_ci.execution_budget_seconds(_gpu_environment("alpha", "beta")) == 10800
+    assert (
+        community_gpu_ci.execution_budget_seconds(
+            _gpu_environment(
+                *(f"family_{chr(97 + i)}" for i in range(community_gpu_ci.MAX_CHANGED_GPU_FAMILIES))
+            )
+        )
+        == 10800
+    )
+    with pytest.raises(community_gpu_ci.CommunityGpuError, match="split this PR"):
+        community_gpu_ci.execution_budget_seconds(
+            _gpu_environment(*(f"family_{chr(97 + i)}" for i in range(20)))
+        )
+
+
+def test_family_result_preserves_failed_skipped_and_unrun_cases(tmp_path):
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "trtmc-alpha-e2e-junit.xml").write_text(
+        "<testsuites><testsuite>"
+        '<testcase name="test_official_checkpoint_e2e[one]" />'
+        '<testcase name="test_other_e2e[two]"><failure /></testcase>'
+        '<testcase name="test_other_e2e[three]"><skipped /></testcase>'
+        "</testsuite></testsuites>"
+    )
+    destination = tmp_path / "result.json"
+    env = {"TRTMC_NATIVE_BUILD_DIR": str(build), "TRTMC_GPU_RESULT_FILE": str(destination)}
+    with pytest.raises(RuntimeError, match="original validation error"):
+        with community_gpu_ci._family_result(env, "alpha") as record:
+            record["requested_cases"] = ["one", "two", "three", "four"]
+            record["entrypoint_started"] = True
+            community_gpu_ci._phase(record, env, "validation", "validation")
+            raise RuntimeError("original validation error")
+    result = json.loads(destination.read_text())
+    assert result["status"] == "failed" and result["failure_class"] == "pr_failure"
+    assert result["cases"] == {
+        "one": "passed",
+        "two": "failed",
+        "three": "skipped",
+        "four": "not_run",
+    }
+    assert result["evidence"] == "original validation error"
+
+
+@pytest.mark.parametrize("phase", ["gpu", "environment"])
+def test_preentry_probe_result_preserves_phase_and_evidence(tmp_path, phase):
+    path = tmp_path / "result.json"
+    env = {
+        "TRTMC_NATIVE_BUILD_DIR": str(tmp_path / "build"),
+        "TRTMC_GPU_RESULT_FILE": str(path),
+    }
+    evidence = f"{phase} probe failed before the PR entrypoint"
+    with pytest.raises(RuntimeError, match=evidence):
+        with community_gpu_ci._family_result(env, "alpha") as record:
+            record["requested_cases"] = ["one"]
+            community_gpu_ci._phase(record, env, phase, "infra_failure")
+            raise RuntimeError(evidence)
+    result = community_gpu_ci._container_result(path, "alpha", 1, {}, ("one",))
+    assert result["phase"] == phase
+    assert result["evidence"] == evidence
+    assert result["status"] == "failed"
+    assert result["failure_class"] == "infra_failure"
+    assert result["entrypoint_started"] is False
+    assert result["cases"] == {"one": "not_run"}
+
+
+@pytest.mark.parametrize("mutation", ["missing", "empty", "skipped", "wrong_owner", "symlink"])
+def test_container_exit_zero_requires_complete_owned_e2e_evidence(tmp_path, mutation):
+    path = tmp_path / "result.json"
+    record = {
+        "schema_version": 1,
+        "family": "alpha",
+        "status": "passed",
+        "phase": "complete",
+        "requested_cases": ["one"],
+        "cases": {"one": "passed"},
+        "failure_class": None,
+    }
+    if mutation == "empty":
+        record["cases"] = {}
+    elif mutation == "skipped":
+        record["cases"] = {"one": "skipped"}
+    elif mutation == "wrong_owner":
+        record["family"] = "beta"
+    if mutation != "missing":
+        path.write_text(json.dumps(record))
+    if mutation == "symlink":
+        outside = tmp_path / "outside.json"
+        path.rename(outside)
+        path.symlink_to(outside)
+    result = community_gpu_ci._container_result(path, "alpha", 0, {})
+    assert result["status"] == "failed"
+    assert result["failure_class"] == "infra_failure"
+    assert all(outcome == "not_run" for outcome in result["cases"].values())
+
+
+@pytest.mark.parametrize("entered", [False, True])
+def test_confirmed_container_oom_is_classified_by_entrypoint_boundary(tmp_path, entered):
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "family": "alpha",
+                "status": "running",
+                "phase": "validation",
+                "failure_class": "validation",
+                "requested_cases": ["one"],
+                "cases": {"one": "not_run"},
+            }
+        )
+    )
+    if entered:
+        Path(str(path) + ".entrypoint").write_text("alpha\n")
+    result = community_gpu_ci._container_result(path, "alpha", 137, {"OOMKilled": True})
+    assert result["failure_class"] == ("pr_failure" if entered else "infra_failure")
+    assert result["status"] == "failed" and result["entrypoint_started"] is entered
+    assert result["phase"] == "validation" and result["cases"]["one"] == "not_run"
+
+
+def test_exhausted_coordinator_budget_marks_every_unstarted_family(tmp_path, monkeypatch):
+    _planned_owners(tmp_path, "alpha", "beta")
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    calls = []
+
+    def inspect_only(command, **kwargs):
+        calls.append(command)
+        assert command[:3] == ["docker", "image", "inspect"]
+        return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", inspect_only)
+    monkeypatch.setattr(community_gpu_ci, "MAX_EXECUTION_SECONDS", 0)
+    with pytest.raises(CiError, match="remaining families were not run"):
+        community_gpu_ci.run_containers(tmp_path, env, "image")
+    report = json.loads((tmp_path / "results/summary.json").read_text())
+    assert not report["passed"] and not report["complete"]
+    assert [row["family"] for row in report["families"]] == ["alpha", "beta"]
+    assert all(
+        row["status"] == "not_run" and row["failure_class"] == "infra_failure"
+        for row in report["families"]
+    )
+    assert len(calls) == 1
+
+
+def test_container_cannot_replace_the_host_selected_case_inventory(tmp_path):
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "family": "alpha",
+                "status": "passed",
+                "phase": "complete",
+                "failure_class": None,
+                "requested_cases": ["easy"],
+                "cases": {"easy": "passed"},
+            }
+        )
+    )
+    result = community_gpu_ci._container_result(path, "alpha", 0, {}, ("required", "other"))
+    assert result["status"] == "failed" and result["failure_class"] == "infra_failure"
+    assert result["cases"] == {"required": "not_run", "other": "not_run"}
+
+
+def test_fifo_result_cannot_block_host_cleanup(tmp_path):
+    path = tmp_path / "result.json"
+    os.mkfifo(path)
+    start = time.monotonic()
+    result = community_gpu_ci._container_result(path, "alpha", 124, {}, ("required",))
+    assert time.monotonic() - start < 1
+    assert result["status"] == "failed" and result["cases"] == {"required": "not_run"}
+
+
+def test_real_container_client_timeout_cleans_up_before_next_family(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    for family in ("alpha", "beta"):
+        _family(
+            tmp_path,
+            family,
+            [{"family": family, "testcases": [{"name": family, "premerge": True}]}],
+        )
+    events = tmp_path / "events"
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    docker = binary / "docker"
+    docker.write_text(
+        f"#!{sys.executable}\nimport json, sys, time\nfrom pathlib import Path\n"
+        f"events = Path({str(events)!r})\n"
+        "if sys.argv[1] == 'image': print('sha256:' + 'a' * 64)\n"
+        "elif sys.argv[1] == 'inspect': print('{}')\n"
+        "elif sys.argv[1] == 'rm':\n"
+        "    with events.open('a') as f: f.write('remove ' + sys.argv[-1].rsplit('-',1)[1] + '\\n')\n"
+        "elif sys.argv[1] == 'run':\n"
+        "    family = sys.argv[-1]\n"
+        "    with events.open('a') as f: f.write('start ' + family + '\\n')\n"
+        "    cache = next(v for v in sys.argv if v.endswith(':/tmp/trtmc-community-huggingface'))\n"
+        "    (Path(cache.rsplit(':',1)[0]) / 'result.json.entrypoint').write_text(family+'\\n')\n"
+        "    if family == 'alpha': time.sleep(10)\n"
+        "    (Path(cache.rsplit(':',1)[0]) / 'result.json').write_text(json.dumps({\n"
+        "        'schema_version':1,'family':family,'status':'passed','phase':'complete',\n"
+        "        'failure_class':None,'requested_cases':[family],'cases':{family:'passed'}}))\n"
+    )
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(community_gpu_ci, "FAMILY_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(community_gpu_ci, "STAGING_TIMEOUT_SECONDS", 2)
+    env = {**_gpu_environment("alpha", "beta"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    with pytest.raises(CiError, match="alpha: family execution timed out"):
+        community_gpu_ci.run_containers(tmp_path, env, "image")
+    assert events.read_text().splitlines() == [
+        "start alpha",
+        "remove alpha",
+        "start beta",
+        "remove beta",
+    ]
+    result = json.loads((tmp_path / "results/summary.json").read_text())
+    assert result["families"][0]["failure_class"] == "pr_failure"
+    assert result["families"][1]["status"] == "passed"
+    assert not result["passed"] and not result["complete"]
+
+
+def test_log_summary_preserves_last_complete_record_after_interruption(tmp_path):
+    path = tmp_path / "output.log"
+    expected = {
+        "schema_version": 1,
+        "complete": False,
+        "passed": False,
+        "families": [
+            {
+                "family": "alpha",
+                "status": "running",
+                "phase": "container",
+                "failure_class": "unknown",
+                "cases": {},
+            },
+            {
+                "family": "beta",
+                "status": "not_run",
+                "phase": "pending",
+                "failure_class": None,
+                "cases": {},
+            },
+        ],
+    }
+    path.write_text(
+        "ordinary output\n"
+        + community_gpu_ci.SUMMARY_PREFIX
+        + json.dumps(expected)
+        + "\n"
+        + community_gpu_ci.SUMMARY_PREFIX
+        + '{"schema_'
+    )
+    rendered = tmp_path / "summary.txt"
+    assert community_gpu_ci.summarize_log(path, rendered) == expected
+    assert "| beta | not&#95;run |" in rendered.read_text()
+    assert "All runnable Community E2Es executed: False" in rendered.read_text()
+
+
+def test_community_routing_preserves_small_case_and_reports_large_case(tmp_path):
+    _family(
+        tmp_path,
+        "alpha",
+        [
+            {
+                "family": "alpha",
+                "hf_id": "example/small",
+                "testcases": [
+                    {"name": "small", "premerge": True},
+                ],
+            },
+            {
+                "family": "alpha",
+                "hf_id": "example/large",
+                "testcases": [
+                    {"name": "large", "premerge": True, "community_gpu": False},
+                ],
+            },
+        ],
+    )
+    plan = community_gpu_ci.family_plan(tmp_path, "alpha")
+    assert plan.testcases == ("small",)
+    assert plan.checkpoints == (("example/small", None),)
+    assert plan.deferred_testcases == ("large",)
+    manifest = json.loads((tmp_path / "families/alpha/tests/manifests/1.json").read_text())
+    assert manifest["testcases"][0]["premerge"] is True
+
+
+@pytest.mark.parametrize("selection", ["false", None])
+def test_community_scope_cannot_silently_remove_all_e2e_coverage(tmp_path, selection):
+    _family(
+        tmp_path,
+        "alpha",
+        [
+            {
+                "family": "alpha",
+                "testcases": [
+                    {"name": "one", "premerge": True, "community_gpu": selection},
+                ],
+            }
+        ],
+    )
+    with pytest.raises(CiError):
+        community_gpu_ci.family_plan(tmp_path, "alpha")
+
+
+def _deferred_owner(repository: Path, family: str) -> None:
+    _family(
+        repository,
+        family,
+        [
+            {
+                "family": family,
+                "hf_id": "example/large-checkpoint-must-not-stage",
+                "testcases": [{"name": "large", "premerge": True, "community_gpu": False}],
+            }
+        ],
+    )
+
+
+@pytest.mark.parametrize("failed_baseline", [None, community_gpu_ci.SHARED_SMOKE_FAMILIES[0]])
+def test_fully_deferred_owner_runs_all_real_baselines_with_effective_plan_budget(
+    tmp_path, monkeypatch, failed_baseline
+):
+    _deferred_owner(tmp_path, "alpha")
+    _planned_owners(tmp_path, *community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    plan = community_gpu_ci.family_plan(tmp_path, "alpha")
+    assert plan.testcases == () and plan.deferred_testcases == ("large",)
+    assert plan.checkpoints == ()
+    events, staged, timeouts, preparation_deadlines = [], [], [], []
+    # Remove the cap only in this fixture so selection errors cannot be hidden by
+    # both a one-owner plan and the five-owner fallback reaching the same cap.
+    monkeypatch.setattr(community_gpu_ci, "MAX_EXECUTION_SECONDS", 100000)
+    monkeypatch.setattr(community_gpu_ci.time, "monotonic", lambda: 1000.0)
+    real_preparation = community_gpu_ci._image_preparation()
+
+    def prepare(repository, family, base_image_id, deadline):
+        preparation_deadlines.append(deadline)
+        return real_preparation.ensure_family_image(repository, family, base_image_id, deadline)
+
+    monkeypatch.setattr(
+        community_gpu_ci, "_image_preparation", lambda: SimpleNamespace(ensure_family_image=prepare)
+    )
+
+    def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
+        if "--stage-family" in command:
+            staged.append(command[command.index("--stage-family") + 1])
+            timeouts.append(kwargs["timeout"])
+            return subprocess.CompletedProcess(command, 0)
+        if command[:2] == ["docker", "run"]:
+            family = command[-1]
+            events.append(("start", family))
+            timeouts.append(kwargs["timeout"])
+            _container_receipt(command, family == failed_baseline)
+            return subprocess.CompletedProcess(command, 17 if family == failed_baseline else 0)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        assert command[:3] == ["docker", "rm", "--force"]
+        events.append(("remove", events[-1][1]))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    env = {**_gpu_environment("alpha"), "TRTMC_GPU_RESULTS_DIR": str(tmp_path / "results")}
+    original_budget = community_gpu_ci.execution_budget_seconds(env)
+    if failed_baseline:
+        with pytest.raises(CiError, match="container exited 17"):
+            community_gpu_ci.run_containers(tmp_path, env, "base")
+    else:
+        community_gpu_ci.run_containers(tmp_path, env, "base")
+    assert (
+        original_budget == 10800
+        and community_gpu_ci.execution_budget_seconds(env) == original_budget
+    )
+    assert all(timeout <= original_budget for timeout in timeouts)
+    assert staged == list(community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    assert preparation_deadlines == [1000 + len(staged) * original_budget] * len(staged)
+    assert events == [(kind, family) for family in staged for kind in ("start", "remove")]
+    summary = json.loads((tmp_path / "results/summary.json").read_text())
+    rows = {row["family"]: row for row in summary["families"]}
+    assert rows["alpha"] == {
+        "family": "alpha",
+        "status": "deferred",
+        "phase": "selection",
+        "failure_class": None,
+        "entrypoint_started": False,
+        "requested_cases": [],
+        "deferred_cases": ["large"],
+        "cases": {},
+    }
+    assert all(
+        rows[family]["cases"] == {family: "passed" if family != failed_baseline else "failed"}
+        for family in staged
+    )
+    assert summary["passed"] is (failed_baseline is None) and summary["complete"]
+    path = tmp_path / "log"
+    path.write_text(community_gpu_ci.SUMMARY_PREFIX + json.dumps(summary))
+    rendered = tmp_path / "rendered"
+    assert community_gpu_ci.summarize_log(path, rendered)["passed"] is summary["passed"]
+    assert "Runnable Community families passed:" in rendered.read_text()
+    assert "alpha: deferred from Community, not qualified here" in rendered.read_text()
+
+
+def test_mixed_active_and_deferred_owners_do_not_admit_baselines(tmp_path, monkeypatch):
+    _deferred_owner(tmp_path, "alpha")
+    _planned_owners(tmp_path, "beta")
+    staged, started = [], []
+
+    def transport(command, **kwargs):
+        if command[0] == "git":
+            return _untracked_impact(command, tmp_path)
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="sha256:" + "a" * 64)
+        if "--stage-family" in command:
+            staged.append(command[command.index("--stage-family") + 1])
+        elif command[:2] == ["docker", "run"]:
+            started.append(command[-1])
+            _container_receipt(command)
+        elif command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"OOMKilled":false}')
+        else:
+            assert command[:3] == ["docker", "rm", "--force"]
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(community_gpu_ci.subprocess, "run", transport)
+    community_gpu_ci.run_containers(tmp_path, _gpu_environment("alpha", "beta"), "image")
+    assert staged == started == ["beta"]
+
+
+def test_deferred_producer_and_direct_family_fail_before_docker_or_install(tmp_path, monkeypatch):
+    _deferred_owner(tmp_path, "alpha")
+    _planned_owners(tmp_path, *community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    calls = []
+    monkeypatch.setattr(
+        community_gpu_ci.subprocess, "run", lambda *args, **kwargs: calls.append(args)
+    )
+    monkeypatch.setattr(
+        community_gpu_ci, "_install_family_requirements", lambda *args: calls.append(args)
+    )
+    with pytest.raises(CiError, match="coverage for every selected owner"):
+        community_gpu_ci.run_containers(
+            tmp_path, _gpu_environment("alpha"), "image", require_family_coverage=True
+        )
+    with pytest.raises(CiError, match="fully deferred"):
+        community_gpu_ci.run(tmp_path, {}, "alpha")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "community_gpu_ci.py",
+            "--containers",
+            "--require-family-coverage",
+            "--repository",
+            str(tmp_path),
+        ],
+    )
+    monkeypatch.setenv("TRTMC_GPU_SCOPE", "families")
+    monkeypatch.setenv("TRTMC_GPU_FAMILIES", '["alpha"]')
+    monkeypatch.setenv("TRTMC_GPU_DIRECT_FAMILIES", '["alpha"]')
+    monkeypatch.setenv("TRTMC_GPU_ADDED_FAMILIES", "[]")
+    assert community_gpu_ci.main() == 1
+    assert calls == []
+
+
+def test_missing_or_deferred_baseline_cannot_create_empty_green(tmp_path, monkeypatch):
+    _deferred_owner(tmp_path, "alpha")
+    calls = []
+    monkeypatch.setattr(
+        community_gpu_ci.subprocess, "run", lambda *args, **kwargs: calls.append(args)
+    )
+    with pytest.raises(CiError, match="GPU plan is missing"):
+        community_gpu_ci.run_containers(tmp_path, _gpu_environment("alpha"), "image")
+    _planned_owners(tmp_path, *community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    path = (
+        tmp_path / "families" / community_gpu_ci.SHARED_SMOKE_FAMILIES[0] / "tests/manifests/0.json"
+    )
+    manifest = json.loads(path.read_text())
+    manifest["testcases"][0]["community_gpu"] = False
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(CiError, match="fallback requires runnable coverage"):
+        community_gpu_ci.run_containers(tmp_path, _gpu_environment("alpha"), "image")
+    assert calls == []
+
+
+@pytest.mark.parametrize("mutation", [None, "empty", "requested", "phase", "duplicates"])
+def test_deferred_only_or_malformed_summary_never_claims_coverage(mutation):
+    row = {
+        "family": "alpha",
+        "status": "deferred",
+        "phase": "selection",
+        "failure_class": None,
+        "requested_cases": [],
+        "deferred_cases": ["large"],
+        "cases": {},
+    }
+    if mutation == "empty":
+        row["deferred_cases"] = []
+    elif mutation == "requested":
+        row["requested_cases"] = ["large"]
+    elif mutation == "phase":
+        row["phase"] = "complete"
+    elif mutation == "duplicates":
+        row["deferred_cases"] = ["large", "large"]
+    checked = community_gpu_ci._checked_summary(
+        {"schema_version": 1, "passed": True, "complete": True, "families": [row]}
+    )
+    if mutation is None:
+        assert checked is not None and not checked["passed"] and not checked["complete"]
+    else:
+        assert checked is None
+
+
+def test_summary_rejects_malformed_case_data_and_recomputes_coverage(tmp_path):
+    record = {
+        "schema_version": 1,
+        "complete": True,
+        "passed": True,
+        "families": [
+            {
+                "family": "alpha",
+                "status": "not_run",
+                "phase": "pending",
+                "failure_class": None,
+                "cases": {"one": "not_run"},
+            },
+        ],
+    }
+    checked = community_gpu_ci._checked_summary(record)
+    assert not checked["complete"] and not checked["passed"]
+    record["families"][0]["cases"]["one"] = {}
+    assert community_gpu_ci._checked_summary(record) is None
+    path = tmp_path / "log"
+    path.write_text(community_gpu_ci.SUMMARY_PREFIX + json.dumps(record))
+    assert community_gpu_ci.summarize_log(path, tmp_path / "summary") is None
+
+
+@pytest.mark.parametrize(
+    "failure,expected_code,expected_signal",
+    [
+        ("ssh", 255, "connection_closed"),
+        ("stderr-receipt", 0, None),
+        ("nonzero-receipt", 17, None),
+        ("failed-phase", 0, None),
+        ("unknown-stderr", 1, None),
+    ],
+)
+def test_probe_failure_evidence_preserves_safe_distinctions_without_accepting(
+    fake, monkeypatch, capsys, failure, expected_code, expected_signal
+):
+    snapshots = []
+    save = brev_provision._save_lease
+
+    def record(path, lease):
+        if "last_probe_evidence" in lease:
+            snapshots.append(json.loads(json.dumps(lease["last_probe_evidence"])))
+        save(path, lease)
+
+    attempts = 0
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        nonlocal attempts
+        result = fake(command, deadline, cap, **kwargs)
+        if command[1] != "exec":
+            return result
+        attempts += 1
+        if attempts > 1:
+            return result
+        if failure == "ssh":
+            return subprocess.CompletedProcess(
+                command, 255, "", "Connection closed by 192.0.2.4 private-probe-token\n"
+            )
+        if failure == "stderr-receipt":
+            return subprocess.CompletedProcess(
+                command, 0, "", result.stdout + "private-probe-token"
+            )
+        if failure == "nonzero-receipt":
+            return subprocess.CompletedProcess(command, 17, result.stdout, "private-probe-token")
+        if failure == "failed-phase":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                result.stdout.replace("TRTMC_PHASE_docker=0", "TRTMC_PHASE_docker=1"),
+                "",
+            )
+        return subprocess.CompletedProcess(
+            command, 1, "", "private-probe-token unknown upstream error"
+        )
+
+    monkeypatch.setattr(brev_provision, "_save_lease", record)
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert fake.provision() == "gpu"
+    assert fake.creates == ["gpu"] and attempts == 2
+    first = snapshots[0]
+    assert first["outcome"] == "completed" and first["returncode"] == expected_code
+    assert first["stderr_signals"] == ([expected_signal] if expected_signal else [])
+    if failure == "stderr-receipt":
+        assert not first["stdout_ready_marker"] and not first["stdout_safe_lines"]
+        assert "TRTMC_PHASE_container_gpu=0" in first["stderr_safe_lines"]
+    if failure == "failed-phase":
+        assert "TRTMC_PHASE_docker=1" in first["stdout_safe_lines"]
+    if failure == "unknown-stderr":
+        assert first["stderr_present"] and not first["stderr_safe_lines"]
+    output = capsys.readouterr().err
+    assert '"returncode": ' + str(expected_code) in output
+    assert "private-probe-token" not in output and "192.0.2.4" not in output
+    assert "private-probe-token" not in fake.lease.read_text()
+
+
+@pytest.mark.parametrize("eventually_ready", [False, True])
+def test_partial_timeout_receipt_is_recorded_but_never_establishes_readiness(
+    fake, clock, monkeypatch, capsys, eventually_ready
+):
+    snapshots = []
+    save = brev_provision._save_lease
+    attempts = 0
+
+    def record(path, lease):
+        if "last_probe_evidence" in lease:
+            snapshots.append(json.loads(json.dumps(lease["last_probe_evidence"])))
+        save(path, lease)
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        nonlocal attempts
+        result = fake(command, deadline, cap, **kwargs)
+        if command[1] == "exec":
+            attempts += 1
+            if attempts == 1 or not eventually_ready:
+                clock.now += min(cap, deadline - clock.now)
+                raise brev_provision.CommandTimeout(
+                    "bounded wait", result.stdout, "Connection reset private-probe-token"
+                )
+        return result
+
+    monkeypatch.setattr(brev_provision, "_save_lease", record)
+    monkeypatch.setattr(brev_provision, "_run", run)
+    if eventually_ready:
+        assert fake.provision(timeout=400) == "gpu"
+        assert attempts == 2
+    else:
+        with pytest.raises(brev_provision.ProvisionError, match="deadline"):
+            fake.provision(timeout=180)
+        assert attempts == 1
+        assert json.loads(fake.lease.read_text())["phase"] == "provision_failed"
+    first = snapshots[0]
+    assert first["outcome"] == "timeout" and first["returncode"] is None
+    assert (
+        first["stdout_ready_marker"] and "TRTMC_PHASE_container_gpu=0" in first["stdout_safe_lines"]
+    )
+    assert first["stderr_signals"] == ["connection_reset"]
+    assert fake.creates == ["gpu"]
+    assert "private-probe-token" not in capsys.readouterr().err + fake.lease.read_text()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process sessions required")
+@pytest.mark.parametrize("escaped_pipe", [False, True])
+def test_real_probe_timeout_retains_partial_stdout_and_stderr_with_bounded_drain(
+    tmp_path, escaped_pipe
+):
+    child_pid = tmp_path / "escaped-pid"
+    cli = tmp_path / "partial_cli.py"
+    cli.write_text(
+        "import subprocess,sys,time\nfrom pathlib import Path\n"
+        "print('TRTMC_PHASE_docker=0', flush=True)\n"
+        "print('TRTMC_PHASE_host_gpu=1', file=sys.stderr, flush=True)\n"
+        "print('Connection closed by 192.0.2.4 private-probe-token', file=sys.stderr, flush=True)\n"
+        + (
+            "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'], "
+            "start_new_session=True)\n"
+            f"Path({str(child_pid)!r}).write_text(str(child.pid))\n"
+            if escaped_pipe
+            else ""
+        )
+        + "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(brev_provision.CommandTimeout) as failure:
+            brev_provision._run([sys.executable, str(cli)], started + 0.3)
+        assert time.monotonic() - started < 2
+        error = failure.value
+        assert error.stdout == "TRTMC_PHASE_docker=0\n"
+        assert "TRTMC_PHASE_host_gpu=1\n" in error.stderr
+        evidence = brev_provision._probe_evidence(
+            error.stdout, error.stderr, "absent", None, "timeout"
+        )
+        assert evidence["stdout_safe_lines"] == ["TRTMC_PHASE_docker=0"]
+        assert evidence["stderr_safe_lines"] == ["TRTMC_PHASE_host_gpu=1"]
+        assert evidence["stderr_signals"] == ["connection_closed"]
+        assert "private-probe-token" not in json.dumps(evidence) and "192.0.2.4" not in json.dumps(
+            evidence
+        )
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_allocation_intent_is_conservative_without_issuing_create(fake):
+    assert fake.provision(prepare_only=True) == "gpu"
+    assert not fake.creates and not fake.api.requests
+    lease = json.loads(fake.lease.read_text())
+    assert lease["phase"] == "prepared" and lease["intent_prepared"]
+    assert lease["organization_id"] == "org-test"
+    assert lease["create_started"] and lease["allocation_pending"]
+    assert not lease["create_accepted"] and lease["instance_id"] is None
+    # Once the next step could run, a surviving intent is not a receipt saying
+    # that no request was submitted, even when the VM is currently absent.
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=61)
+    assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
+
+
+def test_prepared_intent_runs_one_blocking_reservation_and_cannot_be_reused(fake):
+    fake.provision(prepare_only=True)
+    assert fake.provision(from_intent=True) == "gpu"
+    assert fake.creates == ["gpu"]
+    assert json.loads(fake.lease.read_text())["phase"] == "ready"
+    with pytest.raises(brev_provision.ProvisionError, match="does not match"):
+        fake.provision(from_intent=True)
+    assert fake.creates == ["gpu"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"sku": "g6e.2xlarge"},
+        {"requested_disk_gb": 120},
+        {"provider": "nebius"},
+        {"phase": "creating"},
+        {"instance_id": "foreign-instance"},
+        {"create_accepted": True},
+        {"create_started": False},
+        {"intent_prepared": False},
+        {"allocation_pending": False},
+    ],
+)
+def test_reservation_rejects_a_changed_or_consumed_intent(fake, change):
+    fake.provision(provider="aws", prepare_only=True)
+    lease = json.loads(fake.lease.read_text())
+    lease.update(change)
+    fake.lease.write_text(json.dumps(lease))
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision(provider="aws", from_intent=True)
+    assert not fake.creates and not fake.api.requests
+
+
+def test_intent_revalidates_organization_before_post_and_never_deletes_a_foreign_vm(
+    fake, monkeypatch
+):
+    fake.provision(prepare_only=True)
+    monkeypatch.setattr(brev_provision, "_allocation_organization", lambda deadline: "org-other")
+    with pytest.raises(brev_provision.ProvisionError, match="organization changed"):
+        fake.provision(from_intent=True)
+    assert not fake.creates and not fake.api.requests
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+    assert not fake.api.requests
+
+
+@pytest.mark.parametrize("request_arrived", [False, True])
+def test_hard_kill_during_create_recovers_only_the_uploaded_conservative_intent(
+    fake, monkeypatch, request_arrived
+):
+    fake.provision(prepare_only=True)
+    uploaded_intent = fake.lease.read_bytes()
+
+    def killed(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] == "create":
+            if request_arrived:
+                fake(command, deadline, cap, **kwargs)
+            # A process kill skips the helper's exception handler and the
+            # post-reservation artifact upload in the producer job.
+            raise SystemExit(137)
+        return fake(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", killed)
+    with pytest.raises(SystemExit):
+        fake.provision(from_intent=True)
+    fake.lease.write_bytes(uploaded_intent)
+    monkeypatch.setattr(brev_provision, "_run", fake)
+    if request_arrived:
+        assert brev_provision.cleanup("gpu", lease_file=fake.lease) == "gpu"
+        assert json.loads(fake.lease.read_text())["cleanup_confirmed"]
+        assert fake.name is None and fake.creates == ["gpu"]
+    else:
+        with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+            brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=61)
+        assert not fake.creates
+        assert not json.loads(fake.lease.read_text()).get("cleanup_confirmed", False)
+
+
+def test_prepare_and_consume_modes_are_mutually_exclusive_without_provider_calls(fake):
+    with pytest.raises(ValueError, match="separate operations"):
+        fake.provision(prepare_only=True, from_intent=True)
+    assert not fake.commands and not fake.api.requests
+
+
+def test_prepared_intent_cannot_be_consumed_by_a_new_run_attempt(fake, monkeypatch):
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    name = "trtmc-gpu-ci-123-1"
+    assert brev_provision.provision(name, lease_file=fake.lease, prepare_only=True) == name
+    lease = json.loads(fake.lease.read_text())
+    assert lease["run_id"] == "123" and lease["run_attempt"] == "1"
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    with pytest.raises(brev_provision.ProvisionError, match="different run attempt"):
+        brev_provision.provision(name, lease_file=fake.lease, from_intent=True)
+    assert not fake.creates and not fake.api.requests
+
+
+# Captured from v0.6.335 against a local synthetic HTTP server. Only the origin,
+# organization and instance name are normalized; no live credentials are used.
+_RATE_LIMIT_STDERR = """Attempting to create 1 instance(s) with 1 parallel attempts
+Instance types to try: g6.4xlarge (500GB disk)
+
+Trying g6.4xlarge for 1 instance(s)...
+[Worker 1] Trying g6.4xlarge for instance 'gpu'...
+[Worker 1] g6.4xlarge Failed: [error]\x20
+github.com/brevdev/brev-cli/pkg/cmd/gpucreate.(*createContext).createWorkspace
+/go/src/github.com/brevdev/brev-cli/pkg/cmd/gpucreate/gpucreate.go:1252
+: https://brevapi.us-west-2-prod.control-plane.brev.dev/api/organizations/org-test/workspaces?cli_version=v0.6.335&local=true&os=linux&utm_source=cli 429 Too Many Requests {"errors": [{"type": "RateLimitExceeded", "message": "rate limit exceeded"}]}
+
+Type g6.4xlarge had failures, trying next type...
+
+
+Warning: Only created 0/1 instances
+could only create 0/1 instances
+"""
+
+
+def _rate_limit_result(stderr=_RATE_LIMIT_STDERR, *, returncode=1, stdout=""):
+    return subprocess.CompletedProcess(["brev", "create", "gpu"], returncode, stdout, stderr)
+
+
+def _script_rate_limited_create(fake, monkeypatch, results):
+    remaining = list(results)
+    fake.create_leases = []
+    monkeypatch.setattr(brev_provision.secrets, "randbelow", lambda upper: 0)
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] != "create":
+            return fake(command, deadline, cap, **kwargs)
+        fake.create_leases.append(json.loads(fake.lease.read_text()))
+        fake(command, deadline, cap, **kwargs)
+        assert remaining, "unexpected extra create request"
+        result = remaining.pop(0)
+        if isinstance(result, BaseException):
+            fake.name = None
+            raise result
+        if result.returncode:
+            fake.name = None
+        return result
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    return run
+
+
+def _rate_limit_lease(fake):
+    return json.loads(fake.lease.read_text())
+
+
+def test_429_retries_after_delay_and_reuses_one_allocation(fake, clock, monkeypatch):
+    _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result("", returncode=0)]
+    )
+
+    assert fake.provision() == "gpu"
+
+    attempts = _rate_limit_lease(fake)["create_attempts"]
+    assert [attempt["outcome"] for attempt in attempts] == ["rate_limited", "accepted"]
+    creates = [(command, at) for command, at in fake.command_times if command[1] == "create"]
+    assert len(creates) == 2
+    assert 60 <= creates[1][1] - creates[0][1] <= 90
+    assert all(command[2] == "gpu" for command, _at in creates)
+    assert all(lease["create_attempts"][-1]["outcome"] == "pending" for lease in fake.create_leases)
+    assert all(lease["allocation_pending"] for lease in fake.create_leases)
+    assert _rate_limit_lease(fake)["instance_id"] == "allocation-gpu"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    assert fake.name is None and _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_three_429s_return_infra_error_then_confirm_no_dangling_allocation(
+    fake, clock, monkeypatch
+):
+    _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result(), _rate_limit_result()]
+    )
+
+    status = brev_provision.provision_main(["--instance", "gpu", "--lease-file", str(fake.lease)])
+
+    assert status == 75
+    assert len(fake.creates) == 3
+    assert [attempt["outcome"] for attempt in _rate_limit_lease(fake)["create_attempts"]] == [
+        "rate_limited"
+    ] * 3
+    assert not any(command[1] in {"exec", "refresh"} for command in fake.commands)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    lease = _rate_limit_lease(fake)
+    assert lease["cleanup_confirmed"] and not lease["allocation_pending"]
+    assert lease["phase"] == "unallocated"
+    assert len([request for request in fake.api.requests if request[0] == "LIST"]) >= 2
+    assert not any(request[0] == "DELETE" for request in fake.api.requests)
+
+
+def test_visible_instance_after_429_is_recovered_without_another_create(fake, monkeypatch):
+    create_run = _script_rate_limited_create(fake, monkeypatch, [_rate_limit_result()])
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] == "ls" and fake.creates:
+            fake.name = "gpu"
+        return create_run(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert fake.provision() == "gpu"
+    assert fake.creates == ["gpu"]
+    assert _rate_limit_lease(fake)["instance_id"] == "allocation-gpu"
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    assert fake.name is None and _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_inventory_429_does_not_authorize_another_create(fake, clock, monkeypatch):
+    create_run = _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result("", returncode=0)]
+    )
+    unavailable = []
+
+    def run(command, deadline, cap=brev_provision.CLI_TIMEOUT, **kwargs):
+        if command[1] == "ls" and len(fake.creates) == 1 and len(unavailable) < 2:
+            unavailable.append(clock.now)
+            return subprocess.CompletedProcess(command, 1, "", "429 Too Many Requests")
+        return create_run(command, deadline, cap, **kwargs)
+
+    monkeypatch.setattr(brev_provision, "_run", run)
+    assert fake.provision() == "gpu"
+    assert len(unavailable) == 2
+    times = [at for command, at in fake.command_times if command[1] == "create"]
+    assert len(times) == 2 and times[1] >= unavailable[-1] + brev_provision.POLL_INTERVAL
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _rate_limit_result("rate limit exceeded"),
+        _rate_limit_result(
+            _RATE_LIMIT_STDERR.replace("429 Too Many Requests", "500 Internal Server Error")
+        ),
+        _rate_limit_result(_RATE_LIMIT_STDERR + "prior workspace POST returned HTTP 403\n"),
+        brev_provision.CommandTimeout("create timed out", "", _RATE_LIMIT_STDERR),
+        OSError("connection reset after workspace POST"),
+    ],
+    ids=["text-only", "http-500", "mixed-status", "timeout", "transport"],
+)
+def test_uncertain_create_is_never_retried_or_declared_clean(fake, monkeypatch, failure):
+    _script_rate_limited_create(fake, monkeypatch, [failure])
+    with pytest.raises((brev_provision.ProvisionError, OSError)):
+        fake.provision()
+    assert fake.creates == ["gpu"]
+    assert _rate_limit_lease(fake)["allocation_pending"]
+    assert _rate_limit_lease(fake)["create_attempts"][0]["outcome"] == "unknown"
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+@pytest.mark.parametrize("during_post", [False, True], ids=["backoff", "post"])
+def test_interruption_preserves_only_the_requests_that_could_have_been_sent(
+    fake, clock, monkeypatch, during_post
+):
+    responses = (
+        [_rate_limit_result(), KeyboardInterrupt()] if during_post else [_rate_limit_result()]
+    )
+    _script_rate_limited_create(fake, monkeypatch, responses)
+    if not during_post:
+
+        def interrupt_sleep(seconds):
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(brev_provision.time, "sleep", interrupt_sleep)
+    with pytest.raises(KeyboardInterrupt):
+        fake.provision()
+    monkeypatch.setattr(brev_provision.time, "sleep", clock.sleep)
+    outcomes = [attempt["outcome"] for attempt in _rate_limit_lease(fake)["create_attempts"]]
+    if during_post:
+        assert len(fake.creates) == 2 and outcomes == ["rate_limited", "unknown"]
+        with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+            brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+        assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+    else:
+        assert fake.creates == ["gpu"] and outcomes == ["rate_limited"]
+        assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+        assert _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _rate_limit_result(_RATE_LIMIT_STDERR.replace("org-test", "another-org")),
+        _rate_limit_result(
+            _RATE_LIMIT_STDERR.replace(
+                "brevapi.us-west-2-prod.control-plane.brev.dev", "other.example"
+            )
+        ),
+        _rate_limit_result(_RATE_LIMIT_STDERR.replace("g6.4xlarge", "g6e.2xlarge")),
+        _rate_limit_result(_RATE_LIMIT_STDERR.replace("instance 'gpu'", "instance 'unowned'")),
+        _rate_limit_result(
+            _RATE_LIMIT_STDERR.replace("1 parallel attempts", "2 parallel attempts")
+        ),
+        _rate_limit_result(_RATE_LIMIT_STDERR.removesuffix("could only create 0/1 instances\n")),
+        _rate_limit_result(stdout="Created an instance"),
+        _rate_limit_result(returncode=0),
+    ],
+    ids=["org", "origin", "sku", "name", "parallel", "truncated", "stdout", "exit-code"],
+)
+def test_only_complete_matching_workspace_429_is_retryable(result):
+    assert not brev_provision._create_was_rate_limited(result, "gpu", "org-test", "g6.4xlarge", 500)
+
+
+def test_pinned_cli_workspace_429_is_recognized():
+    assert brev_provision._create_was_rate_limited(
+        _rate_limit_result(), "gpu", "org-test", "g6.4xlarge", 500
+    )
+
+
+class _OwnedInstances:
+    """Control-plane state can expose multiple IDs independently of create's response."""
+
+    def __init__(self, clock, identities=()):
+        self.clock = clock
+        self.instances = {identity: self.workspace(identity) for identity in identities}
+        self.requests = []
+        self.list_count = 0
+        self.on_list = None
+        self.delete_statuses = []
+        self.auth_status = 200
+
+    @staticmethod
+    def workspace(identity):
+        return {
+            "id": identity,
+            "name": "gpu",
+            "organizationId": "org-test",
+            "instanceType": "g6.4xlarge",
+            "status": "RUNNING",
+        }
+
+    def __call__(self, method, identity, deadline):
+        self.requests.append((method, identity, self.clock.now))
+        assert deadline is None or self.clock.now < deadline
+        if method == "AUTH":
+            return self.auth_status, {"id": "org-test"}
+        if method == "LIST":
+            self.list_count += 1
+            if self.on_list:
+                self.on_list(self)
+            return 200, {"items": list(self.instances.values())}
+        if method == "GET":
+            return (200, self.instances[identity]) if identity in self.instances else (404, None)
+        assert method == "DELETE"
+        status = self.delete_statuses.pop(0) if self.delete_statuses else 202
+        if status not in {200, 202}:
+            return status, None
+        body = self.instances.pop(identity, None)
+        return (202, body) if body is not None else (404, None)
+
+
+def _rejected_creation(fake, monkeypatch):
+    _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result(), _rate_limit_result()]
+    )
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision()
+
+
+def test_late_instance_between_cleanup_inventories_is_deleted(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock)
+
+    def materialize(api):
+        if api.list_count == 2:
+            api.instances["late-gpu"] = api.workspace("late-gpu")
+
+    api.on_list = materialize
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    assert not api.instances
+    assert [identity for method, identity, _at in api.requests if method == "DELETE"] == [
+        "late-gpu"
+    ]
+    assert _rate_limit_lease(fake)["cleanup_confirmed"]
+    assert _rate_limit_lease(fake)["cleanup_instances"]["late-gpu"]["cleanup_confirmed"]
+
+
+def test_every_owned_duplicate_is_deleted_and_inventory_is_rechecked(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock, ["gpu-one", "gpu-two"])
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=360) == "gpu"
+    assert not api.instances
+    deletions = [(identity, at) for method, identity, at in api.requests if method == "DELETE"]
+    assert {identity for identity, _at in deletions} == {"gpu-one", "gpu-two"}
+    assert (
+        len(
+            [
+                at
+                for method, _identity, at in api.requests
+                if method == "LIST" and at >= deletions[-1][1]
+            ]
+        )
+        >= 2
+    )
+    assert set(_rate_limit_lease(fake)["cleanup_instances"]) == {"gpu-one", "gpu-two"}
+    assert all(
+        child["cleanup_confirmed"]
+        for child in _rate_limit_lease(fake)["cleanup_instances"].values()
+    )
+    assert _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_cleanup_retries_delete_429_without_leaving_the_instance(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock, ["gpu-one"])
+    api.delete_statuses = [429, 202]
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=360) == "gpu"
+    deletions = [at for method, _identity, at in api.requests if method == "DELETE"]
+    assert len(deletions) == 2 and deletions[1] - deletions[0] >= brev_provision.POLL_INTERVAL
+    assert not api.instances and _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "field,value", [("organizationId", "another-org"), ("instanceType", "g6.8xlarge")]
+)
+def test_discovery_never_deletes_a_foreign_org_or_sku(fake, clock, monkeypatch, field, value):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock, ["not-owned"])
+    api.instances["not-owned"][field] = value
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert "not-owned" in api.instances
+    assert not any(method == "DELETE" for method, _identity, _at in api.requests)
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+def test_org_query_failure_delays_create_and_org_change_blocks_it(fake, clock, monkeypatch):
+    _script_rate_limited_create(fake, monkeypatch, [_rate_limit_result()])
+    attempts = []
+
+    def organization(deadline):
+        attempts.append(clock.now)
+        if len(attempts) == 1:
+            return "org-test"
+        if len(attempts) == 2:
+            raise brev_provision.InventoryError("429 Too Many Requests")
+        return "changed-org"
+
+    monkeypatch.setattr(brev_provision, "_allocation_organization", organization)
+    with pytest.raises(brev_provision.ProvisionError, match="organization changed"):
+        fake.provision()
+    assert fake.creates == ["gpu"]
+    assert attempts[2] - attempts[1] >= brev_provision.POLL_INTERVAL
+    assert _rate_limit_lease(fake)["organization_id"] == "org-test"
+
+
+def test_one_conflicting_sku_does_not_strand_another_owned_instance(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+    api = _OwnedInstances(clock, ["wrong-sku", "owned-gpu"])
+    api.instances["wrong-sku"]["instanceType"] = "g6.8xlarge"
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240)
+    assert set(api.instances) == {"wrong-sku"}
+    assert [identity for method, identity, _at in api.requests if method == "DELETE"] == [
+        "owned-gpu"
+    ]
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+def test_known_owned_id_is_deleted_even_when_discovery_is_rate_limited(fake, clock, monkeypatch):
+    _script_rate_limited_create(
+        fake, monkeypatch, [_rate_limit_result(), _rate_limit_result("", returncode=0)]
+    )
+    assert fake.provision() == "gpu"
+    api = _OwnedInstances(clock, ["allocation-gpu"])
+    api.auth_status = 429
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240)
+    assert not api.instances
+    assert any(method == "DELETE" for method, _identity, _at in api.requests)
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+def test_500_after_a_429_stays_unknown_and_cannot_finish_empty_cleanup(fake, monkeypatch):
+    _script_rate_limited_create(
+        fake,
+        monkeypatch,
+        [
+            _rate_limit_result(),
+            _rate_limit_result(
+                _RATE_LIMIT_STDERR.replace("429 Too Many Requests", "500 Internal Server Error")
+            ),
+        ],
+    )
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision()
+    assert fake.creates == ["gpu", "gpu"]
+    assert [attempt["outcome"] for attempt in _rate_limit_lease(fake)["create_attempts"]] == [
+        "rate_limited",
+        "unknown",
+    ]
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+
+def test_provision_budget_exhausted_during_backoff_never_posts_again(fake, clock, monkeypatch):
+    _script_rate_limited_create(fake, monkeypatch, [_rate_limit_result()])
+    with pytest.raises(brev_provision.ProvisionError):
+        fake.provision(timeout=30)
+    assert fake.creates == ["gpu"]
+    assert clock.now == 30
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=240) == "gpu"
+    assert _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_cleanup_restarts_do_not_starve_a_second_id_behind_stuck_deletion(fake, clock, monkeypatch):
+    _rejected_creation(fake, monkeypatch)
+
+    class StuckFirstInstance(_OwnedInstances):
+        def __call__(self, method, identity, deadline):
+            if method == "DELETE" and identity == "first-stuck":
+                self.requests.append((method, identity, self.clock.now))
+                self.instances[identity]["status"] = "DELETING"
+                return 202, self.instances[identity]
+            return super().__call__(method, identity, deadline)
+
+    api = StuckFirstInstance(clock, ["first-stuck", "second-owned"])
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    # Each call reloads the persisted lease, as an owner/backstop replacement
+    # process does. The first deletion never completes within any time budget.
+    for _ in range(3):
+        with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+            brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=90)
+        assert "first-stuck" in api.instances
+        assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+
+    assert set(api.instances) == {"first-stuck"}
+    assert any(
+        method == "DELETE" and identity == "second-owned" for method, identity, _at in api.requests
+    )
+    assert _rate_limit_lease(fake)["cleanup_instances"]["second-owned"]["cleanup_confirmed"]
+
+
+def test_immutable_intent_records_retry_policy_before_create(fake):
+    assert fake.provision(prepare_only=True) == "gpu"
+    lease = _rate_limit_lease(fake)
+    assert lease["rate_limit_retry_policy"] is True
+    assert "create_attempts" not in lease
+    assert lease["create_started"] and lease["allocation_pending"]
+    assert fake.creates == []
+
+
+def test_backstop_with_only_immutable_intent_recovers_all_same_name_ids(fake, clock, monkeypatch):
+    fake.provision(prepare_only=True)
+    assert "create_attempts" not in _rate_limit_lease(fake)
+    api = _OwnedInstances(clock, ["first-created", "second-created"])
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=360) == "gpu"
+
+    assert not api.instances
+    assert {identity for method, identity, _at in api.requests if method == "DELETE"} == {
+        "first-created",
+        "second-created",
+    }
+    assert _rate_limit_lease(fake)["cleanup_confirmed"]
+
+
+def test_backstop_with_only_immutable_intent_cannot_prove_empty_creation_rejected(
+    fake, clock, monkeypatch
+):
+    fake.provision(prepare_only=True)
+    assert "create_attempts" not in _rate_limit_lease(fake)
+    api = _OwnedInstances(clock)
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=130)
+
+    assert not _rate_limit_lease(fake).get("cleanup_confirmed", False)
+    assert _rate_limit_lease(fake)["allocation_pending"]
+    assert not any(method == "DELETE" for method, _identity, _at in api.requests)
+
+
+@pytest.mark.parametrize("scope", ["families", "all"])
+@pytest.mark.parametrize("added_count", [0, 2, 5])
+def test_small_pr_admission_preserves_every_changed_owner_at_limit(scope, added_count):
+    changed = [f"owner_{index}" for index in range(community_gpu_ci.MAX_CHANGED_GPU_FAMILIES)]
+    direct, added = changed[added_count:], changed[:added_count]
+    selected = community_gpu_ci.selected_families(
+        scope, json.dumps(direct), json.dumps(direct), json.dumps(added)
+    )
+    expected = set(changed)
+    if scope == "all":
+        expected.update(community_gpu_ci.SHARED_SMOKE_FAMILIES)
+    assert selected == tuple(sorted(expected))
+
+
+@pytest.mark.parametrize("scope", ["families", "all"])
+@pytest.mark.parametrize("count,added_count", [(6, 0), (6, 2), (6, 6), (86, 0)])
+def test_large_pr_admission_requires_splitting_without_dropping_owners(scope, count, added_count):
+    changed = sorted(f"owner_{index}" for index in range(count))
+    direct, added = changed[added_count:], changed[:added_count]
+    with pytest.raises(community_gpu_ci.CommunityGpuPlanRejected, match="split this PR") as error:
+        community_gpu_ci.selected_families(
+            scope, json.dumps(direct), json.dumps(direct), json.dumps(added)
+        )
+    assert f"changes {count} families" in str(error.value)
+
+
+def test_shared_only_plan_does_not_count_the_trusted_family_inventory_as_changed():
+    inventory = sorted(f"owner_{index}" for index in range(86))
+    assert community_gpu_ci.selected_families("all", json.dumps(inventory), "[]", "[]") == (
+        community_gpu_ci.SHARED_SMOKE_FAMILIES
+    )
+
+
+@pytest.mark.parametrize(
+    "classes,headline",
+    [
+        (["infra_failure"], "CI preparation failure (infra_failure)."),
+        (["pr_failure"], "Family execution failure (pr_failure)."),
+        (["infra_failure", "pr_failure"], "CI preparation failure and family execution failure."),
+        ([None], "GPU CI passed."),
+        (["pending"], "GPU CI incomplete."),
+    ],
+)
+def test_gpu_summary_explains_execution_boundary_and_existing_evidence(tmp_path, classes, headline):
+    rows = []
+    for index, category in enumerate(classes):
+        pending = category == "pending"
+        passed = category is None
+        rows.append(
+            {
+                "family": f"owner_{index}",
+                "status": "not_run" if pending else "passed" if passed else "failed",
+                "phase": "pending" if pending else "complete" if passed else "environment",
+                "failure_class": None if pending else category,
+                "entrypoint_started": passed or category == "pr_failure",
+                "cases": {"one": "not_run" if pending else "passed" if passed else "failed"},
+                "evidence": "Recorded failure cause" if category and not pending else "",
+            }
+        )
+    log, output = tmp_path / "log", tmp_path / "summary"
+    log.write_text(
+        community_gpu_ci.SUMMARY_PREFIX + json.dumps({"schema_version": 1, "families": rows})
+    )
+    result = community_gpu_ci.summarize_log(log, output)
+    rendered = output.read_text()
+    assert f"**{headline}**" in rendered
+    assert "| Family entrypoint |" in rendered and "| Evidence |" in rendered
+    assert "does not establish that this PR introduced the defect" in rendered
+    assert result["passed"] is (classes == [None])
+    if "pr_failure" in classes:
+        assert "| started |" in rendered and "Recorded failure cause" in rendered
+    if "infra_failure" in classes:
+        assert "| not started |" in rendered and "Recorded failure cause" in rendered
+
+
+def test_gpu_summary_renders_untrusted_evidence_as_bounded_plain_text(tmp_path):
+    log, output = tmp_path / "log", tmp_path / "summary"
+    evidence = (
+        '<img src="https://example.test/leak">[click](https://example.test) | `command`\n'
+        + "x" * 2000
+    )
+    row = {
+        "family": "alpha",
+        "status": "failed",
+        "phase": "environment",
+        "failure_class": "infra_failure",
+        "entrypoint_started": False,
+        "cases": {"one": "not_run"},
+        "evidence": evidence,
+        "unrelated_private_metadata": "must-not-render",
+    }
+    log.write_text(
+        community_gpu_ci.SUMMARY_PREFIX + json.dumps({"schema_version": 1, "families": [row]})
+    )
+    community_gpu_ci.summarize_log(log, output)
+    rendered = output.read_text()
+    assert "<img" not in rendered and "&lt;img" in rendered
+    assert "[click]" not in rendered and "`command`" not in rendered
+    assert "&#124;" in rendered and "x" * 1001 not in rendered
+    assert "must-not-render" not in rendered
+    assert len([line for line in rendered.splitlines() if line.startswith("| alpha |")]) == 1
+
+
+@pytest.mark.parametrize("contents", [None, "ordinary setup output\n", "TRTMC_GPU_SUMMARY={}"])
+def test_missing_gpu_summary_reports_infra_without_blame_or_unproven_execution(tmp_path, contents):
+    log, output = tmp_path / "log", tmp_path / "summary"
+    if contents is not None:
+        log.write_text(contents)
+    assert community_gpu_ci.summarize_log(log, output) is None
+    rendered = output.read_text()
+    assert "CI preparation failure (infra_failure)" in rendered
+    assert "family entrypoint execution is not confirmed" in rendered
+    assert "GPU CI passed" not in rendered

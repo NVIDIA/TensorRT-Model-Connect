@@ -92,9 +92,14 @@ When reporting validation:
 - Tie remote CI claims to the exact head SHA. A check on an older head is not
   evidence for the current diff.
 - Distinguish a skipped check from a passing check and a dry run from execution.
-- In this repository, say premerge passed only when the current head has
-  `TRTMC Internal CI / Automated premerge gate=PASS`. A successful Internal CI Bridge dispatch or
-  Source workflow is not the premerge result.
+- In this repository, say ordinary premerge passed only when the current head
+  has `Stable Community GPU CI=success`, including admitted GPU coverage and confirmed
+  cleanup. A dispatch, CPU-only result or optional Dev pass is not that result.
+- Describe a green aggregate as CI-ready for NVIDIA employee maintainer review,
+  not as human approval or an automatic merge. Internal premerge remains an
+  optional, explicitly maintainer-authorized diagnostic path, reported as
+  `Optional Internal CI`; it is not required and cannot override a Stable plan
+  rejection. Private Nightly and wider qualification remain separate.
 - Do not quote or link private Internal CI logs, artifacts, runner details,
   package coordinates, or internal URLs in Source PR text. Use the sanitized
   exact-head status and separately reproducible public evidence.
@@ -128,8 +133,8 @@ Before returning a message, verify:
 - Validation includes both commands and pass/fail results.
 - Base/head and changed-file scope match the artifact being described.
 - CI and model-proof claims refer to the current head SHA.
-- Source/Internal CI wording respects the public evidence boundary and does
-  not call a bridge dispatch a test pass.
+- Community CI and private Nightly wording respects the public evidence boundary
+  and does not call a dispatch or CPU-only result a complete premerge pass.
 - Failures, skips, unrun checks, and residual risks are explicit.
 - The PR title and expected squash/rebase title are aligned and contain no
   repository-banned terms.

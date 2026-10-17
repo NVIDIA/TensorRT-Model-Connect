@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: TensorRT-Model-Connect Internal CI Bridge
+name: Optional Internal CI Bridge
 
 run-name: >-
-  PR #${{ github.event.pull_request.number || inputs.pr_number }} · internal CI dispatch
+  PR #${{ github.event.pull_request.number || inputs.pr_number }} · optional internal CI dispatch
 
+# Maintainer opt-in only. This workflow never publishes a merge-gate status.
 on:
   pull_request_target:
     branches:
@@ -14,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: Open pull request number to test
+        description: Open pull request number for optional Internal CI (not a merge gate)
         required: true
         type: string
 
@@ -31,7 +32,7 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       (
-        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
         (
           github.event_name == 'pull_request_target' &&
           github.ref == 'refs/heads/main' &&
@@ -56,13 +57,14 @@ jobs:
         id: snapshot
         env:
           GH_TOKEN: ${{ github.token }}
-          ACTOR: ${{ github.actor }}
+          ACTOR: ${{ github.triggering_actor }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          test "$GITHUB_REF" = refs/heads/main
 
           actor_role="$(
             gh api --method GET \
@@ -72,7 +74,7 @@ jobs:
           case "$actor_role" in
             maintain|admin) ;;
             *)
-              echo "::error::Only actors with maintain or admin access may dispatch CI."
+              echo "::error::Only actors with maintain or admin access may dispatch optional Internal CI."
               exit 1
               ;;
           esac
@@ -115,42 +117,58 @@ jobs:
           [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$merge_tree" =~ ^[0-9a-f]{40}$ ]]
 
-          # CPU success belongs to the exact PR head. Main may advance after
-          # CPU finishes; accept an older tested base in the authorized base's
-          # history. Internal CI resolves and pins its own merge snapshot.
+          # CPU success belongs to the exact PR head. Accept promoted Stable
+          # CPU even when its GPU plan is too large or GPU execution fails:
+          # optional Internal CI is useful precisely for those investigations.
+          # Stable dispatch head_sha identifies trusted CI code, not PR code;
+          # bind source identity through its title and validated merge parents.
+          # Main may advance after CPU finishes; accept an older tested base
+          # in the authorized base's history, as with legacy CPU runs.
           if ! community_ci_runs="$(
-            gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100"
+            gh api --paginate --method GET \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
+              | jq -s '{workflow_runs: [.[].workflow_runs[]]}'
           )"; then
-            echo "::error::Unable to query Community CI runs for PR head $head_sha."
+            echo "::error::Unable to query legacy Community CPU runs for PR head $head_sha."
+            exit 1
+          fi
+          if ! stable_ci_runs="$(
+            gh api --paginate --method GET \
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/runs?event=workflow_dispatch&branch=main&per_page=100" \
+              | jq -s '{workflow_runs: [.[].workflow_runs[]]}'
+          )"; then
+            echo "::error::Unable to query trusted Stable CPU runs for PR head $head_sha."
             exit 1
           fi
           community_ci_title_prefix="PR #$PR_NUMBER · community CI · head $head_sha · merge "
+          stable_ci_title_prefix="Stable Community CI · PR #$PR_NUMBER · head $head_sha · merge "
           community_ci_run=""
           community_cpu_job=""
-          cpu_reason="No eligible Community CI run was found."
-          if [ -n "$community_ci_runs" ]; then
-            community_ci_candidates="$(
-              jq -r \
-                --arg title_prefix "$community_ci_title_prefix" \
-                --arg head_sha "$head_sha" \
-                '.workflow_runs
-                 | map(
-                     select(.event == "pull_request" and .head_sha == $head_sha)
-                     | select(.display_title | startswith($title_prefix))
-                     | {
-                         id,
-                         updated_at,
-                         merge_sha: (.display_title | ltrimstr($title_prefix))
-                       }
-                   )
-                 | sort_by(.updated_at)
-                 | reverse
-                 | .[]
-                 | [.id, .merge_sha]
-                 | @tsv' \
-                <<<"$community_ci_runs"
-            )"
+          cpu_reason="No eligible Community CPU run was found."
+          community_ci_candidates="$(
+            printf '%s\n%s\n' "$community_ci_runs" "$stable_ci_runs" | jq -sr \
+              --arg title_prefix "$community_ci_title_prefix" \
+              --arg stable_prefix "$stable_ci_title_prefix" \
+              --arg head_sha "$head_sha" \
+              '.[0] as $legacy | .[1] as $stable | ([
+                  $legacy.workflow_runs[]
+                  | select(.event == "pull_request" and .head_sha == $head_sha)
+                  | select(.display_title | startswith($title_prefix))
+                  | {id, updated_at, merge_sha: (.display_title | ltrimstr($title_prefix))}
+                ] + [
+                  $stable.workflow_runs[]
+                  | select(.event == "workflow_dispatch" and .head_branch == "main")
+                  | select(.path == ".github/workflows/community-ci.yml")
+                  | select(.display_title | startswith($stable_prefix))
+                  | {id, updated_at, merge_sha: (.display_title | ltrimstr($stable_prefix))}
+                ])
+               | sort_by(.updated_at)
+               | reverse
+               | .[]
+               | [.id, .merge_sha]
+               | @tsv'
+          )"
+          if [ -n "$community_ci_candidates" ]; then
             while IFS=$'\t' read -r candidate_run candidate_merge_sha; do
               [[ "$candidate_run" =~ ^[1-9][0-9]*$ ]] || continue
               [[ "$candidate_merge_sha" =~ ^[0-9a-f]{40}$ ]] || continue
@@ -234,7 +252,7 @@ jobs:
             "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci"
 
   announce:
-    name: Publish pending result
+    name: Publish optional pending result
     needs: authorize
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -243,7 +261,7 @@ jobs:
       statuses: write
 
     steps:
-      - name: Publish the pending automated status
+      - name: Publish the optional pending status
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
@@ -252,11 +270,11 @@ jobs:
           gh api --silent --method POST \
             "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
             -f state=pending \
-            -f context="TRTMC Internal CI / Automated premerge gate" \
-            -f description="Automated internal CI is running" \
+            -f context="Optional Internal CI" \
+            -f description="Optional Internal CI is running; not a merge gate" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
-      - name: Remove the previous automated failure comment
+      - name: Remove the previous optional failure comment
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -273,7 +291,7 @@ jobs:
               done
 
   dispatch:
-    name: Internal CI dispatch
+    name: Optional Internal CI dispatch
     needs:
       - authorize
       - announce
@@ -289,7 +307,7 @@ jobs:
       private_conclusion: ${{ steps.private_result.outputs.conclusion }}
 
     steps:
-      - name: Dispatch internal premerge CI
+      - name: Dispatch optional internal premerge CI
         id: private_run
         env:
           GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
@@ -392,7 +410,7 @@ jobs:
           done
 
   publish:
-    name: Publish automated result
+    name: Publish optional result
     needs:
       - authorize
       - announce
@@ -417,7 +435,7 @@ jobs:
         run: |
           set -euo pipefail
           state=failure
-          description="Automated internal CI did not complete; details withheld"
+          description="Optional Internal CI incomplete; not a merge gate; details withheld"
           publish_comment=true
 
           # Main may advance while this exact PR head is in CI. pull.base.sha
@@ -437,7 +455,7 @@ jobs:
               && [ "$current_head" = "$HEAD_SHA" ]; then
               snapshot_current=true
             elif [ "$current_head" != "$HEAD_SHA" ]; then
-              description="Automated internal CI result was superseded by a newer PR head"
+              description="Optional Internal CI result was superseded by a newer PR head"
               publish_comment=false
             fi
           fi
@@ -446,14 +464,14 @@ jobs:
             case "$PRIVATE_CONCLUSION" in
               success)
                 state=success
-                description="Automated internal CI passed"
+                description="Optional Internal CI passed; not a merge gate"
                 publish_comment=false
                 ;;
               failure)
-                description="Automated internal CI failed; details withheld"
+                description="Optional Internal CI failed; not a merge gate; details withheld"
                 ;;
               cancelled|timed_out|skipped|neutral|action_required|unknown|"")
-                description="Automated internal CI did not complete; details withheld"
+                description="Optional Internal CI incomplete; not a merge gate; details withheld"
                 ;;
             esac
           fi
@@ -476,10 +494,10 @@ jobs:
           set -euo pipefail
           mkdir -p "$(dirname "$PUBLIC_FAILURE_LOG")"
           {
-            echo "TRTMC Protected CI result"
+            echo "Optional Internal CI result"
             echo "========================="
             echo
-            echo "Status: FAILED"
+            echo "Status: FAILED (optional; not a merge gate)"
             echo "Pull request: #$PR_NUMBER"
             echo "Head commit: $HEAD_SHA"
             echo "Reason: $DESCRIPTION"
@@ -488,17 +506,17 @@ jobs:
           } > "$PUBLIC_FAILURE_LOG"
           {
             echo '<!-- trtmc-internal-ci-result -->'
-            echo 'This is an automated Internal CI result; no review from an individual maintainer is requested.'
+            echo 'This optional Internal CI result does not determine merge readiness. Stable Community GPU CI remains the required CI gate.'
             echo
             echo '```text'
             sed -n '1,240p' "$PUBLIC_FAILURE_LOG"
             echo '```'
             echo
-            echo 'Open the public Source Actions run from the automated status link above.'
+            echo 'Open the public Actions run from the Optional Internal CI status link above.'
           } > "$COMMENT_BODY"
           [ "$(wc -c < "$COMMENT_BODY")" -le 60000 ]
 
-      - name: Publish the terminal automated status
+      - name: Publish the terminal optional status
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
@@ -509,7 +527,7 @@ jobs:
           gh api --silent --method POST \
             "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
             -f state="$STATE" \
-            -f context="TRTMC Internal CI / Automated premerge gate" \
+            -f context="Optional Internal CI" \
             -f description="$DESCRIPTION" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
@@ -527,7 +545,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upsert the automated failure comment
+      - name: Upsert the optional failure comment
         if: ${{ steps.result.outputs.state != 'success' && steps.result.outputs.publish_comment == 'true' }}
         continue-on-error: true
         env:
@@ -557,6 +575,6 @@ jobs:
             done
           fi
 
-      - name: Preserve the failed automated verdict
+      - name: Preserve the failed optional verdict
         if: ${{ steps.result.outputs.state != 'success' }}
         run: exit 1

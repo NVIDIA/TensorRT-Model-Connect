@@ -302,10 +302,17 @@ claiming execution.
 
 Interpret CI carefully:
 
-- Public Community CI and protected premerge are different evidence tiers.
-- A bridge dispatch is not a protected test pass.
-- Only a passing `TRTMC Internal CI / Automated premerge gate` on the current
-  head proves protected premerge for that head.
+- `Stable Community GPU CI` is the ordinary automated premerge gate: CPU checks,
+  admitted GPU coverage and confirmed resource cleanup for the current head.
+- Dispatch success, a CPU-only result and optional Dev qualification do not
+  substitute for that aggregate.
+- A passing aggregate makes the PR CI-ready for an NVIDIA employee maintainer's
+  review; it does not prove human acceptance or authorize a merge.
+- The retained Internal premerge bridge supports explicitly maintainer-authorized
+  diagnostics, including large PRs, through `run-internal-ci` or manual dispatch.
+  `Optional Internal CI` is not required and does not override a Stable plan
+  rejection. Private Nightly, broader hardware tests and release qualification
+  remain different evidence tiers.
 - A later push invalidates earlier head evidence. A base advance may also
   require a fresh exact-merge result.
 - Green source or architecture checks do not prove TensorRT build, checkpoint
