@@ -34,7 +34,7 @@ target_link_libraries(trtmc_model_minimax_h3 PRIVATE
 )
 target_compile_options(trtmc_model_minimax_h3 PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
-  "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>"
 )
 set_target_properties(trtmc_model_minimax_h3 PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -62,6 +62,9 @@ if(TRTMC_BUILD_TESTS)
     trtmc_model_minimax_h3 trtmc_core ${CMAKE_DL_LIBS}
   )
   add_dependencies(minimax_h3_reference_posterior_probe trtmc_backend_trt)
+  set_target_properties(minimax_h3_reference_posterior_probe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  )
   target_compile_options(minimax_h3_reference_posterior_probe PRIVATE -Wall -Wextra -Wpedantic)
 
   add_executable(test_minimax_h3_reference_layout
