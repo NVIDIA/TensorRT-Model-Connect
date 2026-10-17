@@ -114,7 +114,9 @@ set(LFM2_CUDNN_FRONTEND_ARCHIVE "" CACHE FILEPATH "Offline pinned cuDNN frontend
 set(_lfm2_deps "${CMAKE_CURRENT_BINARY_DIR}/_deps")
 set(LFM2_CUDNN_FRONTEND_SOURCE_DIR "${_lfm2_deps}/cudnn_frontend")
 set(LFM2_CUDNN_FRONTEND_INCLUDE_DIR "${LFM2_CUDNN_FRONTEND_SOURCE_DIR}/include")
-set(_frontend_url "https://codeload.github.com/NVIDIA/cudnn-frontend/tar.gz/a91f0e04dcea10515f0f776fc5a89535e316a9c8")
+file(READ "${CMAKE_CURRENT_LIST_DIR}/../ci/native-dependencies.json" _lfm2_dependencies)
+string(JSON _frontend_url GET "${_lfm2_dependencies}" artifacts frontend url)
+string(JSON _frontend_hash GET "${_lfm2_dependencies}" artifacts frontend sha256)
 if(LFM2_CUDNN_FRONTEND_ARCHIVE)
   if(NOT EXISTS "${LFM2_CUDNN_FRONTEND_ARCHIVE}")
     message(FATAL_ERROR "Missing LFM2_CUDNN_FRONTEND_ARCHIVE: ${LFM2_CUDNN_FRONTEND_ARCHIVE}")
@@ -125,7 +127,7 @@ file(MAKE_DIRECTORY "${LFM2_CUDNN_FRONTEND_INCLUDE_DIR}")
 ExternalProject_Add(lfm2_cudnn_frontend_source
   PREFIX "${_lfm2_deps}/frontend_ep" SOURCE_DIR "${LFM2_CUDNN_FRONTEND_SOURCE_DIR}"
   URL "${_frontend_url}" DOWNLOAD_NAME cudnn-frontend.tar.gz
-  URL_HASH SHA256=02383de1161e2476579e23fc1b99639e026635bb0ba17e376ce7e05fdf23873a
+  URL_HASH "SHA256=${_frontend_hash}"
   CONFIGURE_COMMAND "" BUILD_COMMAND "" INSTALL_COMMAND "" UPDATE_COMMAND "")
 
 set(_lfm2_cudnn_source_target "")
@@ -134,14 +136,13 @@ if(LFM2_CUDNN_ROOT)
 else()
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
     set(_sdk_arch linux-x86_64)
-    set(_sdk_hash 73f091ee57668dc18e8b1b61811c0ddff2ec0b762efe613e9f27f9ebfd6c20c0)
   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     set(_sdk_arch linux-sbsa)
-    set(_sdk_hash 21140178191c620799ec09620ae1d89649c9b95441163f8ef956e1493a0e3704)
   else()
     message(FATAL_ERROR "LFM2 cuDNN SDK provisioning supports x86_64 or aarch64 SBSA")
   endif()
-  set(_sdk_url "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/${_sdk_arch}/cudnn-${_sdk_arch}-9.20.0.48_cuda13-archive.tar.xz")
+  string(JSON _sdk_url GET "${_lfm2_dependencies}" artifacts "${_sdk_arch}" url)
+  string(JSON _sdk_hash GET "${_lfm2_dependencies}" artifacts "${_sdk_arch}" sha256)
   if(LFM2_CUDNN_ARCHIVE)
     if(NOT EXISTS "${LFM2_CUDNN_ARCHIVE}")
       message(FATAL_ERROR "Missing LFM2_CUDNN_ARCHIVE: ${LFM2_CUDNN_ARCHIVE}")

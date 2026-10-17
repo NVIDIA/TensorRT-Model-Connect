@@ -86,5 +86,13 @@ RUN python3.12 -c \
     test -f "${TRT_LIB_DIR}/libnvinfer.so.11" && \
     test -f "${TVM_FFI_LIB_DIR}/libtvm_ffi.so"
 
+# Fetch only declared, hash-verified archives before the network-free unit run.
+COPY native-dependencies.py /tmp/trtmc-native-dependencies.py
+COPY native-declarations/ /tmp/trtmc-native-declarations/
+RUN python3.12 /tmp/trtmc-native-dependencies.py \
+      stage-native-dependencies /tmp/trtmc-native-declarations /opt/trtmc-native-dependencies && \
+    rm -rf /tmp/trtmc-native-dependencies.py /tmp/trtmc-native-declarations
+ENV TRTMC_NATIVE_DEPENDENCIES_CACHE=/opt/trtmc-native-dependencies/cache.cmake
+
 WORKDIR /workspace/tensorrt-model-connect
 CMD ["bash"]

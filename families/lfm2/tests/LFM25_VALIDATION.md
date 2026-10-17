@@ -50,6 +50,11 @@ remain mandatory. To use an existing complete SDK instead, configure with
 to the selected SDK. A partial SDK is an error and does not trigger a search
 for libraries in other installations. This build path imports no Torch package.
 
+The archive URLs and hashes live in `families/lfm2/ci/native-dependencies.json`
+and are shared by the family CMake rules and connected Community CPU image
+staging. The unit container receives these verified archives through an initial
+CMake cache and still builds the enabled targets without network access.
+
 The helper, eight cuDNN shared libraries, and their notices are installed in
 both native package components. The runtime libraries sit beside the helper
 and appear in the family library manifest, including for isolated E2E staging.

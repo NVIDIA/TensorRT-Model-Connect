@@ -209,9 +209,15 @@ class UnitTestRunner:
         )
         if build.exists():
             shutil.rmtree(build)
+        cache_arguments = []
+        if cache := self.context.env.get("TRTMC_NATIVE_DEPENDENCIES_CACHE"):
+            if not Path(cache).is_file():
+                raise CiError(f"Native dependency initial cache is missing: {cache}")
+            cache_arguments = ["-C", cache]
         self.context.run(
             [
                 "cmake",
+                *cache_arguments,
                 "-S",
                 self.context.repository,
                 "-B",
