@@ -535,3 +535,34 @@ def test_wide_mean2048_matches_torch_across_reduction_geometries(gpu):
         expected = squares.mean(dim=-1, keepdim=True)
         actual = engine({"squares": squares})["actual"]
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_kv_projection_matches_torch_for_decode_and_prefill(gpu):
+    torch, trt, model = gpu
+    bridge, sampler = model._sampler_libraries()
+    extension = model._register_sampler(bridge, sampler)
+    model._register_w2(extension, model._w2_library(bridge), batched_prefill=True)
+    generator = torch.Generator(device="cuda").manual_seed(193)
+    weight = torch.randn((512, 2048), generator=generator, device="cuda").bfloat16()
+    # The checkpoint mapper supplies [input, output]; the reference Linear
+    # operator stores [output, input]. Exercise that actual owning conversion.
+    mapped = np.ascontiguousarray(weight.float().cpu().numpy().T)
+
+    def define(network):
+        values = network.add_input("input", trt.bfloat16, (-1, 2048))
+        projected = model._add_kv_projection(
+            network, values, mapped, bridge, name="test.kv_projection"
+        )
+        _output(network, projected, "actual")
+
+    engine = TinyEngine(
+        torch,
+        trt,
+        define,
+        {"input": ((1, 2048), (17, 2048), (20, 2048))},
+    )
+    for rows in (1, 3, 17, 20):
+        values = torch.randn((1, rows, 2048), generator=generator, device="cuda").bfloat16()
+        expected = torch.nn.functional.linear(values, weight).reshape(rows, 512)
+        actual = engine({"input": values.reshape(rows, 2048)})["actual"]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)

@@ -294,6 +294,12 @@ def test_eligible_build_registers_before_weights_and_writes_exact_sampler_contra
         ),
         (
             "register",
+            str(pair[0].parent / W2_LIBRARY).encode(),
+            b"project_kv",
+            b"lfm2.kv.cublas_bf16_rows_v1",
+        ),
+        (
+            "register",
             str(pair[0].parent / ATTENTION_LIBRARY).encode(),
             b"run_rows",
             b"lfm2.attention.cudnn_bf16_batched_v1",
@@ -471,6 +477,34 @@ def test_w2_registration_failure_precedes_weights(model, monkeypatch, tmp_path):
     assert "weights" not in model.events
 
 
+def test_kv_projection_registration_failure_precedes_weights(model, monkeypatch, tmp_path):
+    pair = installation(tmp_path / "runtime")
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", str(pair[0].parent))
+    monkeypatch.setattr(model.build_core, "cmake_prefixes", model.original_prefixes)
+    calls = []
+
+    def register(self, library, function, kernel):
+        calls.append((library, function, kernel))
+        return b"missing project_kv" if function == b"project_kv" else None
+
+    monkeypatch.setattr(type(model.register), "__call__", register)
+    with pytest.raises(RuntimeError, match="K/V projection registration failed"):
+        build(model, request(tmp_path))
+    assert calls[-1] == (
+        str(pair[0].parent / W2_LIBRARY).encode(),
+        b"project_kv",
+        b"lfm2.kv.cublas_bf16_rows_v1",
+    )
+    assert calls[-2][1] == b"run_rows"
+    assert "weights" not in model.events and not model.decoder_calls
+
+
+def test_single_row_w2_registration_does_not_require_kv_export(model):
+    extension = SimpleNamespace(trtmc_load_byok_kernel=model.register)
+    model.module._register_w2(extension, Path("/installed/w2.so"))
+    assert model.events == [("register", b"/installed/w2.so", b"run", b"lfm2.w2.cublas_bf16_v1")]
+
+
 def test_missing_attention_dependency_does_not_mix_prefixes_or_load_weights(
     model, monkeypatch, tmp_path
 ):
@@ -575,6 +609,7 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     module = model.module
     config = module._load_config(request(tmp_path).model_dir)
     cfg = module.validate_dense_lfm2_config(config)
+    matrices, kv_projections = [], []
     updates, explicit, plugins, conv_calls, last_rows, qk_norms, wide_norms = (
         [],
         [],
@@ -608,7 +643,17 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     monkeypatch.setattr(
         module,
         "_matmul",
-        lambda network, value, *args, **kw: tensor((value.shape[0], kw["rhs_width"])),
+        lambda network, value, *args, **kw: (
+            matrices.append(kw["name"]) or tensor((value.shape[0], kw["rhs_width"]))
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_add_kv_projection",
+        lambda network, value, weight, bridge, *, name: (
+            kv_projections.append((name, value.shape, value.dtype, bridge))
+            or tensor((value.shape[0], 512))
+        ),
     )
     monkeypatch.setattr(module, "_add_swiglu", lambda network, value, *args, **kw: value)
     monkeypatch.setattr(
@@ -692,6 +737,23 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     (network,) = model.networks
     inputs = {item.name: item for item in network.inputs}
     assert len(updates) == 16
+    attention_layers = [i for i, kind in enumerate(cfg.layer_types) if kind == "full_attention"]
+    assert kv_projections == (
+        [
+            (f"layer.{i}.self_attn.{kind}_proj", (-1, 2048), "bf16", bridge)
+            for i in attention_layers
+            for kind in ("k", "v")
+        ]
+        if enabled
+        else []
+    )
+    assert [name for name in matrices if ".self_attn." in name] == [
+        f"layer.{i}.self_attn.{projection}"
+        for i in attention_layers
+        for projection in (
+            ("q_proj", "out_proj") if enabled else ("q_proj", "k_proj", "v_proj", "out_proj")
+        )
+    ]
     assert len(qk_norms) == 16
     assert [norm["num_heads"] for norm in qk_norms] == [32, 8] * 8
     assert all(norm["head_dim"] == 64 and norm["output_dtype"] == "bf16" for norm in qk_norms)
@@ -892,6 +954,87 @@ def test_batched_w2_rejects_invalid_output_shape_carrier(model, rows, carrier_sh
             Path("/bridge.so"),
             prefix="layer.0",
             shape_like=SimpleNamespace(shape=carrier_shape, dtype=carrier_dtype),
+        )
+
+
+@pytest.mark.parametrize("rows", [-1, 1, 3, 17, 20, 131072])
+def test_kv_projection_preserves_checkpoint_orientation_and_dynamic_rows(model, monkeypatch, rows):
+    tensor = SimpleNamespace(shape=(rows, 2048), dtype="bf16")
+    mapped = np.arange(2048 * 512, dtype=np.float32).reshape(2048, 512)
+    constants, indices, plugins = [], [], []
+
+    def weight_constant(network, shape, values, **kwargs):
+        constants.append((shape, values, kwargs))
+        return SimpleNamespace(shape=shape, dtype="bf16")
+
+    def index_constant(network, shape, values, **kwargs):
+        assert shape == (512,) and kwargs == {"np_dtype": np.int32}
+        assert values.dtype == np.int32 and np.array_equal(values, np.zeros(512, np.int32))
+        result = SimpleNamespace(shape=shape, dtype="int32")
+        indices.append(result)
+        return result
+
+    carrier = SimpleNamespace(shape=(rows, 512), dtype="bf16")
+
+    def gather(value, index, axis):
+        assert value is tensor and index is indices[0] and axis == 1
+        return SimpleNamespace(get_output=lambda _: carrier)
+
+    # No shuffle API: the checkpoint orientation must be restored on the CPU.
+    network = SimpleNamespace(add_gather=gather)
+    monkeypatch.setattr(model.module, "_work_constant", weight_constant)
+    monkeypatch.setattr(model.module, "_constant", index_constant)
+
+    def plugin(network, **kwargs):
+        plugins.append(kwargs)
+        return [SimpleNamespace(shape=carrier.shape, dtype=carrier.dtype, name="")]
+
+    monkeypatch.setattr(model.byok, "add_kernel", plugin)
+    bridge = Path("/installed/bridge.so")
+    output = model.module._add_kv_projection(
+        network, tensor, mapped, bridge, name="layer.9.self_attn.k_proj"
+    )
+    assert output.shape == (rows, 512) and output.dtype == "bf16"
+    assert output.name == "layer.9.self_attn.k_proj"
+    ((shape, values, kwargs),) = constants
+    assert shape == (512, 2048) and values.flags.c_contiguous
+    expected = (
+        np.arange(2048, dtype=np.float32)[None, :] * 512 + np.arange(512, dtype=np.float32)[:, None]
+    )
+    assert np.array_equal(values, expected)
+    assert kwargs == {"storage_dtype": np.dtype(np.float32), "work_dtype": "bf16"}
+    (binding,) = plugins
+    assert binding["plugin_library"] == bridge
+    assert binding["kernel_name"] == "lfm2.kv.cublas_bf16_rows_v1"
+    assert binding["inputs"][0] is tensor and binding["inputs"][2] is carrier
+    assert binding["inputs"][1].shape == (512, 2048)
+    assert binding["output_specs"] == [{"dims": "same_as_input_2", "dtype": "bfloat16"}]
+    assert binding["workspace_bytes"] == 0
+
+
+@pytest.mark.parametrize(
+    "shape,dtype,weight_shape",
+    [
+        ((0, 2048), "bf16", (2048, 512)),
+        ((-2, 2048), "bf16", (2048, 512)),
+        ((131073, 2048), "bf16", (2048, 512)),
+        ((1, 512), "bf16", (2048, 512)),
+        ((2048,), "bf16", (2048, 512)),
+        ((1, 1, 2048), "bf16", (2048, 512)),
+        ((1, 2048), "fp16", (2048, 512)),
+        ((1, 2048), "fp32", (2048, 512)),
+        ((1, 2048), "bf16", (512, 2048)),
+        ((1, 2048), "bf16", (2048, 2048)),
+    ],
+)
+def test_kv_projection_rejects_invalid_contract(model, shape, dtype, weight_shape):
+    with pytest.raises(ValueError, match="LFM2 K/V projection requires"):
+        model.module._add_kv_projection(
+            None,
+            SimpleNamespace(shape=shape, dtype=dtype),
+            np.broadcast_to(np.float32(0), weight_shape),
+            Path("/installed/bridge.so"),
+            name="layer.9.self_attn.k_proj",
         )
 
 

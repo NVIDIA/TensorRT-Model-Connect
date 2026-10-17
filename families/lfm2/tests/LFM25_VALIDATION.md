@@ -126,6 +126,21 @@ binding. An existing normalized hidden tensor supplies the output row shape;
 its values are not read by the W2 helper. The helper retains its earlier
 single-row export for existing plans.
 
+This qualified batched BF16 route also binds the K and V projections in all eight
+attention layers through `project_kv` in the existing W2 library. The owning
+builder restores mapped `[2048,512]` weights to contiguous checkpoint
+`[512,2048]` storage on the CPU before its FP32 constant and BF16 cast. The binding
+uses BF16 operands, FP32 accumulation and the same default cuBLAS policy; a Gather
+supplies the dynamic `[R,512]` output shape without reading the carrier values.
+Q and output projections, normalization, RoPE and legacy projection paths retain
+their existing graph. The new export is required during batched registration,
+before checkpoint weights or the native decoder are loaded. There is no new
+library, dependency, runtime field or KV contract.
+
+Exact fixed-input projection controls and a restored conditional attention block
+qualify those boundaries only. The complete semantic matrix and capacity checks
+remain necessary; these controls do not establish full-model semantic repair.
+
 All eight attention layers use the same
 family-owned cuDNN TVM-FFI binding. The graph has BF16 Q/K/V and output, FP32
 intermediate and compute types, scale 0.125, grouped heads 32/8, and no dropout

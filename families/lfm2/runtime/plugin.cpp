@@ -236,6 +236,14 @@ void register_w2(bool batched) {
             dlclose(library);
             throw std::runtime_error("lfm2 cannot register its W2 operation: " + message);
         }
+        if (rows) {
+            if (const char* error =
+                    load(helper.c_str(), "project_kv", "lfm2.kv.cublas_bf16_rows_v1")) {
+                const std::string message(error);
+                dlclose(library);
+                throw std::runtime_error("lfm2 cannot register its K/V projection: " + message);
+            }
+        }
         return library;
     };
     if (batched) {

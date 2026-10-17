@@ -995,6 +995,50 @@ def _add_w2(
     return output
 
 
+def _add_kv_projection(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    weight: np.ndarray,
+    bridge: Path,
+    *,
+    name: str,
+) -> trt.ITensor:
+    from tensorrt_model_connect.byok import add_kernel
+
+    shape = tuple(tensor.shape)
+    if (
+        tensor.dtype != trt.bfloat16
+        or len(shape) != 2
+        or shape[1] != 2048
+        or (shape[0] != -1 and not 1 <= shape[0] <= 131072)
+    ):
+        raise ValueError("LFM2 K/V projection requires BF16 input shape [R, 2048]")
+    array = np.asarray(weight)
+    if array.shape != (2048, 512):
+        raise ValueError("LFM2 K/V projection requires mapped weight shape [2048, 512]")
+    # Restore checkpoint row-major [output, input] storage before creating the
+    # FP32 constant and its BF16 cast, matching the qualified operator graph.
+    rhs = _work_constant(
+        network,
+        (512, 2048),
+        np.ascontiguousarray(array.T),
+        storage_dtype=np.dtype(np.float32),
+        work_dtype=trt.bfloat16,
+    )
+    indices = _constant(network, (512,), np.zeros((512,), dtype=np.int32), np_dtype=np.int32)
+    shape_like = network.add_gather(tensor, indices, 1).get_output(0)
+    (output,) = add_kernel(
+        network,
+        plugin_library=bridge,
+        kernel_name=_KV_PROJECTION_KERNEL,
+        inputs=[tensor, rhs, shape_like],
+        output_specs=[{"dims": "same_as_input_2", "dtype": "bfloat16"}],
+        workspace_bytes=0,
+    )
+    output.name = name
+    return output
+
+
 def _mark_debug_output(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -1207,26 +1251,42 @@ def build_lfm2_engine(
                 work_dtype=work_dtype,
                 name=f"{prefix}.self_attn.q_proj",
             )
-            k = _matmul(
-                network,
-                operator_input,
-                weights[f"{prefix}.w_k"],
-                lhs_width=cfg.hidden_size,
-                rhs_width=cfg.kv_attention_size,
-                storage_dtype=storage_dtype,
-                work_dtype=work_dtype,
-                name=f"{prefix}.self_attn.k_proj",
-            )
-            v = _matmul(
-                network,
-                operator_input,
-                weights[f"{prefix}.w_v"],
-                lhs_width=cfg.hidden_size,
-                rhs_width=cfg.kv_attention_size,
-                storage_dtype=storage_dtype,
-                work_dtype=work_dtype,
-                name=f"{prefix}.self_attn.v_proj",
-            )
+            if attention_bridge is not None:
+                k = _add_kv_projection(
+                    network,
+                    operator_input,
+                    weights[f"{prefix}.w_k"],
+                    w2_bridge,
+                    name=f"{prefix}.self_attn.k_proj",
+                )
+                v = _add_kv_projection(
+                    network,
+                    operator_input,
+                    weights[f"{prefix}.w_v"],
+                    w2_bridge,
+                    name=f"{prefix}.self_attn.v_proj",
+                )
+            else:
+                k = _matmul(
+                    network,
+                    operator_input,
+                    weights[f"{prefix}.w_k"],
+                    lhs_width=cfg.hidden_size,
+                    rhs_width=cfg.kv_attention_size,
+                    storage_dtype=storage_dtype,
+                    work_dtype=work_dtype,
+                    name=f"{prefix}.self_attn.k_proj",
+                )
+                v = _matmul(
+                    network,
+                    operator_input,
+                    weights[f"{prefix}.w_v"],
+                    lhs_width=cfg.hidden_size,
+                    rhs_width=cfg.kv_attention_size,
+                    storage_dtype=storage_dtype,
+                    work_dtype=work_dtype,
+                    name=f"{prefix}.self_attn.v_proj",
+                )
             q = _per_head_rms_norm(
                 network,
                 q,
@@ -1441,6 +1501,7 @@ _W2_MODE = "cublas_bf16_all_w2_v1"
 _W2_KERNEL = "lfm2.w2.cublas_bf16_v1"
 _W2_ROWS_MODE = "cublas_bf16_batched_w2_v1"
 _W2_ROWS_KERNEL = "lfm2.w2.cublas_bf16_rows_v1"
+_KV_PROJECTION_KERNEL = "lfm2.kv.cublas_bf16_rows_v1"
 _ATTENTION_MODE = "cudnn_bf16_batched_v1"
 _ATTENTION_KERNEL = "lfm2.attention." + _ATTENTION_MODE
 _MEAN64_KERNEL = "lfm2.attention.mean64_fp32_v1"
@@ -1527,6 +1588,15 @@ def _register_w2(extension: ctypes.CDLL, library: Path, *, batched_prefill: bool
         raise RuntimeError(
             "LFM2 W2 registration failed: " + error.decode("utf-8", errors="replace")
         )
+    if batched_prefill:
+        error = extension.trtmc_load_byok_kernel(
+            str(library).encode("utf-8"), b"project_kv", _KV_PROJECTION_KERNEL.encode("utf-8")
+        )
+        if error is not None:
+            raise RuntimeError(
+                "LFM2 K/V projection registration failed: "
+                + error.decode("utf-8", errors="replace")
+            )
 
 
 def _sampler_libraries() -> tuple[Path, Path]:

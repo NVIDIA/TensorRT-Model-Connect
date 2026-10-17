@@ -86,7 +86,7 @@ if(TARGET trtmc_byok_tvm_ffi)
         COMPONENT ${component})
     endforeach()
   endif()
-  add_library(trtmc_lfm2_w2_byok SHARED w2_byok.cpp)
+  add_library(trtmc_lfm2_w2_byok SHARED w2_byok.cpp kv_projection_byok.cpp)
   target_include_directories(trtmc_lfm2_w2_byok SYSTEM PRIVATE
     ${CUDAToolkit_INCLUDE_DIRS}
     ${TRTMC_TVM_FFI_INCLUDE_DIR}
@@ -163,6 +163,16 @@ if(TRTMC_BUILD_TESTS)
     set_target_properties(test_lfm2_w2_contract PROPERTIES
       BUILD_RPATH "${CMAKE_BINARY_DIR};${TRTMC_TVM_FFI_LIBRARY_DIR}")
     add_test(NAME test_lfm2_w2_contract COMMAND test_lfm2_w2_contract)
+    add_executable(test_lfm2_kv_projection_contract
+      ${PROJECT_SOURCE_DIR}/families/lfm2/tests/cpp/test_lfm2_kv_projection_contract.cpp)
+    target_include_directories(test_lfm2_kv_projection_contract PRIVATE ${PROJECT_SOURCE_DIR})
+    target_include_directories(test_lfm2_kv_projection_contract SYSTEM PRIVATE
+      ${CUDAToolkit_INCLUDE_DIRS} ${TRTMC_TVM_FFI_INCLUDE_DIR})
+    target_link_libraries(test_lfm2_kv_projection_contract PRIVATE
+      CUDA::cublas CUDA::cudart ${TRTMC_TVM_FFI_LIBRARY} ${CMAKE_DL_LIBS} Threads::Threads)
+    set_target_properties(test_lfm2_kv_projection_contract PROPERTIES
+      BUILD_RPATH "${CMAKE_BINARY_DIR};${TRTMC_TVM_FFI_LIBRARY_DIR}")
+    add_test(NAME test_lfm2_kv_projection_contract COMMAND test_lfm2_kv_projection_contract)
   endif()
   if(TARGET trtmc_lfm2_sdpa_byok)
     add_executable(test_lfm2_sdpa_contract
