@@ -51,6 +51,22 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(minimax_h3_reference_denoiser_probe
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/reference_denoiser_probe.cpp
+  )
+  target_include_directories(minimax_h3_reference_denoiser_probe PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(minimax_h3_reference_denoiser_probe SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(minimax_h3_reference_denoiser_probe PRIVATE
+    trtmc_model_minimax_h3 trtmc_core ${CMAKE_DL_LIBS}
+  )
+  add_dependencies(minimax_h3_reference_denoiser_probe trtmc_backend_trt)
+  set_target_properties(minimax_h3_reference_denoiser_probe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  )
+  target_compile_options(minimax_h3_reference_denoiser_probe PRIVATE -Wall -Wextra -Wpedantic)
+
   add_executable(test_minimax_h3_reference_denoiser
     diffusion_schedule.cpp reference_layout.cpp reference_denoiser.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_denoiser.cpp

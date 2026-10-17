@@ -249,6 +249,7 @@ ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
         for (const auto& item : common)
             require_profile(module, item.first.c_str(), item.second.shape, item.second.dtype);
         const auto prefix = static_cast<std::size_t>(layout.condition_video_rows) * kVideoWidth;
+        int32_t forwards = 0;
         for (std::size_t index = 0; index < video_schedule.timesteps.size(); ++index) {
             auto plan = make_image_reference_timesteps(layout, video_schedule.timesteps[index],
                                                        audio_schedule.timesteps[index]);
@@ -273,6 +274,7 @@ ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
                     require_profile(module, item.first.c_str(), item.second.shape,
                                     item.second.dtype);
             const auto outputs = module.forward(inputs);
+            ++forwards;
             const auto* video_velocity =
                 velocity(outputs, "video_velocity",
                          static_cast<int64_t>(layout.target_video_indices.size()), kVideoWidth);
@@ -295,8 +297,7 @@ ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
             denoiser_.reset();
             modulations_.reset();
         }
-        return {config_.target, std::move(target_video), std::move(audio),
-                static_cast<int32_t>(video_schedule.timesteps.size())};
+        return {config_.target, std::move(target_video), std::move(audio), forwards};
     } catch (...) {
         denoiser_.reset();
         modulations_.reset();
