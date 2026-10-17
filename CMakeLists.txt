@@ -331,12 +331,17 @@ foreach(_trtmc_description IN LISTS _trtmc_cli_descriptions)
     DESTINATION "${CMAKE_INSTALL_DATADIR}/trtmc/families/${_trtmc_description_family}")
 endforeach()
 
+find_path(TRTMC_TURBOJPEG_INCLUDE_DIR NAMES turbojpeg.h REQUIRED)
+find_library(TRTMC_TURBOJPEG_LIBRARY NAMES turbojpeg REQUIRED)
+
 add_library(trtmc_media_io STATIC apps/cli/io.cpp)
 target_include_directories(trtmc_media_io PRIVATE
   ${PROJECT_SOURCE_DIR}/apps
   ${PROJECT_SOURCE_DIR}/core/runtime/include
 )
 target_include_directories(trtmc_media_io SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
+target_include_directories(trtmc_media_io SYSTEM PRIVATE ${TRTMC_TURBOJPEG_INCLUDE_DIR})
+target_link_libraries(trtmc_media_io PRIVATE ${TRTMC_TURBOJPEG_LIBRARY})
 target_compile_options(trtmc_media_io PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(trtmc_cli STATIC
@@ -502,6 +507,15 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_header_helpers PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME header_helpers COMMAND test_header_helpers)
   set_tests_properties(header_helpers PROPERTIES LABELS cpu)
+
+  add_executable(test_media_io apps/cli/tests/test_media_io.cpp)
+  target_include_directories(test_media_io PRIVATE
+    ${PROJECT_SOURCE_DIR}/apps ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_link_libraries(test_media_io PRIVATE trtmc_media_io)
+  target_compile_options(test_media_io PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME media_io COMMAND test_media_io
+    ${PROJECT_SOURCE_DIR}/apps/cli/tests/data/jpeg)
+  set_tests_properties(media_io PROPERTIES LABELS cpu)
 
   add_executable(test_cli apps/cli/tests/test_cli.cpp)
   target_include_directories(test_cli PRIVATE

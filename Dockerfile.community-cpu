@@ -28,6 +28,7 @@ RUN apt-get update && \
       ninja-build \
       nlohmann-json3-dev \
       libicu-dev \
+      libturbojpeg0-dev \
       pkg-config \
       python3.12 \
       python3.12-dev \

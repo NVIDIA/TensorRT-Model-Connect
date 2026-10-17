@@ -20,6 +20,7 @@ RUN apt-get update && \
       cmake \
       git \
       ninja-build \
+      libturbojpeg0-dev \
       nlohmann-json3-dev \
       patchelf \
       pkg-config \
