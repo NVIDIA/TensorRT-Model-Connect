@@ -113,6 +113,19 @@
           "default": false
         },
         {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "fp8",
+            "nvfp4"
+          ],
+          "help": "Use a ModelOpt FP8 or NVFP4 checkpoint's packed weights"
+        },
+        {
           "name": "execution_variant",
           "flags": [
             "--execution-variant"
