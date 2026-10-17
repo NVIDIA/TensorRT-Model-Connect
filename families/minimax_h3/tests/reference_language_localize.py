@@ -103,7 +103,7 @@ def instrumented_plan(weights):
         native._linear,
         native._qwen_rms_norm,
         native.op.silu,
-        native.op.partial_rope,
+        native._qwen_rope,
         native._rope_cache,
     )
     activation_index = 0
@@ -157,7 +157,7 @@ def instrumented_plan(weights):
         patch.object(native, "_linear", wrapped_linear),
         patch.object(native, "_qwen_rms_norm", wrapped_norm),
         patch.object(native.op, "silu", wrapped_silu),
-        patch.object(native.op, "partial_rope", wrapped_rotary),
+        patch.object(native, "_qwen_rope", wrapped_rotary),
         patch.object(native, "_rope_cache", wrapped_cache),
     ):
         plan = native.build_text_encoder_engine(

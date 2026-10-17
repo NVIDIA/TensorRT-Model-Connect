@@ -124,6 +124,40 @@ def _linear(network, hidden, weights, name: str):
     return op.linear(network, hidden, weights[f"{name}.weight"])
 
 
+def _qwen_rope(network, tensor, cos_half, sin_half, *, rows, heads):
+    # Qwen's language RoPE evaluates two BF16 products and then a BF16 sum.
+    # Preserve those explicit rounding boundaries: a collapsed higher-precision
+    # multiply/add is NOT the same as the released three-operation expression.
+    # The H3 DiT's partial RoPE helper remains unchanged.
+    value = op.rows_to_heads(network, tensor, rows, heads, HEAD_DIM)
+    half = HEAD_DIM // 2
+    first = op.dynamic_slice(network, value, (0, 0, 0, 0), (1, heads, None, half))
+    second = op.dynamic_slice(network, value, (0, 0, 0, half), (1, heads, None, half))
+    negative = network.add_unary(second, trt.UnaryOperation.NEG).get_output(0)
+    rotate = network.add_concatenation((negative, first))
+    rotate.axis = 3
+
+    def table_half(table):
+        shaped = network.add_shuffle(table)
+        shaped.reshape_dims = (1, 1, -1, half)
+        duplicate = network.add_concatenation((shaped.get_output(0), shaped.get_output(0)))
+        duplicate.axis = 3
+        return op.cast(network, duplicate.get_output(0), trt.float32)
+
+    left = network.add_elementwise(
+        op.cast(network, value, trt.float32), table_half(cos_half), trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    right = network.add_elementwise(
+        op.cast(network, rotate.get_output(0), trt.float32),
+        table_half(sin_half),
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    left = op.cast(network, op.cast(network, left, trt.bfloat16), trt.float32)
+    right = op.cast(network, op.cast(network, right, trt.bfloat16), trt.float32)
+    summed = network.add_elementwise(left, right, trt.ElementWiseOperation.SUM).get_output(0)
+    return op.heads_to_rows(network, op.cast(network, summed, trt.bfloat16), rows, heads * HEAD_DIM)
+
+
 def conditioner_input_shapes(sequence_length, *, reference=False):
     if (
         isinstance(sequence_length, bool)
@@ -217,25 +251,21 @@ def build_text_encoder_engine(
         k = _per_head_norm(
             network, k, weights[f"{prefix}.self_attn.k_norm.weight"], sequence_length, NUM_KV_HEADS
         )
-        q = op.partial_rope(
+        q = _qwen_rope(
             network,
             q,
             cos,
             sin,
             rows=sequence_length,
             heads=NUM_HEADS,
-            head_dim=HEAD_DIM,
-            rotary_dim=HEAD_DIM,
         )
-        k = op.partial_rope(
+        k = _qwen_rope(
             network,
             k,
             cos,
             sin,
             rows=sequence_length,
             heads=NUM_KV_HEADS,
-            head_dim=HEAD_DIM,
-            rotary_dim=HEAD_DIM,
         )
         q4 = op.rows_to_heads(network, q, sequence_length, NUM_HEADS, HEAD_DIM)
         k4 = op.rows_to_heads(network, k, sequence_length, NUM_KV_HEADS, HEAD_DIM)
