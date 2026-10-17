@@ -12,6 +12,7 @@ diagnostics, not a replacement for the owning full-video numerical gate.
 """
 
 import argparse
+from contextlib import nullcontext
 import gc
 import hashlib
 import importlib.metadata
@@ -29,7 +30,8 @@ from families.minimax_h3.tests.test_trained_video_decoder import _ATOL, _RTOL, _
 from families.minimax_h3.tests.vae_encoder_checkpoint_oracle import CONFIG_SHA256, REVISION
 
 
-BASELINE_SHA = "4d9d256a0b044a781c61ae41a2ae07fed0eff8cbdf92e0ab98a54cfad10e2ffd"
+# Isolate convolution from the already-restored FP32 register concatenation.
+BASELINE_SHA = "9f9ce39ae65bed193b05f15341aa3f72ff4db0c9b0df188eecce658b1de130c3"
 ROWS_SHA = "c9d0c8c9403e95ba3b80ca5f4d4fbfc433aa713e3a25142763524eaebd5eed27"
 UPSTREAM_SHA = "4c3c9745ee27d16ff343c4998244bad41cd8f4213f0029cf7ce11ebb6d72ca1b"
 KEYS = (
@@ -68,11 +70,32 @@ def compare(actual, expected):
     )
 
 
+def save_array(root, label, value, saved):
+    """Retain each unique full array once, recording exact aliases in reports.
+
+    Identical rebuilds reference the already-written complete payload. Nothing
+    is deleted, overwritten, rounded, sampled, compressed or hard-linked.
+    Different values, shapes or dtypes always create a separate evidence file.
+    """
+    value = np.ascontiguousarray(value)
+    digest = hashlib.sha256(memoryview(value).cast("B")).hexdigest()
+    key = (value.dtype.str, tuple(value.shape), digest)
+    if key not in saved:
+        path = root / (label + ".npy")
+        with path.open("xb") as file:
+            np.save(file, value, allow_pickle=False)
+        saved[key] = path.name
+    return dict(
+        path=saved[key], content_sha256=digest, dtype=str(value.dtype), shape=list(value.shape)
+    )
+
+
 def build_prefix(module, weights, batch):
     import tensorrt as trt
 
     real_builder = trt.Builder
     real_linear = module.op.linear
+    real_convolution = getattr(module, "_post_quant_conv", None)
     recorded = {}
     tensors = {}
 
@@ -98,6 +121,12 @@ def build_prefix(module, weights, batch):
         tensors[BOUNDARIES[len(tensors)]] = result
         return result
 
+    def convolution(network, *args, **kwargs):
+        result = real_convolution(network, *args, **kwargs)
+        assert not tensors
+        tensors["post_quant_conv"] = result
+        return result
+
     def capture(network, value, *_args, **_kwargs):
         tensors["packed_tokens"] = value
         assert tuple(tensors) == BOUNDARIES
@@ -112,6 +141,9 @@ def build_prefix(module, weights, batch):
             patch.object(trt, "Builder", Builder),
             patch.object(module.op, "linear", linear),
             patch.object(module.op, "rms_norm", capture),
+            patch.object(module, "_post_quant_conv", convolution)
+            if real_convolution is not None
+            else nullcontext(),
         ):
             try:
                 module.build_vae_tile_decoder_engine(
@@ -273,9 +305,11 @@ def main():
     batched = reference(tiles)
     for handle in hooks:
         handle.remove()
+    saved, reference_arrays = {}, {}
     for kind, values in [("upstream-sequential", canonical), ("upstream-batched", batched)]:
+        reference_arrays[kind] = {}
         for name, value in values.items():
-            np.save(args.output / (kind + "." + name + ".npy"), value, allow_pickle=False)
+            reference_arrays[kind][name] = save_array(args.output, kind + "." + name, value, saved)
     report = dict(
         source_checkpoint_revision=REVISION,
         source_input_sha256=ROWS_SHA,
@@ -289,6 +323,7 @@ def main():
         prefix_only=True,
         full_trained_decoder_qualified=False,
         full_ref2va_qualified=False,
+        reference_arrays=reference_arrays,
         batch_effect={name: compare(batched[name], canonical[name]) for name in BOUNDARIES},
         executions=[],
     )
@@ -312,12 +347,11 @@ def main():
                         plan_sha256=hashlib.sha256(plan).hexdigest(),
                         plan_bytes=len(plan),
                         boundaries={},
+                        actual_arrays={},
                     )
                     for name in BOUNDARIES:
-                        np.save(
-                            args.output / (label + "." + name + ".npy"),
-                            actual[name],
-                            allow_pickle=False,
+                        row["actual_arrays"][name] = save_array(
+                            args.output, label + "." + name, actual[name], saved
                         )
                         row["boundaries"][name] = compare(actual[name], canonical[name][:batch])
                     row["first_dtype_mismatch"] = next(

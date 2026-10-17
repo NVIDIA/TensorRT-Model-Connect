@@ -173,6 +173,44 @@ def _swiglu(network, hidden, weights, prefix: str):
     )
 
 
+def _post_quant_conv(network, latent, weights):
+    """Original biased 1x1x1 Conv3d under FP16 autocast, then voxel rows.
+
+    A half GEMM followed by a separate half bias sum introduces an additional
+    typed rounding boundary absent from the original convolution expression.
+    TensorRT owns lowering this native convolution, including bias fusion.
+    """
+    kernel = np.asarray(weights["post_quant_conv.weight"])
+    bias = np.asarray(weights["post_quant_conv.bias"])
+    if (
+        kernel.shape != (CHANNELS, CHANNELS, 1, 1, 1)
+        or bias.shape != (CHANNELS,)
+        or kernel.dtype != np.float32
+        or bias.dtype != np.float32
+        or not np.isfinite(kernel).all()
+        or not np.isfinite(bias).all()
+    ):
+        raise ValueError("MiniMax-H3 post_quant_conv requires its original FP32 Conv3d parameters")
+    kernel = np.ascontiguousarray(kernel, dtype=np.float16)
+    bias = np.ascontiguousarray(bias, dtype=np.float16)
+    if not np.isfinite(kernel).all() or not np.isfinite(bias).all():
+        raise ValueError("MiniMax-H3 post_quant_conv parameters overflow FP16 autocast")
+    value = op.cast(network, latent, trt.float16)
+    convolution = network.add_convolution_nd(value, CHANNELS, (1, 1, 1), kernel, bias)
+    if convolution is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 post_quant_conv")
+    convolution.name = "post_quant_conv"
+    convolution.stride_nd = (1, 1, 1)
+    convolution.padding_nd = (0, 0, 0)
+    rows = network.add_shuffle(convolution.get_output(0))
+    rows.first_transpose = trt.Permutation([0, 2, 3, 4, 1])
+    rows.reshape_dims = (latent.shape[0], TOKENS, CHANNELS)
+    result = rows.get_output(0)
+    # Convolution weights borrow these converted buffers until serialization.
+    op._WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).extend((kernel, bias))
+    return result
+
+
 def build_vae_tile_decoder_engine(
     weights: dict,
     *,
@@ -206,17 +244,7 @@ def build_vae_tile_decoder_engine(
     latent = network.add_input(
         "latent_tiles", trt.float32, (batch_size, CHANNELS, FRAMES, HEIGHT, WIDTH)
     )
-    rows = network.add_shuffle(latent)
-    rows.first_transpose = trt.Permutation([0, 2, 3, 4, 1])
-    rows.reshape_dims = (batch_size, TOKENS, CHANNELS)
-    post_weight = weights["post_quant_conv.weight"].reshape(CHANNELS, CHANNELS)
-    hidden = op.linear(
-        network,
-        rows.get_output(0),
-        post_weight,
-        weights["post_quant_conv.bias"],
-        compute_dtype=trt.float16,
-    )
+    hidden = _post_quant_conv(network, latent, weights)
     hidden = op.linear(
         network,
         hidden,

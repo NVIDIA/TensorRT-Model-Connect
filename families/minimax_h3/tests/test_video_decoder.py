@@ -6,7 +6,7 @@ import numpy as np
 from types import SimpleNamespace
 
 from families.minimax_h3 import vae_builder as vae
-from families.minimax_h3.tests.vae_decoder_prefix_localize import compare
+from families.minimax_h3.tests.vae_decoder_prefix_localize import compare, save_array
 
 
 def test_prefix_diagnostic_keeps_dtype_evidence_when_values_match():
@@ -23,6 +23,29 @@ def test_prefix_diagnostic_checks_near_zero_without_comparison_downcast():
     result = compare(actual, expected)
     assert result["dtype_equal"] and not result["byte_exact"]
     assert result["mismatched_elements"] == 1 and result["compared_elements"] == 2
+
+
+def test_prefix_evidence_retains_full_unique_payloads_without_rewriting(tmp_path):
+    saved = {}
+    value = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    first = save_array(tmp_path, "first", value, saved)
+    alias = save_array(tmp_path, "second-rebuild", value.copy(), saved)
+    assert first == alias and not (tmp_path / "second-rebuild.npy").exists()
+    changed = value.copy()
+    changed[1, 2, 3] += 0.25
+    second = save_array(tmp_path, "different", changed, saved)
+    reshaped = save_array(tmp_path, "different-shape", value.reshape(4, 6), saved)
+    half = save_array(tmp_path, "different-dtype", value.astype(np.float16), saved)
+    assert len(saved) == 4 and len(list(tmp_path.iterdir())) == 4
+    for record, expected in [
+        (first, value),
+        (second, changed),
+        (reshaped, value.reshape(4, 6)),
+        (half, value.astype(np.float16)),
+    ]:
+        actual = np.load(tmp_path / record["path"], allow_pickle=False)
+        assert actual.shape == expected.shape and actual.dtype == expected.dtype
+        np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize("batch", [1, 28])
@@ -91,6 +114,9 @@ def test_video_decoder_preserves_fp32_registers_before_first_residual(monkeypatc
     monkeypatch.setattr(vae.op, "linear", linear)
     monkeypatch.setattr(vae.op, "constant", constant)
     monkeypatch.setattr(vae.op, "weight_constant", constant)
+    monkeypatch.setattr(
+        vae, "_post_quant_conv", lambda *_args: tensor((batch, 1792, 24), vae.trt.float16)
+    )
     weights = {
         "post_quant_conv.weight": np.zeros((24, 24), np.float32),
         "post_quant_conv.bias": np.zeros(24, np.float32),
@@ -100,7 +126,78 @@ def test_video_decoder_preserves_fp32_registers_before_first_residual(monkeypatc
     }
     with pytest.raises(CapturedPacking):
         vae.build_vae_tile_decoder_engine(weights, batch_size=batch)
-    assert calls == [vae.trt.float16, vae.trt.float16]
+    assert calls == [vae.trt.float16]
+
+
+@pytest.mark.parametrize("batch", [1, 28])
+def test_video_post_quantization_is_biased_fp16_conv3d(batch):
+    # Original trained parameter shapes and autocast dtypes; no GPU or model
+    # math is supplied by this graph-contract fixture.
+    recorded = {}
+    source = SimpleNamespace(shape=(batch, 24, 7, 16, 16), dtype=vae.trt.float32)
+
+    class Shuffle:
+        def get_output(self, _index):
+            # Permutation storage has eight slots; only this input's rank is active.
+            assert tuple(self.first_transpose[index] for index in range(5)) == (0, 2, 3, 4, 1)
+            assert self.reshape_dims == (batch, 1792, 24)
+            return SimpleNamespace(shape=self.reshape_dims, dtype=vae.trt.float16)
+
+    class Network:
+        def add_cast(self, value, dtype):
+            assert value is source and dtype == vae.trt.float16
+            return SimpleNamespace(
+                get_output=lambda _index: SimpleNamespace(shape=value.shape, dtype=dtype)
+            )
+
+        def add_convolution_nd(self, value, channels, kernel_shape, kernel, bias):
+            assert value.dtype == vae.trt.float16 and value.shape == source.shape
+            assert channels == 24 and kernel_shape == (1, 1, 1)
+            assert kernel.dtype == bias.dtype == np.float16
+            assert kernel.flags.c_contiguous and bias.flags.c_contiguous
+            recorded.update(kernel=kernel, bias=bias)
+            recorded["layer"] = SimpleNamespace(get_output=lambda _index: value)
+            return recorded["layer"]
+
+        def add_shuffle(self, value):
+            assert value.dtype == vae.trt.float16 and value.shape == source.shape
+            return Shuffle()
+
+    weights = {
+        "post_quant_conv.weight": np.arange(576, dtype=np.float32).reshape(24, 24, 1, 1, 1) / 1000,
+        "post_quant_conv.bias": np.linspace(-0.01, 0.01, 24, dtype=np.float32),
+    }
+    network = Network()
+    try:
+        result = vae._post_quant_conv(network, source, weights)
+        assert result.shape == (batch, 1792, 24) and result.dtype == vae.trt.float16
+        assert recorded["layer"].stride_nd == (1, 1, 1) and recorded["layer"].padding_nd == (
+            0,
+            0,
+            0,
+        )
+        for name in ("kernel", "bias"):
+            expected = weights[
+                "post_quant_conv." + ("weight" if name == "kernel" else "bias")
+            ].astype(np.float16)
+            np.testing.assert_array_equal(recorded[name], expected)
+            assert any(
+                value is recorded[name] for value in vae.op._WEIGHT_BUFFER_KEEPALIVE[id(network)]
+            )
+    finally:
+        vae.op.release_weight_buffers(network)
+
+
+def test_video_post_quantization_rejected_convolution_does_not_retain_buffers():
+    source = SimpleNamespace(shape=(1, 24, 7, 16, 16), dtype=vae.trt.float16)
+    network = SimpleNamespace(add_convolution_nd=lambda *_args: None)
+    weights = {
+        "post_quant_conv.weight": np.zeros((24, 24, 1, 1, 1), np.float32),
+        "post_quant_conv.bias": np.zeros(24, np.float32),
+    }
+    with pytest.raises(RuntimeError, match="rejected"):
+        vae._post_quant_conv(network, source, weights)
+    assert id(network) not in vae.op._WEIGHT_BUFFER_KEEPALIVE
 
 
 @pytest.mark.parametrize("batch", [0, -1, 2, 29, True, 1.0, "1", None])
