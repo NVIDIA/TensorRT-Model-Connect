@@ -214,7 +214,11 @@ def test_phi4_siglip_attention_preserves_fp16_score_boundaries(monkeypatch) -> N
     )
 
     assert accumulation_calls == [(half, half), (half, half)]
-    assert elementwise_dtypes[0] == (half, half)
+    # Eager scales FP16 scores by a Python float in FP32; the mask add is FP16.
+    assert elementwise_dtypes == [
+        (module.trt.float32, module.trt.float32),
+        (half, half),
+    ]
     assert output.dtype == half
 
 
