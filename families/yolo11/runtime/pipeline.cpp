@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -74,8 +75,25 @@ Yolo11ObjectDetectionPipeline::Yolo11ObjectDetectionPipeline(
         throw std::runtime_error("Yolo11ObjectDetectionPipeline: invalid model");
 }
 
-ObjectDetectionResult Yolo11ObjectDetectionPipeline::detect(const float* pixels, int32_t height,
-                                                            int32_t width) {
+internal::DetectedBoxesResult
+Yolo11ObjectDetectionPipeline::run(const internal::ImageToBoxesRequest& request,
+                                   internal::ConfigView config) {
+    if (!config.empty())
+        throw internal::ConfigError("YOLO11 has no runtime configuration");
+    const auto& image = request.image;
+    if (image.format != internal::ImageFormat::Float32 || image.channels != 3 ||
+        image.data == nullptr || image.height == 0 || image.width == 0 ||
+        image.height > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
+        image.width > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
+        static_cast<std::uint64_t>(image.height) >
+            std::numeric_limits<std::size_t>::max() / image.width / 3 / sizeof(float) ||
+        image.byte_size != static_cast<std::size_t>(image.height) * image.width * 3 * sizeof(float))
+        throw std::invalid_argument("YOLO11 requires contiguous float32 RGB input");
+
+    const auto height = static_cast<std::int32_t>(image.height);
+    const auto width = static_cast<std::int32_t>(image.width);
+    const auto* pixels = static_cast<const float*>(image.data);
+
     Yolo11Letterbox letterbox;
     auto values = preprocess_yolo11_image(pixels, height, width, preprocess_config_, letterbox);
     Tensor input;
@@ -126,7 +144,7 @@ ObjectDetectionResult Yolo11ObjectDetectionPipeline::detect(const float* pixels,
         candidates.push_back(box);
     }
 
-    ObjectDetectionResult result;
+    internal::DetectedBoxesResult result;
     result.image_height = height;
     result.image_width = width;
     result.boxes = suppress_yolo11_boxes(std::move(candidates), iou_threshold_,

@@ -124,3 +124,80 @@ def test_anchors_cover_every_cell_at_each_stride() -> None:
 def test_batch_norm_uses_the_ultralytics_epsilon() -> None:
     """Ultralytics builds with 1e-3, not the PyTorch default of 1e-5."""
     assert model._BATCH_NORM_EPSILON == 1e-3
+
+
+class _Writer:
+    def __init__(self) -> None:
+        self.sections: dict[str, object] = {}
+
+    def set_header(self, **header) -> None:
+        self.sections["header"] = header
+
+    def add_bytes(self, name: str, value: bytes) -> None:
+        self.sections[name] = value
+
+    def add_json(self, name: str, value: object) -> None:
+        self.sections[name] = value
+
+
+def test_build_rejects_the_old_task_name(tmp_path: Path) -> None:
+    from tensorrt_model_connect.build import BuildRequest
+
+    with pytest.raises(ValueError, match="yolo11 supports only task=image_to_boxes"):
+        model.build(
+            BuildRequest(
+                model_dir=tmp_path,
+                output_path=tmp_path / "unused.bundle",
+                family="yolo11",
+                task="object_detection",
+                precision="fp16",
+            ),
+            _Writer(),
+        )
+
+
+def test_build_exports_image_to_boxes(tmp_path: Path, monkeypatch) -> None:
+    from tensorrt_model_connect.build import BuildRequest
+
+    monkeypatch.setattr(Checkpoint, "open", lambda *args, **kwargs: _checkpoint())
+    monkeypatch.setattr(
+        model,
+        "_build_engine",
+        lambda *args, **kwargs: (
+            b"plan",
+            {
+                "image_height": 640,
+                "image_width": 640,
+                "mean": [0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0],
+                "pad_value": 0.447,
+                "max_detections": 300,
+            },
+        ),
+    )
+
+    writer = _Writer()
+    model.build(
+        BuildRequest(
+            model_dir=tmp_path,
+            output_path=tmp_path / "yolo11n.bundle",
+            family="yolo11",
+            task="image_to_boxes",
+            precision="fp16",
+        ),
+        writer,
+    )
+    assert writer.sections["header"] == {
+        "family": "yolo11",
+        "task": "image_to_boxes",
+        "backend": "trt",
+    }
+    assert writer.sections["engine.plan"] == b"plan"
+    assert writer.sections["runtime.json"] == {
+        "input_image_h": 640,
+        "input_image_w": 640,
+        "image_mean": [0.0, 0.0, 0.0],
+        "image_std": [1.0, 1.0, 1.0],
+        "pad_value": 0.447,
+        "max_detections": 300,
+    }
