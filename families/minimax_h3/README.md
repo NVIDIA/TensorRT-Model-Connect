@@ -23,9 +23,19 @@ plan once and atomically publishes that same temporary file. It no longer
 keeps a separate set of section files while copying the complete final bundle.
 All plan/config/tokenizer bytes and runtime settings are unchanged. If replacing
 an existing destination, that previous file still occupies space until atomic
-publication. Whole-model bundle size, build scratch and host/GPU peaks remain
-unmeasured; packaging mechanics do not establish a minimum RAM/VRAM figure or
-resolve the failed trained-video numerical/storage gates.
+publication. Bundle size, compiler scratch and host/GPU memory are separate
+quantities; the measured example below does not
+establish a minimum RAM/VRAM figure or resolve the failed trained-video
+numerical/storage gates.
+
+One complete original-checkpoint `minimal` build on a single GB300 produced a
+128,526,853,374-byte bundle (119.7 GiB), including all eight plans, tokenizer
+and runtime metadata. Its instrumented build, staging, payload readback and
+hash-verification interval was 605.8 seconds; the builder process's maximum
+RSS was 104,839,424 KiB (approximately 100 GiB). These are observations for
+that exact build, not inference latency or minimum host RAM. Compiler scratch
+and exact GPU allocation peaks remain unqualified. Container memory counters
+also include page cache and prior activity; they are not model RAM minima.
 
 With `core/builder` and the repository root on `PYTHONPATH`:
 
