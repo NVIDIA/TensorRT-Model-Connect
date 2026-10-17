@@ -15,6 +15,8 @@ add_library(trtmc_model_minimax_h3 SHARED
   reference_layout.cpp
   reference_visual_encoder.cpp
   visual_reference.cpp
+  video_decode_math.cpp
+  video_decoder.cpp
   torch_cuda_normal.cu
 )
 
@@ -53,6 +55,25 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_video_decoder
+    video_decoder.cpp video_decode_math.cpp visual_reference.cpp reference_layout.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_video_decoder.cpp
+  )
+  target_include_directories(test_minimax_h3_video_decoder PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_video_decoder SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_minimax_h3_video_decoder PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_video_decoder COMMAND test_minimax_h3_video_decoder)
+
+  add_executable(test_minimax_h3_video_decode_math
+    video_decode_math.cpp visual_reference.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_video_decode_math.cpp
+  )
+  target_include_directories(test_minimax_h3_video_decode_math PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_minimax_h3_video_decode_math PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_video_decode_math COMMAND test_minimax_h3_video_decode_math)
+
   add_executable(minimax_h3_audio_decoder_probe
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/audio_decoder_probe.cpp
   )
