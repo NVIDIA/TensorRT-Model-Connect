@@ -188,6 +188,9 @@ typedef struct {
     /* No concurrent call may use a handle being released. Family destruction
      * stops/joins work before the model's logical execution owner is released. */
     void(TRTMC_CALL* release)(trtmc_speech_session*);
+    /* Optional tail extension. Check header.byte_size before accessing.
+     * Text bytes are borrowed for this call; AGAIN accepts no bytes. */
+    trtmc_status(TRTMC_CALL* append_text)(trtmc_speech_session*, trtmc_string_view, trtmc_error**);
 } trtmc_speech_session_api_v1;
 
 #define TRTMC_TASK_STREAMING_SPEECH_TRANSCRIPTION "streaming_speech_transcription"
