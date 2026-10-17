@@ -1,0 +1,4 @@
+transformers==5.2.0
+accelerate>=1.1.0
+Pillow>=10.1.0
+torchvision
