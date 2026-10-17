@@ -546,6 +546,89 @@ def compare_organism_germ_cell_claims(reference, native):
     }
 
 
+def organism_cellularity_claims(text):
+    """Read bounded, affirmative organism-wide cellularity claims.
+
+    Multiple cells/neurons are evidence of multiple cells, not a required count.
+    Quoted, reported, qualified and explicitly retracted claims imply nothing.
+    Subject recognition is conservative; this is not general coreference analysis.
+    """
+    value = normalized(text).replace("*", "").replace("_", "")
+    value = value.replace("c. elegans", "caenorhabditis elegans")
+    value = value.translate(str.maketrans({dash: "-" for dash in "‐‑‒–—﹣－"}))
+    value = re.sub(
+        r'"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’|`[^`\n]*`|(?<!\w)\x27[^\x27\n]*\x27(?!\w)',
+        " ",
+        value,
+    )
+    target = r"(?:caenorhabditis elegans|(?:the|this) (?:worm|roundworm|nematode))"
+    subject = rf"(?P<subject>{target}|(?:the|this) organism|it)"
+    other = r"\b(?:humans?|homo sapiens|mice|mouse|yeast|bacteria|bacterium|amoebas?|drosophila|flies|other organisms?)\b"
+    qualified = (
+        r"\b(?:if|unless|may|might|could|would|possibly|perhaps|sometimes|usually|"
+        r"embryos?|embryonic|larvae|larval|fertilization|before|after|during|when|"
+        r"claims?|claimed|reports?|reported|says?|said|believes?|believed|states?|stated|"
+        r"denies|denied|false|falsely|incorrectly|"
+        r"correction|incorrect|wrong|mistakenly|myth|misconception|untrue|unknown|unclear|whether)\b"
+        r"|\b(?:not\s+(?:true|correct|accurate|the case)|according to)\b"
+    )
+    classification = re.compile(
+        rf"\b{subject}\s+is\s+(?:an?\s+)?(?P<kind>single[ -]celled|unicellular|multicellular)"
+        r"(?:\s+(?:organism|animal|worm|nematode))?(?=\s*(?:$|[.,;:()!?]|\b(?:and|but)\b))"
+    )
+    count = re.compile(
+        rf"\b{subject}\s+(?:has|contains?|comprises?|consists of)\s+"
+        rf"(?:exactly\s+|only\s+)?{_CLAIM_APPROX}(?P<number>{_CLAIM_NUMBER}|two|three|four)"
+        r"\s+(?:somatic\s+)?(?:cells|neurons)\b"
+    )
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|[|]", value)]
+    claims = set()
+    prefix = ""
+    for index, sentence in enumerate(sentences):
+        following = sentences[index + 1] if index + 1 < len(sentences) else ""
+        retracted = re.match(
+            r"(?:correction\s*:\s*)?(?:that|the preceding) (?:claim|description|classification|statement) "
+            r"(?:is|was) (?:wrong|false|incorrect)\b",
+            following,
+        ) and re.search(r"\b(?:multicellular|not (?:single[ -]celled|unicellular))\b", following)
+        if "?" not in sentence and not re.search(qualified, sentence) and not retracted:
+            for pattern in (classification, count):
+                for match in pattern.finditer(sentence):
+                    # An explicit other subject after the last target mention
+                    # makes a generic reference ambiguous; leave it unclassified.
+                    if match["subject"] in {"it", "this organism", "the organism"}:
+                        context = prefix + sentence[: match.start()]
+                        targets = list(re.finditer(target, context))
+                        if not targets or re.search(other, context[targets[-1].end() :]):
+                            continue
+                    if pattern is classification:
+                        claims.add("multiple" if match["kind"] == "multicellular" else "single")
+                    else:
+                        number = match["number"]
+                        amount = {"two": 2, "three": 3, "four": 4}.get(number)
+                        if (amount if amount is not None else _claim_number(number)) > 1:
+                            claims.add("multiple")
+        prefix += sentence + " "
+    return claims
+
+
+def compare_organism_cellularity_claims(reference, native):
+    expected, actual = (
+        organism_cellularity_claims(reference),
+        organism_cellularity_claims(native),
+    )
+    assert not (
+        ("single" in expected and "multiple" in actual)
+        or ("multiple" in expected and "single" in actual)
+    ), "native/reference explicit cellularity claims conflict"
+    return {
+        "shared_property": bool(expected and actual),
+        "reference_claims": sorted(expected),
+        "native_claims": sorted(actual),
+        "scope": "Affirmative same-organism cellularity only; omissions and unclassified claims imply nothing.",
+    }
+
+
 def organism_numeric_claims(text):
     """Extract bounded, explicit final-answer claims, without judging their truth."""
     value = (
@@ -785,6 +868,9 @@ def evaluate(name, native, expected_parts, reference_ids, eos, request, input_co
             expected_text, actual_text
         )
         checks["explicit_germ_cell_claims"] = compare_organism_germ_cell_claims(
+            expected_text, actual_text
+        )
+        checks["explicit_cellularity_claims"] = compare_organism_cellularity_claims(
             expected_text, actual_text
         )
         if name == "sampled-answer-completion":

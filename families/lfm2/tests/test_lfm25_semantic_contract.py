@@ -1145,3 +1145,126 @@ def test_germ_cell_claims_do_not_apply_to_reasoning_only_sampling_budget():
     )
     assert result["completion_state"] == "reasoning_only_at_budget"
     assert "explicit_germ_cell_claims" not in result
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("model-card-quickstart", "model-card-sampling", "sampled-answer-completion"),
+)
+@pytest.mark.parametrize("budget", [False, True])
+def test_visible_cellularity_contradiction_is_rejected(case, budget):
+    reference = ORGANISM_CORE + " The worm has exactly 302 neurons."
+    native = ORGANISM_CORE + (
+        " Discovered in 1892 by William Howard, it is a single-celled organism "
+        "(in the sense that it is an animal, not a cell) belonging to the phylum Nematoda."
+        " It contains exactly 302 neurons."
+    )
+    args = dict(reference_ids=[1] * 512, native_ids=[2] * 512, limit=512) if budget else {}
+    for left, right in ((reference, native), (native, reference)):
+        with pytest.raises(AssertionError, match="cellularity claims conflict"):
+            check(case, [text(left)], [text(right)], **args)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "C. elegans is single-celled.",
+        "Caenorhabditis elegans is a single celled organism.",
+        "The worm is unicellular.",
+        "This nematode is a single‑celled animal.",
+        "C. elegans is a worm. It is unicellular.",
+        "Bacteria are multicellular, whereas C. elegans is single-celled.",
+        "C. elegans is unicellular, whereas bacteria are multicellular.",
+    ],
+)
+def test_affirmed_target_single_cell_classification(value):
+    assert semantic.organism_cellularity_claims(value) == {"single"}
+    with pytest.raises(AssertionError, match="cellularity claims conflict"):
+        semantic.compare_organism_cellularity_claims("The worm has 302 neurons.", value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "C. elegans is multicellular.",
+        "The worm contains exactly 302 neurons.",
+        "C. elegans is a worm. This organism has 959 somatic cells.",
+        "C. elegans comprises two cells.",
+        "C. elegans consists of four cells.",
+        "C. elegans is a worm. It has roughly 1,000 cells.",
+        "Bacteria are single-celled, whereas C. elegans is multicellular.",
+        "C. elegans is multicellular, whereas bacteria are single-celled.",
+    ],
+)
+def test_target_multiple_cell_evidence_without_exact_count_policy(value):
+    assert semantic.organism_cellularity_claims(value) == {"multiple"}
+    semantic.compare_organism_cellularity_claims("The worm has 302 neurons.", value)
+    with pytest.raises(AssertionError, match="cellularity claims conflict"):
+        semantic.compare_organism_cellularity_claims("The worm is unicellular.", value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "C. elegans is not single-celled.",
+        "The worm isn't unicellular.",
+        "It is not true that C. elegans is single-celled.",
+        'The claim "C. elegans is single-celled" is false.',
+        "A textbook incorrectly calls C. elegans 'unicellular'.",
+        'A source reports: "C. elegans is unicellular."',
+        "A source wrote ‘C. elegans is unicellular.’",
+        "It is a misconception that C. elegans is single-celled.",
+        "Some people believe C. elegans is a single-celled organism.",
+        "A source states that C. elegans is unicellular.",
+        "It was falsely claimed that C. elegans is unicellular.",
+        "C. elegans is single-celled. Correction: that description is wrong; it is multicellular.",
+        "C. elegans is unicellular. That classification is incorrect; it is not single-celled.",
+        "C. elegans is single-celled, but that is incorrect; it is multicellular.",
+        "A biologist denies that C. elegans is single-celled.",
+        "It is not the case that C. elegans is unicellular.",
+        "C. elegans develops from a single cell.",
+        "The worm begins life as a single fertilized egg.",
+        "C. elegans is unicellular during embryonic development.",
+        "C. elegans may be unicellular.",
+        "Is C. elegans single-celled?",
+        "Bacteria are single-celled, whereas C. elegans is transparent.",
+        "C. elegans is transparent, whereas bacteria are single-celled.",
+        "C. elegans is a worm. An amoeba is another organism. It is unicellular.",
+        "C. elegans is a roundworm. Yeast is a model organism. This organism is unicellular.",
+        "C. elegans is a roundworm. Yeast is a model organism. The organism is unicellular.",
+        "Humans have 302 neurons.",
+        "C. elegans has one cell.",
+        "C. elegans has 1 cell.",
+        "C. elegans has 1.0 cells.",
+        "The worm has no cells.",
+        "The worm has 302 neuronal genes.",
+        "C. elegans is a single-celled organism's predator.",
+        "The worm is transparent.",
+    ],
+)
+def test_cellularity_qualified_retracted_other_subject_and_origin_claims_imply_nothing(
+    value,
+):
+    assert semantic.organism_cellularity_claims(value) == set()
+    for target in ("The worm is unicellular.", "The worm has 302 neurons."):
+        for left, right in ((target, value), (value, target)):
+            assert not semantic.compare_organism_cellularity_claims(left, right)["shared_property"]
+
+
+def test_negated_single_cell_statement_can_affirm_multicellularity():
+    value = "C. elegans is not unicellular; it is multicellular."
+    assert semantic.organism_cellularity_claims(value) == {"multiple"}
+    semantic.compare_organism_cellularity_claims("The worm has 302 neurons.", value)
+
+
+def test_cellularity_is_not_checked_in_reasoning_only_sampling_budget():
+    result = check(
+        "model-card-sampling",
+        [{"type": "reasoning", "text": ORGANISM_CORE + " The worm has 302 neurons."}],
+        [{"type": "reasoning", "text": ORGANISM_CORE + " The worm is unicellular."}],
+        reference_ids=[1] * 512,
+        native_ids=[2] * 512,
+        limit=512,
+    )
+    assert result["completion_state"] == "reasoning_only_at_budget"
+    assert "explicit_cellularity_claims" not in result
