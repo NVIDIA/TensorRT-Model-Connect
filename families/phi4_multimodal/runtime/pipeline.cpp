@@ -313,10 +313,30 @@ Tensor make_pixel_values_tensor(const Phi4MultimodalPreprocessedImage& preproces
             break;
         }
     }
+    if (!preprocessed.hd_crop_valid.empty())
+        pixel_t.shape = {static_cast<int64_t>(preprocessed.hd_crop_valid.size() / 2),
+                         preprocessed.channels, preprocessed.height, preprocessed.width};
     if (pixel_t.shape.empty())
         pixel_t.shape = {static_cast<int64_t>(preprocessed.pixel_values.size())};
     pixel_t.dtype = DType::kFloat32;
     return pixel_t;
+}
+
+// Dynamic-HD metadata: valid patch rows/cols per vision batch entry and the
+// rows forming the image tokens.
+void add_dynamic_hd_inputs(TensorMap& inputs, const Phi4MultimodalPreprocessedImage& preprocessed,
+                           const ITrtModule& encoder) {
+    if (preprocessed.hd_crop_valid.empty())
+        return;
+    if (!encoder.has_input("crop_valid") || !encoder.has_input("image_token_rows"))
+        throw std::runtime_error("Phi4MultimodalPipeline: vision engine lacks the Dynamic-HD "
+                                 "inputs; rebuild the bundle");
+    inputs["crop_valid"] = Tensor{const_cast<int32_t*>(preprocessed.hd_crop_valid.data()),
+                                  {static_cast<int64_t>(preprocessed.hd_crop_valid.size() / 2), 2},
+                                  DType::kInt32};
+    inputs["image_token_rows"] = Tensor{const_cast<int32_t*>(preprocessed.hd_token_rows.data()),
+                                        {static_cast<int64_t>(preprocessed.hd_token_rows.size())},
+                                        DType::kInt32};
 }
 
 void add_image_grid_input(TensorMap& inputs, const Phi4MultimodalPreprocessedImage& preprocessed,
@@ -396,7 +416,10 @@ TextResult Phi4MultimodalPipeline::generate(const std::string& prompt, const flo
     int32_t nf = static_cast<int32_t>(features.size() / static_cast<std::size_t>(dim));
 
     // Format prompt, tokenize, generate with vision features
-    auto input_ids = tokenizer_->encode(phi4_multimodal_format_prompt(prompt, vl_preprocess_));
+    if (!preprocessed.hd_token_rows.empty() &&
+        static_cast<std::size_t>(nf) != preprocessed.hd_token_rows.size())
+        throw std::runtime_error("Phi4MultimodalPipeline: image feature count mismatch");
+    auto input_ids = tokenizer_->encode(phi4_multimodal_format_prompt(prompt, vl_preprocess_, nf));
     auto [max_new, eos] = resolve_gen_limits(cfg);
     auto sp_vl = phi4_multimodal_sampling_params_from_config(cfg, eos);
     auto out =
@@ -606,6 +629,7 @@ bool Phi4MultimodalPipeline::run_vision_encoder(
     TensorMap inputs;
     inputs["pixel_values"] = make_pixel_values_tensor(preprocessed, *vision_encoder_);
     add_image_grid_input(inputs, preprocessed, *vision_encoder_);
+    add_dynamic_hd_inputs(inputs, preprocessed, *vision_encoder_);
 
     auto outputs = vision_encoder_->forward(inputs);
 

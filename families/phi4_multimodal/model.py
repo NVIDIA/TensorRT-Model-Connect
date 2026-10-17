@@ -238,6 +238,8 @@ class _Phi4MultimodalModel:
             "patch_size": 14,
             "merge_size": 2,
             "temporal_patch_size": 1,
+            # Dynamic-HD images have a per-image token count; the runtime uses
+            # the vision engine's image_token_rows. 721 is the 2x1 crop grid.
             "num_image_pad_tokens": 721,
             "vision_output_dim": config.hidden_size,
             "preprocessor_type": "phi4_hd_chw",
