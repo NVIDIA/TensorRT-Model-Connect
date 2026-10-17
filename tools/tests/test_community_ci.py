@@ -6,15 +6,22 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import io
+import urllib.request
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 from tools import community_ci, legal_headers
+from tools.ci.process import CiError
+from tools.ci.quality import UnitTestRunner
+from tools.tests.test_new_ci import RecordingContext
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -706,7 +713,7 @@ def test_gpu_image_verifies_the_native_byok_dependency() -> None:
     assert "metadata.version('apache-tvm-ffi') == '0.1.12'" in dockerfile
 
 
-def test_cpu_image_builds_from_the_minimal_requirements_context(
+def test_cpu_image_context_contains_only_requirements_and_declared_native_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = community_ci.CommunityCI(REPO_ROOT, dict(os.environ))
@@ -714,6 +721,20 @@ def test_cpu_image_builds_from_the_minimal_requirements_context(
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(command)
+        context = Path(command[-1])
+        files = {
+            path.relative_to(context).as_posix() for path in context.rglob("*") if path.is_file()
+        }
+        manifests = sorted(REPO_ROOT.glob("families/*/ci/native-dependencies.json"))
+        assert files == {
+            "community-ci.txt",
+            "native-dependencies.py",
+            *(f"native-declarations/{path.parents[1].name}.json" for path in manifests),
+        }
+        for manifest in manifests:
+            assert (
+                context / "native-declarations" / f"{manifest.parents[1].name}.json"
+            ).read_bytes() == manifest.read_bytes()
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(runner.commands, "run", run)
@@ -721,7 +742,69 @@ def test_cpu_image_builds_from_the_minimal_requirements_context(
     runner._ensure_cpu_image()
 
     assert calls[0][:3] == ["docker", "build", "--file"]
-    assert calls[0][-1] == "requirements"
+    assert not Path(calls[0][-1]).exists()  # The connected context is run-owned.
+
+
+@pytest.mark.parametrize("component", ["family", "ci", "manifest"])
+def test_cpu_image_context_rejects_symlink_escapes(tmp_path, monkeypatch, component):
+    repository = tmp_path / "repository"
+    (repository / "requirements").mkdir(parents=True)
+    (repository / "requirements/community-ci.txt").write_text("pytest\n")
+    (repository / "tools").mkdir()
+    (repository / "tools/community_ci.py").write_text("# staging source fixture\n")
+    family = repository / "families/alpha"
+    (family / "ci").mkdir(parents=True)
+    manifest = family / "ci/native-dependencies.json"
+    manifest.write_text("{}")
+    selected = {"family": family, "ci": family / "ci", "manifest": manifest}[component]
+    outside = tmp_path / "outside"
+    selected.rename(outside)
+    selected.symlink_to(outside, target_is_directory=component != "manifest")
+    runner = community_ci.CommunityCI(repository, dict(os.environ))
+    calls = []
+    monkeypatch.setattr(runner.commands, "run", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(CiError, match="must not traverse a symlink"):
+        runner._ensure_cpu_image()
+    assert not calls
+
+
+def test_image_staging_command_needs_no_checkout_or_project_imports(tmp_path):
+    script = tmp_path / "native-dependencies.py"
+    shutil.copyfile(REPO_ROOT / "tools/community_ci.py", script)
+    declarations = tmp_path / "declarations"
+    declarations.mkdir()
+    output = tmp_path / "staged"
+    subprocess.run(
+        [sys.executable, str(script), "stage-native-dependencies", str(declarations), str(output)],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=True,
+        capture_output=True,
+    )
+    assert (output / "cache.cmake").read_text() == ""
+    assert json.loads((output / "downloads.json").read_text()) == []
+
+
+@pytest.mark.parametrize(
+    "component", ["requirements", "requirements/community-ci.txt", "tools", "tools/community_ci.py"]
+)
+def test_cpu_image_fixed_inputs_reject_symlink_escapes(tmp_path, monkeypatch, component):
+    repository = tmp_path / "repository"
+    for name in ("requirements/community-ci.txt", "tools/community_ci.py"):
+        path = repository / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# context fixture\n")
+    selected = repository / component
+    directory = selected.is_dir()
+    outside = tmp_path / "outside"
+    selected.rename(outside)
+    selected.symlink_to(outside, target_is_directory=directory)
+    runner = community_ci.CommunityCI(repository, dict(os.environ))
+    calls = []
+    monkeypatch.setattr(runner.commands, "run", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(CiError, match="must not traverse a symlink"):
+        runner._ensure_cpu_image()
+    assert not calls
 
 
 @pytest.mark.parametrize(
@@ -1986,3 +2069,215 @@ def test_dispatch_rejects_unapproved_implementation_refs(tmp_path, lane, ref):
     assert "approved" in result.stdout
     assert not (tmp_path / "calls").exists()
     assert not (tmp_path / "output").exists()
+
+
+native = community_ci
+
+PAYLOAD = b"archive fixture bytes; no extraction by the downloader"
+
+
+def declaration(tmp_path, **updates):
+    archive = {
+        "cmake_variable": "ALPHA_NATIVE_ARCHIVE",
+        "filename": "native.tar.xz",
+        "url": "https://example.org/native.tar.xz",
+        "sha256": hashlib.sha256(PAYLOAD).hexdigest(),
+        "systems": ["Linux"],
+        "machines": ["x86_64", "aarch64"],
+        **updates,
+    }
+    manifests = tmp_path / "declarations"
+    manifests.mkdir()
+    (manifests / "alpha.json").write_text(
+        json.dumps({"schema_version": 1, "artifacts": {"sdk": archive}})
+    )
+    return manifests
+
+
+@pytest.fixture
+def downloads(monkeypatch):
+    calls = []
+
+    class Response(io.BytesIO):
+        def geturl(self):
+            return "https://cdn.example.org/native.tar.xz"
+
+    class Opener:
+        def open(self, url, *, timeout):
+            calls.append((url, timeout))
+            return Response(PAYLOAD)
+
+    monkeypatch.setattr(native.urllib.request, "build_opener", lambda *_: Opener())
+    return calls
+
+
+@pytest.mark.parametrize("machine", ["x86_64", "aarch64"])
+def test_exact_archive_and_literal_cache_are_usable_offline(tmp_path, downloads, machine):
+    manifests = declaration(tmp_path)
+    # CMake bracket quoting must preserve spaces, variables and a bracket terminator.
+    output = tmp_path / "cache ${not_expanded} ]=] with spaces"
+    native.stage(manifests, output, system="Linux", machine=machine)
+    archive = output / "alpha/native.tar.xz"
+    assert archive.read_bytes() == PAYLOAD
+    receipt = json.loads((output / "downloads.json").read_text())
+    assert receipt[0]["sha256"] == hashlib.sha256(PAYLOAD).hexdigest()
+    assert receipt[0]["bytes"] == len(PAYLOAD)
+    assert receipt[0]["resolved_url"] == "https://cdn.example.org/native.tar.xz"
+    assert len(downloads) == 1
+    if not shutil.which("cmake"):
+        pytest.skip("CMake required for actual initial-cache parser")
+    script = tmp_path / "verify.cmake"
+    script.write_text(
+        'file(READ "${ALPHA_NATIVE_ARCHIVE}" actual HEX)\n'
+        f'if(NOT actual STREQUAL "{PAYLOAD.hex()}")\nmessage(FATAL_ERROR "wrong bytes")\nendif()\n'
+    )
+    subprocess.run(
+        ["cmake", "-C", str(output / "cache.cmake"), "-P", str(script)],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"filename": "../escape"},
+        {"filename": "/tmp/escape"},
+        {"filename": "name/escape"},
+        {"filename": ""},
+        {"cmake_variable": "TRTMC_ENABLE_BYOK"},
+        {"cmake_variable": "CMAKE_PROJECT_INCLUDE"},
+        {"cmake_variable": "ALPHA_X)\nmessage(FATAL_ERROR injected)"},
+        {"url": "http://example.org/archive"},
+        {"url": "file:///etc/passwd"},
+        {"url": "https://name:password@example.org/archive"},
+        {"sha256": "abc"},
+        {"sha256": "A" * 64},
+        {"machines": "x86_64"},
+        {"systems": []},
+    ],
+)
+def test_invalid_declarations_fail_before_download(tmp_path, downloads, updates):
+    manifests = declaration(tmp_path, **updates)
+    with pytest.raises(ValueError):
+        native.stage(manifests, tmp_path / "output", system="Linux", machine="x86_64")
+    assert not downloads
+
+
+def test_hash_mismatch_leaves_no_accepted_archive_or_cache(tmp_path, downloads):
+    manifests = declaration(tmp_path, sha256="0" * 64)
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        native.stage(manifests, output, system="Linux", machine="x86_64")
+    assert len(downloads) == 1
+    assert not list(output.rglob("*.xz*"))
+    assert not (output / "cache.cmake").exists()
+
+
+@pytest.mark.parametrize("collision", ["variable", "filename"])
+def test_collisions_fail_before_download(tmp_path, downloads, collision):
+    manifests = declaration(tmp_path)
+    path = manifests / "alpha.json"
+    value = json.loads(path.read_text())
+    duplicate = dict(value["artifacts"]["sdk"])
+    duplicate["filename" if collision == "variable" else "cmake_variable"] = (
+        "different.tar.xz" if collision == "variable" else "ALPHA_OTHER_ARCHIVE"
+    )
+    value["artifacts"]["duplicate"] = duplicate
+    path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="Duplicate"):
+        native.stage(manifests, tmp_path / "output", system="Linux", machine="x86_64")
+    assert not downloads
+
+
+def test_unsupported_machine_fails_before_download(tmp_path, downloads):
+    manifests = declaration(tmp_path)
+    with pytest.raises(ValueError, match="No native dependency archive"):
+        native.stage(manifests, tmp_path / "output", system="Linux", machine="unknown")
+    assert not downloads
+
+
+def test_boolean_schema_version_is_not_an_integer_version(tmp_path, downloads):
+    manifests = declaration(tmp_path)
+    path = manifests / "alpha.json"
+    value = json.loads(path.read_text())
+    value["schema_version"] = True
+    path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="Unsupported"):
+        native.stage(manifests, tmp_path / "output", system="Linux", machine="x86_64")
+    assert not downloads
+
+
+@pytest.mark.parametrize(
+    "family,variable",
+    [
+        ("cmake", "CMAKE_MODULE_ARCHIVE"),
+        ("trtmc", "TRTMC_RUNTIME_ARCHIVE"),
+        ("build", "BUILD_TEST_ARCHIVE"),
+    ],
+)
+def test_family_name_cannot_claim_global_cache_namespace(tmp_path, downloads, family, variable):
+    manifests = declaration(tmp_path, cmake_variable=variable)
+    (manifests / "alpha.json").rename(manifests / f"{family}.json")
+    with pytest.raises(ValueError, match="must belong"):
+        native.stage(manifests, tmp_path / "output", system="Linux", machine="x86_64")
+    assert not downloads
+
+
+@pytest.mark.parametrize("symlink", ["manifest", "output", "ancestor"])
+def test_symlink_paths_are_not_followed(tmp_path, downloads, symlink):
+    manifests = declaration(tmp_path)
+    output = tmp_path / "output"
+    if symlink == "manifest":
+        actual = tmp_path / "actual.json"
+        (manifests / "alpha.json").rename(actual)
+        (manifests / "alpha.json").symlink_to(actual)
+    else:
+        actual = tmp_path / "actual"
+        actual.mkdir()
+        output.symlink_to(actual, target_is_directory=True)
+        if symlink == "ancestor":
+            output /= "child"
+    with pytest.raises(ValueError, match="symlink|regular family"):
+        native.stage(manifests, output, system="Linux", machine="x86_64")
+    assert not downloads
+
+
+def test_redirect_cannot_downgrade_to_http():
+    handler = native.HTTPSRedirectHandler()
+    request = urllib.request.Request("https://example.org/archive")
+    with pytest.raises(ValueError, match="retain HTTPS"):
+        handler.redirect_request(request, None, 302, "Found", {}, "http://example.org/archive")
+
+
+def test_full_unit_build_uses_initial_cache_without_disabling_coverage(tmp_path):
+    cache = tmp_path / "cache.cmake"
+    cache.write_text("")
+    context = RecordingContext(
+        tmp_path,
+        {
+            "TRTMC_NATIVE_DEPENDENCIES_CACHE": str(cache),
+            "TRTMC_CORE_BUILD_DIR": str(tmp_path / "build"),
+        },
+    )
+    UnitTestRunner(context).premerge()
+    configure = context.calls[3][0]
+    assert configure[:3] == ["cmake", "-C", str(cache)]
+    assert "-DTRTMC_BUILD_TESTS=ON" in configure
+    assert not any("BYOK" in str(value) or "SDPA" in str(value) for value in configure)
+    assert context.calls[4][0][-2:] == ["--parallel", "8"]
+    assert "--target" not in context.calls[4][0]
+    assert context.calls[5][0][-2:] == ["--label-exclude", "gpu"]
+
+
+def test_missing_declared_cache_does_not_fall_back_to_network(tmp_path):
+    context = RecordingContext(
+        tmp_path,
+        {
+            "TRTMC_NATIVE_DEPENDENCIES_CACHE": str(tmp_path / "absent"),
+            "TRTMC_CORE_BUILD_DIR": str(tmp_path / "build"),
+        },
+    )
+    with pytest.raises(CiError, match="initial cache is missing"):
+        UnitTestRunner(context).premerge()
+    assert not any(call[0][0] == "cmake" and "-S" in call[0] for call in context.calls)

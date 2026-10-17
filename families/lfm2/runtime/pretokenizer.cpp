@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <unicode/uchar.h>
 #include <utility>
 
 namespace trtmc {
@@ -86,43 +87,14 @@ Utf8Unit decode_utf8_unit(std::string_view text, std::size_t offset) {
     return {first, 1};
 }
 
-struct Range {
-    char32_t first;
-    char32_t last;
-};
-
-template <std::size_t N>
-bool in_ranges(char32_t codepoint, const std::array<Range, N>& ranges) {
-    return std::any_of(ranges.begin(), ranges.end(), [codepoint](const Range& range) {
-        return codepoint >= range.first && codepoint <= range.last;
-    });
-}
-
 bool is_letter(char32_t codepoint) {
-    // Unicode Letter categories needed by every language advertised for the
-    // pinned LFM2 checkpoint. Deliberate holes exclude punctuation and marks:
-    // notably Arabic comma U+060C and Katakana middle dot U+30FB.
-    static constexpr std::array<Range, 28> ranges{{
-        {'A', 'Z'},       {'a', 'z'},       {0x00AA, 0x00AA}, {0x00B5, 0x00B5}, {0x00BA, 0x00BA},
-        {0x00C0, 0x00D6}, {0x00D8, 0x00F6}, {0x00F8, 0x02C1}, {0x0400, 0x0481}, {0x048A, 0x052F},
-        {0x0620, 0x064A}, {0x066E, 0x066F}, {0x0671, 0x06D3}, {0x06E5, 0x06E6}, {0x06EE, 0x06EF},
-        {0x06FA, 0x06FC}, {0x06FF, 0x06FF}, {0x0904, 0x0939}, {0x093D, 0x093D}, {0x0950, 0x0950},
-        {0x0958, 0x0961}, {0x3041, 0x3096}, {0x309D, 0x309F}, {0x30A1, 0x30FA}, {0x30FC, 0x30FF},
-        {0x3400, 0x4DBF}, {0x4E00, 0x9FFF}, {0xAC00, 0xD7A3},
-    }};
-    return in_ranges(codepoint, ranges);
+    return u_isalpha(static_cast<UChar32>(codepoint));
 }
 
 bool is_number(char32_t codepoint) {
-    static constexpr std::array<Range, 6> ranges{{
-        {'0', '9'},
-        {0x0660, 0x0669},
-        {0x06F0, 0x06F9},
-        {0x0966, 0x096F},
-        {0xFF10, 0xFF19},
-        {0x1D7CE, 0x1D7FF},
-    }};
-    return in_ranges(codepoint, ranges);
+    const auto category = u_charType(static_cast<UChar32>(codepoint));
+    return category == U_DECIMAL_DIGIT_NUMBER || category == U_LETTER_NUMBER ||
+           category == U_OTHER_NUMBER;
 }
 
 bool is_whitespace(char32_t codepoint) {

@@ -67,6 +67,10 @@ Lfm2KvCache::Lfm2KvCache(int32_t num_layers, int32_t max_length, int32_t num_kv_
     : num_layers_(num_layers), max_length_(max_length), num_kv_heads_(num_kv_heads),
       head_dim_(head_dim), stream_(stream), dtype_(dtype), names_(std::move(names)) {
     validate_geometry(num_layers_, max_length_, num_kv_heads_, head_dim_);
+    if (names_.key_value_lengths.empty() == names_.active_length_extent.empty())
+        throw std::invalid_argument("LFM2 KV cache requires exactly one length input contract");
+    if (names_.batched_prefill && names_.active_length_extent.empty())
+        throw std::invalid_argument("LFM2 batched prefill requires the active-length extent");
     kv_dim_ = num_kv_heads_ * head_dim_;
 
     populate_default_names(names_, num_layers_);
@@ -84,8 +88,55 @@ Lfm2KvCache::Lfm2KvCache(int32_t num_layers, int32_t max_length, int32_t num_kv_
 
 void Lfm2KvCache::validate_contract(ITrtModule& module) const {
     validate_scalar(module, names_.cache_write_indices);
-    validate_scalar(module, names_.key_value_lengths);
-    validate_scalar(module, names_.position_id);
+    if (!names_.key_value_lengths.empty()) {
+        validate_scalar(module, names_.key_value_lengths);
+    } else {
+        const auto& name = names_.active_length_extent;
+        const int profiles = names_.batched_prefill ? 2 : 1;
+        if (!module.has_input(name) || module.tensor_dtype(name) != DType::kInt32 ||
+            !module.input_is_dynamic(name) || module.input_rank(name) != 1 ||
+            module.optimization_profile_count() != profiles || module.profile_idx() < 0 ||
+            module.profile_idx() >= profiles || module.has_input("key_value_lengths") ||
+            module.cuda_graph_active() || module.cuda_graph_captured()) {
+            throw std::runtime_error(
+                "LFM2 cuDNN attention requires uncaptured INT32 active-length extent [1,capacity]");
+        }
+        for (int profile = 0; profile < profiles; ++profile) {
+            if (module.input_profile_shape(name, profile, ProfileShapeSelector::kMin) !=
+                    std::vector<int64_t>{1} ||
+                module.input_profile_shape(name, profile, ProfileShapeSelector::kOpt) !=
+                    std::vector<int64_t>{max_length_} ||
+                module.input_profile_shape(name, profile, ProfileShapeSelector::kMax) !=
+                    std::vector<int64_t>{max_length_})
+                throw std::runtime_error(
+                    "LFM2 active-length extent profile must span [1,capacity]");
+        }
+    }
+    if (names_.batched_prefill) {
+        if (!module.has_input("decode_phase") ||
+            module.tensor_dtype("decode_phase") != DType::kInt32 ||
+            module.tensor_shape("decode_phase") != std::vector<int64_t>{1, 1})
+            throw std::runtime_error("LFM2 batched profiles require INT32 decode_phase [1,1]");
+        for (const auto& name : {std::string("token_id"), names_.position_id}) {
+            if (!module.has_input(name) || module.tensor_dtype(name) != DType::kInt32 ||
+                !module.input_is_dynamic(name) || module.input_rank(name) != 1)
+                throw std::runtime_error(
+                    "LFM2 batched token and position inputs must be dynamic INT32 vectors");
+            for (int profile = 0; profile < 2; ++profile) {
+                const int rows = profile == 0 ? max_length_ : 1;
+                if (module.input_profile_shape(name, profile, ProfileShapeSelector::kMin) !=
+                        std::vector<int64_t>{1} ||
+                    module.input_profile_shape(name, profile, ProfileShapeSelector::kOpt) !=
+                        std::vector<int64_t>{rows} ||
+                    module.input_profile_shape(name, profile, ProfileShapeSelector::kMax) !=
+                        std::vector<int64_t>{rows})
+                    throw std::runtime_error(
+                        "LFM2 profiles require full prefill rows and single-row decode");
+            }
+        }
+    } else {
+        validate_scalar(module, names_.position_id);
+    }
     const std::vector<int64_t> expected_shape{1, num_kv_heads_, max_length_, head_dim_};
     for (int32_t layer = 0; layer < num_layers_; ++layer) {
         const auto index = static_cast<std::size_t>(layer);
@@ -128,15 +179,24 @@ void Lfm2KvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
         throw std::invalid_argument("LFM2 KV step length must be positive");
     if (seq_len > max_length_ - position_)
         throw std::runtime_error("LFM2 sequence exceeds fixed native KV cache capacity");
+    if (!names_.active_length_extent.empty() && !names_.batched_prefill && seq_len != 1)
+        throw std::invalid_argument("LFM2 cuDNN attention requires a single-token step");
+    if (names_.batched_prefill && seq_len != 1 && position_ != 0)
+        throw std::invalid_argument(
+            "LFM2 batched prefill must consume the full prompt at position zero");
 
     cache_write_index_ = position_;
     key_value_length_ = position_ + seq_len;
     inputs[names_.cache_write_indices] = Tensor{&cache_write_index_, {1}, DType::kInt32};
-    inputs[names_.key_value_lengths] = Tensor{&key_value_length_, {1}, DType::kInt32};
+    if (!names_.key_value_lengths.empty()) {
+        inputs[names_.key_value_lengths] = Tensor{&key_value_length_, {1}, DType::kInt32};
+    } else {
+        // The dimension is host metadata. No values are uploaded or consumed.
+        inputs[names_.active_length_extent] = Tensor{nullptr, {key_value_length_}, DType::kInt32};
+    }
 
-    // LFM2 always uses rotary position embeddings for the dense checkpoints.
-    // The v1 engine is single-token, but keeping the vector-shaped contract
-    // makes the state correct if a family-owned multi-token engine is added.
+    // The v3 prefill spans the complete prompt; decode and legacy execution
+    // supply one position. The scalar write index identifies the first row.
     positions_.resize(static_cast<std::size_t>(seq_len));
     for (int32_t index = 0; index < seq_len; ++index)
         positions_[static_cast<std::size_t>(index)] = position_ + index;

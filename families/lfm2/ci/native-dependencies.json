@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "artifacts": {
+    "frontend": {
+      "cmake_variable": "LFM2_CUDNN_FRONTEND_ARCHIVE",
+      "filename": "cudnn-frontend.tar.gz",
+      "url": "https://codeload.github.com/NVIDIA/cudnn-frontend/tar.gz/a91f0e04dcea10515f0f776fc5a89535e316a9c8",
+      "sha256": "02383de1161e2476579e23fc1b99639e026635bb0ba17e376ce7e05fdf23873a",
+      "systems": ["Linux"],
+      "machines": []
+    },
+    "linux-x86_64": {
+      "cmake_variable": "LFM2_CUDNN_ARCHIVE",
+      "filename": "cudnn-linux-x86_64-9.20.0.48_cuda13-archive.tar.xz",
+      "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-9.20.0.48_cuda13-archive.tar.xz",
+      "sha256": "73f091ee57668dc18e8b1b61811c0ddff2ec0b762efe613e9f27f9ebfd6c20c0",
+      "systems": ["Linux"],
+      "machines": ["x86_64", "AMD64"]
+    },
+    "linux-sbsa": {
+      "cmake_variable": "LFM2_CUDNN_ARCHIVE",
+      "filename": "cudnn-linux-sbsa-9.20.0.48_cuda13-archive.tar.xz",
+      "url": "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-sbsa/cudnn-linux-sbsa-9.20.0.48_cuda13-archive.tar.xz",
+      "sha256": "21140178191c620799ec09620ae1d89649c9b95441163f8ef956e1493a0e3704",
+      "systems": ["Linux"],
+      "machines": ["aarch64", "arm64"]
+    }
+  }
+}

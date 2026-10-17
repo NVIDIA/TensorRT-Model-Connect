@@ -1,0 +1,61 @@
+{
+  "name": "lfm25-2.6b",
+  "hf_id": "LiquidAI/LFM2.5-2.6B",
+  "hf_revision": "654f9463ce32b05d0429d76fe1f580b27d4c1ac0",
+  "bundle": "lfm25-2.6b-bf16.bundle",
+  "family": "lfm2",
+  "task": "text_generation",
+  "precision": "bf16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "lfm25-2.6b-raw",
+      "reference_precision": "bf16",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 16,
+      "do_sample": false,
+      "repetition_penalty": 1.0,
+      "semantic_case": "raw-capital-completion",
+      "premerge": true
+    },
+    {
+      "name": "lfm25-2.6b-chat",
+      "reference_precision": "bf16",
+      "prompt": "What is C. elegans?",
+      "max_new_tokens": 64,
+      "do_sample": false,
+      "use_chat_template": true,
+      "repetition_penalty": 1.0,
+      "semantic_case": "chat-prefix-interface",
+      "premerge": true
+    },
+    {
+      "name": "lfm25-2.6b-tool-call",
+      "reference_precision": "bf16",
+      "prompt": "<|startoftext|><|im_start|>system\nUse the provided tool to satisfy the request.\nList of tools: [{\"name\": \"set_temperature\", \"description\": \"Set the cabin temperature in Celsius.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"temperature\": {\"type\": \"number\"}}, \"required\": [\"temperature\"]}}]<|im_end|>\n<|im_start|>user\nSet the cabin temperature to 22 degrees Celsius.<|im_end|>\n<|im_start|>assistant\n<think>",
+      "max_new_tokens": 256,
+      "do_sample": false,
+      "repetition_penalty": 1.0,
+      "expected_answers": [
+        "set_temperature(temperature=22)"
+      ],
+      "semantic_case": "positive-temperature-tool",
+      "premerge": true
+    },
+    {
+      "name": "lfm25-2.6b-tool-result",
+      "reference_precision": "bf16",
+      "prompt": "<|startoftext|><|im_start|>system\nUse the provided tool to satisfy the request.\nList of tools: [{\"name\": \"set_temperature\", \"description\": \"Set the cabin temperature in Celsius.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"temperature\": {\"type\": \"number\"}}, \"required\": [\"temperature\"]}}]<|im_end|>\n<|im_start|>user\nSet the cabin temperature to 22 degrees Celsius.<|im_end|>\n<|im_start|>assistant\n<|tool_call_start|>[set_temperature(temperature=22)]<|tool_call_end|><|im_end|>\n<|im_start|>tool\n{\"temperature\":22,\"success\":true}<|im_end|>\n<|im_start|>assistant\n<think>",
+      "max_new_tokens": 256,
+      "do_sample": false,
+      "repetition_penalty": 1.0,
+      "expected_answers": [
+        "22 degrees Celsius"
+      ],
+      "semantic_case": "tool-result",
+      "premerge": true
+    }
+  ],
+  "max_sequence_length": 512,
+  "tensor_parallel_size": 1
+}

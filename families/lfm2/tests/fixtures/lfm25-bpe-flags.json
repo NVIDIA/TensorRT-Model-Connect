@@ -1,0 +1,202 @@
+{
+  "reference": "Hugging Face tokenizers BPE",
+  "tokenizers_version": "0.22.2",
+  "cases": [
+    {
+      "name": "ignore-false-abc",
+      "tokenizer": {
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": true,
+          "use_regex": false
+        },
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+          "type": "BPE",
+          "dropout": null,
+          "unk_token": null,
+          "continuing_subword_prefix": null,
+          "end_of_word_suffix": null,
+          "fuse_unk": false,
+          "byte_fallback": false,
+          "ignore_merges": false,
+          "vocab": {
+            "a": 0,
+            "b": 1,
+            "c": 2,
+            "x": 3,
+            "y": 4,
+            "z": 5,
+            "abc": 6,
+            "xy": 7
+          },
+          "merges": [
+            [
+              "x",
+              "y"
+            ]
+          ]
+        }
+      },
+      "text": "abc",
+      "token_ids": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "name": "ignore-false-xyz",
+      "tokenizer": {
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": true,
+          "use_regex": false
+        },
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+          "type": "BPE",
+          "dropout": null,
+          "unk_token": null,
+          "continuing_subword_prefix": null,
+          "end_of_word_suffix": null,
+          "fuse_unk": false,
+          "byte_fallback": false,
+          "ignore_merges": false,
+          "vocab": {
+            "a": 0,
+            "b": 1,
+            "c": 2,
+            "x": 3,
+            "y": 4,
+            "z": 5,
+            "abc": 6,
+            "xy": 7
+          },
+          "merges": [
+            [
+              "x",
+              "y"
+            ]
+          ]
+        }
+      },
+      "text": "xyz",
+      "token_ids": [
+        7,
+        5
+      ]
+    },
+    {
+      "name": "ignore-true-abc",
+      "tokenizer": {
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": true,
+          "use_regex": false
+        },
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+          "type": "BPE",
+          "dropout": null,
+          "unk_token": null,
+          "continuing_subword_prefix": null,
+          "end_of_word_suffix": null,
+          "fuse_unk": false,
+          "byte_fallback": false,
+          "ignore_merges": true,
+          "vocab": {
+            "a": 0,
+            "b": 1,
+            "c": 2,
+            "x": 3,
+            "y": 4,
+            "z": 5,
+            "abc": 6,
+            "xy": 7
+          },
+          "merges": [
+            [
+              "x",
+              "y"
+            ]
+          ]
+        }
+      },
+      "text": "abc",
+      "token_ids": [
+        6
+      ]
+    },
+    {
+      "name": "ignore-true-xyz",
+      "tokenizer": {
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": true,
+          "use_regex": false
+        },
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+          "type": "BPE",
+          "dropout": null,
+          "unk_token": null,
+          "continuing_subword_prefix": null,
+          "end_of_word_suffix": null,
+          "fuse_unk": false,
+          "byte_fallback": false,
+          "ignore_merges": true,
+          "vocab": {
+            "a": 0,
+            "b": 1,
+            "c": 2,
+            "x": 3,
+            "y": 4,
+            "z": 5,
+            "abc": 6,
+            "xy": 7
+          },
+          "merges": [
+            [
+              "x",
+              "y"
+            ]
+          ]
+        }
+      },
+      "text": "xyz",
+      "token_ids": [
+        7,
+        5
+      ]
+    }
+  ]
+}

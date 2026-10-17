@@ -76,11 +76,14 @@ class TrtBackend final : public IBackend {
 
         const int32_t nprofiles = engine->getNbOptimizationProfiles();
         auto make_ctx_module = [&](int32_t profile_idx) -> std::unique_ptr<ITrtModule> {
-            auto* ctx = engine->createExecutionContext();
+            auto ctx = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext(
+                nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED));
             if (!ctx)
                 throw std::runtime_error("[trtmc] Failed to create TRT execution context");
-            auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx,
-                                                       options.distributed_communicator);
+            auto mod = std::make_unique<TrtModuleImpl>(
+                engine.get(), ctx.get(), stream, profile_idx, options.distributed_communicator,
+                std::vector<ModuleExternalBinding>{}, false, true);
+            ctx.release(); // Module construction has taken context ownership.
             if (!mod->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
             keep_backend_resources(*mod, engine, stream_owner, options.distributed_owner);

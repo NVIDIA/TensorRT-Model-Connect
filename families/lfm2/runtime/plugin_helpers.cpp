@@ -17,6 +17,22 @@ namespace trtmc::lfm2 {
 
 namespace {
 
+bool postprocessor_adds_bos(const nlohmann::json& processor) {
+    if (!processor.is_object())
+        return false;
+    if (processor.value("type", "") == "Sequence") {
+        for (const auto& child : processor.at("processors")) {
+            if (postprocessor_adds_bos(child))
+                return true;
+        }
+    }
+    if (processor.value("type", "") != "TemplateProcessing")
+        return false;
+    const auto& single = processor.at("single");
+    return single.is_array() && !single.empty() && single.front().contains("SpecialToken") &&
+           single.front().at("SpecialToken").value("id", "") == "<|startoftext|>";
+}
+
 class PrefixTokenizer final : public ITokenizer {
   public:
     PrefixTokenizer(std::unique_ptr<ITokenizer> inner, std::int32_t prefix)
@@ -92,7 +108,7 @@ std::shared_ptr<ITokenizer> create_tokenizer(const BundleReader& bundle) {
     const auto& section = require_section(bundle, "tokenizer.json");
     const bool pinned =
         lfm2_uses_pinned_split_byte_level_pretokenizer(section.data(), section.size());
-    auto tokenizer = CreateBpeTokenizer(section.data(), section.size(), !pinned);
+    auto tokenizer = CreateBpeTokenizer(section.data(), section.size(), !pinned, pinned);
     if (tokenizer == nullptr)
         throw std::runtime_error("lfm2 BPE tokenizer construction failed");
     if (lfm2_uses_sequence_byte_level_decoder(section.data(), section.size()))
@@ -100,10 +116,13 @@ std::shared_ptr<ITokenizer> create_tokenizer(const BundleReader& bundle) {
     if (pinned) {
         tokenizer = lfm2_wrap_pinned_pretokenizer(
             std::move(tokenizer), lfm2_tokenizer_added_tokens(section.data(), section.size()));
-        const std::int32_t bos = tokenizer->id_for_token("<|startoftext|>");
-        if (bos < 0)
-            throw std::runtime_error("lfm2 tokenizer has no start token");
-        tokenizer = std::make_unique<PrefixTokenizer>(std::move(tokenizer), bos);
+        const auto json = nlohmann::json::parse(section.begin(), section.end());
+        if (postprocessor_adds_bos(json.value("post_processor", nlohmann::json{}))) {
+            const std::int32_t bos = tokenizer->id_for_token("<|startoftext|>");
+            if (bos < 0)
+                throw std::runtime_error("lfm2 tokenizer has no start token");
+            tokenizer = std::make_unique<PrefixTokenizer>(std::move(tokenizer), bos);
+        }
     }
     return std::shared_ptr<ITokenizer>(std::move(tokenizer));
 }

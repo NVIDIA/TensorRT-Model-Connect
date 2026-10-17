@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -100,7 +101,7 @@ def _required_environment(tp_size: int):
 
 
 def _checkpoint(manifest: dict) -> Path:
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import constants, snapshot_download
 
     revision = manifest.get("hf_revision")
     assert isinstance(revision, str) and revision, "LFM2 reference must pin its checkpoint revision"
@@ -108,6 +109,7 @@ def _checkpoint(manifest: dict) -> Path:
         snapshot_download(
             repo_id=manifest["hf_id"],
             revision=revision,
+            local_files_only=constants.HF_HUB_OFFLINE,
         )
     )
     assert (path / "config.json").is_file(), path
@@ -127,23 +129,30 @@ def _prompt(case: dict) -> str:
     )
 
 
-def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
+def _build_bundle(manifest: dict, model_dir: Path, bundle: Path, runtime_root: Path) -> None:
     quantization = manifest.get("quantization")
     assert quantization is None or isinstance(quantization, str)
     fp32_layers = tuple(manifest.get("fp32_layers", ()))
-    build(
-        BuildRequest(
-            model_dir=model_dir,
-            output_path=bundle,
-            family=_FAMILY,
-            task="text_generation",
-            precision=manifest["precision"],
-            max_sequence_length=manifest["max_sequence_length"],
-            tensor_parallel_size=manifest["tensor_parallel_size"],
-            quantization=quantization,
-            fp32_layers=fp32_layers,
+    # The native runtime directory is an explicit standard library-search prefix
+    # for this build, without adding a family-specific builder environment input.
+    prefixes = [str(runtime_root)]
+    previous = os.environ.get("CMAKE_PREFIX_PATH")
+    if previous:
+        prefixes.append(previous)
+    with patch.dict(os.environ, {"CMAKE_PREFIX_PATH": os.pathsep.join(prefixes)}):
+        build(
+            BuildRequest(
+                model_dir=model_dir,
+                output_path=bundle,
+                family=_FAMILY,
+                task="text_generation",
+                precision=manifest["precision"],
+                max_sequence_length=manifest["max_sequence_length"],
+                tensor_parallel_size=manifest["tensor_parallel_size"],
+                quantization=quantization,
+                fp32_layers=fp32_layers,
+            )
         )
-    )
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
 
 
@@ -291,8 +300,9 @@ def _hf_reference(
     prompt: str,
     actual_ids: list[int],
     torch,
-) -> tuple[list[int], str, str]:
+) -> tuple:
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from families.lfm2.tests.lfm25_contract_validation import capture_reference_execution_identity
 
     trust_remote_code = bool(manifest.get("trust_remote_code", False))
     tokenizer = AutoTokenizer.from_pretrained(
@@ -320,6 +330,7 @@ def _hf_reference(
         .eval()
         .to("cuda")
     )
+    record_evidence("reference_execution", capture_reference_execution_identity(model, torch))
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:
@@ -341,10 +352,28 @@ def _hf_reference(
     reference_text = tokenizer.decode(reference_ids, skip_special_tokens=True).strip()
 
     actual_decoded = tokenizer.decode(actual_ids, skip_special_tokens=True).strip()
+    semantic_inputs = None
+    if "semantic_case" in case:
+        from families.lfm2.tests import lfm25_semantic_contract as semantic
+
+        semantic_request = {"config": {"max_new_tokens": int(case["max_new_tokens"])}}
+        if case["semantic_case"] != "raw-capital-completion":
+            semantic_request["messages"] = [{"role": "user", "content": prompt}]
+        if case["semantic_case"] in {"positive-temperature-tool", "tool-result"}:
+            semantic_request["tools"] = [{"name": "set_temperature"}]
+        eos = model.generation_config.eos_token_id
+        semantic_inputs = {
+            "reference_parts": semantic.reference_parts(tokenizer, reference_ids, semantic_request),
+            "native_parts": semantic.reference_parts(tokenizer, actual_ids, semantic_request),
+            "eos": eos if isinstance(eos, list) else [eos],
+            "request": semantic_request, "input_count": len(prompt_ids),
+        }
     del model
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    if semantic_inputs is not None:
+        return reference_ids, reference_text, actual_decoded, semantic_inputs
     return reference_ids, reference_text, actual_decoded
 
 
@@ -354,6 +383,7 @@ def _assert_correctness(
     reference_ids: list[int],
     reference_text: str,
     actual_decoded: str,
+    semantic_inputs: dict | None = None,
 ) -> None:
     actual_ids = payload["token_ids"]
     assert isinstance(actual_ids, list) and actual_ids
@@ -363,6 +393,28 @@ def _assert_correctness(
     )
     actual_text = str(payload["text"]).strip()
     assert actual_text
+
+    if semantic_inputs is not None:
+        from families.lfm2.tests import lfm25_semantic_contract as semantic
+
+        assert semantic.public_text_form(actual_text) == semantic.public_text_form(actual_decoded), "public text payload differs from its decoded token result"
+        native = {"parts": semantic_inputs["native_parts"], "token_ids": actual_ids}
+        calls = semantic.tool_signature(native["parts"])
+        ended = actual_ids[-1] in semantic_inputs["eos"]
+        native["finish_reason"] = (3 if any(call["state"] == 1 for call in calls) else 1) if ended else 2
+        checks = semantic.evaluate(case["semantic_case"], native,
+                                   semantic_inputs["reference_parts"], reference_ids,
+                                   semantic_inputs["eos"], semantic_inputs["request"],
+                                   semantic_inputs["input_count"])
+        record_evidence("diagnostics", {
+            "acceptance_policy": semantic.POLICY, "semantic_checks": checks,
+            "interface_scope": "Legacy CLI token output independently parsed for behavior; typed SDK contracts are checked separately.",
+            "stop_scope": "EOS/budget inferred from the returned sequence; no typed SDK finish reason is exposed by this CLI.",
+        })
+        if case.get("use_chat_template"):
+            command = [str(value) for value in payload["runtime_command"]]
+            assert command[command.index("--use-chat-template") + 1] == "true"
+        return
 
     if "expected_continuation_token_ids" in case:
         assert actual_ids == case["expected_continuation_token_ids"]
@@ -405,7 +457,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
     _require_selected(case_name, manifest, request.config)
     record_evidence("inputs", {"manifest": manifest, "case": _CASES[case_name][-1]})
-    record_evidence("thresholds", {"exact_token_ids": not _is_sampling(case), "max_new_tokens": case["max_new_tokens"], "case_contract": case})
+    record_evidence("thresholds", {"exact_token_ids": "semantic_case" not in case and not _is_sampling(case), "max_new_tokens": case["max_new_tokens"], "case_contract": case})
     tp_size = manifest["tensor_parallel_size"]
     binary, runtime_root, torch = _required_environment(tp_size)
     model_dir = _checkpoint(manifest)
@@ -415,7 +467,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     bundle = tmp_path / manifest["bundle"]
 
     with evidence_stage("build"):
-        _build_bundle(manifest, model_dir, bundle)
+        _build_bundle(manifest, model_dir, bundle, runtime_root)
     with evidence_stage("compare"):
         _assert_rank_sections(binary, bundle, tp_size)
     with evidence_stage("native"):

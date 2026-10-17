@@ -34,5 +34,11 @@ int main() {
           "renders exact official single-user template");
     check(expected.find("system") == std::string::npos, "does not inject a system prompt");
     check(trtmc::lfm2_apply_chat_template("", "raw") == "raw", "leaves raw prompts unchanged");
+    const std::string thinking_source = source + "{{- \"<|im_start|>assistant\\n<think>\" -}}";
+    check(trtmc::lfm2_detect_chat_template_format(thinking_source) == "chatml_thinking",
+          "detects the LFM2.5 thinking generation prefix");
+    check(trtmc::lfm2_apply_chat_template("chatml_thinking", "Who are you?") ==
+              expected + "<think>",
+          "preserves the LFM2.5 thinking prefix");
     return failures;
 }

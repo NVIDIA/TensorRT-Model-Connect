@@ -12,6 +12,7 @@
 namespace trtmc {
 
 struct TextGenerationConfig;
+class ITrtModule;
 
 struct Lfm2SamplingParams {
     float temperature{1.0F};
@@ -28,6 +29,20 @@ struct Lfm2SampleResult {
     float logprob{0.0F};
     bool is_eos{false};
 };
+
+// Candidates are ordered by descending processed score, then token ID. Keeping
+// the distribution separate from the RNG allows reference comparisons to use
+// the same uniform draw without assuming matching framework RNG algorithms.
+struct Lfm2SamplingDistribution {
+    std::vector<int32_t> indices;
+    std::vector<float> probabilities;
+};
+
+Lfm2SamplingDistribution lfm2_sampling_distribution(const float* logits, int32_t vocab_size,
+                                                    const Lfm2SamplingParams& params,
+                                                    const std::vector<int32_t>& token_history);
+Lfm2SampleResult lfm2_sample_from_distribution(const Lfm2SamplingDistribution& distribution,
+                                               float uniform, const Lfm2SamplingParams& params);
 
 class Lfm2ISampler {
   public:
@@ -52,5 +67,11 @@ std::vector<float> lfm2_apply_repetition_penalty(const float* logits, int32_t vo
 int32_t lfm2_resolve_top_k(const Lfm2SamplingParams& params);
 bool lfm2_is_eos_token(const Lfm2SamplingParams& params, int32_t token_id);
 std::unique_ptr<Lfm2ISampler> create_lfm2_sampler(const Lfm2SamplingParams& params);
+bool lfm2_sampling_uses_distribution(const Lfm2SamplingParams& params);
+// The module is pipeline-owned; each returned sampler owns only its request's
+// seed/offset and preserves the same CPU probability processors.
+void lfm2_validate_sampler_module(const ITrtModule& module);
+std::unique_ptr<Lfm2ISampler> create_lfm2_sampler(const Lfm2SamplingParams& params,
+                                                  ITrtModule& module);
 
 } // namespace trtmc

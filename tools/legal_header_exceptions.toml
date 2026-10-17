@@ -20,3 +20,43 @@ path = "third_party/stb/stb_image_resize2.h"
 reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
 license = "MIT OR Public Domain"
 source = "https://github.com/nothings/stb/blob/cf79a4819767b5c136712221be78c83e28c54a6a/stb_image_resize2.h"
+
+[[exceptions]]
+path = "families/lfm2/runtime/sampler_byok.cu"
+# Upstream license: https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/LICENSE
+reason = "Family-owned adaptation of upstream CUDA sampling; preserve the combined license identifier and retained BSD copyright, conditions, and disclaimer."
+license = "Apache-2.0 AND BSD-3-Clause"
+source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cuda/DistributionTemplates.h"
+
+[[exceptions]]
+path = "families/lfm2/runtime/sampler_byok.NOTICE"
+reason = "Packaged third-party notice; preserve the complete upstream BSD copyright, conditions, and disclaimer alongside the NVIDIA contribution license."
+license = "Apache-2.0 AND BSD-3-Clause"
+source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/LICENSE"
+
+[[exceptions]]
+path = "families/lfm2/runtime/sdpa_byok.cpp"
+reason = "Family-owned adaptation of the upstream dense cuDNN graph; preserve the combined license identifier and retained BSD copyright, conditions, and disclaimer."
+license = "Apache-2.0 AND BSD-3-Clause"
+source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cudnn/MHA.cpp"
+
+[[exceptions]]
+path = "families/lfm2/runtime/mean64_byok.cu"
+# Upstream license: https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/LICENSE
+# Reciprocal square root: https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cuda/UnaryOpsKernel.cu
+reason = "Family-owned adaptation of the upstream CUDA mean and reciprocal square root operations; preserve the combined license identifier and retained BSD copyright, conditions, and disclaimer."
+license = "Apache-2.0 AND BSD-3-Clause"
+source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cuda/Reduce.cuh"
+
+[[exceptions]]
+path = "families/lfm2/runtime/mean2048_byok.cu"
+# Upstream license: https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/LICENSE
+reason = "Family-owned adaptation of the upstream vectorized CUDA mean reduction; preserve the combined license identifier and retained BSD copyright, conditions, and disclaimer."
+license = "Apache-2.0 AND BSD-3-Clause"
+source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cuda/Reduce.cuh"
+
+[[exceptions]]
+path = "families/lfm2/runtime/sdpa_byok.NOTICE"
+reason = "Packaged third-party notice; preserve the complete upstream BSD copyright, conditions, and disclaimer alongside the NVIDIA contribution license."
+license = "Apache-2.0 AND BSD-3-Clause"
+source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/LICENSE"

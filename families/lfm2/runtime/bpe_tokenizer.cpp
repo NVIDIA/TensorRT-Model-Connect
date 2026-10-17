@@ -599,9 +599,11 @@ class BpeTokenizer final : public ITokenizer {
   public:
     static std::unique_ptr<BpeTokenizer> Create(const char* tokenizer_json_data,
                                                 std::size_t tokenizer_json_size,
-                                                bool add_special_tokens = false) {
+                                                bool add_special_tokens = false,
+                                                bool pretokenized = false) {
         auto tokenizer = std::unique_ptr<BpeTokenizer>(new BpeTokenizer());
         tokenizer->mAddSpecialTokens = add_special_tokens;
+        tokenizer->mPretokenized = pretokenized;
         tokenizer->parse_tokenizer_json(tokenizer_json_data, tokenizer_json_size);
         return tokenizer;
     }
@@ -839,7 +841,9 @@ class BpeTokenizer final : public ITokenizer {
 
     void encode_bytelevel(const std::string& text, std::vector<int32_t>& result) const {
         std::vector<std::string> words;
-        if (!mUsePreTokenizer) {
+        if (mPretokenized) {
+            words = {text};
+        } else if (!mUsePreTokenizer) {
             words = fallback_pre_tokenize(text);
         } else if (mPreTokenizerVariant == pretok::Variant::kBloom) {
             words = pretok::bloom_pre_tokenize(text);
@@ -849,6 +853,18 @@ class BpeTokenizer final : public ITokenizer {
 
         for (const auto& word : words) {
             auto chars = byte_encode(word);
+            // Hugging Face BPE can select a complete pretoken directly, even
+            // when its vocabulary entry cannot be reached through merges.
+            if (mIgnoreMerges) {
+                std::string encoded;
+                for (const auto& value : chars)
+                    encoded += value;
+                const auto whole = mTokenToId.find(encoded);
+                if (whole != mTokenToId.end()) {
+                    result.push_back(whole->second);
+                    continue;
+                }
+            }
             if (!chars.empty() && !mEndOfWordSuffix.empty()) {
                 chars.back() += mEndOfWordSuffix;
             }
@@ -1353,6 +1369,7 @@ class BpeTokenizer final : public ITokenizer {
             throw std::runtime_error("Invalid tokenizer.json: model.merges must be an array");
 
         mByteFallback = model.value("byte_fallback", false);
+        mIgnoreMerges = model.value("ignore_merges", false);
         mEndOfWordSuffix = optional_model_string(model, "end_of_word_suffix");
         parse_vocab(j);
         parse_merges(j);
@@ -1524,6 +1541,7 @@ class BpeTokenizer final : public ITokenizer {
     std::vector<std::pair<std::string, int32_t>> mAddedTokenPatterns;
 
     bool mAddSpecialTokens = false;
+    bool mPretokenized = false;
     bool mUsePreTokenizer = true;
     bool mIsMetaspace = false; // Set by detect_pre_tokenizer.
     bool mIsSentencePiece = false;
@@ -1531,6 +1549,7 @@ class BpeTokenizer final : public ITokenizer {
         false; // true for Normalizer Prepend, false for Metaspace first
     bool mSentencePiecePrependIfMissing = true;
     bool mByteFallback = false;
+    bool mIgnoreMerges = false;
     bool mNormalizeLowercase = false;
     bool mNormalizeWhitespace = false;
     std::string mEndOfWordSuffix;
@@ -1558,8 +1577,9 @@ class BpeTokenizer final : public ITokenizer {
 
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size,
-                                               bool add_special_tokens) {
-    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
+                                               bool add_special_tokens, bool pretokenized) {
+    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens,
+                                pretokenized);
 }
 
 } // namespace trtmc
