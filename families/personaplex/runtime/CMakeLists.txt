@@ -31,7 +31,12 @@ target_include_directories(trtmc_model_personaplex
 target_include_directories(trtmc_model_personaplex SYSTEM PRIVATE
   ${TRTMC_CUDA_INCLUDE_DIR}
 )
+# The runtime resamples input audio with libsoxr, as the Native reference does.
+find_path(TRTMC_SOXR_INCLUDE_DIR NAMES soxr.h REQUIRED)
+find_library(TRTMC_SOXR_LIBRARY NAMES soxr REQUIRED)
+target_include_directories(trtmc_model_personaplex SYSTEM PRIVATE ${TRTMC_SOXR_INCLUDE_DIR})
 target_link_libraries(trtmc_model_personaplex PRIVATE
+  ${TRTMC_SOXR_LIBRARY}
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
@@ -62,6 +67,22 @@ if(TRTMC_BUILD_TESTS)
     -Wall -Wextra -Wpedantic
   )
   add_test(NAME test_personaplex_decode_runtime COMMAND test_personaplex_decode_runtime)
+
+  add_executable(test_personaplex_speech_resampler
+    ${PROJECT_SOURCE_DIR}/families/personaplex/tests/cpp/test_speech_resampler.cpp
+    ${PROJECT_SOURCE_DIR}/families/personaplex/runtime/resampler.cpp
+  )
+  target_include_directories(test_personaplex_speech_resampler PRIVATE
+    ${PROJECT_SOURCE_DIR}
+  )
+  target_include_directories(test_personaplex_speech_resampler SYSTEM PRIVATE
+    ${TRTMC_SOXR_INCLUDE_DIR}
+  )
+  target_link_libraries(test_personaplex_speech_resampler PRIVATE ${TRTMC_SOXR_LIBRARY})
+  target_compile_options(test_personaplex_speech_resampler PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME test_personaplex_speech_resampler COMMAND test_personaplex_speech_resampler)
 
   foreach(test_name IN ITEMS
       test_personaplex_speech_decode_stop_policy

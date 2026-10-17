@@ -858,7 +858,7 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
     if (input_sample_rate > 0 && target_rate > 0 && input_sample_rate != target_rate) {
         std::cerr << "[speech] Resampling audio from " << input_sample_rate << " Hz to "
                   << target_rate << " Hz" << std::endl;
-        resampled_buf = resample_linear(audio_in, num_samples, input_sample_rate, target_rate);
+        resampled_buf = resample_audio(audio_in, num_samples, input_sample_rate, target_rate);
         samples_ptr = resampled_buf.data();
         samples_count = static_cast<int32_t>(resampled_buf.size());
         input_sample_rate = target_rate;

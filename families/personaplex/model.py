@@ -383,7 +383,11 @@ class _PersonaPlexModel:
         # the official Mimi codec numerics in FP32, so an FP16 model build must
         # not accidentally request an unsupported encoder engine.
         mimi_encoder_precision = "fp32"
-        mimi_decoder_precision = _component_precision(config, _MIMI_DECODER_COMPONENT, precision)
+        # The official pipeline also decodes with the FP32 Mimi codec
+        # (loaders.get_mimi), whatever the language model's precision. An FP16
+        # decoder changes the waveform enough to fail the reference's spectral
+        # parity, so the decoder follows the codec, not the bundle precision.
+        mimi_decoder_precision = "fp32"
         mimi_frame_capacity = _mimi_frame_capacity(max_cache_length)
 
         # --- Per-codebook Depth Transformer engines ---

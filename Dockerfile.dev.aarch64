@@ -22,6 +22,7 @@ RUN apt-get update && \
       libicu-dev \
       patchelf \
       pkg-config \
+      libsoxr-dev \
       python3.12-dev \
       python3.12-venv && \
     rm -rf /var/lib/apt/lists/*

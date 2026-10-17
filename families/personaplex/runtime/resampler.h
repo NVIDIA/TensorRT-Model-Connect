@@ -10,10 +10,9 @@
 
 namespace trtmc {
 
-std::vector<float> resample_linear(const float* samples, std::int32_t num_samples,
-                                   std::int32_t source_rate, std::int32_t target_rate);
-std::vector<float> resample_linear_range(const float* samples, std::int32_t num_samples,
-                                         std::int32_t source_rate, std::int32_t target_rate,
-                                         std::int32_t output_start, std::int32_t output_count);
+// Resample mono audio as the Native reference does (librosa.resample: libsoxr
+// "HQ"); the output has ceil(num_samples * target_rate / source_rate) samples.
+std::vector<float> resample_audio(const float* samples, std::int32_t num_samples,
+                                  std::int32_t source_rate, std::int32_t target_rate);
 
 } // namespace trtmc
