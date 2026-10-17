@@ -208,17 +208,15 @@ def add_explicit_masked_grouped_query_attention(
         np.array([0.0], dtype=np.float32),
     )
     zero = _cast(network, zero, query.dtype)
-    safe_key = network.add_select(
-        active_grouped.get_output(0),
-        key_grouped.get_output(0),
-        zero,
-    )
+    # Unwritten cache rows may hold non-finite values. Keys need no sanitizing:
+    # the attention mask replaces every inactive score with the blocked value.
+    # Values do, because a zero probability times a non-finite row is NaN.
     safe_value = network.add_select(
         active_grouped.get_output(0),
         value_grouped.get_output(0),
         zero,
     )
-    if safe_key is None or safe_value is None:
+    if safe_value is None:
         raise RuntimeError("TensorRT failed to sanitize inactive native KV rows")
 
     if scale is None:
@@ -241,7 +239,7 @@ def add_explicit_masked_grouped_query_attention(
     scores = network.add_matrix_multiply(
         scaled_query,
         trt.MatrixOperation.NONE,
-        safe_key.get_output(0),
+        key_grouped.get_output(0),
         trt.MatrixOperation.TRANSPOSE,
     )
     if scores is None:
