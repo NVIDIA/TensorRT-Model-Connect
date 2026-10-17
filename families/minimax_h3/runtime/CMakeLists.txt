@@ -5,6 +5,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   bpe_tokenizer.cpp
   diffusion_schedule.cpp
   pipeline.cpp
+  plan_loader.cpp
   plugin.cpp
   qwen_reference.cpp
   reference_conditioner.cpp
@@ -51,6 +52,18 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_plan_loader
+    plan_loader.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_plan_loader.cpp
+  )
+  target_include_directories(test_minimax_h3_plan_loader PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_plan_loader SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_minimax_h3_plan_loader PRIVATE trtmc_core)
+  target_compile_options(test_minimax_h3_plan_loader PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_plan_loader COMMAND test_minimax_h3_plan_loader)
+
   add_executable(minimax_h3_reference_denoiser_probe
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/reference_denoiser_probe.cpp
   )
