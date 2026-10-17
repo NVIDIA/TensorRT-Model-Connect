@@ -12,16 +12,19 @@ from families.locateanything.tests.vision_oracle import preprocess_image_inputs_
 
 
 class _LocalTokenizer:
-    """Small tokenizer.json adapter for the methods used by LocateAnything."""
+    """Local checkpoint tokenizer adapter for the methods used by LocateAnything."""
 
     def __init__(self, model_dir: Path) -> None:
-        from tokenizers import Tokenizer
+        from transformers import Qwen2TokenizerFast
 
-        tokenizer_path = model_dir / "tokenizer.json"
         config_path = model_dir / "tokenizer_config.json"
-        if not tokenizer_path.is_file() or not config_path.is_file():
+        if not config_path.is_file():
             raise FileNotFoundError("LocateAnything requires local tokenizer files")
-        self._tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        # The published checkpoint supplies vocab/merges and added-token
+        # sidecars. Use the upstream tokenizer independently of native export.
+        self._tokenizer = Qwen2TokenizerFast.from_pretrained(
+            model_dir, local_files_only=True
+        ).backend_tokenizer
         config = json.loads(config_path.read_text(encoding="utf-8"))
         self.model_max_length = int(config.get("model_max_length", 16384))
 

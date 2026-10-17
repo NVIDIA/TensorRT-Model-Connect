@@ -13,6 +13,7 @@
 #include <cuda_runtime_api.h>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 
 namespace {
 
@@ -103,6 +104,33 @@ void test_backend_managed_graph_does_not_enable_nested_capture(nvinfer1::ICudaEn
     check(!module.cuda_graph_active(), "backend-managed graph leaves stream capture disabled");
 }
 
+void test_rejected_shape_fails_without_poisoning_the_next_request(nvinfer1::ICudaEngine& engine,
+                                                                  cudaStream_t stream) {
+    for (bool graph : {false, true}) {
+        trtmc::TrtModuleImpl module(&engine, engine.createExecutionContext(), stream);
+        if (graph)
+            module.enable_cuda_graph();
+        float initial[] = {1.0F, 2.0F};
+        (void)module.forward({{"input", trtmc::Tensor{initial, {2}, trtmc::DType::kFloat32}}});
+        float oversized[] = {1.0F, 2.0F, 3.0F, 4.0F, 5.0F};
+        bool rejected = false;
+        try {
+            (void)module.forward(
+                {{"input", trtmc::Tensor{oversized, {5}, trtmc::DType::kFloat32}}});
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "out-of-profile shapes must fail instead of returning stale-shape outputs");
+        float next[] = {7.0F, 8.0F};
+        const auto output =
+            module.forward({{"input", trtmc::Tensor{next, {2}, trtmc::DType::kFloat32}}});
+        const auto& tensor = output.at("output");
+        const auto* values = static_cast<const float*>(tensor.data);
+        check(tensor.numel() == 2 && values[0] == 7.0F && values[1] == 8.0F,
+              "a rejected shape leaves the next valid request usable");
+    }
+}
+
 void test_short_static_upload_does_not_keep_the_previous_input(nvinfer1::ICudaEngine& engine,
                                                                cudaStream_t stream) {
     for (bool graph : {false, true}) {
@@ -162,6 +190,7 @@ int main() {
     test_first_forward_allocates_unbound_dynamic_input(*engine, stream);
     test_external_dynamic_input_stays_external(*engine, stream);
     test_backend_managed_graph_does_not_enable_nested_capture(*engine, stream);
+    test_rejected_shape_fails_without_poisoning_the_next_request(*engine, stream);
     test_short_static_upload_does_not_keep_the_previous_input(*static_engine, stream);
     test_short_external_static_upload_preserves_its_tail(*static_engine, stream);
     cudaStreamDestroy(stream);

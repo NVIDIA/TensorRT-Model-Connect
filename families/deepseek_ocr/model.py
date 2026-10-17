@@ -679,7 +679,7 @@ class _DeepseekOcrModel:
             "num_image_pad_tokens": 145,  # 144 projected + 1 view_separator
             "prefill_max_length": MAX_SEQUENCE_PREFILL_LENGTH,
             "vision_output_dim": hidden,
-            "preprocessor_type": "simple_chw",
+            "preprocessor_type": "pad_center_chw",
             "image_mean": [0.5, 0.5, 0.5],
             "image_std": [0.5, 0.5, 0.5],
             "interpolation": "bicubic",

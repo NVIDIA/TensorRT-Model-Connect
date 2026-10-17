@@ -404,7 +404,7 @@ PYTHONPATH=apps/aiperf_qual:apps/benchmark:core/builder:. \
   python -m trtmc_aiperf_qual endpoint-models --repo . --group embeddings
 ```
 
-Groups are `embeddings`, `reranking`, `transcription`, and `detection`.
+Groups are `embeddings`, `reranking`, `transcription`, `detection`, and `vision`.
 The inventory selects a normal full-model profile when one is available, with
 precision and parallel variants listed separately. Checkpoints without one
 remain explicit gaps. Discovery reports `unverified`; it does not claim
@@ -437,16 +437,40 @@ PYTHONPATH=apps/aiperf_qual:apps/benchmark:apps/perf_serving:core/builder:. \
     --out /path/to/new-result-directory
 ```
 
+The default client tokenizer uses the profile's pinned checkpoint revision.
+Use `--tokenizer /path/to/prepared-tokenizer` when its files live separately;
+`--tokenizer-revision` pins an explicitly selected Hugging Face tokenizer.
+Hub overrides require a full commit SHA. Local tokenizer directories are
+fingerprinted before and after profiling, including their file contents.
+Lance and Phi4 provide `families/<family>/tests/aiperf/prepare_tokenizer.py`
+to export their existing tokenizers into a standalone client directory.
+Source identity is captured after acquiring the GPU lock, including content
+fingerprints for tracked changes and untracked files. Generated run output is
+excluded. Changes to source, tokenizer, bundle or inputs between the snapshots
+preserve raw evidence and prevent a success summary.
+
 Use the existing sentence/ranking examples or prepared audio/image JSONL from
 the guides below. The command verifies every corpus input against native output,
 then checks all 55 complete responses from five warmups and 50 measured requests,
-including SHA-256 hashes of media bytes, complete vectors/transcripts/boxes,
+including SHA-256 hashes of media bytes, complete vectors/transcripts/boxes/answers,
 native class IDs or passage indices, and every request/timing join. Results
 separate HTTP latency from public Task time. Build/load/startup, native/HTTP verification and
 warmup are excluded from measured throughput. This transport verification is
 separate from the owning family's numerical/quality criteria. It establishes
 no capacity or performance regression gate. The client is AIPerf 0.13.0 from
 PyPI; an AIPerf source checkout is unnecessary.
+
+DeepSeek-OCR-2 preserves aspect ratio with mean-color padding in its existing
+768-pixel, 145-visual-token single-view profile. Rebuild older square-warping
+bundles with the current family runtime. Its unchanged owning reference uses
+1024-pixel crop-mode inference; record that different visual budget when
+interpreting conversion parity. This endpoint run measures the native Task
+and does not claim a reference-relative speedup.
+
+Native InternVL3 retains one 448-pixel, 256-visual-token view. Its unchanged
+owning reference may tile one image into multiple views. Record that visual
+budget difference alongside conversion parity; serving one original image
+does not establish identical internal view counts.
 
 ## Native endpoint pilot coverage
 
@@ -494,7 +518,8 @@ through AIPerf. This qualifies object detection; document/table layout remains p
 Use [Profile Embeddings with AIPerf](../../website/docs/user-guides/profile-embeddings-with-aiperf.md),
 [Profile Reranking with AIPerf](../../website/docs/user-guides/profile-reranking-with-aiperf.md),
 [Profile Transcription with AIPerf](../../website/docs/user-guides/profile-transcription-with-aiperf.md),
-or [Profile Object Detection with AIPerf](../../website/docs/user-guides/profile-detection-with-aiperf.md)
+[Profile Object Detection with AIPerf](../../website/docs/user-guides/profile-detection-with-aiperf.md),
+or [Profile Image Understanding with AIPerf](../../website/docs/user-guides/profile-vision-with-aiperf.md)
 for the short recipes. Native Task-call wall time stays separate from client
 HTTP latency; these small runs are integration examples, not performance gates.
 

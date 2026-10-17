@@ -257,7 +257,8 @@ void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& e
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = new_shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    if (!ctx_->setInputShape(name.c_str(), dims))
+        throw std::invalid_argument("TensorRT rejected dynamic shape for tensor '" + name + "'");
     entry.shape = new_shape;
 }
 

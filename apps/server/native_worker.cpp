@@ -11,6 +11,7 @@
 #include "trtmc/audio.hpp"
 #include "trtmc/control.hpp"
 #include "trtmc/features.hpp"
+#include "trtmc/language.hpp"
 #include "trtmc/perception.hpp"
 #include "trtmc/runtime/family_loader.h"
 #include "trtmc/stream.hpp"
@@ -447,9 +448,64 @@ int run_detection_protocol(Invoke&& invoke, Extract&& extract, std::istream& inp
                         input, output);
 }
 
+template <class Generate>
+int run_vision_protocol(std::int64_t default_tokens, Generate&& generate, std::istream& input,
+                        std::ostream& output) {
+    return run_protocol({{"event", "ready"},
+                         {"protocol_version", 2},
+                         {"capabilities", Json::array({"vision_language_generation"})},
+                         {"default_max_new_tokens", default_tokens}},
+                        {{"generate_vision",
+                          [&](const Json& request) {
+                              const auto prompt = string_field(request, "prompt");
+                              cli::io::LoadedImage image;
+                              const auto path = string_field(request, "image_path");
+                              try {
+                                  image = cli::io::read_image(path);
+                              } catch (const std::exception&) {
+                                  throw ProtocolError("image must be a readable image file");
+                              }
+                              if (image.height <= 0 || image.width <= 0 || image.pixels.empty())
+                                  throw ProtocolError("image must contain RGB pixels");
+                              auto result = generate(prompt, image, request);
+                              result["image_height"] = image.height;
+                              result["image_width"] = image.width;
+                              return result;
+                          }}},
+                        input, output);
+}
+
 int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) {
     // Legacy bundle modes select the declared public Task before invocation.
     // Several families implement more C++ interfaces than a given bundle enables.
+    if (std::string_view(task.task()) == IVisionLanguageGeneration::kTask) {
+        auto* vision = dynamic_cast<IVisionLanguageGeneration*>(&task);
+        if (!vision)
+            throw std::invalid_argument("bundle does not implement vision-language generation");
+        const auto* text = dynamic_cast<ITextGeneration*>(&task);
+        const auto defaults = text ? text->default_max_new_tokens() : 128;
+        return run_vision_protocol(
+            defaults,
+            [&](const std::string& prompt, const cli::io::LoadedImage& image, const Json& request) {
+                const auto config = parse_config(request, defaults);
+                if (!config.system_prompt.empty())
+                    throw ProtocolError("system prompts are unsupported for image requests");
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = vision->generate(prompt, image.pixels.data(), image.height,
+                                                     image.width, config);
+                const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
+                return Json{{"text", result.text},
+                            {"completion_tokens", result.token_ids.size()},
+                            {"setup_ms", result.setup_ms},
+                            {"prefill_ms", result.prefill_ms},
+                            {"decode_ms", result.decode_ms},
+                            {"model_call_ms", wall_ms},
+                            {"timing_scope", "public_task_call_wall"}};
+            },
+            input, output);
+    }
     if (std::string_view(task.task()) == IEncoding::kTask) {
         auto* encoder = dynamic_cast<IEncoding*>(&task);
         if (!encoder)
@@ -528,6 +584,34 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) 
 }
 
 int run_model_worker(const Model& model, std::istream& input, std::ostream& output) {
+    const auto primary = model.info().bundle_task;
+    if (primary == ImagesTextToText::kTask || primary == IVisionLanguageGeneration::kTask) {
+        const auto task = model.task<ImagesTextToText>();
+        const auto fields = task.config_fields();
+        return run_vision_protocol(
+            default_token_limit(fields),
+            [&](const std::string& prompt, const cli::io::LoadedImage& image, const Json& request) {
+                const auto config = parse_sdk_config(request, fields);
+                const auto input = ImagesTextToTextRequest::from_parts(
+                    {ImageInput{{image.pixels.data(), image.pixels.size()},
+                                static_cast<std::uint32_t>(image.height),
+                                static_cast<std::uint32_t>(image.width)},
+                     TextPart{prompt}});
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = task.run(input, config);
+                const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
+                return Json{{"text", std::string(result.text())},
+                            {"completion_tokens", result.token_ids().size()},
+                            {"setup_ms", result.setup_ms()},
+                            {"prefill_ms", result.prefill_ms()},
+                            {"decode_ms", result.decode_ms()},
+                            {"model_call_ms", wall_ms},
+                            {"timing_scope", "public_task_call_wall"}};
+            },
+            input, output);
+    }
     if (model.supports<TextToEmbedding>()) {
         const auto task = model.task<TextToEmbedding>();
         return run_embedding_protocol([&](const std::string& text) { return task.run({text}); },

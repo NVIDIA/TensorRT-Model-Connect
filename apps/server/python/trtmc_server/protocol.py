@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .errors import WorkerProtocolError, WorkerRemoteError, WorkerRequestTooLargeError
-from .schemas import ChatCompletionRequest, GenerationRequest, TextContentPart
+from .schemas import ChatCompletionRequest, GenerationRequest, TextContentPart, ImageContentPart
 
 
 def generation_config(request: GenerationRequest, max_tokens: int) -> dict[str, Any]:
@@ -35,10 +35,30 @@ def chat_prompt(request: ChatCompletionRequest) -> tuple[str, str]:
     raise ValueError("messages must be one user message with an optional preceding system message")
 
 
-def _message_text(content: str | list[TextContentPart]) -> str:
+def chat_image(request: ChatCompletionRequest) -> str | None:
+    images = [part.image_url.url for message in request.messages if isinstance(message.content, list)
+              for part in message.content if isinstance(part, ImageContentPart)]
+    if not images:
+        return None
+    if len(images) != 1 or len(request.messages) != 1 or request.messages[0].role != "user":
+        raise ValueError("image chat requires one user message with exactly one image")
+    return images[0]
+
+
+def _message_text(content: str | list[TextContentPart | ImageContentPart]) -> str:
     if isinstance(content, str):
         return content
-    return "".join(part.text for part in content)
+    return "".join(part.text for part in content if isinstance(part, TextContentPart))
+
+
+def extract_vision_result(result: Any, height: int, width: int) -> tuple[str, int, dict[str, float]]:
+    text, tokens, timings = extract_result(result)
+    if (type(result.get("image_height")) is not int or
+            type(result.get("image_width")) is not int or result["image_height"] != height or
+            result["image_width"] != width):
+        raise WorkerProtocolError("worker vision result has invalid text or image identity")
+    extract_task_timing(result)
+    return text, tokens, timings
 
 
 def extract_result(result: Any) -> tuple[str, int, dict[str, float]]:

@@ -1,0 +1,22 @@
+{
+  "name": "internvl35-2b",
+  "hf_id": "OpenGVLab/InternVL3_5-2B-HF",
+  "hf_revision": "3f301ffcf3dcbb47893afae6650ea3e78d96fb6d",
+  "bundle": "internvl35-2b-vl.bundle",
+  "family": "internvl",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "internvl35-2b",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "reference_backend": "hf_transformers",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 4096
+}

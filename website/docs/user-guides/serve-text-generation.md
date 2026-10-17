@@ -96,8 +96,8 @@ support that placement.
 | Route | Supported behavior |
 | --- | --- |
 | `POST /v1/completions` | One string `prompt`; `model` is required. |
-| `POST /v1/chat/completions` | One text `user` message and optional preceding `system` message; content may be a string or text-only content blocks. |
-| `GET /v1/models` | Configured text models. |
+| `POST /v1/chat/completions` | One text `user` message and optional preceding `system` message; vision-language bundles also accept one user message with text and one embedded image. |
+| `GET /v1/models` | Configured models and their native capabilities. |
 | `GET /health/live` | Control-plane process liveness. |
 | `GET /health/ready` | Worker readiness and admission state. |
 | `GET /metrics` | Prometheus text metrics for admission and inference. |
@@ -106,9 +106,13 @@ Generation accepts `temperature`, `top_p`, `min_p`, `top_k`, `seed`,
 `enable_thinking`, `n`, `stream`, and `stream_options.include_usage`.
 Completions accept `max_tokens`;
 chat accepts either `max_tokens` or `max_completion_tokens`. The MVP
-requires `n=1`. It rejects unknown fields, prompt arrays, non-text content
-blocks, multi-turn chat, stop sequences, tools, and log probabilities instead
+requires `n=1`. It rejects unknown fields, prompt arrays, unsupported media content,
+multi-turn chat, stop sequences, tools, and log probabilities instead
 of silently ignoring them.
+
+For single-image chat, see [Profile Image Understanding with AIPerf](./profile-vision-with-aiperf.md).
+Image requests require a vision-language bundle and accept one embedded RGB PNG/JPEG
+plus text. System prompts, streaming, and thinking controls are rejected for this workload.
 
 Streaming responses use OpenAI-compatible SSE and end with `data: [DONE]`.
 Single-process Qwen bundles implement the existing `StreamingTextContinuation`

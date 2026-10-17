@@ -335,12 +335,19 @@ def _detect_layer_prefix(readers) -> str:
     raise RuntimeError("Cannot find LocateAnything text decoder layer weights")
 
 
-def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
+def _native_tokenizer(model_dir: Path):
+    """Load the checkpoint's fast tokenizer, including vocab/merges-only exports."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True, local_files_only=True)
+    if not tokenizer.is_fast:
+        raise ValueError("LocateAnything requires a fast tokenizer for native serialization")
+    return tokenizer.backend_tokenizer
+
+
+def _tokenizer_runtime_contract(tokenizer) -> dict[str, object]:
     """Resolve this family's exact native-tokenizer framing."""
 
-    from tokenizers import Tokenizer
-
-    tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
     default_ids = list(tokenizer.encode("hello").ids)
     plain_ids = list(tokenizer.encode("hello", add_special_tokens=False).ids)
     if default_ids == plain_ids:
@@ -398,6 +405,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     ):
         raise NotImplementedError("LocateAnything supports only single-device non-quantized builds")
     model_dir = Path(request.model_dir)
+    tokenizer = _native_tokenizer(model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "locateanything":
         raise ValueError(f"LocateAnything does not support model_type={config.model_type!r}")
@@ -455,10 +463,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.add_bytes("engine.plan", decode)
     writer.add_bytes("prefill.plan", prefill)
     writer.add_bytes("vision.plan", vision)
-    runtime.update(_tokenizer_runtime_contract(model_dir))
+    runtime.update(_tokenizer_runtime_contract(tokenizer))
+    writer.add_bytes("tokenizer.json", tokenizer.to_str().encode("utf-8"))
     writer.add_json("runtime.json", runtime)
     for filename in (
-        "tokenizer.json",
         "tokenizer_config.json",
         "chat_template.jinja",
         "vocab.json",

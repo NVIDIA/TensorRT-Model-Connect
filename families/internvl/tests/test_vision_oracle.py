@@ -22,10 +22,17 @@ from families.internvl.tests.vision_oracle import (
 
 def test_every_internvl_case_requires_the_vision_oracle() -> None:
     assert set(CASES) == {
+        "internvl3-1b",
         "internvl3-2b",
         "internvl3-2b-tp2",
         "internvl3-8b",
         "internvl3-8b-tp4",
+        "internvl3-14b",
+        "internvl35-1b",
+        "internvl35-2b",
+        "internvl35-4b",
+        "internvl35-8b",
+        "internvl35-14b",
     }
 
 

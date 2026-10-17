@@ -381,3 +381,31 @@ assert "huggingface_hub" not in sys.modules
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert "trtmc internvl build" in result.stdout
     assert "--int4-gemm-plugin-version" in result.stdout
+
+
+@pytest.mark.parametrize("reason", [None, "", " "])
+def test_public_capacity_deferral_requires_an_owning_reason(tmp_path, monkeypatch, reason):
+    import json
+    from families.internvl.tests import test_e2e
+
+    manifest = {"family": "internvl", "task": "vision_language_generation", "testcases": [{
+        "name": "case", "community_gpu": False,
+        "metadata": {"community_gpu_deferred_reason": reason},
+    }]}
+    (tmp_path / "case.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr(test_e2e, "MANIFEST_ROOT", tmp_path)
+    with pytest.raises(AssertionError, match="owning reason"):
+        test_e2e._case_index()
+
+
+def test_public_capacity_deferral_keeps_the_full_family_case_selected(tmp_path, monkeypatch):
+    import json
+    from families.internvl.tests import test_e2e
+
+    case = {"name": "case", "premerge": True, "community_gpu": False,
+            "metadata": {"community_gpu_deferred_reason": "Two engines exceed the public GPU capacity"}}
+    (tmp_path / "case.json").write_text(json.dumps({
+        "family": "internvl", "task": "vision_language_generation", "testcases": [case],
+    }))
+    monkeypatch.setattr(test_e2e, "MANIFEST_ROOT", tmp_path)
+    assert test_e2e._case_index()["case"][2] == case

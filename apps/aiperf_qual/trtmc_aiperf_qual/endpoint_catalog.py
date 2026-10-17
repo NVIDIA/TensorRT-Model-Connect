@@ -24,6 +24,7 @@ GROUP_TASKS = {
     "transcription": {"transcription", "speech_transcription", "transcription_streaming",
                       "streaming_speech_transcription"},
     "detection": {"object_detection", "image_to_boxes"},
+    "vision": {"vision_language_generation", "images_text_to_text"},
 }
 
 

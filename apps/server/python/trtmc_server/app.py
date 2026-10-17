@@ -32,7 +32,7 @@ from .errors import (
     WorkerTimeoutError,
 )
 from .metrics import Metrics
-from .protocol import chat_prompt, extract_embedding, extract_ranking, extract_result, extract_transcription, extract_detection, generation_config, public_worker_error
+from .protocol import chat_prompt, chat_image, extract_vision_result, extract_embedding, extract_ranking, extract_result, extract_transcription, extract_detection, generation_config, public_worker_error
 from .records import RequestPolicy, RequestRecords
 from .registry import ModelRegistry
 from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest, TranscriptionRequest, DetectionRequest
@@ -677,10 +677,67 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         context["transcript_bytes"] = len(text.encode("utf-8"))
         return PlainTextResponse(text) if request.response_format == "text" else {"text": text}
 
+    async def vision_chat(http_request: Request, request: ChatCompletionRequest,
+                          prompt: str, image_url: str) -> Any:
+        route = http_request.url.path
+        context = http_request.state.timing
+        context.update(model=request.model, input_items=1)
+        if (request.stream or request.stream_options is not None or request.n != 1 or
+                request.stop is not None or request.enable_thinking is not None):
+            metrics.reject(route, 400)
+            return error_response(400, "unsupported_parameter",
+                                  "image chat supports one nonstreaming answer without stop or thinking controls")
+        if not prompt.strip():
+            metrics.reject(route, 400)
+            return error_response(400, "invalid_request", "image chat requires a text prompt", param="text")
+        if len(prompt.encode("utf-8")) > config.max_prompt_bytes:
+            metrics.reject(route, 413)
+            return error_response(413, "content_too_large", "prompt exceeds the server limit")
+        try:
+            default_tokens = registry.max_tokens(request.model, config.max_generation_tokens)
+        except ModelNotFoundError as error:
+            metrics.reject(route, 404)
+            return error_response(404, error.code, str(error), param="model")
+        max_tokens = request.max_completion_tokens or request.max_tokens or default_tokens
+        if max_tokens > config.max_generation_tokens:
+            metrics.reject(route, 400)
+            return error_response(400, "max_tokens_exceeded", "requested generation exceeds the server limit")
+        try:
+            data, suffix, metadata = await asyncio.to_thread(image_upload, image_url, config.max_image_pixels)
+            context.update(metadata)
+        except ImagePixelLimitError as error:
+            context.update(error.metadata)
+            metrics.reject(route, 413)
+            return error_response(413, "content_too_large", str(error))
+        except ValueError as error:
+            metrics.reject(route, 400)
+            return error_response(400, "invalid_request", str(error))
+
+        worker_config = generation_config(request, max_tokens)
+        context["generation_config"] = worker_config
+        media = await create_uploaded_input(data, suffix)
+
+        def validate(value):
+            return extract_vision_result(value, context["image_height"], context["image_width"])
+
+        result = await execute_task(http_request, request.model, "vision_language_generation", "generate_vision",
+                                    {"prompt": prompt, "image_path": str(media.path), "config": worker_config},
+                                    validate, release_input=media.close)
+        if isinstance(result, JSONResponse):
+            return result
+        text, tokens, timings = validate(result)
+        context.update(timings, completion_tokens=tokens, completion_token_source="native_task")
+        return {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion",
+                "created": int(time.time()), "model": request.model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                             "logprobs": None, "finish_reason": None}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": tokens, "total_tokens": tokens}}
+
     @app.post("/v1/chat/completions")
     async def chat_completions(http_request: Request, request: ChatCompletionRequest) -> Any:
         try:
             prompt, system_prompt = chat_prompt(request)
+            image_url = chat_image(request)
         except ValueError as error:
             metrics.reject("/v1/chat/completions", 400)
             return error_response(400, "invalid_request", str(error), param="messages")
@@ -691,6 +748,8 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
                 "invalid_request",
                 "max_tokens and max_completion_tokens are mutually exclusive",
             )
+        if image_url is not None:
+            return await vision_chat(http_request, request, prompt, image_url)
         return await execute(
             "/v1/chat/completions",
             request,
