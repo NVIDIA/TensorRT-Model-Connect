@@ -5,6 +5,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   bpe_tokenizer.cpp
   pipeline.cpp
   plugin.cpp
+  visual_reference.cpp
   torch_cuda_normal.cu
 )
 
@@ -40,6 +41,15 @@ install(TARGETS trtmc_model_minimax_h3
 )
 
 if(TRTMC_BUILD_TESTS)
+  # Host-only reference layout/math; no CUDA or model runtime is required.
+  add_executable(test_minimax_h3_visual_reference
+    visual_reference.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_visual_reference.cpp
+  )
+  target_include_directories(test_minimax_h3_visual_reference PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_minimax_h3_visual_reference PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_visual_reference COMMAND test_minimax_h3_visual_reference)
+
   add_executable(test_minimax_h3_math
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_minimax_h3_math.cpp
   )
