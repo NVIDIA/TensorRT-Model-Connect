@@ -6,14 +6,17 @@
 
 #include "trtmc/task.h"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace trtmc::qwen3_5::edge_llm {
 
-inline constexpr const char* kRevision = "e8b29522938901f6df19ebeedd4b69bc8edbcd97";
+inline constexpr const char* kRevision = "95515c2f87fba8982db5a519f9022277667b3cc9";
 
 /// Return whether an artifact is a normalized file below one of the two Edge roots.
 inline bool safe_artifact_path(const std::string& name) {
@@ -51,6 +54,36 @@ inline void validate_capacity(int prompt_tokens, int input_limit, int capacity,
     if (prompt_tokens <= 0 || prompt_tokens > input_limit || generated_tokens <= 0 ||
         generated_tokens > static_cast<std::int64_t>(capacity) - prompt_tokens)
         throw std::invalid_argument("Qwen3.5 Edge prompt and generation exceed bundle capacity");
+}
+
+/// Validate external normalized-float HWC images before multiplying dimensions or allocating.
+inline std::size_t image_elements(const float* pixels, std::int32_t height, std::int32_t width) {
+    if (!pixels && height == 0 && width == 0)
+        return 0;
+    if (!pixels || height <= 0 || width <= 0)
+        throw std::invalid_argument("Qwen3.5 Edge image requires pixels and positive dimensions");
+    const auto h = static_cast<std::size_t>(height);
+    const auto w = static_cast<std::size_t>(width);
+    const auto maximum =
+        std::min(std::numeric_limits<std::size_t>::max() / sizeof(float),
+                 static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()));
+    if (w > maximum / 3 || h > maximum / (w * 3))
+        throw std::invalid_argument("Qwen3.5 Edge image dimensions overflow");
+    return h * w * 3;
+}
+
+/// Preserve native float-to-byte rounding and clamping; preprocessing belongs to Edge.
+inline std::vector<std::uint8_t> image_bytes(const float* pixels, std::int32_t height,
+                                             std::int32_t width) {
+    const auto size = image_elements(pixels, height, width);
+    std::vector<std::uint8_t> result(size);
+    for (std::size_t i = 0; i < size; ++i) {
+        if (!std::isfinite(pixels[i]))
+            throw std::invalid_argument("Qwen3.5 Edge image contains non-finite pixels");
+        result[i] =
+            static_cast<std::uint8_t>(std::round(std::clamp(pixels[i], 0.0F, 1.0F) * 255.0F));
+    }
+    return result;
 }
 
 } // namespace trtmc::qwen3_5::edge_llm

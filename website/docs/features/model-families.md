@@ -206,13 +206,24 @@ a checkpoint or GPU imports. This uses the existing
 [family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
 
 The Qwen3.5 family maps the recorded original-source dense 0.8B/2B/4B/9B
-configurations (Instruct and Base) and explicit 4B/9B DFlash pairs to the pinned
-Edge-LLM 0.10.1 SDK on native x86 SM80, FP16, batch one. Historical local
-build/public/direct/HF receipts are documented separately from current-head
-checks. Qwen3 or older, MoE, 27B, quantized sources, and other platforms are not
-qualified by this route. Existing quality gates are unchanged.
+configurations (Instruct and Base), embedded MTP, and explicit 4B/9B DFlash
+pairs to the pinned Edge-LLM 0.11.0 SDK on native x86 SM80/SM120, FP16 compute,
+batch one. Dense 27B uses TP2 for its LLM and TP1 for its visual component.
+The SM120 route preserves admitted ModelOpt weight formats; the recorded 2B
+FP8-KV and NVFP4 LM-head component flows are checkpoint-driven.
+Compatible PyPI Python tools are discovered automatically, with the source-built
+SDK interpreter as fallback; a matching native C++ SDK is still required.
+Execution admission is not a blanket accuracy claim: recorded quality-only
+failures remain runnable and existing gates are unchanged. Qwen3 or older,
+MoE, Qwen3.6/3.8 and speculative TP2 are outside this owner.
 See the [family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_5/edge_llm/README.md)
-for exact revisions, paired execution, and replay gaps.
+for commands, paired execution, validation boundaries and known quality issues.
+
+Visual bundles expose the existing typed video and mixed image/video APIs;
+decoded frame order and optional timestamps are preserved. The recorded 2B
+two-frame appearance case passed Model Connect/direct parity and independent
+FP32 NED0.0; it is not a motion-quality or all-configuration qualification.
+The generic image CLI is unchanged. See the owning recipe for API boundaries.
 
 ## Optional Llama Edge execution
 

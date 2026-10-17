@@ -35,7 +35,8 @@
           ],
           "type": "string",
           "choices": [
-            "text_generation"
+            "text_generation",
+            "vision_language_generation"
           ],
           "default": "text_generation"
         },
@@ -49,7 +50,7 @@
             "fp32",
             "fp16"
           ],
-          "help": "Build precision (default: fp16 for paired execution, fp32 otherwise)"
+          "help": "Build precision (default: fp16 for speculative execution, fp32 otherwise)"
         },
         {
           "name": "backend",
@@ -109,9 +110,11 @@
           ],
           "type": "string",
           "choices": [
-            "dflash"
+            "dflash",
+            "dflash_ddtree",
+            "mtp"
           ],
-          "help": "Explicit paired execution mode; no automatic draft discovery"
+          "help": "Explicit speculative decoding mode; MTP uses embedded draft layers"
         },
         {
           "name": "companion",

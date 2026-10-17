@@ -16,8 +16,12 @@ from . import builder as edge_llm
 
 _LOG = logging.getLogger(__name__)
 
-# Only the native platform exercised by the recorded original-source profiles.
-EDGE_DISPATCH = {("linux", "x86_64", 80, "fp16"): edge_llm.prepare}
+# Native SDK matching is rechecked before building on either local GPU platform.
+EDGE_DISPATCH = {
+    ("linux", "x86_64", 80, "fp16"): edge_llm.prepare,
+    ("linux", "x86_64", 120, "fp16"): edge_llm.prepare,
+}
+QUANTIZED_EDGE_DISPATCH = {("linux", "x86_64", 120, "fp16"): edge_llm.prepare}
 
 # Layers, hidden, intermediate, attention heads, KV heads, vocabulary.
 # These configurations are verified from the retained per-model engine metadata.
@@ -32,38 +36,63 @@ DENSE_CONFIGS = {
 def candidate(request, raw: dict) -> bool:
     """Return whether this family's model/request contract can delegate to Edge."""
     config = raw.get("text_config", raw)
+    if not isinstance(config, dict):
+        return False
+    shape = tuple(config.get(key) for key in (
+        "num_hidden_layers", "hidden_size", "intermediate_size",
+        "num_attention_heads", "num_key_value_heads", "vocab_size",
+    ))
+    source_quantization = edge_llm.checkpoint_quantization(Path(request.model_dir), raw)
+    topology_matches = (
+        request.tensor_parallel_size == 1 and shape in DENSE_CONFIGS
+    ) or (
+        request.tensor_parallel_size == 2
+        and shape == (64, 5120, 17408, 24, 4, 248320)
+    )
+    quantization = raw.get("quantization_config")
+    kv_scheme = quantization.get("kv_cache_scheme") if isinstance(quantization, dict) else None
     return (
-        isinstance(config, dict)
+        topology_matches
         and raw.get("model_type") == "qwen3_5"
-        and tuple(
-            config.get(key)
-            for key in (
-                "num_hidden_layers",
-                "hidden_size",
-                "intermediate_size",
-                "num_attention_heads",
-                "num_key_value_heads",
-                "vocab_size",
-            )
-        )
-        in DENSE_CONFIGS
         and ("output_gate_type" not in config or "mlp_only_layers" in config)
         and config.get("linear_key_head_dim") == config.get("linear_value_head_dim") == 128
         and not config.get("num_experts")
-        and not raw.get("quantization_config")
-        and not config.get("quantization_config")
-        and not any(
-            (Path(request.model_dir) / name).exists()
-            for name in ("hf_quant_config.json", "quantize_config.json", "quant_config.json")
+        and (source_quantization == "none" or (
+            source_quantization in {"nvfp4", "fp8", "mxfp8", "int4_awq", "int8_sq"}
+            and (
+                shape in {
+                    (32, 2560, 9216, 16, 4, 248320),
+                    (32, 4096, 12288, 16, 4, 248320),
+                }
+                or (
+                    shape == (24, 1024, 3584, 8, 2, 248320)
+                    and source_quantization in {"nvfp4", "fp8", "mxfp8", "int4_awq", "int8_sq"}
+                )
+                or (
+                    shape == (24, 2048, 6144, 8, 2, 248320)
+                    and source_quantization in {"nvfp4", "fp8", "mxfp8", "int4_awq", "int8_sq"}
+                )
+            )
+            and request.tensor_parallel_size == 1
+        ))
+        and (
+            not kv_scheme or (
+                source_quantization == "fp8"
+                and shape == (24, 2048, 6144, 8, 2, 248320)
+                and request.task == "text_generation"
+            )
         )
         and request.backend == "trt"
-        and request.task == "text_generation"
+        and (
+            request.task == "text_generation"
+            or (
+                request.task == "vision_language_generation"
+                and isinstance(raw.get("vision_config"), dict)
+            )
+        )
         and request.precision.lower() == "fp16"
-        and request.quantization in {None, "none"}
-        and request.max_batch_size
-        == request.tensor_parallel_size
-        == request.context_parallel_size
-        == 1
+        and request.quantization in {None, source_quantization}
+        and request.max_batch_size == request.context_parallel_size == 1
         and not request.dynamic_kv_cache
         and not request.fp32_layers
         and request.graph_transform is None
@@ -74,7 +103,8 @@ def candidate(request, raw: dict) -> bool:
     )
 
 
-def build(request, writer, native, *, draft_dir: Path | None = None) -> None:
+def build(request, writer, native, *, draft_dir: Path | None = None,
+          spec_type: str | None = None) -> None:
     """Dispatch locally or warn and retry native once with the original request.
 
     Args:
@@ -98,7 +128,7 @@ def build(request, writer, native, *, draft_dir: Path | None = None) -> None:
     if not candidate(request, raw):
         native(request, writer)
         return
-    if draft_dir is None and not edge_llm.package_present():
+    if draft_dir is None and spec_type is None and not edge_llm.package_present():
         native(request, writer)
         return
     capacity = config.get("max_position_embeddings")
@@ -118,9 +148,14 @@ def build(request, writer, native, *, draft_dir: Path | None = None) -> None:
         try:
             target = edge_llm.local_target()
             key = (target["os"], target["arch"], target["sm"], request.precision.lower())
-            adapter = EDGE_DISPATCH.get(key)
+            routes = (EDGE_DISPATCH
+                      if edge_llm.checkpoint_quantization(Path(request.model_dir), raw) == "none"
+                      else QUANTIZED_EDGE_DISPATCH)
+            adapter = routes.get(key)
             if adapter is not None:
                 options = {} if draft_dir is None else {"draft_dir": draft_dir}
+                if spec_type is not None:
+                    options["spec_type"] = spec_type
                 files, marker = adapter(request, raw, target, Path(directory), log_path, **options)
         except Exception as error:
             failure = error
@@ -152,12 +187,39 @@ def build(request, writer, native, *, draft_dir: Path | None = None) -> None:
 
 
 def build_paired(request, writer, execution) -> None:
-    """Build an explicit Qwen3.5 DFlash pair, never a base-only replacement."""
+    """Build explicit Qwen3.5 speculative execution, never a base-only replacement."""
     execution.validate_local()
 
-    if execution.variant != "dflash" or tuple(x.role for x in execution.checkpoints) != ("draft",):
+    if request.tensor_parallel_size != 1:
+        raise ValueError("Qwen3.5 speculative execution requires single-device generation")
+    if request.task not in {"text_generation", "vision_language_generation"}:
+        raise ValueError("Qwen3.5 speculative execution requires text or image generation")
+    if execution.variant == "mtp":
+        if execution.checkpoints:
+            raise ValueError("Qwen3.5 MTP uses embedded draft layers, not a companion")
+        raw = json.loads((request.model_dir / "config.json").read_text())
+        base = raw.get("text_config", raw)
+        if (
+            not candidate(request, raw)
+            or (base.get("hidden_size"), base.get("num_hidden_layers")) not in {
+                (1024, 24), (2048, 24), (2560, 32), (4096, 32),
+            }
+            or base.get("mtp_num_hidden_layers") != 1
+            or edge_llm.checkpoint_quantization(request.model_dir, raw) not in {"none", "nvfp4"}
+        ):
+            raise ValueError("Qwen3.5 MTP requires admitted original or NVFP4 single-draft profiles")
+        limit = request.max_sequence_length or min(base["max_position_embeddings"], 256)
+        if limit <= 4:
+            raise ValueError("Qwen3.5 MTP context must exceed its four verification positions")
+
+        def native_mtp(original_request, original_writer):
+            raise NotImplementedError("Native Qwen3.5 does not implement the requested MTP variant")
+
+        build(request, writer, native_mtp, spec_type="mtp")
+        return
+    if execution.variant not in {"dflash", "dflash_ddtree"} or tuple(x.role for x in execution.checkpoints) != ("draft",):
         raise ValueError(
-            "Qwen3.5 paired execution requires variant=dflash and one draft checkpoint"
+            "Qwen3.5 paired execution requires variant=dflash or dflash_ddtree and one draft checkpoint"
         )
     draft_dir = execution.checkpoints[0].model_dir
     raw = json.loads((request.model_dir / "config.json").read_text())
@@ -176,7 +238,7 @@ def build_paired(request, writer, execution) -> None:
         raise ValueError("Qwen3.5 DFlash target layer count differs from base")
     config = draft.get("dflash_config")
     if not isinstance(config, dict) or config.get("block_size") != 16:
-        raise ValueError("Qwen3.5 DFlash currently maps the upstream linear block16 profile")
+        raise ValueError("Qwen3.5 DFlash currently maps the upstream block16 draft profile")
     layers = config.get("target_layer_ids")
     if (
         not isinstance(layers, list)
@@ -192,14 +254,14 @@ def build_paired(request, writer, execution) -> None:
     limit = request.max_sequence_length or min(base["max_position_embeddings"], 256)
     if type(capacity) is not int or not 16 < limit <= capacity:
         raise ValueError("Requested context exceeds DFlash draft capacity or block minimum")
-    if draft.get("quantization_config") or any(
-        (draft_dir / name).exists()
-        for name in ("hf_quant_config.json", "quantize_config.json", "quant_config.json")
-    ):
-        raise ValueError("This Qwen3.5 DFlash profile requires unquantized draft weights")
+    base_format = edge_llm.checkpoint_quantization(Path(request.model_dir), raw)
+    draft_format = edge_llm.checkpoint_quantization(draft_dir, draft)
+    if draft_format != base_format or draft_format not in {"none", "nvfp4"}:
+        raise ValueError("Qwen3.5 DFlash requires matching original or ModelOpt NVFP4 checkpoints")
 
     def native_pair(original_request, original_writer):
         # Preserve the requested variant on fallback; native has no DFlash decoder.
         raise NotImplementedError("Native Qwen3.5 does not implement the requested DFlash variant")
 
-    build(request, writer, native_pair, draft_dir=draft_dir)
+    options = {"spec_type": "dflash_ddtree"} if execution.variant == "dflash_ddtree" else {}
+    build(request, writer, native_pair, draft_dir=draft_dir, **options)

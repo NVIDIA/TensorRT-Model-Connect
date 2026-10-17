@@ -12,6 +12,12 @@ _BASE = family_support(
     default_task="text_generation",
 )
 
+_MULTIMODAL = family_support(
+    model_types=("qwen35", "qwen3.5", "qwen3_5"),
+    tasks=("text_generation", "vision_language_generation"),
+    default_task="text_generation",
+)
+
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
     config = metadata.config.get("text_config", metadata.config)
@@ -19,4 +25,5 @@ def describe(metadata: ModelMetadata) -> FamilySupport | None:
         "mlp_only_layers" not in config
     ):
         return None
-    return _BASE(metadata)
+    support = _MULTIMODAL if isinstance(metadata.config.get("vision_config"), dict) else _BASE
+    return support(metadata)

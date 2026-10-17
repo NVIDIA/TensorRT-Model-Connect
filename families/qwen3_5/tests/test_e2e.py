@@ -30,7 +30,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
-        assert manifest["task"] == "text_generation", path
+        assert manifest["task"] in {"text_generation", "vision_language_generation"}, path
         assert isinstance(manifest["precision"], str), path
         assert isinstance(manifest["max_sequence_length"], int), path
         assert isinstance(manifest["tensor_parallel_size"], int), path
@@ -92,8 +92,6 @@ def _required_environment(tp_size: int):
     assert torch.cuda.device_count() >= tp_size, (
         f"{_FAMILY} TP{tp_size} requires {tp_size} visible GPUs; found {torch.cuda.device_count()}"
     )
-    if tp_size > 1:
-        assert shutil.which("mpirun"), "selected TP E2E requires mpirun"
     return binary, runtime_root, torch
 
 
@@ -142,7 +140,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             model_dir=model_dir,
             output_path=bundle,
             family=_FAMILY,
-            task="text_generation",
+            task=manifest["task"],
             precision=manifest["precision"],
             max_sequence_length=manifest["max_sequence_length"],
             tensor_parallel_size=manifest["tensor_parallel_size"],
@@ -153,7 +151,8 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
 
 
-def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
+def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int,
+                          task: str = "text_generation", *, require_edge: bool = False) -> bool:
     inspected = subprocess.run(
         [str(binary), "inspect", str(bundle)],
         check=True,
@@ -165,14 +164,25 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
     record_evidence("native", {"stdout": getattr(inspected, "stdout", None), "stderr": getattr(inspected, "stderr", None)})
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
-    assert payload["task"] == "text_generation"
-    if tp_size > 1:
+    edge = "edge_llm.json" in payload["sections"]
+    assert edge or not require_edge, "This provisioned case requires Edge-LLM, not native fallback"
+    expected_task = "images_text_to_text" if edge and task == "vision_language_generation" else task
+    # Previously published single-image bundles retain the legacy task ID.
+    assert payload["task"] in {task, expected_task}
+    if edge:
+        if tp_size == 2:
+            for rank in range(tp_size):
+                assert f"edge_llm/engine/llm_world2_rank{rank}.engine" in payload["sections"]
+        if task == "vision_language_generation":
+            assert "edge_llm/engine/visual/visual.engine" in payload["sections"]
+    elif tp_size > 1:
         rank_sections = {
             name
             for name in payload["sections"]
             if name.startswith("engine.rank") and name.endswith(".plan")
         }
         assert rank_sections == {f"engine.rank{rank}.plan" for rank in range(tp_size)}
+    return edge
 
 
 def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict) -> list[str]:
@@ -186,6 +196,14 @@ def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict)
         "--max-new-tokens",
         str(case["max_new_tokens"]),
     ]
+    if "image" in case and "images" in case:
+        raise ValueError("Specify image or ordered images, not both")
+    if "images" in case:
+        if not case["images"]:
+            raise ValueError("Ordered images cannot be empty")
+        arguments.extend(["--images", json.dumps(case["images"])])
+    elif "image" in case:
+        arguments.extend(["--image", str(case["image"])])
     options = {
         "temperature": "--temperature",
         "top_k": "--top-k",
@@ -214,10 +232,12 @@ def _run_native(
     case: dict,
     tp_size: int,
     tmp_path: Path,
+    *, edge: bool = False,
 ) -> dict:
     command = [str(binary), *_native_arguments(bundle, runtime_root, prompt, case)]
     environment = dict(os.environ)
-    if tp_size > 1:
+    if tp_size > 1 and not edge:
+        assert shutil.which("mpirun"), "selected native TP E2E requires mpirun"
         environment["TRTMC_NCCL_RENDEZVOUS"] = str(tmp_path / "nccl.rendezvous")
         prefix = ["mpirun", "--tag-output", "-np", str(tp_size)]
         for name in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "TRTMC_NCCL_RENDEZVOUS"):
@@ -225,20 +245,32 @@ def _run_native(
                 prefix.extend(["-x", name])
         command = [*prefix, *command]
 
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        env=environment,
-    )
-    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("commands", {"argv": command})
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired as error:
+        # TimeoutExpired stores partial output as bytes even with text=True.
+        partial = {}
+        for name in ("stdout", "stderr"):
+            value = getattr(error, name) or ""
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            (tmp_path / f"native.{name}.log").write_text(value, encoding="utf-8")
+            partial[name] = value
+        record_evidence("native", partial)
+        raise
     record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     (tmp_path / "native.stdout.log").write_text(completed.stdout, encoding="utf-8")
     (tmp_path / "native.stderr.log").write_text(completed.stderr, encoding="utf-8")
     completed.check_returncode()
-    if tp_size == 1:
+    if tp_size == 1 or edge:
         return json.loads(completed.stdout)
 
     rank_zero_payloads = []
@@ -330,6 +362,61 @@ def _record_text_diagnostics(native_ids: list[int], reference_ids: list[int]) ->
     })
 
 
+def _reference_inputs(model_dir: Path, manifest: dict, tokenizer, prompt: str, case: dict):
+    """Validate processor dependencies and media before loading large source weights."""
+    if "image" in case or "images" in case:
+        from PIL import Image
+        from transformers import AutoProcessor
+        assert case.get("use_chat_template", True), "Image requests require the source chat template"
+        processor = AutoProcessor.from_pretrained(
+            model_dir, local_files_only=True, trust_remote_code=bool(manifest.get("trust_remote_code", False)),
+        )
+        # Match the owning visual profile, using the source patch and merge sizes.
+        factor = processor.image_processor.patch_size * processor.image_processor.merge_size
+        processor.image_processor.size = {
+            "shortest_edge": 128 * factor * factor,
+            "longest_edge": 1280 * factor * factor,
+        }
+        if "image" in case and "images" in case:
+            raise ValueError("Specify image or ordered images, not both")
+        paths = case["images"] if "images" in case else [case["image"]]
+        if not paths:
+            raise ValueError("Ordered images cannot be empty")
+        messages = [{"role": "user", "content": [
+            *({"type": "image"} for _ in paths), {"type": "text", "text": prompt},
+        ]}]
+        # Base checkpoints may embed their provider template only in tokenizer_config.json.
+        template_options = {}
+        if "enable_thinking" in case:
+            template_options["enable_thinking"] = case["enable_thinking"]
+        rendered = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+            chat_template=processor.chat_template or tokenizer.chat_template,
+            **template_options,
+        )
+        images = []
+        for path in paths:
+            with Image.open(path) as image:
+                images.append(image.convert("RGB"))
+        try:
+            inputs = processor(
+                text=[rendered], images=images, return_tensors="pt",
+                # Serialized tokenizer defaults take precedence over processor.size.
+                images_kwargs={
+                    "min_pixels": processor.image_processor.size["shortest_edge"],
+                    "max_pixels": processor.image_processor.size["longest_edge"],
+                },
+            )
+        finally:
+            for image in images:
+                image.close()
+        record_evidence("inputs", {"images": list(map(str, paths)),
+                                  "image_grid_thw": inputs["image_grid_thw"].tolist()})
+    else:
+        inputs = _render_prompt(tokenizer, prompt, case)
+    return inputs
+
+
 def _hf_reference(
     model_dir: Path,
     manifest: dict,
@@ -356,17 +443,30 @@ def _hf_reference(
         "bf16": torch.bfloat16,
     }
     assert reference_precision in dtypes, reference_precision
-    model = (
-        AutoModelForCausalLM.from_pretrained(
-            model_dir,
-            local_files_only=True,
-            trust_remote_code=trust_remote_code,
-            dtype=dtypes[reference_precision],
-        )
-        .eval()
-        .to("cuda")
-    )
-    inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
+    # Large-model references may distribute FP32 weights without relaxing the oracle.
+    device_map = manifest.get("reference_device_map")
+    reference_options = {} if device_map is None else {"device_map": device_map}
+    if "reference_max_memory" in manifest:
+        assert device_map is not None, "reference_max_memory requires reference_device_map"
+        reference_options["max_memory"] = {
+            int(device) if str(device).isdigit() else device: budget
+            for device, budget in manifest["reference_max_memory"].items()
+        }
+    inputs = _reference_inputs(model_dir, manifest, tokenizer, prompt, case)
+    model_class = AutoModelForCausalLM
+    if "image" in case or "images" in case:
+        from transformers import AutoModelForImageTextToText
+        model_class = AutoModelForImageTextToText
+    model = model_class.from_pretrained(
+        model_dir,
+        local_files_only=True,
+        trust_remote_code=trust_remote_code,
+        dtype=dtypes[reference_precision],
+        **reference_options,
+    ).eval()
+    if device_map is None:
+        model = model.to("cuda")
+    inputs = inputs.to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:
         assert prompt_ids == case["expected_prompt_token_ids"]
@@ -500,7 +600,10 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     with evidence_stage("build"):
         _build_bundle(manifest, model_dir, bundle)
     with evidence_stage("compare"):
-        _assert_rank_sections(binary, bundle, tp_size)
+        edge = _assert_rank_sections(
+            binary, bundle, tp_size, manifest["task"],
+            require_edge=bool(manifest.get("require_edge_llm", False)),
+        )
     with evidence_stage("native"):
         payload = _run_native(
             binary,
@@ -510,6 +613,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             case,
             tp_size,
             tmp_path,
+            edge=edge,
         )
     record_evidence("native", payload)
     reruns = int(case.get("determinism_reruns", 0))
@@ -523,6 +627,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
                 case,
                 tp_size,
                 tmp_path,
+                edge=edge,
             )
         record_evidence("native", repeated)
         with evidence_stage("compare"):
