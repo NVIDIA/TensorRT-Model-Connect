@@ -990,3 +990,88 @@ def test_larval_stage_exactly_modifier_preserves_scoped_denial():
     assert semantic.organism_numeric_claims("It has exactly four larval stages.")[
         "larval_stage_count"
     ] == {(4, 4, False)}
+
+
+@pytest.mark.parametrize("case", ("model-card-quickstart", "model-card-sampling"))
+def test_complete_larval_sequence_rejects_the_retained_three_stage_contradiction(case):
+    reference = "Complete but very short: egg → larva (L1–L4) → adult."
+    native = "Egg → first‑larva (L1) → second‑larva (L2) → third‑larva (L3) → adult."
+    for left, right in ((reference, native), (native, reference)):
+        with pytest.raises(AssertionError, match="larval_stage_count claims conflict"):
+            check(case, [text(ORGANISM_CORE + " " + left)], [text(ORGANISM_CORE + " " + right)])
+
+
+@pytest.mark.parametrize(
+    "value,count",
+    [
+        ("Egg -> L1 -> L2 -> L3 -> adult.", 3),
+        ("Egg → L1 → L2 → L3 → L4 → adult.", 4),
+        ("Egg ⇒ larval stages (L1 through L4) ⇒ adulthood.", 4),
+        ("Egg ⟶ larvae (L1, L2, L3, and L4) ⟶ adult.", 4),
+        ("Egg → larva (L1–L4) → adult. The remaining answer is cut off", 4),
+        ("Egg → L1 → adult.", 1),
+        ("Drosophila has a different life cycle. C. elegans: egg → L1–L4 → adult.", 4),
+        ("Drosophila: egg → L1 → L2 → L3 → adult; C. elegans: egg → L1–L4 → adult.", 4),
+        ("C. elegans: egg → L1–L4 → adult; Drosophila: egg → L1 → L2 → L3 → adult.", 4),
+    ],
+)
+def test_complete_larval_sequence_has_a_bounded_explicit_count(value, count):
+    assert semantic.organism_numeric_claims(value)["larval_stage_count"] == {(count, count, False)}
+    comparison = semantic.compare_organism_numeric_claims(f"{count} larval stages.", value)
+    assert comparison["shared_properties"] == ["larval_stage_count"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Egg → L1 → L2 → L3",
+        "Egg → L1 → L2 → L3 →",
+        "Egg → L1 → L2 → L3 → adul",
+        "Egg → L1 → L2 → ... → adult.",
+        "Egg → L1 → L2 → … → adult.",
+        "L1 → L2 → L3 → adult.",
+        "Egg → L2 → L3 → adult.",
+        "Egg → L1 → L3 → adult.",
+        "Egg → L1 → L2 → L2 → adult.",
+        "Egg → L4–L1 → adult.",
+        "Egg → L1–L40 → adult.",
+        "Egg → L1 → dauer → L4 → adult.",
+        "Egg → L1/L2/L3 → adult.",
+        "Egg → L1 → L2 → L3 → adult?",
+        'Someone wrote "egg → L1 → L2 → L3 → adult".',
+        "Someone wrote ‘egg → L1 → L2 → L3 → adult’.",
+        "It does not follow egg → L1 → L2 → L3 → adult.",
+        "It doesn’t follow egg → L1 → L2 → L3 → adult.",
+        "If C. elegans followed egg → L1 → L2 → L3 → adult, this would be different.",
+        "C. elegans may follow egg → L1 → L2 → L3 → adult.",
+        "A source claimed egg → L1 → L2 → L3 → adult.",
+        "Some people believe egg → L1 → L2 → L3 → adult.",
+        "This simplified diagram shows egg → L1 → L2 → L3 → adult.",
+        "Drosophila has a life cycle: egg → L1 → L2 → L3 → adult.",
+        "A fly has a life cycle: egg → L1 → L2 → L3 → adult.",
+        "A butterfly has a life cycle: egg → L1 → L2 → L3 → adult.",
+        "Drosophila, unlike C. elegans, has a life cycle: egg → L1 → L2 → L3 → adult.",
+        "C. elegans is a nematode. Drosophila is a fly. It develops egg → L1 → L2 → L3 → adult.",
+        "Egg → L1 → L2 → L3 → adult, but that is incorrect.",
+        "Egg → L1 → L2 → L3 → adult. That is incorrect.",
+        "Egg → L1 → L2 → L3 → adult. That’s wrong.",
+        "Egg → L1 → L2 → L3 → adult. That is not correct.",
+        "Egg → L1 → L2 → L3 → adult. This sequence is incomplete.",
+        "Egg → L1 → L2 → L3 → adult, but this sequence is incomplete.",
+        "Rather than egg → L1 → L2 → L3 → adult, use the complete sequence.",
+    ],
+)
+def test_open_or_unendorsed_larval_sequences_do_not_invent_a_total(value):
+    assert semantic.organism_numeric_claims(value)["larval_stage_count"] == set()
+    assert (
+        semantic.compare_organism_numeric_claims("Four larval stages.", value)["shared_properties"]
+        == []
+    )
+
+
+def test_complete_sequence_conflict_is_not_hidden_by_an_additional_matching_count():
+    with pytest.raises(AssertionError, match="larval_stage_count claims conflict"):
+        semantic.compare_organism_numeric_claims(
+            "Four larval stages.",
+            "Four larval stages. Egg → L1 → L2 → L3 → adult.",
+        )

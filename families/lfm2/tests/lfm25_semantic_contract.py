@@ -629,6 +629,72 @@ def compare_organism_cellularity_claims(reference, native):
     }
 
 
+def _larval_sequence_labels(segment):
+    prefix = (
+        r"(?:(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)[ -]+)?"
+        r"larva(?:e|l stages?)?\s*"
+    )
+    segment = re.sub(r"^" + prefix, "", segment).strip()
+    if segment.startswith("(") and segment.endswith(")"):
+        segment = segment[1:-1].strip()
+    span = re.fullmatch(r"l([1-9]\d?)\s*(?:-|to|through)\s*l([1-9]\d?)", segment)
+    if span:
+        low, high = int(span[1]), int(span[2])
+        return list(range(low, high + 1)) if low <= high <= 10 else []
+    if re.fullmatch(r"l[1-9]\d?(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+)l[1-9]\d?)*", segment):
+        labels = [int(number) for number in re.findall(r"l([1-9]\d?)", segment)]
+        return labels if max(labels) <= 10 else []
+    return []
+
+
+def _larval_stage_sequences(value):
+    """Read affirmative closed egg-to-adult arrows, not partial stage listings.
+
+    Only contiguous L1..Ln labels up to L10 (or a labelled range) ending at adulthood
+    imply a count. Quotes, qualifications, retractions and explicit other
+    organisms remain unclassified. This does not infer missing prose or EOS.
+    """
+    value = re.sub(r"\bc\.\s*(?=elegans\b)", "c ", value)
+    value = re.sub(r'"[^"\n]*"|“[^”]*”|‘[^’]*’|(?<!\w)\'[^\'\n]*\'(?!\w)', " ", value)
+    arrow = r"(?:->|→|⇒|⟶)"
+    other = r"\b(?:humans?|homo sapiens|mice|mouse|yeast|drosophila|fruit (?:fly|flies)|(?:fly|flies)|(?:butterfly|butterflies)|moths?|mosquito(?:es)?|other (?:organisms?|animals?|species))\b"
+    qualified = (
+        r"\b(?:not|never|if|unless|might|may|could|would|hypothetical|incorrect|wrong|false|"
+        r"claims?|claimed|say|says|said|reports?|reported|believes?|believed|proposed|"
+        r"misconception|myth|example|including|partial|incomplete|abbreviated|simplified|omits?|omitted|skipping)\b|n['’]t|\brather than\b|\binstead of\b"
+    )
+    correction = (
+        r"\s*(?:(?:that|this)(?:\s+(?:sequence|chain|diagram|claim))?"
+        r"(?:\s+(?:is|was)|['’]s)\s+(?:wrong|incorrect|false|not\s+correct|incomplete)\b|correction\b)"
+    )
+    target = r"\b(?:c\s+elegans|caenorhabditis\s+elegans)\b"
+    facts = set()
+    for match in re.finditer(
+        rf"\begg\s*{arrow}\s*(?P<stages>[^.!?;:]{{1,240}}?)\s*{arrow}\s*adult(?:hood)?\b", value
+    ):
+        start = max(value.rfind(mark, 0, match.start()) for mark in ".!?;") + 1
+        tail = re.search(r"[.!?;]", value[match.end() :])
+        end = match.end() + tail.start() if tail else len(value)
+        context = value[start:end]
+        mentions = list(re.finditer(rf"(?P<other>{other})|{target}", value[: match.start()]))
+        if re.search(qualified, context) or re.search(other, context):
+            continue
+        if mentions and mentions[-1].group("other"):
+            continue
+        if value[end : end + 1] == "?" or re.match(correction, value[end + 1 :]):
+            continue
+        groups = [
+            _larval_sequence_labels(part.strip()) for part in re.split(arrow, match["stages"])
+        ]
+        if not all(groups):
+            continue
+        labels = [number for group in groups for number in group]
+        if labels == list(range(1, len(labels) + 1)):
+            number = Fraction(len(labels))
+            facts.add((number, number, False))
+    return facts
+
+
 def organism_numeric_claims(text):
     """Extract bounded, explicit final-answer claims, without judging their truth."""
     value = (
@@ -703,6 +769,7 @@ def organism_numeric_claims(text):
             )
         )
         facts["larval_stage_count"].add((number, number, denied))
+    facts["larval_stage_count"].update(_larval_stage_sequences(value))
     return facts
 
 
