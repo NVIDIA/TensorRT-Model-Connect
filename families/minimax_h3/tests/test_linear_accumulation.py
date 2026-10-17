@@ -33,10 +33,14 @@ class _Network:
         self.casts = []
         self.products = []
         self.sums = []
+        self.constants = []
 
     def add_constant(self, shape, value):
-        assert tuple(shape) == value.shape and value.dtype == np.float32
-        return _layer(_tensor(value, op.trt.float32))
+        assert tuple(shape) == value.shape
+        dtype = next(kind for kind, storage in _STORAGE.items() if np.dtype(storage) == value.dtype)
+        tensor = _tensor(value, dtype)
+        self.constants.append(tensor)
+        return _layer(tensor)
 
     def add_cast(self, value, dtype):
         self.casts.append((value.dtype, dtype))
@@ -88,6 +92,8 @@ def test_linear_float_accumulation_preserves_half_operands_and_bias_boundary(
             round_before_bias=round_before_bias,
         )
         assert actual.dtype == op.trt.float16
+        # Accumulation must not retain the original FP32 storage constants.
+        assert all(value.dtype == op.trt.float16 for value in network.constants)
         np.testing.assert_array_equal(actual.value, expected.astype(np.float16))
         left, right = network.products[0]
         assert left.dtype == right.dtype == op.trt.float32
@@ -123,6 +129,7 @@ def test_linear_default_accumulation_keeps_existing_graph(compute_dtype, with_bi
     try:
         actual = op.linear(network, source, weight, bias, compute_dtype=compute_dtype)
         assert actual.dtype == compute_dtype
+        assert all(value.dtype == op.trt.float32 for value in network.constants)
         assert all(value.dtype == compute_dtype for value in network.products[0])
         if with_bias:
             assert all(value.dtype == compute_dtype for value in network.sums[0])
@@ -141,6 +148,18 @@ def test_linear_rejects_invalid_accumulation_before_graph_calls(accumulation_dty
             _tensor([[1.0]], op.trt.float16),
             np.ones((1, 1), np.float32),
             accumulation_dtype=accumulation_dtype,
+        )
+
+
+@pytest.mark.parametrize("compute_dtype", [op.trt.int32, "float16"])
+def test_float_accumulation_rejects_invalid_operand_dtype_before_graph_calls(compute_dtype):
+    with pytest.raises(ValueError, match="floating-point operands"):
+        op.linear(
+            object(),
+            _tensor([[1.0]], op.trt.float16),
+            np.ones((1, 1), np.float32),
+            compute_dtype=compute_dtype,
+            accumulation_dtype=op.trt.float32,
         )
 
 

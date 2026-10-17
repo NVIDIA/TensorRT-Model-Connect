@@ -183,6 +183,14 @@ def run_cached_case(output, record_property, cache):
                 ),
             )
             plan = build_vae_tile_decoder_engine(weights, batch_size=batch, workspace_bytes=8 << 30)
+            write_json(
+                output / (preset + ".plan-size.json"),
+                dict(
+                    plan_bytes=len(plan),
+                    frozen_plan_cap_bytes=plan_cap,
+                    within_storage_bound=len(plan) <= plan_cap,
+                ),
+            )
             assert len(plan) <= plan_cap, "candidate plan exceeds frozen storage bound"
             writer = BundleWriter(output / (preset + ".component.bundle"))
             try:

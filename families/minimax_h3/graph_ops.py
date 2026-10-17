@@ -139,9 +139,26 @@ def linear(
         round_before_bias and accumulation_dtype is None
     ):
         raise ValueError("MiniMax-H3 round_before_bias requires explicit FP32 accumulation")
+    if compute_dtype is None and bf16:
+        compute_dtype = trt.bfloat16
+    if compute_dtype is None:
+        compute_dtype = tensor.dtype
+    if accumulation_dtype is not None:
+        storage_dtype = {
+            trt.float16: np.float16,
+            trt.bfloat16: ml_dtypes.bfloat16,
+            trt.float32: np.float32,
+        }.get(compute_dtype)
+        if storage_dtype is None:
+            raise ValueError("MiniMax-H3 FP32 accumulation requires floating-point operands")
 
     tensor_rank = len(tuple(tensor.shape))
     rhs_value = np.asarray(weight)
+    if accumulation_dtype is not None:
+        # Store only the original autocast operand values. Starting from an
+        # FP32 constant and down/up-casting it can retain a full-width weight
+        # initializer even though the computation consumes half values.
+        rhs_value = np.ascontiguousarray(rhs_value, dtype=storage_dtype)
     if tensor_rank > 2:
         # TensorRT MatrixMultiply applies NumPy-style broadcast across the
         # leading dimensions only when both operands expose those dimensions.
@@ -149,10 +166,6 @@ def linear(
         # explicitly [1, out, in] instead of relying on implicit rank lift.
         rhs_value = rhs_value.reshape((1,) * (tensor_rank - 2) + rhs_value.shape)
     rhs = weight_constant(network, rhs_value)
-    if compute_dtype is None and bf16:
-        compute_dtype = trt.bfloat16
-    if compute_dtype is None:
-        compute_dtype = tensor.dtype
     tensor = cast(network, tensor, compute_dtype)
     rhs = cast(network, rhs, compute_dtype)
     if accumulation_dtype is not None:
@@ -166,7 +179,10 @@ def linear(
             output = cast(network, output, compute_dtype)
             output = cast(network, output, accumulation_dtype)
         shape = (1,) * (len(tuple(output.shape)) - 1) + (-1,)
-        bias_tensor = weight_constant(network, np.asarray(bias).reshape(shape))
+        bias_value = np.asarray(bias).reshape(shape)
+        if accumulation_dtype is not None:
+            bias_value = np.ascontiguousarray(bias_value, dtype=storage_dtype)
+        bias_tensor = weight_constant(network, bias_value)
         if accumulation_dtype is not None:
             bias_tensor = cast(network, bias_tensor, compute_dtype)
         bias_tensor = cast(network, bias_tensor, output.dtype)
