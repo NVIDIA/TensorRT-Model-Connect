@@ -224,14 +224,15 @@ def build_vae_tile_decoder_engine(
         weights["decoder.proj_in.bias"],
         compute_dtype=trt.float16,
     )
-    hidden = op.cast(network, hidden, trt.float16)
+    # Upstream autocasts proj_in, not the learned FP32 register parameter.
+    # torch.cat promotes the complete initial residual sequence to FP32; an
+    # FP16 concatenation loses register bits and changes the first block norm.
+    hidden = op.cast(network, hidden, trt.float32)
     registers = np.broadcast_to(
         weights["decoder.register_tokens"], (batch_size, REGISTER_TOKENS, DIM)
     ).copy()
-    registers = op.cast(network, op.weight_constant(network, registers), trt.float16)
-    cls = op.cast(
-        network, op.constant(network, np.zeros((batch_size, 1, DIM), np.float32)), trt.float16
-    )
+    registers = op.cast(network, op.weight_constant(network, registers), trt.float32)
+    cls = op.constant(network, np.zeros((batch_size, 1, DIM), np.float32))
     packed = network.add_concatenation([hidden, registers, cls])
     packed.axis = 1
     hidden = packed.get_output(0)
