@@ -8,6 +8,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   qwen_reference.cpp
   reference_conditioner.cpp
   reference_image.cpp
+  reference_visual_encoder.cpp
   visual_reference.cpp
   torch_cuda_normal.cu
 )
@@ -47,6 +48,19 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_reference_visual_encoder
+    reference_visual_encoder.cpp
+    reference_image.cpp
+    visual_reference.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_visual_encoder.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_visual_encoder PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_reference_visual_encoder SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_minimax_h3_reference_visual_encoder PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_visual_encoder COMMAND test_minimax_h3_reference_visual_encoder)
+
   add_executable(test_minimax_h3_reference_image
     reference_image.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_image.cpp
