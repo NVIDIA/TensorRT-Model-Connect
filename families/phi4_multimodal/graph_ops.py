@@ -964,8 +964,11 @@ def add_siglip_attention_core(
     """Match the checkpoint's eager SigLIP attention precision boundaries.
 
     QK and PV are evaluated through FP32 tensors and rounded to FP16 outputs.
-    Scaling and masking remain FP16 operations, and softmax alone is explicitly
-    evaluated in FP32 before its probabilities are rounded back to FP16.
+    The eager scores are FP16 tensors multiplied by a Python float, which
+    PyTorch evaluates in FP32 with the unrounded scale and rounds once, so the
+    scale is applied in FP32. Masking remains an FP16 operation, and softmax
+    alone is explicitly evaluated in FP32 before its probabilities are rounded
+    back to FP16.
     """
     output_dtype = q_4d.dtype
     scores = _add_matrix_multiply_with_fp32_accumulation(
@@ -973,10 +976,14 @@ def add_siglip_attention_core(
         q_4d, trt.MatrixOperation.NONE,
         k_4d, trt.MatrixOperation.TRANSPOSE,
     )
+    scores_dtype = scores.dtype
+    if scores_dtype != trt.float32:
+        scores = network.add_cast(scores, trt.float32).get_output(0)
     scale_t = _scalar_constant_for_trt_dtype(
-        network, (1, 1, 1, 1), scale, scores.dtype)
+        network, (1, 1, 1, 1), scale, trt.float32)
     scores = network.add_elementwise(
         scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+    scores = _cast_back_to_trt_dtype(network, scores, scores_dtype)
 
     if mask is not None:
         if mask.dtype != scores.dtype:
