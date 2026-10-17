@@ -16,5 +16,5 @@
     }
   ],
   "tensor_parallel_size": 1,
-  "max_sequence_length": 384
+  "max_sequence_length": 16640
 }

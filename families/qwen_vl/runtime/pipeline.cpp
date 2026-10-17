@@ -495,6 +495,13 @@ void add_dynamic_vision_metadata(TensorMap& inputs, const QwenVlPreprocessedImag
               {patches, preprocessed.vision_rope_half_dim});
     add_float("vision_sin_half", preprocessed.vision_sin_half,
               {patches, preprocessed.vision_rope_half_dim});
+    add_float("vision_position_weights", preprocessed.vision_position_weights, {4, patches});
+    if (encoder.has_input("vision_position_indices")) {
+        inputs["vision_position_indices"] =
+            Tensor{const_cast<int32_t*>(preprocessed.vision_position_indices.data()),
+                   {4, patches},
+                   DType::kInt32};
+    }
     add_int("vision_window_indices", preprocessed.vision_window_indices);
     add_int("vision_padded_window_indices", preprocessed.vision_padded_window_indices);
     add_int("vision_compact_window_indices", preprocessed.vision_compact_window_indices);
