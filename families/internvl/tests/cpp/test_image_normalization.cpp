@@ -86,6 +86,8 @@ void check_dynamic_tiles(bool portrait) {
     auto document = nlohmann::json::parse(runtime_json());
     document["preprocessor_type"] = "dynamic_tiles_chw";
     document["max_image_tiles"] = 2;
+    // Match get_vl_config, which declares the thumbnail explicitly.
+    document["use_thumbnail"] = true;
     document["fixed_image_size"] = 4;
     document["image_mean"] = std::array<float, 3>{0, 0, 0};
     document["image_std"] = std::array<float, 3>{1, 1, 1};
