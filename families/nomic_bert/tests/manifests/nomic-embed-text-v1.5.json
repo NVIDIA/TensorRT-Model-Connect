@@ -1,0 +1,44 @@
+{
+  "name": "nomic-embed-text-v1.5",
+  "hf_id": "nomic-ai/nomic-embed-text-v1.5",
+  "hf_revision": "e9b6763023c676ca8431644204f50c2b100d9aab",
+  "code_revision": "7710840340a098cfb869c4f65e87cf2b1b70caca",
+  "bundle": "nomic-embed-text-v1.5.bundle",
+  "family": "nomic_bert",
+  "task": "text_to_embedding",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512,
+  "testcases": [
+    {
+      "name": "nomic-v1.5-retrieval",
+      "reference_precision": "fp32",
+      "prompt": "Where is the capital of France?",
+      "premerge": true
+    },
+    {
+      "name": "nomic-v1.5-unicode",
+      "reference_precision": "fp32",
+      "prompt": "Hello​world, café 北京.",
+      "premerge": true
+    },
+    {
+      "name": "nomic-v1.5-latin-extended",
+      "reference_precision": "fp32",
+      "prompt": "İstanbul, Dvořák, ČESKÝ KRUMLOV and Łódź.",
+      "premerge": true
+    },
+    {
+      "name": "nomic-v1.5-greek-cyrillic",
+      "reference_precision": "fp32",
+      "prompt": "ΑΘΉΝΑ, Москва, ЙОГА and ЁЛКА.",
+      "premerge": true
+    },
+    {
+      "name": "nomic-v1.5-empty",
+      "reference_precision": "fp32",
+      "prompt": "",
+      "premerge": true
+    }
+  ]
+}
