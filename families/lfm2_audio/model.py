@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -114,10 +115,21 @@ def backbone_config(raw):
 
 
 def read_weights(path, *, keep=None):
-    with safe_open(str(path), framework="numpy") as reader:
+    path = Path(path)
+    with ExitStack() as stack:
+        if path.is_dir():
+            from .checkpoint_mapper import _open_safetensors
+
+            readers = _open_safetensors(path)
+            for reader in readers:
+                stack.enter_context(reader)
+            tensor_map = readers.tensor_map
+        else:
+            reader = stack.enter_context(safe_open(str(path), framework="numpy"))
+            tensor_map = dict.fromkeys(reader.keys(), reader)
         return {
             name: np.asarray(reader.get_tensor(name), dtype=np.float32)
-            for name in reader.keys()
+            for name, reader in tensor_map.items()
             if keep is None or keep(name)
         }
 
@@ -176,7 +188,7 @@ def build(request, writer):
     resolved = validate_dense_lfm2_config(lfm_config)
     detok_resolved = validate_dense_lfm2_config(detok_config)
     weights = read_weights(
-        root / "model.safetensors",
+        root,
         keep=lambda name: not name.startswith("lfm.") or name == "lfm.embed_tokens.weight",
     )
     writer.set_header(family="lfm2_audio", task=request.task, backend=request.backend)
@@ -229,9 +241,7 @@ def build(request, writer):
         [weights[f"depth_embeddings.{i}.embedding.weight"] for i in range(8)]
     )
     writer.add_bytes("depth_embeddings.f32", depth_embeddings.astype("<f4").tobytes())
-    detok = read_weights(
-        root / "audio_detokenizer/model.safetensors", keep=lambda name: name == "emb.emb.weight"
-    )
+    detok = read_weights(root / "audio_detokenizer", keep=lambda name: name == "emb.emb.weight")
     writer.add_bytes("detokenizer_embeddings.f32", detok["emb.emb.weight"].astype("<f4").tobytes())
     writer.add_bytes("mel_filters.f32", mel_filters().astype("<f4").tobytes())
     runtime = {

@@ -14,21 +14,42 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 BF16_BITS = [0x3F80, 0xC020, 0x8000, 0x3F00]
-EXPECTED = {"bf16": [value << 16 for value in BF16_BITS], "fp32": [0x3E000000, 0xC0E00000]}
+EXPECTED = {
+    "bf16": [value << 16 for value in BF16_BITS],
+    "fp32": [0x3E000000, 0xC0E00000, 0x80000000],
+}
 
 
-def write_checkpoint(path):
-    header = json.dumps(
-        {
-            "bf16": {"dtype": "BF16", "shape": [4], "data_offsets": [0, 8]},
-            "fp32": {"dtype": "F32", "shape": [2], "data_offsets": [8, 16]},
-        },
-        separators=(",", ":"),
-    ).encode()
+def checkpoint_tensors():
+    return {
+        "bf16": ("BF16", [4], struct.pack("<4H", *BF16_BITS)),
+        "fp32": ("F32", [3], struct.pack("<3I", *EXPECTED["fp32"])),
+    }
+
+
+def write_checkpoint(path, tensors=None):
+    header, data = {}, bytearray()
+    for name, (dtype, shape, raw) in (tensors or checkpoint_tensors()).items():
+        start = len(data)
+        data.extend(raw)
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [start, len(data)]}
+    header = json.dumps(header, separators=(",", ":")).encode()
     header += b" " * (-len(header) % 8)
-    path.write_bytes(
-        struct.pack("<Q", len(header)) + header + struct.pack("<4H2f", *BF16_BITS, 0.125, -7.0)
-    )
+    path.write_bytes(struct.pack("<Q", len(header)) + header + data)
+
+
+def write_layout(root, stem, indexed, tensors=None):
+    tensors = tensors or checkpoint_tensors()
+    if not indexed:
+        write_checkpoint(root / (stem + ".safetensors"), tensors)
+        return
+    weight_map = {}
+    for index in range(2):
+        filename = f"shard-{index + 1:05d}.safetensors"
+        entries = dict(list(tensors.items())[index::2])
+        write_checkpoint(root / filename, entries)
+        weight_map.update(dict.fromkeys(entries, filename))
+    (root / (stem + ".safetensors.index.json")).write_text(json.dumps({"weight_map": weight_map}))
 
 
 def run_reader(path, *, direct):
@@ -74,17 +95,69 @@ def test_standalone_read_weights_registers_bf16(tmp_path):
 
 @pytest.mark.parametrize("stem", ["model", "diffusion_pytorch_model"])
 @pytest.mark.parametrize("indexed", [False, True])
-def test_mapper_reads_bf16_checkpoint_layouts(tmp_path, stem, indexed):
-    filename = "shard-00001.safetensors" if indexed else stem + ".safetensors"
-    write_checkpoint(tmp_path / filename)
-    if indexed:
-        (tmp_path / (stem + ".safetensors.index.json")).write_text(
-            json.dumps({"weight_map": {name: filename for name in EXPECTED}})
-        )
-    assert run_reader(tmp_path, direct=False) == EXPECTED
+@pytest.mark.parametrize("direct", [False, True])
+def test_readers_load_bf16_checkpoint_layouts(tmp_path, stem, indexed, direct):
+    write_layout(tmp_path, stem, indexed)
+    assert run_reader(tmp_path, direct=direct) == EXPECTED
 
 
-def test_build_materializes_only_consumed_weights_and_releases_detokenizer(monkeypatch, tmp_path):
+@pytest.mark.parametrize("filter_error", [False, True])
+def test_directory_filter_runs_before_loading_and_closes_shards(
+    monkeypatch, tmp_path, filter_error
+):
+    import numpy as np
+
+    from families.lfm2_audio import checkpoint_mapper, model
+
+    write_layout(tmp_path, "model", True)
+    actual = checkpoint_mapper._open_safetensors(tmp_path)
+    loaded, closed = [], []
+
+    class Reader:
+        def __init__(self, reader):
+            self.reader = reader
+
+        def __enter__(self):
+            self.reader.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            closed.append(self.reader)
+            return self.reader.__exit__(*args)
+
+        def keys(self):
+            return self.reader.keys()
+
+        def get_tensor(self, name):
+            assert name == "bf16", "excluded tensor was materialized"
+            loaded.append(name)
+            return self.reader.get_tensor(name)
+
+    readers = checkpoint_mapper._ReaderCollection([Reader(reader) for reader in actual])
+    monkeypatch.setattr(checkpoint_mapper, "_open_safetensors", lambda _: readers)
+
+    def keep(name):
+        if filter_error and name == "fp32":
+            raise ValueError("filter failed")
+        return name == "bf16"
+
+    if filter_error:
+        with pytest.raises(ValueError, match="filter failed"):
+            model.read_weights(tmp_path, keep=keep)
+    else:
+        values = model.read_weights(tmp_path, keep=keep)
+        assert set(values) == {"bf16"}
+        assert values["bf16"].view(np.uint32).tolist() == EXPECTED["bf16"]
+    assert loaded == ["bf16"]
+    assert len(closed) == 2 and {id(reader) for reader in closed} == {
+        id(reader) for reader in actual
+    }
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_build_materializes_only_consumed_weights_and_releases_detokenizer(
+    monkeypatch, tmp_path, indexed
+):
     import gc
     from types import ModuleType
     import weakref
@@ -92,7 +165,7 @@ def test_build_materializes_only_consumed_weights_and_releases_detokenizer(monke
     import ml_dtypes
     import numpy as np
 
-    from families.lfm2_audio import model
+    from families.lfm2_audio import checkpoint_mapper, model
 
     fixtures = Path(__file__).parent / "fixtures"
     raw = json.loads((fixtures / "config.json").read_text())
@@ -122,29 +195,51 @@ def test_build_materializes_only_consumed_weights_and_releases_detokenizer(monke
         values["conformer.pre_encode.out.weight"].view(np.uint32).copy()
     )
     loaded, mapped, stages = {"root": [], "detokenizer": []}, {}, []
+    opened, closed = [], []
+    unused_root = ["lfm.layers.0.feed_forward.w1.weight", "lfm.embedding_norm.weight"]
+    detok_names = ["lin.weight", "emb.emb.weight", "lfm.layers.0.feed_forward.w1.weight"]
+
+    def tensors(selected):
+        return {
+            name: (
+                "BF16" if values.get(name, values[names[0]]).dtype.name == "bfloat16" else "F32",
+                [2, 2],
+                values.get(name, values[names[0]]).tobytes(),
+            )
+            for name in selected
+        }
+
+    write_layout(tmp_path, "model", indexed, tensors([*names, *unused_root]))
+    detok_root = tmp_path / "audio_detokenizer"
+    detok_root.mkdir()
+    write_layout(
+        detok_root, "diffusion_pytorch_model" if indexed else "model", indexed, tensors(detok_names)
+    )
+    original_open = checkpoint_mapper.safe_open
 
     class Reader:
-        def __init__(self, which):
+        def __init__(self, which, reader, path):
             self.which = which
+            self.reader = reader
+            self.path = path
 
         def __enter__(self):
+            self.reader.__enter__()
+            opened.append(self.path)
             return self
 
         def __exit__(self, *_):
-            return False
+            closed.append(self.path)
+            return self.reader.__exit__(*_)
 
         def keys(self):
-            return (
-                ["lfm.layers.0.feed_forward.w1.weight", *names, "lfm.embedding_norm.weight"]
-                if self.which == "root"
-                else ["lin.weight", "emb.emb.weight", "lfm.layers.0.feed_forward.w1.weight"]
-            )
+            return self.reader.keys()
 
         def get_tensor(self, name):
             allowed = names if self.which == "root" else ["emb.emb.weight"]
             assert name in allowed, f"unused tensor materialized: {name}"
             loaded[self.which].append(name)
-            return values[name]
+            return self.reader.get_tensor(name)
 
     def open_weights(path, *, framework):
         assert framework == "numpy"
@@ -152,9 +247,9 @@ def test_build_materializes_only_consumed_weights_and_releases_detokenizer(monke
         if which == "detokenizer":
             gc.collect()
             assert mapped["detokenizer"]() is None, "serialized detokenizer weights still live"
-        return Reader(which)
+        return Reader(which, original_open(path, framework=framework), str(path))
 
-    monkeypatch.setattr(model, "safe_open", open_weights)
+    monkeypatch.setattr(checkpoint_mapper, "safe_open", open_weights)
 
     class WeightMap(dict):
         pass
@@ -166,6 +261,7 @@ def test_build_materializes_only_consumed_weights_and_releases_detokenizer(monke
         return weights
 
     def engine(_config, weights, _length, **_kwargs):
+        assert sorted(opened) == sorted(closed), "checkpoint readers still open during engine build"
         stages.append(weights["which"])
         return weights["which"].encode()
 
@@ -180,7 +276,6 @@ def test_build_materializes_only_consumed_weights_and_releases_detokenizer(monke
 
     for module_name, function_name, function in (
         ("backbone", "build_lfm2_engine", engine),
-        ("checkpoint_mapper", "load_lfm2_weights", map_weights),
         ("conformer", "build_encoder", lambda *args, **kwargs: consume("encoder", *args, **kwargs)),
         (
             "depthformer",
@@ -191,6 +286,7 @@ def test_build_materializes_only_consumed_weights_and_releases_detokenizer(monke
         module = ModuleType(f"families.lfm2_audio.{module_name}")
         setattr(module, function_name, function)
         monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(checkpoint_mapper, "load_lfm2_weights", map_weights)
 
     class Writer:
         def __init__(self):
@@ -214,7 +310,10 @@ def test_build_materializes_only_consumed_weights_and_releases_detokenizer(monke
         (tmp_path / name).write_text(name)
     writer = Writer()
     model.build(model.BuildRequest(tmp_path, max_sequence_length=16), writer)
-    assert loaded == {"root": names, "detokenizer": ["emb.emb.weight"]}
+    assert sorted(loaded["root"]) == sorted(names)
+    assert loaded["detokenizer"] == ["emb.emb.weight"]
+    assert len(opened) == len(closed) == (4 if indexed else 2)
+    assert sorted(opened) == sorted(closed)
     assert stages == ["backbone", "encoder", "depthformer", "detokenizer"]
     for output, name in (
         ("text_embeddings.f32", "lfm.embed_tokens.weight"),
