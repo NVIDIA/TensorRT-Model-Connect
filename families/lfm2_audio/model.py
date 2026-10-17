@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 from safetensors import safe_open
+import ml_dtypes  # noqa: F401 -- register NumPy's BF16 dtype before checkpoint reads
 
 from .config import validate_dense_lfm2_config
 
