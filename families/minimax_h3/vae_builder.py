@@ -198,7 +198,9 @@ def _post_quant_conv(network, latent, weights):
     if not np.isfinite(kernel).all() or not np.isfinite(bias).all():
         raise ValueError("MiniMax-H3 post_quant_conv parameters overflow FP16 autocast")
     value = op.cast(network, latent, trt.float16)
-    no_bias = np.empty(0, np.float16)
+    # An empty NumPy array can have a non-null pointer, which TensorRT rejects
+    # for count zero. Its native empty Weights object has the required null pointer.
+    no_bias = trt.Weights(trt.float16)
     convolution = network.add_convolution_nd(value, CHANNELS, (1, 1, 1), kernel, no_bias)
     if convolution is None:
         raise RuntimeError("TensorRT rejected MiniMax-H3 post_quant_conv")
@@ -206,7 +208,7 @@ def _post_quant_conv(network, latent, weights):
     convolution.stride_nd = (1, 1, 1)
     convolution.padding_nd = (0, 0, 0)
     # Retain borrowed convolution weights before any subsequent graph call.
-    op._WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).extend((kernel, no_bias))
+    op._WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).append(kernel)
     value = op.cast(network, convolution.get_output(0), trt.float32)
     bias = op.constant(network, bias.astype(np.float32).reshape(1, CHANNELS, 1, 1, 1))
     value = network.add_elementwise(value, bias, trt.ElementWiseOperation.SUM).get_output(0)

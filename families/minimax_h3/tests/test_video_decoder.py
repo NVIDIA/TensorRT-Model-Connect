@@ -162,8 +162,8 @@ def test_video_post_quantization_rounds_half_convolution_before_bias(batch):
         def add_convolution_nd(self, value, channels, kernel_shape, kernel, bias):
             assert value.dtype == vae.trt.float16 and value.shape == source.shape
             assert channels == 24 and kernel_shape == (1, 1, 1)
-            assert kernel.dtype == bias.dtype == np.float16
-            assert kernel.flags.c_contiguous and bias.flags.c_contiguous
+            assert kernel.dtype == np.float16 and kernel.flags.c_contiguous
+            assert isinstance(bias, vae.trt.Weights) and bias.dtype == vae.trt.float16
             assert bias.size == 0, "bias must follow the half-rounded convolution"
             recorded.update(kernel=kernel, bias=bias)
             recorded["layer"] = SimpleNamespace(
@@ -206,7 +206,7 @@ def test_video_post_quantization_rounds_half_convolution_before_bias(batch):
         np.testing.assert_array_equal(
             recorded["kernel"], weights["post_quant_conv.weight"].astype(np.float16)
         )
-        for name in ("kernel", "bias", "bias_constant"):
+        for name in ("kernel", "bias_constant"):
             assert any(
                 value is recorded[name] for value in vae.op._WEIGHT_BUFFER_KEEPALIVE[id(network)]
             )
