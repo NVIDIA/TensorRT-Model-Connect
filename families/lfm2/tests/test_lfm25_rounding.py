@@ -47,7 +47,19 @@ class TinyEngine:
             assert config.add_optimization_profile(profile) >= 0
         plan = self.builder.build_serialized_network(self.network, config)
         assert plan is not None, "actual family helper failed to build"
-        self.runtime = trt.Runtime(self.logger)
+        self._load_plan(plan)
+
+    @classmethod
+    def from_plan(cls, torch, trt, plan):
+        """Execute a plan built by an owning builder without rebuilding its graph."""
+        instance = cls.__new__(cls)
+        instance.torch, instance.trt = torch, trt
+        instance.logger = trt.Logger(trt.Logger.WARNING)
+        instance._load_plan(plan)
+        return instance
+
+    def _load_plan(self, plan):
+        self.runtime = self.trt.Runtime(self.logger)
         self.engine = self.runtime.deserialize_cuda_engine(plan)
         assert self.engine is not None
         self.context = self.engine.create_execution_context()

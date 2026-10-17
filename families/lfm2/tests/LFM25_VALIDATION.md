@@ -262,6 +262,21 @@ tests of the full probability vector, seed/offset transitions, and selected ID.
 Sampled generation must also satisfy the case-specific behavior contract;
 operator-level agreement and greedy behavior alone do not establish that result.
 
+The owning GPU regression builds one actual sampler plan without a checkpoint:
+
+```bash
+PYTHONPATH=core/builder:. python -m pytest \
+  families/lfm2/tests/test_lfm25_sampler_stage.py -q -p no:cacheprovider
+```
+
+Set `CMAKE_PREFIX_PATH` to the installed family helper/bridge prefix. Valid
+full-vocabulary weights compare selected IDs and packed seed/offset state with
+an independent Torch CUDA generator on the same device, including ties,
+candidate boundaries, high seed bits, offset carry and explicit-state reuse.
+The all-zero native fallback is checked separately without calling Torch
+multinomial on invalid zero mass. Missing CUDA/TensorRT skips this test and
+leaves the GPU stage unqualified; missing helpers on an available GPU fail.
+
 The separate `model-card-sampling` case runs the original `model.generate` with
 `do_sample=True` and the native public SDK with temperature `0.1`, top-k `50`,
 repetition penalty `1.1`, seed `42`, and the card's `512`-token cap.
