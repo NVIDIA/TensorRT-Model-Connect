@@ -122,6 +122,7 @@ class TrtModuleImpl final : public ITrtModule {
     void bind_alias_group(const std::string& input_name, void* ptr);
     bool alias_group_has_address(const std::string& input_name, void* ptr) const;
     bool bind_external_alias(const std::string& name, void* ptr);
+    bool can_rebind_external_input_async(const BufferEntry& entry) const;
     bool should_allocate_input(const std::string& name, std::size_t nbytes) const;
     void validate_alias_outputs_exist(const std::vector<std::string>& output_names) const;
     void bind_alias_outputs_or_invalidate(const std::vector<std::string>& output_names, void* ptr);

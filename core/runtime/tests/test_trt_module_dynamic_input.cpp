@@ -469,6 +469,87 @@ void compare_matrix(trtmc::TrtModuleImpl& baseline, trtmc::TrtModuleImpl& deferr
           "nontrivial matrix control produces nonzero outputs");
 }
 
+void test_external_input_rebind_submission(nvinfer1::ICudaEngine& engine, cudaStream_t stream,
+                                           bool deferred) {
+    using Peer = trtmc::TrtModuleImplTestPeer;
+    constexpr int rows = 17;
+    constexpr std::size_t elements = rows * 64;
+    constexpr std::size_t bytes = elements * sizeof(float);
+    trtmc::DeviceTensor input_a({rows, 64}, trtmc::DType::kFloat32, stream);
+    trtmc::DeviceTensor input_b({rows, 64}, trtmc::DType::kFloat32, stream);
+    trtmc::DeviceTensor capture_a({rows, 64}, trtmc::DType::kFloat32, stream);
+    trtmc::DeviceTensor capture_b({rows, 64}, trtmc::DType::kFloat32, stream);
+    const auto strategy = deferred ? nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED
+                                   : nvinfer1::ExecutionContextAllocationStrategy::kSTATIC;
+    trtmc::TrtModuleImpl module(&engine, engine.createExecutionContext(strategy), stream, 0,
+                                nullptr, {}, false, deferred);
+    std::vector<float> values_a(elements), values_b(elements);
+    for (std::size_t i = 0; i < elements; ++i) {
+        values_a[i] = static_cast<float>(static_cast<int>(i % 17) - 8) / 16.0F;
+        values_b[i] = static_cast<float>(static_cast<int>(i % 13) - 6) / 8.0F;
+    }
+    const auto expected_a = run_matrix(module, values_a, rows, false, stream);
+    const auto expected_b = run_matrix(module, values_b, rows, false, stream);
+    check(expected_a.size() == elements && expected_b.size() == elements,
+          "both synchronous controls return complete matrix outputs");
+    if (expected_a.size() != elements || expected_b.size() != elements)
+        return;
+    check(expected_a != expected_b, "external rebind inputs produce distinct expected outputs");
+    check(cudaMemcpyAsync(input_a.data(), values_a.data(), bytes, cudaMemcpyHostToDevice, stream) ==
+              cudaSuccess,
+          "upload external input A before blocking the stream");
+    check(cudaMemcpyAsync(input_b.data(), values_b.data(), bytes, cudaMemcpyHostToDevice, stream) ==
+              cudaSuccess,
+          "upload external input B before blocking the stream");
+    module.bind_external("input", input_a.data(), {rows, 64});
+    module.forward_device_async({});
+    module.sync();
+    const auto memory = Peer::memory(module);
+    const auto capacity = Peer::capacity(module);
+    int device = 0;
+    check(cudaGetDevice(&device) == cudaSuccess, "read submission control CUDA device");
+    cudaEvent_t done = nullptr;
+    check(cudaEventCreate(&done) == cudaSuccess, "create external rebind completion marker");
+    {
+        PendingStream pending(stream);
+        module.forward_device_async({});
+        check(cudaMemcpyAsync(capture_a.data(), module.device_ptr("output"), bytes,
+                              cudaMemcpyDeviceToDevice, stream) == cudaSuccess,
+              "queue output A capture before rebinding input");
+        check(cudaEventRecord(done, stream) == cudaSuccess, "record blocked output A capture");
+        auto submitted = std::async(std::launch::async, [&] {
+            if (cudaSetDevice(device) != cudaSuccess)
+                throw std::runtime_error("unable to select submission control device");
+            module.bind_external("input", input_b.data(), {rows, 64});
+            module.forward_device_async({});
+            if (cudaMemcpyAsync(capture_b.data(), module.device_ptr("output"), bytes,
+                                cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+                throw std::runtime_error("unable to queue output B capture");
+        });
+        const bool returned =
+            submitted.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+        check(returned, "external same-shape rebind and enqueue return while stream is blocked");
+        check(cudaEventQuery(done) == cudaErrorNotReady,
+              "output A remains pending when the second submission returns");
+        pending.release();
+        submitted.get();
+        module.sync();
+    }
+    std::vector<float> actual_a(elements), actual_b(elements);
+    check(cudaMemcpy(actual_a.data(), capture_a.data(), bytes, cudaMemcpyDeviceToHost) ==
+              cudaSuccess,
+          "read captured output A");
+    check(cudaMemcpy(actual_b.data(), capture_b.data(), bytes, cudaMemcpyDeviceToHost) ==
+              cudaSuccess,
+          "read captured output B");
+    check(std::memcmp(actual_a.data(), expected_a.data(), bytes) == 0 &&
+              std::memcmp(actual_b.data(), expected_b.data(), bytes) == 0,
+          "queued rebind preserves each launch's original external input");
+    check(Peer::memory(module) == memory && Peer::capacity(module) == capacity,
+          "external same-shape rebind leaves activation storage unchanged");
+    cudaEventDestroy(done);
+}
+
 void test_nonzero_activation_profile(nvinfer1::ICudaEngine& engine, cudaStream_t stream,
                                      int profile, bool graph) {
     using Peer = trtmc::TrtModuleImplTestPeer;
@@ -533,6 +614,8 @@ int main() {
     auto matrix_engine = build_two_matmuls();
     if (!matrix_engine)
         return 1;
+    test_external_input_rebind_submission(*matrix_engine, stream, false);
+    test_external_input_rebind_submission(*matrix_engine, stream, true);
     for (int profile : {0, 1}) {
         test_nonzero_activation_profile(*matrix_engine, stream, profile, false);
         test_nonzero_activation_profile(*matrix_engine, stream, profile, true);

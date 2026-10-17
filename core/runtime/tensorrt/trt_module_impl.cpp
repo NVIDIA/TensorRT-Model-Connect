@@ -229,6 +229,10 @@ void TrtModuleImpl::validate_initial_external_bindings(
 
 void TrtModuleImpl::bind_external(const std::string& name, void* ptr,
                                   const std::vector<int64_t>& shape) {
+    const auto input = buffers_.find(name);
+    if (!shape.empty() && input != buffers_.end() &&
+        runtime_shape_needs_update(input->second, shape))
+        synchronize_activation_use();
     bind_external(name, ptr);
     if (shape.empty())
         return;
@@ -1118,6 +1122,11 @@ void* TrtModuleImpl::device_ptr(const std::string& name) const {
     return it->second.d_ptr;
 }
 
+bool TrtModuleImpl::can_rebind_external_input_async(const BufferEntry& entry) const {
+    return entry.is_input && entry.is_external && entry.shape_valid && !activation_memory_dirty_ &&
+           !activation_shape_inputs_ && !use_cuda_graph_ && !backend_managed_cuda_graph_;
+}
+
 void TrtModuleImpl::bind_external(const std::string& name, void* external_device_ptr) {
     auto it = buffers_.find(name);
     if (it == buffers_.end())
@@ -1131,7 +1140,11 @@ void TrtModuleImpl::bind_external(const std::string& name, void* external_device
         throw std::invalid_argument("External buffer for '" + name + "' is null");
     if (external_device_ptr == entry.d_ptr)
         return;
-    synchronize_activation_use();
+    // A previously enqueued launch retains its external input address. With
+    // admitted shapes and no graph/shape I/O, changing only that address does
+    // not replace activation storage or free the caller's input buffer.
+    if (!can_rebind_external_input_async(entry))
+        synchronize_activation_use();
 
     // Bind the candidate before changing ownership. If TensorRT rejects the
     // address, the module must retain both its previous context binding and its
