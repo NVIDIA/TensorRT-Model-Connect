@@ -540,6 +540,12 @@ namespace {
 
 void compute_text_prompt_frame_embed(const SpeechConfig& cfg, int32_t text_token_id, int32_t hidden,
                                      float* summed_embed) {
+    if (cfg.temporal_embed_half) {
+        const int32_t bos = speech_clamp_token(cfg.codebook_size, cfg.audio_vocab_size);
+        const std::vector<int32_t> audio_tokens(static_cast<std::size_t>(cfg.num_codebooks), bos);
+        compute_half_summed_embed(cfg, hidden, audio_tokens, text_token_id, summed_embed);
+        return;
+    }
     std::fill(summed_embed, summed_embed + hidden, 0.0F);
     const int32_t text_tok = speech_clamp_token(text_token_id, cfg.temporal_text_vocab);
     const auto text_offset = static_cast<std::size_t>(text_tok) * hidden;

@@ -125,6 +125,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (temporal_shape.size() < 2 || temporal_shape[1] <= 0 || depth_shape.size() < 2 ||
         depth_shape[1] <= 0)
         throw std::runtime_error("PersonaPlex engine cache geometry is invalid");
+    // An FP16 temporal transformer (per-layer FP32 promotions keep the FP16
+    // base) consumes Half input embeddings, summed as the reference does.
+    config.temporal_embed_half = temporal.module->tensor_dtype("cache_k_0") == DType::kFloat16;
     auto temporal_state = std::make_unique<PersonaplexKvCache>(
         config.temporal_num_layers, config.mimi_max_frames,
         static_cast<std::int32_t>(temporal_shape[1]), options.stream,

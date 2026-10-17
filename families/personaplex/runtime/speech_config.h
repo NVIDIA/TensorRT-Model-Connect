@@ -34,6 +34,9 @@ struct SpeechConfig {
 
     std::vector<float> temporal_text_embedding;
     int32_t temporal_text_vocab{0};
+    // The temporal transformer runs in FP16: sum the input embeddings as the
+    // reference's Half embed_codes does (see speech_temporal_embed_plan.h).
+    bool temporal_embed_half{false};
     int32_t text_padding_id{3};
 
     std::vector<float> depth_text_embedding;
