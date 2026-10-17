@@ -40,7 +40,7 @@ class FixtureTokenizer:
 
 class PositionOracle:
     get_rope_index = Qwen3VLModel.get_rope_index
-    get_vision_position_ids = staticmethod(Qwen3VLModel.get_vision_position_ids)
+    get_vision_position_ids = Qwen3VLModel.get_vision_position_ids
     config = SimpleNamespace(vision_config=SimpleNamespace(spatial_merge_size=2))
 
 

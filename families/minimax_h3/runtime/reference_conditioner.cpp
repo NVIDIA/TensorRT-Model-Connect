@@ -25,8 +25,11 @@ void require_input(ITrtModule& module, const std::string& name, DType dtype) {
         throw std::runtime_error("MiniMax-H3 reference plan has incompatible native input " + name);
 }
 
-const Tensor& output(const TensorMap& outputs, const std::string& name, DType dtype,
-                     const std::vector<int64_t>& shape) {
+// Copy the lightweight descriptor, not its borrowed payload. This makes the
+// return lifetime unambiguous even to compilers that conservatively associate
+// a returned reference with the temporary name/shape arguments.
+Tensor output(const TensorMap& outputs, const std::string& name, DType dtype,
+              const std::vector<int64_t>& shape) {
     const auto found = outputs.find(name);
     if (found == outputs.end() || !found->second.data || found->second.dtype != dtype ||
         found->second.shape != shape)
@@ -115,7 +118,7 @@ ReferenceImageConditioner::encode(const std::vector<ResizedQwenImage>& images,
             const auto values = vision_->forward(inputs);
             Features owned;
             for (std::size_t branch = 0; branch < kFeatures.size(); ++branch) {
-                const auto& tensor =
+                const auto tensor =
                     output(values, kFeatures[branch], DType::kBFloat16, {patch_rows / 4, kWidth});
                 owned[branch].resize(tensor.numel());
                 std::memcpy(owned[branch].data(), tensor.data, tensor.nbytes());
@@ -169,7 +172,7 @@ ReferenceImageConditioner::encode(const std::vector<ResizedQwenImage>& images,
             inputs.emplace(kFeatures[branch],
                            Tensor{dense[branch].data(), {count, kWidth}, DType::kBFloat16});
         const auto values = language_->forward(inputs);
-        const auto& tensor =
+        const auto tensor =
             output(values, "encoder_hidden_states", DType::kFloat32, {count, kWidth});
         std::vector<float> embeddings(tensor.numel());
         std::memcpy(embeddings.data(), tensor.data, tensor.nbytes());
