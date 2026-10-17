@@ -46,9 +46,10 @@ the C++ runtime and Python debug runner bind fp32 buffers to engine IO.
 Attention masking: the Qwen2.5-VL LM is causal (``is_causal=True`` in HF
 ``modeling_qwen2_5_vl.py``). The engine bakes a lower-triangular causal
 constant ``[max_S, max_S]`` and adds the broadcast padding mask, so each
-query position only attends to non-pad keys with position <= q. The combined
-mask is cast to bf16 just before being fed to IAttention (the -1e9 sentinel
-survives fine in bf16).
+query position only attends to non-pad keys with position <= q. Attention
+scores, this FP32 mask, and the softmax run in FP32: Qwen2.5-VL's q/k biases
+give logits in the thousands, which BF16 cannot resolve for softmax (the
+reference SDPA keeps them in FP32).
 
 RoPE: this builder emits standard 1D rotate-half RoPE. Qwen2.5-VL uses 3D
 mRoPE in HF, but for text-only input (which is all the T2I path ever sees)
@@ -239,12 +240,12 @@ def _make_qwen25vl_mrope_full_tables(
     freqs = position_ids[:, :, None].astype(np.float64) * inv_freq[None, None, :]
     emb = np.concatenate([freqs, freqs], axis=-1)
 
-    section = [int(v) * 2 for v in mrope_section]
-    starts = np.cumsum([0] + section[:-1])
-    parts = [
-        emb[axis, :, start : start + width]
-        for axis, (start, width) in enumerate(zip(starts, section))
-    ]
+    # HF apply_multimodal_rotary_pos_emb splits the full-dim table by
+    # mrope_section * 2 and takes chunk i from axis i % 3, so each rotate-half
+    # half carries its own temporal/height/width bands.
+    sections = [int(v) for v in mrope_section] * 2
+    bounds = np.cumsum([0] + sections)
+    parts = [emb[index % 3, :, bounds[index] : bounds[index + 1]] for index in range(len(sections))]
     full = np.concatenate(parts, axis=-1)
     return np.cos(full).astype(np.float32), np.sin(full).astype(np.float32)
 
@@ -485,8 +486,8 @@ def build_qwen25vl_text_encoder_engine(
     # ---- Combined causal + padding additive mask -> [1, 1, max_S, max_S]. ----
     # HF Qwen2.5-VL LM is causal (modeling_qwen2_5_vl.py: is_causal=True), so
     # each query at position q can only attend to keys k<=q. We sum a constant
-    # lower-triangular -1e9 mask with the broadcast padding mask, then cast to
-    # the compute dtype for IAttention.
+    # lower-triangular -1e9 mask with the broadcast padding mask, kept in FP32
+    # for the FP32 attention core.
     causal_np = np.triu(np.full((max_S, max_S), -1.0e9, dtype=np.float32), k=1).reshape(
         1, 1, max_S, max_S
     )
@@ -498,7 +499,6 @@ def build_qwen25vl_text_encoder_engine(
     attn_mask_fp32 = network.add_elementwise(
         causal_const, pad_reshape.get_output(0), trt.ElementWiseOperation.SUM
     ).get_output(0)
-    attn_mask_4d = network.add_cast(attn_mask_fp32, work_trt_dtype).get_output(0)
 
     # ---- Decoder stack. ----
     # Heavy ops route through graph_ops / graph_blocks. The bf16 precision
@@ -580,9 +580,10 @@ def build_qwen25vl_text_encoder_engine(
                 sequence_length=max_S,
             )
 
-        # GQA scaled dot-product attention. ``add_attention_from_rows`` builds
-        # the [1, H, S, D] reshape, applies 1/sqrt(D) Q-prescale, and runs
-        # native IAttention with our additive mask.
+        # GQA scaled dot-product attention with our additive mask. Qwen2.5-VL's
+        # q/k biases give attention logits in the thousands; the reference's
+        # SDPA keeps them in FP32, while BF16 logits that large lose the
+        # softmax. So the scores and softmax run in FP32 (primitive attention).
         ctx = graph_ops.add_attention_from_rows(
             network,
             q,
@@ -593,7 +594,8 @@ def build_qwen25vl_text_encoder_engine(
             head_dim=cfg.head_dim,
             q_seq=max_S,
             kv_seq=max_S,
-            mask=attn_mask_4d,
+            mask=attn_mask_fp32,
+            fp32_scores=True,
             tag=f"{prefix}.attn",
         )
 

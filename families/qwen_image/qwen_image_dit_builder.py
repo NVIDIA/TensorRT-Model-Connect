@@ -1017,6 +1017,8 @@ def _add_joint_block_graph(
     n_text: int,
     attention_mask=None,
     batch_size: int = 1,
+    cond_img_mod: "np.ndarray | None" = None,
+    n_gen: "int | None" = None,
 ):
     """Build the math of one Qwen-Image MMDiT joint block.
 
@@ -1029,6 +1031,11 @@ def _add_joint_block_graph(
     ``batch_size`` is the static batch (``1``) or sentinel for dynamic
     (``>1``): the dim is treated as dynamic when ``batch_size > 1``, in
     which case slice helpers build a runtime shape tensor from input dim 0.
+
+    ``cond_img_mod`` ([6*hidden], the block's ``img_mod`` output at timestep
+    0) enables diffusers' ``zero_cond_t``: the first ``n_gen`` image tokens
+    use the timestep modulation, the condition-image tokens after them use
+    ``cond_img_mod``.
     """
     H = cfg.num_attention_heads
     D = cfg.attention_head_dim
@@ -1094,13 +1101,58 @@ def _add_joint_block_graph(
     img_shift_msa, img_scale_msa, img_gate_msa, img_shift_mlp, img_scale_mlp, img_gate_mlp = (
         _six_chunks(img_mod_params)
     )
+    cond_chunks = None
+    if cond_img_mod is not None:
+        if n_gen is None or not 0 < n_gen < n_img:
+            raise ValueError("zero_cond_t needs 0 < n_gen < n_img generated-image tokens")
+        cond_params = _add_constant_reduced(
+            network, (1, 6 * dim), np.asarray(cond_img_mod, dtype=np.float32).reshape(1, 6 * dim)
+        )
+        cond_chunks = [_slice_batch_vector(network, cond_params, i * dim, dim, 1) for i in range(6)]
+
+    def _img_segments(x_3d):
+        gen = _slice_batch_sequence(network, x_3d, 0, n_gen, dim, batch_size)
+        cond = _slice_batch_sequence(network, x_3d, n_gen, n_img - n_gen, dim, batch_size)
+        return gen, cond
+
+    def _concat_tokens(gen, cond):
+        joined = network.add_concatenation([gen, cond])
+        joined.axis = 1
+        return joined.get_output(0)
+
+    def _img_modulate(x_3d, chunk):
+        shift, scale = (
+            (img_shift_msa, img_scale_msa) if chunk == 0 else (img_shift_mlp, img_scale_mlp)
+        )
+        if cond_chunks is None:
+            return _add_modulate(network, x_3d, shift, scale, dim)
+        gen, cond = _img_segments(x_3d)
+        cond_shift, cond_scale = cond_chunks[3 * chunk], cond_chunks[3 * chunk + 1]
+        return _concat_tokens(
+            _add_modulate(network, gen, shift, scale, dim),
+            _add_modulate(network, cond, cond_shift, cond_scale, dim),
+        )
+
+    def _img_gate_residual(residual_3d, branch_3d, chunk):
+        gate = img_gate_msa if chunk == 0 else img_gate_mlp
+        if cond_chunks is None:
+            return _add_gate_residual(network, residual_3d, gate, branch_3d, dim)
+        residual_gen, residual_cond = _img_segments(residual_3d)
+        branch_gen, branch_cond = _img_segments(branch_3d)
+        return _concat_tokens(
+            _add_gate_residual(network, residual_gen, gate, branch_gen, dim),
+            _add_gate_residual(
+                network, residual_cond, cond_chunks[3 * chunk + 2], branch_cond, dim
+            ),
+        )
+
     txt_shift_msa, txt_scale_msa, txt_gate_msa, txt_shift_mlp, txt_scale_mlp, txt_gate_mlp = (
         _six_chunks(txt_mod_params)
     )
 
     # ----- norm1 + modulate per stream.
     img_normed = _add_layernorm_no_affine_3d(network, img_3d, dim, cfg.layer_norm_eps)
-    img_modulated = _add_modulate(network, img_normed, img_shift_msa, img_scale_msa, dim)
+    img_modulated = _img_modulate(img_normed, 0)
     txt_normed = _add_layernorm_no_affine_3d(network, txt_3d, dim, cfg.layer_norm_eps)
     txt_modulated = _add_modulate(network, txt_normed, txt_shift_msa, txt_scale_msa, dim)
 
@@ -1177,12 +1229,12 @@ def _add_joint_block_graph(
     txt_attn_out = _out_proj(attn_txt_3d, "attn.to_add_out", n_text)
 
     # ----- gated residual (post-attention).
-    hs_img = _add_gate_residual(network, img_3d, img_gate_msa, img_attn_out, dim)
+    hs_img = _img_gate_residual(img_3d, img_attn_out, 0)
     hs_txt = _add_gate_residual(network, txt_3d, txt_gate_msa, txt_attn_out, dim)
 
     # ----- norm2 + modulate(mod2) + MLP + gated residual.
     img_n2 = _add_layernorm_no_affine_3d(network, hs_img, dim, cfg.layer_norm_eps)
-    img_mod2_out = _add_modulate(network, img_n2, img_shift_mlp, img_scale_mlp, dim)
+    img_mod2_out = _img_modulate(img_n2, 1)
     img_mlp_out = _add_mlp_block(
         network,
         img_mod2_out,
@@ -1193,7 +1245,7 @@ def _add_joint_block_graph(
         n_img,
         batch_size=batch_size,
     )
-    img_out = _add_gate_residual(network, hs_img, img_gate_mlp, img_mlp_out, dim)
+    img_out = _img_gate_residual(hs_img, img_mlp_out, 1)
 
     txt_n2 = _add_layernorm_no_affine_3d(network, hs_txt, dim, cfg.layer_norm_eps)
     txt_mod2_out = _add_modulate(network, txt_n2, txt_shift_mlp, txt_scale_mlp, dim)
@@ -1263,6 +1315,8 @@ class QwenImageDiTConfig:
     max_image_tokens: int = 8192
     max_text_tokens: int = 1024
     guidance_embeds: bool = False  # Qwen-Image-2512: False.
+    # Edit-2511: condition-image tokens are modulated at timestep 0.
+    zero_cond_t: bool = False
 
 
 def _joint_block_cfg_from(cfg: QwenImageDiTConfig) -> JointBlockConfig:
@@ -1354,6 +1408,33 @@ def _add_rms_norm_last_dim_3d(network, x_3d, hidden_size: int, gamma: np.ndarray
         trt.ElementWiseOperation.PROD,
     )
     return scaled.get_output(0)
+
+
+def _silu_np(x: np.ndarray) -> np.ndarray:
+    return x / (1.0 + np.exp(-x))
+
+
+def _zero_timestep_embedding(weights: Mapping[str, np.ndarray], in_dim: int) -> np.ndarray:
+    """``time_text_embed`` at timestep 0, a weight-only constant [hidden].
+
+    The sinusoid of 0 is cos=1, sin=0, and ``flip_sin_to_cos`` puts cos first.
+    """
+    half = in_dim // 2
+    sample = np.concatenate([np.ones(half), np.zeros(in_dim - half)]).astype(np.float32)
+    w1 = np.asarray(weights["time_text_embed.timestep_embedder.linear_1.weight"], np.float32)
+    b1 = np.asarray(weights["time_text_embed.timestep_embedder.linear_1.bias"], np.float32)
+    w2 = np.asarray(weights["time_text_embed.timestep_embedder.linear_2.weight"], np.float32)
+    b2 = np.asarray(weights["time_text_embed.timestep_embedder.linear_2.bias"], np.float32)
+    return w2 @ _silu_np(w1 @ sample + b1) + b2
+
+
+def _zero_timestep_img_mod(
+    weights: Mapping[str, np.ndarray], prefix: str, zero_temb: np.ndarray
+) -> np.ndarray:
+    """A block's ``img_mod`` output [6*hidden] at timestep 0."""
+    w = np.asarray(weights[f"{prefix}img_mod.1.weight"], np.float32)
+    b = np.asarray(weights[f"{prefix}img_mod.1.bias"], np.float32)
+    return w @ _silu_np(zero_temb) + b
 
 
 def _add_time_text_embed(
@@ -1721,6 +1802,9 @@ def build_qwen_image_dit_engine(
 
     # ----- Joint blocks loop.
     jb_cfg = _joint_block_cfg_from(cfg)
+    zero_cond = cfg.zero_cond_t and len(image_token_shapes) > 1
+    n_gen = image_token_shapes[0][0] * image_token_shapes[0][1]
+    zero_temb = _zero_timestep_embedding(weights, cfg.timestep_embed_dim) if zero_cond else None
     cur_img = img_tokens
     cur_txt = txt_tokens
     for i in range(cfg.num_joint_blocks):
@@ -1741,6 +1825,10 @@ def build_qwen_image_dit_engine(
             n_text=n_text,
             attention_mask=attention_mask,
             batch_size=inner_batch_size,
+            cond_img_mod=(
+                _zero_timestep_img_mod(weights, prefix, zero_temb) if zero_cond else None
+            ),
+            n_gen=n_gen if zero_cond else None,
         )
 
     # ----- AdaLayerNormContinuous(elementwise_affine=False) -> proj_out.
@@ -1877,6 +1965,7 @@ def load_qwen_image_dit_weights(
         max_image_tokens=8192,
         max_text_tokens=1024,
         guidance_embeds=bool(cfg_json.get("guidance_embeds", False)),
+        zero_cond_t=bool(cfg_json.get("zero_cond_t", False)),
     )
 
     safetensor_files = sorted(text_dir.glob("*.safetensors"))
