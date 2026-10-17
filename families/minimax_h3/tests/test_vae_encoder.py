@@ -20,6 +20,7 @@ from families.minimax_h3.vae_encoder_builder import (
     checkpoint_keys,
     checkpoint_shapes,
 )
+from families.minimax_h3.tests.vae_encoder_localize import upstream_hook_path
 
 
 TINY = replace(
@@ -28,6 +29,15 @@ TINY = replace(
     latent_channels=2,
     norm_num_groups=2,
 )
+
+
+def test_diagnostic_downsample_hooks_observe_the_same_padding_boundary():
+    assert (
+        upstream_hook_path("encoder.down_blocks.0.downsamplers.0.conv")
+        == "encoder.down_blocks.0.downsamplers.0"
+    )
+    for name in ("encoder.conv_in", "encoder.down_blocks.0.resnets.0.conv1", "encoder.norm_out"):
+        assert upstream_hook_path(name) == name
 
 
 def test_original_encoder_schema_has_exactly_118_fp32_tensors():

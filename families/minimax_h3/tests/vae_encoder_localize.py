@@ -41,9 +41,8 @@ def sha(path):
 
 def compare(actual, expected):
     actual, expected = np.asarray(actual), np.asarray(expected)
-    assert (
-        actual.shape == expected.shape and np.isfinite(actual).all() and np.isfinite(expected).all()
-    )
+    assert actual.shape == expected.shape, (actual.shape, expected.shape)
+    assert np.isfinite(actual).all() and np.isfinite(expected).all(), "nonfinite boundary values"
     error = np.abs(actual - expected)
     mismatches = int(np.count_nonzero(error > ATOL + RTOL * np.abs(expected)))
     return dict(
@@ -54,6 +53,15 @@ def compare(actual, expected):
         compared_elements=error.size,
         passes_original_tolerance=mismatches == 0,
     )
+
+
+def upstream_hook_path(name):
+    # Downsample.forward pads bottom/right BEFORE calling its child conv.
+    # Native _conv receives the parent's unpadded input. The parent's output
+    # equals the child's output, so observing the parent aligns both ends.
+    if ".downsamplers." in name and name.endswith(".conv"):
+        return name[: -len(".conv")]
+    return name
 
 
 def main():
@@ -132,7 +140,7 @@ def main():
 
     modules = dict(original.named_modules())
     hooks = [
-        modules[name].register_forward_hook(capture(name))
+        modules[upstream_hook_path(name)].register_forward_hook(capture(name))
         for name in names
         if not name.startswith("input::")
     ]
@@ -150,20 +158,36 @@ def main():
     assert context is not None and context.set_input_shape("pixels", tuple(pixels.shape))
     assert context.set_tensor_address("pixels", pixels.data_ptr())
     stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
     outputs = {}
     for name in [*("trace::" + name for name in names), "moments"]:
         shape = tuple(context.get_tensor_shape(name))
         outputs[name] = torch.empty(shape, dtype=torch.float32, device="cuda")
         assert context.set_tensor_address(name, outputs[name].data_ptr())
+    stream.wait_stream(torch.cuda.current_stream())
     assert context.execute_async_v3(stream.cuda_stream)
     stream.synchronize()
     boundaries = []
-    for name in names:
-        result = compare(
-            outputs["trace::" + name].cpu().numpy(), expected_boundaries[name].cpu().numpy()
-        )
-        boundaries.append(dict(name=name, **result))
+    with (args.output / "boundaries.jsonl").open("x") as trace:
+        for name in names:
+            actual_value = outputs["trace::" + name].cpu().numpy()
+            expected_value = expected_boundaries[name].cpu().numpy()
+            trace.write(
+                json.dumps(
+                    dict(
+                        name=name,
+                        actual_shape=list(actual_value.shape),
+                        expected_shape=list(expected_value.shape),
+                        actual_finite=bool(np.isfinite(actual_value).all()),
+                        expected_finite=bool(np.isfinite(expected_value).all()),
+                    )
+                )
+                + "\n"
+            )
+            trace.flush()
+            result = compare(actual_value, expected_value)
+            boundaries.append(dict(name=name, **result))
+            trace.write(json.dumps(boundaries[-1], allow_nan=False) + "\n")
+            trace.flush()
     expected_array = expected.cpu().numpy()
     instrumented = outputs["moments"].cpu().numpy()
     np.save(args.output / "instrumented-moments.npy", instrumented, allow_pickle=False)
