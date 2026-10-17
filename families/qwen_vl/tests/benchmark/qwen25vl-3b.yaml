@@ -11,7 +11,7 @@ candidate:
   precision: fp32
   bundle: qwen25vl-3b-vl.bundle
   build:
-    max_sequence_length: 16640
+    max_sequence_length: 384
 
 reference_environment:
   requirements: ../../requirements.txt

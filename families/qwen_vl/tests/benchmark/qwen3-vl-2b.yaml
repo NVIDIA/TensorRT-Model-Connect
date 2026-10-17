@@ -11,7 +11,7 @@ candidate:
   precision: bf16
   bundle: qwen3-vl-2b.bundle
   build:
-    max_sequence_length: 16640
+    max_sequence_length: 256
 
 reference_environment:
   requirements: ../../requirements.txt
