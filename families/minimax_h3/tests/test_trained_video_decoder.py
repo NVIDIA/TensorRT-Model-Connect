@@ -98,6 +98,12 @@ def _large_inventory(root):
 def test_trained_video_decoder_full_portrait_matches_native_memory_presets(
     tmp_path, record_property
 ):
+    cached_reference = os.environ.get("TRTMC_MINIMAX_H3_VIDEO_REFERENCE_CACHE")
+    if cached_reference:
+        from families.minimax_h3.tests.vae_cached_video_case import run_cached_case
+
+        return run_cached_case(tmp_path, record_property, Path(cached_reference))
+
     import torch
     from diffusers import AutoencoderKLMiniMaxH3
     from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoRotaryPosEmbed

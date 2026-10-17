@@ -126,6 +126,12 @@ The owning full trained-video gate is
 `tests/test_trained_video_decoder.py`. It compares every pixel of all 124
 FP32 output frames against the pinned original reference at unchanged
 `rtol=1e-3`, `atol=1e-5`, and checks cold/warm behavior for both presets.
+An explicit `TRTMC_MINIMAX_H3_VIDEO_REFERENCE_CACHE` may reuse the exact frozen
+full upstream result: case metadata, full input/reference bytes and storage
+bound inputs must match their SHA-256 identities. Both new candidate bundles
+are built before inference, and all four complete native videos are retained.
+This changes execution/storage scheduling, not any frame, comparison dtype or
+acceptance threshold. Without that opt-in, the test generates its reference.
 Prefix diagnostics, synthetic trajectory tests and guarded factory fixtures
 cannot replace that gate or qualify full reference-conditioned generation.
 The complete trained reference encoder, Qwen conditioning, DiT trajectory,
