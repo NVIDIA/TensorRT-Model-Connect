@@ -104,8 +104,8 @@ def _load(
                     tokens = generator.step(encoded[:, :, index : index + 1])
                     if tokens is None:
                         continue
+                    # The auxiliary codec is for official warmup, not a second copy of returned audio.
                     decoded_chunks.append(mimi.decode(tokens[:, 1:9]))
-                    other_mimi.decode(tokens[:, 1:9])
                     generated_frames += 1
                     if generated_frames >= max_frames:
                         return summary()
