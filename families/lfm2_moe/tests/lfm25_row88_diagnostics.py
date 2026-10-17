@@ -261,6 +261,131 @@ class StateRows:
         return result
 
 
+class Layer0Prefix:
+    """Observe existing row1 values; the newest cache tap is never recomputed."""
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.handles = []
+        self.values = {}
+        self.descriptors = {}
+        self.sources = {}
+        self.counts = {}
+        self.error = None
+        self.hooks_removed = False
+
+    def attach(self, model):
+        import inspect
+
+        try:
+            layer = model.model.layers[0]
+            modules = {
+                "embedding": (model.model.embed_tokens, [1, 1, 2048]),
+                "operator_norm": (layer.operator_norm, [1, 1, 2048]),
+                "in_proj": (layer.conv.in_proj, [1, 1, 6144]),
+            }
+            methods = {name: module.forward for name, (module, _) in modules.items()}
+            methods.update(conv=layer.conv.forward, slow_conv=layer.conv.slow_forward)
+            for name, method in methods.items():
+                source = inspect.getsource(method)
+                if len(source.encode("utf-8")) > 8192:
+                    raise ValueError("prefix callable source exceeds observation bound")
+                code = method.__func__.__code__
+                self.sources[name] = {
+                    "module": method.__module__,
+                    "qualname": method.__qualname__,
+                    "filename": Path(code.co_filename).name,
+                    "first_line": code.co_firstlineno,
+                    "source_text": source,
+                }
+            for name, (module, shape) in modules.items():
+                self.handles.append(module.register_forward_hook(self._output(name, shape)))
+            self.handles.append(layer.conv.register_forward_hook(self._conv, with_kwargs=True))
+        except Exception as error:
+            self.error = type(error).__name__
+
+    def _retain(self, name, tensor, shape):
+        if list(tensor.shape) != shape or name in self.values:
+            raise ValueError("prefix tensor shape or call count differs")
+        self.values[name] = _bits(tensor)
+        self.descriptors[name] = _descriptor(tensor)
+        self.counts[name] = self.counts.get(name, 0) + 1
+
+    def _output(self, name, shape):
+        def observe(module, args, output):
+            if self.owner.calls == 1 and self.error is None:
+                try:
+                    self._retain(name, output, shape)
+                except Exception as error:
+                    self.error = type(error).__name__
+            return None
+
+        return observe
+
+    def _conv(self, module, args, kwargs, output):
+        if self.owner.calls == 1 and self.error is None:
+            try:
+                cache = kwargs["past_key_values"]
+                tensor = cache.conv_cache[0]
+                if list(tensor.shape) != [1, 2048, 3]:
+                    raise ValueError("prefix convolution cache shape differs")
+                self._retain("newest_conv_tap", tensor[..., -1:], [1, 2048, 1])
+            except Exception as error:
+                self.error = type(error).__name__
+        return None
+
+    def finish(self):
+        import numpy as np
+
+        self.hooks_removed = True
+        for handle in self.handles:
+            try:
+                handle.remove()
+            except Exception as error:
+                self.hooks_removed = False
+                self.error = type(error).__name__
+        state = self.owner.state
+        expected = {"embedding", "operator_norm", "in_proj", "newest_conv_tap"}
+        history = (
+            state is not None
+            and len(state.calls) > 1
+            and state.calls[1]["input_ids"] == [[state.target["reference_prefix"][0]]]
+            and state.calls[1]["cache_position"] == [16]
+            and state.calls[1]["cache_length_before"] == 16
+        )
+        endpoint = (
+            state is not None
+            and len(state.rows) > 1
+            and state.conv_taps >= 4
+            and "newest_conv_tap" in self.values
+            and np.array_equal(self.values["newest_conv_tap"][0, :, 0], state.conv_values[0, :, 3])
+        )
+        complete = set(self.values) == expected and all(x == 1 for x in self.counts.values())
+        return {
+            "status": "capture_error"
+            if self.error
+            else "captured"
+            if complete and history and endpoint
+            else "unavailable",
+            "row": 1,
+            "layer": 0,
+            "input_ids": state.calls[1]["input_ids"] if history else None,
+            "cache_position": [16] if history else None,
+            "history_matches": bool(history),
+            "endpoint_matches_root_state": bool(endpoint),
+            "error_type": self.error,
+            "hook_removed": self.hooks_removed,
+            "calls": self.counts,
+            "descriptors": self.descriptors,
+            "sources": self.sources,
+            "tensors": self.values,
+            "semantic_dtype": "bfloat16",
+            "storage_dtype": "uint16",
+            "scope": "Passive outputs from the existing original generation. Newest cache tap is copied after layer0 convolution, not recomputed. External full IDs/raw and retained endpoint joins are required before cross-run interpretation.",
+            "source_scope": "Bound callable locations and inspected source text; no replacement or claim about lower-level kernels.",
+        }
+
+
 class Row88Capture:
     """A passive root-forward hook; no generation argument, output or RNG change."""
 
@@ -275,6 +400,7 @@ class Row88Capture:
         self.state_handle = None
         self.state_error = None
         self.state_hook_removed = False
+        self.prefix = Layer0Prefix(self)
 
     def attach(self, model):
         try:
@@ -286,6 +412,7 @@ class Row88Capture:
             self.state_handle = model.register_forward_pre_hook(self._before, with_kwargs=True)
         except Exception as error:
             self.state_error = type(error).__name__
+        self.prefix.attach(model)
 
     def _before(self, module, args, kwargs):
         if self.state is not None:
@@ -330,6 +457,10 @@ class Row88Capture:
             prompt_ids=self.prompt_ids,
             scope="Root forward logits before generation processors; hook returns None.",
         )
+        try:
+            prefix_report = self.prefix.finish()
+        except Exception as error:
+            prefix_report = {"status": "capture_error", "error_type": type(error).__name__}
         record_evidence("reference_row88", self.report)
         try:
             state_report = (
@@ -355,6 +486,10 @@ class Row88Capture:
                 )
             except Exception:
                 pass  # Do not replace the original generation or semantic verdict.
+        try:
+            record_evidence("reference_layer0_row1", prefix_report)
+        except Exception:
+            pass  # Prefix observation cannot replace the original verdict either.
 
 
 def capture_for(manifest, case):

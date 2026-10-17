@@ -52,7 +52,11 @@ def test_passive_hook_records_only_row88_and_never_replaces_outputs(monkeypatch)
     assert probe.report["status"] == "captured"
     assert probe.report["dtype"] == "torch.bfloat16"
     assert probe.report["logits"].tolist() == [88.0] * 7
-    assert [name for name, _ in observed] == ["reference_row88", "reference_state_rows"]
+    assert [name for name, _ in observed] == [
+        "reference_row88",
+        "reference_state_rows",
+        "reference_layer0_row1",
+    ]
     assert observed[1][1]["status"] == "unavailable"
     assert not model._forward_pre_hooks
 
@@ -706,3 +710,225 @@ def test_state_payloads_fit_existing_serializer_bounds_without_float_widening(tm
         2 * (kv_with_anomaly + conv_with_anomaly) + 18 * 2048 * 3 * 2 + 128000 * 4 + 10 * 128
     )
     assert max_added == 19535104 and max_added < 20 * 1024 * 1024
+
+
+def prefix_modules(torch):
+    """Small callable fixture; no checkpoint or alternate reference arithmetic."""
+
+    class Embedding(torch.nn.Module):
+        def forward(self, value):
+            return value
+
+    class Norm(torch.nn.Module):
+        def forward(self, value):
+            return value.clone()
+
+    class Projection(torch.nn.Module):
+        def forward(self, value):
+            return torch.cat((value, value, value), dim=-1)
+
+    class Conv(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.in_proj = Projection()
+            self.calls = 0
+
+        def slow_forward(self, value, past_key_values):
+            projected = self.in_proj(value)
+            # The diagnostic must read this existing state, not derive it from
+            # the projection (the fixture deliberately stores a distinct value).
+            past_key_values.conv_cache[0][..., -1] = value[:, 0, :]
+            return projected[..., :2048]
+
+        def forward(self, value, past_key_values):
+            self.calls += 1
+            return self.slow_forward(value, past_key_values)
+
+    layer = torch.nn.Module()
+    layer.operator_norm, layer.conv = Norm(), Conv()
+    inner = torch.nn.Module()
+    inner.embed_tokens, inner.layers = Embedding(), torch.nn.ModuleList([layer])
+    model = torch.nn.Module()
+    model.model = inner
+    return model
+
+
+def test_layer0_prefix_observes_existing_values_once_without_changing_forward():
+    torch = pytest.importorskip("torch")
+    model = prefix_modules(torch)
+    layer = model.model.layers[0]
+    cache = SimpleNamespace(conv_cache=[torch.zeros((1, 2048, 3), dtype=torch.bfloat16)])
+    value = torch.arange(2048, dtype=torch.float32).reshape(1, 1, 2048).to(torch.bfloat16)
+    value[0, 0, 0] = -0.0
+
+    def forward():
+        embedded = model.model.embed_tokens(value)
+        normalized = layer.operator_norm(embedded)
+        return layer.conv(normalized, past_key_values=cache)
+
+    expected = forward().clone()
+    expected_cache = cache.conv_cache[0].clone()
+    state = SimpleNamespace(
+        calls=[
+            {},
+            {
+                "input_ids": [[target()["reference_prefix"][0]]],
+                "cache_position": [16],
+                "cache_length_before": 16,
+            },
+        ],
+        target=target(),
+        rows=[{}, {}],
+        conv_taps=4,
+        conv_values=np.zeros((18, 2048, 4), dtype=np.uint16),
+    )
+    owner = SimpleNamespace(calls=0, state=state)
+    prefix = diagnostic.Layer0Prefix(owner)
+    prefix.attach(model)
+    rng = torch.get_rng_state().clone()
+    for row in (0, 1, 2):
+        owner.calls = row
+        actual = forward()
+        assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+        assert torch.equal(cache.conv_cache[0].view(torch.int16), expected_cache.view(torch.int16))
+    assert layer.conv.calls == 4 and torch.equal(rng, torch.get_rng_state())
+    state.conv_values[0, :, 3] = diagnostic._bits(cache.conv_cache[0])[0, :, -1]
+    report = prefix.finish()
+    assert report["status"] == "captured" and report["endpoint_matches_root_state"]
+    assert report["input_ids"] == [[124901]]
+    assert report["calls"] == dict.fromkeys(
+        ["embedding", "operator_norm", "in_proj", "newest_conv_tap"], 1
+    )
+    assert report["tensors"]["embedding"][0, 0, 0] == 0x8000
+    assert all(not array.flags.writeable for array in report["tensors"].values())
+    before = report["tensors"]["newest_conv_tap"].copy()
+    cache.conv_cache[0].fill_(1)
+    np.testing.assert_array_equal(report["tensors"]["newest_conv_tap"], before)
+    assert all(not module._forward_hooks for module in model.modules())
+    assert set(report["sources"]) == {"embedding", "operator_norm", "in_proj", "conv", "slow_conv"}
+    assert all(
+        record["source_text"] and record["first_line"] > 0 for record in report["sources"].values()
+    )
+
+
+@pytest.mark.parametrize("failure", ["dtype", "shape", "duplicate", "history", "endpoint"])
+def test_layer0_prefix_errors_are_separate_from_original_outputs(failure):
+    torch = pytest.importorskip("torch")
+    state = SimpleNamespace(
+        calls=[{}, {"input_ids": [[124901]], "cache_position": [16], "cache_length_before": 16}],
+        target=target(),
+        rows=[{}, {}],
+        conv_taps=4,
+        conv_values=np.zeros((18, 2048, 4), dtype=np.uint16),
+    )
+    owner = SimpleNamespace(calls=1, state=state)
+    prefix = diagnostic.Layer0Prefix(owner)
+    for name, shape in (
+        ("embedding", [1, 1, 2048]),
+        ("operator_norm", [1, 1, 2048]),
+        ("in_proj", [1, 1, 6144]),
+    ):
+        value = torch.zeros(shape, dtype=torch.bfloat16)
+        if name == "in_proj" and failure == "dtype":
+            value = value.float()
+        if name == "in_proj" and failure == "shape":
+            value = value[..., :1]
+        hook = prefix._output(name, shape)
+        assert hook(None, (), value) is None
+        if name == "in_proj" and failure == "duplicate":
+            assert hook(None, (), value) is None
+    cache = SimpleNamespace(conv_cache=[torch.zeros((1, 2048, 3), dtype=torch.bfloat16)])
+    if failure == "endpoint":
+        cache.conv_cache[0][0, 0, -1] = -0.0
+    sentinel = object()
+    assert prefix._conv(None, (), {"past_key_values": cache}, sentinel) is None
+    if failure == "history":
+        state.calls[1]["input_ids"] = [[1]]
+    report = prefix.finish()
+    assert report["status"] in {"capture_error", "unavailable"}
+    if failure == "endpoint":
+        assert not report["endpoint_matches_root_state"]
+        assert report["tensors"]["newest_conv_tap"][0, 0, 0] == 0x8000
+
+
+def test_prefix_recording_failure_does_not_replace_original_failure(monkeypatch):
+    torch = pytest.importorskip("torch")
+    model = prefix_modules(torch)
+    probe = diagnostic.Row88Capture()
+    probe.attach(model)
+    records = []
+
+    def record(name, value):
+        if name == "reference_layer0_row1":
+            raise OSError("diagnostic export failed")
+        records.append(name)
+
+    monkeypatch.setattr(diagnostic, "record_evidence", record)
+    with pytest.raises(AssertionError, match="unchanged original failure"):
+        try:
+            raise AssertionError("unchanged original failure")
+        finally:
+            probe.finish(target()["prompt_ids"])
+    assert records == ["reference_row88", "reference_state_rows"]
+    assert all(
+        not module._forward_hooks and not module._forward_pre_hooks for module in model.modules()
+    )
+
+
+def test_prefix_arrays_use_bounded_lossless_trusted_payloads(tmp_path):
+    from tools.e2e_evidence import Evidence
+
+    arrays = {
+        name: np.zeros(shape, np.uint16)
+        for name, shape in (
+            ("embedding", (1, 1, 2048)),
+            ("operator_norm", (1, 1, 2048)),
+            ("in_proj", (1, 1, 6144)),
+            ("newest_conv_tap", (1, 2048, 1)),
+        )
+    }
+    arrays["newest_conv_tap"][0, 0, 0] = 0x8000
+    recorder = Evidence(tmp_path, family="lfm2_moe", case="prefix", source_revision="fixture")
+    recorder.record("reference_layer0_row1", {"tensors": arrays})
+    assert len(recorder.data["artifacts"]) == 4
+    added = sum(item["size_bytes"] for item in recorder.data["artifacts"])
+    assert added == 24576 + 4 * 128
+    for name, value in arrays.items():
+        descriptor = recorder.data["reference_layer0_row1"]["tensors"][name]
+        assert descriptor["dtype"] == "uint16"
+        np.testing.assert_array_equal(
+            np.load(tmp_path / descriptor["artifact"], allow_pickle=False), value
+        )
+    assert 19535104 + added == 19560192 < 20 * 1024 * 1024
+    # This bounds these arrays only; actual whole-report export is still required.
+
+
+def test_prefix_hooks_accept_actual_original_meta_modules_without_forward():
+    torch = pytest.importorskip("torch")
+    original = pytest.importorskip("transformers.models.lfm2_moe.modeling_lfm2_moe")
+    rng = torch.get_rng_state().clone()
+    with torch.device("meta"):
+        config = original.Lfm2MoeConfig(hidden_size=2048, conv_L_cache=3, conv_bias=False)
+        layer = SimpleNamespace(
+            operator_norm=original.Lfm2MoeRMSNorm(2048, eps=config.norm_eps),
+            conv=original.Lfm2MoeShortConv(config, layer_idx=0),
+        )
+        model = SimpleNamespace(
+            model=SimpleNamespace(embed_tokens=torch.nn.Embedding(1, 2048), layers=[layer])
+        )
+    prefix = diagnostic.Layer0Prefix(SimpleNamespace(calls=0, state=None))
+    prefix.attach(model)
+    assert prefix.error is None and len(prefix.handles) == 4
+    assert prefix.sources["operator_norm"]["filename"] == "modeling_lfm2_moe.py"
+    assert not prefix.values and torch.equal(rng, torch.get_rng_state())
+    report = prefix.finish()
+    assert report["status"] == "unavailable" and report["hook_removed"]
+    assert all(
+        not module._forward_hooks
+        for module in (
+            model.model.embed_tokens,
+            layer.operator_norm,
+            layer.conv.in_proj,
+            layer.conv,
+        )
+    )
