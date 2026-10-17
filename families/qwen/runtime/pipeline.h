@@ -13,6 +13,7 @@
 
 #include "families/qwen/runtime/inference_state.h"
 #include "families/qwen/runtime/sampler.h"
+#include "families/qwen/runtime/task_config.h"
 #include "families/qwen/runtime/tokenizer.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/internal/stream.h"
@@ -45,8 +46,7 @@ struct QwenTextGenConfig {
     int32_t num_layers{0};
 };
 
-class QwenTextGenerationPipeline final : public ITextGeneration,
-                                         public internal::IModel,
+class QwenTextGenerationPipeline final : public internal::IModel,
                                          public internal::ITextContinuation,
                                          public internal::IStreamingTextContinuation {
   public:
@@ -56,9 +56,8 @@ class QwenTextGenerationPipeline final : public ITextGeneration,
                                std::unique_ptr<ITrtModule> prefill,
                                std::shared_ptr<void> distributed_owner = nullptr);
 
-    // Public API: takes raw text, returns typed result.
-    TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
-    int32_t default_max_new_tokens() const override { return 128; }
+    const char* task() const noexcept override { return ITextContinuation::kTask.data(); }
+    TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {});
     std::vector<internal::TaskInstance> task_bindings() override;
     TextResult run(const internal::TextContinuationRequest&, internal::ConfigView) override;
     std::unique_ptr<internal::ITextStream> start(const internal::TextContinuationRequest&,
