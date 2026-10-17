@@ -50,7 +50,9 @@ if(TRTMC_BUILD_TESTS)
     add_executable(lfm2_moe_logits_probe
       ${PROJECT_SOURCE_DIR}/families/lfm2_moe/tests/cpp/lfm25_logits_probe.cpp)
     target_include_directories(lfm2_moe_logits_probe PRIVATE
-      ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include ${TRTMC_CUDA_INCLUDE_DIR})
+      ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core
+      ${PROJECT_SOURCE_DIR}/core/runtime/include ${TRTMC_CUDA_INCLUDE_DIR}
+      ${TRTMC_TRT_INCLUDE_DIR})
     target_link_libraries(lfm2_moe_logits_probe PRIVATE
       trtmc_model_lfm2_moe trtmc_core trtmc_backend_trt nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})
   endif()
