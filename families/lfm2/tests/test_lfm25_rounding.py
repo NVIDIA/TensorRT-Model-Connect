@@ -9,6 +9,7 @@ checkpoint weights, and retain exact equality as the rounding oracle.
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import numpy as np
@@ -25,7 +26,12 @@ def gpu():
         pytest.skip("LFM2 BF16 rounding regression requires BF16 CUDA support")
     from families.lfm2 import model
 
-    return torch, trt, model
+    # CI supplies the native build when no installed SDK prefix was selected.
+    prefix = os.environ.get("CMAKE_PREFIX_PATH") or os.environ.get("TRTMC_NATIVE_BUILD_DIR")
+    with pytest.MonkeyPatch.context() as environment:
+        if prefix:
+            environment.setenv("CMAKE_PREFIX_PATH", prefix)
+        yield torch, trt, model
 
 
 class TinyEngine:

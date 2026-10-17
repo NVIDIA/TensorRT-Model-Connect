@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run the real sampler plan against independent Torch CUDA draws and state."""
 
+import os
 from types import SimpleNamespace
 import struct
 
@@ -24,13 +25,18 @@ def stage():
         pytest.skip("LFM2 sampler-stage regression requires CUDA")
     from families.lfm2 import model
 
-    bridge, library = model._sampler_libraries()
-    extension = model._register_sampler(bridge, library)
-    plan = model.build_lfm2_sampler_engine(bridge)
-    engine = TinyEngine.from_plan(torch, trt, plan)
-    return SimpleNamespace(
-        torch=torch, engine=engine, extension=extension, stream=torch.cuda.Stream()
-    )
+    # This fixture owns its prefix independently of the rounding-test fixture.
+    prefix = os.environ.get("CMAKE_PREFIX_PATH") or os.environ.get("TRTMC_NATIVE_BUILD_DIR")
+    with pytest.MonkeyPatch.context() as environment:
+        if prefix:
+            environment.setenv("CMAKE_PREFIX_PATH", prefix)
+        bridge, library = model._sampler_libraries()
+        extension = model._register_sampler(bridge, library)
+        plan = model.build_lfm2_sampler_engine(bridge)
+        engine = TinyEngine.from_plan(torch, trt, plan)
+        yield SimpleNamespace(
+            torch=torch, engine=engine, extension=extension, stream=torch.cuda.Stream()
+        )
 
 
 def _generator(torch, seed, offset):
