@@ -33,6 +33,7 @@ def export_tokenizer(model_dir: Path, output_dir: Path) -> None:
         padding_side=tokenizer.padding_side,
         truncation_side=tokenizer.truncation_side,
         clean_up_tokenization_spaces=tokenizer.clean_up_tokenization_spaces,
+        chat_template=tokenizer.chat_template,
         **tokenizer.special_tokens_map,
     )
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -40,6 +41,8 @@ def export_tokenizer(model_dir: Path, output_dir: Path) -> None:
     restored = AutoTokenizer.from_pretrained(output_dir, use_fast=True, local_files_only=True)
     if restored.get_vocab() != vocabulary:
         raise RuntimeError("exported tokenizer changed the vocabulary")
+    if restored.chat_template != tokenizer.chat_template:
+        raise RuntimeError("exported tokenizer changed the chat template")
     for probe in identities:
         if restored.encode(probe["text"], add_special_tokens=probe["add_special_tokens"]) != probe["token_ids"]:
             raise RuntimeError("exported tokenizer changed token IDs or framing")
