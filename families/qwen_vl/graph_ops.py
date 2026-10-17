@@ -888,9 +888,26 @@ def add_dynamic_windowed_self_attention_with_rope(
     if window_mask.dtype != windowed_qkv[0].dtype:
         window_mask = network.add_cast(
             window_mask, windowed_qkv[0].dtype).get_output(0)
-    context = add_attention_core(
-        network, *windowed_qkv, mask=window_mask,
-        scale=1.0 / np.sqrt(max(head_dim, 1)))
+    if windowed_qkv[0].dtype == trt.float32:
+        # Keep the window equation composable with the full-attention query loops.
+        scale = add_constant(
+            network, (1, 1, 1, 1), np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32))
+        query = network.add_elementwise(
+            windowed_qkv[0], scale, trt.ElementWiseOperation.PROD).get_output(0)
+        scores = network.add_matrix_multiply(
+            query, trt.MatrixOperation.NONE,
+            windowed_qkv[1], trt.MatrixOperation.TRANSPOSE).get_output(0)
+        scores = network.add_elementwise(
+            scores, window_mask, trt.ElementWiseOperation.SUM).get_output(0)
+        probabilities = network.add_softmax(scores)
+        probabilities.axes = 1 << 3
+        context = network.add_matrix_multiply(
+            probabilities.get_output(0), trt.MatrixOperation.NONE,
+            windowed_qkv[2], trt.MatrixOperation.NONE).get_output(0)
+    else:
+        context = add_attention_core(
+            network, *windowed_qkv, mask=window_mask,
+            scale=1.0 / np.sqrt(max(head_dim, 1)))
     flattened = network.add_shuffle(context)
     flattened.first_transpose = trt.Permutation([0, 2, 1, 3])
     flattened.reshape_dims = (-1, hidden_size)
