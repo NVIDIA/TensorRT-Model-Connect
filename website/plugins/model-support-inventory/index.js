@@ -5,6 +5,21 @@
 
 const fs = require('fs');
 const path = require('path');
+const {execFileSync} = require('child_process');
+
+const RECIPE_BASE = '/models-recipes/model-recipes';
+
+function collectFamilyDetails(repoRoot) {
+  const output = execFileSync(process.env.PYTHON || 'python3', [
+    path.resolve(__dirname, '../../scripts/collect-family-details.py'),
+    '--repo-root', repoRoot,
+  ], {encoding: 'utf8', maxBuffer: 64 * 1024 * 1024});
+  const details = JSON.parse(output);
+  if (details.schemaVersion !== 1 || !details.families) {
+    throw new Error('Unsupported family configuration inventory');
+  }
+  return details;
+}
 
 const TASKS = {
   audio_generation: ['Text to speech', 'Audio', 'text-to-speech', 'generate-audio'],
@@ -250,12 +265,12 @@ function manifestFiles(family) {
     .sort();
 }
 
-function profileFromManifest(repoRoot, family, filePath) {
+function profileFromManifest(repoRoot, family, filePath, sourceBaseUrl) {
   const manifest = readJson(filePath);
   if (manifest.runtime_strategy !== undefined || manifest.task_strategy !== undefined) {
     throw new Error(`${filePath} uses a removed strategy field`);
   }
-  if (!manifest.name || !manifest.bundle
+  if (typeof manifest.name !== 'string' || !manifest.name || !manifest.bundle
       || manifest.family !== family.name || !manifest.task) {
     throw new Error(`${filePath} must declare name, bundle, exact family, and task`);
   }
@@ -283,8 +298,16 @@ function profileFromManifest(repoRoot, family, filePath) {
   const parallelMode = contextParallelSize > 1
     ? 'context_parallel'
     : tensorParallelSize > 1 ? 'tensor_parallel' : 'single_device';
+  const familySlug = family.name.replaceAll('_', '-');
+  const slug = encodeURIComponent(manifest.name);
+  const sourcePath = path.relative(repoRoot, filePath).replaceAll('\\', '/');
   return {
     profile: manifest.name,
+    slug,
+    url: `${RECIPE_BASE}/checkpoints/${familySlug}/${slug}`,
+    familyUrl: `${RECIPE_BASE}/families/${familySlug}`,
+    sourceUrl: `${sourceBaseUrl}/${sourcePath}`,
+    manifest,
     hfId: manifest.hf_id || 'prepared local checkpoint',
     revision: manifest.hf_id ? manifest.hf_revision || 'not pinned' : 'not applicable',
     bundle: manifest.bundle,
@@ -301,7 +324,7 @@ function profileFromManifest(repoRoot, family, filePath) {
       ? manifest.testcases.map((testcase) => testcase.name).filter(Boolean)
       : [],
     fp32Layers: Array.isArray(manifest.fp32_layers) ? manifest.fp32_layers : [],
-    sourcePath: path.relative(repoRoot, filePath).replaceAll('\\', '/'),
+    sourcePath,
   };
 }
 
@@ -331,13 +354,14 @@ function taskRecipe(taskName, profiles) {
   };
 }
 
-function collectModelSupportInventory(repoRoot) {
+function collectModelSupportInventory(repoRoot, {familyDetails = null, sourceRevision = 'main'} = {}) {
+  const sourceBaseUrl = `https://github.com/NVIDIA/TensorRT-Model-Connect/blob/${sourceRevision}`;
   const families = familyDirectories(repoRoot);
   const profiles = [];
   for (const family of families) {
     requireFamilyShape(family);
     for (const filePath of manifestFiles(family)) {
-      profiles.push(profileFromManifest(repoRoot, family, filePath));
+      profiles.push(profileFromManifest(repoRoot, family, filePath, sourceBaseUrl));
     }
   }
   profiles.sort((left, right) =>
@@ -347,9 +371,20 @@ function collectModelSupportInventory(repoRoot) {
 
   const familyRecipes = families.map((family) => {
     const owned = profiles.filter((profile) => profile.family === family.name);
+    if (new Set(owned.map((profile) => profile.slug)).size !== owned.length) {
+      throw new Error(`${family.name} has duplicate recipe names and checkpoint routes`);
+    }
+    if (familyDetails && !Object.hasOwn(familyDetails.families, family.name)) {
+      throw new Error(`${family.name} is missing its configuration audit`);
+    }
     return {
       family: family.name,
       slug: family.name.replaceAll('_', '-'),
+      url: `${RECIPE_BASE}/families/${family.name.replaceAll('_', '-')}`,
+      sourceUrl: `${sourceBaseUrl}/families/${family.name}`,
+      details: familyDetails?.families[family.name] || null,
+      declaredCliCommands: (familyDetails?.families[family.name]?.cli?.commands || [])
+        .filter((command) => command.executor === 'native').map((command) => command.name),
       profiles: owned,
       taskSlugs: [...new Set(owned.flatMap((profile) => profile.taskSlugs))].sort(),
       cliCommands: [...new Set(owned.flatMap((profile) => profile.cliCommands))].sort(),
@@ -367,6 +402,10 @@ function collectModelSupportInventory(repoRoot) {
     .sort((left, right) => left.label.localeCompare(right.label));
 
   return {
+    sourceRevision,
+    sourceBaseUrl,
+    configurationSummary: familyDetails?.summary || null,
+    sharedBuildCommand: familyDetails?.sharedBuildCommand || null,
     familyCount: families.length,
     familyNames: families.map((family) => family.name),
     manifestCount: profiles.length,
@@ -380,13 +419,24 @@ function modelSupportInventoryPlugin(context) {
   return {
     name: 'model-support-inventory',
     loadContent() {
-      return collectModelSupportInventory(path.resolve(context.siteDir, '..'));
+      const repoRoot = path.resolve(context.siteDir, '..');
+      const sourceRevision = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot, encoding: 'utf8',
+      }).trim();
+      return collectModelSupportInventory(repoRoot, {
+        sourceRevision,
+        familyDetails: collectFamilyDetails(repoRoot),
+      });
     },
-    contentLoaded({content, actions}) {
-      actions.setGlobalData(content);
+    async contentLoaded({content, actions}) {
+      actions.setGlobalData({
+        ...content,
+        familyRecipes: content.familyRecipes.map(({details, ...family}) => family),
+      });
       const routeBase = context.baseUrl.replace(/\/$/, '');
       const taskPage = path.join(context.siteDir, 'src/components/ModelRecipes/TaskPage.js');
       const familyPage = path.join(context.siteDir, 'src/components/ModelRecipes/FamilyPage.js');
+      const checkpointPage = path.join(context.siteDir, 'src/components/ModelRecipes/CheckpointPage.js');
       for (const task of content.taskRecipes) {
         actions.addRoute({
           path: `${routeBase}/models-recipes/model-recipes/tasks/${task.slug}`,
@@ -396,12 +446,25 @@ function modelSupportInventoryPlugin(context) {
         });
       }
       for (const family of content.familyRecipes) {
+        const modules = family.details ? {
+          details: await actions.createData(`family-${family.slug}.json`, JSON.stringify(family.details)),
+        } : {};
         actions.addRoute({
           path: `${routeBase}/models-recipes/model-recipes/families/${family.slug}`,
           component: familyPage,
           exact: true,
           props: {familySlug: family.slug},
+          modules,
         });
+        for (const profile of family.profiles) {
+          actions.addRoute({
+            path: `${routeBase}${profile.url}`,
+            component: checkpointPage,
+            exact: true,
+            props: {familySlug: family.slug, profileSlug: profile.slug},
+            modules,
+          });
+        }
       }
     },
   };
@@ -409,3 +472,4 @@ function modelSupportInventoryPlugin(context) {
 
 module.exports = modelSupportInventoryPlugin;
 module.exports.collectModelSupportInventory = collectModelSupportInventory;
+module.exports.collectFamilyDetails = collectFamilyDetails;
