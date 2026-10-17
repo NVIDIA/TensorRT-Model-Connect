@@ -13,6 +13,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   reference_denoiser.cpp
   reference_image.cpp
   reference_layout.cpp
+  reference_pipeline.cpp
   reference_visual_encoder.cpp
   visual_reference.cpp
   video_decode_math.cpp
@@ -55,6 +56,20 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_reference_pipeline
+    reference_pipeline.cpp reference_conditioner.cpp reference_visual_encoder.cpp
+    reference_denoiser.cpp reference_image.cpp reference_layout.cpp qwen_reference.cpp
+    diffusion_schedule.cpp audio_decoder.cpp video_decoder.cpp video_decode_math.cpp
+    visual_reference.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_pipeline.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_pipeline PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_reference_pipeline SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_minimax_h3_reference_pipeline PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_pipeline COMMAND test_minimax_h3_reference_pipeline)
+
   add_executable(minimax_h3_video_decoder_probe
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/video_decoder_probe.cpp
   )
