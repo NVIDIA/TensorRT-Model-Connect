@@ -78,8 +78,8 @@ void test_matches_librosa_soxr_hq() {
         if (index < output.size())
             worst = std::max(worst, static_cast<double>(std::abs(output[index] - value)));
     }
-    check(worst <= 2.0e-4,
-          "16 -> 24 kHz matches soxr HQ within 2e-4 (worst " + std::to_string(worst) + ")");
+    check(worst <= 1.0e-6,
+          "16 -> 24 kHz matches soxr HQ within 1e-6 (worst " + std::to_string(worst) + ")");
 }
 
 void test_identity_and_validation() {
@@ -93,6 +93,17 @@ void test_identity_and_validation() {
         threw = true;
     }
     check(threw, "non-positive rates are rejected");
+    threw = false;
+    try {
+        trtmc::resample_audio(nullptr, 3, 24000, 24000);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "missing samples are rejected");
+    check(trtmc::resample_audio(nullptr, 0, 16000, 24000).empty(),
+          "zero samples resample to an empty signal");
+    check(trtmc::resample_audio(signal.data(), 0, 24000, 24000).empty(),
+          "zero samples copy to an empty signal");
 }
 
 } // namespace

@@ -29,6 +29,7 @@ RUN apt-get update && \
       nlohmann-json3-dev \
       libicu-dev \
       pkg-config \
+      libsoxr-dev \
       python3.12 \
       python3.12-dev \
       python3.12-venv \
