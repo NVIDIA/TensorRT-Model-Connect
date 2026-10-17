@@ -2253,7 +2253,13 @@ def test_redirect_cannot_downgrade_to_http():
 def test_full_unit_build_uses_initial_cache_without_disabling_coverage(tmp_path):
     cache = tmp_path / "cache.cmake"
     cache.write_text("")
-    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_DEPENDENCIES_CACHE": str(cache)})
+    context = RecordingContext(
+        tmp_path,
+        {
+            "TRTMC_NATIVE_DEPENDENCIES_CACHE": str(cache),
+            "TRTMC_CORE_BUILD_DIR": str(tmp_path / "build"),
+        },
+    )
     UnitTestRunner(context).premerge()
     configure = context.calls[3][0]
     assert configure[:3] == ["cmake", "-C", str(cache)]
@@ -2266,7 +2272,11 @@ def test_full_unit_build_uses_initial_cache_without_disabling_coverage(tmp_path)
 
 def test_missing_declared_cache_does_not_fall_back_to_network(tmp_path):
     context = RecordingContext(
-        tmp_path, {"TRTMC_NATIVE_DEPENDENCIES_CACHE": str(tmp_path / "absent")}
+        tmp_path,
+        {
+            "TRTMC_NATIVE_DEPENDENCIES_CACHE": str(tmp_path / "absent"),
+            "TRTMC_CORE_BUILD_DIR": str(tmp_path / "build"),
+        },
     )
     with pytest.raises(CiError, match="initial cache is missing"):
         UnitTestRunner(context).premerge()
