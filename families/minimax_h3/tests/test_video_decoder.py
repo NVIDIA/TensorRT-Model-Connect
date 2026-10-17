@@ -130,11 +130,14 @@ def test_video_decoder_preserves_fp32_registers_before_first_residual(monkeypatc
 
 
 @pytest.mark.parametrize("batch", [1, 28])
-def test_video_post_quantization_is_biased_fp16_conv3d(batch):
+def test_video_post_quantization_rounds_half_convolution_before_bias(batch):
     # Original trained parameter shapes and autocast dtypes; no GPU or model
     # math is supplied by this graph-contract fixture.
     recorded = {}
     source = SimpleNamespace(shape=(batch, 24, 7, 16, 16), dtype=vae.trt.float32)
+
+    def tensor(dtype, label):
+        return SimpleNamespace(shape=source.shape, dtype=dtype, label=label)
 
     class Shuffle:
         def get_output(self, _index):
@@ -145,22 +148,46 @@ def test_video_post_quantization_is_biased_fp16_conv3d(batch):
 
     class Network:
         def add_cast(self, value, dtype):
-            assert value is source and dtype == vae.trt.float16
-            return SimpleNamespace(
-                get_output=lambda _index: SimpleNamespace(shape=value.shape, dtype=dtype)
-            )
+            if value is source:
+                assert dtype == vae.trt.float16
+                label = "half-input"
+            elif value.label == "half-convolution":
+                assert dtype == vae.trt.float32
+                label = "wide-convolution"
+            else:
+                assert value.label == "wide-sum" and dtype == vae.trt.float16
+                label = "half-output"
+            return SimpleNamespace(get_output=lambda _index: tensor(dtype, label))
 
         def add_convolution_nd(self, value, channels, kernel_shape, kernel, bias):
             assert value.dtype == vae.trt.float16 and value.shape == source.shape
             assert channels == 24 and kernel_shape == (1, 1, 1)
             assert kernel.dtype == bias.dtype == np.float16
             assert kernel.flags.c_contiguous and bias.flags.c_contiguous
+            assert bias.size == 0, "bias must follow the half-rounded convolution"
             recorded.update(kernel=kernel, bias=bias)
-            recorded["layer"] = SimpleNamespace(get_output=lambda _index: value)
+            recorded["layer"] = SimpleNamespace(
+                get_output=lambda _index: tensor(vae.trt.float16, "half-convolution")
+            )
             return recorded["layer"]
+
+        def add_constant(self, shape, values):
+            assert tuple(shape) == (1, 24, 1, 1, 1) and values.dtype == np.float32
+            # Widen the autocast-half bias, not the original FP32 parameter.
+            expected = weights["post_quant_conv.bias"].astype(np.float16).astype(np.float32)
+            np.testing.assert_array_equal(values.reshape(24), expected)
+            recorded["bias_constant"] = values
+            return SimpleNamespace(get_output=lambda _index: tensor(vae.trt.float32, "wide-bias"))
+
+        def add_elementwise(self, left, right, operation):
+            assert left.label == "wide-convolution" and right.label == "wide-bias"
+            assert left.dtype == right.dtype == vae.trt.float32
+            assert operation == vae.trt.ElementWiseOperation.SUM
+            return SimpleNamespace(get_output=lambda _index: tensor(vae.trt.float32, "wide-sum"))
 
         def add_shuffle(self, value):
             assert value.dtype == vae.trt.float16 and value.shape == source.shape
+            assert value.label == "half-output"
             return Shuffle()
 
     weights = {
@@ -176,11 +203,10 @@ def test_video_post_quantization_is_biased_fp16_conv3d(batch):
             0,
             0,
         )
-        for name in ("kernel", "bias"):
-            expected = weights[
-                "post_quant_conv." + ("weight" if name == "kernel" else "bias")
-            ].astype(np.float16)
-            np.testing.assert_array_equal(recorded[name], expected)
+        np.testing.assert_array_equal(
+            recorded["kernel"], weights["post_quant_conv.weight"].astype(np.float16)
+        )
+        for name in ("kernel", "bias", "bias_constant"):
             assert any(
                 value is recorded[name] for value in vae.op._WEIGHT_BUFFER_KEEPALIVE[id(network)]
             )

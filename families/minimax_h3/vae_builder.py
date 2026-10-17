@@ -174,11 +174,13 @@ def _swiglu(network, hidden, weights, prefix: str):
 
 
 def _post_quant_conv(network, latent, weights):
-    """Original biased 1x1x1 Conv3d under FP16 autocast, then voxel rows.
+    """Preserve the original autocast Conv3d's separate half-rounded bias.
 
-    A half GEMM followed by a separate half bias sum introduces an additional
-    typed rounding boundary absent from the original convolution expression.
-    TensorRT owns lowering this native convolution, including bias fusion.
+    PyTorch's cuDNN path returns a half convolution before adding the half
+    bias. A fused biased convolution omits that first rounding. Widen both
+    half values losslessly for the sum, then round back to half explicitly;
+    this retains both boundaries without changing convolution precision.
+    TensorRT still owns all lowering and kernel selection.
     """
     kernel = np.asarray(weights["post_quant_conv.weight"])
     bias = np.asarray(weights["post_quant_conv.bias"])
@@ -196,18 +198,23 @@ def _post_quant_conv(network, latent, weights):
     if not np.isfinite(kernel).all() or not np.isfinite(bias).all():
         raise ValueError("MiniMax-H3 post_quant_conv parameters overflow FP16 autocast")
     value = op.cast(network, latent, trt.float16)
-    convolution = network.add_convolution_nd(value, CHANNELS, (1, 1, 1), kernel, bias)
+    no_bias = np.empty(0, np.float16)
+    convolution = network.add_convolution_nd(value, CHANNELS, (1, 1, 1), kernel, no_bias)
     if convolution is None:
         raise RuntimeError("TensorRT rejected MiniMax-H3 post_quant_conv")
     convolution.name = "post_quant_conv"
     convolution.stride_nd = (1, 1, 1)
     convolution.padding_nd = (0, 0, 0)
-    rows = network.add_shuffle(convolution.get_output(0))
+    # Retain borrowed convolution weights before any subsequent graph call.
+    op._WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).extend((kernel, no_bias))
+    value = op.cast(network, convolution.get_output(0), trt.float32)
+    bias = op.constant(network, bias.astype(np.float32).reshape(1, CHANNELS, 1, 1, 1))
+    value = network.add_elementwise(value, bias, trt.ElementWiseOperation.SUM).get_output(0)
+    value = op.cast(network, value, trt.float16)
+    rows = network.add_shuffle(value)
     rows.first_transpose = trt.Permutation([0, 2, 3, 4, 1])
     rows.reshape_dims = (latent.shape[0], TOKENS, CHANNELS)
     result = rows.get_output(0)
-    # Convolution weights borrow these converted buffers until serialization.
-    op._WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).extend((kernel, bias))
     return result
 
 

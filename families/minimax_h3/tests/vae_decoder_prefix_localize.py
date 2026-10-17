@@ -30,8 +30,8 @@ from families.minimax_h3.tests.test_trained_video_decoder import _ATOL, _RTOL, _
 from families.minimax_h3.tests.vae_encoder_checkpoint_oracle import CONFIG_SHA256, REVISION
 
 
-# Isolate convolution from the already-restored FP32 register concatenation.
-BASELINE_SHA = "9f9ce39ae65bed193b05f15341aa3f72ff4db0c9b0df188eecce658b1de130c3"
+# Isolate intermediate half rounding from the fused biased-Conv3d baseline.
+BASELINE_SHA = "dbcf62336c3add495edfc5c1f554de3bc4021dbe5f5a79589e17fb4baf2ce341"
 ROWS_SHA = "c9d0c8c9403e95ba3b80ca5f4d4fbfc433aa713e3a25142763524eaebd5eed27"
 UPSTREAM_SHA = "4c3c9745ee27d16ff343c4998244bad41cd8f4213f0029cf7ce11ebb6d72ca1b"
 KEYS = (
