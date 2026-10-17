@@ -3,8 +3,11 @@
 """CPU frontend and overlap-add comparisons with the original audio processor."""
 
 import json
+import cProfile
+from contextlib import nullcontext
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -112,19 +115,150 @@ def test_mel_reference(probe, reference, tmp_path, name):
     filters = proc.featurizer.filter_banks.numpy()
     result, actual = invoke(probe, tmp_path, "mel", source, filters=filters)
     assert result.returncode == 0, result.stderr
-    expected, length = proc(torch.tensor(source)[None], torch.tensor([count]))
+    observation = None
+    if name.startswith("silence"):
+        from liquid_audio.model.conformer.processor import normalize_batch
+
+        from .dsp_observation import NormalizationObservation
+
+        observation = NormalizationObservation(torch, normalize_batch)
+    with observation if observation is not None else nullcontext():
+        expected, length = proc(torch.tensor(source)[None], torch.tensor([count]))
     expected = expected[0].T.contiguous()
     actual = torch.tensor(actual.reshape(expected.shape))
-    assert int(result.stdout) == count // 160 + 1
-    assert int(length[0]) == count // 160
-    assert torch.count_nonzero(actual[-1]) == 0
-    assert torch.isfinite(actual).all()
-    if name.startswith("silence"):
-        torch.testing.assert_close(actual, expected, rtol=0, atol=1e-6)
+    try:
+        assert int(result.stdout) == count // 160 + 1
+        assert int(length[0]) == count // 160
+        assert torch.count_nonzero(actual[-1]) == 0
+        assert torch.isfinite(actual).all()
+        if name.startswith("silence"):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=1e-6)
+        else:
+            # Normalized frontend error stays below one eighth of the BF16 ULP at
+            # unit scale. Separate strict waveform/token parity remains mandatory.
+            torch.testing.assert_close(actual, expected, rtol=0, atol=2**-10)
+    except AssertionError:
+        if observation is not None:
+            try:
+                config = json.loads((TESTS / "fixtures/config.json").read_text())["preprocessor"]
+                observation.report_failure(
+                    actual, expected, sample_count=count, processor_config=config
+                )
+            except Exception:
+                pass  # Never replace the unchanged assertion with an observation failure.
+        raise
+
+
+def test_normalization_observation_preserves_processor_call_and_profiler(reference, capsys):
+    from liquid_audio.model.conformer.processor import normalize_batch
+
+    from .dsp_observation import NormalizationObservation
+
+    previous = sys.getprofile()
+    if previous is not None and not callable(previous):
+        pytest.skip("The capture control leaves an active non-callable profiler untouched")
+    torch, proc, _ = reference
+    source, count = torch.zeros((1, 1280)), torch.tensor([1280])
+    expected = proc(source, count)
+    rng = torch.get_rng_state().clone()
+    prior_calls = []
+
+    def prior(frame, event, value):
+        if previous is not None:
+            previous(frame, event, value)
+        if frame.f_code is normalize_batch.__code__ and event == "call":
+            prior_calls.append(event)
+
+    sys.setprofile(prior)
+    try:
+        with NormalizationObservation(torch, normalize_batch) as observation:
+            actual = proc(source, count)
+        assert sys.getprofile() is prior
+    finally:
+        sys.setprofile(previous)
+    assert prior_calls == ["call"]
+    assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
+    assert torch.equal(torch.get_rng_state(), rng)
+    assert observation.data["normalization_calls"] == observation.data["normalization_returns"] == 1
+    assert observation.data["errors"] == []
+    assert (
+        "def normalize_batch("
+        in observation.data["reference_source_context"]["inspected_source_text"]
+    )
+    assert observation.data["normalization_input"]["all_channels_bit_identical"]
+    where = [
+        item for item in observation.data["operations"] if item["operator"] == "aten.where.self"
+    ]
+    assert len(where) == 2
+    assert where[0]["output"]["first_channel_rle"][-1] == {"start": 8, "length": 1, "bits": 0}
+    assert observation.data["variance_before_sqrt"]["shape"] == [1, 128]
+    assert capsys.readouterr().out == ""
+
+
+def test_normalization_observation_preserves_failures_and_bounds(reference, monkeypatch, capsys):
+    from liquid_audio.model.conformer.processor import normalize_batch
+
+    from .dsp_observation import NormalizationObservation, tensor_observation
+
+    torch, _, _ = reference
+    previous = sys.getprofile()
+    if previous is not None and not callable(previous):
+        pytest.skip("The capture control leaves an active non-callable profiler untouched")
+    observation = NormalizationObservation(torch, normalize_batch)
+    with pytest.raises(AssertionError, match="original assertion"):
+        with observation:
+            normalize_batch(torch.zeros((1, 128, 9)), torch.tensor([8]), "per_feature")
+            raise AssertionError("original assertion")
+    assert sys.getprofile() is previous
+    assert observation.data["normalization_calls"] == 1
+    varied = torch.arange(512, dtype=torch.float32).reshape(1, 2, 256)
+    assert tensor_observation(varied)["payload"].startswith("bounded_unavailable")
+    monkeypatch.setattr(
+        observation, "_snapshot", lambda _: (_ for _ in ()).throw(ValueError("observe"))
+    )
+    with pytest.raises(AssertionError, match="original assertion"):
+        try:
+            raise AssertionError("original assertion")
+        except AssertionError:
+            observation.report_failure(varied, varied, sample_count=1280, processor_config={})
+            raise
+    output = capsys.readouterr().out
+    assert output.count("LFM2_AUDIO_NORMALIZATION_DIAGNOSTIC=") == 1
+    assert "ValueError" in output
+
+
+def test_normalization_observation_preserves_active_cprofile(reference):
+    from liquid_audio.model.conformer.processor import normalize_batch
+
+    from .dsp_observation import NormalizationObservation
+
+    if sys.getprofile() is not None:
+        pytest.skip("The cProfile control requires ownership of its profiling scope")
+    torch, proc, _ = reference
+    source, count = torch.zeros((1, 1280)), torch.tensor([1280])
+    expected = proc(source, count)
+    profiler = cProfile.Profile()
+    profiler.enable()
+    try:
+        active = sys.getprofile()
+        # Python may expose cProfile here or use its separate monitoring API.
+        assert active is None or (active is profiler and not callable(active))
+        with NormalizationObservation(torch, normalize_batch) as observation:
+            actual = proc(source, count)
+            if active is not None:
+                assert sys.getprofile() is active
+        assert sys.getprofile() is active
+    finally:
+        profiler.disable()
+    if active is not None:
+        assert observation.data["observation_unavailable"] == "active profiler is not callable"
+        assert observation.data["normalization_calls"] == 0
     else:
-        # Normalized frontend error stays below one eighth of the BF16 ULP at
-        # unit scale. Separate strict waveform/token parity remains mandatory.
-        torch.testing.assert_close(actual, expected, rtol=0, atol=2**-10)
+        assert observation.data["normalization_calls"] == 1
+    calls = [item for item in profiler.getstats() if item.code is normalize_batch.__code__]
+    assert len(calls) == 1 and calls[0].callcount == 1
+    assert not observation.profile_installed and not observation.mode_installed
+    assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=True))
 
 
 @pytest.mark.parametrize("frames", [1, 2, 6, 12, 36])
