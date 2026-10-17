@@ -465,6 +465,8 @@ int run_vision_protocol(std::int64_t default_tokens, Generate&& generate, std::i
                               } catch (const std::exception&) {
                                   throw ProtocolError("image must be a readable image file");
                               }
+                              if (image.height <= 0 || image.width <= 0 || image.pixels.empty())
+                                  throw ProtocolError("image must contain RGB pixels");
                               auto result = generate(prompt, image, request);
                               result["image_height"] = image.height;
                               result["image_width"] = image.width;

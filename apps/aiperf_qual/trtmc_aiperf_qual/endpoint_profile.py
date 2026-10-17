@@ -246,8 +246,10 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
     expected = {}
     with gpu_exclusive(environment):
         # Capture the source that actually starts inference, after any lock wait.
-        revision = tokenizer_revision or (entry.model.hf_revision if tokenizer is None else None)
-        selected_tokenizer = tokenizer_identity(tokenizer or entry.hf_id, revision, override=tokenizer is not None)
+        revision = (tokenizer_revision if tokenizer_revision is not None else
+                    entry.model.hf_revision if tokenizer is None else None)
+        tokenizer_override = tokenizer is not None or tokenizer_revision is not None
+        selected_tokenizer = tokenizer_identity(tokenizer or entry.hf_id, revision, override=tokenizer_override)
         provenance = {**source_identity(repo, out), "profile": name,
                       "manifest": json.loads(entry.model.manifest_path.read_text()),
                       "bundle_sha256": digest(bundle), "inputs_sha256": digest(inputs),
@@ -338,7 +340,7 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
             summary["images_per_second"] = summary["requests_per_second"]
         final_source = source_identity(repo, out)
         provenance["final_source"] = final_source
-        final_tokenizer = tokenizer_identity(tokenizer or entry.hf_id, revision, override=tokenizer is not None)
+        final_tokenizer = tokenizer_identity(tokenizer or entry.hf_id, revision, override=tokenizer_override)
         provenance["final_tokenizer"] = final_tokenizer
         (out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
         if (any(final_source[key] != provenance[key] for key in final_source) or

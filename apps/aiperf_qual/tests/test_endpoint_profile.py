@@ -3,6 +3,7 @@
 
 import base64
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,25 @@ def test_invalid_or_nonendpoint_profile_has_a_clear_selection_error(tmp_path, mo
             profile(Environment({"repo": str(tmp_path)}), name, Path("unused"), Path("unused"),
                     tmp_path / "uncreated")
     assert not (tmp_path / "uncreated").exists()
+
+
+@pytest.mark.parametrize("revision", ["main", "v1.0", ""])
+def test_revision_only_override_is_validated_before_starting_a_profile(tmp_path, monkeypatch, revision):
+    import trtmc_benchmark.catalog as catalog
+    from trtmc_aiperf_qual import endpoint_profile
+
+    entry = SimpleNamespace(name="vision", hf_id="organization/checkpoint",
+                            model=SimpleNamespace(task="vision_language_generation", hf_revision="a" * 40))
+    monkeypatch.setattr(catalog, "ManifestCatalog", lambda _: SimpleNamespace(entries=lambda: [entry]))
+    monkeypatch.setattr(endpoint_profile, "inventory", lambda *_: [{"profile": "vision"}])
+    monkeypatch.setattr(endpoint_profile, "gpu_exclusive", lambda _: nullcontext())
+    monkeypatch.setattr(endpoint_profile, "source_identity",
+                        lambda *_: pytest.fail("invalid tokenizer revision reached profiling"))
+    environment = Environment({"repo": str(tmp_path), "runtime_root": str(tmp_path),
+                               "aiperf_python": "unused"})
+    with pytest.raises(ConfigError, match="full commit SHA"):
+        endpoint_profile.profile(environment, "vision", Path("unused"), Path("unused"),
+                                 tmp_path / "out", tokenizer_revision=revision)
 
 
 def test_singleton_embedding_wire_forms_keep_the_same_input_identity():

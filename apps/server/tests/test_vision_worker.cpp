@@ -53,6 +53,10 @@ void verify(const std::string& path) {
     auto missing = valid;
     missing.erase("image_path");
     input << missing.dump() << '\n';
+    auto unreadable = valid;
+    unreadable["id"] = "unreadable-image";
+    unreadable["image_path"] = path + "/missing.png";
+    input << unreadable.dump() << '\n';
     auto bad_config = valid;
     bad_config["config"]["unknown"] = true;
     input << bad_config.dump() << '\n';
@@ -68,14 +72,14 @@ void verify(const std::string& path) {
     std::istringstream stream(output.str());
     for (std::string line; std::getline(stream, line);)
         replies.push_back(Json::parse(line));
-    require(replies.size() == 6 && task.calls == 2 &&
+    require(replies.size() == 7 && task.calls == 2 &&
                 replies[0].at("capabilities") == Json::array({"vision_language_generation"}) &&
                 replies[0].at("default_max_new_tokens") == 10,
             "declared bundle capability prevents inherited text dispatch");
-    for (std::size_t i = 1; i < 4; ++i)
+    for (std::size_t i = 1; i < 5; ++i)
         require(replies[i].at("error").at("type") == "invalid_request_error",
                 "invalid requests remain recoverable and never invoke the Task");
-    const auto result = replies[4].at("result");
+    const auto result = replies[5].at("result");
     require(result.at("text") == "Red. Complete answer." && result.at("completion_tokens") == 3 &&
                 result.at("image_height") == 4 && result.at("image_width") == 8 &&
                 result.at("model_call_ms").get<double>() >= 0 &&

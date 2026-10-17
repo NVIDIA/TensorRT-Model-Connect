@@ -40,12 +40,46 @@ def test_profile_admits_upstream_padding_for_thin_and_regular_images(height, wid
 ])
 def test_qwen3_profile_admits_upstream_resize_at_the_aspect_limit(height, width, minimum):
     from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-    from families.qwen_vl.qwen_vl_vision_builder import _qwen3_max_profile_patches
+    from families.qwen_vl.qwen_vl_vision_builder import _smart_resize_max_profile_patches
 
     resized_h, resized_w = smart_resize(
         height, width, factor=32, min_pixels=minimum, max_pixels=448**2,
     )
     patches = resized_h * resized_w // 16**2
-    assert patches <= _qwen3_max_profile_patches(minimum, 448**2, 16, 2)
+    assert patches <= _smart_resize_max_profile_patches(minimum, 448**2, 16, 2)
     if max(height, width) / min(height, width) == 200 or minimum == 448**2:
         assert patches > 784  # The old nominal-area profile rejected this valid shape.
+
+
+@pytest.mark.parametrize("patch_size", [14, 16])
+@pytest.mark.parametrize("height,width", [(1000, 1000), (1000, 50000), (50000, 1000),
+                                          (100, 20000), (20000, 100), (32, 32),
+                                          (32, 6400), (6400, 32)])
+def test_profile_admits_resize_with_tight_unaligned_pixel_limits(height, width, patch_size):
+    from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+    from families.qwen_vl.qwen_vl_vision_builder import (
+        _smart_resize_min_profile_patches, _smart_resize_max_profile_patches,
+    )
+
+    resized_h, resized_w = smart_resize(height, width, factor=patch_size * 2,
+                                       min_pixels=200000, max_pixels=200000)
+    patches = resized_h * resized_w // patch_size**2
+    assert _smart_resize_min_profile_patches(200000, 200000, patch_size, 2) <= patches
+    assert patches <= _smart_resize_max_profile_patches(200000, 200000, patch_size, 2)
+    if height == width == 1000:
+        assert (resized_h, resized_w, patches) == ((420, 420, 900) if patch_size == 14 else (416, 416, 676))
+        assert patches < 200000 // (patch_size**2 * 4) * 4  # Rejected by the old minimum.
+
+
+@pytest.mark.parametrize("minimum,maximum,patch_size,expected", [
+    (3136, 448**2, 14, (16, 1024)),
+    (1024, 448**2, 16, (4, 792)),
+    (65536, 448**2, 16, (256, 792)),
+])
+def test_canonical_profile_bounds_are_unchanged(minimum, maximum, patch_size, expected):
+    from families.qwen_vl.qwen_vl_vision_builder import (
+        _smart_resize_min_profile_patches, _smart_resize_max_profile_patches,
+    )
+
+    assert (_smart_resize_min_profile_patches(minimum, maximum, patch_size, 2),
+            _smart_resize_max_profile_patches(minimum, maximum, patch_size, 2)) == expected

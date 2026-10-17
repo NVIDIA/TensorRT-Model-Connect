@@ -195,7 +195,18 @@ def _max_window_padded_rows(max_patches: int, window_groups: int, merge_unit: in
     ) * patches_per_window
 
 
-def _qwen3_max_profile_patches(min_pixels: int, max_pixels: int, patch_size: int, merge_size: int) -> int:
+def _smart_resize_min_profile_patches(min_pixels: int, max_pixels: int, patch_size: int, merge_size: int) -> int:
+    """Admit floor-based downscaling even when its area undershoots min_pixels."""
+    unit = merge_size * merge_size
+    cell_pixels = patch_size * patch_size * unit
+    nominal = max(unit, int(min_pixels) // cell_pixels * unit)
+    # For positive normalized sides, clamped floor(x)*floor(y) >= floor(x*y/2).
+    # Thus downscaling to max_pixels can safely use this conservative minimum.
+    downscaled = max(unit, int(max_pixels) // (2 * cell_pixels) * unit)
+    return min(nominal, downscaled)
+
+
+def _smart_resize_max_profile_patches(min_pixels: int, max_pixels: int, patch_size: int, merge_size: int) -> int:
     """Bound factor clamping and ceil-based enlargement at aspect ratios <=200."""
     factor = patch_size * merge_size
     unit = merge_size * merge_size
@@ -295,9 +306,10 @@ def build_qwen_vl_vision_engine(
         if not profile_pixels[0] <= profile_pixels[1] <= profile_pixels[2]:
             raise ValueError(
                 "dynamic Qwen-VL image pixel limits must satisfy min <= opt <= max")
-        profile_patches = tuple(
-            max(merge_unit, (value // patch_pixels // merge_unit) * merge_unit)
-            for value in profile_pixels
+        profile_patches = (
+            _smart_resize_min_profile_patches(min_image_pixels, max_image_pixels, patch_size, merge_size),
+            max(merge_unit, int(opt_image_pixels) // (patch_pixels * merge_unit) * merge_unit),
+            _smart_resize_max_profile_patches(min_image_pixels, max_image_pixels, patch_size, merge_size),
         )
     else:
         profile_patches = (num_patches, num_patches, num_patches)
@@ -955,8 +967,9 @@ def build_qwen3_vl_vision_engine(
         for area in profile_pixels
     )
     if dynamic_image_resolution:
-        profile_patches = (*profile_patches[:2],
-                           _qwen3_max_profile_patches(min_image_pixels, max_image_pixels, patch_size, merge_size))
+        profile_patches = (_smart_resize_min_profile_patches(min_image_pixels, max_image_pixels, patch_size, merge_size),
+                           profile_patches[1],
+                           _smart_resize_max_profile_patches(min_image_pixels, max_image_pixels, patch_size, merge_size))
 
     if verbose:
         print(f"[trtmc build] Qwen3-VL Vision: image={fixed_image_size}, "
