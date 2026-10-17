@@ -29,6 +29,35 @@ resolved API directly.
 decides whether that directory is a Hugging Face snapshot or a prepared
 checkpoint; `BuildRequest` does not perform another discovery pass.
 
+## Bundle output staging
+
+By default, `BundleWriter` stages separate section files and copies them into
+the final atomic output. A family that emits sections in order can opt into
+single-file staging before opening its first section:
+
+```python
+writer.enable_direct_staging(header_reserve_bytes=64 * 1024)
+```
+
+This reserves a bounded, whitespace-padded JSON header in one temporary
+format-v1 bundle. Each section is appended once; `finish()` fills the header
+and atomically renames that same file. Section bytes, offsets relative to the
+payload, core provenance and the reader contract are unchanged. Reserved
+capacity must be a positive integer no larger than the existing 100-MiB
+header limit; a header that does not fit fails before publication.
+
+Direct staging permits one open section at a time. Section handles support
+forward writes and section-relative `tell()`, not seeking, reading or exposing
+the underlying descriptor. Existing builds keep their default behavior unless
+their family explicitly selects this mode. `abort()` discards only owned
+staging files, preserving any previously published destination.
+
+For a fresh output, payload disk occupancy no longer includes a separate
+staged copy plus a final copy. Replacing an existing bundle still requires
+retaining that old file until atomic publication. Checkpoints, compiler
+scratch, serialized-plan host buffers and GPU residency are separate costs;
+single-file staging does not claim to reduce them.
+
 ## Optional graph transform
 
 `BuildRequest.graph_transform` is an in-place callback invoked on the completed

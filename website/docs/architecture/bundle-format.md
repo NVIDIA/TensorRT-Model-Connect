@@ -26,6 +26,14 @@ does not eagerly load section contents.
 The core does not interpret family sections or compute section hashes. Only
 format 1 is supported.
 
+The JSON header may contain trailing JSON whitespace inside its declared
+length. Writers can reserve this bounded header capacity, append sections to
+one temporary file, then fill the header and atomically publish without a
+second payload copy. The payload still starts at `16 + json_header_length`;
+section offsets and lengths retain their existing meaning. No new format or
+reader adaptation is needed. See [bundle output staging](../api/python-builder.md#bundle-output-staging)
+for the explicit writer API and its sequential-write contract.
+
 ## Build provenance
 
 Section names starting with `trtmc.` are reserved for the core; `BundleWriter`
