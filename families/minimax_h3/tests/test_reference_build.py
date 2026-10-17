@@ -162,6 +162,8 @@ def test_reference_build_streams_all_eight_exact_partitions(
         if name.endswith(".plan"):
             plans.emitted.append(name)
         add(name, value)
+        assert not list(tmp_path.glob(".reference.bundle.sections.*"))
+        assert len(list(tmp_path.glob(".reference.bundle.*.tmp"))) == 1
 
     writer.add_bytes = stage
     owner.build(
@@ -170,6 +172,7 @@ def test_reference_build_streams_all_eight_exact_partitions(
         memory_preset=preset,
     )
     writer.finish()
+    assert struct.unpack("<Q", output.read_bytes()[8:16])[0] == 65536
     assert plans.built == plans.emitted == list(owner.PLAN_NAMES)
     assert plans.retired == set(owner.PLAN_NAMES)
     assert [name for name, _keys in plans.loaded] == [

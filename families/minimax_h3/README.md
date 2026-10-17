@@ -16,9 +16,16 @@ continuation, and does not enable four-step reference inference.
 Use a complete local original checkpoint. The trained component oracles pin
 `MiniMaxAI/MiniMax-H3` revision
 `48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc`; no download is implicit in the
-example. Provide an existing output directory and enough disk for both staged
-sections and the atomic final bundle. During packaging, peak disk can approach
-twice the total serialized plan size. This is separate from GPU residency.
+example. Provide an existing output directory with space for the actual
+serialized bundle and compiler scratch. This explicit Ref2VA path enables
+single-file staging: it reserves a 64-KiB format-v1 JSON header, appends every
+plan once and atomically publishes that same temporary file. It no longer
+keeps a separate set of section files while copying the complete final bundle.
+All plan/config/tokenizer bytes and runtime settings are unchanged. If replacing
+an existing destination, that previous file still occupies space until atomic
+publication. Whole-model bundle size, build scratch and host/GPU peaks remain
+unmeasured; packaging mechanics do not establish a minimum RAM/VRAM figure or
+resolve the failed trained-video numerical/storage gates.
 
 With `core/builder` and the repository root on `PYTHONPATH`:
 

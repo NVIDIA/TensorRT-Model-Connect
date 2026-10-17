@@ -275,6 +275,9 @@ def build(request, writer, *, memory_preset="minimal"):
     validate_component_key_partition(
         root / "vae", [encoder.checkpoint_keys(), video.checkpoint_keys()]
     )
+    # Keep each original plan only once on disk. This changes the writer's
+    # staging mechanics, not any section bytes, model settings or runtime math.
+    writer.enable_direct_staging()
     writer.set_header(family="minimax_h3", task=TASK, backend=request.backend)
 
     def stage(name, component, keys, builder, *args, **kwargs):
