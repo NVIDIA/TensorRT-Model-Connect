@@ -22,8 +22,8 @@ struct ReferencePipelineConfig {
 };
 
 // Native original-H3 image Ref2VA composition. This class uses the existing
-// semantic contract, but is not advertised by support.py or selected by the
-// family factory until the matching build path and trained gates are ready.
+// semantic contract. The family factory accepts its explicit reference bundle,
+// but support.py does not advertise it before complete trained gates pass.
 // The stream and loader's borrowed backend must outlive this model.
 class ImageReferencePipeline final : public internal::IModel,
                                      public internal::IReferencesTextToAudioVideo {
