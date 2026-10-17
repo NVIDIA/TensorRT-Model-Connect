@@ -11,7 +11,7 @@ candidate:
   precision: fp16
   bundle: phi4-multimodal.bundle
   build:
-    max_sequence_length: 768
+    max_sequence_length: 10368
 
 reference_environment:
   requirements: ../../requirements.txt

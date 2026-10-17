@@ -153,6 +153,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     model.num_layers = num_layers;
     model.prefill_max_length =
         phi4_multimodal_factory::require_positive_int(config, "prefill_max_length");
+    if (config.contains("rope_long_factor_threshold"))
+        model.rope_long_factor_threshold =
+            phi4_multimodal_factory::require_int(config, "rope_long_factor_threshold");
     const auto& io = config.at("io_map");
     model.present_k_pattern = io.at("present_k_pattern").get<std::string>();
     model.present_v_pattern = io.at("present_v_pattern").get<std::string>();

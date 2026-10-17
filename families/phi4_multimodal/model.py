@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import graph_ops
 from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -238,6 +239,8 @@ class _Phi4MultimodalModel:
             "patch_size": 14,
             "merge_size": 2,
             "temporal_patch_size": 1,
+            # Dynamic-HD images have a per-image token count; the runtime uses
+            # the vision engine's image_token_rows. 721 is the 2x1 crop grid.
             "num_image_pad_tokens": 721,
             "vision_output_dim": config.hidden_size,
             "preprocessor_type": "phi4_hd_chw",
@@ -247,6 +250,11 @@ class _Phi4MultimodalModel:
             "vl_prompt_template": ("<|user|>{image_pads}{prompt}<|end|><|assistant|>"),
             "image_token_str": "<|endoftext10|>",
         }
+
+
+# Room for the largest Dynamic-HD image (10,065 image tokens for 36 crops) plus
+# the prompt and generated tokens.
+DEFAULT_MAX_SEQUENCE_LENGTH = 10368
 
 
 def _load_vision_weights(model_dir: str) -> WeightDict:
@@ -339,7 +347,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if str(config.model_type).lower() not in {"phi4mm", "phi4_multimodal"}:
             raise ValueError(f"Phi-4 Multimodal does not support model_type={config.model_type!r}")
         precision = str(request.precision).lower()
-        max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
+        max_length = int(
+            request.max_sequence_length
+            or min(config.max_position_embeddings, DEFAULT_MAX_SEQUENCE_LENGTH)
+        )
         config.raw["_model_dir"] = str(model_dir)
         model = _Phi4MultimodalModel()
         weights = model.load_weights(str(model_dir), config)
@@ -368,6 +379,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if vision is None:
             raise RuntimeError("Phi-4 Multimodal vision build returned no engine")
         vl = model.get_vl_config(config) or {}
+        rope_threshold = graph_ops.longrope_regime_threshold(config.raw)
         runtime = {
             "tensor_parallel_size": 1,
             "num_layers": config.num_hidden_layers,
@@ -378,6 +390,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "image_token_id": int(vl.get("image_token_id", -1)),
             "vision_output_dim": int(vl.get("vision_output_dim", config.hidden_size)),
             "prefill_max_length": int(vl.get("prefill_max_length", max_length)),
+            # Sequences longer than this use the long LongRoPE factors (0: one regime).
+            "rope_long_factor_threshold": (
+                rope_threshold if max_length > rope_threshold else 0),
             "io_map": {
                 "cache_k_pattern": "cache_k_{i}",
                 "cache_v_pattern": "cache_v_{i}",
