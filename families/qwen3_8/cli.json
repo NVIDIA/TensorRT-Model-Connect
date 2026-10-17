@@ -118,6 +118,14 @@
           ]
         },
         {
+          "name": "mtp_seq_len",
+          "flags": [
+            "--mtp-seq-len"
+          ],
+          "type": "int",
+          "help": "Build the embedded MTP engines (the checkpoint must have MTP weights); N = 1 real token + N-1 drafted tokens verified per round, N >= 2. Without this option no MTP engines are built."
+        },
+        {
           "name": "execution_variant",
           "flags": [
             "--execution-variant"
