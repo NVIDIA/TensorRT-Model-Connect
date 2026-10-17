@@ -61,7 +61,10 @@ except BaseException:
 The family-local entry point is intentional: it exposes the experimental
 memory preset without inventing a shared CLI option or changing discovery.
 It validates original configs, tokenizer, key partitions and normalization
-statistics. It does not establish model correctness merely by producing a
+statistics. Selected weights support the original indexed components and the
+original single-file, unindexed audio VAE; only requested tensors are loaded.
+Ambiguous layouts and missing selected keys fail explicitly. It does not
+establish model correctness merely by producing a
 bundle. Supported build settings are batch 1, TP/CP 1 and no quantization;
 unsupported overrides fail explicitly.
 
