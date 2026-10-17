@@ -16,7 +16,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "modernbert"
-TASKS = frozenset({"encoding"})
+TASKS = frozenset({"text_to_pooled_features"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -155,14 +155,11 @@ def _run_json(
     command: str,
     *arguments: str,
 ) -> dict:
-    invocation = [
-        str(binary),
-        command,
-        str(bundle),
-        "--runtime-root",
-        str(runtime_root),
-        *arguments,
-    ]
+    invocation = (
+        [str(binary), command, str(bundle), "--runtime-root", str(runtime_root), *arguments]
+        if command
+        else [str(binary), str(bundle), str(runtime_root), *arguments]
+    )
     if int(manifest["tensor_parallel_size"]) > 1:
         mpirun = shutil.which("mpirun")
         assert mpirun, "selected multi-GPU E2E requires mpirun"
@@ -248,10 +245,20 @@ def _native(
     case: dict,
     tmp_path: Path,
 ):
-    manifest["task"]
-    return _run_json(
+    cli = _run_json(
         binary, runtime_root, bundle, manifest, case, "encode", "--text", _case_text(case)
     )
+    for language in ("c", "cpp"):
+        consumer = _required_path(
+            str(binary.parent / f"test_modernbert_sdk_{language}"),
+            f"ModernBERT public {language} consumer",
+        )
+        result = _run_json(consumer, runtime_root, bundle, manifest, case, "", _case_text(case))
+        record_evidence("native", {"consumer": language, "result": result})
+        assert result["task"] == manifest["task"]
+        assert result["pooling"] == "cls" and result["normalization"] == "none"
+        np.testing.assert_allclose(result["values"], cli["values"], rtol=1e-6, atol=1e-7)
+    return cli
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):

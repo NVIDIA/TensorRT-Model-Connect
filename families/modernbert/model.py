@@ -487,8 +487,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {"encoding", "embedding", "reranking"}:
-        raise ValueError("modernbert task must be encoding, embedding, or reranking")
+    if request.task not in {"text_to_pooled_features", "text_to_embedding"}:
+        raise ValueError("modernbert task must be text_to_pooled_features or text_to_embedding")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if not str(config.model_type).lower().startswith("modernbert"):
@@ -545,6 +545,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         {
             **_tokenizer_runtime_contract(model_dir),
             "tensor_parallel_size": parallel.tp_size,
+            "vocab_size": config.vocab_size,
+            "max_sequence_length": max_sequence_length,
         },
     )
     for filename in _BUNDLE_FILES:
