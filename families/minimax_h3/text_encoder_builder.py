@@ -175,9 +175,15 @@ def build_text_encoder_engine(
                 continue
             visual_inputs[name] = network.add_input(
                 name,
-                trt.bool if name == "visual_mask" else trt.bfloat16,
+                trt.int32 if name == "visual_mask" else trt.bfloat16,
                 (-1, 1 if name == "visual_mask" else HIDDEN_SIZE),
             )
+        # The native TensorMap ABI has int32 but no bool storage type. Keep
+        # this conversion inside the family graph rather than changing core.
+        one = op.constant(network, np.ones((1, 1), np.int32), dtype=np.int32)
+        visual_mask = network.add_elementwise(
+            visual_inputs["visual_mask"], one, trt.ElementWiseOperation.EQUAL
+        ).get_output(0)
     profile = builder.create_optimization_profile()
     opt_sequence_length = min(sequence_length, 128)
     for name, shapes in input_shapes.items():
@@ -193,7 +199,7 @@ def build_text_encoder_engine(
     hidden = network.add_gather(table, input_ids, 0).get_output(0)
     if reference:
         hidden = network.add_select(
-            visual_inputs["visual_mask"], visual_inputs["visual_features"], hidden
+            visual_mask, visual_inputs["visual_features"], hidden
         ).get_output(0)
     cos, sin = _rope_cache(network, position_ids, reference=reference)
 
@@ -275,7 +281,7 @@ def build_text_encoder_engine(
                 network, op.constant(network, np.zeros((1, 1), np.float32)), trt.bfloat16
             )
             features = network.add_select(
-                visual_inputs["visual_mask"], visual_inputs[f"deepstack_features_{index}"], zero
+                visual_mask, visual_inputs[f"deepstack_features_{index}"], zero
             ).get_output(0)
             hidden = network.add_elementwise(
                 hidden, features, trt.ElementWiseOperation.SUM

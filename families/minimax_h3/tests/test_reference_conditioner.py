@@ -119,6 +119,7 @@ def test_reference_language_injects_visual_features_and_deepstack_before_hidden_
     runtime = trt.Runtime(logger)
     engine = runtime.deserialize_cuda_engine(plan)
     assert engine is not None and engine.num_io_tensors == 8
+    assert engine.get_tensor_dtype("visual_mask") == trt.int32
     context = engine.create_execution_context()
     assert context is not None
     original.cuda()
@@ -154,7 +155,7 @@ def test_reference_language_injects_visual_features_and_deepstack_before_hidden_
             inputs = dict(
                 input_ids=ids,
                 position_ids=positions,
-                visual_mask=mask,
+                visual_mask=mask.int(),
                 visual_features=visual,
                 **{f"deepstack_features_{i}": value for i, value in enumerate(deepstack)},
             )

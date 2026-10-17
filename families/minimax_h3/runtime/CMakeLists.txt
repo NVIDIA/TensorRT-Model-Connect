@@ -5,6 +5,8 @@ add_library(trtmc_model_minimax_h3 SHARED
   bpe_tokenizer.cpp
   pipeline.cpp
   plugin.cpp
+  qwen_reference.cpp
+  reference_conditioner.cpp
   visual_reference.cpp
   torch_cuda_normal.cu
 )
@@ -41,6 +43,27 @@ install(TARGETS trtmc_model_minimax_h3
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_reference_conditioner
+    qwen_reference.cpp
+    reference_conditioner.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_conditioner.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_conditioner PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_reference_conditioner SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_minimax_h3_reference_conditioner PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_conditioner COMMAND test_minimax_h3_reference_conditioner)
+
+  add_executable(test_minimax_h3_qwen_reference
+    qwen_reference.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_qwen_reference.cpp
+  )
+  target_include_directories(test_minimax_h3_qwen_reference PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_minimax_h3_qwen_reference PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_qwen_reference COMMAND test_minimax_h3_qwen_reference)
+
   # Host-only reference layout/math; no CUDA or model runtime is required.
   add_executable(test_minimax_h3_visual_reference
     visual_reference.cpp
