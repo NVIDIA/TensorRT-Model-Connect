@@ -184,6 +184,122 @@ void test_rsqrt_contract() {
                    [&](RsqrtInputs& x) { x.output.tensor.strides = bad_strides; });
 }
 
+struct WideRsqrtInputs {
+    View input{0x100000000ULL, {17, 1}};
+    View output{0x200000000ULL, {17, 1}};
+    void geometry(int64_t rows) {
+        input.shape[0] = rows;
+        output.shape[0] = rows;
+    }
+    RsqrtContract validate() { return validate_rsqrt_contract(input.get(), output.get()); }
+};
+
+template <typename Mutation>
+void wide_rejected(const char* message, Mutation mutation) {
+    WideRsqrtInputs input;
+    mutation(input);
+    bool caught = false;
+    try {
+        (void)input.validate();
+    } catch (const std::exception&) {
+        caught = true;
+    }
+    expect(caught, message);
+}
+
+void test_wide_rsqrt_contract() {
+    WideRsqrtInputs input;
+    for (const int64_t rows : {int64_t{1}, int64_t{3}, int64_t{17}, int64_t{20}, kMaximumRows}) {
+        input.geometry(rows);
+        const auto c = input.validate();
+        expect(c.elements == rows && c.bytes == static_cast<size_t>(rows) * sizeof(float) &&
+                   c.grid_x == static_cast<uint32_t>((rows + 255) / 256),
+               "wide rank-two geometry and minimally covering launch");
+    }
+    bool full_profile = true;
+    for (int64_t rows = 1; rows <= kMaximumRows; ++rows) {
+        input.geometry(rows);
+        const auto c = input.validate();
+        const auto covered = static_cast<int64_t>(c.grid_x) * 256;
+        full_profile =
+            full_profile && c.elements == rows && covered >= rows && covered - 256 < rows;
+    }
+    expect(full_profile, "all wide row counts have bounded minimal launch coverage");
+    input.geometry(17);
+    int64_t strides[2] = {1, 1};
+    input.input.tensor.strides = strides;
+    input.output.tensor.strides = strides;
+    expect(input.validate().elements == 17, "wide explicit contiguous strides");
+    input.input.tensor.byte_offset = 4;
+    input.output.tensor.byte_offset = 12;
+    const auto c = input.validate();
+    expect(reinterpret_cast<uintptr_t>(c.input) == 0x100000004ULL &&
+               reinterpret_cast<uintptr_t>(c.output) == 0x20000000cULL,
+           "wide aligned effective offsets applied exactly once");
+    wide_rejected("wide zero rows", [](WideRsqrtInputs& x) { x.geometry(0); });
+    wide_rejected("wide negative rows", [](WideRsqrtInputs& x) { x.geometry(-1); });
+    wide_rejected("wide over-profile rows",
+                  [](WideRsqrtInputs& x) { x.geometry(kMaximumRows + 1); });
+    WideRsqrtInputs excessive;
+    excessive.geometry(std::numeric_limits<int64_t>::max());
+    int64_t huge_strides[2] = {std::numeric_limits<int64_t>::max(), 1};
+    excessive.input.tensor.strides = huge_strides;
+    bool bounded_before_strides = false;
+    try {
+        (void)excessive.validate();
+    } catch (const std::exception& error) {
+        bounded_before_strides =
+            std::string(error.what()).find("row count is outside its profile") != std::string::npos;
+    }
+    expect(bounded_before_strides, "wide row bound precedes unsafe stride arithmetic");
+    wide_rejected("wide input width", [](WideRsqrtInputs& x) { x.input.shape[1] = 2; });
+    wide_rejected("wide input zero width", [](WideRsqrtInputs& x) { x.input.shape[1] = 0; });
+    wide_rejected("wide input negative width", [](WideRsqrtInputs& x) { x.input.shape[1] = -1; });
+    wide_rejected("wide output width", [](WideRsqrtInputs& x) { x.output.shape[1] = 2; });
+    wide_rejected("wide row mismatch", [](WideRsqrtInputs& x) { x.output.shape[0] = 18; });
+    wide_rejected("wide input rank one", [](WideRsqrtInputs& x) { x.input.tensor.ndim = 1; });
+    wide_rejected("wide output rank one", [](WideRsqrtInputs& x) { x.output.tensor.ndim = 1; });
+    wide_rejected("wide input rank zero", [](WideRsqrtInputs& x) { x.input.tensor.ndim = 0; });
+    wide_rejected("wide rank mismatch", [](WideRsqrtInputs& x) { x.output.tensor.ndim = 3; });
+    wide_rejected("wide unsupported rank", [](WideRsqrtInputs& x) { x.input.tensor.ndim = 4; });
+    wide_rejected("wide input BF16",
+                  [](WideRsqrtInputs& x) { x.input.tensor.dtype = {kDLBfloat, 16, 1}; });
+    wide_rejected("wide output FP64", [](WideRsqrtInputs& x) { x.output.tensor.dtype.bits = 64; });
+    wide_rejected("wide vector lanes", [](WideRsqrtInputs& x) { x.input.tensor.dtype.lanes = 2; });
+    wide_rejected("wide input CPU",
+                  [](WideRsqrtInputs& x) { x.input.tensor.device.device_type = kDLCPU; });
+    wide_rejected("wide output CPU",
+                  [](WideRsqrtInputs& x) { x.output.tensor.device.device_type = kDLCPU; });
+    wide_rejected("wide negative device",
+                  [](WideRsqrtInputs& x) { x.input.tensor.device.device_id = -1; });
+    wide_rejected("wide device mismatch",
+                  [](WideRsqrtInputs& x) { x.output.tensor.device.device_id = 1; });
+    wide_rejected("wide input null", [](WideRsqrtInputs& x) { x.input.tensor.data = nullptr; });
+    wide_rejected("wide output null", [](WideRsqrtInputs& x) { x.output.tensor.data = nullptr; });
+    wide_rejected("wide input alignment",
+                  [](WideRsqrtInputs& x) { x.input.tensor.byte_offset = 1; });
+    wide_rejected("wide output alignment",
+                  [](WideRsqrtInputs& x) { x.output.tensor.byte_offset = 1; });
+    wide_rejected("wide input offset overflow", [](WideRsqrtInputs& x) {
+        x.input.tensor.byte_offset = std::numeric_limits<uint64_t>::max();
+    });
+    wide_rejected("wide output range overflow", [](WideRsqrtInputs& x) {
+        x.output.tensor.data = reinterpret_cast<void*>(std::numeric_limits<uintptr_t>::max() - 3);
+    });
+    wide_rejected("wide exact alias",
+                  [](WideRsqrtInputs& x) { x.output.tensor.data = x.input.tensor.data; });
+    wide_rejected("wide partial overlap", [](WideRsqrtInputs& x) {
+        x.output.tensor.data = reinterpret_cast<void*>(uintptr_t{0x100000004ULL});
+    });
+    int64_t bad_strides[2] = {2, 1};
+    wide_rejected("wide input noncontiguous",
+                  [&](WideRsqrtInputs& x) { x.input.tensor.strides = bad_strides; });
+    wide_rejected("wide output noncontiguous",
+                  [&](WideRsqrtInputs& x) { x.output.tensor.strides = bad_strides; });
+    rsqrt_rejected("rank-three H1 remains unsupported", [](RsqrtInputs& x) { x.geometry(17, 1); });
+    rejected("mean64 remains rank-three only", [](Inputs& x) { x.squares.tensor.ndim = 2; });
+}
+
 } // namespace
 
 int main() {
@@ -305,6 +421,7 @@ int main() {
     rejected("noncontiguous output", [&](Inputs& x) { x.output.tensor.strides = bad_ys; });
 
     test_rsqrt_contract();
+    test_wide_rsqrt_contract();
     std::cout << checks << " CPU metadata checks; " << failures << " failures; no CUDA calls\n";
     return failures == 0 ? 0 : 1;
 }

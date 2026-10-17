@@ -263,15 +263,30 @@ struct RsqrtContract {
 };
 
 RsqrtContract validate_rsqrt_contract(tvm::ffi::TensorView input, tvm::ffi::TensorView output) {
-    require_metadata(input);
-    require_metadata(output);
+    for (const auto tensor : {input, output}) {
+        require(tensor.ndim() == 2 || tensor.ndim() == 3,
+                "LFM2 rsqrt requires rank-two or rank-three tensors");
+        const auto dtype = tensor.dtype();
+        require(dtype.code == kDLFloat && dtype.bits == 32 && dtype.lanes == 1,
+                "LFM2 rsqrt requires FP32 tensors");
+        require(tensor.device().device_type == kDLCUDA && tensor.device().device_id >= 0,
+                "LFM2 rsqrt requires a CUDA device");
+    }
+    require(input.ndim() == output.ndim(), "LFM2 rsqrt input and output ranks must match");
     const int64_t rows = input.size(0);
-    const int64_t heads = input.size(1);
     require(rows >= 1 && rows <= kMaximumRows, "LFM2 rsqrt row count is outside its profile");
-    require(heads == 8 || heads == 32, "LFM2 rsqrt requires eight or thirty-two heads");
-    require(input.size(2) == 1, "LFM2 rsqrt input must have shape [R, H, 1]");
-    require(output.size(0) == rows && output.size(1) == heads && output.size(2) == 1,
-            "LFM2 rsqrt input and output must have the same shape [R, H, 1]");
+    const bool wide = input.ndim() == 2;
+    const int64_t heads = wide ? 1 : input.size(1);
+    if (wide) {
+        require(input.size(1) == 1, "LFM2 wide rsqrt input must have shape [R, 1]");
+        require(output.size(0) == rows && output.size(1) == 1,
+                "LFM2 wide rsqrt input and output must have the same shape [R, 1]");
+    } else {
+        require(heads == 8 || heads == 32, "LFM2 rsqrt requires eight or thirty-two heads");
+        require(input.size(2) == 1, "LFM2 rsqrt input must have shape [R, H, 1]");
+        require(output.size(0) == rows && output.size(1) == heads && output.size(2) == 1,
+                "LFM2 rsqrt input and output must have the same shape [R, H, 1]");
+    }
     require(output.device().device_id == input.device().device_id,
             "LFM2 rsqrt tensors must use the same CUDA device");
     // Bound all dimensions before inspecting potentially explicit strides.

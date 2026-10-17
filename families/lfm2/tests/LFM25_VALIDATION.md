@@ -153,19 +153,21 @@ selection, without a fixed engine identifier or autotuning search.
 
 For this batched BF16 route, Q/K normalization computes FP32 squares in the
 graph and reduces each 64-value head through the family mean64 TVM-FFI binding,
-using the pinned Torch CUDA reduction order. After adding epsilon, the Q/K
+using the pinned Torch CUDA reduction order. After adding epsilon, the
 rsqrt binding uses the reference CUDA float reciprocal-square-root operation.
 The same qualified batched BF16 route uses the `mean2048` binding for the
 2048-wide operator, FFN and final norms. This binding follows the pinned Torch
-CUDA vectorized reduction order on FP32 squares. Wide-norm epsilon addition,
-SQRT/RECIP, subsequent multiplication, BF16 rounding and gamma remain unchanged.
-Q/K epsilon, BF16 rounding, gamma and RoPE also remain unchanged.
+CUDA vectorized reduction order on FP32 squares. These wide norms also use
+the rsqrt binding after adding epsilon. Subsequent multiplication, BF16 rounding
+and gamma remain unchanged; Q/K normalization and RoPE retain their existing
+route.
 
 The existing attention library exports `mean64`, `rsqrt` and `mean2048` alongside
 `run_rows`; all four exports are required before loading checkpoint weights or
 the native decoder. A last-axis one-element Gather supplies each mean's dynamic
 output shape, and the helper does not read its values. The rsqrt output retains
-its input shape. Legacy build paths retain their existing reduction and
+its FP32 input shape: `[R,1]` for wide norms or `[R,8|32,1]` for Q/K norms.
+Legacy build paths retain their existing reduction and
 SQRT/RECIP operations. No runtime field or KV contract changes. Older plans
 remain loadable with the updated paired runtime and helper; a missing required
 export fails without substituting different operations. Rebuilt helper binaries

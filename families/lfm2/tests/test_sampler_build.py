@@ -1217,9 +1217,24 @@ def test_mean2048_cannot_replace_other_widths_or_fp16_norm(model, width, dtype):
         )
 
 
-@pytest.mark.parametrize("rows,heads", [(-1, 8), (-1, 32), (1, 8), (17, 32), (131072, 32)])
-def test_rsqrt_preserves_variance_shape(model, monkeypatch, rows, heads):
-    variance = SimpleNamespace(shape=(rows, heads, 1), dtype="fp32")
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (-1, 8, 1),
+        (-1, 32, 1),
+        (1, 8, 1),
+        (17, 32, 1),
+        (131072, 32, 1),
+        (-1, 1),
+        (1, 1),
+        (3, 1),
+        (17, 1),
+        (20, 1),
+        (131072, 1),
+    ],
+)
+def test_rsqrt_preserves_variance_shape(model, monkeypatch, shape):
+    variance = SimpleNamespace(shape=shape, dtype="fp32")
     output = SimpleNamespace(shape=variance.shape, dtype="fp32")
     bindings = []
     network = object()
@@ -1255,10 +1270,18 @@ def test_rsqrt_preserves_variance_shape(model, monkeypatch, rows, heads):
         ((131073, 8, 1), "fp32"),
         ((17, 8), "fp32"),
         ((1, 17, 8, 1), "fp32"),
+        ((17, 1), "bf16"),
+        ((17, 2), "fp32"),
+        ((17, 2048), "fp32"),
+        ((0, 1), "fp32"),
+        ((-2, 1), "fp32"),
+        ((131073, 1), "fp32"),
+        ((1,), "fp32"),
+        ((), "fp32"),
     ],
 )
 def test_rsqrt_rejects_unsupported_geometry(model, shape, dtype):
-    with pytest.raises(ValueError, match="Q/K rsqrt requires FP32"):
+    with pytest.raises(ValueError, match="LFM2 rsqrt requires FP32"):
         model.module._rsqrt(object(), SimpleNamespace(shape=shape, dtype=dtype), Path("bridge.so"))
 
 
@@ -1273,7 +1296,7 @@ def test_rsqrt_rejects_unsupported_geometry(model, shape, dtype):
         (2048, "fp16", None),
     ],
 )
-def test_rms_norm_routes_means_and_preserves_wide_sqrt_recip(
+def test_rms_norm_routes_qualified_rsqrt_and_preserves_legacy_sqrt_recip(
     model, monkeypatch, width, dtype, route
 ):
     module = model.module
@@ -1323,8 +1346,8 @@ def test_rms_norm_routes_means_and_preserves_wide_sqrt_recip(
         return result(mean_shape)
 
     def rsqrt(actual_network, variance, actual_bridge):
-        assert actual_network is network and actual_bridge == bridge and route == "qk"
-        assert variance.shape == (17, 8, 1) and variance.dtype == "fp32"
+        assert actual_network is network and actual_bridge == bridge and route in {"qk", "wide"}
+        assert variance.shape == mean_shape and variance.dtype == "fp32"
         events.append(("rsqrt", variance))
         return result(variance.shape)
 
@@ -1352,11 +1375,11 @@ def test_rms_norm_routes_means_and_preserves_wide_sqrt_recip(
     )
     assert output.shape == shape and output.dtype == dtype
     names = [event[0] for event in events]
-    if route == "qk":
-        assert names == ["prod", "mean64", "sum", "rsqrt", "prod", "prod"]
+    if route:
+        reduction = "mean64" if route == "qk" else "mean2048"
+        assert names == ["prod", reduction, "sum", "rsqrt", "prod", "prod"]
     else:
-        reduction = "mean2048" if route == "wide" else "reduce"
-        assert names == ["prod", reduction, "sum", "unary", "unary", "prod", "prod"]
+        assert names == ["prod", "reduce", "sum", "unary", "unary", "prod", "prod"]
         assert [event[1] for event in events if event[0] == "unary"] == ["sqrt", "recip"]
     # Gamma multiplication still receives the explicitly model-dtype activation.
     assert events[-1][1].dtype == events[-1][2].dtype == dtype

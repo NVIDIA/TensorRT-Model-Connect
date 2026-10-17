@@ -220,14 +220,15 @@ def _rsqrt(
     from tensorrt_model_connect.byok import add_kernel
 
     shape = tuple(variance.shape)
+    supported_shape = (len(shape) == 2 and shape[1] == 1) or (
+        len(shape) == 3 and shape[1] in {8, 32} and shape[2] == 1
+    )
     if (
         variance.dtype != trt.float32
-        or len(shape) != 3
-        or shape[1] not in {8, 32}
-        or shape[2] != 1
+        or not supported_shape
         or (shape[0] != -1 and not 1 <= shape[0] <= 131072)
     ):
-        raise ValueError("LFM2 Q/K rsqrt requires FP32 [R,8|32,1] variance")
+        raise ValueError("LFM2 rsqrt requires FP32 [R,1] or [R,8|32,1] variance")
     return add_kernel(
         network,
         plugin_library=bridge,
@@ -282,6 +283,8 @@ def _rms_norm(
     ).get_output(0)
     if mean64_bridge is not None:
         reciprocal = _rsqrt(network, variance, mean64_bridge)
+    elif mean2048_bridge is not None:
+        reciprocal = _rsqrt(network, variance, mean2048_bridge)
     else:
         root = network.add_unary(variance, trt.UnaryOperation.SQRT).get_output(0)
         reciprocal = network.add_unary(root, trt.UnaryOperation.RECIP).get_output(0)

@@ -508,6 +508,41 @@ def test_qk_rsqrt_preserves_torch_fp32_rounding(gpu, heads):
     assert distinguishes_split_operations, "fixture must distinguish the reference operator"
 
 
+def test_wide_rsqrt_preserves_torch_fp32_rounding(gpu):
+    torch, trt, model = gpu
+    bridge, sampler = model._sampler_libraries()
+    extension = model._register_sampler(bridge, sampler)
+    model._register_attention(extension, model._attention_library(bridge))
+
+    def define(network):
+        variance = network.add_input("variance", trt.float32, (-1, 1))
+        _output(network, model._rsqrt(network, variance, bridge), "actual")
+
+    engine = TinyEngine(
+        torch,
+        trt,
+        define,
+        {"variance": ((1, 1), (17, 1), (257, 1))},
+    )
+    # This wide-normalization variance exposes the split operation's rounding.
+    # R257 also exercises a partial second block with the rank-two contract.
+    witness = np.array([0x3AA733D3], dtype=np.uint32).view(np.float32)[0]
+    witness = np.float32(witness + np.float32(1e-5))
+    distinguishes_split_operations = False
+    for rows in (1, 3, 17, 20, 257):
+        index = torch.arange(rows, dtype=torch.int32, device="cuda")
+        mantissa = 1 + (index % 23).float() / 32
+        exponent = (index // 23) % 21 - 10
+        variance = torch.ldexp(mantissa, exponent).reshape(rows, 1)
+        variance[0, 0] = float(witness)
+        expected = torch.rsqrt(variance)
+        split_operations = torch.reciprocal(torch.sqrt(variance))
+        distinguishes_split_operations |= bool(torch.any(expected != split_operations))
+        actual = engine({"variance": variance})["actual"]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert distinguishes_split_operations, "fixture must distinguish the reference operator"
+
+
 def test_wide_mean2048_matches_torch_across_reduction_geometries(gpu):
     torch, trt, model = gpu
     bridge, sampler = model._sampler_libraries()
