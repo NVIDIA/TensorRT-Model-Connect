@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ninja-build \
       nlohmann-json3-dev \
       libicu-dev \
+      libturbojpeg0-dev \
       openmpi-bin \
       patchelf \
       pkg-config \
