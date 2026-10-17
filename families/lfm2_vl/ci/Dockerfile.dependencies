@@ -10,12 +10,12 @@ RUN python -m pip install --disable-pip-version-check --no-cache-dir \
     && python -m pip check
 
 ENV TRTMC_LFM2_VL_MODEL_DIR=/opt/trtmc-lfm2-vl-assets
-RUN python -c 'import hashlib, os, urllib.request; from pathlib import Path; from PIL import Image; \
+RUN python -c 'import hashlib, os, sys, urllib.request; from pathlib import Path; from PIL import Image; \
     destination = Path(os.environ["TRTMC_LFM2_VL_MODEL_DIR"]) / "model-card.jpg"; \
     destination.parent.mkdir(parents=True, exist_ok=True); \
     url = "https://cdn.britannica.com/61/93061-050-99147DCE/Statue-of-Liberty-Island-New-York-Bay.jpg"; \
     response = urllib.request.urlopen(url, timeout=60); \
     data = response.read(); response.close(); \
-    assert hashlib.sha256(data).hexdigest() == "ff13fd6f991b37253d3745dc6b9ef8e7a92f17cee7c4c8bc84735000a668fcd7", "model-card photo SHA256 mismatch"; \
+    hashlib.sha256(data).hexdigest() == "ff13fd6f991b37253d3745dc6b9ef8e7a92f17cee7c4c8bc84735000a668fcd7" or sys.exit("model-card photo SHA256 mismatch"); \
     destination.write_bytes(data); \
     image = Image.open(destination); image.verify(); image.close()'
