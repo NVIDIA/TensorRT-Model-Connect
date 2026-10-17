@@ -76,9 +76,8 @@ void pixels() {
     require(std::all_of(expanded.begin(), expanded.end(), [](uint8_t x) { return x == 173; }),
             "constant image remains constant");
     rejected([&] { (void)resize_reference_rgb_lanczos(nullptr, rgb.size(), 32, 48, {64, 64}); });
-    rejected([&] {
-        (void)resize_reference_rgb_lanczos(rgb.data(), rgb.size() - 1, 32, 48, {64, 64});
-    });
+    rejected(
+        [&] { (void)resize_reference_rgb_lanczos(rgb.data(), rgb.size() - 1, 32, 48, {64, 64}); });
     rejected([&] { (void)resize_reference_rgb_lanczos(rgb.data(), rgb.size(), 32, 48, {0, 64}); });
     PreparedReferenceImage image{{64, 96}, fixture(64, 96, 0)};
     const auto tile = pack_visual_reference_rgb_tile(image, 16, 32, 32, 48);

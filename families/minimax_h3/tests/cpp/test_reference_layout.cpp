@@ -76,20 +76,16 @@ void test_layout() {
 
 void test_rejections() {
     const ReferenceTargetLatentShape target{2, 4, 6, 3};
-    rejects<std::length_error>([&] {
-        make_image_reference_layout({1, 0, 1}, {{4, 6}, {2, 4}}, target, 28);
-    });
+    rejects<std::length_error>(
+        [&] { make_image_reference_layout({1, 0, 1}, {{4, 6}, {2, 4}}, target, 28); });
     rejects<std::invalid_argument>([&] { make_image_reference_layout({1}, {}, target, 100); });
     rejects<std::invalid_argument>([&] { make_image_reference_layout({}, {{4, 6}}, target, 100); });
-    rejects<std::invalid_argument>([&] {
-        make_image_reference_layout({2}, {{4, 6}}, target, 100);
-    });
-    rejects<std::invalid_argument>([&] {
-        make_image_reference_layout({1}, {{3, 6}}, target, 100);
-    });
-    rejects<std::invalid_argument>([&] {
-        make_image_reference_layout({1}, {{4, 6}}, {2, 4, 6, 0}, 100);
-    });
+    rejects<std::invalid_argument>(
+        [&] { make_image_reference_layout({2}, {{4, 6}}, target, 100); });
+    rejects<std::invalid_argument>(
+        [&] { make_image_reference_layout({1}, {{3, 6}}, target, 100); });
+    rejects<std::invalid_argument>(
+        [&] { make_image_reference_layout({1}, {{4, 6}}, {2, 4, 6, 0}, 100); });
     rejects<std::invalid_argument>([&] {
         make_image_reference_layout({1}, std::vector<ImageReferenceLatentShape>(10, {2, 2}), target,
                                     100);

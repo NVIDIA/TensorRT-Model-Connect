@@ -1077,7 +1077,6 @@ std::vector<float> MiniMaxH3Pipeline::ResidentState::decode_vae(bool first_block
     return decode_monolithic_vae(latent, expected_pixels);
 }
 
-
 MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
                                      std::unique_ptr<ITokenizer> tokenizer, std::string model_id,
                                      bool first_block_cache, float cache_threshold)

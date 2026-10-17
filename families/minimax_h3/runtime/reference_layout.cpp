@@ -1,8 +1,9 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * Copyright 2026 The MiniMax and HuggingFace Teams.
  * SPDX-License-Identifier: Apache-2.0
  */
+
+/* Copyright 2026 The MiniMax and HuggingFace Teams. */
 
 #include "families/minimax_h3/runtime/reference_layout.h"
 

@@ -130,15 +130,13 @@ void exercise(ReferenceMemoryPreset preset) {
     auto cap = configuration(preset);
     cap.max_text_rows = 10;
     ImageReferencePipeline text_limited(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>([&] {
-        (void)text_limited.run({{references.data(), references.size()}, "prompt"}, {});
-    });
+    rejects<std::length_error>(
+        [&] { (void)text_limited.run({{references.data(), references.size()}, "prompt"}, {}); });
     cap = configuration(preset);
     cap.denoiser.max_sequence_rows = 40000;
     ImageReferencePipeline dit_limited(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>([&] {
-        (void)dit_limited.run({{references.data(), references.size()}, "prompt"}, {});
-    });
+    rejects<std::length_error>(
+        [&] { (void)dit_limited.run({{references.data(), references.size()}, "prompt"}, {}); });
     require(loads == 0, "Qwen and Ref2VA packed caps must fail before allocation/inference");
     cap = configuration(preset);
     cap.denoiser.max_sequence_rows = 86862;

@@ -16,7 +16,7 @@ namespace trtmc {
 namespace {
 
 struct FileIdentity {
-    struct stat value {};
+    struct stat value{};
 
     explicit FileIdentity(const std::string& path) {
         if (::stat(path.c_str(), &value) != 0 || !S_ISREG(value.st_mode))
