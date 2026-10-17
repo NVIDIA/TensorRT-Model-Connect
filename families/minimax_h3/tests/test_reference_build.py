@@ -276,6 +276,40 @@ def test_model_dispatches_explicit_reference_task_only(monkeypatch, checkpoint, 
     assert observed == [(req, writer)]
 
 
+def test_native_factory_fixture_manifest_contains_only_explicit_plan_markers(
+    checkpoint, plans, tmp_path
+):
+    from families.minimax_h3.tests.reference_factory_oracle import CASES, build_fixtures
+
+    fixtures = tmp_path / "factory"
+    fixtures.mkdir()
+    manifest = build_fixtures(checkpoint, fixtures)
+    assert [row["case"] for row in manifest] == [case[0] for case in CASES]
+    assert sum(row["constructs"] for row in manifest) == 4 and len(manifest) == 10
+    for record in manifest:
+        header, payloads = sections(Path(record["bundle"]))
+        for name, payload in payloads.items():
+            if name.endswith(".plan"):
+                assert payload == ("fixture:" + name).encode()
+        runtime = json.loads(payloads["runtime.json"])
+        if record["constructs"]:
+            assert set(payloads) == {*owner.PLAN_NAMES, "runtime.json", "tokenizer.json"}
+            assert runtime["weights_variant"] == "transformer_ref"
+            assert header["task"] == owner.TASK
+        elif record["case"] == "reject-missing-audio-plan":
+            assert "audio_vae.plan" not in payloads
+        elif record["case"] == "reject-text-only-weights":
+            assert runtime["weights_variant"] == "transformer"
+        elif record["case"] == "reject-residency-batch-mismatch":
+            assert runtime["memory_preset"] == "minimal" and runtime["vae_tile_batch"] == 28
+        elif record["case"] == "reject-invalid-statistics":
+            assert runtime["latents_std"][0] == -1.0
+        elif record["case"] == "reject-unknown-schema":
+            assert runtime["schema_version"] == "unknown/v2"
+        elif record["case"] == "reject-wrong-primary-task":
+            assert header["task"] == "image_generation"
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
