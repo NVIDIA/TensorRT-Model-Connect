@@ -212,6 +212,25 @@ def _mean2048(
     )[0]
 
 
+def _sum3(
+    network: trt.INetworkDefinition,
+    products: trt.ITensor,
+    bridge: Path,
+) -> trt.ITensor:
+    from tensorrt_model_connect.byok import add_kernel
+
+    if products.dtype != trt.float32 or tuple(products.shape) != (1, 2048, 3):
+        raise ValueError("LFM2 decode sum3 requires FP32 [1,2048,3] products")
+    return add_kernel(
+        network,
+        plugin_library=bridge,
+        kernel_name=_SUM3_KERNEL,
+        inputs=[products],
+        output_specs=[{"dims": [1, 2048], "dtype": "float32"}],
+        workspace_bytes=0,
+    )[0]
+
+
 def _rsqrt(
     network: trt.INetworkDefinition,
     variance: trt.ITensor,
@@ -589,9 +608,12 @@ def _add_batched_conv_layer(
     config: DenseLfm2Config,
     storage_dtype: np.dtype,
     work_dtype: trt.DataType,
+    sum3_bridge: Path | None = None,
 ) -> tuple[trt.ITensor, trt.ITensor]:
     """Full causal prefill and the original cached single-row convolution."""
     hidden, length = config.hidden_size, config.conv_l_cache
+    if sum3_bridge is not None and (hidden != 2048 or length != 3 or work_dtype != trt.bfloat16):
+        raise ValueError("LFM2 decode sum3 is limited to BF16 width-2048 three-tap convolution")
     projected = _matmul(
         network,
         hidden_state,
@@ -700,14 +722,27 @@ def _add_batched_conv_layer(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
     )
+    windows_fp32 = _cast(network, active_windows, trt.float32)
+    weights_fp32 = _cast(network, conv_weights, trt.float32)
     weighted = network.add_elementwise(
-        _cast(network, active_windows, trt.float32),
-        _cast(network, conv_weights, trt.float32),
+        windows_fp32,
+        weights_fp32,
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
     rounded = _cast(network, _cast(network, weighted, work_dtype), trt.float32)
     weighted = network.add_select(phase.get_output(0), rounded, weighted).get_output(0)
     convolved = network.add_reduce(weighted, trt.ReduceOperation.SUM, 1 << 2, False).get_output(0)
+    if sum3_bridge is not None:
+        # Keep the prompt reduction intact. Only the cached single-row branch
+        # materializes rounded products for the source-ordered decode sum.
+        decode_products = network.add_elementwise(
+            _cast(network, decode_window.get_output(0), trt.float32),
+            weights_fp32,
+            trt.ElementWiseOperation.PROD,
+        ).get_output(0)
+        decode_rounded = _cast(network, _cast(network, decode_products, work_dtype), trt.float32)
+        decode_sum = _sum3(network, decode_rounded, sum3_bridge)
+        convolved = network.add_select(decode_phase, decode_sum, convolved).get_output(0)
     convolved = _bias(
         network,
         _cast(network, convolved, work_dtype),
@@ -1240,6 +1275,11 @@ def build_lfm2_engine(
                 config=cfg,
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
+                **(
+                    {"sum3_bridge": attention_bridge}
+                    if attention_bridge is not None and cfg.conv_l_cache == 3
+                    else {}
+                ),
             )
             present_conv_outputs.append(present_conv)
             conv_index += 1
@@ -1510,6 +1550,7 @@ _ATTENTION_KERNEL = "lfm2.attention." + _ATTENTION_MODE
 _MEAN64_KERNEL = "lfm2.attention.mean64_fp32_v1"
 _MEAN2048_KERNEL = "lfm2.attention.mean2048_fp32_v1"
 _RSQRT_KERNEL = "lfm2.attention.rsqrt_fp32_v1"
+_SUM3_KERNEL = "lfm2.conv.sum3_fp32_v1"
 
 
 def _uses_w2(config: DenseLfm2Config, precision: str) -> bool:
@@ -1578,6 +1619,14 @@ def _register_attention(extension: ctypes.CDLL, library: Path) -> None:
     if error is not None:
         raise RuntimeError(
             "LFM2 wide mean2048 registration failed: " + error.decode("utf-8", errors="replace")
+        )
+
+    error = extension.trtmc_load_byok_kernel(
+        str(library).encode("utf-8"), b"sum3", _SUM3_KERNEL.encode("utf-8")
+    )
+    if error is not None:
+        raise RuntimeError(
+            "LFM2 decode sum3 registration failed: " + error.decode("utf-8", errors="replace")
         )
 
 

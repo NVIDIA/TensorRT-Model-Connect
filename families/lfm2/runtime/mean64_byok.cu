@@ -8,6 +8,8 @@
  * and setReduceConfig in aten/src/ATen/native/cuda/Reduce.cuh.
  * The FP32 reciprocal square root follows rsqrt_wrapper in the same commit's
  * aten/src/ATen/native/cuda/UnaryOpsKernel.cu: CUDA ::rsqrt(float), or ::rsqrtf.
+ * The decode SUM3 follows the same commit's ReduceSumProdKernel.cu FP32
+ * accumulation and Reduce.cuh contiguous width-three order with zero identities.
  */
 
 /*
@@ -328,7 +330,69 @@ void rsqrt_fp32(tvm::ffi::TensorView input, tvm::ffi::TensorView output) {
         TVM_FFI_THROW(RuntimeError) << cudaGetErrorString(error);
 }
 
+struct Sum3Contract {
+    int device;
+    const float* input;
+    float* output;
+    size_t input_bytes;
+    size_t output_bytes;
+};
+
+Sum3Contract validate_sum3_contract(tvm::ffi::TensorView input, tvm::ffi::TensorView output) {
+    require(input.ndim() == 3 && output.ndim() == 2,
+            "LFM2 SUM3 requires rank-three input and rank-two output");
+    require(input.size(0) == 1 && input.size(1) == 2048 && input.size(2) == 3,
+            "LFM2 SUM3 requires fixed input shape [1, 2048, 3]");
+    require(output.size(0) == 1 && output.size(1) == 2048,
+            "LFM2 SUM3 requires fixed output shape [1, 2048]");
+    for (const auto tensor : {input, output}) {
+        const auto dtype = tensor.dtype();
+        require(dtype.code == kDLFloat && dtype.bits == 32 && dtype.lanes == 1,
+                "LFM2 SUM3 requires FP32 tensors");
+        require(tensor.device().device_type == kDLCUDA && tensor.device().device_id >= 0,
+                "LFM2 SUM3 requires a CUDA device");
+        // Bound all dimensions before inspecting explicit or null strides.
+        require(tensor.IsContiguous(), "LFM2 SUM3 requires contiguous tensors");
+    }
+    require(input.device().device_id == output.device().device_id,
+            "LFM2 SUM3 tensors must use the same CUDA device");
+    constexpr size_t input_bytes = 6144 * sizeof(float);
+    constexpr size_t output_bytes = 2048 * sizeof(float);
+    const auto source = storage_address(input, input_bytes);
+    const auto target = storage_address(output, output_bytes);
+    require(source + input_bytes <= target || target + output_bytes <= source,
+            "LFM2 SUM3 input and output storage must not overlap");
+    return {input.device().device_id, reinterpret_cast<const float*>(source),
+            reinterpret_cast<float*>(target), input_bytes, output_bytes};
+}
+
+__global__ void ordered_sum3(const float* products, float* output) {
+    const int channel = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (channel < 2048) {
+        const float left =
+            __fadd_rn(__fadd_rn(0.0f, products[3 * channel]), products[3 * channel + 2]);
+        const float right = __fadd_rn(0.0f, products[3 * channel + 1]);
+        output[channel] = __fadd_rn(left, right);
+    }
+}
+
+void sum3_fp32(tvm::ffi::TensorView input, tvm::ffi::TensorView output) {
+    const auto contract = validate_sum3_contract(input, output);
+    int device = -1;
+    auto error = cudaGetDevice(&device);
+    if (error != cudaSuccess)
+        TVM_FFI_THROW(RuntimeError) << cudaGetErrorString(error);
+    require(device == contract.device, "LFM2 SUM3 tensor device is not the active CUDA device");
+    // CUDA's default stream is valid; preserve the caller's inherited stream.
+    const auto stream = reinterpret_cast<cudaStream_t>(TVMFFIEnvGetStream(kDLCUDA, device));
+    ordered_sum3<<<8, 256, 0, stream>>>(contract.input, contract.output);
+    error = cudaGetLastError();
+    if (error != cudaSuccess)
+        TVM_FFI_THROW(RuntimeError) << cudaGetErrorString(error);
+}
+
 } // namespace
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(mean64, mean64);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(rsqrt, rsqrt_fp32);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(sum3, sum3_fp32);

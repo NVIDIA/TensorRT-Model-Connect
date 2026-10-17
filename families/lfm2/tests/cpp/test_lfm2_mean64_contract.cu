@@ -300,6 +300,111 @@ void test_wide_rsqrt_contract() {
     rejected("mean64 remains rank-three only", [](Inputs& x) { x.squares.tensor.ndim = 2; });
 }
 
+struct Sum3Inputs {
+    View input{0x100000000ULL, {1, 2048, 3}};
+    View output{0x200000000ULL, {1, 2048}};
+
+    Sum3Contract validate() { return validate_sum3_contract(input.get(), output.get()); }
+};
+
+template <typename Mutation>
+void sum3_rejected(const char* message, Mutation mutation) {
+    Sum3Inputs input;
+    mutation(input);
+    bool caught = false;
+    try {
+        (void)input.validate();
+    } catch (const std::exception&) {
+        caught = true;
+    }
+    expect(caught, message);
+}
+
+void test_sum3_contract() {
+    Sum3Inputs input;
+    auto contract = input.validate();
+    expect(contract.input_bytes == 24576 && contract.output_bytes == 8192 && contract.device == 0,
+           "SUM3 fixed geometry and logical capacities with null strides");
+    int64_t xs[3] = {6144, 3, 1}, ys[2] = {2048, 1};
+    input.input.tensor.strides = xs;
+    input.output.tensor.strides = ys;
+    expect(input.validate().input_bytes == 24576, "SUM3 explicit contiguous strides");
+    input.input.tensor.byte_offset = 4;
+    input.output.tensor.byte_offset = 8;
+    contract = input.validate();
+    expect(reinterpret_cast<uintptr_t>(contract.input) == 0x100000004ULL &&
+               reinterpret_cast<uintptr_t>(contract.output) == 0x200000008ULL,
+           "SUM3 aligned byte offsets are applied once");
+    for (const int64_t rows : {int64_t{0}, int64_t{2}, int64_t{-1}, INT64_MAX})
+        sum3_rejected("SUM3 rejects unsupported rows",
+                      [&](Sum3Inputs& x) { x.input.shape[0] = rows; });
+    sum3_rejected("SUM3 hidden width", [](Sum3Inputs& x) { x.input.shape[1] = 2047; });
+    sum3_rejected("SUM3 reduction width", [](Sum3Inputs& x) { x.input.shape[2] = 4; });
+    sum3_rejected("SUM3 output rows", [](Sum3Inputs& x) { x.output.shape[0] = 2; });
+    sum3_rejected("SUM3 output width", [](Sum3Inputs& x) { x.output.shape[1] = 2049; });
+    sum3_rejected("SUM3 input rank", [](Sum3Inputs& x) { x.input.tensor.ndim = 2; });
+    sum3_rejected("SUM3 output rank", [](Sum3Inputs& x) { x.output.tensor.ndim = 3; });
+    for (const bool output : {false, true}) {
+        const auto target = [&](Sum3Inputs& x) -> DLTensor& {
+            return output ? x.output.tensor : x.input.tensor;
+        };
+        sum3_rejected("SUM3 FP32 width", [&](Sum3Inputs& x) { target(x).dtype.bits = 16; });
+        sum3_rejected("SUM3 FP32 code", [&](Sum3Inputs& x) { target(x).dtype.code = kDLInt; });
+        sum3_rejected("SUM3 scalar lanes", [&](Sum3Inputs& x) { target(x).dtype.lanes = 2; });
+        sum3_rejected("SUM3 CUDA device",
+                      [&](Sum3Inputs& x) { target(x).device.device_type = kDLCPU; });
+        sum3_rejected("SUM3 nonnegative device",
+                      [&](Sum3Inputs& x) { target(x).device.device_id = -1; });
+        sum3_rejected("SUM3 nonnull storage", [&](Sum3Inputs& x) { target(x).data = nullptr; });
+        sum3_rejected("SUM3 aligned storage", [&](Sum3Inputs& x) { target(x).byte_offset = 1; });
+        sum3_rejected("SUM3 offset overflow",
+                      [&](Sum3Inputs& x) { target(x).byte_offset = UINT64_MAX; });
+        sum3_rejected("SUM3 range overflow", [&](Sum3Inputs& x) {
+            target(x).data = reinterpret_cast<void*>(UINTPTR_MAX - 3);
+        });
+    }
+    sum3_rejected("SUM3 same device", [](Sum3Inputs& x) { x.output.tensor.device.device_id = 1; });
+    int64_t bad_xs[3] = {8192, 4, 1}, bad_ys[2] = {4096, 2};
+    sum3_rejected("SUM3 contiguous input", [&](Sum3Inputs& x) { x.input.tensor.strides = bad_xs; });
+    sum3_rejected("SUM3 contiguous output",
+                  [&](Sum3Inputs& x) { x.output.tensor.strides = bad_ys; });
+    sum3_rejected("SUM3 distinct storage",
+                  [](Sum3Inputs& x) { x.output.tensor.data = x.input.tensor.data; });
+    sum3_rejected("SUM3 overlapping output begins inside input", [](Sum3Inputs& x) {
+        x.output.tensor.data = reinterpret_cast<void*>(uintptr_t{0x100000004ULL});
+    });
+    sum3_rejected("SUM3 overlapping output begins before input", [](Sum3Inputs& x) {
+        x.output.tensor.data = reinterpret_cast<void*>(uintptr_t{0xFFFFFFFCULL});
+    });
+
+    // Exact adjacency is valid; one FP32 word of overlap is not.
+    Sum3Inputs after;
+    after.output.tensor.data = reinterpret_cast<void*>(uintptr_t{0x100000000ULL} + 24576);
+    expect(after.validate().output_bytes == 8192, "SUM3 output adjacent after input");
+    Sum3Inputs before;
+    before.output.tensor.data = reinterpret_cast<void*>(uintptr_t{0x100000000ULL} - 8192);
+    expect(before.validate().input_bytes == 24576, "SUM3 output adjacent before input");
+    sum3_rejected("SUM3 final input word overlaps output", [](Sum3Inputs& x) {
+        x.output.tensor.data = reinterpret_cast<void*>(uintptr_t{0x100000000ULL} + 24572);
+    });
+    for (const bool output : {false, true}) {
+        Sum3Inputs malformed;
+        auto& view = output ? malformed.output : malformed.input;
+        view.shape[0] = 2;
+        view.tensor.strides = reinterpret_cast<int64_t*>(uintptr_t{1});
+        bool shape_checked_first = false;
+        try {
+            (void)malformed.validate();
+        } catch (const std::exception& error) {
+            shape_checked_first = std::string(error.what()).find("fixed") != std::string::npos;
+        }
+        expect(shape_checked_first, "SUM3 bounds precede unreadable stride storage");
+    }
+    Sum3Inputs device;
+    device.input.tensor.device.device_id = device.output.tensor.device.device_id = 7;
+    expect(device.validate().device == 7, "SUM3 metadata preserves matching nonzero device ID");
+}
+
 } // namespace
 
 int main() {
@@ -422,6 +527,7 @@ int main() {
 
     test_rsqrt_contract();
     test_wide_rsqrt_contract();
+    test_sum3_contract();
     std::cout << checks << " CPU metadata checks; " << failures << " failures; no CUDA calls\n";
     return failures == 0 ? 0 : 1;
 }

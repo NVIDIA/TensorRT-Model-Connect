@@ -543,6 +543,37 @@ def test_wide_rsqrt_preserves_torch_fp32_rounding(gpu):
     assert distinguishes_split_operations, "fixture must distinguish the reference operator"
 
 
+def test_decode_sum3_preserves_order_and_positive_zero(gpu):
+    torch, trt, model = gpu
+    bridge, sampler = model._sampler_libraries()
+    extension = model._register_sampler(bridge, sampler)
+    model._register_attention(extension, model._attention_library(bridge))
+
+    def define(network):
+        products = network.add_input("products", trt.float32, (1, 2048, 3))
+        _output(network, model._sum3(network, products, bridge), "actual")
+
+    engine = TinyEngine(torch, trt, define)
+    # Literal exact-bit oracles distinguish the width-three addition order and
+    # positive-zero identities. The first triplet lands on a BF16 midpoint;
+    # cancellation (1 + 2^-24) + (-1) is zero, unlike (1 - 1) + 2^-24.
+    triplets = np.array(
+        [
+            [0xB0A10000, 0xBAC00000, 0xBC690000],
+            [0x80000000, 0x80000000, 0x80000000],
+            [0x3F800000, 0xBF800000, 0x33800000],
+        ],
+        dtype=np.uint32,
+    )
+    expected_bits = np.array([0xBC808000, 0x00000000, 0x00000000], dtype=np.uint32)
+    index = np.arange(2048) % len(triplets)
+    products = torch.from_numpy(triplets[index].view(np.float32).reshape(1, 2048, 3)).cuda()
+    actual = engine({"products": products})["actual"].cpu().numpy().view(np.uint32)
+    assert np.array_equal(actual, expected_bits[index].reshape(1, 2048)), (
+        "decode SUM3 must preserve the declared FP32 order and positive zero"
+    )
+
+
 def test_wide_mean2048_matches_torch_across_reduction_geometries(gpu):
     torch, trt, model = gpu
     bridge, sampler = model._sampler_libraries()

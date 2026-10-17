@@ -162,8 +162,8 @@ the rsqrt binding after adding epsilon. Subsequent multiplication, BF16 rounding
 and gamma remain unchanged; Q/K normalization and RoPE retain their existing
 route.
 
-The existing attention library exports `mean64`, `rsqrt` and `mean2048` alongside
-`run_rows`; all four exports are required before loading checkpoint weights or
+The existing attention library exports `mean64`, `rsqrt`, `mean2048` and `sum3` alongside
+`run_rows`; all five exports are required before loading checkpoint weights or
 the native decoder. A last-axis one-element Gather supplies each mean's dynamic
 output shape, and the helper does not read its values. The rsqrt output retains
 its FP32 input shape: `[R,1]` for wide norms or `[R,8|32,1]` for Q/K norms.
@@ -174,6 +174,17 @@ export fails without substituting different operations. Rebuilt helper binaries
 and new model plans require their own qualification; prior binary evidence does
 not automatically qualify them. A matched reduction or conditional block does
 not establish full-model semantic agreement.
+
+The same batched BF16 route uses `sum3` for the cached three-tap convolution
+reduction. Its fixed FP32 `[1,2048,3]` input contains the already BF16-rounded
+decode products. It follows the pinned Torch addition order: lane zero adds
+positive zero, tap zero and tap two; lane one adds positive zero and tap one;
+then the two lanes combine in FP32. The graph retains the existing BF16 sum cast
+and C multiplication. The prefill reduction remains in TensorRT, and the new
+decode branch materializes only one product window regardless of prompt length.
+Other cache lengths and legacy or generic convolution paths retain their existing
+reductions. The fixed
+operator and conditional-block checks do not qualify full-model semantics.
 
 The version-3 decoder retains the version-2
 `active_length_extent`, an INT32 dynamic input whose dimension carries the host

@@ -304,6 +304,12 @@ void register_attention(bool batched) {
                 throw std::runtime_error("lfm2 cannot register its wide mean2048 operation: " +
                                          message);
             }
+            if (const char* error = load(helper.c_str(), "sum3", "lfm2.conv.sum3_fp32_v1")) {
+                const std::string message(error);
+                dlclose(library);
+                throw std::runtime_error("lfm2 cannot register its decode sum3 operation: " +
+                                         message);
+            }
         }
         return library;
     };

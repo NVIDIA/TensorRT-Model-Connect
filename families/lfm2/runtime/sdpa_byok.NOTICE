@@ -5,6 +5,9 @@ The Q/K mean64 and width-2048 CUDA reductions are adapted from the same commit
 and aten/src/ATen/native/cuda/MemoryAccess.cuh).
 The Q/K FP32 reciprocal square root follows the same commit
 (aten/src/ATen/native/cuda/UnaryOpsKernel.cu), using CUDA float rsqrt.
+The three-tap decode sum follows that commit's BF16 sum FP32 accumulation and
+contiguous width-three reduction order with positive-zero identities
+(aten/src/ATen/native/cuda/ReduceSumProdKernel.cu and Reduce.cuh).
 
 From PyTorch:
 

@@ -322,6 +322,12 @@ def test_eligible_build_registers_before_weights_and_writes_exact_sampler_contra
             b"mean2048",
             b"lfm2.attention.mean2048_fp32_v1",
         ),
+        (
+            "register",
+            str(pair[0].parent / ATTENTION_LIBRARY).encode(),
+            b"sum3",
+            b"lfm2.conv.sum3_fp32_v1",
+        ),
         "weights",
         "decoder",
         "sampler",
@@ -601,14 +607,17 @@ def test_attention_capacity_preflight_is_independent_of_checkpoint_context(model
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("cache_length", [3, 4])
 def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
-    model, monkeypatch, tmp_path, enabled
+    model, monkeypatch, tmp_path, enabled, cache_length
 ):
     # Keep the actual decoder loop, KV update wiring, and attention dispatcher.
     # Unrelated dense arithmetic is replaced by shape-only CPU tensors.
     module = model.module
     config = module._load_config(request(tmp_path).model_dir)
+    config.raw["conv_L_cache"] = cache_length
     cfg = module.validate_dense_lfm2_config(config)
+    assert cfg.conv_l_cache == cache_length
     matrices, kv_projections = [], []
     updates, explicit, plugins, conv_calls, last_rows, qk_norms, wide_norms = (
         [],
@@ -660,7 +669,7 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
         module,
         "_add_conv_layer",
         lambda network, value, state, *args, **kw: (
-            conv_calls.append(("legacy", value, state)) or value,
+            conv_calls.append(("legacy", value, state, kw)) or value,
             tensor(state.shape),
         ),
     )
@@ -668,7 +677,7 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
         module,
         "_add_batched_conv_layer",
         lambda network, value, state, *args, **kw: (
-            conv_calls.append(("batched", value, state)) or value,
+            conv_calls.append(("batched", value, state, kw)) or value,
             tensor(state.shape),
         ),
     )
@@ -765,7 +774,11 @@ def test_decoder_routes_all_eight_attention_sites_and_preserves_cache_geometry(
     assert len(conv_calls) == 22
     assert {call[0] for call in conv_calls} == {"batched" if enabled else "legacy"}
     assert all(call[1].shape == ((-1 if enabled else 1), 2048) for call in conv_calls)
-    assert all(call[2].shape == (2048, 3) for call in conv_calls)
+    assert all(call[2].shape == (2048, cache_length) for call in conv_calls)
+    expected_sum3_bridge = bridge if enabled and cache_length == 3 else None
+    assert all(call[3].get("sum3_bridge") == expected_sum3_bridge for call in conv_calls)
+    if expected_sum3_bridge is None:
+        assert all("sum3_bridge" not in call[3] for call in conv_calls)
     assert [value.shape for value in last_rows] == ([(-1, 2048)] if enabled else [])
     assert next(value for value in network.outputs if value.name == "logits").shape == (1, 128000)
     assert all(entry[0].shape == (1, 8, 131072, 64) for entry in updates)
@@ -1039,15 +1052,16 @@ def test_kv_projection_rejects_invalid_contract(model, shape, dtype, weight_shap
 
 
 @pytest.mark.parametrize(
-    "missing,label,predecessor",
+    "missing,label,predecessor,namespace",
     [
-        ("mean64", "Q/K mean64", b"run_rows"),
-        ("rsqrt", "Q/K rsqrt", b"mean64"),
-        ("mean2048", "wide mean2048", b"rsqrt"),
+        ("mean64", "Q/K mean64", b"run_rows", "attention"),
+        ("rsqrt", "Q/K rsqrt", b"mean64", "attention"),
+        ("mean2048", "wide mean2048", b"rsqrt", "attention"),
+        ("sum3", "decode sum3", b"mean2048", "conv"),
     ],
 )
-def test_missing_normalization_export_fails_before_weights(
-    model, monkeypatch, tmp_path, missing, label, predecessor
+def test_missing_attention_helper_export_fails_before_weights(
+    model, monkeypatch, tmp_path, missing, label, predecessor, namespace
 ):
     pair = installation(tmp_path / "runtime")
     monkeypatch.setenv("CMAKE_PREFIX_PATH", str(pair[0].parent))
@@ -1067,7 +1081,7 @@ def test_missing_normalization_export_fails_before_weights(
     assert calls[-1] == (
         str(pair[0].parent / ATTENTION_LIBRARY).encode(),
         missing.encode(),
-        f"lfm2.attention.{missing}_fp32_v1".encode(),
+        f"lfm2.{namespace}.{missing}_fp32_v1".encode(),
     )
     assert "weights" not in model.events and "decoder" not in model.events
 
@@ -1383,3 +1397,214 @@ def test_rms_norm_routes_qualified_rsqrt_and_preserves_legacy_sqrt_recip(
         assert [event[1] for event in events if event[0] == "unary"] == ["sqrt", "recip"]
     # Gamma multiplication still receives the explicitly model-dtype activation.
     assert events[-1][1].dtype == events[-1][2].dtype == dtype
+
+
+def test_sum3_binds_only_one_fixed_decode_window(model, monkeypatch):
+    products = SimpleNamespace(shape=(1, 2048, 3), dtype="fp32")
+    output = SimpleNamespace(shape=(1, 2048), dtype="fp32")
+    network, bridge, bindings = object(), Path("/installed/bridge.so"), []
+    monkeypatch.setattr(
+        model.byok,
+        "add_kernel",
+        lambda actual_network, **kw: bindings.append((actual_network, kw)) or [output],
+    )
+    assert model.module._sum3(network, products, bridge) is output
+    assert bindings == [
+        (
+            network,
+            {
+                "plugin_library": bridge,
+                "kernel_name": "lfm2.conv.sum3_fp32_v1",
+                "inputs": [products],
+                "output_specs": [{"dims": [1, 2048], "dtype": "float32"}],
+                "workspace_bytes": 0,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "shape,dtype",
+    [
+        ((-1, 2048, 3), "fp32"),
+        ((17, 2048, 3), "fp32"),
+        ((1, 2048, 3), "bf16"),
+        ((1, 1024, 3), "fp32"),
+        ((1, 2048, 4), "fp32"),
+        ((2048, 3), "fp32"),
+    ],
+)
+def test_sum3_rejects_non_decode_geometry(model, shape, dtype):
+    with pytest.raises(ValueError, match="sum3 requires FP32"):
+        model.module._sum3(object(), SimpleNamespace(shape=shape, dtype=dtype), Path("bridge.so"))
+
+
+@pytest.mark.parametrize(
+    "hidden,length,dtype", [(1024, 3, "bf16"), (2048, 4, "bf16"), (2048, 3, "fp16")]
+)
+def test_sum3_bridge_rejects_unqualified_conv_before_graph(model, hidden, length, dtype):
+    with pytest.raises(ValueError, match="sum3 is limited to BF16"):
+        model.module._add_batched_conv_layer(
+            object(),
+            object(),
+            object(),
+            object(),
+            {},
+            position_id=object(),
+            prefix="test",
+            config=SimpleNamespace(hidden_size=hidden, conv_l_cache=length),
+            storage_dtype=np.dtype(np.float32),
+            work_dtype=dtype,
+            sum3_bridge=Path("bridge.so"),
+        )
+
+
+@pytest.mark.parametrize("rows", [1, 17, -1])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_batched_conv_keeps_prefill_reduce_and_bounds_decode_products(
+    model, monkeypatch, rows, enabled
+):
+    module, hidden = model.module, 2048
+    for name, values in [
+        (
+            "ElementWiseOperation",
+            {"PROD": "prod", "SUM": "sum", "SUB": "sub", "MIN": "min", "EQUAL": "equal"},
+        ),
+        ("ReduceOperation", {"SUM": "sum"}),
+    ]:
+        monkeypatch.setattr(module.trt, name, SimpleNamespace(**values), raising=False)
+
+    def tensor(shape, dtype="bf16", kind="input", inputs=()):
+        return SimpleNamespace(shape=tuple(shape), dtype=dtype, kind=kind, inputs=inputs)
+
+    def layer(value):
+        return SimpleNamespace(get_output=lambda index: value)
+
+    def broadcast(*shapes):
+        width = max(map(len, shapes))
+        padded = [(1,) * (width - len(s)) + tuple(s) for s in shapes]
+        return tuple(next((x for x in dims if x != 1), 1) for dims in zip(*padded))
+
+    class Shuffle:
+        def __init__(self, value):
+            self.value, self.first_transpose, self.reshape_dims = value, None, None
+
+        def get_output(self, index):
+            shape = self.value.shape
+            if self.first_transpose is not None:
+                shape = tuple(shape[i] for i in self.first_transpose)
+            if self.reshape_dims is not None:
+                reshaped = list(self.reshape_dims)
+                if reshaped.count(-1) == 1 and all(d >= 0 for d in shape):
+                    known = int(np.prod([d for d in reshaped if d != -1]))
+                    reshaped[reshaped.index(-1)] = int(np.prod(shape)) // known
+                shape = tuple(reshaped)
+            return tensor(shape, self.value.dtype, "shuffle", (self.value,))
+
+    class Concat:
+        def __init__(self, values):
+            self.values, self.axis = values, 0
+
+        def get_output(self, index):
+            shape = list(self.values[0].shape)
+            dims = [v.shape[self.axis] for v in self.values]
+            shape[self.axis] = -1 if -1 in dims else sum(dims)
+            return tensor(shape, self.values[0].dtype, "concat", tuple(self.values))
+
+    reductions, selections, ordered, projections = [], [], [], []
+
+    def slice_tensor(value, start, size, stride):
+        out = tensor(size, value.dtype, "slice", (value,))
+
+        def set_input(index, shape):
+            assert index == 2
+            out.shape = (value.shape[0], size[1])
+
+        return SimpleNamespace(get_output=lambda index: out, set_input=set_input)
+
+    def elementwise(left, right, op):
+        return layer(
+            tensor(
+                broadcast(left.shape, right.shape),
+                "bool" if op == "equal" else left.dtype,
+                op,
+                (left, right),
+            )
+        )
+
+    def select(condition, yes, no):
+        out = tensor(broadcast(no.shape, yes.shape), yes.dtype, "select", (condition, yes, no))
+        selections.append(out)
+        return layer(out)
+
+    def reduce(value, op, axes, keep):
+        assert op == "sum" and axes == 4 and not keep
+        out = tensor(value.shape[:2], value.dtype, "reduce", (value,))
+        reductions.append(out)
+        return layer(out)
+
+    network = SimpleNamespace(
+        add_shape=lambda value: layer(tensor((len(value.shape),), "int64")),
+        add_slice=slice_tensor,
+        add_shuffle=Shuffle,
+        add_concatenation=Concat,
+        add_elementwise=elementwise,
+        add_select=select,
+        add_reduce=reduce,
+        add_gather=lambda value, indices, axis: layer(
+            tensor(
+                value.shape[:axis] + indices.shape + value.shape[axis + 1 :],
+                value.dtype,
+                "gather",
+                (value, indices),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        module, "_constant", lambda net, shape, values, **kw: tensor(shape, "int32")
+    )
+    monkeypatch.setattr(module, "_work_constant", lambda net, shape, values, **kw: tensor(shape))
+    monkeypatch.setattr(
+        module, "_cast", lambda net, value, dtype: tensor(value.shape, dtype, "cast", (value,))
+    )
+    monkeypatch.setattr(module, "_bias", lambda net, value, *args, **kw: value)
+
+    def matmul(net, value, weights, **kw):
+        projections.append(value)
+        return tensor((value.shape[0], kw["rhs_width"]))
+
+    monkeypatch.setattr(module, "_matmul", matmul)
+    bridge = Path("bridge.so")
+
+    def sum3(net, products, actual_bridge):
+        assert net is network and actual_bridge == bridge
+        assert products.shape == (1, hidden, 3) and products.dtype == "fp32"
+        assert products.kind == "cast" and products.inputs[0].dtype == "bf16"
+        assert products.inputs[0].inputs[0].kind == "prod"
+        out = tensor((1, hidden), "fp32", "ordered", (products,))
+        ordered.append(out)
+        return out
+
+    monkeypatch.setattr(module, "_sum3", sum3)
+    phase = tensor((1, 1), "bool")
+    output, present = module._add_batched_conv_layer(
+        network,
+        tensor((rows, hidden)),
+        tensor((hidden, 3)),
+        phase,
+        {"test.conv_in": None, "test.conv_out": None, "test.conv_weight": None},
+        position_id=tensor((rows,), "int32"),
+        prefix="test",
+        config=SimpleNamespace(hidden_size=hidden, conv_l_cache=3),
+        storage_dtype=np.dtype(np.float32),
+        work_dtype="bf16",
+        sum3_bridge=bridge if enabled else None,
+    )
+    assert output.shape == (rows, hidden) and present.shape == (hidden, 3)
+    assert len(reductions) == 1 and reductions[0].shape == (rows, hidden)
+    assert len(ordered) == int(enabled)
+    sum_input = projections[-1].inputs[1].inputs[0]
+    if enabled:
+        assert sum_input.kind == "select" and sum_input.inputs == (phase, ordered[0], reductions[0])
+    else:
+        assert sum_input is reductions[0]
