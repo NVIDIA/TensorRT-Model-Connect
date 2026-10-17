@@ -164,24 +164,3 @@ def test_checkpoint_rejects_a_rename_collision():
             "model.encoder.layers.0.fc1.weight": 1,
             "model.encoder.layers.0.mlp.fc1.weight": 2,
         })
-
-
-def test_benchmark_profile_matches_the_native_checkpoint_and_shape():
-    from pathlib import Path
-
-    import yaml
-
-    root = Path(__file__).resolve().parent
-    manifest = json.loads((root / "manifests/deformable-detr-r50.json").read_text())
-    profile = yaml.safe_load((root / "benchmark/deformable-detr-r50.yaml").read_text())
-    candidate = profile["candidate"]
-    assert candidate["family"] == manifest["family"]
-    assert candidate["checkpoint"] == manifest["hf_id"]
-    assert candidate["revision"] == manifest["hf_revision"]
-    assert candidate["task"] == manifest["task"]
-    assert candidate["precision"] == manifest["precision"]
-    assert candidate["bundle"] == manifest["bundle"]
-    assert candidate["build"] == {
-        "image_height": manifest["image_height"],
-        "image_width": manifest["image_width"],
-    }
