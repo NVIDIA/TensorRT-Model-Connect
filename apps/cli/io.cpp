@@ -21,9 +21,8 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <vector>
-
 #include <turbojpeg.h>
+#include <vector>
 
 namespace trtmc::cli::io {
 
@@ -215,8 +214,7 @@ LoadedImage read_image_stb(const std::string& path) {
 LoadedImage read_jpeg(const std::string& path) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     const auto size = input.tellg();
-    if (size <= 0 || static_cast<std::uint64_t>(size) >
-                         std::numeric_limits<unsigned long>::max())
+    if (size <= 0 || static_cast<std::uint64_t>(size) > std::numeric_limits<unsigned long>::max())
         return {};
     std::vector<unsigned char> compressed(static_cast<std::size_t>(size));
     input.seekg(0);
@@ -227,8 +225,8 @@ LoadedImage read_jpeg(const std::string& path) {
     if (!decoder)
         return {};
     int width = 0, height = 0, subsampling = 0, colorspace = 0;
-    if (tjDecompressHeader3(decoder.get(), compressed.data(), compressed.size(),
-                            &width, &height, &subsampling, &colorspace) != 0 ||
+    if (tjDecompressHeader3(decoder.get(), compressed.data(), compressed.size(), &width, &height,
+                            &subsampling, &colorspace) != 0 ||
         width <= 0 || height <= 0)
         return {};
     // Preserve the existing CLI conversion for CMYK/YCCK inputs. RGB and
@@ -240,9 +238,8 @@ LoadedImage read_jpeg(const std::string& path) {
         return {};
     const auto count = static_cast<std::size_t>(width) * height * 3U;
     std::vector<unsigned char> raw(count);
-    if (tjDecompress2(decoder.get(), compressed.data(), compressed.size(), raw.data(),
-                      width, 0, height, TJPF_RGB,
-                      TJFLAG_ACCURATEDCT | TJFLAG_STOPONWARNING) != 0)
+    if (tjDecompress2(decoder.get(), compressed.data(), compressed.size(), raw.data(), width, 0,
+                      height, TJPF_RGB, TJFLAG_ACCURATEDCT | TJFLAG_STOPONWARNING) != 0)
         return {};
     LoadedImage result;
     result.width = width;
@@ -258,8 +255,8 @@ LoadedImage read_jpeg(const std::string& path) {
 LoadedImage read_image(const std::string& path) {
     std::ifstream input(path, std::ios::binary);
     unsigned char signature[2]{};
-    if (input.read(reinterpret_cast<char*>(signature), 2) &&
-        signature[0] == 0xff && signature[1] == 0xd8)
+    if (input.read(reinterpret_cast<char*>(signature), 2) && signature[0] == 0xff &&
+        signature[1] == 0xd8)
         return read_jpeg(path);
     return read_image_stb(path);
 }

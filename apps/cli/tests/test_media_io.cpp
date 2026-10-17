@@ -26,10 +26,12 @@ int main(int argc, char** argv) {
     };
     const fs::path fixtures(argv[1]);
     for (const auto* name : {"rgb-444", "rgb-422", "rgb-420", "progressive-420", "grayscale"}) {
-        const auto actual = trtmc::cli::io::read_image((fixtures / (std::string(name) + ".jpg")).string());
-        const auto golden = trtmc::cli::io::read_image((fixtures / (std::string(name) + ".png")).string());
-        check(actual.width == 37 && actual.height == 29 &&
-                  golden.width == 37 && golden.height == 29,
+        const auto actual =
+            trtmc::cli::io::read_image((fixtures / (std::string(name) + ".jpg")).string());
+        const auto golden =
+            trtmc::cli::io::read_image((fixtures / (std::string(name) + ".png")).string());
+        check(actual.width == 37 && actual.height == 29 && golden.width == 37 &&
+                  golden.height == 29,
               std::string(name) + ": original dimensions must be preserved");
         check(!actual.empty() && actual.pixels == golden.pixels,
               std::string(name) + ": decoded RGB must exactly match Pillow");
@@ -39,9 +41,10 @@ int main(int argc, char** argv) {
 
     // The decoder is selected by content, not by a filename extension. Use a
     // unique task directory so separate test processes cannot overwrite it.
-    const auto temporary = fs::temp_directory_path() /
-        ("trtmc-jpeg-" + std::to_string(
-            fs::file_time_type::clock::now().time_since_epoch().count()));
+    const auto temporary =
+        fs::temp_directory_path() /
+        ("trtmc-jpeg-" +
+         std::to_string(fs::file_time_type::clock::now().time_since_epoch().count()));
     fs::create_directory(temporary);
     fs::copy_file(fixtures / "rgb-420.jpg", temporary / "input.bin");
     check(trtmc::cli::io::read_image((temporary / "input.bin").string()).pixels ==
