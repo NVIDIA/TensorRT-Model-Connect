@@ -185,6 +185,33 @@ def _mean64(
     )[0]
 
 
+def _mean2048(
+    network: trt.INetworkDefinition,
+    squared: trt.ITensor,
+    bridge: Path,
+) -> trt.ITensor:
+    from tensorrt_model_connect.byok import add_kernel
+
+    shape = tuple(squared.shape)
+    if (
+        squared.dtype != trt.float32
+        or len(shape) != 2
+        or shape[1] != 2048
+        or (shape[0] != -1 and not 1 <= shape[0] <= 131072)
+    ):
+        raise ValueError("LFM2 mean2048 requires FP32 [R,2048] squares")
+    index = _constant(network, (1,), np.zeros((1,), dtype=np.int32), np_dtype=np.int32)
+    shape_like = network.add_gather(squared, index, 1).get_output(0)
+    return add_kernel(
+        network,
+        plugin_library=bridge,
+        kernel_name=_MEAN2048_KERNEL,
+        inputs=[squared, shape_like],
+        output_specs=[{"dims": "same_as_input_1", "dtype": "float32"}],
+        workspace_bytes=0,
+    )[0]
+
+
 def _rsqrt(
     network: trt.INetworkDefinition,
     variance: trt.ITensor,
@@ -220,9 +247,12 @@ def _rms_norm(
     epsilon: float,
     output_dtype: trt.DataType,
     mean64_bridge: Path | None = None,
+    mean2048_bridge: Path | None = None,
 ) -> trt.ITensor:
     if mean64_bridge is not None and (width != 64 or output_dtype != trt.bfloat16):
         raise ValueError("LFM2 mean64 is limited to BF16 Q/K normalization")
+    if mean2048_bridge is not None and (width != 2048 or output_dtype != trt.bfloat16):
+        raise ValueError("LFM2 mean2048 is limited to BF16 width-2048 normalization")
     if tuple(np.asarray(gamma).shape) != (width,):
         raise ValueError(f"mapped LFM2 RMSNorm weight must have shape ({width},)")
     fp32 = _cast(network, tensor, trt.float32)
@@ -233,11 +263,12 @@ def _rms_norm(
         fp32,
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
-    mean = (
-        _mean64(network, squared, mean64_bridge)
-        if mean64_bridge is not None
-        else network.add_reduce(squared, trt.ReduceOperation.AVG, axes, True).get_output(0)
-    )
+    if mean64_bridge is not None:
+        mean = _mean64(network, squared, mean64_bridge)
+    elif mean2048_bridge is not None:
+        mean = _mean2048(network, squared, mean2048_bridge)
+    else:
+        mean = network.add_reduce(squared, trt.ReduceOperation.AVG, axes, True).get_output(0)
     eps_shape = (1,) * rank
     eps = _constant(
         network,
@@ -1145,6 +1176,7 @@ def build_lfm2_engine(
             width=cfg.hidden_size,
             epsilon=cfg.norm_eps,
             output_dtype=work_dtype,
+            mean2048_bridge=attention_bridge,
         )
         if layer_type == "conv":
             conv_builder = (
@@ -1270,6 +1302,7 @@ def build_lfm2_engine(
             width=cfg.hidden_size,
             epsilon=cfg.norm_eps,
             output_dtype=work_dtype,
+            mean2048_bridge=attention_bridge,
         )
         ffn_output = _add_swiglu(
             network,
@@ -1300,6 +1333,7 @@ def build_lfm2_engine(
         width=cfg.hidden_size,
         epsilon=cfg.norm_eps,
         output_dtype=work_dtype,
+        mean2048_bridge=attention_bridge,
     )
     if attention_bridge is not None:
         hidden_state = _last_row(network, hidden_state)
@@ -1410,6 +1444,7 @@ _W2_ROWS_KERNEL = "lfm2.w2.cublas_bf16_rows_v1"
 _ATTENTION_MODE = "cudnn_bf16_batched_v1"
 _ATTENTION_KERNEL = "lfm2.attention." + _ATTENTION_MODE
 _MEAN64_KERNEL = "lfm2.attention.mean64_fp32_v1"
+_MEAN2048_KERNEL = "lfm2.attention.mean2048_fp32_v1"
 _RSQRT_KERNEL = "lfm2.attention.rsqrt_fp32_v1"
 
 
@@ -1471,6 +1506,14 @@ def _register_attention(extension: ctypes.CDLL, library: Path) -> None:
     if error is not None:
         raise RuntimeError(
             "LFM2 Q/K rsqrt registration failed: " + error.decode("utf-8", errors="replace")
+        )
+
+    error = extension.trtmc_load_byok_kernel(
+        str(library).encode("utf-8"), b"mean2048", _MEAN2048_KERNEL.encode("utf-8")
+    )
+    if error is not None:
+        raise RuntimeError(
+            "LFM2 wide mean2048 registration failed: " + error.decode("utf-8", errors="replace")
         )
 
 

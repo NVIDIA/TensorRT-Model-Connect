@@ -506,3 +506,32 @@ def test_qk_rsqrt_preserves_torch_fp32_rounding(gpu, heads):
         actual = engine({"variance": variance})["actual"]
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert distinguishes_split_operations, "fixture must distinguish the reference operator"
+
+
+def test_wide_mean2048_matches_torch_across_reduction_geometries(gpu):
+    torch, trt, model = gpu
+    bridge, sampler = model._sampler_libraries()
+    extension = model._register_sampler(bridge, sampler)
+    model._register_attention(extension, model._attention_library(bridge))
+
+    def define(network):
+        squares = network.add_input("squares", trt.float32, (-1, 2048))
+        _output(network, model._mean2048(network, squares, bridge), "actual")
+
+    engine = TinyEngine(
+        torch,
+        trt,
+        define,
+        {"squares": ((1, 2048), (17, 2048), (20, 2048))},
+    )
+    # Cover every block-width branch and incomplete final row groups with the
+    # same deterministic BF16 values spanning a wide exponent range.
+    for rows in (1, 2, 3, 4, 8, 16, 17, 20):
+        index = torch.arange(rows * 2048, device="cuda", dtype=torch.int64)
+        mantissa = 1 + (index % 7).float() / 8
+        exponent = ((index // 7) % 25 - 12).to(torch.int32)
+        values = torch.ldexp(mantissa, exponent).reshape(rows, 2048).bfloat16()
+        squares = values.float().square()
+        expected = squares.mean(dim=-1, keepdim=True)
+        actual = engine({"squares": squares})["actual"]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)

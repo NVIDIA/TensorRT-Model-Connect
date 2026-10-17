@@ -51,7 +51,8 @@ set(_lfm2_runtime_libraries "[]")
 if(TARGET trtmc_byok_tvm_ffi)
   include("${CMAKE_CURRENT_LIST_DIR}/cudnn.cmake")
   if(TARGET lfm2_cudnn)
-    add_library(trtmc_lfm2_sdpa_byok SHARED sdpa_byok.cpp mean64_byok.cu)
+    add_library(trtmc_lfm2_sdpa_byok SHARED
+      sdpa_byok.cpp mean64_byok.cu mean2048_byok.cu)
     target_include_directories(trtmc_lfm2_sdpa_byok SYSTEM PRIVATE
       ${LFM2_CUDNN_FRONTEND_INCLUDE_DIR} ${LFM2_CUDNN_INCLUDE_DIR}
       ${CUDAToolkit_INCLUDE_DIRS} ${TRTMC_TVM_FFI_INCLUDE_DIR})
@@ -188,6 +189,18 @@ if(TRTMC_BUILD_TESTS)
       CUDA_RUNTIME_LIBRARY Shared
       BUILD_RPATH "${CMAKE_BINARY_DIR};${TRTMC_TVM_FFI_LIBRARY_DIR}")
     add_test(NAME test_lfm2_mean64_contract COMMAND test_lfm2_mean64_contract)
+    add_executable(test_lfm2_mean2048_contract
+      ${PROJECT_SOURCE_DIR}/families/lfm2/tests/cpp/test_lfm2_mean2048_contract.cu)
+    target_include_directories(test_lfm2_mean2048_contract PRIVATE ${PROJECT_SOURCE_DIR})
+    target_include_directories(test_lfm2_mean2048_contract SYSTEM PRIVATE
+      ${CUDAToolkit_INCLUDE_DIRS} ${TRTMC_TVM_FFI_INCLUDE_DIR})
+    target_link_libraries(test_lfm2_mean2048_contract PRIVATE CUDA::cudart ${TRTMC_TVM_FFI_LIBRARY})
+    target_compile_options(test_lfm2_mean2048_contract PRIVATE
+      "$<$<COMPILE_LANGUAGE:CUDA>:-O2;--ftz=false;--prec-div=true;--fmad=true>")
+    set_target_properties(test_lfm2_mean2048_contract PROPERTIES
+      CUDA_RUNTIME_LIBRARY Shared
+      BUILD_RPATH "${CMAKE_BINARY_DIR};${TRTMC_TVM_FFI_LIBRARY_DIR}")
+    add_test(NAME test_lfm2_mean2048_contract COMMAND test_lfm2_mean2048_contract)
   endif()
   if(TARGET trtmc_backend_trt)
     add_executable(lfm2_logits_probe

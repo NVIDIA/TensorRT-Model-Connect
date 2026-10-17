@@ -289,6 +289,13 @@ void register_attention(bool batched) {
                 throw std::runtime_error("lfm2 cannot register its Q/K rsqrt operation: " +
                                          message);
             }
+            if (const char* error =
+                    load(helper.c_str(), "mean2048", "lfm2.attention.mean2048_fp32_v1")) {
+                const std::string message(error);
+                dlclose(library);
+                throw std::runtime_error("lfm2 cannot register its wide mean2048 operation: " +
+                                         message);
+            }
         }
         return library;
     };

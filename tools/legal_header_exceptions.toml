@@ -49,6 +49,13 @@ license = "Apache-2.0 AND BSD-3-Clause"
 source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cuda/Reduce.cuh"
 
 [[exceptions]]
+path = "families/lfm2/runtime/mean2048_byok.cu"
+# Upstream license: https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/LICENSE
+reason = "Family-owned adaptation of the upstream vectorized CUDA mean reduction; preserve the combined license identifier and retained BSD copyright, conditions, and disclaimer."
+license = "Apache-2.0 AND BSD-3-Clause"
+source = "https://github.com/pytorch/pytorch/blob/7661cd9c6b841b62b7f411aa52ec51f05457263b/aten/src/ATen/native/cuda/Reduce.cuh"
+
+[[exceptions]]
 path = "families/lfm2/runtime/sdpa_byok.NOTICE"
 reason = "Packaged third-party notice; preserve the complete upstream BSD copyright, conditions, and disclaimer alongside the NVIDIA contribution license."
 license = "Apache-2.0 AND BSD-3-Clause"
