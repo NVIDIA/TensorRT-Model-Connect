@@ -59,6 +59,9 @@ def _require(weights: WeightDict, key: str) -> np.ndarray:
 def navit_bucket_table() -> np.ndarray:
     """SiglipVisionEmbeddings' bucketized patch coordinates by valid patch count.
 
+    Ported from the checkpoint's vision_siglip_navit.py (Apache-2.0); see
+    families/phi4_multimodal/NOTICE.
+
     Row ``n`` holds ``bucketize(arange(0, 1 - 1e-6, 1 / n), arange(1/32, 1, 1/32),
     right=True)`` for ``n`` valid patches, evaluated in the checkpoint's float32
     arithmetic; row 0 (no valid patches) stays zero.
