@@ -4,7 +4,7 @@
   "hf_revision": "7e2c5583769f54514fd87e3ba9de408e33eaba0f",
   "bundle": "hrnet-w18-ms-aug-in1k.bundle",
   "family": "timm_hrnet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {

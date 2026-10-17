@@ -30,6 +30,6 @@ describe = family_support(
         "res2net101d",
         "res2next50",
     ),
-    tasks=("classification",),
-    default_task="classification",
+    tasks=("image_to_class_scores",),
+    default_task="image_to_class_scores",
 )
