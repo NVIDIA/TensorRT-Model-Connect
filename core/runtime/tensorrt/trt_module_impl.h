@@ -32,7 +32,7 @@ class TrtModuleImpl final : public ITrtModule {
                   cudaStream_t stream, int32_t profile_idx = 0,
                   void* distributed_communicator = nullptr,
                   const std::vector<ModuleExternalBinding>& external_bindings = {},
-                  bool backend_managed_cuda_graph = false);
+                  bool backend_managed_cuda_graph = false, bool deferred_activation_memory = false);
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -80,6 +80,7 @@ class TrtModuleImpl final : public ITrtModule {
         bool is_input{true};
         bool is_external{false};
         bool is_dynamic{false};
+        bool shape_valid{true};
     };
     struct TimingEvent {
         cudaEvent_t start{nullptr};
@@ -94,6 +95,13 @@ class TrtModuleImpl final : public ITrtModule {
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
     bool backend_managed_cuda_graph_{false};
+    bool deferred_activation_memory_{false};
+    bool activation_memory_dirty_{true};
+    bool activation_shape_inputs_{false};
+    bool activation_work_pending_{false};
+    void* activation_memory_{nullptr};
+    std::size_t activation_capacity_{0};
+    std::size_t activation_required_{0};
     bool alias_groups_ready_{true};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
@@ -112,6 +120,8 @@ class TrtModuleImpl final : public ITrtModule {
     validate_initial_external_bindings(nvinfer1::ICudaEngine* engine,
                                        const std::vector<ModuleExternalBinding>& external_bindings);
     void bind_alias_group(const std::string& input_name, void* ptr);
+    bool alias_group_has_address(const std::string& input_name, void* ptr) const;
+    bool bind_external_alias(const std::string& name, void* ptr);
     bool should_allocate_input(const std::string& name, std::size_t nbytes) const;
     void validate_alias_outputs_exist(const std::vector<std::string>& output_names) const;
     void bind_alias_outputs_or_invalidate(const std::vector<std::string>& output_names, void* ptr);
@@ -129,7 +139,19 @@ class TrtModuleImpl final : public ITrtModule {
                                   nvinfer1::OptProfileSelector selector);
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
+    bool runtime_shape_needs_update(const BufferEntry& entry,
+                                    const std::vector<int64_t>& shape) const;
+    void set_runtime_input_shape(const std::string& name, BufferEntry& entry,
+                                 const nvinfer1::Dims& dims);
     void execute_enqueue();
+    void synchronize_activation_use();
+    std::size_t query_activation_bytes();
+    static std::size_t validate_activation_query(std::size_t required, bool reported_error);
+    bool bind_activation_memory(void* memory, std::size_t capacity);
+    void reserve_activation_memory(std::size_t required);
+    void* allocate_activation_memory(std::size_t required);
+    void commit_activation_growth(void* memory, std::size_t capacity);
+    void prepare_activation_memory();
     void flush_timing_events();
     bool begin_timing_event(TimingEvent& event);
     void finish_timing_event(TimingEvent event);

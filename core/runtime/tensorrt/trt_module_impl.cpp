@@ -8,9 +8,13 @@
 #include "runtime/primitives/trt_common.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -18,6 +22,73 @@
 namespace trtmc {
 
 namespace {
+
+// Query APIs return zero or void on error. Preserve the caller's recorder while
+// distinguishing an empty activation requirement from a failed TensorRT call.
+class ScopedTrtErrors final : public nvinfer1::IErrorRecorder {
+  public:
+    explicit ScopedTrtErrors(nvinfer1::IExecutionContext& context)
+        : context_(context), previous_(context.getErrorRecorder()) {
+        if (previous_)
+            previous_->incRefCount();
+        context_.setErrorRecorder(this);
+    }
+    ~ScopedTrtErrors() override {
+        context_.setErrorRecorder(previous_);
+        if (previous_)
+            previous_->decRefCount();
+    }
+    int32_t getNbErrors() const noexcept override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return failed_ ? 1 : 0;
+    }
+    nvinfer1::ErrorCode getErrorCode(int32_t) const noexcept override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return code_;
+    }
+    ErrorDesc getErrorDesc(int32_t) const noexcept override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return description_.data();
+    }
+    bool hasOverflowed() const noexcept override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return overflow_;
+    }
+    void clear() noexcept override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        failed_ = false;
+        overflow_ = false;
+    }
+    bool reportError(nvinfer1::ErrorCode code, ErrorDesc description) noexcept override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (failed_) {
+                overflow_ = true;
+            } else {
+                code_ = code;
+                std::strncpy(description_.data(), description ? description : "",
+                             description_.size() - 1);
+                failed_ = true;
+            }
+        }
+        if (previous_)
+            previous_->reportError(code, description);
+        return true;
+    }
+    RefCount incRefCount() noexcept override { return ++references_; }
+    RefCount decRefCount() noexcept override { return --references_; }
+    bool failed() const noexcept { return getNbErrors() != 0 || hasOverflowed(); }
+
+  private:
+    nvinfer1::IExecutionContext& context_;
+    nvinfer1::IErrorRecorder* previous_;
+    mutable std::mutex mutex_;
+    std::atomic<int32_t> references_{0};
+    std::array<char, 512> description_{};
+    nvinfer1::ErrorCode code_{nvinfer1::ErrorCode::kUNSPECIFIED_ERROR};
+    bool failed_{false};
+    bool overflow_{false};
+};
 
 bool engine_has_io_tensor(nvinfer1::ICudaEngine* engine, const std::string& expected_name) {
     for (int32_t index = 0; index < engine->getNbIOTensors(); ++index) {
@@ -62,10 +133,11 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
                              cudaStream_t stream, int32_t profile_idx,
                              void* distributed_communicator,
                              const std::vector<ModuleExternalBinding>& external_bindings,
-                             bool backend_managed_cuda_graph)
+                             bool backend_managed_cuda_graph, bool deferred_activation_memory)
     : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
       distributed_communicator_(distributed_communicator),
       backend_managed_cuda_graph_(backend_managed_cuda_graph),
+      deferred_activation_memory_(deferred_activation_memory),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
@@ -209,6 +281,12 @@ void TrtModuleImpl::reset_execution_context() {
 }
 
 TrtModuleImpl::~TrtModuleImpl() {
+    if (deferred_activation_memory_) {
+        const auto error = cudaStreamSynchronize(stream_);
+        if (error != cudaSuccess)
+            std::cerr << "[trt_module] Activation teardown synchronization failed: "
+                      << cudaGetErrorString(error) << '\n';
+    }
     flush_timing_events();
     // CUDA Graphs may contain TensorRT collective launches that retain the
     // distributed communicator. Destroy the captured graph before member
@@ -216,6 +294,12 @@ TrtModuleImpl::~TrtModuleImpl() {
     cuda_graph_->reset();
     free_buffers();
     delete ctx_;
+    if (activation_memory_ != nullptr) {
+        const auto error = cudaFree(activation_memory_);
+        if (error != cudaSuccess)
+            std::cerr << "[trt_module] Activation memory release failed: "
+                      << cudaGetErrorString(error) << '\n';
+    }
 }
 
 void TrtModuleImpl::keep_alive(std::shared_ptr<void> resource) {
@@ -247,8 +331,11 @@ void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& e
                                          const std::vector<int64_t>& new_shape) {
     // Skip static inputs: TRT rejects setInputShape on them even when the
     // engine as a whole advertises dynamic shapes via optimization profiles.
-    if (!has_dynamic_shapes_ || !entry.is_dynamic || new_shape == entry.shape)
+    if (!runtime_shape_needs_update(entry, new_shape))
         return;
+    if (deferred_activation_memory_ && !ctx_)
+        throw std::runtime_error("TensorRT execution context is unavailable");
+    synchronize_activation_use();
     // Any captured CUDA graph was baked against the OLD shape; force a
     // re-capture on the next enqueue so the new shape actually takes.
     if (use_cuda_graph_)
@@ -257,8 +344,27 @@ void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& e
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = new_shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    set_runtime_input_shape(name, entry, dims);
     entry.shape = new_shape;
+}
+
+bool TrtModuleImpl::runtime_shape_needs_update(const BufferEntry& entry,
+                                               const std::vector<int64_t>& shape) const {
+    return has_dynamic_shapes_ && entry.is_dynamic &&
+           (shape != entry.shape || (deferred_activation_memory_ && !entry.shape_valid));
+}
+
+void TrtModuleImpl::set_runtime_input_shape(const std::string& name, BufferEntry& entry,
+                                            const nvinfer1::Dims& dims) {
+    if (deferred_activation_memory_) {
+        activation_memory_dirty_ = true;
+        entry.shape_valid = false;
+        if (!ctx_->setInputShape(name.c_str(), dims))
+            throw std::runtime_error("TensorRT rejected input shape for '" + name + "'");
+        entry.shape_valid = true;
+    } else {
+        ctx_->setInputShape(name.c_str(), dims);
+    }
 }
 
 std::size_t TrtModuleImpl::compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
@@ -275,7 +381,7 @@ std::size_t TrtModuleImpl::compute_alloc_bytes(const nvinfer1::Dims& dims, DType
 
 void TrtModuleImpl::detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io) {
     has_dynamic_shapes_ = false;
-    for (int32_t i = 0; i < num_io && !has_dynamic_shapes_; ++i) {
+    for (int32_t i = 0; i < num_io && (!has_dynamic_shapes_ || deferred_activation_memory_); ++i) {
         const char* raw_name = engine->getIOTensorName(i);
         if (raw_name == nullptr)
             continue;
@@ -284,6 +390,8 @@ void TrtModuleImpl::detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t
             continue;
         if (dims_are_dynamic(engine->getTensorShape(name.c_str())))
             has_dynamic_shapes_ = true;
+        if (deferred_activation_memory_ && engine->isShapeInferenceIO(name.c_str()))
+            activation_shape_inputs_ = true;
     }
 }
 
@@ -525,6 +633,16 @@ void TrtModuleImpl::bind_alias_group(const std::string& input_name, void* ptr) {
     alias_groups_ready_ = false;
 }
 
+bool TrtModuleImpl::alias_group_has_address(const std::string& input_name, void* ptr) const {
+    if (ptr == nullptr || buffers_.at(input_name).d_ptr != ptr)
+        return false;
+    const auto& outputs = alias_outputs_by_input_.at(input_name);
+    return std::all_of(outputs.begin(), outputs.end(), [&](const auto& name) {
+        const auto output = buffers_.find(name);
+        return output != buffers_.end() && output->second.d_ptr == ptr;
+    });
+}
+
 void TrtModuleImpl::validate_alias_groups_bound() const {
     for (const auto& [input_name, output_names] : alias_outputs_by_input_) {
         const auto input = buffers_.find(input_name);
@@ -599,6 +717,7 @@ TensorMap TrtModuleImpl::forward(const TensorMap& inputs) {
 void TrtModuleImpl::enable_cuda_graph() {
     if (backend_managed_cuda_graph_)
         return;
+    synchronize_activation_use();
     use_cuda_graph_ = true;
     cuda_graph_->reset();
 }
@@ -642,7 +761,95 @@ void TrtModuleImpl::execute_enqueue() {
         validate_alias_groups_bound();
         alias_groups_ready_ = true;
     }
+    prepare_activation_memory();
+    if (deferred_activation_memory_)
+        activation_work_pending_ = true;
     record_timed_enqueue();
+}
+
+void TrtModuleImpl::synchronize_activation_use() {
+    if (deferred_activation_memory_ && activation_work_pending_)
+        sync();
+}
+
+std::size_t TrtModuleImpl::query_activation_bytes() {
+    ScopedTrtErrors errors(*ctx_);
+    const auto inferred = ctx_->inferShapes(0, nullptr);
+    if (inferred != 0 || errors.failed())
+        throw std::runtime_error(
+            "TensorRT activation sizing requires valid input shapes and addresses");
+    const auto required = ctx_->updateDeviceMemorySizeForShapes();
+    return validate_activation_query(required, errors.failed());
+}
+
+std::size_t TrtModuleImpl::validate_activation_query(std::size_t required, bool reported_error) {
+    if (reported_error || required > static_cast<std::size_t>(std::numeric_limits<int64_t>::max()))
+        throw std::runtime_error("TensorRT activation memory size query failed");
+    return required;
+}
+
+bool TrtModuleImpl::bind_activation_memory(void* memory, std::size_t capacity) {
+    ScopedTrtErrors errors(*ctx_);
+    ctx_->setDeviceMemoryV2(memory, static_cast<int64_t>(capacity));
+    return !errors.failed();
+}
+
+void TrtModuleImpl::prepare_activation_memory() {
+    if (!deferred_activation_memory_ || (!activation_memory_dirty_ && !activation_shape_inputs_))
+        return;
+    synchronize_activation_use();
+    // Shape-inference inputs may have new values even when their dimensions
+    // and addresses are unchanged. Their queued uploads must finish first.
+    if (activation_shape_inputs_)
+        sync();
+    cuda_graph_->reset();
+    const auto required = query_activation_bytes();
+    reserve_activation_memory(required);
+    activation_required_ = required;
+    activation_memory_dirty_ = false;
+}
+
+void TrtModuleImpl::reserve_activation_memory(std::size_t required) {
+    if (required > static_cast<std::size_t>(std::numeric_limits<int64_t>::max()))
+        throw std::runtime_error("TensorRT activation memory size exceeds the API limit");
+    activation_memory_dirty_ = true;
+    synchronize_activation_use();
+    cuda_graph_->reset();
+    const bool grow = required > activation_capacity_;
+    void* candidate = grow ? allocate_activation_memory(required) : activation_memory_;
+    const auto capacity = grow ? required : activation_capacity_;
+    if (!bind_activation_memory(required == 0 ? nullptr : candidate,
+                                required == 0 ? 0 : capacity)) {
+        // A void setter can fail after changing internal bindings. Destroy the
+        // context before releasing either allocation; it must never be reused.
+        delete ctx_;
+        ctx_ = nullptr;
+        if (grow)
+            cudaFree(candidate);
+        throw std::runtime_error("TensorRT rejected activation memory");
+    }
+    if (grow)
+        commit_activation_growth(candidate, required);
+}
+
+void* TrtModuleImpl::allocate_activation_memory(std::size_t required) {
+    void* memory = nullptr;
+    if (cudaMalloc(&memory, required) != cudaSuccess)
+        throw std::runtime_error("Unable to allocate " + std::to_string(required) +
+                                 " TensorRT activation bytes for profile " +
+                                 std::to_string(profile_idx_));
+    return memory;
+}
+
+void TrtModuleImpl::commit_activation_growth(void* memory, std::size_t capacity) {
+    if (activation_memory_ && cudaFree(activation_memory_) != cudaSuccess) {
+        delete ctx_;
+        ctx_ = nullptr;
+        cudaFree(memory);
+        throw std::runtime_error("Unable to release previous TensorRT activation memory");
+    }
+    activation_memory_ = memory;
+    activation_capacity_ = capacity;
 }
 
 bool TrtModuleImpl::cuda_graph_captured() const {
@@ -748,7 +955,13 @@ void TrtModuleImpl::flush_timing_events() {
 }
 
 void TrtModuleImpl::sync() {
-    cudaStreamSynchronize(stream_);
+    const auto error = cudaStreamSynchronize(stream_);
+    if (deferred_activation_memory_) {
+        if (error != cudaSuccess)
+            throw std::runtime_error(std::string("TensorRT stream synchronization failed: ") +
+                                     cudaGetErrorString(error));
+        activation_work_pending_ = false;
+    }
 }
 
 // --- Forward device async (GPU → GPU, no sync) ---
@@ -786,7 +999,7 @@ void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
 
 DeviceTensorMap TrtModuleImpl::forward_device(const DeviceTensorMap& inputs) {
     forward_device_async(inputs);
-    cudaStreamSynchronize(stream_);
+    sync();
 
     // Return non-owning DeviceTensor* pointers to our internal output buffers.
     // The output_device_tensors_ map is lazily populated on first call.
@@ -910,21 +1123,15 @@ void TrtModuleImpl::bind_external(const std::string& name, void* external_device
     if (it == buffers_.end())
         return;
 
-    if (alias_input_by_output_.count(name) != 0) {
-        throw std::invalid_argument("Bind TensorRT alias input '" +
-                                    alias_input_by_output_.at(name) + "', not output '" + name +
-                                    "'");
-    }
-    if (alias_outputs_by_input_.count(name) != 0) {
-        bind_alias_group(name, external_device_ptr);
+    if (bind_external_alias(name, external_device_ptr))
         return;
-    }
 
     auto& entry = it->second;
     if (external_device_ptr == nullptr)
         throw std::invalid_argument("External buffer for '" + name + "' is null");
     if (external_device_ptr == entry.d_ptr)
         return;
+    synchronize_activation_use();
 
     // Bind the candidate before changing ownership. If TensorRT rejects the
     // address, the module must retain both its previous context binding and its
@@ -942,6 +1149,20 @@ void TrtModuleImpl::bind_external(const std::string& name, void* external_device
     entry = std::move(candidate);
     if (free_previous)
         cudaFree(previous_ptr);
+}
+
+bool TrtModuleImpl::bind_external_alias(const std::string& name, void* ptr) {
+    if (alias_input_by_output_.count(name) != 0)
+        throw std::invalid_argument("Bind TensorRT alias input '" +
+                                    alias_input_by_output_.at(name) + "', not output '" + name +
+                                    "'");
+    if (alias_outputs_by_input_.count(name) == 0)
+        return false;
+    if (deferred_activation_memory_ && alias_group_has_address(name, ptr))
+        return true;
+    synchronize_activation_use();
+    bind_alias_group(name, ptr);
+    return true;
 }
 
 } // namespace trtmc
