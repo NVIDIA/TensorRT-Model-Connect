@@ -95,7 +95,7 @@ ImageReferencePipeline::ImageReferencePipeline(ReferenceModuleLoader loader,
     : loader_(std::move(loader)), tokenizer_(std::move(tokenizer)), config_(std::move(config)),
       stream_(stream) {
     if (!loader_ || !tokenizer_ || config_.max_condition_video_rows <= 0 ||
-        config_.max_condition_video_rows > 16384 || config_.denoiser.layers != 50 ||
+        config_.max_condition_video_rows > 49152 || config_.denoiser.layers != 50 ||
         config_.denoiser.hidden_size != 5376 || config_.denoiser.text_width != 5120 ||
         config_.denoiser.target.frames != 37 || config_.denoiser.target.audio_latents != 207 ||
         (config_.memory != ReferenceMemoryPreset::Minimal &&

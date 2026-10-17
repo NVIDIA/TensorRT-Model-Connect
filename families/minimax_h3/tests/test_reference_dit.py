@@ -66,6 +66,29 @@ def test_reference_profile_covers_all_operands_without_the_text_only_cap():
             assert shapes[name][point] == (total,)
 
 
+def test_expanded_portrait_profile_enlarges_both_conditioning_streams(tmp_path):
+    from tensorrt_model_connect import BuildRequest
+    from families.minimax_h3 import reference_build
+
+    request = BuildRequest(
+        model_dir=tmp_path / "not-read",
+        output_path=tmp_path / "not-built.bundle",
+        family="minimax_h3",
+        task=reference_build.TASK,
+        precision="bf16",
+    )
+    _, _, target, ref = reference_build._target(request, "minimal", "six_portrait")
+    builder, config = Builder(), Config()
+    dit._add_reference_profile(builder, config, target, ref)
+    shapes = config.optimization.shapes
+    assert shapes["encoder_hidden_states"]["max"] == (65536, 5120)
+    assert shapes["video_hidden_states"]["max"] == (37296 + 49152, 96)
+    assert shapes["audio_hidden_states"]["max"] == (414, 32)
+    assert shapes["position_ids"]["max"] == (152398, 3)
+    for name in ("packed_indices", "adaln_indices", "timestep_indices"):
+        assert shapes[name]["max"] == (152398,)
+
+
 @pytest.mark.parametrize(
     "field,values",
     [

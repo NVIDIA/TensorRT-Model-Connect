@@ -54,7 +54,15 @@ def plans(monkeypatch):
     from families.minimax_h3 import reference_posterior_builder, text_encoder_builder
     from families.minimax_h3 import vae_builder, vae_encoder_builder, vision_builder
 
-    state = SimpleNamespace(built=[], emitted=[], retired=set(), loaded=[], partitions=[])
+    state = SimpleNamespace(
+        built=[],
+        emitted=[],
+        retired=set(),
+        loaded=[],
+        partitions=[],
+        text_rows=32768,
+        condition_rows=(4096, 5504, 16384),
+    )
 
     class Plan(bytes):
         def __new__(cls, name):
@@ -80,14 +88,14 @@ def plans(monkeypatch):
                     kwargs["patch_rows"] == (16384, 22016, 65536) and kwargs["precision"] == "bf16"
                 )
             elif name == "text_encoder.plan":
-                assert kwargs["reference"] is True and kwargs["sequence_length"] == 32768
+                assert kwargs["reference"] is True and kwargs["sequence_length"] == state.text_rows
             elif name == "vae_encoder.plan":
                 assert kwargs["max_frames"] == 1
             elif name == "adaln.plan":
                 assert kwargs["input_timesteps"] is True and args[0].first_block_cache is False
             elif name == "denoiser.plan":
                 assert kwargs["reference_profile"].condition_audio_rows == (0, 0, 0)
-                assert kwargs["reference_profile"].condition_video_rows == (4096, 5504, 16384)
+                assert kwargs["reference_profile"].condition_video_rows == state.condition_rows
             elif name == "vae.plan":
                 assert kwargs["batch_size"] == state.batch
             elif name == "audio_vae.plan":
@@ -206,6 +214,59 @@ def test_reference_build_streams_all_eight_exact_partitions(
         == json.loads((checkpoint / "vae/config.json").read_text())["latents_mean"]
     )
     assert runtime["config_sha256"] == owner._configs(checkpoint)[1]
+    assert "reference_capacity" not in runtime  # Legacy default metadata stays unchanged.
+
+
+@pytest.mark.parametrize("preset,batch", [("minimal", 1), ("original", 28)])
+def test_six_portrait_capacity_rebuilds_language_and_dit_profiles_without_quality_changes(
+    checkpoint, plans, tmp_path, preset, batch
+):
+    output = tmp_path / "six-portrait.bundle"
+    writer = BundleWriter(output)
+    plans.batch, plans.text_rows, plans.condition_rows = batch, 65536, (4096, 43776, 49152)
+    add = writer.add_bytes
+
+    def stage(name, value):
+        if name.endswith(".plan"):
+            plans.emitted.append(name)
+        add(name, value)
+
+    writer.add_bytes = stage
+    owner.build(
+        request(checkpoint, output), writer, memory_preset=preset, reference_capacity="six_portrait"
+    )
+    writer.finish()
+    assert plans.built == plans.emitted == list(owner.PLAN_NAMES)
+    assert plans.retired == set(owner.PLAN_NAMES)
+    _, data = sections(output)
+    runtime = json.loads(data["runtime.json"])
+    assert runtime["reference_capacity"] == "six_portrait"
+    assert runtime["max_text_rows"] == 65536 and runtime["text_rows"] == [1, 128, 65536]
+    assert runtime["condition_video_rows"] == [4096, 43776, 49152]
+    assert runtime["max_sequence_rows"] == 152398
+    assert runtime["reference_pixels"] == [16384, 22016, 65536]
+    assert (
+        runtime["num_frames"],
+        runtime["fps"],
+        runtime["num_inference_steps"],
+        runtime["denoiser_forwards"],
+        runtime["height"],
+        runtime["width"],
+    ) == (124, 24, 50, 49, 1344, 768)
+    assert runtime["memory_preset"] == preset and runtime["vae_tile_batch"] == batch
+    assert runtime["weights_variant"] == "transformer_ref" and runtime["first_block_cache"] is False
+    assert runtime["config_sha256"] == owner._configs(checkpoint)[1]
+    assert plans.partitions == [("transformer_ref", 638), ("vae", 703)]
+
+
+@pytest.mark.parametrize("capacity", ["", "auto", "six_images", None, True, [65536, 49152]])
+def test_unknown_reference_capacity_fails_before_weights(checkpoint, plans, tmp_path, capacity):
+    output = tmp_path / "no.bundle"
+    writer = BundleWriter(output)
+    with pytest.raises(ValueError, match="reference_capacity"):
+        owner.build(request(checkpoint, output), writer, reference_capacity=capacity)
+    writer.abort()
+    assert not plans.loaded and not output.exists()
 
 
 def test_missing_ref_partition_cannot_fall_back_to_text_only(checkpoint, plans, tmp_path):

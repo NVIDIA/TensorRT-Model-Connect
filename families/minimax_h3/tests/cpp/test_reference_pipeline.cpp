@@ -154,6 +154,35 @@ void exercise(ReferenceMemoryPreset preset) {
         rejects<std::runtime_error>([&] { (void)run(); });
         require(loads == retry + 1, "a failed phase must permit a fresh native request");
     }
+
+    // Six actual 9:16 operands need 43,776 image rows in BOTH conditioning
+    // streams. Prove each old cap rejects before any allocation/engine load;
+    // expanded metadata reaches the same intentional first-engine failure.
+    std::array<std::array<uint8_t, 16 * 9 * 3>, 6> portraits{};
+    references.clear();
+    for (std::size_t index = 0; index < portraits.size(); ++index) {
+        auto& portrait = portraits[index];
+        portrait.fill(static_cast<uint8_t>(index * 31));
+        references.emplace_back(
+            ImageView{portrait.data(), portrait.size(), 16, 9, 3, ImageFormat::UInt8});
+    }
+    const auto before = loads;
+    cap = configuration(preset);
+    cap.denoiser.max_sequence_rows = 152398;
+    ImageReferencePipeline old_text(loader, std::make_unique<Tokenizer>(), cap, stream);
+    rejects<std::length_error>(
+        [&] { (void)old_text.run({{references.data(), references.size()}, "prompt"}, {}); });
+    cap.max_text_rows = 65536;
+    ImageReferencePipeline old_visual(loader, std::make_unique<Tokenizer>(), cap, stream);
+    rejects<std::length_error>(
+        [&] { (void)old_visual.run({{references.data(), references.size()}, "prompt"}, {}); });
+    require(loads == before, "both legacy operand budgets reject six portraits before loading");
+    cap.max_condition_video_rows = 49152;
+    ImageReferencePipeline expanded(loader, std::make_unique<Tokenizer>(), cap, stream);
+    rejects<std::runtime_error>(
+        [&] { (void)expanded.run({{references.data(), references.size()}, "prompt"}, {}); });
+    require(loads == before + 1,
+            "expanded six-portrait input reaches the real conditioner without dropping references");
     auto bad_topology = configuration(preset);
     bad_topology.denoiser.layers = 1;
     rejects<std::invalid_argument>([&] {

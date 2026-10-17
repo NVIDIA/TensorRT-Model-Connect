@@ -38,6 +38,13 @@ PLAN_NAMES = (
 )
 TEXT_ROWS = 32768
 REFERENCE_ROWS = (4096, 5504, 16384)
+REFERENCE_CAPACITIES = {
+    "standard": (TEXT_ROWS, REFERENCE_ROWS),
+    # Six 9:16 references retain their released 3648x2048 preparation: 43,776
+    # rows in both the visual language input and the separate DiT condition.
+    # The maximum also covers six references up to 2:1, subject to text budget.
+    "six_portrait": (65536, (4096, 43776, 49152)),
+}
 REFERENCE_PIXELS = (16384, 22016, 65536)
 WORKSPACE_BYTES = 8 << 30
 
@@ -199,7 +206,7 @@ def _configs(root):
     return configs, {name: hashlib.sha256(value).hexdigest() for name, value in raw.items()}
 
 
-def _target(request, memory_preset):
+def _target(request, memory_preset, reference_capacity="standard"):
     if (
         request.family != "minimax_h3"
         or request.task != TASK
@@ -211,6 +218,9 @@ def _target(request, memory_preset):
         )
     if memory_preset not in ("minimal", "original"):
         raise ValueError("MiniMax-H3 memory_preset must be minimal or original")
+    if not isinstance(reference_capacity, str) or reference_capacity not in REFERENCE_CAPACITIES:
+        raise ValueError("MiniMax-H3 reference_capacity must be standard or six_portrait")
+    text_rows, condition_rows = REFERENCE_CAPACITIES[reference_capacity]
     if (
         request.max_sequence_length is not None
         or request.dynamic_kv_cache
@@ -235,23 +245,26 @@ def _target(request, memory_preset):
     target = replace(
         SOL_ENGINE_1344X768_124F,
         video_rows=video_rows,
-        text_rows=TEXT_ROWS,
-        padded_sequence_length=video_rows + 414 + TEXT_ROWS,
+        text_rows=text_rows,
+        padded_sequence_length=video_rows + 414 + text_rows,
     )
-    reference = Ref2VAPackedProfile((1, 128, TEXT_ROWS), REFERENCE_ROWS, (0, 0, 0))
+    reference = Ref2VAPackedProfile((1, 128, text_rows), condition_rows, (0, 0, 0))
     reference.validate(target)
     return height, width, target, reference
 
 
-def build(request, writer, *, memory_preset="minimal"):
+def build(request, writer, *, memory_preset="minimal", reference_capacity="standard"):
     """Build the explicit experimental profile; callers own writer commit/abort.
 
     Minimal selects staged modules and a static batch-1 video plan; original
     selects resident modules and batch 28. Both use the same trained partitions,
     reference resolution, precision boundaries, target geometry and 49 forwards.
+    Reference capacity changes operand profiles, not reference preparation,
+    model math or checkpoint partitions. Standard retains the original budget;
+    six_portrait requires newly built language/DiT plans, not a metadata edit.
     The complete trained path must still pass its owning qualification gates.
     """
-    height, width, target, reference = _target(request, memory_preset)
+    height, width, target, reference = _target(request, memory_preset, reference_capacity)
     root = Path(request.model_dir)
     configs, config_sha256 = _configs(root)
     tokenizer = (root / "tokenizer/tokenizer.json").read_bytes()
@@ -311,7 +324,7 @@ def build(request, writer, *, memory_preset="minimal"):
         "text_encoder",
         text.checkpoint_keys(),
         text.build_text_encoder_engine,
-        sequence_length=TEXT_ROWS,
+        sequence_length=reference.text_rows[2],
         reference=True,
     )
     stage(
@@ -378,7 +391,7 @@ def build(request, writer, *, memory_preset="minimal"):
             audio_latent_frames=207,
             audio_sampling_rate=32000,
             audio_channels=2,
-            max_text_rows=TEXT_ROWS,
+            max_text_rows=reference.text_rows[2],
             max_sequence_rows=reference.sequence_rows(target)[2],
             text_rows=list(reference.text_rows),
             condition_video_rows=list(reference.condition_video_rows),
@@ -391,5 +404,10 @@ def build(request, writer, *, memory_preset="minimal"):
             first_block_cache=False,
             config_sha256=config_sha256,
             **_statistics(configs["vae"], 24, "video VAE"),
+            **(
+                {"reference_capacity": reference_capacity}
+                if reference_capacity != "standard"
+                else {}
+            ),
         ),
     )

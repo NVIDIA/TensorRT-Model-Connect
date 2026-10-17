@@ -86,10 +86,33 @@ void check() {
     parsed = parse_image_reference_config(master);
     require(parsed.denoiser.target.height == 96 && parsed.denoiser.target.width == 54,
             "exact 9:16 master geometry without short-edge reduction");
+    auto expanded = fixture();
+    expanded["reference_capacity"] = "six_portrait";
+    expanded["max_text_rows"] = 65536;
+    expanded["text_rows"] = {1, 128, 65536};
+    expanded["condition_video_rows"] = {4096, 43776, 49152};
+    expanded["max_sequence_rows"] = 152398;
+    parsed = parse_image_reference_config(expanded);
+    require(parsed.max_text_rows == 65536 && parsed.max_condition_video_rows == 49152 &&
+                parsed.denoiser.max_sequence_rows == 152398 &&
+                parsed.denoiser.target.height == 84 && parsed.denoiser.target.width == 48,
+            "expanded conditioning profiles preserve target geometry and full topology");
+    for (const auto& name :
+         {"max_text_rows", "text_rows", "condition_video_rows", "max_sequence_rows"}) {
+        auto incompatible = expanded;
+        incompatible[name] = fixture()[name];
+        rejects(incompatible);
+    }
+    auto unlabeled = expanded;
+    unlabeled.erase("reference_capacity");
+    rejects(unlabeled); // Existing metadata cannot silently become an expanded profile.
     const std::vector<std::pair<const char*, Json>> changes = {
         {"schema_version", "v2"},
         {"weights_variant", "transformer"},
         {"workflow", "t2va"},
+        {"reference_capacity", "auto"},
+        {"reference_capacity", "six_portrait"},
+        {"reference_capacity", true},
         {"memory_preset", "auto"},
         {"vae_tile_batch", 28},
         {"vae_tile_batch", 1.0},

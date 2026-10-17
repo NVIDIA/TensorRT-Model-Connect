@@ -21,8 +21,9 @@ serialized bundle and compiler scratch. This explicit Ref2VA path enables
 single-file staging: it reserves a 64-KiB format-v1 JSON header, appends every
 plan once and atomically publishes that same temporary file. It no longer
 keeps a separate set of section files while copying the complete final bundle.
-All plan/config/tokenizer bytes and runtime settings are unchanged. If replacing
-an existing destination, that previous file still occupies space until atomic
+Single-file staging itself does not change plan/config/tokenizer bytes or
+runtime settings. If replacing an existing destination, that previous file
+still occupies space until atomic
 publication. Bundle size, compiler scratch and host/GPU memory are separate
 quantities; the measured example below does not
 establish a minimum RAM/VRAM figure or resolve the failed trained-video
@@ -61,7 +62,11 @@ request = BuildRequest(
 writer = BundleWriter(request.output_path)
 writer.record_build(request)
 try:
-    build(request, writer, memory_preset=os.environ.get("H3_MEMORY_PRESET", "minimal"))
+    build(
+        request, writer,
+        memory_preset=os.environ.get("H3_MEMORY_PRESET", "minimal"),
+        reference_capacity=os.environ.get("H3_REFERENCE_CAPACITY", "standard"),
+    )
     writer.finish()
 except BaseException:
     writer.abort()
@@ -69,7 +74,8 @@ except BaseException:
 ```
 
 The family-local entry point is intentional: it exposes the experimental
-memory preset without inventing a shared CLI option or changing discovery.
+memory and reference-capacity presets without inventing shared CLI options or
+changing discovery.
 It validates original configs, tokenizer, key partitions and normalization
 statistics. Selected weights support the original indexed components and the
 original single-file, unindexed audio VAE; only requested tensors are loaded.
@@ -96,6 +102,41 @@ Plans are loaded one at a time from the bundle. The largest plan still incurs
 a transient CPU read buffer. Minimal residency also does not remove the full
 FP32 video result: default geometry alone needs 1,535,901,696 bytes for that
 buffer. There is no qualified minimum RAM/VRAM figure for the complete path.
+
+## Reference capacity profiles
+
+`reference_capacity` is independent of `memory_preset`. It changes the language
+and DiT operand profiles, not checkpoint partitions, image preparation, output
+geometry, precision, frames, steps, or model topology.
+
+| Capacity | Maximum text rows, including visual tokens | DiT condition-video min/opt/max rows |
+| --- | --- | --- |
+| `standard` (default) | 32,768 | 4,096 / 5,504 / 16,384 |
+| `six_portrait` (experimental; trained build/inference not yet run) | 65,536 | 4,096 / 43,776 / 49,152 |
+
+Original preparation maps a 9:16 image to 3648x2048. Each such image contributes
+7,296 rows to **each** conditioning stream; six contribute 43,776 before prompt
+and presentation tokens. The standard budget therefore cannot accept six
+distinct portrait anchors. Reusing one exactly identical accepted tensor for
+several semantic roles is different from discarding distinct references.
+
+The expanded maximum also fits six images with aspect ratios up to 2:1, subject
+to the separate text/presentation budget. It is a row budget, not a promise to
+accept any six image shapes or any prompt length. The pipeline rejects either
+overflow before loading engines; it never downsizes or omits references to fit.
+
+Select the capacity **at build time** and use the matching newly built bundle.
+Both the language and DiT plans require larger profiles. Editing old bundle
+metadata or merely increasing a client's reference-count setting does not
+expand those engines. Legacy default metadata remains unchanged; expanded
+metadata has an explicit capacity label and all budgets must agree.
+
+The expanded path currently has CPU build-wiring, metadata and native preflight
+tests only. It has no measured trained bundle size, generation latency or
+memory peak and does not waive existing trained numerical/quality gates. The
+119.7-GiB and build-RSS observations above apply to the earlier standard build,
+not this new capacity. Larger profiles can change tactics and memory use; no
+numerical equivalence or single-device fit is claimed before actual validation.
 
 ## Bundle composition
 
