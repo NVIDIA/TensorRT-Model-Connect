@@ -20,10 +20,16 @@ import numpy as np
 class NativeGraph:
     """Build strongly typed TensorRT graphs from the distilled module tree."""
 
-    def __init__(self, network: Any, trt: Any, *, fp16: bool) -> None:
+    def __init__(
+        self, network: Any, trt: Any, *, fp16: bool, fp32_conv_accumulation: bool = False
+    ) -> None:
         self.network = network
         self.trt = trt
         self.fp16 = fp16
+        # Autocast convolutions round inputs and weights to FP16 but accumulate
+        # in FP32. With this set, FP16 convolutions run on FP32 copies of the
+        # FP16-rounded values and only the output is rounded back.
+        self.fp32_conv_accumulation = fp32_conv_accumulation and fp16
         self.work_np_dtype = np.float16 if fp16 else np.float32
         self.work_trt_dtype = trt.float16 if fp16 else trt.float32
         # TensorRT weights refer to their host buffers until engine build.
@@ -268,6 +274,11 @@ class NativeGraph:
             if getattr(module, "bias", None) is not None
             else None
         )
+        output_dtype = tensor.dtype
+        if self.fp32_conv_accumulation and output_dtype == self.trt.float16:
+            tensor = self.cast(tensor, self.trt.float32)
+            weight = weight.astype(np.float32)
+            bias = None if bias is None else bias.astype(np.float32)
         self._weight_buffers.append(weight)
         weights = self.trt.Weights(weight)
         if bias is not None:
@@ -298,7 +309,7 @@ class NativeGraph:
                 layer.padding_nd = padding
         else:
             layer.padding_nd = padding
-        return layer.get_output(0)
+        return self.cast(layer.get_output(0), output_dtype)
 
     def _fold_batch_norm_into_convolution(
         self,
