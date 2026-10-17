@@ -3,10 +3,12 @@
 
 add_library(trtmc_model_minimax_h3 SHARED
   bpe_tokenizer.cpp
+  diffusion_schedule.cpp
   pipeline.cpp
   plugin.cpp
   qwen_reference.cpp
   reference_conditioner.cpp
+  reference_denoiser.cpp
   reference_image.cpp
   reference_layout.cpp
   reference_visual_encoder.cpp
@@ -49,6 +51,17 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_reference_denoiser
+    diffusion_schedule.cpp reference_layout.cpp reference_denoiser.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_denoiser.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_denoiser PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_reference_denoiser SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_minimax_h3_reference_denoiser PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_denoiser COMMAND test_minimax_h3_reference_denoiser)
+
   # The owning Python GPU oracle drives this probe with a real serialized
   # posterior plan and compares native CPU noise plus backend execution.
   add_executable(minimax_h3_reference_posterior_probe
