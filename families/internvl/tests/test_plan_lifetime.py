@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkeypatch):
+@pytest.mark.parametrize("tiles", [1, 12])
+def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkeypatch, tiles):
     pytest.importorskip("tensorrt")
     from families.internvl import model
     from families.internvl.edge_llm import dispatch
@@ -50,7 +51,7 @@ def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkey
 
         @staticmethod
         def get_vl_config(_config):
-            return {"image_token_id": 3, "vision_output_dim": 4}
+            return {"image_token_id": 3, "vision_output_dim": 4, "num_image_pad_tokens": 256}
 
     monkeypatch.setattr(model, "_InternVLModel", Model)
     monkeypatch.setattr(model, "_tokenizer_runtime_contract", lambda _directory: {})
@@ -63,17 +64,29 @@ def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkey
         mtp_seq_len=None, dynamic_kv_cache=False, image_height=None, image_width=None,
         video_num_frames=None, max_batch_size=1, context_parallel_size=1,
         task="vision_language_generation", tensor_parallel_size=1, quantization=None,
-        fp32_layers=(), model_dir=tmp_path, precision="fp16", max_sequence_length=768,
+        fp32_layers=(), model_dir=tmp_path, precision="fp16",
+        max_sequence_length=4096 if tiles > 1 else 768, max_image_tiles=tiles,
         verbose=False, backend="trt", family="internvl",
         output_path=tmp_path / "model.bundle", graph_transform=None,
     )
     writer = BundleWriter(tmp_path / "model.bundle")
+    staged = {}
+    add_bytes = writer.add_bytes
+
+    def stage(name, value):
+        if name.endswith(".plan"):
+            staged[name] = bytes(value)
+        add_bytes(name, value)
+
+    monkeypatch.setattr(writer, "add_bytes", stage)
     try:
         model.build(request, writer)
         writer.finish()
     finally:
         writer.abort()
     gc.collect()
-    assert built == ["prefill", "decode", "vision"]
+    assert built == (["prefill", "decode", "vision"] if tiles == 1 else ["prefill", "vision"])
+    if tiles > 1:
+        assert staged["engine.plan"] == staged["prefill.plan"]
     assert not live
     assert (tmp_path / "model.bundle").is_file()
