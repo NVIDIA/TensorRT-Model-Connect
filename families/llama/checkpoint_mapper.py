@@ -111,6 +111,8 @@ def load_standard_weights(
         f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
     )
     weights["embedding"] = embedding.astype(target_dtype)
+    # Jiaxin Deng: keep only the stored embedding while loading decoder layers.
+    del embedding
 
     def _load_layer(layer_idx: int) -> tuple[int, WeightDict, int, int]:
         prefix = f"layer.{layer_idx}"
@@ -128,36 +130,23 @@ def load_standard_weights(
         layer[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
         layer[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
-        # Q/K/V/O projections
-        q_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.q_proj.weight", model_prefix)
-        )
-        k_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.k_proj.weight", model_prefix)
-        )
-        v_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.v_proj.weight", model_prefix)
-        )
-        o_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.o_proj.weight", model_prefix)
-        )
-
-        q_hidden = q_raw.shape[0]
-        gate_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.gate_proj.weight", model_prefix)
-        )
-        layer_mlp_size = gate_raw.shape[0]
-
-        # Transpose all projections [out, in] -> [in, out]
-        q_t = _transpose_2d(q_raw, "q_proj", precision=layer_precision)
-        k_t = _transpose_2d(k_raw, "k_proj", precision=layer_precision)
-        v_t = _transpose_2d(v_raw, "v_proj", precision=layer_precision)
-        o_t = _transpose_2d(o_raw, "o_proj", precision=layer_precision)
-
-        layer[f"{prefix}.w_q"] = q_t
-        layer[f"{prefix}.w_k"] = k_t
-        layer[f"{prefix}.w_v"] = v_t
-        layer[f"{prefix}.w_o"] = o_t
+        # Jiaxin Deng: release each FP32 source before loading the next projection.
+        for source, target in (
+            ("self_attn.q_proj", "w_q"),
+            ("self_attn.k_proj", "w_k"),
+            ("self_attn.v_proj", "w_v"),
+            ("self_attn.o_proj", "w_o"),
+            ("mlp.gate_proj", "w_gate"),
+            ("mlp.up_proj", "w_up"),
+            ("mlp.down_proj", "w_down"),
+        ):
+            raw = _load_tensor(readers, _layer_key(layer_idx, f"{source}.weight", model_prefix))
+            layer[f"{prefix}.{target}"] = _transpose_2d(raw, source, precision=layer_precision)
+            if target == "w_q":
+                q_hidden = raw.shape[0]
+            elif target == "w_gate":
+                layer_mlp_size = raw.shape[0]
+            del raw
 
         # Optional QKV biases (Qwen2 style)
         q_bias_key = _layer_key(layer_idx, "self_attn.q_proj.bias", model_prefix)
@@ -181,16 +170,6 @@ def load_standard_weights(
             layer[f"{prefix}.k_norm"] = _repeat_head_norm(
                 _load_tensor(readers, k_norm_key).astype(np.float32), num_kv_heads
             )
-
-        # MLP projections
-        up_raw = _load_tensor(readers, _layer_key(layer_idx, "mlp.up_proj.weight", model_prefix))
-        down_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.down_proj.weight", model_prefix)
-        )
-
-        layer[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj", precision=layer_precision)
-        layer[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj", precision=layer_precision)
-        layer[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj", precision=layer_precision)
 
         return layer_idx, layer, q_hidden, layer_mlp_size
 
@@ -232,7 +211,9 @@ def load_standard_weights(
         )
     else:
         # Tied embeddings
-        weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied", precision=precision)
+        weights["w_out"] = _transpose_2d(
+            weights["embedding"].copy(), "embedding_tied", precision=precision
+        )
 
     weights["_attention_size"] = attention_size  # type: ignore[assignment]
     weights["_kv_attention_size"] = kv_attention_size  # type: ignore[assignment]
