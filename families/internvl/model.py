@@ -500,13 +500,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             )
             # Stage serialized plans on disk before building the next one.
             writer.add_bytes("prefill.plan", prefill)
-            if request.max_image_tiles > 1:
+            if int(model_vl.get("max_image_tiles", 1)) > 1:
                 # The dynamic-Sq graph accepts both multi-token prefill and
                 # single-token decode. Use that same mathematical network for
                 # tiled inputs; each runtime module owns its execution state.
                 writer.add_bytes("engine.plan", prefill)
             del prefill
-            if request.max_image_tiles == 1:
+            if int(model_vl.get("max_image_tiles", 1)) == 1:
                 config.raw["_decoder_engine_role"] = "decode"
                 decode = model.build_engine(
                     config,

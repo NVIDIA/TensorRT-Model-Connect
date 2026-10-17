@@ -28,6 +28,11 @@ def test_every_internvl_case_requires_the_vision_oracle() -> None:
         "internvl3-8b",
         "internvl3-8b-tp4",
         "internvl3-14b",
+        "internvl35-1b",
+        "internvl35-2b",
+        "internvl35-4b",
+        "internvl35-8b",
+        "internvl35-14b",
     }
 
 

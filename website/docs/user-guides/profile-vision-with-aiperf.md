@@ -81,10 +81,10 @@ Rebuild older DeepSeek-OCR-2 bundles to use aspect-preserving padding with the
 current family runtime before qualification. Rebuild older native InternVL3
 bundles to include the checkpoint processor's image-token delimiters.
 
-For native InternVL image tiling, build with the family option
-`--max-image-tiles 12 --max-sequence-length 4096`. This encodes up to twelve
-local tiles plus a thumbnail from the same original image. The default is one
-resized view; a tiled bundle needs enough context for all visual and text tokens.
+Native InternVL builds follow the checkpoint processor's image tiling (up to
+12 local tiles plus a thumbnail). Use `--max-sequence-length 4096` to leave room
+for those visual tokens and the answer. Rebuild older single-view bundles with
+the current family runtime before qualification.
 
 For a local tokenizer, omit `--tokenizer-revision` and add
 `--tokenizer /path/to/tokenizer` to AIPerf. For Lance, run this once in its

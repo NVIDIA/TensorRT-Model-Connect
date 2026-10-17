@@ -51,7 +51,8 @@ def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkey
 
         @staticmethod
         def get_vl_config(_config):
-            return {"image_token_id": 3, "vision_output_dim": 4, "num_image_pad_tokens": 256}
+            return {"image_token_id": 3, "vision_output_dim": 4, "num_image_pad_tokens": 256,
+                    "max_image_tiles": tiles}
 
     monkeypatch.setattr(model, "_InternVLModel", Model)
     monkeypatch.setattr(model, "_tokenizer_runtime_contract", lambda _directory: {})
@@ -65,7 +66,7 @@ def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkey
         video_num_frames=None, max_batch_size=1, context_parallel_size=1,
         task="vision_language_generation", tensor_parallel_size=1, quantization=None,
         fp32_layers=(), model_dir=tmp_path, precision="fp16",
-        max_sequence_length=4096 if tiles > 1 else 768, max_image_tiles=tiles,
+        max_sequence_length=4096 if tiles > 1 else 768,
         verbose=False, backend="trt", family="internvl",
         output_path=tmp_path / "model.bundle", graph_transform=None,
     )
