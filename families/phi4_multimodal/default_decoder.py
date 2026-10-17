@@ -245,36 +245,15 @@ def build_standard_decoder_engine(
     sin_half_tensor = None
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
 
+    rope_position_id = position_id
     if position_type == "rope":
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
-        rope_frequency_factors = None
-        rope_attention_factor = 1.0
-        rope_scaling = config.raw.get("rope_scaling") or {}
-        if rope_scaling.get("type") == "longrope":
-            original_max = int(config.raw.get(
-                "original_max_position_embeddings",
-                config.raw.get("max_position_embeddings", attention_window)))
-            max_positions = int(config.raw.get(
-                "max_position_embeddings", original_max))
-            extension_factor = max_positions / max(original_max, 1)
-            rope_attention_factor = float(rope_scaling.get(
-                "attention_factor",
-                1.0 if extension_factor <= 1.0 else np.sqrt(
-                    1.0 + np.log(extension_factor) / np.log(original_max))))
-            factor_key = (
-                "long_factor" if attention_window > original_max
-                else "short_factor")
-            rope_frequency_factors = rope_scaling.get(factor_key)
-        cos_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope,
-            frequency_factors=rope_frequency_factors,
-            attention_factor=rope_attention_factor)
-        sin_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope,
-            frequency_factors=rope_frequency_factors,
-            attention_factor=rope_attention_factor)
+        cos_half_np, sin_half_np, rope_threshold = graph_ops.make_rope_half_tables(
+            config.raw, attention_window, head_dim, config.rope_theta,
+            partial_rotary_factor, interleaved=interleaved_rope)
+        if rope_threshold:
+            rope_position_id = graph_ops.add_rope_regime_positions(
+                network, position_id, attention_window)
         cos_half_tensor = graph_ops.add_constant(
             network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
         cos_half_tensor = _cast_work_dtype(cos_half_tensor)
@@ -394,7 +373,8 @@ def build_standard_decoder_engine(
             cache_k=_cast_layer_dtype(cache_k_inputs[layer_idx]),
             cache_v=_cast_layer_dtype(cache_v_inputs[layer_idx]),
             attention_mask=_cast_layer_dtype(attention_mask),
-            position_id=position_id,
+            # The layer uses positions only to gather RoPE rows.
+            position_id=rope_position_id,
             attention_scale=attn_scale,
             eps_tensor=_cast_layer_dtype(eps_tensor),
             eps=config.rms_norm_eps,

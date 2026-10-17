@@ -4,6 +4,7 @@
  */
 
 #include "families/phi4_multimodal/runtime/image_preprocessor.h"
+#include "families/phi4_multimodal/runtime/phi4_longrope.h"
 
 #include <cmath>
 #include <iostream>
@@ -119,6 +120,10 @@ int main() {
     rejects(invalid.dump(), "unsupported interpolation");
     rejects("{", "malformed JSON");
     rejects("[]", "non-object JSON");
+    // LongRoPE: short factors up to the threshold, long factors beyond it.
+    check(trtmc::phi4_multimodal_rope_long_factor(4096, 4096) == 0, "4096 tokens stay short");
+    check(trtmc::phi4_multimodal_rope_long_factor(4097, 4096) == 1, "4097 tokens use long");
+    check(trtmc::phi4_multimodal_rope_long_factor(100000, 0) == 0, "threshold 0 has one regime");
     if (failures == 0)
         std::cout << "PASS: Phi4 runtime preprocessing config contract\n";
     return failures == 0 ? 0 : 1;

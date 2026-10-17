@@ -287,35 +287,16 @@ def build_dual_profile_decoder_engine(
     # native IRotaryEmbeddingLayer.
     cos_half_table: trt.ITensor | None = None
     sin_half_table: trt.ITensor | None = None
+    rope_position_id = position_id
     if position_type == "rope":
         kmax = max_cache_length + max_prefill_length
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
-        rope_frequency_factors = None
-        rope_attention_factor = 1.0
-        rope_scaling = config.raw.get("rope_scaling") or {}
-        if rope_scaling.get("type") == "longrope":
-            original_max = int(config.raw.get(
-                "original_max_position_embeddings",
-                config.raw.get("max_position_embeddings", kmax)))
-            max_positions = int(config.raw.get(
-                "max_position_embeddings", original_max))
-            extension_factor = max_positions / max(original_max, 1)
-            rope_attention_factor = float(rope_scaling.get(
-                "attention_factor",
-                1.0 if extension_factor <= 1.0 else np.sqrt(
-                    1.0 + np.log(extension_factor) / np.log(original_max))))
-            factor_key = "long_factor" if kmax > original_max else "short_factor"
-            rope_frequency_factors = rope_scaling.get(factor_key)
-        cos_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope,
-            frequency_factors=rope_frequency_factors,
-            attention_factor=rope_attention_factor)
-        sin_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope,
-            frequency_factors=rope_frequency_factors,
-            attention_factor=rope_attention_factor)
+        cos_half_np, sin_half_np, rope_threshold = graph_ops.make_rope_half_tables(
+            config.raw, kmax, head_dim, config.rope_theta,
+            partial_rotary_factor, interleaved=interleaved_rope)
+        if rope_threshold:
+            rope_position_id = graph_ops.add_rope_regime_positions(
+                network, position_id, kmax)
         cos_half_table = _const_in_work_dtype(
             network, cos_half_np.shape, cos_half_np,
             work_np_dtype, work_trt_dtype)
@@ -476,12 +457,12 @@ def build_dual_profile_decoder_engine(
         if position_type == "rope":
             q = graph_ops.add_apply_rope_native(
                 network, q, num_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
+                cos_half_table, sin_half_table, rope_position_id,
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
             k = graph_ops.add_apply_rope_native(
                 network, k, num_kv_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
+                cos_half_table, sin_half_table, rope_position_id,
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
 

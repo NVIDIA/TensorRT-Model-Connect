@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import graph_ops
 from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -378,6 +379,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if vision is None:
             raise RuntimeError("Phi-4 Multimodal vision build returned no engine")
         vl = model.get_vl_config(config) or {}
+        rope_threshold = graph_ops.longrope_regime_threshold(config.raw)
         runtime = {
             "tensor_parallel_size": 1,
             "num_layers": config.num_hidden_layers,
@@ -388,6 +390,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "image_token_id": int(vl.get("image_token_id", -1)),
             "vision_output_dim": int(vl.get("vision_output_dim", config.hidden_size)),
             "prefill_max_length": int(vl.get("prefill_max_length", max_length)),
+            # Sequences longer than this use the long LongRoPE factors (0: one regime).
+            "rope_long_factor_threshold": (
+                rope_threshold if max_length > rope_threshold else 0),
             "io_map": {
                 "cache_k_pattern": "cache_k_{i}",
                 "cache_v_pattern": "cache_v_{i}",

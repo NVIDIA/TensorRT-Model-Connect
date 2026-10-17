@@ -6,6 +6,7 @@
 #include "families/phi4_multimodal/runtime/pipeline.h"
 
 #include "families/phi4_multimodal/runtime/image_preprocessor.h"
+#include "families/phi4_multimodal/runtime/phi4_longrope.h"
 #include "families/phi4_multimodal/runtime/tensor_names.h"
 
 #include <algorithm>
@@ -233,6 +234,12 @@ bool add_vl_prefill_deepstack_inputs(ITrtModule& prefill, TensorMap& inputs,
     return true;
 }
 
+// The decoder engines take the LongRoPE regime when the checkpoint has two.
+void add_rope_regime_input(const ITrtModule& module, TensorMap& inputs, int32_t& rope_long_factor) {
+    if (module.has_input("rope_long_factor"))
+        inputs["rope_long_factor"] = Tensor{&rope_long_factor, {1}, DType::kInt32};
+}
+
 bool copy_last_prefill_logits(const TensorMap& outputs, int32_t vocab_size,
                               std::vector<float>& logits) {
     const auto logits_it = outputs.find("logits");
@@ -450,14 +457,18 @@ Phi4MultimodalPipeline::generate_ids(const std::vector<int32_t>& input_ids,
 
 void Phi4MultimodalPipeline::reset_generation_context(int32_t prompt_length) {
     const auto start = std::chrono::steady_clock::now();
+    reset_sequence_state(prompt_length);
+    last_setup_ms_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+void Phi4MultimodalPipeline::reset_sequence_state(int32_t prompt_length) {
     state_->reset();
     state_->set_prompt_length(prompt_length);
     text_decoder_->reset_execution_context();
     if (prefill_)
         prefill_->reset_execution_context();
     state_->bind_to(*text_decoder_);
-    last_setup_ms_ =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 std::vector<int32_t>
@@ -472,6 +483,7 @@ Phi4MultimodalPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
     active_sampler->reset();
 
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
+    begin_rope_regime(input_ids.size());
 
     std::vector<float> logits;
 
@@ -482,14 +494,21 @@ Phi4MultimodalPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
 
     std::vector<int32_t> output = input_ids;
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
+    const SequencePrefill prefill_sequence = [this](const std::vector<int32_t>& sequence,
+                                                    std::vector<float>& sequence_logits) {
+        reset_sequence_state(static_cast<int32_t>(sequence.size()));
+        for (const auto token_id : sequence)
+            run_text_step(token_id, sequence_logits);
+    };
 
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         Phi4MultimodalSampleResult result =
             active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        // No forward pass once generation is over, as in the reference.
+        if (result.is_eos || step + 1 == max_new_tokens)
             break;
-        run_text_step(result.token_id, logits);
+        run_decode_step(output, logits, prefill_sequence);
     }
 
     return output;
@@ -507,19 +526,32 @@ std::vector<int32_t> Phi4MultimodalPipeline::generate_vl_from_ids(
     active_sampler->reset();
 
     reset_generation_context(static_cast<int32_t>(input_ids.size()));
+    begin_rope_regime(input_ids.size());
+
+    // Image features stay at their image-token positions when the whole
+    // sequence is recomputed.
+    const SequencePrefill prefill_sequence = [&](const std::vector<int32_t>& sequence,
+                                                 std::vector<float>& sequence_logits) {
+        if (!run_vl_prefill_batched(sequence, image_features, deepstack_features, num_features,
+                                    feature_dim, sequence_logits)) {
+            int32_t feature_index = 0;
+            for (const auto& tid : sequence)
+                run_vl_prefill_token(tid, image_features, deepstack_features, num_features,
+                                     feature_dim, feature_index, sequence_logits);
+        }
+        state_->mark_prefill_complete();
+    };
 
     std::vector<float> logits;
-    if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
-                                feature_dim, logits)) {
-        int32_t feature_index = 0;
-        for (const auto& tid : input_ids)
-            run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
-                                 feature_index, logits);
-    }
-    state_->mark_prefill_complete();
+    prefill_sequence(input_ids, logits);
 
     std::vector<int32_t> output = input_ids;
-    run_vl_decode_loop(active_sampler, params, output, logits, max_new_tokens);
+    run_vl_decode_loop(
+        active_sampler, params, output, logits, max_new_tokens,
+        [&](const std::vector<int32_t>& sequence, std::vector<float>& sequence_logits) {
+            reset_sequence_state(static_cast<int32_t>(sequence.size()));
+            prefill_sequence(sequence, sequence_logits);
+        });
     return output;
 }
 
@@ -542,6 +574,7 @@ bool Phi4MultimodalPipeline::run_vl_prefill_batched(
 
     TensorMap inputs;
     add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
+    add_rope_regime_input(*prefill_, inputs, rope_long_factor_);
     if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
         return false;
 
@@ -579,16 +612,36 @@ void Phi4MultimodalPipeline::run_vl_prefill_token(
 void Phi4MultimodalPipeline::run_vl_decode_loop(Phi4MultimodalISampler* sampler,
                                                 const Phi4MultimodalSamplingParams& params,
                                                 std::vector<int32_t>& output,
-                                                std::vector<float>& logits,
-                                                int32_t max_new_tokens) {
+                                                std::vector<float>& logits, int32_t max_new_tokens,
+                                                const SequencePrefill& prefill_sequence) {
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         Phi4MultimodalSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos)
+        // No forward pass once generation is over, as in the reference.
+        if (result.is_eos || step + 1 == max_new_tokens)
             break;
-        run_text_step(result.token_id, logits);
+        run_decode_step(output, logits, prefill_sequence);
     }
+}
+
+void Phi4MultimodalPipeline::begin_rope_regime(std::size_t sequence_length) {
+    rope_long_factor_ =
+        phi4_multimodal_rope_long_factor(sequence_length, config_.rope_long_factor_threshold);
+}
+
+void Phi4MultimodalPipeline::run_decode_step(const std::vector<int32_t>& output,
+                                             std::vector<float>& logits,
+                                             const SequencePrefill& prefill_sequence) {
+    const auto long_factor =
+        phi4_multimodal_rope_long_factor(output.size(), config_.rope_long_factor_threshold);
+    if (long_factor == rope_long_factor_) {
+        run_text_step(output.back(), logits);
+        return;
+    }
+    // The cached keys were rotated with the short factors; recompute them all.
+    rope_long_factor_ = long_factor;
+    prefill_sequence(output, logits);
 }
 
 void Phi4MultimodalPipeline::run_text_step(int32_t token_id, std::vector<float>& logits) {
@@ -608,6 +661,7 @@ void Phi4MultimodalPipeline::run_text_step_with_embed(
     inputs["token_id"] = token_t;
 
     state_->prepare_step(inputs);
+    add_rope_regime_input(*text_decoder_, inputs, rope_long_factor_);
 
     std::vector<float> zero_embed;
     std::vector<float> zero_deepstack;

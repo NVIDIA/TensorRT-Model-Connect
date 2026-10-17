@@ -538,6 +538,88 @@ def make_rope_table_half_dim(
     return table
 
 
+# Runtime selector of the LongRoPE regime: 0 short factors, 1 long factors.
+ROPE_LONG_FACTOR_INPUT = "rope_long_factor"
+
+
+def longrope_regime_threshold(raw_config: dict) -> int:
+    """Sequence length above which a LongRoPE checkpoint switches to its long
+    factors (``original_max_position_embeddings``); 0 when the checkpoint has a
+    single regime."""
+    scaling = raw_config.get("rope_scaling") or {}
+    if scaling.get("type") != "longrope":
+        return 0
+    if scaling.get("short_factor") == scaling.get("long_factor"):
+        return 0
+    return int(raw_config.get(
+        "original_max_position_embeddings",
+        raw_config.get("max_position_embeddings", 0)))
+
+
+def make_rope_half_tables(
+    raw_config: dict,
+    rows: int,
+    head_dim: int,
+    rope_theta: float,
+    partial_rotary_factor: float = 1.0,
+    interleaved: bool = False,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Build the decoder's half-dimension RoPE cos/sin tables for ``rows`` positions.
+
+    LongRoPE checkpoints scale the frequencies with ``short_factor`` while the
+    sequence fits ``original_max_position_embeddings`` and with ``long_factor``
+    beyond it; the reference picks the factors per forward call from the
+    sequence length. When ``rows`` exceeds that length and the factors differ,
+    the tables hold both regimes (rows ``[0, rows)`` short, rows
+    ``[rows, 2 * rows)`` long) and the returned threshold is
+    ``original_max_position_embeddings``; otherwise one table and threshold 0.
+    """
+    def tables(factors, attention_factor):
+        return tuple(
+            make_rope_table_half_dim(
+                rows, head_dim, rope_theta, cosine, partial_rotary_factor,
+                interleaved=interleaved, frequency_factors=factors,
+                attention_factor=attention_factor)
+            for cosine in (True, False))
+
+    scaling = raw_config.get("rope_scaling") or {}
+    if scaling.get("type") != "longrope":
+        return (*tables(None, 1.0), 0)
+    original_max = int(raw_config.get(
+        "original_max_position_embeddings",
+        raw_config.get("max_position_embeddings", rows)))
+    max_positions = int(raw_config.get("max_position_embeddings", original_max))
+    extension_factor = max_positions / max(original_max, 1)
+    attention_factor = float(scaling.get(
+        "attention_factor",
+        1.0 if extension_factor <= 1.0 else np.sqrt(
+            1.0 + np.log(extension_factor) / np.log(original_max))))
+    if rows <= original_max:
+        return (*tables(scaling.get("short_factor"), attention_factor), 0)
+    long_cos, long_sin = tables(scaling.get("long_factor"), attention_factor)
+    threshold = longrope_regime_threshold(raw_config)
+    if not threshold:
+        return long_cos, long_sin, 0
+    short_cos, short_sin = tables(scaling.get("short_factor"), attention_factor)
+    return (np.concatenate([short_cos, long_cos]),
+            np.concatenate([short_sin, long_sin]), threshold)
+
+
+def add_rope_regime_positions(
+    network: trt.INetworkDefinition,
+    position_id: trt.ITensor,
+    rows: int,
+) -> trt.ITensor:
+    """Offset RoPE positions into the long-factor rows of a two-regime table."""
+    regime = network.add_input(ROPE_LONG_FACTOR_INPUT, trt.int32, (1,))
+    row_count = network.add_constant(
+        (1,), trt.Weights(np.array([rows], dtype=np.int32))).get_output(0)
+    offset = network.add_elementwise(
+        regime, row_count, trt.ElementWiseOperation.PROD).get_output(0)
+    return network.add_elementwise(
+        position_id, offset, trt.ElementWiseOperation.SUM).get_output(0)
+
+
 def reshape_rows_to_heads_4d(
     network: trt.INetworkDefinition,
     x: trt.ITensor,
