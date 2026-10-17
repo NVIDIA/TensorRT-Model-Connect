@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "cosmos3",
+            "cosmos3_nano",
+            "cosmos3-nano"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    },
+    {
+      "if": {
+        "/model_index/_class_name": {
+          "in": [
+            "Cosmos3OmniDiffusersPipeline",
+            "Cosmos3OmniPipeline",
+            "Cosmos3OmniModularPipeline"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    }
+  ]
+}

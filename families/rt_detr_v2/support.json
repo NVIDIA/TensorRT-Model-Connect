@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": { "/config/model_type": { "in": ["rt_detr_v2"] } },
+      "then": { "tasks": ["object_detection"], "default_task": "object_detection" }
+    },
+    {
+      "if": { "/config/architectures": { "contains_any": ["RtDetrV2ForObjectDetection"] } },
+      "then": { "tasks": ["object_detection"], "default_task": "object_detection" }
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "timm_nfnet",
+            "dm_nfnet_f0",
+            "dm_nfnet_f1",
+            "dm_nfnet_f2",
+            "dm_nfnet_f3",
+            "dm_nfnet_f4",
+            "dm_nfnet_f5",
+            "dm_nfnet_f6"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "dm_nfnet_f0",
+            "dm_nfnet_f1",
+            "dm_nfnet_f2",
+            "dm_nfnet_f3",
+            "dm_nfnet_f4",
+            "dm_nfnet_f5",
+            "dm_nfnet_f6"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "dm_nfnet_f0",
+            "dm_nfnet_f1",
+            "dm_nfnet_f2",
+            "dm_nfnet_f3",
+            "dm_nfnet_f4",
+            "dm_nfnet_f5",
+            "dm_nfnet_f6"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    }
+  ]
+}

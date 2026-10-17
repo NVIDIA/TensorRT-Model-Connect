@@ -3,12 +3,7 @@
 
 """Checkpoint identity and task ownership for timm SEResNet."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("timm_seresnet", "seresnet50"),
-    architectures=("seresnet50",),
-    tasks=("classification",),
-    default_task="classification",
-)
+describe = support_from_json(__file__)

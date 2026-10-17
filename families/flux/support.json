@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "flux",
+            "flux.2"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation",
+          "image_generation_batch"
+        ],
+        "default_task": "image_generation"
+      }
+    },
+    {
+      "if": {
+        "/model_index/_class_name": {
+          "in": [
+            "Flux2Pipeline",
+            "FluxPipeline"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation",
+          "image_generation_batch"
+        ],
+        "default_task": "image_generation"
+      }
+    }
+  ]
+}

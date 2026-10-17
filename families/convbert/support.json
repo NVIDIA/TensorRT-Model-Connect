@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "convbert"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "embedding",
+          "encoding",
+          "reranking"
+        ],
+        "default_task": "encoding"
+      }
+    }
+  ]
+}

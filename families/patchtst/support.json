@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "patchtst"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "time_series_forecast"
+        ],
+        "default_task": "time_series_forecast"
+      }
+    }
+  ]
+}

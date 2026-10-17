@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "mobilenetv4_conv_small_050",
+            "mobilenetv4_conv_small",
+            "mobilenetv4_conv_medium",
+            "mobilenetv4_conv_large"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "mobilenetv4_conv_small_050",
+            "mobilenetv4_conv_small",
+            "mobilenetv4_conv_medium",
+            "mobilenetv4_conv_large"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    }
+  ]
+}

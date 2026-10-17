@@ -3,11 +3,7 @@
 
 """Family-owned model and task support for timm_inception."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    architectures=("inception_v3",),
-    tasks=("image_to_class_scores",),
-    default_task="image_to_class_scores",
-)
+describe = support_from_json(__file__)
