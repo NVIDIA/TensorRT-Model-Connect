@@ -49,6 +49,21 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  # The owning Python GPU oracle drives this probe with a real serialized
+  # posterior plan and compares native CPU noise plus backend execution.
+  add_executable(minimax_h3_reference_posterior_probe
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/reference_posterior_probe.cpp
+  )
+  target_include_directories(minimax_h3_reference_posterior_probe PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(minimax_h3_reference_posterior_probe SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(minimax_h3_reference_posterior_probe PRIVATE
+    trtmc_model_minimax_h3 trtmc_core ${CMAKE_DL_LIBS}
+  )
+  add_dependencies(minimax_h3_reference_posterior_probe trtmc_backend_trt)
+  target_compile_options(minimax_h3_reference_posterior_probe PRIVATE -Wall -Wextra -Wpedantic)
+
   add_executable(test_minimax_h3_reference_layout
     reference_layout.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_layout.cpp
