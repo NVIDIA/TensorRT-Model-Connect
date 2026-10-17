@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_minimax_h3 SHARED
+  audio_decoder.cpp
   bpe_tokenizer.cpp
   diffusion_schedule.cpp
   pipeline.cpp
@@ -52,6 +53,33 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(minimax_h3_audio_decoder_probe
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/audio_decoder_probe.cpp
+  )
+  target_include_directories(minimax_h3_audio_decoder_probe PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(minimax_h3_audio_decoder_probe SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(minimax_h3_audio_decoder_probe PRIVATE
+    trtmc_model_minimax_h3 trtmc_core ${CMAKE_DL_LIBS}
+  )
+  add_dependencies(minimax_h3_audio_decoder_probe trtmc_backend_trt)
+  set_target_properties(minimax_h3_audio_decoder_probe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  )
+  target_compile_options(minimax_h3_audio_decoder_probe PRIVATE -Wall -Wextra -Wpedantic)
+
+  add_executable(test_minimax_h3_audio_decoder
+    audio_decoder.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_audio_decoder.cpp
+  )
+  target_include_directories(test_minimax_h3_audio_decoder PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_audio_decoder SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_minimax_h3_audio_decoder PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_audio_decoder COMMAND test_minimax_h3_audio_decoder)
+
   add_executable(test_minimax_h3_plan_loader
     plan_loader.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_plan_loader.cpp
