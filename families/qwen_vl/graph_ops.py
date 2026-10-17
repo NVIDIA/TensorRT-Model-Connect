@@ -1638,6 +1638,11 @@ def add_attention_core(
         if mask is not None and mask.dtype != trt.float32:
             mask = network.add_cast(mask, trt.float32).get_output(0)
 
+    # Causal/padding masks contain zero or a negative sentinel. Keep their
+    # addition at the attention dtype in the strongly typed graph.
+    if mask is not None and mask.dtype != q_4d.dtype:
+        mask = network.add_cast(mask, q_4d.dtype).get_output(0)
+
     # Pre-scale Q: TRT IAttention does not apply score scaling itself.
     # Match the scale constant's dtype to Q's dtype: in strongly-typed networks
     # a FP32 constant mixed with a FP16/BF16 Q causes add_elementwise to emit
