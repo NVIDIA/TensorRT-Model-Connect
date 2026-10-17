@@ -59,7 +59,8 @@ class Qwen38MtpScheduler {
                        std::unique_ptr<ITrtModule> draft_chain_module,
                        std::unique_ptr<ITrtModule> multi_token_module, Qwen38HybridState& state,
                        int32_t hidden_size, int32_t vocab_size, int32_t num_draft_tokens,
-                       cudaStream_t stream);
+                       cudaStream_t stream, std::unique_ptr<ITrtModule> prefill_module = nullptr,
+                       int32_t prefill_chunk_len = 0);
 
     // Bind MTP's own persistent cache to mtp_module_/draft_chain_module_,
     // and bind multi_token_module_'s per-layer state I/O directly to the
@@ -87,6 +88,18 @@ class Qwen38MtpScheduler {
     // exactly once per position in the main model's token stream, in
     // order, or MTP's attention history desyncs.
     int32_t draft(int32_t token, int32_t position, const float* hidden_state);
+
+    // True when the bundle ships the batched MTP prefill engine.
+    bool has_prefill() const { return prefill_module_ != nullptr; }
+
+    // Warm MTP's cache for m (1 <= m <= prefill chunk length) consecutive
+    // positions in one call: row r pairs tokens[r] at position first_position+r
+    // with hidden_rows[r] (the main model's hidden state of the position before
+    // it). Equivalent to m in-order draft() calls, minus the draft logits that
+    // warm-up discards. Same invariant as draft(): MTP's cache position must be
+    // first_position - 1.
+    void prefill_warmup(const int32_t* tokens, int32_t first_position, const float* hidden_rows,
+                        int32_t m);
 
     struct DraftChainResult {
         std::vector<int32_t> token_ids;   // (num_draft_tokens(),)
@@ -153,6 +166,8 @@ class Qwen38MtpScheduler {
     std::unique_ptr<ITrtModule> mtp_module_;
     std::unique_ptr<ITrtModule> draft_chain_module_;
     std::unique_ptr<ITrtModule> multi_token_module_;
+    std::unique_ptr<ITrtModule> prefill_module_; // optional, see prefill_warmup()
+    int32_t prefill_chunk_len_{0};
     Qwen38HybridState& state_;
     cudaStream_t stream_;
     int32_t hidden_size_;
@@ -175,6 +190,11 @@ class Qwen38MtpScheduler {
     std::vector<DeviceTensor> draft_chain_present_k_;
     std::vector<DeviceTensor> draft_chain_present_v_;
 
+    // prefill_module_'s (chunk_len, kv_dim) present_k/v outputs, appended to
+    // mtp_cache_ by prefill_warmup().
+    std::vector<DeviceTensor> prefill_present_k_;
+    std::vector<DeviceTensor> prefill_present_v_;
+
     void* mtp_logits_device_ptr_{nullptr};
     void* draft_chain_ids_device_ptr_{nullptr};
     void* draft_chain_hidden_device_ptr_{nullptr};
@@ -184,6 +204,9 @@ class Qwen38MtpScheduler {
     std::vector<float> mtp_logits_host_;
     std::vector<float> multi_logits_host_;
     std::vector<float> mask_scratch_;
+    std::vector<int32_t> prefill_tokens_;
+    std::vector<int32_t> prefill_positions_;
+    std::vector<float> prefill_hidden_;
     bool bound_{false};
 };
 

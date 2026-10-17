@@ -25,15 +25,16 @@ int32_t argmax(const float* data, std::size_t n) {
 }
 } // namespace
 
-Qwen38MtpScheduler::Qwen38MtpScheduler(std::unique_ptr<ITrtModule> mtp_module,
-                                       std::unique_ptr<ITrtModule> draft_chain_module,
-                                       std::unique_ptr<ITrtModule> multi_token_module,
-                                       Qwen38HybridState& state, int32_t hidden_size,
-                                       int32_t vocab_size, int32_t num_draft_tokens,
-                                       cudaStream_t stream)
+Qwen38MtpScheduler::Qwen38MtpScheduler(
+    std::unique_ptr<ITrtModule> mtp_module, std::unique_ptr<ITrtModule> draft_chain_module,
+    std::unique_ptr<ITrtModule> multi_token_module, Qwen38HybridState& state, int32_t hidden_size,
+    int32_t vocab_size, int32_t num_draft_tokens, cudaStream_t stream,
+    std::unique_ptr<ITrtModule> prefill_module, int32_t prefill_chunk_len)
     : mtp_module_(std::move(mtp_module)), draft_chain_module_(std::move(draft_chain_module)),
-      multi_token_module_(std::move(multi_token_module)), state_(state), stream_(stream),
-      hidden_size_(hidden_size), vocab_size_(vocab_size), num_draft_tokens_(num_draft_tokens) {
+      multi_token_module_(std::move(multi_token_module)),
+      prefill_module_(std::move(prefill_module)), prefill_chunk_len_(prefill_chunk_len),
+      state_(state), stream_(stream), hidden_size_(hidden_size), vocab_size_(vocab_size),
+      num_draft_tokens_(num_draft_tokens) {
     if (!mtp_module_ || !mtp_module_->ok())
         throw std::runtime_error("Qwen38MtpScheduler: invalid MTP module");
     if (!draft_chain_module_ || !draft_chain_module_->ok())
@@ -79,6 +80,18 @@ Qwen38MtpScheduler::Qwen38MtpScheduler(std::unique_ptr<ITrtModule> mtp_module,
         throw std::runtime_error(
             "Qwen38MtpScheduler: failed to allocate draft-chain present K/V scratch");
     }
+
+    if (prefill_module_) {
+        if (!prefill_module_->ok() || prefill_chunk_len_ < 1)
+            throw std::runtime_error("Qwen38MtpScheduler: invalid MTP prefill module");
+        prefill_present_k_.emplace_back(std::vector<int64_t>{prefill_chunk_len_, main_kv.kv_dim()},
+                                        main_kv.dtype(), stream_);
+        prefill_present_v_.emplace_back(std::vector<int64_t>{prefill_chunk_len_, main_kv.kv_dim()},
+                                        main_kv.dtype(), stream_);
+        if (!prefill_present_k_.back().ok() || !prefill_present_v_.back().ok())
+            throw std::runtime_error(
+                "Qwen38MtpScheduler: failed to allocate MTP prefill present K/V scratch");
+    }
 }
 
 void Qwen38MtpScheduler::bind_state() {
@@ -92,6 +105,11 @@ void Qwen38MtpScheduler::bind_state() {
     mtp_cache_->bind_cache_inputs(*draft_chain_module_);
     draft_chain_module_->bind_external("mtp_present_k", draft_chain_present_k_[0].data());
     draft_chain_module_->bind_external("mtp_present_v", draft_chain_present_v_[0].data());
+
+    if (prefill_module_) {
+        prefill_module_->bind_external("mtp_present_k", prefill_present_k_[0].data());
+        prefill_module_->bind_external("mtp_present_v", prefill_present_v_[0].data());
+    }
 
     Qwen38KvCache& main_kv = *state_.kv_cache();
     Qwen38RecurrentState& ssm = *state_.recurrent_state();
@@ -181,6 +199,57 @@ int32_t Qwen38MtpScheduler::draft(int32_t token, int32_t position, const float* 
     mtp_cache_->advance(1);
 
     return argmax(mtp_logits_host_.data(), mtp_logits_host_.size());
+}
+
+void Qwen38MtpScheduler::prefill_warmup(const int32_t* tokens, int32_t first_position,
+                                        const float* hidden_rows, int32_t m) {
+    if (!bound_) {
+        throw std::runtime_error(
+            "Qwen38MtpScheduler: bind_state() must be called before prefill_warmup()");
+    }
+    if (!prefill_module_)
+        throw std::runtime_error("Qwen38MtpScheduler::prefill_warmup: no MTP prefill module");
+    if (m < 1 || m > prefill_chunk_len_)
+        throw std::runtime_error("Qwen38MtpScheduler::prefill_warmup: m out of range");
+    if (mtp_cache_->position() != first_position - 1) {
+        throw std::runtime_error(
+            "Qwen38MtpScheduler::prefill_warmup: MTP cache position out of sync with caller's "
+            "position (every main-model token must get exactly one draft()/warm-up call, in "
+            "order)");
+    }
+
+    // Rows are independent, so padding rows just repeat the last real one.
+    const auto chunk = static_cast<std::size_t>(prefill_chunk_len_);
+    const auto hs = static_cast<std::size_t>(hidden_size_);
+    prefill_tokens_.resize(chunk);
+    prefill_positions_.resize(chunk);
+    prefill_hidden_.resize(chunk * hs);
+    for (std::size_t i = 0; i < chunk; ++i) {
+        const auto r = std::min(i, static_cast<std::size_t>(m) - 1);
+        prefill_tokens_[i] = tokens[r];
+        prefill_positions_[i] = first_position + static_cast<int32_t>(r);
+        std::copy(hidden_rows + r * hs, hidden_rows + (r + 1) * hs,
+                  prefill_hidden_.begin() + i * hs);
+    }
+
+    TensorMap inputs;
+    Tensor t;
+    t.data = prefill_tokens_.data();
+    t.shape = {prefill_chunk_len_};
+    t.dtype = DType::kInt32;
+    inputs["next_token_ids"] = t;
+    t.data = prefill_positions_.data();
+    inputs["position_id"] = t;
+    t.data = prefill_hidden_.data();
+    t.shape = {prefill_chunk_len_, hidden_size_};
+    t.dtype = DType::kFloat32;
+    inputs["hidden_state"] = t;
+
+    prefill_module_->forward_async(inputs);
+    prefill_module_->sync();
+
+    mtp_cache_->append_prefill_kv({prefill_present_k_[0].data()}, {prefill_present_v_[0].data()},
+                                  m);
 }
 
 Qwen38MtpScheduler::DraftChainResult

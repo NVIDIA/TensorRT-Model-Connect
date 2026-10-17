@@ -118,6 +118,14 @@
           ]
         },
         {
+          "name": "prefill_chunk_len",
+          "flags": [
+            "--prefill-chunk-len"
+          ],
+          "type": "int",
+          "help": "Prompt tokens per multi-token prefill engine call (default 128; 0 = single-token prefill)"
+        },
+        {
           "name": "execution_variant",
           "flags": [
             "--execution-variant"

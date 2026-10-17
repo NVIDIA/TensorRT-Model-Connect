@@ -8,6 +8,7 @@
 #include "families/qwen3_8/runtime/mtp_scheduler.h"
 #include "families/qwen3_8/runtime/pipeline.h"
 #include "families/qwen3_8/runtime/plugin_helpers.h"
+#include "families/qwen3_8/runtime/prefill_runner.h"
 #include "families/qwen3_8/runtime/recurrent_state.h"
 #include "trtmc/runtime/family_factory.h"
 #ifdef TRTMC_HAS_EDGE_LLM
@@ -46,6 +47,7 @@ struct RuntimeConfig {
     std::string precision;
     bool has_mtp;
     std::int32_t mtp_num_draft_tokens;
+    std::int32_t prefill_chunk_len; // 0: no prefill_engine.plan, single-token prefill
 };
 
 template <typename T>
@@ -69,7 +71,10 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (!json.is_object())
         throw std::runtime_error("qwen3_8 runtime.json must be an object");
-    if (json.size() != 22)
+    // prefill_chunk_len is optional: bundles built before the multi-token
+    // prefill engine existed carry 22 fields and prefill token by token.
+    const bool has_prefill_field = json.contains("prefill_chunk_len");
+    if (json.size() != (has_prefill_field ? 23U : 22U))
         throw std::runtime_error("qwen3_8 runtime.json has an unexpected field set");
     if (require_value<std::string>(json, "decoder_engine_layout") != "single")
         throw std::runtime_error("qwen3_8 requires decoder_engine_layout='single'");
@@ -95,6 +100,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::string>(json, "precision"),
         require_value<bool>(json, "has_mtp"),
         require_value<std::int32_t>(json, "mtp_num_draft_tokens"),
+        has_prefill_field ? require_value<std::int32_t>(json, "prefill_chunk_len") : 0,
     };
     const auto layer_types = require_value<std::vector<std::string>>(json, "layer_types");
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
@@ -107,6 +113,8 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         layer_types.size() != static_cast<std::size_t>(config.num_layers)) {
         throw std::runtime_error("qwen3_8 runtime.json contains invalid geometry");
     }
+    if (config.prefill_chunk_len < 0 || config.prefill_chunk_len == 1)
+        throw std::runtime_error("qwen3_8 runtime.json has invalid prefill_chunk_len");
     if (config.precision != "fp16" && config.precision != "fp32" && config.precision != "bf16")
         throw std::runtime_error("qwen3_8 runtime.json contains invalid precision");
     if (config.has_mtp && config.mtp_num_draft_tokens < 1)
@@ -178,9 +186,27 @@ ITask* create(const FamilyContext& context) {
         auto multi_token_module =
             load_engine(context.backend, require_section(context.reader, "multi_token_engine.plan"),
                         "qwen3_8 multi-token verification");
+        std::unique_ptr<ITrtModule> mtp_prefill_module;
+        if (config.prefill_chunk_len > 0 &&
+            context.reader.find_section("mtp_prefill_engine.plan")) {
+            mtp_prefill_module = load_engine(
+                context.backend, require_section(context.reader, "mtp_prefill_engine.plan"),
+                "qwen3_8 MTP prefill");
+        }
         mtp_scheduler = std::make_unique<Qwen38MtpScheduler>(
             std::move(mtp_module), std::move(draft_chain_module), std::move(multi_token_module),
-            *state, config.hidden_size, config.vocab_size, config.mtp_num_draft_tokens, stream);
+            *state, config.hidden_size, config.vocab_size, config.mtp_num_draft_tokens, stream,
+            std::move(mtp_prefill_module), config.prefill_chunk_len);
+    }
+
+    std::unique_ptr<Qwen38PrefillRunner> prefill_runner;
+    if (config.prefill_chunk_len > 0) {
+        auto prefill_module =
+            load_engine(context.backend, require_section(context.reader, "prefill_engine.plan"),
+                        "qwen3_8 prefill");
+        prefill_runner = std::make_unique<Qwen38PrefillRunner>(
+            std::move(prefill_module), *state, config.prefill_chunk_len, config.hidden_size,
+            config.vocab_size, stream);
     }
 
     RecurrentGenConfig generation;
@@ -193,7 +219,7 @@ ITask* create(const FamilyContext& context) {
 
     return new RecurrentPipeline(std::move(decoder), std::move(state), std::move(generation),
                                  stream, "Qwen3.8", create_tokenizer(context.reader), std::string{},
-                                 nullptr, std::move(mtp_scheduler));
+                                 nullptr, std::move(mtp_scheduler), std::move(prefill_runner));
 }
 
 } // namespace trtmc::qwen3_8
