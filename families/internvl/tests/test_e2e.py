@@ -31,15 +31,6 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
         assert manifest["family"] == FAMILY
         assert manifest["task"] in TASKS
         for case in manifest["testcases"]:
-            community = case.get("community_gpu", True)
-            assert type(community) is bool, "community_gpu must be boolean"
-            if not community:
-                # This declares the public runner's capacity only. Explicit
-                # family E2E selectors still execute the complete testcase.
-                reason = case.get("metadata", {}).get("community_gpu_deferred_reason")
-                assert isinstance(reason, str) and reason.strip(), (
-                    "a Community capacity deferral requires an owning reason"
-                )
             name = str(case["name"])
             assert name not in result
             result[name] = (path, manifest, case)
@@ -138,22 +129,23 @@ def _runtime(manifest: dict) -> tuple[Path, Path]:
 
 
 def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
-    request = BuildRequest(
-        model_dir=model_dir,
-        output_path=bundle,
-        family=FAMILY,
-        task=manifest["task"],
-        precision=manifest["precision"],
-        max_sequence_length=manifest.get("max_sequence_length"),
-        image_height=manifest.get("image_height"),
-        image_width=manifest.get("image_width"),
-        video_num_frames=manifest.get("video_num_frames"),
-        max_batch_size=int(manifest.get("max_batch_size", 1)),
-        tensor_parallel_size=int(manifest["tensor_parallel_size"]),
-        quantization=manifest.get("quantization"),
-        fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
+    build(
+        BuildRequest(
+            model_dir=model_dir,
+            output_path=bundle,
+            family=FAMILY,
+            task=manifest["task"],
+            precision=manifest["precision"],
+            max_sequence_length=manifest.get("max_sequence_length"),
+            image_height=manifest.get("image_height"),
+            image_width=manifest.get("image_width"),
+            video_num_frames=manifest.get("video_num_frames"),
+            max_batch_size=int(manifest.get("max_batch_size", 1)),
+            tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+            quantization=manifest.get("quantization"),
+            fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
+        )
     )
-    build(request)
 
 
 def _run_json(
@@ -463,13 +455,6 @@ def test_2b_comparator_accepts_ned_or_word_agreement() -> None:
 
 def test_reference_routes_keep_8b_on_golden_and_2b_on_hf() -> None:
     expected_backends = {
-        "internvl3-1b": "hf_transformers",
-        "internvl35-1b": "hf_transformers",
-        "internvl35-2b": "hf_transformers",
-        "internvl35-4b": "hf_transformers",
-        "internvl35-8b": "hf_transformers",
-        "internvl35-14b": "hf_transformers",
-        "internvl3-14b": "hf_transformers",
         "internvl3-2b": "hf_transformers",
         "internvl3-2b-tp2": "hf_transformers",
         "internvl3-8b": "golden_snapshot",

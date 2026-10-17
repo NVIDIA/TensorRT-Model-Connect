@@ -226,11 +226,11 @@ def _load_internvl_text_weights(
     model_dir: str,
     config: ModelConfig,
 ) -> WeightDict:
-    """Load InternVL text decoder weights.
+    """Load InternVL3 text decoder weights.
 
     InternVL3-8B-hf uses model.language_model.model.layers.{i}.* prefix.
     Falls back to model.layers.{i}.* if language_model prefix not found.
-    Qwen2 and Qwen3 decoder blocks share the graph; Qwen3 adds per-head Q/K norms.
+    The text decoder is standard Qwen2 architecture.
     """
     from pathlib import Path
 
@@ -312,13 +312,6 @@ def _load_internvl_text_weights(
             if _has_tensor(readers, full_key):
                 raw = _load_tensor(readers, full_key).astype(np.float32)
                 weights[f"{prefix}.{proj_name}"] = raw
-
-        # Qwen3 normalizes each projected Q/K head before RoPE. The graph
-        # already supports these optional weights; preserve them at loading.
-        for name in ("q_norm", "k_norm"):
-            key = f"{hf_prefix}.self_attn.{name}.weight"
-            if _has_tensor(readers, key):
-                weights[f"{prefix}.{name}"] = _load_tensor(readers, key).astype(np.float32)
 
         # SwiGLU MLP
         gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
