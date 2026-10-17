@@ -9,6 +9,11 @@
 // Phi4MMImageProcessor: the crop grid and padding of dynamic_preprocess, the
 // per-crop patch masks, Pillow's bilinear resize of the image, the bicubic
 // global view, and the sub_glb token layout of Phi4MMImageEmbedding.
+//
+// Ported from the checkpoint's processing_phi4mm.py and modeling_phi4mm.py
+// (Apache-2.0), Pillow 12.2.0 src/libImaging/Resample.c (MIT-CMU) and PyTorch v2.12.0
+// UpSample.h / cpu/UpSampleKernel.cpp (BSD-3-Clause); the notices are
+// reproduced in families/phi4_multimodal/NOTICE.
 
 #include <algorithm>
 #include <cmath>
@@ -151,7 +156,8 @@ inline HdLayout hd_layout(int32_t width, int32_t height, int32_t max_crops = kHd
 
 // Image.resize((width, height), Image.BILINEAR) on an 8-bit RGB image: Pillow's
 // separable 22-bit fixed-point triangle filter, horizontal pass first, each
-// pass rounded to 8 bits.
+// pass rounded to 8 bits. Adapted from Pillow's Resample.c (precompute_coeffs,
+// normalize_coeffs_8bpc, ImagingResampleHorizontal/Vertical_8bpc).
 inline std::vector<uint8_t> pillow_bilinear_resize_rgb(const std::vector<uint8_t>& src,
                                                        int32_t height, int32_t width,
                                                        int32_t out_height, int32_t out_width) {
@@ -229,7 +235,8 @@ inline std::vector<uint8_t> pillow_bilinear_resize_rgb(const std::vector<uint8_t
 
 // F.interpolate(x, size, mode="bicubic", align_corners=False) on a float CHW
 // image on CPU (no antialiasing, A = -0.75, clamped borders): the height
-// weights wrap the width interpolation, accumulated in float.
+// weights wrap the width interpolation, accumulated in float. Adapted from
+// PyTorch's cubic_convolution1/2 and CPU bicubic upsampling kernel.
 inline std::vector<float> torch_bicubic_resize_chw(const std::vector<float>& src, int32_t channels,
                                                    int32_t height, int32_t width,
                                                    int32_t out_height, int32_t out_width) {
