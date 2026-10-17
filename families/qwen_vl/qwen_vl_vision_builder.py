@@ -814,7 +814,7 @@ def _add_deepstack_merger(
         network, fc1, fc1_hidden, fc1_b, dtype=dtype)
 
     # GELU activation
-    activated = graph_ops.add_gelu_new(network, fc1, dtype=dtype)
+    activated = network.add_activation(fc1, trt.ActivationType.GELU_ERF).get_output(0)
 
     # fc2: [num_merged, fc1_hidden] -> [num_merged, text_hidden_size]
     fc2_w = weights[f"{merger_prefix}.linear_fc2.weight"].astype(np.float32)
@@ -1177,8 +1177,8 @@ def build_qwen3_vl_vision_engine(
         merger_fc1_w.T.copy(), dtype=work_np_dtype)
     fc1_out = graph_ops.add_bias_sum(
         network, fc1_out, fc1_hidden, merger_fc1_b, dtype=work_np_dtype)
-    activated = graph_ops.add_gelu_new(
-        network, fc1_out, dtype=work_np_dtype)
+    activated = network.add_activation(
+        fc1_out, trt.ActivationType.GELU_ERF).get_output(0)
     fc2_out = graph_ops.add_matmul_rhs_constant(
         network, activated, fc1_hidden, text_hidden_size,
         merger_fc2_w.T.copy(), dtype=work_np_dtype)
