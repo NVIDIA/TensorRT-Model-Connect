@@ -811,6 +811,49 @@ static void build_dynamic_vision_rope(int32_t merged_w, const QwenVlPreprocessCo
     }
 }
 
+// Qwen3-VL interpolates its learned square position table before applying
+// merge-group order. Preserve the reference's FP32 linspace and corner order.
+static void build_dynamic_qwen3_positions(int32_t grid_h, int32_t grid_w,
+                                          const QwenVlPreprocessConfig& config,
+                                          QwenVlPreprocessedImage& result) {
+    const int32_t side = config.vision_position_grid_size;
+    const int32_t merge = config.merge_size;
+    const int32_t patches = grid_h * grid_w;
+    result.vision_position_indices.resize(static_cast<std::size_t>(4) * patches);
+    result.vision_position_weights.resize(static_cast<std::size_t>(4) * patches);
+    const auto coordinate = [side](int32_t index, int32_t length) {
+        if (length <= 1)
+            return 0.0F;
+        const float step = static_cast<float>(side - 1) / (length - 1);
+        return index < length / 2 ? step * index : (side - 1) - step * (length - index - 1);
+    };
+    int32_t patch = 0;
+    for (int32_t group_h = 0; group_h < grid_h / merge; ++group_h) {
+        for (int32_t group_w = 0; group_w < grid_w / merge; ++group_w) {
+            for (int32_t local_h = 0; local_h < merge; ++local_h) {
+                for (int32_t local_w = 0; local_w < merge; ++local_w, ++patch) {
+                    const float h = coordinate(group_h * merge + local_h, grid_h);
+                    const float w = coordinate(group_w * merge + local_w, grid_w);
+                    const int32_t h0 = static_cast<int32_t>(h);
+                    const int32_t w0 = static_cast<int32_t>(w);
+                    const int32_t h1 = std::min(h0 + 1, side - 1);
+                    const int32_t w1 = std::min(w0 + 1, side - 1);
+                    const float dh = h - h0, dw = w - w0;
+                    const int32_t indices[] = {h0 * side + w0, h0 * side + w1, h1 * side + w0,
+                                               h1 * side + w1};
+                    const float weights[] = {(1.0F - dh) * (1.0F - dw), (1.0F - dh) * dw,
+                                             dh * (1.0F - dw), dh * dw};
+                    for (int32_t corner = 0; corner < 4; ++corner) {
+                        const auto offset = static_cast<std::size_t>(corner) * patches + patch;
+                        result.vision_position_indices[offset] = indices[corner];
+                        result.vision_position_weights[offset] = weights[corner];
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void build_dynamic_window_padding(const std::vector<int32_t>& group_counts,
                                          const QwenVlPreprocessConfig& config,
                                          QwenVlPreprocessedImage& result) {
@@ -911,9 +954,19 @@ preprocess_qwen_smart_resize_patchify(const LoadedImage& loaded,
     result.channels = patch_vector;
     result.height = loaded.target_height;
     result.width = loaded.target_width;
-    const auto group_counts = build_dynamic_window_order(grid_h, grid_w, config, result);
-    build_dynamic_vision_rope(grid_w / merge, config, result);
-    build_dynamic_window_padding(group_counts, config, result);
+    if (config.vision_position_grid_size > 0) {
+        // Qwen3-VL has full attention in merge-group order, with no window
+        // permutation. The shared family RoPE builder consumes that identity.
+        result.vision_window_indices.resize(static_cast<std::size_t>(group_rows) * group_columns);
+        for (std::size_t group = 0; group < result.vision_window_indices.size(); ++group)
+            result.vision_window_indices[group] = static_cast<int32_t>(group);
+        build_dynamic_vision_rope(group_columns, config, result);
+        build_dynamic_qwen3_positions(grid_h, grid_w, config, result);
+    } else {
+        const auto group_counts = build_dynamic_window_order(grid_h, grid_w, config, result);
+        build_dynamic_vision_rope(group_columns, config, result);
+        build_dynamic_window_padding(group_counts, config, result);
+    }
     result.ok = true;
     return result;
 }
@@ -1136,6 +1189,12 @@ QwenVlPreprocessConfig qwen_vl_parse_preprocess_config(const std::string& config
         cfg.vision_num_heads = require_preprocess_int(document, "vision_num_heads");
         cfg.vision_window_size = require_preprocess_int(document, "vision_window_size");
         cfg.vision_rope_theta = require_preprocess_number(document, "vision_rope_theta");
+        if (document.contains("vision_position_grid_size")) {
+            cfg.vision_position_grid_size =
+                require_preprocess_int(document, "vision_position_grid_size");
+            if (cfg.vision_position_grid_size <= 0)
+                throw std::runtime_error("runtime.json has invalid learned-position grid");
+        }
     }
     if (cfg.fixed_image_size <= 0 || cfg.patch_size <= 0 || cfg.merge_size <= 0 ||
         cfg.temporal_patch_size <= 0 || cfg.vision_output_dim <= 0)
