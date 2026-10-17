@@ -200,6 +200,9 @@ def build_vae_tile_decoder_engine(
         workspace_bytes,
         default_bytes=VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
     )
+    # Preserve the upstream FP32 normalization/residual boundaries; TF32 is
+    # not part of the original decoder's FP16 autocast computation contract.
+    config.clear_flag(trt.BuilderFlag.TF32)
     latent = network.add_input(
         "latent_tiles", trt.float32, (batch_size, CHANNELS, FRAMES, HEIGHT, WIDTH)
     )

@@ -98,6 +98,7 @@ DecodedH3Video VideoDecoder::run(const std::vector<float>& rows) {
             validate_module(*module_, config_.tile_batch);
         }
         VideoClipAssembler assembler(geometry_);
+        uint64_t forwards = 0;
         for (int32_t clip = 0; clip < geometry_.clips; ++clip)
             for (std::size_t first = 0; first < geometry_.tiles(); first += config_.tile_batch) {
                 auto input = extract(rows, geometry_, config_, clip, first);
@@ -107,6 +108,7 @@ DecodedH3Video VideoDecoder::run(const std::vector<float>& rows) {
                                                        kLatentTile, kLatentTile},
                                                       DType::kFloat32});
                 const auto outputs = module_->forward(inputs);
+                ++forwards;
                 const auto found = outputs.find("decoded_tiles");
                 if (found == outputs.end() || !found->second.data ||
                     found->second.dtype != DType::kFloat32 ||
@@ -124,6 +126,7 @@ DecodedH3Video VideoDecoder::run(const std::vector<float>& rows) {
                                      kDecodedTileValues);
             }
         auto result = assembler.finish();
+        result.forwards = forwards;
         if (residency_ == VideoDecoderResidency::Staged)
             module_.reset();
         return result;

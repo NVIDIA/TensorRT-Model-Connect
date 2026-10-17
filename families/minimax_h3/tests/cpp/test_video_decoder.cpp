@@ -173,6 +173,9 @@ std::vector<float> test(int32_t batch, VideoDecoderResidency residency) {
                 "staged release / resident reuse");
         require(state.forwards == (batch == 1 ? 4 : 2),
                 "all real tiles and partial static batch handled");
+        require(cold.forwards == static_cast<uint64_t>(batch == 1 ? 2 : 1) &&
+                    warm.forwards == cold.forwards,
+                "result reports actual successful engine forward calls");
         retained = cold.rgb;
         state.failure = 1;
         must_throw([&] { owner.run(rows); });

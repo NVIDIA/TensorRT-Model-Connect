@@ -24,6 +24,9 @@ def test_video_decoder_static_batch_threads_through_typed_input(monkeypatch, bat
             raise CapturedInput
 
     class Config:
+        def clear_flag(self, flag):
+            assert flag == vae.trt.BuilderFlag.TF32
+
         def set_memory_pool_limit(self, _pool, value):
             self.limit = value
 

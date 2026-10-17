@@ -32,6 +32,7 @@ float video_half_to_float(uint16_t value);
 struct DecodedH3Video {
     int32_t frames, height, width;
     std::vector<float> rgb; // Owned THWC FP32 [0,1], matching the shared contract.
+    uint64_t forwards{0};   // Actual successful engine calls; zero for host-only assembly.
 };
 
 // Consumes original (unblended) tiles in clip/row-major order. Keeps only one
