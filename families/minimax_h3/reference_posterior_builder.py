@@ -33,6 +33,19 @@ def posterior_input_shapes(latent_pixels=(16384, 22016, 65536)):
     }
 
 
+def _apply_profile(profile, shapes):
+    for name, values in shapes.items():
+        # The Python setter returns None and raises on invalid dimensions;
+        # it is not the boolean-returning C++ API. Verify actual stored bounds
+        # rather than interpreting that documented return value as a failure.
+        profile.set_shape(name, *values)
+        stored = tuple(tuple(shape) for shape in profile.get_shape(name))
+        if stored != tuple(values):
+            raise RuntimeError(
+                f"H3 posterior profile did not retain the requested shapes for {name}"
+            )
+
+
 def build_reference_posterior_engine(*, latent_pixels=(16384, 22016, 65536)) -> bytes:
     shapes = posterior_input_shapes(latent_pixels)
     logger = trt.Logger(trt.Logger.WARNING)
@@ -46,8 +59,7 @@ def build_reference_posterior_engine(*, latent_pixels=(16384, 22016, 65536)) -> 
     moments = network.add_input("moments", trt.float32, (48, -1))
     noise = network.add_input("noise", trt.float32, (24, -1))
     profile = builder.create_optimization_profile()
-    for name, values in shapes.items():
-        assert profile.set_shape(name, *values)
+    _apply_profile(profile, shapes)
     config.add_optimization_profile(profile)
     mean = op.dynamic_slice(network, moments, (0, 0), (24, None))
     logvar = op.dynamic_slice(network, moments, (24, 0), (24, None))
