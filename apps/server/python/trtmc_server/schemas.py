@@ -19,9 +19,18 @@ class TextContentPart(StrictRequest):
     text: str
 
 
+class ImageURL(StrictRequest):
+    url: str = Field(min_length=1)
+
+
+class ImageContentPart(StrictRequest):
+    type: Literal["image_url"]
+    image_url: ImageURL
+
+
 class ChatMessage(StrictRequest):
     role: str
-    content: str | list[TextContentPart]
+    content: str | list[TextContentPart | ImageContentPart]
 
 
 class StreamOptions(StrictRequest):

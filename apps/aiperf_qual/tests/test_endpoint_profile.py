@@ -87,3 +87,32 @@ def test_transcription_check_requires_the_complete_native_text():
     assert check_output("transcription", {"text": "Full transcript."}, {"text": "Full transcript."}) == 1
     with pytest.raises(ValueError):
         check_output("transcription", {"text": "Full"}, {"text": "Full transcript."})
+
+
+def test_vision_checks_complete_answers_token_counts_and_image_question_identity(tmp_path):
+    image = "data:image/png;base64," + base64.b64encode(b"original image").decode()
+    inputs = tmp_path / "inputs.jsonl"
+    inputs.write_text(json.dumps({"texts": ["Question?"], "image": image}) + "\n")
+    row, = samples("vision", inputs, "model", 10)
+    payload = row["payload"]
+    other = json.loads(json.dumps(payload))
+    other["messages"][0]["content"][0]["text"] = "Different question?"
+    assert input_key("vision", payload) != input_key("vision", other)
+    other = json.loads(json.dumps(payload))
+    other["messages"][0]["content"][1]["image_url"]["url"] = image + "AA=="
+    with pytest.raises(ValueError):
+        input_key("vision", other)
+    native = {"text": "Full answer.", "output_tokens": 3}
+    response = {"choices": [{"index": 0, "message": {"role": "assistant", "content": "Full answer."}}],
+                "usage": {"completion_tokens": 3}}
+    assert check_output("vision", response, native) == len(native["text"])
+    response["choices"][0]["message"]["content"] = "Full"
+    with pytest.raises(ValueError):
+        check_output("vision", response, native)
+    response["choices"][0]["message"]["content"] = ""
+    with pytest.raises(ValueError):
+        check_output("vision", response, {"text": "", "output_tokens": 3})
+    response["choices"][0]["message"]["content"] = "Full answer."
+    response["usage"]["completion_tokens"] = 2
+    with pytest.raises(ValueError):
+        check_output("vision", response, native)

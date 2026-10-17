@@ -164,6 +164,19 @@ void test_task_selection_and_failures(const std::filesystem::path& root,
                     run.messages[1].at("result").at("text") == item.second,
                 "primary Task selection does not inject undeclared defaults or languages");
     }
+    for (const auto& item : std::vector<std::pair<std::string, std::string>>{
+             {"text_conversation", "language_fixture"}, {"images_text_to_text", "text_fixture"}}) {
+        std::istringstream input;
+        std::ostringstream output;
+        try {
+            trtmc::server::run_bundle_worker(write_bundle(root, item.first, item.second).string(),
+                                             options, input, output);
+            throw std::runtime_error("server selected a secondary Task instead of the primary");
+        } catch (const trtmc::Error& error) {
+            require(error.code() == TRTMC_UNSUPPORTED && output.str().empty(),
+                    "secondary capabilities cannot enable or replace a bundle's primary Task");
+        }
+    }
     const auto failure = invoke(write_bundle(root, "must_not_run"), options,
                                 {generate("failure"), generate("must-not-retry")});
     require(failure.status == 1 && failure.messages.size() == 2 &&
@@ -274,6 +287,36 @@ void test_detection_task(const std::filesystem::path& root, const trtmc::LoadOpt
                 result.at("timing_scope") == "public_task_call_wall",
             "SDK defaults and complete native image detection results survive transport");
 }
+
+void test_vision_task(const std::filesystem::path& root, const trtmc::LoadOptions& options,
+                      const std::string& primary) {
+    const auto bundle = write_bundle(root, primary, "language_fixture");
+    const auto path = root / "server-sdk-vision.png";
+    std::vector<float> pixels(8 * 4 * 3, 0.0F);
+    pixels[0] = 1.0F;
+    trtmc::cli::io::save_png(path.string(), pixels, 8, 4);
+    const Json valid{{"id", "vision"},
+                     {"op", "generate_vision"},
+                     {"image_path", path.string()},
+                     {"prompt", "Question?"},
+                     {"config", {{"suffix", "tail"}}}};
+    auto invalid = valid;
+    invalid["config"]["unknown"] = 1;
+    const auto run = invoke(bundle, options, {invalid, valid});
+    std::filesystem::remove(path);
+    require(run.status == 0 && run.messages.size() == 3 &&
+                run.messages[0].at("capabilities") == Json::array({"vision_language_generation"}) &&
+                run.messages[1].at("error").at("type") == "invalid_request_error",
+            "SDK vision capability and family-declared Config are honored");
+    const auto& result = run.messages[2].at("result");
+    const auto text = result.at("text").get<std::string>();
+    require(text.find("I:1;") != std::string::npos &&
+                text.find("T:Question?;") != std::string::npos && text.size() >= 4 &&
+                text.compare(text.size() - 4, 4, "tail") == 0 && result.at("image_height") == 4 &&
+                result.at("image_width") == 8 && result.at("model_call_ms").get<double>() >= 0 &&
+                result.at("timing_scope") == "public_task_call_wall",
+            "actual public SDK Task receives image and question with its own Config");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -290,6 +333,8 @@ int main(int argc, char** argv) {
         test_audio_task(root, options);
         test_audio_task_new_token_field(root, options);
         test_detection_task(root, options);
+        test_vision_task(root, options, "images_text_to_text");
+        test_vision_task(root, options, "vision_language_generation");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

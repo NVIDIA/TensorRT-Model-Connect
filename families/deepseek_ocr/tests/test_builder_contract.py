@@ -325,14 +325,14 @@ def test_deepseek_ocr_resizes_sam_position_embedding_for_768_view() -> None:
     np.testing.assert_allclose(resized, 1.0, atol=1e-6)
 
 
-def test_deepseek_ocr_uses_official_768_single_view_contract() -> None:
+def test_deepseek_ocr_uses_bounded_768_aspect_preserving_view() -> None:
     vl_config = model._DeepseekOcrModel().get_vl_config(_config())
 
     assert vl_config is not None
     assert vl_config["fixed_image_size"] == 768
     assert vl_config["num_image_pad_tokens"] == 145
     assert vl_config["prefill_max_length"] == 256
-    assert vl_config["preprocessor_type"] == "simple_chw"
+    assert vl_config["preprocessor_type"] == "pad_center_chw"
 
 
 @pytest.mark.parametrize(

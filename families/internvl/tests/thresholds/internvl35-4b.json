@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "normalized_text_edit_distance": 0.15,
+    "token_agreement_rate": 1.0
+  }
+}
