@@ -87,3 +87,16 @@ def test_siglip_encoder_gelu_is_tanh_approximation_in_fp32(vision_builder, monke
         ("activation", "float32", "gelu_tanh"),
         ("cast", "float32", "float16"),
     ]
+
+
+def test_default_context_holds_the_largest_dynamic_hd_image(vision_builder) -> None:
+    import json
+    from pathlib import Path
+
+    from families.phi4_multimodal import model
+
+    family = Path(model.__file__).resolve().parent
+    manifest = json.loads((family / "tests/manifests/phi4-multimodal.json").read_text())
+    # The largest image plus a prompt and the benchmark's 128 generated tokens.
+    assert model.DEFAULT_MAX_SEQUENCE_LENGTH >= vision_builder.MAX_IMAGE_TOKENS + 256
+    assert manifest["max_sequence_length"] == model.DEFAULT_MAX_SEQUENCE_LENGTH

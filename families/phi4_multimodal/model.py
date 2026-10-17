@@ -251,6 +251,11 @@ class _Phi4MultimodalModel:
         }
 
 
+# Room for the largest Dynamic-HD image (10,065 image tokens for 36 crops) plus
+# the prompt and generated tokens.
+DEFAULT_MAX_SEQUENCE_LENGTH = 10368
+
+
 def _load_vision_weights(model_dir: str) -> WeightDict:
     """Load and canonicalize the checkpoint's image tower weights."""
     readers = _open_safetensors(Path(model_dir))
@@ -341,7 +346,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if str(config.model_type).lower() not in {"phi4mm", "phi4_multimodal"}:
             raise ValueError(f"Phi-4 Multimodal does not support model_type={config.model_type!r}")
         precision = str(request.precision).lower()
-        max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
+        max_length = int(
+            request.max_sequence_length
+            or min(config.max_position_embeddings, DEFAULT_MAX_SEQUENCE_LENGTH)
+        )
         config.raw["_model_dir"] = str(model_dir)
         model = _Phi4MultimodalModel()
         weights = model.load_weights(str(model_dir), config)
