@@ -34,6 +34,11 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/timm_vgg/tests/data/test_img.jpeg`
 - `families/timm_vit/tests/data/test_img.jpeg`
 
+`families/dinov2/tests/data/test_img.png` is a lossless PNG re-encoding of
+the RGB pixels that Pillow decodes from that photograph, distributed under the
+same terms. DINOv2 validation uses it so the native JPEG decoder and the
+reference decoder read identical pixels.
+
 ## Project-created image fixtures
 
 The following images were created for TensorRT Model Connect testing and are
