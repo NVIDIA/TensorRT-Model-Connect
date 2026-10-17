@@ -8,6 +8,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   qwen_reference.cpp
   reference_conditioner.cpp
   reference_image.cpp
+  reference_layout.cpp
   reference_visual_encoder.cpp
   visual_reference.cpp
   torch_cuda_normal.cu
@@ -48,6 +49,15 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_reference_layout
+    reference_layout.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_layout.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_layout PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_minimax_h3_reference_layout PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_minimax_h3_reference_layout PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_layout COMMAND test_minimax_h3_reference_layout)
+
   add_executable(test_minimax_h3_reference_visual_encoder
     reference_visual_encoder.cpp
     reference_image.cpp
