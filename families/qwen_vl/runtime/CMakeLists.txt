@@ -65,4 +65,17 @@ if(TRTMC_BUILD_TESTS)
   )
   target_compile_options(test_qwen_vl_image_normalization PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME qwen_vl_image_normalization COMMAND test_qwen_vl_image_normalization)
+
+  add_executable(test_qwen_vl_dynamic_vision_metadata
+    ${PROJECT_SOURCE_DIR}/families/qwen_vl/tests/cpp/test_dynamic_vision_metadata.cpp
+    image_preprocessor.cpp)
+  target_include_directories(test_qwen_vl_dynamic_vision_metadata PRIVATE ${PROJECT_SOURCE_DIR})
+  target_include_directories(test_qwen_vl_dynamic_vision_metadata SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb)
+  target_link_libraries(test_qwen_vl_dynamic_vision_metadata PRIVATE
+    nlohmann_json::nlohmann_json Threads::Threads)
+  target_compile_options(test_qwen_vl_dynamic_vision_metadata PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME qwen_vl_dynamic_vision_metadata COMMAND test_qwen_vl_dynamic_vision_metadata
+    ${PROJECT_SOURCE_DIR}/families/qwen_vl/tests/data/dynamic-vision/hf-position-metadata.json)
+
 endif()

@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -57,6 +58,12 @@ def _is_qwen3_vl(config: ModelConfig) -> bool:
     """Detect Qwen3-VL by the presence of deepstack_visual_indexes."""
     vc = config.raw.get("vision_config", {})
     return bool(vc.get("deepstack_visual_indexes"))
+
+
+def _native_resolution_default(config: ModelConfig) -> bool:
+    if any(key in _vision_build_options(config) for key in ("image_height", "image_width")):
+        return False
+    return _is_qwen3_vl(config) or config.raw.get("model_type") == "qwen2_5_vl"
 
 
 def _add_nan_safe_deepstack_gate(
@@ -119,8 +126,7 @@ def _dynamic_vision_profile(
 ) -> tuple[bool, int, int, int]:
     """Resolve dynamic smart-resize limits from build and processor configs."""
     options = _vision_build_options(config)
-    enabled = bool(options.get("dynamic_resolution", not any(
-        key in options for key in ("image_height", "image_width"))))
+    enabled = bool(options.get("dynamic_resolution", _native_resolution_default(config)))
     processor_config: dict = {}
     processor_path = Path(model_dir) / "preprocessor_config.json"
     if processor_path.exists():
@@ -129,22 +135,35 @@ def _dynamic_vision_profile(
         if isinstance(loaded, dict):
             processor_config = loaded
 
+    size = processor_config.get("size", {}) if _is_qwen3_vl(config) else {}
+    if not isinstance(size, dict):
+        size = {}
+    default_min, default_max = (65536, 16777216) if _is_qwen3_vl(config) else (3136, 12845056)
     min_pixels = int(options.get("min_pixels", 0))
     max_pixels = int(options.get("max_pixels", 0))
     if min_pixels <= 0:
-        size = processor_config.get("size", {})
-        min_pixels = int(processor_config.get("min_pixels", size.get(
-            "shortest_edge", 65536 if _is_qwen3_vl(config) else 3136)))
+        min_pixels = int(processor_config.get("min_pixels", size.get("shortest_edge", default_min)))
     if max_pixels <= 0:
-        # Preserve the existing 448-square token budget while allowing the
-        # checkpoint's smart-resize geometry within that declared build limit.
-        max_pixels = _DEFAULT_FIXED_IMAGE_SIZE**2
+        max_pixels = int(processor_config.get("max_pixels", size.get("longest_edge", default_max)))
     opt_pixels = int(options.get("opt_pixels", 200704))
     if not min_pixels <= opt_pixels <= max_pixels:
         raise ValueError(
             "qwen_vl_vision pixel limits must satisfy min_pixels <= opt_pixels <= max_pixels"
         )
     return enabled, min_pixels, opt_pixels, max_pixels
+
+
+def _default_sequence_length(model_dir: str, config: ModelConfig) -> int:
+    """Reserve one Native-sized image plus text, without resizing it."""
+    length = 256
+    if _native_resolution_default(config):
+        enabled, _, _, maximum = _dynamic_vision_profile(model_dir, config)
+        if enabled:
+            vision = config.raw["vision_config"]
+            patch_size = int(vision.get("patch_size", 16 if _is_qwen3_vl(config) else 14))
+            factor = patch_size * int(vision.get("spatial_merge_size", 2))
+            length += maximum // (factor * factor)
+    return min(config.max_position_embeddings, length)
 
 
 if TYPE_CHECKING:
@@ -328,8 +347,7 @@ class _QwenVLModel:
         dynamic_resolution = bool(
             profile.get(
                 "enabled",
-                _vision_build_options(config).get("dynamic_resolution", not any(
-                    key in _vision_build_options(config) for key in ("image_height", "image_width"))),
+                _vision_build_options(config).get("dynamic_resolution", _native_resolution_default(config)),
             )
         )
 
@@ -392,13 +410,12 @@ class _QwenVLModel:
 
         if dynamic_resolution:
             options = _vision_build_options(config)
+            default_min, default_max = (65536, 16777216) if _is_qwen3_vl(config) else (3136, 12845056)
             vl_cfg.update(
                 {
-                    "min_pixels": int(profile.get("min_pixels", options.get("min_pixels") or (
-                        65536 if _is_qwen3_vl(config) else 3136
-                    ))),
+                    "min_pixels": int(profile.get("min_pixels", options.get("min_pixels") or default_min)),
                     "max_pixels": int(
-                        profile.get("max_pixels", options.get("max_pixels") or _DEFAULT_FIXED_IMAGE_SIZE**2)
+                        profile.get("max_pixels", options.get("max_pixels") or default_max)
                     ),
                     "vision_embed_dim": int(
                         vision_config.get("embed_dim", vision_config.get("hidden_size", 1280))
@@ -410,10 +427,13 @@ class _QwenVLModel:
                     "vision_rope_theta": float(vision_config.get("rope_theta", 10000.0)),
                 }
             )
-            if _is_qwen3_vl(config):
-                vl_cfg["vision_position_grid_size"] = int(
-                    np.sqrt(vision_config.get("num_position_embeddings", 2304))
-                )
+
+        if dynamic_resolution and _is_qwen3_vl(config):
+            position_count = int(vision_config.get("num_position_embeddings", 2304))
+            position_side = math.isqrt(position_count)
+            if position_side * position_side != position_count:
+                raise ValueError("Qwen3-VL learned position table must have a square grid")
+            vl_cfg["vision_position_grid_size"] = position_side
 
         if _is_qwen3_vl(config):
             ds_indexes = vision_config.get("deepstack_visual_indexes", [])
@@ -1116,7 +1136,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if not ("qwen" in str(config.model_type).lower() and "vl" in str(config.model_type).lower()):
         raise ValueError(f"Qwen-VL does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
-    max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
+    max_length = int(request.max_sequence_length or _default_sequence_length(str(model_dir), config))
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     parallel.validate()
     config.raw["_model_dir"] = str(model_dir)
