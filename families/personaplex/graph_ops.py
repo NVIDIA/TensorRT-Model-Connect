@@ -8,6 +8,8 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import tensorrt as trt
 
@@ -789,17 +791,13 @@ def make_rope_table_half_dim(
     default = 1.0 if cosine else 0.0
     if max_cache_length <= 0 or rope_theta <= 0.0:
         return np.full((max(max_cache_length, 1), max(half, 1)), default, dtype=np.float32)
-    table = np.full((max_cache_length, half), default, dtype=np.float32)
-    for pos in range(max_cache_length):
-        for d in range(half):
-            # For both interleaved and rotate-half the frequency index is d
-            # (the distinction only affects which input pair is rotated; the
-            # freq assignment per half-dim is the same).
-            exponent = (2.0 * d) / rotary_ndims
-            inv_freq = rope_theta ** (-exponent)
-            angle = pos * inv_freq
-            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
-    return table
+    # Moshi forms frequencies, angles and trigonometric values in FP32.
+    # Computing them in float64 and converting afterwards changes coefficients.
+    frequency_scale = np.float32(-math.log(rope_theta) * 2.0 / rotary_ndims)
+    frequencies = np.exp(np.arange(half, dtype=np.float32) * frequency_scale)
+    positions = np.arange(max_cache_length, dtype=np.float32)
+    angles = positions[:, None] * frequencies[None, :]
+    return np.cos(angles) if cosine else np.sin(angles)
 
 
 def reshape_rows_to_heads_4d(
