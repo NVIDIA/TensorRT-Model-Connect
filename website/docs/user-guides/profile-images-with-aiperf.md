@@ -28,9 +28,11 @@ The client comes from PyPI; an AIPerf source checkout is unnecessary.
 ```bash
 trtmc-server ./stable-diffusion-v1-5.bundle \
   --model-name stable-diffusion-v1-5 \
+  --startup-timeout 1800 \
   --records artifacts/aiperf-images-server.jsonl
 ```
 
+Large image bundles can take several minutes to load.
 Wait for `Uvicorn running on http://127.0.0.1:8000`. Add `--runtime-root`
 if the native libraries are in a separate directory.
 
