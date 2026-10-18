@@ -220,11 +220,9 @@ class _QwenImageModel:
             pack_qwen_image_preprocessor_weights,
         )
         from .qwen_image_vae_builder import (
-            build_qwen_image_vae_encoder_engine,
             build_qwen_image_vae_decoder_engine,
             load_qwen_image_vae_weights,
         )
-        from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
 
         repo = Path(weights.get("_model_dir") or model_dir)
 
@@ -299,6 +297,29 @@ class _QwenImageModel:
         # static DiT and VAE plans.
         config_json_bytes = json.dumps(bundle_cfg, indent=2).encode("utf-8")
 
+        if is_edit:
+            from .component_build import build_edit_components
+
+            return build_edit_components(repo, config_json_bytes, {
+                "text_encoder": {
+                    "max_seq_len": n_text,
+                    "apply_final_norm": bool(bundle_cfg["text_encoder"].get("apply_final_norm", True)),
+                    "enable_image_inputs": True, "image_token_start": 70,
+                    "image_grid_thw": (1, vision_height // vision_patch, vision_width // vision_patch),
+                    "vision_spatial_merge_size": int(bundle_cfg["vision_encoder"]["merge_size"]),
+                    "vision_tokens_per_second": int(vision_cfg.get("tokens_per_second", 2)),
+                    "verbose": verbose},
+                "denoiser": {"h_lat": h_lat, "w_lat": w_lat, "n_text": n_text,
+                    "image_token_shapes": image_token_shapes, "verbose": verbose,
+                    "max_batch_size": dit_mbs, "opt_batch_size": dit_opt},
+                "vision": {"vision_config": vision_cfg,
+                    "fixed_image_size": int(bundle_cfg["vision_encoder"]["image_size"]),
+                    "fixed_image_height": vision_height, "fixed_image_width": vision_width,
+                    "verbose": verbose},
+                "vae_decoder": {"h_lat": latent_h, "w_lat": latent_w, "verbose": verbose},
+                "vae_encoder": {"image_h": cond_h, "image_w": cond_w, "verbose": verbose},
+            })
+
         # 2. Qwen2.5-VL LM text encoder.
         print(
             f"[qwen-image] Loading Qwen2.5-VL text encoder weights "
@@ -323,20 +344,10 @@ class _QwenImageModel:
                 text_cfg,
                 text_w,
                 text_plan_path,
-                enable_image_inputs=is_edit,
-                # The hardcoded edit chat template matches HF EditPlus'
-                # "Picture 1: <|vision_start|>..." prefix.
+                enable_image_inputs=False,
                 image_token_start=70,
-                image_grid_thw=(
-                    1,
-                    vision_height // vision_patch,
-                    vision_width // vision_patch,
-                )
-                if is_edit
-                else None,
-                vision_spatial_merge_size=int(bundle_cfg["vision_encoder"]["merge_size"])
-                if is_edit
-                else 2,
+                image_grid_thw=None,
+                vision_spatial_merge_size=2,
                 vision_tokens_per_second=int(vision_cfg.get("tokens_per_second", 2)),
                 verbose=verbose,
             )
@@ -387,32 +398,6 @@ class _QwenImageModel:
             file=sys.stderr,
         )
 
-        # 4. Optional Qwen2.5-VL vision engine for Edit prompt conditioning.
-        vision_engine_bytes = None
-        if is_edit:
-            print(
-                f"[qwen-image] Loading Qwen2.5-VL visual weights from {repo / 'text_encoder'} ...",
-                file=sys.stderr,
-            )
-            vision_w = _load_qwen25vl_visual_weights(str(repo / "text_encoder"))
-            print(
-                "[qwen-image] Building Qwen2.5-VL vision engine ...",
-                file=sys.stderr,
-            )
-            vision_engine_bytes = build_qwen_vl_vision_engine(
-                vision_cfg,
-                vision_w,
-                fixed_image_size=int(bundle_cfg["vision_encoder"]["image_size"]),
-                fixed_image_height=vision_height,
-                fixed_image_width=vision_width,
-                verbose=verbose,
-            )
-            del vision_w
-            print(
-                f"[qwen-image]   vision plan: {len(vision_engine_bytes) / (1024 * 1024):.1f} MB",
-                file=sys.stderr,
-            )
-
         # 5. VAE decoder/encoder engines + preprocessor blob.
         print(
             f"[qwen-image] Loading VAE weights from {repo / 'vae'} ...",
@@ -445,32 +430,6 @@ class _QwenImageModel:
             file=sys.stderr,
         )
 
-        vae_encoder_bytes = None
-        if is_edit:
-            with tempfile.NamedTemporaryFile(
-                suffix=".plan", delete=False, prefix="qwen_image_vae_encoder_"
-            ) as f:
-                vae_encoder_plan_path = Path(f.name)
-            try:
-                print(
-                    f"[qwen-image] Building VAE encoder engine (image={cond_h}x{cond_w}) ...",
-                    file=sys.stderr,
-                )
-                build_qwen_image_vae_encoder_engine(
-                    vae_cfg,
-                    vae_w,
-                    vae_encoder_plan_path,
-                    image_h=cond_h,
-                    image_w=cond_w,
-                    verbose=verbose,
-                )
-                vae_encoder_bytes = vae_encoder_plan_path.read_bytes()
-            finally:
-                vae_encoder_plan_path.unlink(missing_ok=True)
-            print(
-                f"[qwen-image]   vae encoder plan: {len(vae_encoder_bytes) / (1024 * 1024):.1f} MB",
-                file=sys.stderr,
-            )
         del vae_w
 
         # 6. Preprocessor weights blob (latents_mean / latents_std).
@@ -486,10 +445,6 @@ class _QwenImageModel:
             "vae_decoder": vae_engine_bytes,
             "preprocessor_weights": prep_blob,
         }
-        if vision_engine_bytes is not None:
-            components["vision_engine"] = vision_engine_bytes
-        if vae_encoder_bytes is not None:
-            components["vae_encoder"] = vae_encoder_bytes
         return components
 
 
