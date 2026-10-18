@@ -24,33 +24,34 @@ def test_all_edit_components_finish_in_separate_checked_processes(monkeypatch, t
     calls = []
     real_run = subprocess.run
 
-    def run(command, *, check, env):
-        assert check is True and command[:3] == [sys.executable, "-m", "families.qwen_image.component_build"]
+    def run(command, *, check):
+        assert check is True and command[0] == sys.executable
+        assert command[4] == component_build.__spec__.name
         if not calls:
-            probe = real_run([*command[:3], "--help"], check=True, env=env,
+            probe = real_run([*command[:5], "--help"], check=True,
                              capture_output=True, text=True, timeout=30)
             assert "separate TensorRT allocation lifetimes" in probe.stdout
-        kind, model, output, device, options = command[3:]
+        kind, model, output, device, options = command[5:]
         assert Path(model) == tmp_path / "model with spaces" and device == "3"
         assert json.loads(options) == settings[kind]
-        calls.append(command)
+        calls.append((kind, Path(output)))
         Path(output).write_bytes(kind.encode())
         if kind == "vae_decoder":
             Path(output).with_suffix(".weights").write_bytes(b"original preprocessor")
 
     monkeypatch.setattr(component_build.subprocess, "run", run)
     result = component_build.build_edit_components(tmp_path / "model with spaces", b"original config", settings)
-    assert [call[3] for call in calls] == list(settings)
+    assert [kind for kind, _ in calls] == list(settings)
     assert result == {"config_json": b"original config", "text_encoders": [("qwen2_5_vl_lm", b"text_encoder")],
         "denoiser": b"denoiser", "vision_engine": b"vision", "vae_decoder": b"vae_decoder",
         "vae_encoder": b"vae_encoder", "preprocessor_weights": b"original preprocessor"}
-    assert all(not Path(call[5]).exists() for call in calls)
+    assert all(not path.exists() for _, path in calls)
 
 
 def test_failed_component_cannot_produce_a_partial_bundle(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(current_device=lambda: 0)))
 
-    def fail(command, *, check, env):
+    def fail(command, *, check):
         raise subprocess.CalledProcessError(1, command)
 
     monkeypatch.setattr(component_build.subprocess, "run", fail)

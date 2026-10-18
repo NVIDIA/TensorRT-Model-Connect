@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -67,15 +66,16 @@ def build_edit_components(model: Path, config_json: bytes, settings: dict) -> di
     import torch
 
     device = torch.cuda.current_device()
-    environment = {**os.environ, "PYTHONPATH": os.pathsep.join(str(path) for path in sys.path)}
+    launcher = ("import json, runpy, sys; sys.path[:] = json.loads(sys.argv.pop(1)); "
+                "runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)")
     plans = {}
     with tempfile.TemporaryDirectory(prefix="qwen-image-edit-build-") as directory:
         root = Path(directory)
         for component in ("text_encoder", "denoiser", "vision", "vae_decoder", "vae_encoder"):
             output = root / f"{component}.plan"
-            subprocess.run([sys.executable, "-m", __spec__.name,
-                component, str(model), str(output), str(device), json.dumps(settings[component])],
-                check=True, env=environment)
+            subprocess.run([sys.executable, "-c", launcher,
+                json.dumps([str(path) for path in sys.path]), __spec__.name,
+                component, str(model), str(output), str(device), json.dumps(settings[component])], check=True)
             plans[component] = output.read_bytes()
         preprocessor = (root / "vae_decoder.weights").read_bytes()
     return {"config_json": config_json, "text_encoders": [("qwen2_5_vl_lm", plans["text_encoder"])],
