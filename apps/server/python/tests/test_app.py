@@ -112,6 +112,27 @@ def make_client(registry: FakeRegistry) -> TestClient:
     return TestClient(app)
 
 
+def test_real_prompt_and_native_output_identity_survive_http(tmp_path):
+    import hashlib
+
+    registry = FakeRegistry()
+    path = tmp_path / "records.jsonl"
+    prompt = "  first\nsecond\u2028third\u0085fourth  "
+    app = create_app(registry, ServerConfig(max_body_bytes=4096, max_prompt_bytes=1024,
+                                            max_generation_tokens=64, records=path))
+    with TestClient(app) as client:
+        response = client.post("/v1/completions", json={"model": "test/model", "prompt": prompt},
+                               headers={"X-Request-ID": "original-corpus-row"})
+        assert response.status_code == 200 and response.json()["choices"][0]["text"] == "Paris"
+    assert registry.requests[0][1]["prompt"] == prompt
+    row, = [json.loads(line) for line in path.read_text().split("\n") if line]
+    assert row["request_id"] == "original-corpus-row"
+    assert row["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+    assert row["prompt_bytes"] == len(prompt.encode())
+    assert row["completion_sha256"] == hashlib.sha256(b"Paris").hexdigest()
+    assert "prompt" not in row and "text" not in row
+
+
 def test_completion_and_chat_keep_model_semantics_in_worker(caplog: Any) -> None:
     registry = FakeRegistry()
     caplog.set_level(logging.INFO, logger="uvicorn.error")

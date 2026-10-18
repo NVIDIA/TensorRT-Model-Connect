@@ -320,6 +320,8 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         chat_max_tokens: int | None = None,
     ) -> Any:
         context["model"] = request.model
+        context.update(prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                       prompt_bytes=len(prompt.encode("utf-8")))
         if request.n != 1:
             metrics.reject(route, 400)
             return error_response(400, "unsupported_parameter", "n must be 1", param="n")
@@ -458,6 +460,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
 
         inference_seconds = time.monotonic() - inference_started
         context.update(timings, worker_roundtrip_ms=inference_seconds * 1000,
+                       completion_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
                        completion_tokens=completion_tokens, completion_token_source="native_task",
                        timing_scope=result.get("timing_scope", "unavailable"),
                        streaming="buffered" if request.stream else "none")

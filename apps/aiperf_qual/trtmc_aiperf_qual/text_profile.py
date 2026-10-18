@@ -76,7 +76,7 @@ print(json.dumps({
 def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
     workload = config["workload"]
     axes = {"endpoint": workload.get("endpoints", ["completions", "chat"]),
-            "input_tokens": workload.get("input_tokens", [32]),
+            "input_tokens": [None] if config.get("corpus") else workload.get("input_tokens", [32]),
             "output_tokens": workload.get("output_tokens", [16]),
             "concurrency": workload.get("concurrency", [1]),
             "request_rate": workload.get("request_rate", [None]),
@@ -88,6 +88,8 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
         if item["endpoint"] not in {"completions", "chat"} or type(item["streaming"]) is not bool:
             raise ConfigError("text profiles support completions/chat and boolean streaming only")
         for name in ("input_tokens", "output_tokens", "concurrency"):
+            if name == "input_tokens" and config.get("corpus"):
+                continue
             if type(item[name]) is not int or item[name] <= 0:
                 raise ConfigError(f"{name} must be a positive integer")
         rate = item["request_rate"]
@@ -98,21 +100,31 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
         value = workload.get(name, default)
         if type(value) is not int or value < (1 if name == "requests" else 0):
             raise ConfigError(f"{name} has an invalid request count")
+    if config.get("corpus"):
+        count = config["corpus"].get("count")
+        if type(count) is not int or count < 1 or workload.get("requests", 20) < count:
+            raise ConfigError("corpus count must be positive and every prompt needs a measured request")
+        if any(item["endpoint"] != "completions" or item["streaming"] for item in result):
+            raise ConfigError("real-prompt profiles currently support nonstreaming completions")
     return result
 
 
-def arguments(url: str, config: dict[str, Any], case: dict[str, Any]) -> list[str]:
+def arguments(url: str, config: dict[str, Any], case: dict[str, Any], *, input_file: Path | None = None) -> list[str]:
     workload = config["workload"]
     tokenizer = config["tokenizer"]
     result = ["--url", url, "--endpoint-type", case["endpoint"],
               "--tokenizer", str(tokenizer["name"]), "--tokenizer-revision", tokenizer["revision"],
-              "--synthetic-input-tokens-mean", str(case["input_tokens"]),
-              "--synthetic-input-tokens-stddev", "0", "--output-tokens-mean", str(case["output_tokens"]),
+              "--output-tokens-mean", str(case["output_tokens"]),
               "--output-tokens-stddev", "0", "--concurrency", str(case["concurrency"]),
               "--request-count", str(workload.get("requests", 20)),
-              "--warmup-request-count", str(workload.get("warmup_requests", 3)),
-              "--warmup-concurrency", "1", "--extra-inputs", "temperature:0", "seed:0", "top_k:1",
+              "--extra-inputs", "temperature:0", "seed:0", "top_k:1",
               ]
+    if input_file is None:
+        result += ["--synthetic-input-tokens-mean", str(case["input_tokens"]), "--synthetic-input-tokens-stddev", "0"]
+    else:
+        result += ["--input-file", str(input_file), "--custom-dataset-type", "single_turn"]
+    if workload.get("warmup_requests", 3):
+        result += ["--warmup-request-count", str(workload.get("warmup_requests", 3)), "--warmup-concurrency", "1"]
     if case["endpoint"] == "chat":
         result.append("enable_thinking:false")
     if case["request_rate"] is not None:
@@ -259,6 +271,16 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
         if digest(bundle) != bundle_hash:
             raise ConfigError("validation changed the bundle; validate the final artifact before timing")
         provenance["server_binary_sha256"] = digest(Path(config["server"]["binary"]))
+        corpus = None
+        if config.get("corpus"):
+            from .text_corpus import prepare
+            runtime = Path(config["server"]["runtime_root"])
+            inspected = json.loads(subprocess.check_output([str(runtime / "trtmc"), "inspect", str(bundle)], text=True))
+            capacity = inspected.get("provenance", {}).get("build", {}).get("max_sequence_length")
+            if type(capacity) is not int or capacity < 1:
+                raise ConfigError("real prompts require the bundle's explicit core context limit")
+            corpus = prepare(config, capacity, max(case["output_tokens"] for case in matrix), out)
+            provenance["corpus"] = corpus
         (out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
         with text_serving(environment, config["server"], out / "server") as service:
             libraries = json.loads((out / "server/loaded-libraries.json").read_text())
@@ -267,13 +289,25 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
             if any(case["streaming"] for case in matrix) and service["info"].get("trtmc", {}).get("streaming") != "incremental":
                 raise ConfigError("token latency requires incremental family streaming; this model uses buffered SSE")
             for index, case in enumerate(matrix):
-                run = run_aiperf(environment, out / f"run-{index:03d}", arguments(service["url"], config, case),
+                run = run_aiperf(environment, out / f"run-{index:03d}", arguments(service["url"], config, case,
+                    input_file=Path(corpus["input_file"]) if corpus else None),
                     model_name=config["server"]["model_name"],
                     command_prefix=[str(environment["aiperf_python"]), "-m", "aiperf"],
                     timeout_s=config.get("profile_timeout", 1800))
                 records = [json.loads(line) for line in service["records"].read_text().split("\n") if line.strip()]
                 rows = join_records(run, records)
                 (run.directory / "joined.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+                if corpus:
+                    from .text_corpus import verify
+                    try:
+                        verified = verify(run, rows, corpus)
+                    except ConfigError as error:
+                        (run.directory / "corpus-verification.json").write_text(json.dumps(
+                            {"verified": False, "error": str(error), "request_records": "joined.jsonl"}, indent=2) + "\n")
+                        raise
+                    if digest(Path(corpus["input_file"])) != corpus["input_file_sha256"]:
+                        raise ConfigError("real-prompt inputs changed during profiling")
+                    (run.directory / "corpus-verification.json").write_text(json.dumps(verified, indent=2) + "\n")
                 incomplete = (len([row for row in rows if row["phase"] == "profiling"]) != config["workload"].get("requests", 20)
                               or summarize(rows)["missing_metric_exports"] > 0)
                 entries.append({"case": case, "exit_code": run.exit_code or int(incomplete),
@@ -369,7 +403,8 @@ def reference_profiles(environment: Environment, config: dict[str, Any], out: Pa
             # admission or stream policies would confound a backend comparison.
             if case["streaming"] or case["concurrency"] != 1 or case["request_rate"] is not None:
                 continue
-            run = run_aiperf(environment, out / f"reference-{index:03d}", arguments(service["url"], config, case),
+            run = run_aiperf(environment, out / f"reference-{index:03d}", arguments(service["url"], config, case,
+                input_file=out / "inputs.jsonl" if config.get("corpus") else None),
                 command_prefix=[str(environment["aiperf_python"]), "-m", "aiperf"],
                 timeout_s=config.get("profile_timeout", 1800))
             raw_records = [json.loads(line) for line in service["records"].read_text().split("\n") if line.strip()]

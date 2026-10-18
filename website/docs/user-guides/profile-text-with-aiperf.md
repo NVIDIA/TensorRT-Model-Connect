@@ -116,3 +116,24 @@ Run the model's family correctness checks before interpreting performance.
 For automatic correctness checks, server startup/shutdown, workload sweeps,
 and joined client/native timing reports, use the optional
 [text-profile runner](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#text-profiling-with-the-persistent-server).
+
+## Benchmark actual prompts
+
+Put one original prompt in each JSONL record:
+
+```json
+{"text":"Explain why the sky is blue."}
+{"text":"Write a short welcome message for a new teammate."}
+```
+
+Save this as `prompts.jsonl`. With the same server running, use
+`--input-file prompts.jsonl --custom-dataset-type single_turn` in the benchmark
+command above and remove both `--synthetic-input-tokens-*` options. AIPerf sends
+the supplied text. Choose prompts that fit the built model's context limit
+together with the requested output.
+
+For a reproducible selection of real ShareGPT prompts, the optional
+[text-profile runner](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#pinned-real-prompts)
+provides a pinned Qwen3-0.6B workload. It preserves selected strings, records
+over-limit rejections, and verifies HTTP input/output against native dispatch
+records. It uses the same published AIPerf package.

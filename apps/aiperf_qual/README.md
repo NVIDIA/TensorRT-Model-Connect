@@ -708,3 +708,39 @@ overhead. Encoding FPS is presentation metadata; it never changes built frames.
 The [three-step usage guide](../../website/docs/user-guides/profile-videos-with-aiperf.md)
 also works with plain `pip install aiperf==0.13.0`, without an AIPerf checkout
 or the optional capture transport.
+
+### Pinned real prompts
+
+Copy `config/text/environment.yaml` and
+`config/text/qwen3-0.6b-real-prompts.yaml`, then set their existing interpreter,
+server, runtime and bundle paths. Use the already-built `qwen3-0.6b-fp16`
+full profile; the runner invokes its unchanged owning-family checks against
+that exact bundle before profiling. Build instructions remain in the website's
+[Build a Bundle](../../website/docs/user-guides/build-a-bundle.md) guide.
+
+```bash
+python -m trtmc_aiperf_qual text-profile \
+  --environment environment.yaml --config qwen3-0.6b-real-prompts.yaml \
+  --out artifacts/qwen-real-prompts
+```
+
+The workload pins the ShareGPT file revision and checksum and the model's
+existing tokenizer revision. It selects the first twelve distinct, nonempty first-human
+turns whose original text plus sixteen output tokens fits the bundle's recorded
+context limit. Selection does not rewrite, truncate or pad text. `corpus.json`
+records every considered source index, selected string, tokenizer length and
+rejection reason; unexamined rows are counted separately. Counts use the pinned
+tokenizer without special tokens; native input-token counts remain unavailable.
+
+The published AIPerf `single_turn` loader sends `inputs.jsonl`, with twelve
+measured requests, one separately retained warmup, concurrency one and greedy
+sampling. Every selected prompt must appear in the measured phase.
+`run-000/corpus-verification.json` joins the original strings to actual wire
+payloads and the native-dispatch input/output hashes by request ID.
+Server records contain hashes and byte counts, without storing raw text.
+`report.json` keeps client latency/throughput and native Task-call timings
+separate. Build, loading and warmup are excluded from measured requests.
+A selection failure or changed/missing input/output fails verification and
+preserves its ledger and request artifacts. Family quality criteria are unchanged;
+this workload verifies transport and reports performance, without adding a new
+numerical accuracy gate.
