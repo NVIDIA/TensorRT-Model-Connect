@@ -83,12 +83,8 @@ def _swiglu_mlp(
 ) -> trt.ITensor:
     gate = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_gate"], f"{prefix}.w_gate")
     up = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_up"], f"{prefix}.w_up")
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
-    mlp_out = matmul(
-        gated.get_output(0), mlp_size, hidden, weights[f"{prefix}.w_down"], f"{prefix}.w_down"
-    )
+    gated = graph_blocks.add_swiglu_activation(network, gate, up)
+    mlp_out = matmul(gated, mlp_size, hidden, weights[f"{prefix}.w_down"], f"{prefix}.w_down")
     return mlp_out
 
 
