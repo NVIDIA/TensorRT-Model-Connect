@@ -118,11 +118,11 @@ def verify_records(run, joined, corpus, count_tokens):
         tokens = count_tokens(prompt)
         if tokens + original["output_length"] > corpus["context_limit"]:
             raise ConfigError("actual generated trace prompt exceeds context; no truncation is allowed")
-        if (server is None or server.get("prompt_sha256") != hashlib.sha256(prompt.encode()).hexdigest() or
+        if server is not None and (server.get("prompt_sha256") != hashlib.sha256(prompt.encode()).hexdigest() or
                 server.get("status") != row.get("status")):
             raise ConfigError("trace wire/native input or status identity does not match")
         status = row.get("status")
-        if status == 200:
+        if status == 200 and server is not None:
             text = response_text(row)
             if (not isinstance(text, str) or server.get("timing_scope") != "public_task_call_wall" or
                     type(server.get("completion_tokens")) is not int or not 0 <= server["completion_tokens"] <= original["output_length"] or
@@ -130,7 +130,7 @@ def verify_records(run, joined, corpus, count_tokens):
                     server.get("generation_config", {}).get("max_new_tokens") != original["output_length"]):
                 raise ConfigError("trace native output, generation cap or Task timing is invalid")
             state = "completed"
-        elif status == 429 and "model_call_ms" not in server:
+        elif status == 429 and server is not None and "model_call_ms" not in server:
             state = "rejected"
         else:
             state = "failed"
@@ -141,8 +141,9 @@ def verify_records(run, joined, corpus, count_tokens):
                         "credit_issued_ns": meta["credit_issued_ns"], "request_start_ns": meta["request_start_ns"],
                         "request_end_ns": meta["request_end_ns"], "target_input_tokens": original["input_length"],
                         "actual_input_tokens_pinned_tokenizer": tokens, "target_output_tokens": original["output_length"],
-                        "native_output_tokens": server.get("completion_tokens"),
-                        "admission_ms": server.get("admission_ms"), "client_error": row.get("error")})
+                        "native_output_tokens": (server or {}).get("completion_tokens"),
+                        "admission_ms": (server or {}).get("admission_ms"), "client_error": row.get("error"),
+                        "server_record_present": server is not None})
     if seen != set(expected):
         raise ConfigError("trace replay omitted source rows")
     anchor = min(records, key=lambda row: row["scheduled_offset_ms"])["credit_issued_ns"]

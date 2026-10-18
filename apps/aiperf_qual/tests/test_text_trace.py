@@ -76,6 +76,19 @@ def test_all_offered_requests_include_visible_overload_and_schedule_measurements
     assert report["credit_schedule_error_ms"]["p95"] == 0
 
 
+def test_transport_failure_without_native_dispatch_remains_in_the_failed_census(capture):
+    run, joined, corpus, raw = capture
+    raw[0].update(status=None, error={"type": "connection_error"}, responses=[])
+    joined[0]["server"] = None
+    with pytest.raises(ConfigError, match="unexpected failures"):
+        verify_records(run, joined, corpus, len)
+    report = json.loads((run.directory / "trace-accounting.json").read_text())
+    assert not report["verified"]
+    assert (report["offered"], report["completed"], report["rejected"], report["failed"]) == (3, 1, 1, 1)
+    assert report["requests"][0]["client_error"] == {"type": "connection_error"}
+    assert report["requests"][0]["server_record_present"] is False
+
+
 @pytest.mark.parametrize("change", ["missing", "cap", "failed", "schedule"])
 def test_missing_changed_failed_or_mistimed_requests_cannot_qualify(capture, change):
     run, joined, corpus, raw = capture
