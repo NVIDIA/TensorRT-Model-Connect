@@ -1028,6 +1028,21 @@ def _load_flux2_fp8_scales() -> dict[str, dict[str, float]]:
     return scales
 
 
+def _clip_tokenizer_bytes(directory: Path) -> bytes:
+    """Serialize the checkpoint's split CLIP assets without modifying its cache."""
+    serialized = directory / "tokenizer.json"
+    if serialized.is_file():
+        return serialized.read_bytes()
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        directory, use_fast=True, local_files_only=True, trust_remote_code=False
+    )
+    if not tokenizer.is_fast:
+        raise ValueError("FLUX requires a fast CLIP tokenizer for native export")
+    return tokenizer.backend_tokenizer.to_str().encode("utf-8")
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one FLUX image-generation bundle."""
     if request.mtp_seq_len is not None:
@@ -1080,6 +1095,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         fp8_scales = _load_flux2_fp8_scales()
     else:
         raise NotImplementedError(f"FLUX does not support quantization={request.quantization!r}")
+    tokenizer_path = model_dir / ("tokenizer" if is_flux2 else "tokenizer_2") / "tokenizer.json"
+    tokenizer = tokenizer_path.read_bytes()
+    clip_tokenizer = None if is_flux2 else _clip_tokenizer_bytes(model_dir / "tokenizer")
     components = model.build_components(
         str(model_dir),
         config,
@@ -1105,16 +1123,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.add_bytes("vae.plan", components["vae_decoder"])
     writer.add_bytes("preprocessor.weights", components["preprocessor_weights"])
 
-    if is_flux2:
-        tokenizer_path = model_dir / "tokenizer/tokenizer.json"
-        tokenizer_suffix: list[int] = []
-    else:
-        tokenizer_path = model_dir / "tokenizer_2/tokenizer.json"
-        tokenizer_suffix = [1]
-        writer.add_bytes(
-            "clip_tokenizer.json", (model_dir / "tokenizer/tokenizer.json").read_bytes()
-        )
-    writer.add_bytes("tokenizer.json", tokenizer_path.read_bytes())
+    tokenizer_suffix = [] if is_flux2 else [1]
+    if clip_tokenizer is not None:
+        writer.add_bytes("clip_tokenizer.json", clip_tokenizer)
+    writer.add_bytes("tokenizer.json", tokenizer)
     runtime = model.get_diffusion_config(config)
     runtime.update(
         {
