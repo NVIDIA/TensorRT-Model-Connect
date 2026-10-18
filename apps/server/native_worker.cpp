@@ -5,9 +5,9 @@
 
 #include "server/native_worker.h"
 
+#include "bundle_provenance.h"
 #include "cli/io.h"
 #include "config.h"
-#include "bundle_provenance.h"
 #include "task_runtime.h"
 #include "trtmc/audio.hpp"
 #include "trtmc/control.hpp"
@@ -25,15 +25,15 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <filesystem>
-#include <iomanip>
-#include <sstream>
+#include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -573,8 +573,8 @@ Json write_video_frames(const ImageResult& result, const std::string& directory,
                         VideoGeometry geometry, double wall_ms) {
     if (result.width != geometry.width || result.height != geometry.height ||
         result.num_frames != geometry.frames || result.channels != 3 ||
-        result.pixels.size() != static_cast<std::size_t>(geometry.width) * geometry.height *
-                                    geometry.frames * 3U ||
+        result.pixels.size() !=
+            static_cast<std::size_t>(geometry.width) * geometry.height * geometry.frames * 3U ||
         !std::all_of(result.pixels.begin(), result.pixels.end(),
                      [](float v) { return std::isfinite(v); }))
         throw std::runtime_error("video result differs from the built RGB THWC geometry");
@@ -584,12 +584,16 @@ Json write_video_frames(const ImageResult& result, const std::string& directory,
         std::ostringstream name;
         name << "frame-" << std::setw(6) << std::setfill('0') << frame << ".png";
         const auto begin = result.pixels.begin() + static_cast<std::ptrdiff_t>(frame_size * frame);
-        cli::io::save_png((std::filesystem::path(directory) / name.str()).string(),
-                          std::vector<float>(begin, begin + static_cast<std::ptrdiff_t>(frame_size)),
-                          geometry.width, geometry.height);
+        cli::io::save_png(
+            (std::filesystem::path(directory) / name.str()).string(),
+            std::vector<float>(begin, begin + static_cast<std::ptrdiff_t>(frame_size)),
+            geometry.width, geometry.height);
     }
-    return {{"width", geometry.width}, {"height", geometry.height}, {"channels", 3},
-            {"num_frames", geometry.frames}, {"model_call_ms", wall_ms},
+    return {{"width", geometry.width},
+            {"height", geometry.height},
+            {"channels", 3},
+            {"num_frames", geometry.frames},
+            {"model_call_ms", wall_ms},
             {"timing_scope", "public_task_call_wall"}};
 }
 
@@ -620,23 +624,31 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output,
         if (!image)
             throw std::invalid_argument("bundle does not implement image generation");
         if (geometry.frames > 1) {
-            const Json ready{{"event", "ready"}, {"protocol_version", 1},
+            const Json ready{{"event", "ready"},
+                             {"protocol_version", 1},
                              {"capabilities", Json::array({"video_generation"})},
-                             {"video", {{"width", geometry.width}, {"height", geometry.height},
-                                        {"num_frames", geometry.frames}}}};
-            return run_protocol(ready, {{"generate_video", [&](const Json& request) {
-                const auto prompt = string_field(request, "prompt");
-                const auto path = string_field(request, "output_path");
-                const auto config = image_config(request);
-                if ((config.width && config.width != geometry.width) ||
-                    (config.height && config.height != geometry.height))
-                    throw ProtocolError("video size must match the built geometry");
-                const auto started = std::chrono::steady_clock::now();
-                const auto result = image->generate_image(prompt, config);
-                const auto wall_ms = std::chrono::duration<double, std::milli>(
-                                         std::chrono::steady_clock::now() - started).count();
-                return write_video_frames(result, path, geometry, wall_ms);
-            }}}, input, output);
+                             {"video",
+                              {{"width", geometry.width},
+                               {"height", geometry.height},
+                               {"num_frames", geometry.frames}}}};
+            return run_protocol(
+                ready,
+                {{"generate_video",
+                  [&](const Json& request) {
+                      const auto prompt = string_field(request, "prompt");
+                      const auto path = string_field(request, "output_path");
+                      const auto config = image_config(request);
+                      if ((config.width && config.width != geometry.width) ||
+                          (config.height && config.height != geometry.height))
+                          throw ProtocolError("video size must match the built geometry");
+                      const auto started = std::chrono::steady_clock::now();
+                      const auto result = image->generate_image(prompt, config);
+                      const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                               std::chrono::steady_clock::now() - started)
+                                               .count();
+                      return write_video_frames(result, path, geometry, wall_ms);
+                  }}},
+                input, output);
         }
         return run_image_protocol(
             [&](const std::string& prompt, const std::string& path, const Json& request) {
@@ -1072,7 +1084,8 @@ int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std
     if (primary == IImageGeneration::kTask) {
         const auto provenance = app::read_provenance(bundle);
         if (!provenance.is_object() || !provenance.contains("build"))
-            throw std::invalid_argument("generation bundle needs core build provenance; rebuild it");
+            throw std::invalid_argument(
+                "generation bundle needs core build provenance; rebuild it");
         const auto& build = provenance.at("build");
         geometry = {build.value("image_width", 0), build.value("image_height", 0),
                     build.value("video_num_frames", 1)};

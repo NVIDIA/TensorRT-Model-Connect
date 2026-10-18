@@ -5,8 +5,9 @@
 #include "cli/io.h"
 #include "server/native_worker.h"
 #include "trtmc/task.h"
-#include <filesystem>
+
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -18,7 +19,7 @@ class Video final : public trtmc::IImageGeneration {
     int calls{0};
     const char* task() const noexcept override { return kTask; }
     trtmc::ImageResult generate_image(const std::string& prompt,
-                                     const trtmc::ImageGenerationConfig& config) override {
+                                      const trtmc::ImageGenerationConfig& config) override {
         if (prompt != "three frames" || config.seed != 42 || config.num_steps != 30)
             throw std::runtime_error("native request changed");
         ++calls;
@@ -36,13 +37,16 @@ class Video final : public trtmc::IImageGeneration {
 };
 int main() {
     const auto root = std::filesystem::temp_directory_path() /
-                      ("trtmc-video-worker-" + std::to_string(
-                          std::chrono::steady_clock::now().time_since_epoch().count()));
+                      ("trtmc-video-worker-" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
         Video task;
-        const Json request{{"id", "clip"}, {"op", "generate_video"}, {"prompt", "three frames"},
-                           {"output_path", root.string()},
-                           {"config", {{"width", 8}, {"height", 4}, {"num_steps", 30}, {"seed", 42}}}};
+        const Json request{
+            {"id", "clip"},
+            {"op", "generate_video"},
+            {"prompt", "three frames"},
+            {"output_path", root.string()},
+            {"config", {{"width", 8}, {"height", 4}, {"num_steps", 30}, {"seed", 42}}}};
         auto bad = request;
         bad["config"]["width"] = 16;
         std::stringstream input;
