@@ -107,7 +107,8 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
                 "--download-video-content",
                 "--input-file", str(prepared), "--custom-dataset-type", "single_turn",
                 "--tokenizer", "builtin", "--concurrency", "1", "--warmup-concurrency", "1",
-                "--request-count", str(requests), "--warmup-request-count", str(warmup)],
+                "--request-count", str(requests),
+                *(["--warmup-request-count", str(warmup)] if warmup else [])],
                 env={"TRTMC_VIDEO_CAPTURE_DIR": str(capture.resolve())}, model_name=entry.hf_id,
                 command_prefix=[client, "-m", "aiperf"], request_timeout_s=timeout,
                 timeout_s=timeout * (requests + warmup + 1))
