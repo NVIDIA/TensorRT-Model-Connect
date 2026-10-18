@@ -42,7 +42,7 @@ def test_image_workload_keeps_catalog_controls_and_explicit_latent_replay(tmp_pa
     assert workloads[0]["prompt_sha256"] == hashlib.sha256(b"A blue rectangle").hexdigest()
 
 
-@pytest.mark.parametrize("changed", ["family", "task", "hf_id", "revision", "precision", "image_width"])
+@pytest.mark.parametrize("changed", ["family", "task", "hf_id", "revision", "precision", "image_width", "quantization"])
 def test_wrong_bundle_cannot_be_qualified_as_the_selected_profile(tmp_path, monkeypatch, changed):
     import trtmc_aiperf_qual.image_profile as module
 

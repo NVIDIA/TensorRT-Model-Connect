@@ -290,7 +290,7 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
                 body = {key: value for key, value in (await request.form()).items()}
             else:
                 body = await request.json()
-            mapped = openai.image_generation(body, {**config.base_request, "media_type": "video"})
+            mapped = openai.image_generation(body, {**config.base_request, "media_type": "video"}, video=True)
             job = {"id": request_id, "object": "video", "status": "in_progress", "created_at": int(time.time())}
             state["jobs"][request_id] = job
 

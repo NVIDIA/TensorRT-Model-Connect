@@ -103,3 +103,9 @@ def test_ranking_and_image_generation_mapping():
 def test_embeddings_reject_options_that_would_change_the_native_vector(options):
     with pytest.raises(openai.RequestError):
         openai.embeddings({"input": "one", **options}, {})
+
+
+@pytest.mark.parametrize("options", [{"num_frames": 17}, {"seconds": 4}, {"fps": 24}])
+def test_image_endpoint_rejects_video_only_options(options):
+    with pytest.raises(openai.RequestError, match="unsupported fields"):
+        openai.image_generation({"prompt": "cat", **options}, {})

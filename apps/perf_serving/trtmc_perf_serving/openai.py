@@ -153,9 +153,12 @@ def ranking(body: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, Any]:
     return {**base, "query": query, "documents": documents}
 
 
-def image_generation(body: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, Any]:
-    _check_fields(body, {"prompt", "size", "seed", "num_inference_steps", "guidance_scale", "negative_prompt",
-                         "cfg_scale", "initial_latents_b64", "num_frames", "seconds", "fps"})
+def image_generation(body: Mapping[str, Any], base: Mapping[str, Any], *, video: bool = False) -> dict[str, Any]:
+    allowed = {"prompt", "size", "seed", "num_inference_steps", "guidance_scale", "negative_prompt",
+               "cfg_scale", "initial_latents_b64"}
+    if video:
+        allowed |= {"num_frames", "seconds", "fps"}
+    _check_fields(body, allowed)
     if not isinstance(body.get("prompt"), str) or not body["prompt"].strip():
         raise RequestError("prompt must be one nonempty string")
     if body.get("stream"):
