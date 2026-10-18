@@ -833,3 +833,41 @@ The ordinary AIPerf exports retain client timing and replay metrics.
 timing for completed requests. A profile needs native completions, full request
 accounting and no unexpected failures. Rejected requests and their client
 errors remain visible. Nonstreaming trace replay provides no TTFT/ITL samples.
+
+### Controlled shared prefixes
+
+Use `config/text/qwen3-0.6b-shared-prefix.yaml` with the same environment and
+existing full Qwen bundle. First leave `workload.warmup_requests: 0`:
+
+```bash
+python -m trtmc_aiperf_qual text-profile \
+  --environment environment.yaml --config qwen3-0.6b-shared-prefix.yaml \
+  --out artifacts/qwen-prefix-fresh
+```
+
+Copy the configuration, change only `workload.warmup_requests` to `12`, and
+run it again with `--out artifacts/qwen-prefix-warm`. Each invocation starts a
+new server process and runs unchanged family correctness on its exact bundle.
+Both runs measure the same twelve prompts, concurrency one and sixteen-token
+generation caps. The second run first sends twelve separate warmup requests
+from that same corpus. Startup, validation and warmup are excluded from the
+measured request metrics. This is a process-warmup comparison; the fresh run
+can still benefit from shared host/system caches.
+
+The layout consists of one literal prefix and twelve distinct suffixes.
+`corpus.json` retains each complete original concatenation, UTF-8 hash, actual
+pinned-tokenizer length, shared token-prefix length and overlap fraction.
+Overlap is counted on complete prompt token IDs, so tokenization at the
+prefix/suffix boundary is included. Any over-limit prompt fails selection
+with a rejection ledger; prompts are never shortened. AIPerf's existing
+`single_turn` loader sends these exact strings. The verification report checks
+every measured prompt, native input/output hashes and fresh/warm phase counts.
+
+The qualified Qwen implementation clears generation state in
+`reset_generation_context` before each request. It exposes no cross-request
+prefix-cache control or cache-hit telemetry. `cache_audit` records this manual
+source audit, its source-file hash and repository revision, separately from
+observations. Per-generation KV state does not establish reuse across requests.
+Cache-hit telemetry is explicitly unavailable. Latency/throughput differences
+in `report.json` are descriptive; neither common input text nor a faster warm
+run proves a cache hit. No cache implementation or model spec is added.

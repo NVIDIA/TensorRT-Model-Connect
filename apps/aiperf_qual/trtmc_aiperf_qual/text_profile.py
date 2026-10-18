@@ -295,7 +295,7 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
             capacity = inspected.get("provenance", {}).get("build", {}).get("max_sequence_length")
             if type(capacity) is not int or capacity < 1:
                 raise ConfigError("real prompts require the bundle's explicit core context limit")
-            corpus = prepare(config, capacity, max(case["output_tokens"] or 0 for case in matrix), out)
+            corpus = prepare(config, capacity, max(case["output_tokens"] or 0 for case in matrix), out, repo=repo)
             provenance["corpus"] = corpus
         (out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
         with text_serving(environment, config["server"], out / "server") as service:

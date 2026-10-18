@@ -63,7 +63,10 @@ def load_source(config: dict[str, Any]):
     return source, source_hash, records, tokenizer
 
 
-def prepare(config: dict[str, Any], capacity: int, output: int, out: Path) -> dict[str, Any]:
+def prepare(config: dict[str, Any], capacity: int, output: int, out: Path, *, repo: Path | None = None) -> dict[str, Any]:
+    if config["corpus"].get("format") == "controlled_prefix":
+        from .text_prefix import prepare as prepare_prefix
+        return prepare_prefix(config, capacity, output, out, repo=repo)
     if config["corpus"].get("format") == "azure_trace":
         from .text_trace import prepare as prepare_trace
         return prepare_trace(config, capacity, out)
@@ -127,7 +130,10 @@ def verify_and_record(run, joined: list[dict[str, Any]], corpus: dict[str, Any])
     """Preserve a verification verdict for missing, changed or malformed inputs."""
     path = run.directory / "corpus-verification.json"
     try:
-        if corpus.get("format") == "azure_trace":
+        if corpus.get("format") == "controlled_prefix":
+            from .text_prefix import verify as verify_prefix
+            verified = verify_prefix(run, joined, corpus)
+        elif corpus.get("format") == "azure_trace":
             from .text_trace import verify as verify_trace
             verified = verify_trace(run, joined, corpus)
         elif corpus.get("format") == "sharegpt_multi_turn":

@@ -189,3 +189,22 @@ rejections when comparing offered load with completed throughput.
 The optional [production-trace profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#pinned-production-trace)
 provides a pinned Azure example, verifies arrival timing and accounts for every
 request. It uses the existing Qwen bundle and the published AIPerf package.
+
+## Benchmark shared prompt prefixes
+
+Use the same actual-prompt JSONL format with a common beginning and distinct
+endings. For example:
+
+```json
+{"text":"A service has one execution lane. Requests arriving while it is busy can be rejected. Question: How many lanes are there?"}
+{"text":"A service has one execution lane. Requests arriving while it is busy can be rejected. Question: When can a request be rejected?"}
+```
+
+Run these through AIPerf's `single_turn` loader as described above. Shared
+text alone does not establish native cache reuse. The current Qwen pilot resets
+generation state for each request and exposes no cross-request prefix-cache
+hit metrics.
+
+For an exact token-overlap report and a reproducible comparison with and
+without process warmup, use the optional
+[shared-prefix profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#controlled-shared-prefixes).
