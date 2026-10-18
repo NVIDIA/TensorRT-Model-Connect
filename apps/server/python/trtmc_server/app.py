@@ -255,6 +255,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             await asyncio.to_thread(registry.start)
             yield
         finally:
+            videos.accepting = False
             await asyncio.to_thread(registry.close)
             await videos.close()
             records.close()
@@ -540,12 +541,14 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         request_id = http_request.state.request_id
         admitted = time.monotonic()
         session = acquired_session
+        admitted_ok = False
         try:
             if not registry.supports(model, capability):
                 metrics.reject(route, 400)
                 return error_response(400, "unsupported_task", "model does not support this endpoint", param="model")
             if session is None:
                 session = registry.acquire(model)
+            admitted_ok = True
         except ModelNotFoundError as error:
             metrics.reject(route, 404)
             return error_response(404, error.code, str(error), param="model")
@@ -558,8 +561,11 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             metrics.reject(route, 503)
             return error_response(503, "server_draining", "server is not accepting requests")
         finally:
-            if session is None and release_input is not None:
-                release_input()
+            if not admitted_ok:
+                if session is not None:
+                    session.close()
+                if release_input is not None:
+                    release_input()
         queue_seconds = time.monotonic() - admitted
         context.update(replica=getattr(session, "replica_name", None),
                        admission_ms=queue_seconds * 1000, streaming="none")

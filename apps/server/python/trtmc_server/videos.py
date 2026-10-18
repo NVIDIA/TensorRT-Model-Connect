@@ -54,6 +54,9 @@ class VideoJobs:
         self.tasks: set[asyncio.Task] = set()
         self.downloads_idle = asyncio.Event()
         self.downloads_idle.set()
+        self.setups = 0
+        self.setups_idle = asyncio.Event()
+        self.setups_idle.set()
         self.accepting = True
         self.router = APIRouter()
         self.router.add_api_route("/v1/videos", self.submit, methods=["POST"])
@@ -69,6 +72,7 @@ class VideoJobs:
 
     async def close(self):
         self.accepting = False
+        await self.setups_idle.wait()
         # Registry shutdown retires native calls. Encoding still owns its files.
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
@@ -128,6 +132,8 @@ class VideoJobs:
             return self.error(400, "invalid_request", "invalid or unsupported video controls")
         except RuntimeError:
             return self.error(503, "server_draining", "server is not accepting requests")
+        self.setups += 1
+        self.setups_idle.clear()
         root = None
         identifier = None
         media = None
@@ -163,6 +169,10 @@ class VideoJobs:
             if root is not None:
                 shutil.rmtree(root)
             raise
+        finally:
+            self.setups -= 1
+            if not self.setups:
+                self.setups_idle.set()
 
     async def run(self, job, request, payload, geometry, fps, session, media, context):
         started = time.monotonic()
@@ -195,8 +205,10 @@ class VideoJobs:
         finally:
             job["finished"] = time.monotonic()
             context["completion_ms"] = (time.monotonic() - started) * 1000
-            self.records.write(context)
-            await asyncio.to_thread(shutil.rmtree, job["root"] / "frames", True)
+            try:
+                self.records.write(context)
+            finally:
+                await asyncio.to_thread(shutil.rmtree, job["root"] / "frames", True)
             job["reserved"] = (job["root"] / "video.mp4").stat().st_size if (job["root"] / "video.mp4").is_file() else 0
             job["active"] = False
 

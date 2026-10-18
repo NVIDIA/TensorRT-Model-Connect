@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import base64
 from concurrent.futures import Future
 import hashlib
 import json
@@ -220,5 +221,69 @@ def test_cancelled_download_releases_expiry_lease_even_before_first_chunk(tmp_pa
         assert job["downloads"] == 0
         await jobs.expire()
         assert not root.exists() and not jobs.jobs
+
+    asyncio.run(scenario())
+
+
+def test_reserved_worker_and_replay_release_if_capability_disappears(monkeypatch):
+    import trtmc_server.videos as videos
+
+    worker = VideoWorker()
+    media_paths = []
+    original = videos.create_uploaded_input
+    checks = 0
+
+    async def capture(*args):
+        media = await original(*args)
+        media_paths.append(media.path)
+        return media
+
+    def draining(model, capability):
+        nonlocal checks
+        checks += 1
+        return checks == 1
+
+    monkeypatch.setattr(videos, "create_uploaded_input", capture)
+    worker.supports = draining
+    with TestClient(app_for(worker)) as client:
+        identifier = submit(client, initial_latents_b64=base64.b64encode(b"\0" * 4).decode()).json()["id"]
+        assert finished(client, identifier)["status"] == "failed"
+        assert not worker.busy and not worker.calls
+        assert media_paths and all(not path.exists() for path in media_paths)
+
+
+def test_shutdown_waits_for_in_progress_submission_setup(monkeypatch, tmp_path):
+    import trtmc_server.videos as videos
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = videos.create_uploaded_input
+        media_paths = []
+
+        async def blocked(*args):
+            entered.set()
+            await release.wait()
+            media = await original(*args)
+            media_paths.append(media.path)
+            return media
+
+        def unavailable_codec(*args):
+            raise RuntimeError("injected codec failure")
+
+        monkeypatch.setattr(videos, "create_uploaded_input", blocked)
+        monkeypatch.setattr(videos, "encode", unavailable_codec)
+        app = app_for(VideoWorker(), tmp_path / "records.jsonl")
+        manager = app.router.lifespan_context(app)
+        await manager.__aenter__()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+            posting = asyncio.create_task(client.post("/v1/videos", json={"model": "video", "prompt": "rgb"}))
+            await asyncio.wait_for(entered.wait(), 5)
+            closing = asyncio.create_task(manager.__aexit__(None, None, None))
+            await asyncio.sleep(0.02)
+            assert not closing.done()
+            release.set()
+            assert (await posting).status_code == 202
+            await asyncio.wait_for(closing, 5)
+        assert media_paths and all(not path.exists() for path in media_paths)
 
     asyncio.run(scenario())
