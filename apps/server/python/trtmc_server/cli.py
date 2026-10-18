@@ -40,7 +40,7 @@ def positive_seconds(value: str) -> float:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="trtmc-server",
-        description="Serve text-generation bundles alongside vision-language, image-generation, embedding, reranking, audio-transcription, and object-detection bundles through persistent native workers",
+        description="Serve text-generation bundles alongside vision-language, image-generation, image-editing, embedding, reranking, audio-transcription, and object-detection bundles through persistent native workers",
     )
     result.add_argument("bundle", nargs="?", help="single .bundle artifact")
     result.add_argument("--model-name", help="API model name for the positional bundle")

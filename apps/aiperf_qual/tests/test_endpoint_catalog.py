@@ -64,3 +64,12 @@ def test_image_inventory_covers_existing_checkpoints_and_excludes_legacy_video()
         "flux-2-dev", "flux-schnell", "pixart-sigma-1024", "qwen-image", "qwen-image-2512",
         "stable-diffusion-v1-5", "z-image-turbo"}
     assert all("Wan" not in row["checkpoint"] and "MiniMax" not in row["checkpoint"] for row in rows)
+
+
+def test_edit_inventory_requires_the_declared_reference_conditioned_task():
+    assert not group_inventory([entry("generator", task="image_generation")], "image-edit")
+    repo = Path(__file__).resolve().parents[3]
+    row, = inventory(repo, "image-edit")
+    assert row["checkpoint"] == "Qwen/Qwen-Image-Edit-2511"
+    assert row["profile"] == "qwen-image-edit-2511"
+    assert len(row["variants"]) == 1

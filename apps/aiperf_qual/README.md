@@ -404,7 +404,8 @@ PYTHONPATH=apps/aiperf_qual:apps/benchmark:core/builder:. \
   python -m trtmc_aiperf_qual endpoint-models --repo . --group embeddings
 ```
 
-Groups are `embeddings`, `reranking`, `transcription`, `detection`, `vision`, and `images`.
+Groups are `embeddings`, `reranking`, `transcription`, `detection`, `vision`,
+`images`, and `image-edit`.
 The image group excludes legacy video profiles even when their Task string is
 `image_generation`.
 
@@ -435,6 +436,33 @@ against the selected existing profile, and retains the actual build provenance.
 Use a current-builder bundle with that provenance for qualification.
 See [Profile Image Generation with AIPerf](../../website/docs/user-guides/profile-images-with-aiperf.md)
 for the three-step interactive example.
+
+For one reference image plus instruction, use `image-edit-profile` instead:
+
+```bash
+PYTHONPATH=apps/aiperf_qual:apps/benchmark:apps/perf_serving:core/builder:. \
+  python -m trtmc_aiperf_qual image-edit-profile \
+    --environment /path/to/local-environment.yaml \
+    --profile qwen-image-edit-2511 --bundle /path/to/qwen-image-edit-2511.bundle \
+    --inputs /path/to/image-edits.jsonl --request-count 5 --warmup-request-count 1 \
+    --out /path/to/new-edit-results
+```
+
+Each JSONL row supplies `text`, one local `image` path (relative to the dataset
+file or absolute) or an embedded image data URL, and optional `extra` controls.
+The qualifier pins decoded RGB pixels in lossless PNG uploads, preserving the
+original source hash and avoiding AIPerf's lossy re-encoding of local JPEGs.
+It reuses the image-generation server/qualifier, with AIPerf `image_edit` and
+multipart `/v1/images/edits`. Each input image/instruction pair, native controls,
+replay noise and complete edited output is checked by request identity. Saved
+inputs accompany their outputs in `images.json`. Build geometry is recorded
+separately from actual conditioning and requested output geometry: an edit
+builder may use its image dimensions for the input. Checkpoint, Task, precision
+and other build provenance checks remain mandatory. Quality still requires the
+owning family's unchanged correctness criteria on the exact served bundle.
+See [Profile Image Editing with AIPerf](../../website/docs/user-guides/profile-image-edits-with-aiperf.md)
+for the three-step Qwen example.
+
 The inventory selects a normal full-model profile when one is available, with
 precision and parallel variants listed separately. Checkpoints without one
 remain explicit gaps. Discovery reports `unverified`; it does not claim

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -109,3 +110,18 @@ class ImageGenerationRequest(StrictRequest):
     negative_prompt: str | None = None
     # Optional replay noise in the existing family's raw float32 layout; never a client path.
     initial_latents_b64: str | None = None
+
+    @classmethod
+    def from_form(cls, fields: dict[str, Any]) -> ImageGenerationRequest:
+        """Multipart uses strings; retain the JSON route's strict numeric contract."""
+        values = dict(fields)
+        for key in ("seed", "num_inference_steps", "n"):
+            if key in values:
+                if not isinstance(values[key], str) or not re.fullmatch(r"[0-9]+", values[key]):
+                    raise ValueError(f"{key} must be an integer")
+                values[key] = int(values[key])
+        if "stream" in values:
+            if values["stream"] not in {"false", "true"}:
+                raise ValueError("stream must be false")
+            values["stream"] = values["stream"] == "true"
+        return cls.model_validate(values)

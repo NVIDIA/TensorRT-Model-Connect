@@ -69,6 +69,7 @@ module.exports = {
         'user-guides/profile-detection-with-aiperf',
         'user-guides/profile-vision-with-aiperf',
         'user-guides/profile-images-with-aiperf',
+        'user-guides/profile-image-edits-with-aiperf',
         {
           type: 'category',
           label: 'Task Guides',

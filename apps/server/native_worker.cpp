@@ -520,24 +520,72 @@ ImageGenerationConfig image_config(const Json& request) {
 }
 
 template <class Generate>
-int run_image_protocol(Generate&& generate, std::istream& input, std::ostream& output) {
-    return run_protocol({{"event", "ready"},
-                         {"protocol_version", 1},
-                         {"capabilities", Json::array({"image_generation"})}},
-                        {{"generate_image",
-                          [&](const Json& request) {
-                              const auto prompt = string_field(request, "prompt");
-                              const auto path = string_field(request, "output_path");
-                              // Generation and timing stay with the public Task. PNG encoding is
-                              // the same codec used by the CLI and benchmark artifact recorder.
-                              return generate(prompt, path, request);
-                          }}},
-                        input, output);
+int run_image_protocol(Generate&& generate, std::istream& input, std::ostream& output,
+                       std::string_view capability = "image_generation",
+                       std::string_view operation = "generate_image") {
+    return run_protocol(
+        {{"event", "ready"}, {"protocol_version", 1}, {"capabilities", Json::array({capability})}},
+        {{std::string(operation),
+          [&](const Json& request) {
+              const auto prompt = string_field(request, "prompt");
+              const auto path = string_field(request, "output_path");
+              // Generation and timing stay with the public Task. PNG encoding is
+              // the same codec used by the CLI and benchmark artifact recorder.
+              return generate(prompt, path, request);
+          }}},
+        input, output);
+}
+
+template <class Edit>
+int run_edit_protocol(Edit&& edit, std::istream& input, std::ostream& output) {
+    return run_image_protocol(
+        [&](const std::string& prompt, const std::string& path, const Json& request) {
+            cli::io::LoadedImage image;
+            try {
+                image = cli::io::read_image(string_field(request, "image_path"));
+            } catch (const std::exception&) {
+                throw ProtocolError("image must be a readable image file");
+            }
+            if (image.height <= 0 || image.width <= 0 || image.pixels.empty())
+                throw ProtocolError("image must contain RGB pixels");
+            auto result = edit(prompt, image, path, request);
+            result["image_height"] = image.height;
+            result["image_width"] = image.width;
+            return result;
+        },
+        input, output, "image_edit", "edit_image");
+}
+
+Json write_generated_image(const ImageResult& result, const std::string& path, double wall_ms) {
+    if (result.num_frames != 1)
+        throw std::runtime_error("image endpoint requires one generated frame");
+    cli::io::save_png(path, result.pixels, result.width, result.height, result.channels);
+    return {{"height", result.height},     {"width", result.width},
+            {"channels", result.channels}, {"output_count", 1},
+            {"model_call_ms", wall_ms},    {"timing_scope", "public_task_call_wall"}};
 }
 
 int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) {
     // Legacy bundle modes select the declared public Task before invocation.
     // Several families implement more C++ interfaces than a given bundle enables.
+    if (std::string_view(task.task()) == IImageEditing::kTask) {
+        auto* editor = dynamic_cast<IImageEditing*>(&task);
+        if (!editor)
+            throw std::invalid_argument("bundle does not implement image editing");
+        return run_edit_protocol(
+            [&](const std::string& prompt, const cli::io::LoadedImage& image,
+                const std::string& path, const Json& request) {
+                const auto config = image_config(request);
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = editor->generate_image(prompt, image.pixels.data(),
+                                                           image.height, image.width, config);
+                const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
+                return write_generated_image(result, path, wall_ms);
+            },
+            input, output);
+    }
     if (std::string_view(task.task()) == IImageGeneration::kTask) {
         auto* image = dynamic_cast<IImageGeneration*>(&task);
         if (!image)
@@ -550,14 +598,7 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) 
                 const auto wall_ms = std::chrono::duration<double, std::milli>(
                                          std::chrono::steady_clock::now() - started)
                                          .count();
-                if (result.num_frames != 1)
-                    throw std::runtime_error("image endpoint requires one generated frame");
-                cli::io::save_png(path, result.pixels, result.width, result.height,
-                                  result.channels);
-                return Json{
-                    {"height", result.height},     {"width", result.width},
-                    {"channels", result.channels}, {"output_count", 1},
-                    {"model_call_ms", wall_ms},    {"timing_scope", "public_task_call_wall"}};
+                return write_generated_image(result, path, wall_ms);
             },
             input, output);
     }
@@ -668,6 +709,38 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) 
 
 int run_model_worker(const Model& model, std::istream& input, std::ostream& output) {
     const auto primary = model.info().bundle_task;
+    if (primary == ImagesTextToImageEdit::kTask || primary == IImageEditing::kTask) {
+        const auto task = model.task<ImagesTextToImageEdit>();
+        const auto fields = task.config_fields();
+        return run_edit_protocol(
+            [&](const std::string& prompt, const cli::io::LoadedImage& image,
+                const std::string& path, const Json& request) {
+                const auto config = parse_sdk_config(request, fields);
+                const auto latents = image_latents(request);
+                const ImagesTextToImageEditRequest edit{
+                    {ImageInput{{image.pixels.data(), image.pixels.size()},
+                                static_cast<std::uint32_t>(image.height),
+                                static_cast<std::uint32_t>(image.width)}},
+                    prompt,
+                    {latents.data(), latents.size()}};
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = task.run(edit, config);
+                const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
+                if (result.width() > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+                    result.height() > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
+                    throw std::runtime_error("image dimensions exceed the PNG writer range");
+                cli::io::save_png(path, result.pixels(), static_cast<int>(result.width()),
+                                  static_cast<int>(result.height()),
+                                  static_cast<int>(result.channels()));
+                return Json{
+                    {"height", result.height()},     {"width", result.width()},
+                    {"channels", result.channels()}, {"output_count", 1},
+                    {"model_call_ms", wall_ms},      {"timing_scope", "public_task_call_wall"}};
+            },
+            input, output);
+    }
     if (primary == TextToImage::kTask || primary == IImageGeneration::kTask) {
         const auto task = model.task<TextToImage>();
         const auto fields = task.config_fields();

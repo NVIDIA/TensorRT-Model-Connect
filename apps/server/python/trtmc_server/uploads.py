@@ -34,6 +34,39 @@ async def multipart_audio(request: Request, limit: int) -> tuple[dict[str, Any],
         raise ValueError("invalid multipart WAV upload") from error
 
 
+async def multipart_image(request: Request, limit: int) -> tuple[dict[str, Any], bytes]:
+    """Read one reference image and bounded text controls, without client paths."""
+    try:
+        async with request.form(max_files=1, max_fields=16, max_part_size=limit) as form:
+            if any(len(form.getlist(key)) != 1 for key in form):
+                raise ValueError("multipart fields must occur once")
+            upload = form.get("image")
+            if not isinstance(upload, UploadFile):
+                raise ValueError("image must contain one uploaded reference image")
+            fields = {key: value for key, value in form.items() if key != "image"}
+            if any(not isinstance(value, str) for value in fields.values()):
+                raise ValueError("only one image upload is supported")
+            data = await upload.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError("uploaded image exceeds the server limit")
+            return fields, data
+    except HTTPException as error:
+        raise ValueError("invalid multipart image upload") from error
+
+
+def image_file(data: bytes, max_pixels: int) -> tuple[bytes, str, dict[str, Any]]:
+    """Use the existing image validator for an uploaded PNG or JPEG container."""
+    import base64
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        kind = "png"
+    elif data.startswith(b"\xff\xd8\xff"):
+        kind = "jpeg"
+    else:
+        raise ValueError("image must be a PNG or JPEG file")
+    return image_upload(f"data:image/{kind};base64," + base64.b64encode(data).decode(), max_pixels)
+
+
 def wav_metadata(data: bytes) -> dict[str, Any]:
     try:
         with wave.open(io.BytesIO(data), "rb") as audio:

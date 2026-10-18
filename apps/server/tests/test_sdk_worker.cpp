@@ -319,6 +319,33 @@ void test_vision_task(const std::filesystem::path& root, const trtmc::LoadOption
 }
 } // namespace
 
+void test_image_edit_task(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    const auto bundle = write_bundle(root, "images_text_to_image_edit", "image_fixture");
+    const auto image = root / "reference.png", noise = root / "edit-noise.f32",
+               png = root / "edited.png";
+    trtmc::cli::io::save_png(image.string(), std::vector<float>{1, 0, 0}, 1, 1);
+    const float values[]{0.25F, 0, 0};
+    std::ofstream(noise, std::ios::binary)
+        .write(reinterpret_cast<const char*>(values), sizeof(values));
+    const auto run = invoke(bundle, options,
+                            {{{"id", "edit"},
+                              {"op", "edit_image"},
+                              {"prompt", "watercolor"},
+                              {"image_path", image.string()},
+                              {"output_path", png.string()},
+                              {"initial_latents_path", noise.string()},
+                              {"config", {{"level", 0.0}}}}});
+    require(run.status == 0 && run.messages.size() == 2 &&
+                run.messages[0]["capabilities"] == Json::array({"image_edit"}),
+            "the declared SDK edit Task is selected");
+    const auto result = run.messages[1].at("result");
+    const auto decoded = trtmc::cli::io::read_image(png.string());
+    require(decoded.width == 1 && decoded.height == 1 && decoded.pixels[0] == 64.0F / 255.0F &&
+                decoded.pixels[1] == 1 && decoded.pixels[2] == 1 && result["image_width"] == 1 &&
+                result["image_height"] == 1 && result["timing_scope"] == "public_task_call_wall",
+            "SDK edit consumes the image, explicit Config and actual replay noise");
+}
+
 int main(int argc, char** argv) {
     if (argc != 2)
         return 2;
@@ -334,6 +361,7 @@ int main(int argc, char** argv) {
         test_audio_task_new_token_field(root, options);
         test_detection_task(root, options);
         test_vision_task(root, options, "images_text_to_text");
+        test_image_edit_task(root, options);
         test_vision_task(root, options, "vision_language_generation");
         return 0;
     } catch (const std::exception& error) {

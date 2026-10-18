@@ -26,6 +26,7 @@ GROUP_TASKS = {
     "detection": {"object_detection", "image_to_boxes"},
     "vision": {"vision_language_generation", "images_text_to_text"},
     "images": {"image_generation", "text_to_image"},
+    "image-edit": {"image_edit", "images_text_to_image_edit"},
 }
 
 
