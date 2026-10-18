@@ -90,13 +90,19 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
     if config.get("corpus", {}).get("format") == "controlled_prefix" and len(result) != 1:
         raise ConfigError("controlled-prefix profiles require one workload case per fresh server process")
     for item in result:
-        if item["endpoint"] not in {"completions", "chat"} or type(item["streaming"]) is not bool:
-            raise ConfigError("text profiles support completions/chat and boolean streaming only")
+        if item["endpoint"] not in {"completions", "chat", "responses"} or type(item["streaming"]) is not bool:
+            raise ConfigError("text profiles support completions/chat/responses and boolean streaming only")
+        if item["endpoint"] == "responses" and item["streaming"]:
+            raise ConfigError("Responses profiles support nonstreaming stateless text only")
+        if item["endpoint"] == "responses" and config.get("reference"):
+            raise ConfigError("the existing reference server does not support Responses comparisons")
         for name in ("input_tokens", "output_tokens", "concurrency"):
             if (name == "input_tokens" and config.get("corpus")) or trace:
                 continue
             if type(item[name]) is not int or item[name] <= 0:
                 raise ConfigError(f"{name} must be a positive integer")
+        if item["endpoint"] == "responses" and (type(item["output_tokens"]) is not int or item["output_tokens"] < 16):
+            raise ConfigError("Responses max_output_tokens must be at least 16")
         rate = item["request_rate"]
         if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float))
                                  or not math.isfinite(rate) or rate <= 0):
@@ -112,8 +118,9 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
             raise ConfigError("conversation profiles require one output-token cap for their per-turn settings")
         if type(count) is not int or count < 1 or workload.get("requests", 20) < count * (2 if multi_turn else 1):
             raise ConfigError("corpus count must be positive and every prompt needs a measured request")
-        if any(item["endpoint"] != ("chat" if multi_turn else "completions") or item["streaming"] for item in result):
-            raise ConfigError("real-prompt profiles require nonstreaming chat for conversations or completions for single turns")
+        allowed = {"chat"} if multi_turn else ({"completions"} if trace else {"completions", "responses"})
+        if any(item["endpoint"] not in allowed or item["streaming"] for item in result):
+            raise ConfigError("corpus profiles require nonstreaming chat for conversations or completions/responses for single turns")
         if trace and (len(result) != 1 or workload.get("requests", 20) != count or workload.get("warmup_requests", 3) != 0
                       or any(item["request_rate"] is not None for item in result)):
             raise ConfigError("trace replay requires exactly one request per source row, no AIPerf warmup or request-rate override")
@@ -142,8 +149,10 @@ def arguments(url: str, config: dict[str, Any], case: dict[str, Any], *, input_f
     if workload.get("warmup_requests", 3):
         result += ["--warmup-request-count", str(workload.get("warmup_requests", 3)), "--warmup-concurrency", "1"]
     result += ["--extra-inputs", "temperature:0", "seed:0", "top_k:1"]
-    if case["endpoint"] == "chat":
+    if case["endpoint"] in {"chat", "responses"}:
         result.append("enable_thinking:false")
+    if case["endpoint"] == "responses":
+        result.append("store:false")
     if case["request_rate"] is not None:
         result += ["--request-rate", str(case["request_rate"])]
     if case["streaming"]:
@@ -315,6 +324,9 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
                 records = [json.loads(line) for line in service["records"].read_text().split("\n") if line.strip()]
                 rows = join_records(run, records)
                 (run.directory / "joined.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+                if case["endpoint"] == "responses":
+                    from .text_responses import verify as verify_responses
+                    verify_responses(run, rows)
                 if corpus:
                     from .text_corpus import verify_and_record
                     verify_and_record(run, rows, corpus)
@@ -342,6 +354,11 @@ def response_text(record: dict[str, Any]) -> str | None:
         return None
     try:
         body = json.loads(record["responses"][-1]["text"])
+        if not isinstance(body, dict):
+            return None
+        if body.get("object") == "response":
+            return "".join(part["text"] for item in body["output"] for part in item["content"]
+                           if item["type"] == "message" and part["type"] == "output_text")
         choice = body["choices"][0]
         return choice["text"] if "text" in choice else choice["message"]["content"]
     except (KeyError, IndexError, TypeError, ValueError):

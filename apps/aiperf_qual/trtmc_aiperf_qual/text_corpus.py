@@ -103,7 +103,8 @@ def verify(run, joined: list[dict[str, Any]], corpus: dict[str, Any]) -> dict[st
     for raw in run.raw_records(phase=None):
         request_id = raw["metadata"].get("x_request_id")
         payload = raw.get("payload")
-        prompt = payload.get("prompt") if isinstance(payload, dict) else None
+        from .text_responses import prompt_text
+        prompt = prompt_text(payload)
         if (not isinstance(request_id, str) or request_id in seen or request_id not in by_id
                 or not isinstance(prompt, str) or prompt not in expected):
             raise ConfigError("real-prompt request has unknown/duplicate identity or changed text")

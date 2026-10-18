@@ -873,3 +873,43 @@ observations. Per-generation KV state does not establish reuse across requests.
 Cache-hit telemetry is explicitly unavailable. Latency/throughput differences
 in `report.json` are descriptive; neither common input text nor a faster warm
 run proves a cache hit. No cache implementation or model spec is added.
+
+### Stateless Responses
+
+Use `config/text/qwen3-0.6b-responses.yaml` with the same environment and
+already-built full Qwen3-0.6B FP16 bundle:
+
+```bash
+python -m trtmc_aiperf_qual text-profile \
+  --environment environment.yaml --config qwen3-0.6b-responses.yaml \
+  --out artifacts/qwen-responses
+```
+
+The existing server accepts nonstreaming `/v1/responses` with one input string
+or one user message containing string/`input_text` parts, plus optional string
+`instructions`. It maps these onto the same public native generation Task,
+admission, limits, errors and timing records as text generation. Model-specific
+chat formatting stays in the family. One successful native Task call produces
+one typed assistant `message` with `output_text` content, `resp_`/`msg_` IDs and
+completed status. Native EOS-versus-cap termination metadata is unavailable.
+Input/total token usage is unavailable, so `usage` is null; actual native output
+counts remain in the server records. AIPerf uses its default client tokenizer
+estimates. Do not request `--use-server-token-count`.
+
+This subset is stateless: `store` defaults to false. Storage, response-ID
+continuation, tools, history, media, structured reasoning, and streaming are
+explicit errors. No Responses events or TTFT/ITL are advertised. Generation
+uses `max_output_tokens` (at least 16) and the existing supported sampling
+controls. The reference perf-serving server does not expose this endpoint, so
+the optional matched reference-performance comparison is rejected for Responses;
+the unchanged family correctness prerequisite still runs.
+
+The pilot selects the first six fitting original prompts from the same pinned
+ShareGPT source/tokenizer as the single-turn corpus. Published AIPerf's existing
+`responses` endpoint and `single_turn` loader send six measured requests plus one
+separate warmup, concurrency one, greedy sampling, a sixteen-token cap and
+`store:false`. `corpus-verification.json` checks original text and native hashes;
+`responses-verification.json` additionally checks the typed response, model,
+unique request/response identities, output, native generation cap and Task timing.
+Failures preserve a verdict and the raw/joined request records. `report.json`
+keeps client end-to-end metrics separate from native `public_task_call_wall`.

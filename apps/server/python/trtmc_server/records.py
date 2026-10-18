@@ -86,5 +86,5 @@ class RequestPolicy:
             logging.getLogger("uvicorn.error").info(json.dumps({"event": "http_request",
                 "request_id": request_id, "route": scope["path"], "status": status,
                 "duration_seconds": context["handler_ms"] / 1000}, separators=(",", ":")))
-            if scope["path"] in {"/v1/completions", "/v1/chat/completions", "/v1/embeddings", "/v1/ranking", "/v1/audio/transcriptions", "/v1/infer", "/v1/images/generations", "/v1/images/edits", "/v1/videos"}:
+            if scope["path"] in {"/v1/completions", "/v1/chat/completions", "/v1/responses", "/v1/embeddings", "/v1/ranking", "/v1/audio/transcriptions", "/v1/infer", "/v1/images/generations", "/v1/images/edits", "/v1/videos"}:
                 self.records.write(context)

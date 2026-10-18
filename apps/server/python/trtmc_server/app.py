@@ -46,6 +46,8 @@ from trtmc_perf_serving.images import png_response
 from trtmc_perf_serving.openai import image_generation
 from .protocol import extract_task_timing
 from .schemas import ImageGenerationRequest
+from .schemas import ResponsesRequest
+from .responses import generation_input, response_body
 
 
 
@@ -319,6 +321,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         chat: bool,
         chat_max_tokens: int | None = None,
         messages: list[dict[str, str]] | None = None,
+        responses: bool = False,
     ) -> Any:
         context["model"] = request.model
         context.update(prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
@@ -367,7 +370,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
                 400,
                 "max_tokens_exceeded",
                 f"requested generation exceeds {config.max_generation_tokens} tokens",
-                param="max_tokens",
+                param="max_output_tokens" if responses else "max_tokens",
             )
 
         queued_at = time.monotonic()
@@ -506,6 +509,10 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             object_name = "text_completion"
             response_id = f"cmpl-{uuid.uuid4().hex}"
         created = int(time.time())
+        if responses:
+            return JSONResponse(content=response_body(text=text, model=request.model, created=created,
+                max_tokens=max_tokens, request=request, instructions=system_prompt),
+                headers={"X-Request-ID": request_id})
         if request.stream:
             return _streaming_completion_response(
                 response_id=response_id,
@@ -534,6 +541,24 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             },
             headers={"X-Request-ID": request_id},
         )
+
+    @app.post("/v1/responses")
+    async def responses(http_request: Request, request: ResponsesRequest) -> Any:
+        try:
+            if not registry.supports(request.model, "text_generation"):
+                metrics.reject("/v1/responses", 400)
+                return error_response(400, "unsupported_task", "model does not support text generation", param="model")
+        except ModelNotFoundError as error:
+            metrics.reject("/v1/responses", 404)
+            return error_response(404, error.code, str(error), param="model")
+        try:
+            generation, prompt = generation_input(request)
+        except ValueError as error:
+            metrics.reject("/v1/responses", 400)
+            return error_response(400, "unsupported_parameter", str(error), param="input")
+        return await execute("/v1/responses", generation, prompt,
+            request_id=http_request.state.request_id, context=http_request.state.timing,
+            system_prompt=request.instructions or "", chat=True, responses=True)
 
     @app.post("/v1/completions")
     async def completions(http_request: Request, request: CompletionRequest) -> Any:

@@ -208,3 +208,18 @@ hit metrics.
 For an exact token-overlap report and a reproducible comparison with and
 without process warmup, use the optional
 [shared-prefix profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#controlled-shared-prefixes).
+
+## Benchmark stateless Responses
+
+With the same Qwen server, change the completions benchmark command to
+`--endpoint-type responses` and
+`--extra-inputs temperature:0 enable_thinking:false store:false`. Keep
+nonstreaming mode and an output limit of at least 16 tokens. AIPerf sends one
+user text input to `/v1/responses` and reads the native answer from its typed
+message output. The optional [Responses profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#stateless-responses)
+provides pinned prompts and automatic request/output verification.
+
+This endpoint supports stateless single-turn text only. Storage, response-ID
+continuation, tools, media, reasoning-specific fields and streaming are rejected.
+Usage is unavailable because the native Task does not report input-token counts;
+use AIPerf's default client tokenizer estimates.

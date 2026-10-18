@@ -62,6 +62,33 @@ class ChatCompletionRequest(GenerationRequest):
     max_completion_tokens: int | None = Field(default=None, ge=1)
 
 
+class ResponseInputText(StrictRequest):
+    type: Literal["input_text"]
+    text: str
+
+
+class ResponseInputMessage(StrictRequest):
+    type: Literal["message"] = "message"
+    role: Literal["user"]
+    content: str | list[ResponseInputText] = Field(min_length=1)
+
+
+class ResponsesRequest(StrictRequest):
+    """The supported stateless, nonstreaming, single-user text subset."""
+    model: str
+    input: str | list[ResponseInputMessage] = Field(min_length=1)
+    instructions: str | None = None
+    max_output_tokens: int | None = Field(default=None, ge=16)
+    temperature: float | None = Field(default=None, ge=0)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    min_p: float | None = Field(default=None, ge=0, le=1)
+    top_k: int | None = Field(default=None, ge=0)
+    seed: int | None = Field(default=None, ge=0)
+    enable_thinking: bool | None = None
+    stream: Literal[False] = False
+    store: Literal[False] = False
+
+
 class EmbeddingRequest(StrictRequest):
     model: str
     input: str | list[str]
