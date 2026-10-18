@@ -404,7 +404,34 @@ PYTHONPATH=apps/aiperf_qual:apps/benchmark:core/builder:. \
   python -m trtmc_aiperf_qual endpoint-models --repo . --group embeddings
 ```
 
-Groups are `embeddings`, `reranking`, `transcription`, `detection`, and `vision`.
+Groups are `embeddings`, `reranking`, `transcription`, `detection`, `vision`, and `images`.
+The image group excludes legacy video profiles even when their Task string is
+`image_generation`.
+
+For an already-built image bundle that passed its owning family's unchanged
+correctness checks, use `image-profile` with the same environment file shown
+below. Inputs are AIPerf single-turn JSONL (`{"text":"a prompt"}`); catalog
+dimensions, steps, guidance and seed are applied explicitly. Per-row `extra`
+may carry supported controls or `initial_latents_b64` in the family's existing
+raw float32 layout for matched-noise replay.
+
+```bash
+PYTHONPATH=apps/aiperf_qual:apps/benchmark:apps/perf_serving:core/builder:. \
+  python -m trtmc_aiperf_qual image-profile \
+    --environment /path/to/local-environment.yaml \
+    --profile stable-diffusion-v1-5 --bundle /path/to/stable-diffusion-v1-5.bundle \
+    --inputs /path/to/image-prompts.jsonl --request-count 5 --warmup-request-count 1 \
+    --out /path/to/new-image-results
+```
+
+This uses pip-installed AIPerf `image_generation` through `trtmc-server`.
+It joins every client response and metric to its native request record, checks
+the complete decoded PNG against that invocation's native artifact SHA-256,
+and saves measured and warmup images separately by request identity in
+`images.json`. `summary.json` separates HTTP latency, Task time and images/sec.
+Transport identity does not replace the family's model-quality gate.
+See [Profile Image Generation with AIPerf](../../website/docs/user-guides/profile-images-with-aiperf.md)
+for the three-step interactive example.
 The inventory selects a normal full-model profile when one is available, with
 precision and parallel variants listed separately. Checkpoints without one
 remain explicit gaps. Discovery reports `unverified`; it does not claim

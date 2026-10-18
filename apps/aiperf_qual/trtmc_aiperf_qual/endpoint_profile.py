@@ -238,6 +238,8 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
                   if entry and entry.model and entry.model.task in tasks), None)
     if group is None:
         raise ConfigError(f"{name!r} is not a native endpoint catalog profile")
+    if group == "images":
+        raise ConfigError("use image-profile for the image-generation workload")
     if not any(row["profile"] == name for row in inventory(repo, group)):
         raise ConfigError("select the group's normal full-model checkpoint profile")
     out.mkdir(parents=True, exist_ok=False)

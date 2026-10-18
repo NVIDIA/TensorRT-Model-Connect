@@ -25,6 +25,7 @@ from . import openai
 from .backends.base import Backend, BackendError, BackendUnavailable, Invocation
 from .digests import add_media_digests
 from .files import materialize_files, server_path_fields
+from .images import generated_image
 
 # Request IDs name a per-request directory under the scratch root: one path component that is never
 # "." or ".." (leading alphanumeric, no separators).
@@ -121,7 +122,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
     identity = dict(backend.describe())
     operation = backend.operation
 
-    async def execute(request_id: str, route: str, operation_request: Mapping[str, Any]) -> dict[str, Any]:
+    async def execute(request_id: str, route: str, operation_request: Mapping[str, Any], *,
+                      image_output: bool = False) -> dict[str, Any]:
         workdir = config.scratch / request_id
         try:
             # Backends write output artifacts below the request directory even without inputs.
@@ -145,6 +147,9 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             invocation, queue_ms, handler_ms = await lane.run(call)
             # Generated media leave the request as digests (the files are removed below).
             observation = add_media_digests(invocation.observation, operation, workdir)
+            image = generated_image(workdir) if image_output else None
+            if image is not None:
+                observation["output_sha256"] = image["sha256"]
             if replayed is not None:
                 observation["latent_replay"] = replayed
                 if replayed:
@@ -164,7 +169,7 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
                        "backend": identity.get("backend"), "time": time.time(), "timing": timing,
                        "observation": reported})
         return {"timing": timing, "observation": invocation.observation, "reported": reported,
-                "extra": invocation.extra}
+                "extra": invocation.extra, "image": image}
 
     def request_id_of(request: Request) -> str:
         value = request.headers.get("x-request-id", "")
@@ -272,8 +277,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
     async def images(request: Request):
         async def handle(request_id: str):
             mapped = openai.image_generation(await request.json(), config.base_request)
-            result = await execute(request_id, "/v1/images/generations", mapped)
-            return respond({"created": int(time.time()), "data": [{"url": _artifact_url(result)}],
+            result = await execute(request_id, "/v1/images/generations", mapped, image_output=True)
+            return respond({"created": int(time.time()), "data": [{"b64_json": result["image"]["b64_json"]}],
                             **_media_stats(result["timing"])}, result, request_id)
         return await guarded(request, "/v1/images/generations", ("generate_image",), handle)
 

@@ -61,6 +61,12 @@ against the digest; a client never names a path). OpenAI fields that every backe
 (for example `ignore_eos`) are rejected with HTTP 400 instead of being
 silently ignored.
 
+Image generation returns one complete PNG as `data[0].b64_json`, including when
+`--keep-artifacts` is off. Encoding happens after the timed Task call and before
+temporary files are reclaimed. `trtmc_observation.output_sha256` identifies the
+exact returned PNG. The image route supports `n=1`, nonstreaming generation and
+`response_format=b64_json`; unsupported quality/format/batching options are rejected.
+
 `stream: true` returns buffered SSE for every backend: the complete output is
 sent as one chunk. TTFT therefore equals request latency, and streaming
 behavior stays comparable between the candidate and the reference.

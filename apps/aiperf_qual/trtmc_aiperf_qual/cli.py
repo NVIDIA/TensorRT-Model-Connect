@@ -430,7 +430,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     text.add_argument("--out", type=Path, required=True)
     endpoints = commands.add_parser("endpoint-models", help="inventory every checkpoint for a native endpoint group")
     endpoints.add_argument("--repo", type=Path, required=True)
-    endpoints.add_argument("--group", choices=("embeddings", "reranking", "transcription", "detection", "vision"), required=True)
+    endpoints.add_argument("--group", choices=("embeddings", "reranking", "transcription", "detection", "vision", "images"), required=True)
+    images = commands.add_parser("image-profile", help="verify and profile one existing text-to-image bundle")
+    images.add_argument("--environment", type=Path, required=True)
+    images.add_argument("--profile", required=True)
+    images.add_argument("--bundle", type=Path, required=True)
+    images.add_argument("--inputs", type=Path, required=True)
+    images.add_argument("--out", type=Path, required=True)
+    images.add_argument("--request-count", type=int, default=5)
+    images.add_argument("--warmup-request-count", type=int, default=1)
     endpoint_run = commands.add_parser("endpoint-profile", help="verify and profile one built native endpoint model")
     endpoint_run.add_argument("--environment", type=Path, required=True)
     endpoint_run.add_argument("--profile", required=True)
@@ -442,6 +450,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     endpoint_run.add_argument("--tokenizer-revision", help="revision of an explicitly selected client tokenizer")
     arguments = parser.parse_args(argv)
     try:
+        if arguments.command == "image-profile":
+            from .image_profile import profile as image_profile
+
+            print(json.dumps(image_profile(load_environment(arguments.environment), arguments.profile,
+                arguments.bundle, arguments.inputs, arguments.out, requests=arguments.request_count,
+                warmup=arguments.warmup_request_count), indent=2))
+            return 0
         if arguments.command == "endpoint-profile":
             from .endpoint_profile import profile as endpoint_profile
 

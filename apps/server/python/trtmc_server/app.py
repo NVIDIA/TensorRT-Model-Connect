@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import json
 import math
 import time
@@ -38,6 +41,10 @@ from .registry import ModelRegistry
 from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest, TranscriptionRequest, DetectionRequest
 from .uploads import UploadedInput, multipart_audio, wav_metadata, image_upload, create_uploaded_input, ImagePixelLimitError
 from .worker import WorkerSession
+from trtmc_perf_serving.images import png_response
+from trtmc_perf_serving.openai import image_generation
+from .protocol import extract_task_timing
+from .schemas import ImageGenerationRequest
 
 
 
@@ -79,6 +86,7 @@ class _BodyLimitMiddleware:
             "/v1/ranking",
             "/v1/audio/transcriptions",
             "/v1/infer",
+            "/v1/images/generations",
         }:
             await self.app(scope, receive, send)
             return
@@ -563,6 +571,61 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             elapsed = time.monotonic() - started
             context["worker_roundtrip_ms"] = elapsed * 1000
             metrics.finish(route, status, queue_seconds=queue_seconds, inference_seconds=elapsed)
+
+    @app.post("/v1/images/generations")
+    async def images(http_request: Request, request: ImageGenerationRequest) -> Any:
+        context = http_request.state.timing
+        context["model"] = request.model
+        try:
+            if len(request.prompt.encode("utf-8")) > config.max_prompt_bytes:
+                return error_response(413, "content_too_large", "prompt exceeds the server limit")
+            mapped = image_generation(request.model_dump(exclude_none=True), {})
+            if mapped.get("height", 0) * mapped.get("width", 0) > config.max_image_pixels:
+                return error_response(413, "content_too_large", "output exceeds the pixel limit")
+            noise = base64.b64decode(request.initial_latents_b64, validate=True) if request.initial_latents_b64 is not None else b""
+            if request.initial_latents_b64 is not None and (not noise or len(noise) % 4):
+                raise ValueError("initial_latents_b64 must encode nonempty raw float32 values")
+        except (ValueError, binascii.Error):
+            return error_response(400, "invalid_request", "invalid image generation options")
+        # Reuse upload ownership: files survive cancellation until the native call ends.
+        media = await create_uploaded_input(noise, ".f32")
+        output = media.path.with_name("output.png")
+        controls = {key: value for key, value in mapped.items()
+                    if key not in {"prompt", "initial_latents_path"}}
+        payload = {"prompt": request.prompt, "config": controls, "output_path": str(output)}
+        if request.initial_latents_b64 is not None:
+            payload["initial_latents_path"] = str(media.path)
+        context.update(prompt_sha256=hashlib.sha256(request.prompt.encode()).hexdigest(),
+                       generation_config=controls,
+                       initial_latents_sha256=hashlib.sha256(noise).hexdigest() if noise else None)
+        encoded: dict[str, Any] = {}
+
+        def validate(value):
+            if not isinstance(value, Mapping):
+                raise WorkerProtocolError("worker image result must be an object")
+            extract_task_timing(value)
+            if (type(value.get("width")) is not int or type(value.get("height")) is not int or
+                    type(value.get("output_count")) is not int or value["output_count"] != 1):
+                raise WorkerProtocolError("worker returned invalid image dimensions or count")
+            try:
+                image = png_response(output, max_pixels=config.max_image_pixels)
+            except (OSError, ValueError) as error:
+                raise WorkerProtocolError("worker returned an unreadable PNG") from error
+            if (image["width"], image["height"]) != (value["width"], value["height"]):
+                raise WorkerProtocolError("worker image metadata disagrees with its PNG")
+            if image["channels"] != value.get("channels"):
+                raise WorkerProtocolError("worker image channels disagree with its PNG")
+            if request.size and (image["width"], image["height"]) != (controls["width"], controls["height"]):
+                raise WorkerProtocolError("worker did not honor the requested image size")
+            encoded.update(image)
+
+        result = await execute_task(http_request, request.model, "image_generation", "generate_image",
+                                    payload, validate, release_input=media.close)
+        if isinstance(result, JSONResponse):
+            return result
+        context.update(output_sha256=encoded["sha256"], output_width=encoded["width"],
+                       output_height=encoded["height"], output_count=1)
+        return {"created": int(time.time()), "data": [{"b64_json": encoded["b64_json"]}]}
 
     @app.post("/v1/embeddings")
     async def embeddings(http_request: Request, request: EmbeddingRequest) -> Any:

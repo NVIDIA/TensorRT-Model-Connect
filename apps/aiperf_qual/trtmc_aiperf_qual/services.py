@@ -555,6 +555,8 @@ def text_serving(environment: Environment, settings: Mapping[str, Any], out: Pat
         command += ["--runtime-root", str(settings["runtime_root"])]
     if settings.get("cuda_graphs"):
         command.append("--cuda-graphs")
+    if settings.get("max_body_bytes") is not None:
+        command += ["--max-body-bytes", str(settings["max_body_bytes"])]
     env = {**_serve_env(environment), **dict(extra_env or {})}
     env["PYTHONPATH"] = f"{repo}/apps/server/python:" + env["PYTHONPATH"]
     (out / "command.json").write_text(json.dumps(command, indent=2) + "\n")

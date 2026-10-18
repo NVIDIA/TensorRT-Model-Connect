@@ -11,6 +11,7 @@
 #include "trtmc/audio.hpp"
 #include "trtmc/control.hpp"
 #include "trtmc/features.hpp"
+#include "trtmc/image.hpp"
 #include "trtmc/language.hpp"
 #include "trtmc/perception.hpp"
 #include "trtmc/runtime/family_loader.h"
@@ -23,6 +24,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -475,9 +477,90 @@ int run_vision_protocol(std::int64_t default_tokens, Generate&& generate, std::i
                         input, output);
 }
 
+std::vector<float> image_latents(const Json& request) {
+    if (!request.contains("initial_latents_path"))
+        return {};
+    const auto path = string_field(request, "initial_latents_path");
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file || file.tellg() <= 0 || file.tellg() % sizeof(float) != 0)
+        throw ProtocolError("initial latents must be a nonempty raw float32 file");
+    const auto bytes = static_cast<std::size_t>(file.tellg());
+    // Bound the local worker protocol's auxiliary file independently of JSONL size.
+    if (bytes > kMaxLineBytes)
+        throw ProtocolError("initial latents exceed the worker limit");
+    std::vector<float> values(bytes / sizeof(float));
+    file.seekg(0);
+    file.read(reinterpret_cast<char*>(values.data()), bytes);
+    if (!file ||
+        !std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); }))
+        throw ProtocolError("initial latents must contain finite float32 values");
+    return values;
+}
+
+ImageGenerationConfig image_config(const Json& request) {
+    const auto config = request.value("config", Json::object());
+    if (!config.is_object())
+        throw ProtocolError("config must be an object");
+    validate_fields(config, {"seed", "num_steps", "guidance_scale", "cfg_scale", "negative_prompt",
+                             "height", "width"});
+    ImageGenerationConfig result;
+    assign(config, "seed", result.seed);
+    assign(config, "num_steps", result.num_steps);
+    assign(config, "guidance_scale", result.guidance_scale);
+    assign(config, "cfg_scale", result.cfg_scale);
+    assign(config, "negative_prompt", result.negative_prompt);
+    assign(config, "height", result.height);
+    assign(config, "width", result.width);
+    if (result.seed < -1 || result.num_steps == 0 || result.num_steps < -1 || result.height < 0 ||
+        result.width < 0 || !std::isfinite(result.guidance_scale) ||
+        !std::isfinite(result.cfg_scale))
+        throw ProtocolError("invalid image generation controls");
+    result.initial_latents = image_latents(request);
+    return result;
+}
+
+template <class Generate>
+int run_image_protocol(Generate&& generate, std::istream& input, std::ostream& output) {
+    return run_protocol({{"event", "ready"},
+                         {"protocol_version", 1},
+                         {"capabilities", Json::array({"image_generation"})}},
+                        {{"generate_image",
+                          [&](const Json& request) {
+                              const auto prompt = string_field(request, "prompt");
+                              const auto path = string_field(request, "output_path");
+                              // Generation and timing stay with the public Task. PNG encoding is
+                              // the same codec used by the CLI and benchmark artifact recorder.
+                              return generate(prompt, path, request);
+                          }}},
+                        input, output);
+}
+
 int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) {
     // Legacy bundle modes select the declared public Task before invocation.
     // Several families implement more C++ interfaces than a given bundle enables.
+    if (std::string_view(task.task()) == IImageGeneration::kTask) {
+        auto* image = dynamic_cast<IImageGeneration*>(&task);
+        if (!image)
+            throw std::invalid_argument("bundle does not implement image generation");
+        return run_image_protocol(
+            [&](const std::string& prompt, const std::string& path, const Json& request) {
+                const auto config = image_config(request);
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = image->generate_image(prompt, config);
+                const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
+                if (result.num_frames != 1)
+                    throw std::runtime_error("image endpoint requires one generated frame");
+                cli::io::save_png(path, result.pixels, result.width, result.height,
+                                  result.channels);
+                return Json{
+                    {"height", result.height},     {"width", result.width},
+                    {"channels", result.channels}, {"output_count", 1},
+                    {"model_call_ms", wall_ms},    {"timing_scope", "public_task_call_wall"}};
+            },
+            input, output);
+    }
     if (std::string_view(task.task()) == IVisionLanguageGeneration::kTask) {
         auto* vision = dynamic_cast<IVisionLanguageGeneration*>(&task);
         if (!vision)
@@ -585,6 +668,31 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output) 
 
 int run_model_worker(const Model& model, std::istream& input, std::ostream& output) {
     const auto primary = model.info().bundle_task;
+    if (primary == TextToImage::kTask || primary == IImageGeneration::kTask) {
+        const auto task = model.task<TextToImage>();
+        const auto fields = task.config_fields();
+        return run_image_protocol(
+            [&](const std::string& prompt, const std::string& path, const Json& request) {
+                const auto config = parse_sdk_config(request, fields);
+                const auto latents = image_latents(request);
+                const auto started = std::chrono::steady_clock::now();
+                const auto result = task.run({prompt, {latents.data(), latents.size()}}, config);
+                const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count();
+                if (result.width() > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+                    result.height() > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
+                    throw std::runtime_error("image dimensions exceed the PNG writer range");
+                cli::io::save_png(path, result.pixels(), static_cast<int>(result.width()),
+                                  static_cast<int>(result.height()),
+                                  static_cast<int>(result.channels()));
+                return Json{
+                    {"height", result.height()},     {"width", result.width()},
+                    {"channels", result.channels()}, {"output_count", 1},
+                    {"model_call_ms", wall_ms},      {"timing_scope", "public_task_call_wall"}};
+            },
+            input, output);
+    }
     if (primary == ImagesTextToText::kTask || primary == IVisionLanguageGeneration::kTask) {
         const auto task = model.task<ImagesTextToText>();
         const auto fields = task.config_fields();

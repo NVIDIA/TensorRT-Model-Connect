@@ -93,3 +93,19 @@ class TranscriptionRequest(StrictRequest):
     model: str = Field(min_length=1)
     response_format: Literal["json", "text"] = "json"
     max_output_tokens: int | None = Field(default=None, ge=1)
+
+
+class ImageGenerationRequest(StrictRequest):
+    model: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    n: Literal[1] = 1
+    stream: Literal[False] = False
+    response_format: Literal["b64_json"] = "b64_json"
+    size: str | None = None
+    seed: int | None = Field(default=None, ge=0, le=2**31 - 1, strict=True)
+    num_inference_steps: int | None = Field(default=None, ge=1, strict=True)
+    guidance_scale: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    cfg_scale: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    negative_prompt: str | None = None
+    # Optional replay noise in the existing family's raw float32 layout; never a client path.
+    initial_latents_b64: str | None = None

@@ -26,6 +26,9 @@ trtmc generate-video media.bundle \
 Use `generate-image` for one image and `generate-image-batch` with a prompt
 file plus comma-separated seeds for a family that declares the batch Task.
 
+To benchmark a built text-to-image bundle over HTTP, see
+[Profile Image Generation with AIPerf](./profile-images-with-aiperf.md).
+
 ## Perception
 
 ```bash

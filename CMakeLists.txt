@@ -559,6 +559,14 @@ if(TRTMC_BUILD_TESTS)
     target_compile_options(test_server_vision_worker PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME server_vision_worker COMMAND test_server_vision_worker)
     set_tests_properties(server_vision_worker PROPERTIES LABELS cpu)
+
+    add_executable(test_server_image_worker apps/server/tests/test_image_worker.cpp)
+    target_include_directories(test_server_image_worker PRIVATE
+      "${PROJECT_SOURCE_DIR}/apps" "${PROJECT_SOURCE_DIR}/apps/cli")
+    target_link_libraries(test_server_image_worker PRIVATE trtmc_server trtmc_media_io nlohmann_json::nlohmann_json)
+    target_compile_options(test_server_image_worker PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server_image_worker COMMAND test_server_image_worker)
+    set_tests_properties(server_image_worker PROPERTIES LABELS cpu)
   endif()
 
   add_library(trtmc_test_cli_fixture SHARED apps/cli/tests/test_family_cli.cpp)

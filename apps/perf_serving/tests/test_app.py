@@ -227,12 +227,18 @@ def test_image_and_video_responses_carry_inference_time_and_probed_peak_memory(t
             nvml.used[0] = 1600 * 1024 * 1024  # transient memory during the call
             time.sleep(0.01)
             nvml.used[0] = 1100 * 1024 * 1024
+            from PIL import Image
+            Image.new("RGB", (8, 4), color="red").save(artifact_base.with_suffix(".png"))
             return Invocation({"artifact": "/out.png"}, 250.0)
 
     client, _ = client_for(tmp_path, Generator(operation="generate_image"), memory_probe=probe)
     image = client.post("/v1/images/generations", json={"prompt": "cat", "model": "m", "response_format": "b64_json"})
     assert image.status_code == 200
     body = image.json()
+    import io
+    from PIL import Image
+    with Image.open(io.BytesIO(base64.b64decode(body["data"][0]["b64_json"]))) as png:
+        assert png.size == (8, 4) and png.getpixel((7, 3)) == (255, 0, 0)
     assert body["inference_time_s"] == 0.25 and body["peak_memory_mb"] == 600.0
     assert body["trtmc_timing"]["peak_memory_mb"] == 600.0
     with client:  # keeps the event loop (and the background video job) alive between requests
