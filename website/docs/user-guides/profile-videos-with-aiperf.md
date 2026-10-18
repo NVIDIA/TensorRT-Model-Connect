@@ -50,7 +50,11 @@ AIPerf submits multipart POST `/v1/videos`, polls GET `/v1/videos/{id}`, then
 downloads GET `/v1/videos/{id}/content`. Keep `--download-video-content` to
 include the complete MP4 transfer. The server encodes every native RGB frame
 losslessly; `fps` controls playback. Frame count is fixed when the bundle is
-built. A mismatched size/frame count, `seconds`, image conditioning, streaming,
+built. Video serving requires explicit size and frame count in the bundle's
+core build provenance; rebuild older video bundles that lack this metadata.
+Existing still-image bundles retain their image endpoint, including bundles
+with missing provenance or family-default dimensions.
+A mismatched size/frame count, `seconds`, image conditioning, streaming,
 or batching is rejected.
 
 Read client latency in `profile_export_aiperf.json`. It includes submission,

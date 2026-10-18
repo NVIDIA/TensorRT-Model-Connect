@@ -31,6 +31,14 @@ GROUP_TASKS = {
 }
 
 
+def is_video_model(model: Any) -> bool:
+    """Recognize a declared video workload, including the legacy image Task."""
+    return model.task == "text_to_video" or int(model.build_settings.get("video_num_frames") or 1) > 1 or any(
+        int(case.get("num_frames") or case.get("video_num_frames") or 1) > 1 or
+        case.get("media_type") == "video" for case in model.testcases
+    )
+
+
 def group_inventory(entries: Iterable[Any], group: str) -> list[dict[str, Any]]:
     """One row per checkpoint, with every catalog profile and its availability."""
     tasks = GROUP_TASKS[group]
@@ -42,12 +50,7 @@ def group_inventory(entries: Iterable[Any], group: str) -> list[dict[str, Any]]:
         if group in {"images", "videos"}:
             # Legacy video bundles share image_generation. Their declared frame
             # geometry belongs to the video workload, regardless of family name.
-            settings = model.build_settings
-            video = int(settings.get("video_num_frames") or 1) > 1 or any(
-                int(case.get("num_frames") or case.get("video_num_frames") or 1) > 1 or
-                case.get("media_type") == "video" for case in model.testcases
-            )
-            if video != (group == "videos"):
+            if is_video_model(model) != (group == "videos"):
                 continue
         smoke = "-l0-" in f"-{entry.name}-" or "-regression-" in f"-{entry.name}-"
         variant = {

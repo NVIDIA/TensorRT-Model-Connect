@@ -27,6 +27,22 @@ def test_invalid_or_nonendpoint_profile_has_a_clear_selection_error(tmp_path, mo
     assert not (tmp_path / "uncreated").exists()
 
 
+@pytest.mark.parametrize("name,command", [
+    ("wan21-t2v-1.3b", "video-profile"),
+    ("wan22-ti2v-5b", "video-profile"),
+    ("minimax-h3-768p", "video-profile"),
+    ("stable-diffusion-v1-5", "image-profile"),
+])
+def test_generation_profiles_select_the_supported_command_before_writing(tmp_path, name, command):
+    from trtmc_aiperf_qual.endpoint_profile import profile
+
+    repo = Path(__file__).resolve().parents[3]
+    output = tmp_path / "uncreated"
+    with pytest.raises(ConfigError, match=command):
+        profile(Environment({"repo": str(repo)}), name, Path("unused"), Path("unused"), output)
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("revision", ["main", "v1.0", ""])
 def test_revision_only_override_is_validated_before_starting_a_profile(tmp_path, monkeypatch, revision):
     import trtmc_benchmark.catalog as catalog

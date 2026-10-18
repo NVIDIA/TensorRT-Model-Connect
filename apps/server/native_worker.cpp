@@ -1083,16 +1083,31 @@ int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std
     VideoGeometry geometry;
     if (primary == IImageGeneration::kTask) {
         const auto provenance = app::read_provenance(bundle);
-        if (!provenance.is_object() || !provenance.contains("build"))
-            throw std::invalid_argument(
-                "generation bundle needs core build provenance; rebuild it");
-        const auto& build = provenance.at("build");
-        geometry = {build.value("image_width", 0), build.value("image_height", 0),
-                    build.value("video_num_frames", 1)};
-        if (geometry.frames < 1 || geometry.width < 1 || geometry.height < 1 ||
-            static_cast<std::uint64_t>(geometry.width) * geometry.height * geometry.frames >
-                512U * 1024U * 1024U)
-            throw std::invalid_argument("invalid or excessive built generation geometry");
+        // Older image bundles and family-owned default dimensions do not need
+        // core geometry. Enable video only for an explicit multi-frame build.
+        const auto build = provenance.is_object() ? provenance.value("build", Json{}) : Json{};
+        const auto integer = [&](const char* name, int fallback) {
+            if (!build.is_object() || !build.contains(name) || build.at(name).is_null())
+                return fallback;
+            int result = fallback;
+            try {
+                assign(build, name, result);
+            } catch (const std::exception&) {
+                throw std::invalid_argument(std::string("invalid built geometry field: ") + name);
+            }
+            return result;
+        };
+        geometry.frames = integer("video_num_frames", 1);
+        if (geometry.frames < 1)
+            throw std::invalid_argument("invalid built video frame count");
+        if (geometry.frames > 1) {
+            geometry.width = integer("image_width", 0);
+            geometry.height = integer("image_height", 0);
+            if (geometry.width < 1 || geometry.height < 1 ||
+                static_cast<std::uint64_t>(geometry.width) * geometry.height >
+                    (512U * 1024U * 1024U) / static_cast<std::uint64_t>(geometry.frames))
+                throw std::invalid_argument("invalid or excessive built video geometry");
+        }
     }
     if (app::uses_existing_task_runtime(primary)) {
         try {

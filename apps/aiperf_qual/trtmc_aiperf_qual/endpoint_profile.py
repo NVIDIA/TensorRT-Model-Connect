@@ -24,7 +24,7 @@ from typing import Any
 
 from .aiperf_runner import run_aiperf
 from .config import ConfigError, Environment
-from .endpoint_catalog import GROUP_TASKS, inventory
+from .endpoint_catalog import GROUP_TASKS, inventory, is_video_model
 from .services import gpu_exclusive, text_serving
 from .text_profile import check_aiperf, digest, git, join_records, statistics
 
@@ -238,6 +238,8 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
                   if entry and entry.model and entry.model.task in tasks), None)
     if group is None:
         raise ConfigError(f"{name!r} is not a native endpoint catalog profile")
+    if group == "videos" or (group == "images" and is_video_model(entry.model)):
+        raise ConfigError("use video-profile for the text-to-video workload")
     if group == "images":
         raise ConfigError("use image-profile for the image-generation workload")
     if not any(row["profile"] == name for row in inventory(repo, group)):
