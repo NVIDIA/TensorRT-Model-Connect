@@ -87,6 +87,9 @@ class FakeRegistry:
     def supports_streaming(self, model: str) -> bool:
         return False
 
+    def supports(self, model: str, capability: str) -> bool:
+        return capability == "text_conversation" and getattr(self, "conversation", False)
+
     def max_tokens(self, model: str, hard_cap: int) -> int:
         if model != "test/model":
             raise ModelNotFoundError(model)
@@ -131,6 +134,44 @@ def test_real_prompt_and_native_output_identity_survive_http(tmp_path):
     assert row["prompt_bytes"] == len(prompt.encode())
     assert row["completion_sha256"] == hashlib.sha256(b"Paris").hexdigest()
     assert "prompt" not in row and "text" not in row
+
+
+def test_history_forwards_typed_roles_and_content_without_a_client_template(tmp_path):
+    import hashlib
+
+    registry = FakeRegistry()
+    registry.conversation = True
+    path = tmp_path / "records.jsonl"
+    messages = [{"role": "system", "content": "  system\n"},
+                {"role": "user", "content": "Remember ORCHID."},
+                {"role": "assistant", "content": "OK\u2028"},
+                {"role": "user", "content": "What word?"}]
+    app = create_app(registry, ServerConfig(max_body_bytes=4096, max_prompt_bytes=1024,
+                                          max_generation_tokens=64, records=path))
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", json={"model": "test/model", "messages": messages})
+    assert response.status_code == 200
+    operation, payload = registry.requests[0]
+    assert operation == "converse" and payload["messages"] == messages
+    assert "prompt" not in payload and "use_chat_template" not in payload["config"]
+    row, = [json.loads(line) for line in path.read_text().split("\n") if line]
+    assert row["conversation_sha256"] == hashlib.sha256(json.dumps(
+        messages, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    assert row["conversation_roles"] == ["system", "user", "assistant", "user"]
+    assert "messages" not in row and row["native_operation"] == "converse"
+
+
+def test_history_rejects_unsupported_models_streaming_and_full_history_limits():
+    registry = FakeRegistry()
+    messages = [{"role": "user", "content": "first"}, {"role": "assistant", "content": "answer"},
+                {"role": "user", "content": "last"}]
+    with make_client(registry) as client:
+        assert client.post("/v1/chat/completions", json={"model": "test/model", "messages": messages}).status_code == 400
+        registry.conversation = True
+        assert client.post("/v1/chat/completions", json={"model": "test/model", "messages": messages, "stream": True}).status_code == 400
+        messages[0]["content"] = "x" * 2048
+        assert client.post("/v1/chat/completions", json={"model": "test/model", "messages": messages}).status_code == 413
+    assert registry.requests == []
 
 
 def test_completion_and_chat_keep_model_semantics_in_worker(caplog: Any) -> None:

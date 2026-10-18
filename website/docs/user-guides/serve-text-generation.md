@@ -96,7 +96,7 @@ support that placement.
 | Route | Supported behavior |
 | --- | --- |
 | `POST /v1/completions` | One string `prompt`; `model` is required. |
-| `POST /v1/chat/completions` | One text `user` message and optional preceding `system` message; vision-language bundles also accept one user message with text and one embedded image. |
+| `POST /v1/chat/completions` | One text `user` message and optional preceding `system` message. Native `TextConversation` models also accept nonstreaming text history (up to 64 messages, final role `user`). Vision-language bundles accept one user message with text and one embedded image. |
 | `GET /v1/models` | Configured models and their native capabilities. |
 | `GET /health/live` | Control-plane process liveness. |
 | `GET /health/ready` | Worker readiness and admission state. |
@@ -107,8 +107,14 @@ Generation accepts `temperature`, `top_p`, `min_p`, `top_k`, `seed`,
 Completions accept `max_tokens`;
 chat accepts either `max_tokens` or `max_completion_tokens`. The MVP
 requires `n=1`. It rejects unknown fields, prompt arrays, unsupported media content,
-multi-turn chat, stop sequences, tools, and log probabilities instead
+unsupported history, stop sequences, tools, and log probabilities instead
 of silently ignoring them.
+
+For text history, the current Qwen family implements the existing
+`TextConversation` Task for its supported ChatML templates. Send user/assistant
+messages in their original order, optionally preceded by a system message,
+and end with a user message. History requests are nonstreaming and must fit
+the complete context limit; unsupported models return an explicit error.
 
 For single-image chat, see [Profile Image Understanding with AIPerf](./profile-vision-with-aiperf.md).
 Image requests require a vision-language bundle and accept one embedded RGB PNG/JPEG
@@ -160,6 +166,8 @@ composition, and validation remain inside the family selected by the bundle.
 For migrated bundles, the native worker calls the public header-only C++ Task
 wrapper over the stable C ABI. It uses `TextContinuation`, or the primary
 `ConditionalTextGeneration` / `TextTranslation` contract for those bundles.
+History calls the existing `TextConversation` contract only when the loaded
+model advertises it. The family formats and tokenizes the typed messages.
 Translation uses the family's bundled language defaults; this HTTP protocol
 does not add source/target-language parameters.
 

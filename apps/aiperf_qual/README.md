@@ -744,3 +744,42 @@ A selection failure or changed/missing input/output fails verification and
 preserves its ledger and request artifacts. Family quality criteria are unchanged;
 this workload verifies transport and reports performance, without adding a new
 numerical accuracy gate.
+
+### Pinned conversations
+
+Use the same environment and already-built Qwen3-0.6B FP16 bundle with
+`config/text/qwen3-0.6b-conversations.yaml`:
+
+```bash
+python -m trtmc_aiperf_qual text-profile \
+  --environment environment.yaml --config qwen3-0.6b-conversations.yaml \
+  --out artifacts/qwen-conversations
+```
+
+The current Qwen family library implements the existing native
+`TextConversation` contract for supported ChatML templates. The server forwards
+typed roles and text; Qwen owns template rendering and tokenization. Existing
+single-turn generation and its correctness criteria remain unchanged. Rebuild
+the server/runtime libraries for history support; existing engine bundles can
+be reused. This profile uses nonstreaming chat; history streaming, tools and
+non-text messages are unsupported.
+
+The profile pins the same ShareGPT file and tokenizer as the single-turn
+example. It selects six distinct fitting human/assistant/human prefixes and
+sends their first two original human strings through AIPerf's existing
+`multi_turn` loader. AIPerf captures actual native answers for subsequent
+history (`deltas_without_responses`); source assistant answers are not replayed.
+The second turn has 50 ms of think time. Twelve measured requests cover both
+turns of all six conversations, with two separate warmup requests.
+
+`corpus.json` preserves source indices, original user strings, considered
+rejections, the selection budget and the exact delay policy. The run's
+`corpus-verification.json` checks roles/order, original text, retained actual
+assistant output, native dispatch hashes, and every measured turn by request
+and conversation identity. Actual wire histories are counted with the pinned
+tokenizer and checked against the bundle context plus requested output;
+native input-token counts remain unavailable. Configured and observed
+between-turn gaps are recorded separately, without claiming exact scheduler
+precision. `report.json` includes client and native Task-call timings for each
+turn as well as the full workload. Startup/build/load/warmup are excluded from
+measured requests. No TTFT/ITL or cross-request cache acceleration is claimed.

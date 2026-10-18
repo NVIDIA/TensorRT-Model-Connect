@@ -137,3 +137,30 @@ For a reproducible selection of real ShareGPT prompts, the optional
 provides a pinned Qwen3-0.6B workload. It preserves selected strings, records
 over-limit rejections, and verifies HTTP input/output against native dispatch
 records. It uses the same published AIPerf package.
+
+## Benchmark a conversation
+
+With the current Qwen server and runtime, save this as `conversations.jsonl`:
+
+```json
+{"session_id":"example","turns":[{"text":"Remember the code word ORCHID. Reply OK."},{"text":"What code word did I give you?","delay":50}]}
+```
+
+Use the benchmark command above with `--endpoint-type chat`, replace the two
+synthetic-input options with
+`--input-file conversations.jsonl --custom-dataset-type multi_turn`, and use
+`--extra-inputs temperature:0 enable_thinking:false`. Each turn is one request;
+`--request-count 2` measures one complete conversation. The delay is 50
+milliseconds after the first response. AIPerf includes the original user turn
+and the actual model answer in the follow-up request.
+
+Keep conversation requests nonstreaming. History requires the loaded model's
+native `TextConversation` capability; unsupported models return an explicit
+error. Qwen owns chat formatting and tokenization. Its existing bundles work
+with the updated family library; follow the existing build guide for the
+server/runtime installation. The complete history and requested output must
+fit the bundle's context limit; history is never silently dropped.
+
+For pinned ShareGPT conversations, per-turn timings, and automatic history
+verification, use the optional
+[conversation profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#pinned-conversations).

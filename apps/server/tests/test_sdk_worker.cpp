@@ -213,7 +213,8 @@ void test_incremental_stream(const std::filesystem::path& root, const trtmc::Loa
             "stream emits one delta and one terminal then shutdown");
     require(run.messages[0].at("protocol_version") == 2 &&
                 run.messages[0].at("capabilities") ==
-                    Json::array({"text_generation", "streaming_text_continuation"}),
+                    Json::array(
+                        {"text_generation", "streaming_text_continuation", "text_conversation"}),
             "ready advertises actual SDK stream capability");
     require(run.messages[1].at("id") == "stream" && run.messages[1].at("event") == "delta" &&
                 run.messages[1].at("result").at("text_delta") == "hello!",
@@ -224,6 +225,23 @@ void test_incremental_stream(const std::filesystem::path& root, const trtmc::Loa
                     "public_task_stream_wall_including_backpressure" &&
                 run.messages[2].at("result").at("model_call_ms").get<double>() >= 0,
             "terminal result carries scoped timing");
+
+    const auto invalid_history =
+        invoke(bundle, options,
+               {{{"id", "bad-history"}, {"op", "converse"}, {"messages", Json::array()}},
+                {{"id", "bad-role"},
+                 {"op", "converse"},
+                 {"messages", Json::array({{{"role", "tool"}, {"content", "unsupported"}}})}},
+                {{"id", "after-history-errors"}, {"op", "generate"}, {"prompt", "hello"}}});
+    require(invalid_history.status == 0 && invalid_history.messages.size() == 4,
+            "invalid conversation requests preserve the worker");
+    for (std::size_t index = 1; index < 3; ++index)
+        require(invalid_history.messages[index].at("ok") == false &&
+                    invalid_history.messages[index].at("error").at("type") ==
+                        "invalid_request_error",
+                "bad histories are recoverable request errors");
+    require(invalid_history.messages.back().at("result").at("text") == "sync",
+            "text generation remains usable after conversation errors");
 }
 void test_audio_task(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
     const auto bundle = write_bundle(root, "speech_transcription", "audio_fixture");

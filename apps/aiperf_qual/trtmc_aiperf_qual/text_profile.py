@@ -102,10 +102,13 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
             raise ConfigError(f"{name} has an invalid request count")
     if config.get("corpus"):
         count = config["corpus"].get("count")
-        if type(count) is not int or count < 1 or workload.get("requests", 20) < count:
+        multi_turn = config["corpus"].get("format") == "sharegpt_multi_turn"
+        if multi_turn and len({item["output_tokens"] for item in result}) != 1:
+            raise ConfigError("conversation profiles require one output-token cap for their per-turn settings")
+        if type(count) is not int or count < 1 or workload.get("requests", 20) < count * (2 if multi_turn else 1):
             raise ConfigError("corpus count must be positive and every prompt needs a measured request")
-        if any(item["endpoint"] != "completions" or item["streaming"] for item in result):
-            raise ConfigError("real-prompt profiles currently support nonstreaming completions")
+        if any(item["endpoint"] != ("chat" if multi_turn else "completions") or item["streaming"] for item in result):
+            raise ConfigError("real-prompt profiles require nonstreaming chat for conversations or completions for single turns")
     return result
 
 
@@ -121,7 +124,8 @@ def arguments(url: str, config: dict[str, Any], case: dict[str, Any], *, input_f
     if input_file is None:
         result += ["--synthetic-input-tokens-mean", str(case["input_tokens"]), "--synthetic-input-tokens-stddev", "0"]
     else:
-        result += ["--input-file", str(input_file), "--custom-dataset-type", "single_turn"]
+        result += ["--input-file", str(input_file), "--custom-dataset-type",
+                   "multi_turn" if config.get("corpus", {}).get("format") == "sharegpt_multi_turn" else "single_turn"]
     if workload.get("warmup_requests", 3):
         result += ["--warmup-request-count", str(workload.get("warmup_requests", 3)), "--warmup-concurrency", "1"]
     result += ["--extra-inputs", "temperature:0", "seed:0", "top_k:1"]
@@ -305,6 +309,9 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
                 entries.append({"case": case, "exit_code": run.exit_code or int(incomplete),
                                 "incomplete_export": incomplete, "command": run.command,
                                 "summary": summarize(rows), "aiperf_summary": run.summary})
+                if corpus and corpus.get("format") == "sharegpt_multi_turn":
+                    entries[-1]["per_turn"] = {str(turn): summarize([row for row in rows
+                        if row["client_metadata"].get("turn_index") == turn]) for turn in (0, 1)}
                 (out / "report.json").write_text(json.dumps({"runs": entries}, indent=2) + "\n")
                 if entries[-1]["exit_code"]:
                     break

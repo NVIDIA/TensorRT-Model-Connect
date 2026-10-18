@@ -139,8 +139,16 @@ const ConfigField qwen_text_fields[] = {
     {"enable_thinking", ConfigKind::Bool, true, "Enable Qwen thinking"},
     {"system_prompt", ConfigKind::String, std::string_view{}, "ChatML system message"},
 };
-TextGenerationConfig qwen_text_config(internal::ConfigView supplied) {
-    internal::validate_config(qwen_text_fields, supplied);
+const auto qwen_conversation_fields = [] {
+    std::vector<ConfigField> fields;
+    for (const auto& field : qwen_text_fields)
+        if (field.name != "use_chat_template" && field.name != "system_prompt")
+            fields.push_back(field);
+    return fields;
+}();
+TextGenerationConfig qwen_text_config(internal::ConfigView supplied,
+                                      Span<const ConfigField> fields = qwen_text_fields) {
+    internal::validate_config(fields, supplied);
     TextGenerationConfig result;
     const auto integer = [&](std::string_view name) {
         const auto value = *internal::config_get<std::int64_t>(supplied, qwen_text_fields, name);
@@ -180,10 +188,63 @@ std::vector<internal::TaskInstance> QwenTextGenerationPipeline::task_bindings() 
     // move a tensor-parallel communicator onto a producer thread.
     std::vector<internal::TaskInstance> result{
         internal::bind<internal::ITextContinuation>(*this, qwen_text_fields)};
+    if (config_.chat_template_format == "chatml" ||
+        config_.chat_template_format == "chatml_thinking")
+        result.push_back(internal::bind<internal::ITextConversation>(
+            *this, {qwen_conversation_fields.data(), qwen_conversation_fields.size()}));
     if (!distributed_owner_)
         result.push_back(
             internal::bind<internal::IStreamingTextContinuation>(*this, qwen_text_fields));
     return result;
+}
+
+internal::ConversationResult
+QwenTextGenerationPipeline::run(const internal::TextConversationRequest& request,
+                                internal::ConfigView config) {
+    if (!request.tools.empty())
+        throw std::invalid_argument("Qwen conversation tools are unsupported");
+    const auto cfg = qwen_text_config(
+        config, {qwen_conversation_fields.data(), qwen_conversation_fields.size()});
+    std::vector<std::pair<std::string, std::string>> messages;
+    for (const auto& message : request.messages) {
+        std::string role;
+        switch (message.role) {
+        case internal::MessageRole::System:
+            role = "system";
+            break;
+        case internal::MessageRole::User:
+            role = "user";
+            break;
+        case internal::MessageRole::Assistant:
+            role = "assistant";
+            break;
+        default:
+            throw std::invalid_argument("Qwen conversation role is unsupported");
+        }
+        std::string text;
+        for (const auto& part : message.parts) {
+            const auto* value = std::get_if<internal::TextPartView>(&part);
+            if (value == nullptr)
+                throw std::invalid_argument("Qwen conversation requires text-only message parts");
+            text += value->text;
+        }
+        messages.emplace_back(std::move(role), std::move(text));
+    }
+    const auto rendered = qwen_apply_conversation_template(config_.chat_template_format, messages,
+                                                           cfg.enable_thinking);
+    try {
+        const auto generated = generate(rendered, cfg);
+        internal::ConversationResult result;
+        result.parts.emplace_back(internal::TextPart{generated.text});
+        result.token_ids = generated.token_ids;
+        result.setup_ms = generated.setup_ms;
+        result.prefill_ms = generated.prefill_ms;
+        result.decode_ms = generated.decode_ms;
+        result.usage.output_tokens = generated.token_ids.size();
+        return result;
+    } catch (const QwenGenerationCapacityError& error) {
+        throw std::invalid_argument(error.what());
+    }
 }
 
 TextResult QwenTextGenerationPipeline::run(const internal::TextContinuationRequest& request,

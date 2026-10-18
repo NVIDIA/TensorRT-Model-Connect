@@ -24,15 +24,19 @@ def generation_config(request: GenerationRequest, max_tokens: int) -> dict[str, 
 
 def chat_prompt(request: ChatCompletionRequest) -> tuple[str, str]:
     messages = request.messages
-    if len(messages) == 1 and messages[0].role == "user":
-        return _message_text(messages[0].content), ""
-    if (
-        len(messages) == 2
-        and messages[0].role == "system"
-        and messages[1].role == "user"
+    if messages[-1].role != "user" or any(
+        message.role not in {"user", "assistant"} and not (index == 0 and message.role == "system")
+        for index, message in enumerate(messages)
     ):
-        return _message_text(messages[1].content), _message_text(messages[0].content)
-    raise ValueError("messages must be one user message with an optional preceding system message")
+        raise ValueError("messages require user/assistant roles, an optional leading system, and a final user")
+    return _message_text(messages[-1].content), (
+        _message_text(messages[0].content) if messages[0].role == "system" else "")
+
+
+def chat_history(request: ChatCompletionRequest) -> list[dict[str, str]] | None:
+    if len(request.messages) == 1 or (len(request.messages) == 2 and request.messages[0].role == "system"):
+        return None
+    return [{"role": message.role, "content": _message_text(message.content)} for message in request.messages]
 
 
 def chat_image(request: ChatCompletionRequest) -> str | None:

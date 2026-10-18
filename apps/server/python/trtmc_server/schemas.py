@@ -58,7 +58,7 @@ class CompletionRequest(GenerationRequest):
 
 
 class ChatCompletionRequest(GenerationRequest):
-    messages: list[ChatMessage] = Field(min_length=1, max_length=2)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=64)
     max_completion_tokens: int | None = Field(default=None, ge=1)
 
 

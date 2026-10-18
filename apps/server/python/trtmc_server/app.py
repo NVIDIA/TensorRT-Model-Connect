@@ -35,7 +35,7 @@ from .errors import (
     WorkerTimeoutError,
 )
 from .metrics import Metrics
-from .protocol import chat_prompt, chat_image, extract_vision_result, extract_embedding, extract_ranking, extract_result, extract_transcription, extract_detection, generation_config, public_worker_error
+from .protocol import chat_prompt, chat_history, chat_image, extract_vision_result, extract_embedding, extract_ranking, extract_result, extract_transcription, extract_detection, generation_config, public_worker_error
 from .records import RequestPolicy, RequestRecords
 from .registry import ModelRegistry
 from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest, TranscriptionRequest, DetectionRequest
@@ -318,6 +318,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         system_prompt: str = "",
         chat: bool,
         chat_max_tokens: int | None = None,
+        messages: list[dict[str, str]] | None = None,
     ) -> Any:
         context["model"] = request.model
         context.update(prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
@@ -338,7 +339,9 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             return error_response(
                 400, "unsupported_parameter", "stop is not supported", param="stop"
             )
-        if len(prompt.encode("utf-8")) + len(system_prompt.encode("utf-8")) > config.max_prompt_bytes:
+        input_bytes = (sum(len(message["content"].encode("utf-8")) for message in messages) if messages is not None
+                       else len(prompt.encode("utf-8")) + len(system_prompt.encode("utf-8")))
+        if input_bytes > config.max_prompt_bytes:
             metrics.reject(route, 413)
             return error_response(
                 413, "content_too_large", "prompt exceeds the server limit", param="prompt"
@@ -349,6 +352,14 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         except ModelNotFoundError as error:
             metrics.reject(route, 404)
             return error_response(404, error.code, str(error), param="model")
+        if messages is not None:
+            if request.stream or not registry.supports(request.model, "text_conversation"):
+                metrics.reject(route, 400)
+                return error_response(400, "unsupported_parameter", "this model requires nonstreaming native conversation support for history",
+                                      param="stream" if request.stream else "messages")
+            encoded = json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            context.update(conversation_sha256=hashlib.sha256(encoded).hexdigest(),
+                           conversation_messages=len(messages), conversation_roles=[message["role"] for message in messages])
         max_tokens = requested_tokens or default_tokens
         if max_tokens > config.max_generation_tokens:
             metrics.reject(route, 400)
@@ -382,13 +393,17 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         context["replica"] = getattr(session, "replica_name", None)
         context["admission_ms"] = queue_seconds * 1000
         worker_config = generation_config(request, max_tokens)
-        worker_config["use_chat_template"] = chat
-        if system_prompt:
-            worker_config["system_prompt"] = system_prompt
+        if messages is None:
+            worker_config["use_chat_template"] = chat
+            if system_prompt:
+                worker_config["system_prompt"] = system_prompt
         context["generation_config"] = {key: value for key, value in worker_config.items() if key != "system_prompt"}
         context["has_system_prompt"] = bool(system_prompt)
         metrics.begin()
         inference_started = time.monotonic()
+        operation = "converse" if messages is not None else "generate"
+        context["native_operation"] = operation
+        payload = {"messages": messages, "config": worker_config} if messages is not None else {"prompt": prompt, "config": worker_config}
         if request.stream and registry.supports_streaming(request.model):
             return await incremental_response(session, {"prompt": prompt, "config": worker_config},
                 model=request.model, chat=chat, include_usage=(request.stream_options is not None
@@ -396,7 +411,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
                 route=route, queue_seconds=queue_seconds, started=inference_started, metrics=metrics)
         try:
             result = await _worker_request(
-                session, {"prompt": prompt, "config": worker_config}
+                session, payload, operation=operation
             )
             text, completion_tokens, timings = extract_result(result)
         except asyncio.CancelledError:
@@ -863,8 +878,8 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
     @app.post("/v1/chat/completions")
     async def chat_completions(http_request: Request, request: ChatCompletionRequest) -> Any:
         try:
-            prompt, system_prompt = chat_prompt(request)
             image_url = chat_image(request)
+            prompt, system_prompt = chat_prompt(request)
         except ValueError as error:
             metrics.reject("/v1/chat/completions", 400)
             return error_response(400, "invalid_request", str(error), param="messages")
@@ -886,6 +901,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             system_prompt=system_prompt,
             chat=True,
             chat_max_tokens=request.max_completion_tokens,
+            messages=chat_history(request),
         )
 
     videos = VideoJobs(registry, config, records, execute_task, error_response)

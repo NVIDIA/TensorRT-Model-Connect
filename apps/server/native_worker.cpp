@@ -279,20 +279,21 @@ int run_protocol(const Json& ready, const Operations& operations, std::istream& 
 
 template <class Generate>
 int run_text_protocol(std::int64_t default_tokens, Generate&& generate, std::istream& input,
-                      std::ostream& output, StreamGenerate streaming = {}) {
+                      std::ostream& output, StreamGenerate streaming = {},
+                      Operations operations = {}) {
     Json capabilities = Json::array({"text_generation"});
     if (streaming)
         capabilities.push_back("streaming_text_continuation");
+    if (operations.count("converse"))
+        capabilities.push_back("text_conversation");
     const Json ready{{"event", "ready"},
                      {"protocol_version", 2},
                      {"capabilities", capabilities},
                      {"default_max_new_tokens", default_tokens}};
-    return run_protocol(ready,
-                        {{"generate",
-                          [&](const Json& request) {
-                              return generate(string_field(request, "prompt", true), request);
-                          }}},
-                        input, output, std::move(streaming));
+    operations.emplace("generate", [&](const Json& request) {
+        return generate(string_field(request, "prompt", true), request);
+    });
+    return run_protocol(ready, operations, input, output, std::move(streaming));
 }
 
 const std::vector<float>& checked_embedding_values(const EmbeddingResult& result) {
@@ -943,6 +944,64 @@ int run_model_worker(const Model& model, std::istream& input, std::ostream& outp
     return run_text_worker(model, input, output);
 }
 
+Operations conversation_operations(const Model* model) {
+    if (model == nullptr || !model->supports<TextConversation>())
+        return {};
+    const auto task = model->task<TextConversation>();
+    const auto fields = task.config_fields();
+    return {{"converse", [task, fields](const Json& request) {
+                 const auto found = request.find("messages");
+                 if (found == request.end() || !found->is_array() || found->empty() ||
+                     found->size() > 64)
+                     throw ProtocolError("messages must contain between 1 and 64 text messages");
+                 TextConversationRequest conversation;
+                 for (const auto& message : *found) {
+                     const auto role = string_field(message, "role");
+                     MessageRole typed;
+                     if (role == "system")
+                         typed = MessageRole::System;
+                     else if (role == "user")
+                         typed = MessageRole::User;
+                     else if (role == "assistant")
+                         typed = MessageRole::Assistant;
+                     else
+                         throw ProtocolError("unsupported conversation role");
+                     conversation.messages.push_back(
+                         {typed, {TextPart{string_field(message, "content", true)}}});
+                 }
+                 const auto config = parse_sdk_config(request, fields);
+                 try {
+                     const auto started = std::chrono::steady_clock::now();
+                     const auto result = task.run(conversation, config);
+                     const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                              std::chrono::steady_clock::now() - started)
+                                              .count();
+                     std::string text;
+                     const auto message = result.message();
+                     for (const auto& part : message.parts) {
+                         const auto* value = std::get_if<TextPart>(&part);
+                         if (value == nullptr)
+                             throw std::runtime_error(
+                                 "conversation Task returned a non-text assistant part");
+                         text += value->text;
+                     }
+                     const auto view = result.result().c_view();
+                     return Json{{"text", text},
+                                 {"completion_tokens", result.result().token_ids().size()},
+                                 {"setup_ms", view.setup_ms},
+                                 {"prefill_ms", view.prefill_ms},
+                                 {"decode_ms", view.decode_ms},
+                                 {"model_call_ms", wall_ms},
+                                 {"timing_scope", "public_task_call_wall"}};
+                 } catch (const Error& error) {
+                     if (error.code() == TRTMC_INVALID_ARGUMENT ||
+                         error.code() == TRTMC_INVALID_CONFIG)
+                         throw ProtocolError("conversation request is invalid for this model");
+                     throw;
+                 }
+             }}};
+}
+
 template <class Task, class Request>
 int run_sdk_worker(const Task& task, Request&& make_request, std::istream& input,
                    std::ostream& output, const Model* model = nullptr) {
@@ -1025,7 +1084,7 @@ int run_sdk_worker(const Task& task, Request&& make_request, std::istream& input
                 throw;
             }
         },
-        input, output, std::move(streaming));
+        input, output, std::move(streaming), conversation_operations(model));
 }
 
 } // namespace

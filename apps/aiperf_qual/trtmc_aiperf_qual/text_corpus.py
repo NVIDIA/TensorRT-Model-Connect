@@ -43,14 +43,14 @@ def select_prompts(records: list[Any], count: int, context: int, output: int,
     return selected, ledger
 
 
-def prepare(config: dict[str, Any], capacity: int, output: int, out: Path) -> dict[str, Any]:
+def load_source(config: dict[str, Any]):
     from transformers import AutoTokenizer
     from .suites import _hf_file, _read_records
 
     spec = config["corpus"]
     source = spec["source"]
-    if spec.get("format") != "sharegpt" or not SHA.fullmatch(str(source.get("revision", ""))):
-        raise ConfigError("real prompts require ShareGPT format and an immutable dataset revision")
+    if not SHA.fullmatch(str(source.get("revision", ""))):
+        raise ConfigError("real prompts require an immutable dataset revision")
     path = _hf_file(source)
     source_hash = digest(path)
     if source.get("sha256") and source["sha256"] != source_hash:
@@ -60,6 +60,17 @@ def prepare(config: dict[str, Any], capacity: int, output: int, out: Path) -> di
         raise ConfigError("ShareGPT source must contain a list of conversations")
     tokenizer = AutoTokenizer.from_pretrained(config["tokenizer"]["name"],
         revision=config["tokenizer"]["revision"], trust_remote_code=False)
+    return source, source_hash, records, tokenizer
+
+
+def prepare(config: dict[str, Any], capacity: int, output: int, out: Path) -> dict[str, Any]:
+    if config["corpus"].get("format") == "sharegpt_multi_turn":
+        from .text_conversations import prepare as prepare_conversations
+        return prepare_conversations(config, capacity, output, out)
+    if config["corpus"].get("format") != "sharegpt":
+        raise ConfigError("unsupported real-prompt corpus format")
+    spec = config["corpus"]
+    source, source_hash, records, tokenizer = load_source(config)
     selected, ledger = select_prompts(records, spec["count"], capacity, output,
                                       lambda text: tokenizer.encode(text, add_special_tokens=False))
     prepared = out / "inputs.jsonl"
@@ -113,7 +124,11 @@ def verify_and_record(run, joined: list[dict[str, Any]], corpus: dict[str, Any])
     """Preserve a verification verdict for missing, changed or malformed inputs."""
     path = run.directory / "corpus-verification.json"
     try:
-        verified = verify(run, joined, corpus)
+        if corpus.get("format") == "sharegpt_multi_turn":
+            from .text_conversations import verify as verify_conversations
+            verified = verify_conversations(run, joined, corpus)
+        else:
+            verified = verify(run, joined, corpus)
         try:
             unchanged = digest(Path(corpus["input_file"])) == corpus["input_file_sha256"]
         except OSError as error:
