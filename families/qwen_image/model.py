@@ -192,10 +192,8 @@ class _QwenImageModel:
         ``denoiser``, ``vae_decoder``, ``preprocessor_weights`` -- and adds
         a Qwen-Image-specific ``config_json`` blob consumed by ``build()``.
 
-        Tokenizer files are NOT packed here. engine_builder walks the
-        ``tokenizer/`` directory pointed to by ``weights["_tokenizer_dir"]``
-        and emits per-file bundle sections (tokenizer.json, vocab.json,
-        merges.txt, etc.), matching the Z-Image / FLUX / Wan path.
+        Tokenizer assets are packed by this family's ``build()`` entry point,
+        separately from the generated engine components.
 
         ``max_cache_length`` is part of the FamilyPlugin protocol but
         unused here -- Qwen-Image is a diffusion model and has no KV cache.
@@ -479,13 +477,8 @@ class _QwenImageModel:
         prep_src = extract_preprocessor_source(vae_cfg)
         prep_blob = pack_qwen_image_preprocessor_weights(prep_src)
 
-        # Final components dict. Keys ``text_encoders``, ``denoiser``,
-        # ``vae_decoder``, ``preprocessor_weights`` match the contract
-        # consumed by engine_builder._build_diffusion_bundle. ``config_json``
-        # is a Qwen-Image-specific extra; engine_builder uses it as-is for
-        # the bundle's config.json section when present. Tokenizer files
-        # are emitted by engine_builder's per-file walk of the tokenizer/
-        # directory (matches Z-Image / FLUX).
+        # The family build entry point packs these components, runtime config
+        # and the checkpoint's tokenizer into the bundle.
         components = {
             "config_json": config_json_bytes,
             "text_encoders": [("qwen2_5_vl_lm", text_engine_bytes)],
@@ -498,6 +491,24 @@ class _QwenImageModel:
         if vae_encoder_bytes is not None:
             components["vae_encoder"] = vae_encoder_bytes
         return components
+
+
+def _tokenizer_bytes(directory: Path) -> bytes:
+    """Export the checkpoint tokenizer to the native runtime's HF BPE JSON format."""
+    serialized = directory / "tokenizer.json"
+    if serialized.is_file():
+        return serialized.read_bytes()
+    # Official Qwen-Image snapshots ship vocab/merges and tokenizer configuration,
+    # not a pre-serialized fast tokenizer. Preserve their token IDs and added tokens
+    # through the checkpoint's Transformers tokenizer; never write into the cache.
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        directory, use_fast=True, local_files_only=True, trust_remote_code=False
+    )
+    if not tokenizer.is_fast:
+        raise ValueError("Qwen-Image requires a fast BPE tokenizer for native export")
+    return tokenizer.backend_tokenizer.to_str().encode("utf-8")
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
@@ -546,6 +557,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         model_type="qwen_image_edit" if request.task == "image_edit" else "qwen_image",
         raw=raw_geometry,
     )
+    tokenizer = _tokenizer_bytes(model_dir / "tokenizer")
     model = _QwenImageModel()
     weights = model.load_weights(str(model_dir), config)
     components = model.build_components(
@@ -586,5 +598,5 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.task == "image_edit":
         writer.add_bytes("vision.plan", components["vision_engine"])
         writer.add_bytes("vae_encoder.plan", components["vae_encoder"])
-    writer.add_bytes("tokenizer.json", (model_dir / "tokenizer/tokenizer.json").read_bytes())
+    writer.add_bytes("tokenizer.json", tokenizer)
     writer.add_json("runtime.json", runtime)
