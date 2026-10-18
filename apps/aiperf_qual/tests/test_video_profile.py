@@ -40,3 +40,16 @@ def test_partial_clip_and_unsupported_duration_cannot_be_qualified(tmp_path):
         source.write_text(json.dumps({"text": "cats", "extra": extra}) + "\n")
         with pytest.raises(ConfigError):
             prepare_inputs(source, tmp_path / "prepared.jsonl", base)
+
+
+def test_long_video_timeout_is_forwarded_once_to_published_client(monkeypatch, tmp_path):
+    from trtmc_aiperf_qual import aiperf_runner
+    from trtmc_aiperf_qual.config import Environment
+
+    monkeypatch.setattr(aiperf_runner, "_run", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(aiperf_runner, "_wait_ready", lambda *args: None)
+    run = aiperf_runner.run_aiperf(Environment({"hf_datasets_cache": str(tmp_path)}),
+        tmp_path / "client", ["--endpoint-type", "video_generation"],
+        command_prefix=["python", "-m", "aiperf"], request_timeout_s=14400)
+    assert run.command.count("--request-timeout-seconds") == 1
+    assert run.command[run.command.index("--request-timeout-seconds") + 1] == "14400"

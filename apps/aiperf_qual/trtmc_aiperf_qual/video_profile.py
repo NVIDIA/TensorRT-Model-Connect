@@ -104,12 +104,13 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
         with text_serving(environment, settings, out / "server") as server:
             run = run_aiperf(environment, out / "client", ["--url", server["url"],
                 "--endpoint-type", "video_generation", "--transport", "trtmc_video_capture",
-                "--download-video-content", "--request-timeout-seconds", str(timeout),
+                "--download-video-content",
                 "--input-file", str(prepared), "--custom-dataset-type", "single_turn",
                 "--tokenizer", "builtin", "--concurrency", "1", "--warmup-concurrency", "1",
                 "--request-count", str(requests), "--warmup-request-count", str(warmup)],
                 env={"TRTMC_VIDEO_CAPTURE_DIR": str(capture.resolve())}, model_name=entry.hf_id,
-                command_prefix=[client, "-m", "aiperf"], timeout_s=timeout * (requests + warmup + 1))
+                command_prefix=[client, "-m", "aiperf"], request_timeout_s=timeout,
+                timeout_s=timeout * (requests + warmup + 1))
             if run.exit_code:
                 raise RuntimeError("AIPerf failed; original client and server evidence preserved")
             records = [json.loads(line) for line in server["records"].read_text().split("\n") if line.strip()]
