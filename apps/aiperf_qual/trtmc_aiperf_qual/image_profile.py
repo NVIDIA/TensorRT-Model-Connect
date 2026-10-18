@@ -51,10 +51,11 @@ def prepare_inputs(inputs: Path, destination: Path, base: dict[str, Any]) -> lis
     unknown = set(base) - names - {"prompt", "batch_size", "media_type"}
     if unknown:
         raise ConfigError(f"catalog image controls need an explicit adapter: {sorted(unknown)}")
-    controls = {key: value for key, value in base.items() if key in names - {"height", "width", "num_steps"}}
+    controls = {key: value for key, value in base.items() if key in names - {"height", "width", "num_steps"}
+                and not (key in {"guidance_scale", "cfg_scale"} and value == -1)}
     if base.get("height") and base.get("width"):
         controls["size"] = f"{base['width']}x{base['height']}"
-    if base.get("num_steps"):
+    if base.get("num_steps", -1) > 0:
         controls["num_inference_steps"] = base["num_steps"]
     rows = []
     effective = []
@@ -67,8 +68,9 @@ def prepare_inputs(inputs: Path, destination: Path, base: dict[str, Any]) -> lis
             prompt, = row["texts"]
         extra = {**controls, **row.get("extra", {})}
         image_generation({"prompt": prompt, **extra}, {})
-        if "size" not in extra or "num_inference_steps" not in extra or "seed" not in extra:
-            raise ConfigError("image workload must state dimensions, steps and seed")
+        if ("size" not in extra or "num_inference_steps" not in extra or "seed" not in extra or
+                "guidance_scale" not in extra):
+            raise ConfigError("image workload must state dimensions, steps, seed and guidance")
         rows.append({"text": prompt, "extra": extra})
         effective.append({"prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "controls": extra})
     if not rows:
@@ -80,6 +82,7 @@ def prepare_inputs(inputs: Path, destination: Path, base: dict[str, Any]) -> lis
 def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out: Path, *,
             requests: int = 5, warmup: int = 1) -> dict[str, Any]:
     from trtmc_benchmark.catalog import ManifestCatalog, resolve_case
+    from .models import resolve_model
 
     if requests < 1 or warmup < 0:
         raise ConfigError("request count must be positive and warmup nonnegative")
@@ -92,7 +95,9 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
     entry, = [e for e in ManifestCatalog(repo / "families").entries() if e.name == name]
     out.mkdir(parents=True, exist_ok=False)
     prepared = out / "inputs.jsonl"
-    controls = prepare_inputs(inputs, prepared, dict(resolve_case(entry.model, bundle).request))
+    base = {**dict(resolve_case(entry.model, bundle).request),
+            **resolve_model(name, environment).get("catalog_request", {})}
+    controls = prepare_inputs(inputs, prepared, base)
     client = str(environment["aiperf_python"])
     worker = Path(environment.values.get("image_worker", runtime / "trtmc-server"))
     with gpu_exclusive(environment):
