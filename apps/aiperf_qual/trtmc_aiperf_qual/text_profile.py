@@ -75,10 +75,13 @@ print(json.dumps({
 
 def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
     workload = config["workload"]
+    trace = config.get("corpus", {}).get("format") == "azure_trace"
+    if trace and any(key in workload for key in ("input_tokens", "output_tokens", "concurrency")):
+        raise ConfigError("trace input/output targets and arrival schedule cannot be replaced by workload axes")
     axes = {"endpoint": workload.get("endpoints", ["completions", "chat"]),
             "input_tokens": [None] if config.get("corpus") else workload.get("input_tokens", [32]),
-            "output_tokens": workload.get("output_tokens", [16]),
-            "concurrency": workload.get("concurrency", [1]),
+            "output_tokens": [None] if trace else workload.get("output_tokens", [16]),
+            "concurrency": [None] if trace else workload.get("concurrency", [1]),
             "request_rate": workload.get("request_rate", [None]),
             "streaming": workload.get("streaming", [False])}
     result = [dict(zip(axes, values)) for values in itertools.product(*axes.values())]
@@ -88,7 +91,7 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
         if item["endpoint"] not in {"completions", "chat"} or type(item["streaming"]) is not bool:
             raise ConfigError("text profiles support completions/chat and boolean streaming only")
         for name in ("input_tokens", "output_tokens", "concurrency"):
-            if name == "input_tokens" and config.get("corpus"):
+            if (name == "input_tokens" and config.get("corpus")) or trace:
                 continue
             if type(item[name]) is not int or item[name] <= 0:
                 raise ConfigError(f"{name} must be a positive integer")
@@ -109,23 +112,31 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
             raise ConfigError("corpus count must be positive and every prompt needs a measured request")
         if any(item["endpoint"] != ("chat" if multi_turn else "completions") or item["streaming"] for item in result):
             raise ConfigError("real-prompt profiles require nonstreaming chat for conversations or completions for single turns")
+        if trace and (len(result) != 1 or workload.get("requests", 20) != count or workload.get("warmup_requests", 3) != 0
+                      or any(item["request_rate"] is not None for item in result)):
+            raise ConfigError("trace replay requires exactly one request per source row, no AIPerf warmup or request-rate override")
     return result
 
 
 def arguments(url: str, config: dict[str, Any], case: dict[str, Any], *, input_file: Path | None = None) -> list[str]:
     workload = config["workload"]
+    trace = config.get("corpus", {}).get("format") == "azure_trace"
     tokenizer = config["tokenizer"]
     result = ["--url", url, "--endpoint-type", case["endpoint"],
               "--tokenizer", str(tokenizer["name"]), "--tokenizer-revision", tokenizer["revision"],
-              "--output-tokens-mean", str(case["output_tokens"]),
-              "--output-tokens-stddev", "0", "--concurrency", str(case["concurrency"]),
               "--request-count", str(workload.get("requests", 20)),
               ]
+    if trace:
+        result.append("--fixed-schedule")
+    else:
+        result += ["--output-tokens-mean", str(case["output_tokens"]), "--output-tokens-stddev", "0",
+                   "--concurrency", str(case["concurrency"])]
     if input_file is None:
         result += ["--synthetic-input-tokens-mean", str(case["input_tokens"]), "--synthetic-input-tokens-stddev", "0"]
     else:
-        result += ["--input-file", str(input_file), "--custom-dataset-type",
-                   "multi_turn" if config.get("corpus", {}).get("format") == "sharegpt_multi_turn" else "single_turn"]
+        kind = "mooncake_trace" if trace else (
+            "multi_turn" if config.get("corpus", {}).get("format") == "sharegpt_multi_turn" else "single_turn")
+        result += ["--input-file", str(input_file), "--custom-dataset-type", kind]
     if workload.get("warmup_requests", 3):
         result += ["--warmup-request-count", str(workload.get("warmup_requests", 3)), "--warmup-concurrency", "1"]
     result += ["--extra-inputs", "temperature:0", "seed:0", "top_k:1"]
@@ -201,6 +212,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "successful_requests_per_second": len(successes) / elapsed if elapsed and elapsed > 0 else None,
         "actual_completion_tokens": statistics(server_values("completion_tokens")),
         "native_model_call_ms": statistics(server_values("model_call_ms")),
+        "admission_ms": statistics(server_values("admission_ms")),
         "worker_roundtrip_ms": statistics(server_values("worker_roundtrip_ms")),
         "handler_ms": statistics(server_values("handler_ms")),
         "client_request_latency_ms": statistics(client_values("request_latency")),
@@ -283,7 +295,7 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
             capacity = inspected.get("provenance", {}).get("build", {}).get("max_sequence_length")
             if type(capacity) is not int or capacity < 1:
                 raise ConfigError("real prompts require the bundle's explicit core context limit")
-            corpus = prepare(config, capacity, max(case["output_tokens"] for case in matrix), out)
+            corpus = prepare(config, capacity, max(case["output_tokens"] or 0 for case in matrix), out)
             provenance["corpus"] = corpus
         (out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
         with text_serving(environment, config["server"], out / "server") as service:

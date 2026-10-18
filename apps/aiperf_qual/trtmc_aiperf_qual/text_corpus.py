@@ -64,6 +64,9 @@ def load_source(config: dict[str, Any]):
 
 
 def prepare(config: dict[str, Any], capacity: int, output: int, out: Path) -> dict[str, Any]:
+    if config["corpus"].get("format") == "azure_trace":
+        from .text_trace import prepare as prepare_trace
+        return prepare_trace(config, capacity, out)
     if config["corpus"].get("format") == "sharegpt_multi_turn":
         from .text_conversations import prepare as prepare_conversations
         return prepare_conversations(config, capacity, output, out)
@@ -124,7 +127,10 @@ def verify_and_record(run, joined: list[dict[str, Any]], corpus: dict[str, Any])
     """Preserve a verification verdict for missing, changed or malformed inputs."""
     path = run.directory / "corpus-verification.json"
     try:
-        if corpus.get("format") == "sharegpt_multi_turn":
+        if corpus.get("format") == "azure_trace":
+            from .text_trace import verify as verify_trace
+            verified = verify_trace(run, joined, corpus)
+        elif corpus.get("format") == "sharegpt_multi_turn":
             from .text_conversations import verify as verify_conversations
             verified = verify_conversations(run, joined, corpus)
         else:

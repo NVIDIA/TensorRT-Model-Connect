@@ -783,3 +783,53 @@ between-turn gaps are recorded separately, without claiming exact scheduler
 precision. `report.json` includes client and native Task-call timings for each
 turn as well as the full workload. Startup/build/load/warmup are excluded from
 measured requests. No TTFT/ITL or cross-request cache acceleration is claimed.
+
+### Pinned production trace
+
+Use the same environment and already-built Qwen3-0.6B FP16 bundle with
+`config/text/qwen3-0.6b-trace.yaml`:
+
+```bash
+python -m trtmc_aiperf_qual text-profile \
+  --environment environment.yaml --config qwen3-0.6b-trace.yaml \
+  --out artifacts/qwen-trace
+```
+
+The source is the CC-BY [Azure 2023 conversational inference trace](https://github.com/Azure/AzurePublicDataset/blob/790921015d50dd6aae7f7e47f39ba0e235ad6b08/AzureLLMInferenceDataset2023.md)
+from Patel et al., *Splitwise* (ISCA 2024). The configuration pins the CSV
+revision and checksum. Selection keeps the first twelve source rows with
+positive input/output targets whose sum plus a sixteen-token safety margin
+fits the existing bundle. `corpus.json` retains original rows, source indices,
+selection/rejection reasons and unexamined counts. Targets are never shortened.
+
+Source timestamps have no declared timezone. Preparation subtracts the earliest
+selected timestamp using decimal arithmetic, multiplies by `corpus.time_scale`
+(default `1`), then writes relative milliseconds for AIPerf's existing
+`mooncake_trace` loader and `--fixed-schedule`. There is no concurrency or
+request-rate override. Run each time scale separately with a fresh output
+directory. Scaling changes offered load; it is always recorded.
+
+This trace contains token lengths, not original prompts. AIPerf synthesizes
+input text. The verifier records its actual pinned-tokenizer length and checks
+the context bound without truncation. Original output lengths become native
+generation caps; EOS can produce fewer tokens, and actual native output counts
+remain visible. These token targets do not establish a numerical accuracy test.
+The unchanged owning-family checks run on the exact served bundle first.
+
+All twelve arrivals are measured, including the first request. There is no
+AIPerf warmup or implicit retry; full validation and server startup precede the
+trace window. One replica provides one execution lane. Overload can return
+`429`, which is retained as a rejection rather than silently dropped.
+`run-000/trace-accounting.json` accounts for completed, rejected and failed
+requests by source/request identity, checks input/output hashes and generation
+caps, and reports offered/achieved rates. It checks relative scheduler credit
+offsets against the recorded `arrival_tolerance_ms` (default 100 ms); actual
+HTTP send offsets are reported separately. This tolerance describes replay
+timing, without changing model correctness criteria. Startup jitter and client
+scheduling can affect send timing; submillisecond replay accuracy is not claimed.
+
+The ordinary AIPerf exports retain client timing and replay metrics.
+`report.json` separately reports server admission and `public_task_call_wall`
+timing for completed requests. A profile needs native completions, full request
+accounting and no unexpected failures. Rejected requests and their client
+errors remain visible. Nonstreaming trace replay provides no TTFT/ITL samples.

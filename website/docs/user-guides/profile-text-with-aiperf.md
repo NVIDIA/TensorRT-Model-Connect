@@ -164,3 +164,28 @@ fit the bundle's context limit; history is never silently dropped.
 For pinned ShareGPT conversations, per-turn timings, and automatic history
 verification, use the optional
 [conversation profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#pinned-conversations).
+
+## Replay request arrivals
+
+With the same server running, save this as `trace.jsonl`:
+
+```json
+{"session_id":"first","timestamp":0,"input_length":32,"output_length":16}
+{"session_id":"second","timestamp":1000,"input_length":48,"output_length":16}
+```
+
+Use the completions benchmark command with
+`--input-file trace.jsonl --custom-dataset-type mooncake_trace --fixed-schedule`.
+Remove the synthetic-input, output-token, concurrency and warmup options.
+Set `--request-count 2`. Timestamps are milliseconds from the start of replay;
+these requests are offered one second apart. AIPerf generates prompts from the
+input lengths because this trace contains lengths rather than original text.
+Keep each input and output target within the bundle's context limit.
+
+Request arrivals continue while inference runs. One server replica has one
+execution lane, so overlapping requests may return `429`. Include those
+rejections when comparing offered load with completed throughput.
+
+The optional [production-trace profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#pinned-production-trace)
+provides a pinned Azure example, verifies arrival timing and accounts for every
+request. It uses the existing Qwen bundle and the published AIPerf package.
