@@ -9,6 +9,7 @@
 #include "cli/io.h"
 #include "cli/sdk_dispatch.h"
 #include "config.h"
+#include "bundle_provenance.h"
 #include "task_runtime.h"
 #include "trtmc/control.hpp"
 #include "trtmc/runtime/family_loader.h"
@@ -397,19 +398,7 @@ void write_json(std::ostream& output, const nlohmann::json& value) {
     output << value.dump() << '\n';
 }
 
-// Core build provenance is optional metadata; older bundles report null.
-nlohmann::json read_provenance(const std::string& bundle_path) {
-    constexpr std::string_view kSection = "trtmc.provenance.json";
-    constexpr std::uint64_t kMaxBytes = 1U << 20U;
-    const BundleReader reader(bundle_path);
-    const BundleSectionInfo* section = reader.find_section(kSection);
-    if (section == nullptr)
-        return nullptr;
-    if (section->length > kMaxBytes)
-        throw std::runtime_error("bundle provenance exceeds 1 MiB");
-    const std::vector<char> bytes = reader.read_section(kSection);
-    return nlohmann::json::parse(bytes.begin(), bytes.end());
-}
+using app::read_provenance;
 
 nlohmann::json text_json(const TextResult& result) {
     nlohmann::json value{{"text", result.text},

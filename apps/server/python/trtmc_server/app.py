@@ -41,6 +41,7 @@ from .registry import ModelRegistry
 from .schemas import ChatCompletionRequest, CompletionRequest, EmbeddingRequest, GenerationRequest, RankingRequest, TranscriptionRequest, DetectionRequest
 from .uploads import UploadedInput, multipart_audio, multipart_image, image_file, wav_metadata, image_upload, create_uploaded_input, ImagePixelLimitError
 from .worker import WorkerSession
+from .videos import VideoJobs
 from trtmc_perf_serving.images import png_response
 from trtmc_perf_serving.openai import image_generation
 from .protocol import extract_task_timing
@@ -58,6 +59,9 @@ class ServerConfig:
         records: Path | None = None,
         max_audio_seconds: float = 30.0,
         max_image_pixels: int = 16_000_000,
+        max_video_jobs: int = 8,
+        max_video_bytes: int = 4 * 1024**3,
+        video_ttl_seconds: float = 600,
     ) -> None:
         self.max_body_bytes = max_body_bytes
         self.max_prompt_bytes = max_prompt_bytes
@@ -69,6 +73,12 @@ class ServerConfig:
         if type(max_image_pixels) is not int or max_image_pixels <= 0:
             raise ValueError("max_image_pixels must be positive")
         self.max_image_pixels = max_image_pixels
+        if type(max_video_jobs) is not int or max_video_jobs < 1 or type(max_video_bytes) is not int or max_video_bytes < 1:
+            raise ValueError("video job and storage limits must be positive integers")
+        if not math.isfinite(video_ttl_seconds) or video_ttl_seconds <= 0:
+            raise ValueError("video TTL must be finite and positive")
+        self.max_video_jobs, self.max_video_bytes = max_video_jobs, max_video_bytes
+        self.video_ttl_seconds = video_ttl_seconds
 
 
 class _BodyLimitMiddleware:
@@ -88,6 +98,7 @@ class _BodyLimitMiddleware:
             "/v1/infer",
             "/v1/images/generations",
             "/v1/images/edits",
+            "/v1/videos",
         }:
             await self.app(scope, receive, send)
             return
@@ -245,6 +256,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             yield
         finally:
             await asyncio.to_thread(registry.close)
+            await videos.close()
             records.close()
 
     app = FastAPI(title="TensorRT-Model-Connect Server", version="0.1.0", lifespan=lifespan)
@@ -519,18 +531,21 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         http_request: Request, model: str, capability: str, operation: str,
         payload: dict[str, Any], validate: Callable[[Any], Any],
         release_input: Callable[[], None] | None = None,
+        acquired_session: WorkerSession | None = None,
+        task_context: dict[str, Any] | None = None,
     ) -> Any:
         route = http_request.url.path
-        context = http_request.state.timing
+        context = task_context if task_context is not None else http_request.state.timing
         context["model"] = model
         request_id = http_request.state.request_id
         admitted = time.monotonic()
-        session = None
+        session = acquired_session
         try:
             if not registry.supports(model, capability):
                 metrics.reject(route, 400)
                 return error_response(400, "unsupported_task", "model does not support this endpoint", param="model")
-            session = registry.acquire(model)
+            if session is None:
+                session = registry.acquire(model)
         except ModelNotFoundError as error:
             metrics.reject(route, 404)
             return error_response(404, error.code, str(error), param="model")
@@ -864,6 +879,8 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
             chat_max_tokens=request.max_completion_tokens,
         )
 
+    videos = VideoJobs(registry, config, records, execute_task, error_response)
+    app.include_router(videos.router)
     return app
 
 

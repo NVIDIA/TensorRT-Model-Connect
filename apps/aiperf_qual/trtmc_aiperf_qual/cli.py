@@ -430,8 +430,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     text.add_argument("--out", type=Path, required=True)
     endpoints = commands.add_parser("endpoint-models", help="inventory every checkpoint for a native endpoint group")
     endpoints.add_argument("--repo", type=Path, required=True)
-    endpoints.add_argument("--group", choices=("embeddings", "reranking", "transcription", "detection", "vision", "images", "image-edit"), required=True)
-    for name, description in (("image-profile", "text-to-image"), ("image-edit-profile", "image editing")):
+    endpoints.add_argument("--group", choices=("embeddings", "reranking", "transcription", "detection", "vision", "images", "image-edit", "videos"), required=True)
+    for name, description in (("image-profile", "text-to-image"), ("image-edit-profile", "image editing"), ("video-profile", "text-to-video")):
         images = commands.add_parser(name, help=f"verify and profile one existing {description} bundle")
         images.add_argument("--environment", type=Path, required=True)
         images.add_argument("--profile", required=True)
@@ -451,6 +451,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     endpoint_run.add_argument("--tokenizer-revision", help="revision of an explicitly selected client tokenizer")
     arguments = parser.parse_args(argv)
     try:
+        if arguments.command == "video-profile":
+            from .video_profile import profile as video_profile
+
+            print(json.dumps(video_profile(load_environment(arguments.environment), arguments.profile,
+                arguments.bundle, arguments.inputs, arguments.out, requests=arguments.request_count,
+                warmup=arguments.warmup_request_count), indent=2))
+            return 0
         if arguments.command in {"image-profile", "image-edit-profile"}:
             from .image_profile import profile as image_profile
 

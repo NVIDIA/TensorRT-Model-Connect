@@ -668,3 +668,43 @@ wall ratio. Mismatched work is reported as noncomparable.
 The normal qualification commands keep the existing perf-serving service and
 its raw Task/observation protocol. `services.serving(service="trtmc-server")`
 is an explicit text candidate option; callers must use the public text endpoints.
+
+### Complete text-to-video clips
+
+Use the existing full `minimax-h3-768p`, `wan21-t2v-1.3b` or `wan22-ti2v-5b`
+profile after its unchanged family correctness case passes on the exact bundle.
+`endpoint-models --repo . --group videos` also reports partial/L0-only and
+distributed variants; inventory is not qualification. No new model specs are needed.
+
+```bash
+python -m trtmc_aiperf_qual video-profile \
+  --environment environment.yaml --profile wan21-t2v-1.3b \
+  --bundle /path/to/validated.bundle --inputs prompts.jsonl \
+  --out artifacts/wan21-video --request-count 2 --warmup-request-count 1
+```
+
+Each input row has `text` and optional `extra` controls, for example
+`{"text":"A cat sitting on a beach watching the sunset"}`. Geometry, steps, seed
+and declared guidance come from the existing profile; omitted guidance keeps
+the public Task's default. `extra.initial_latents_b64` can replay the original
+owner's raw float32 latents when its public Task supports them. Never substitute
+a smaller clip or different precision for the selected full profile.
+
+The environment needs FFmpeg/ffprobe with `libx264rgb`, the native server and
+PyPI AIPerf 0.13.0 plus this repository's qualification plugins. Optional
+`video_worker`, `video_port`, and `video_request_timeout` select the server
+executable, port and timeout. The opt-in `trtmc_video_capture` transport extends
+only AIPerf's actual download hook: normal submission, polling, and download stay
+with the published client. It preserves the exact returned bytes by job ID,
+because AIPerf deliberately excludes binary downloads from raw JSON exports.
+The qualifier checks every decoded RGB frame, frame order, dimensions, file
+hash, native completion, fixed request controls and request/metric identity.
+It saves complete clips and decoded frames; these can be compared against the
+original owning reference with its unchanged quality criteria.
+
+Client latency includes polling, download and capture-file writing. It is
+reported separately from native Task time, without subtracting estimated
+overhead. Encoding FPS is presentation metadata; it never changes built frames.
+The [three-step usage guide](../../website/docs/user-guides/profile-videos-with-aiperf.md)
+also works with plain `pip install aiperf==0.13.0`, without an AIPerf checkout
+or the optional capture transport.

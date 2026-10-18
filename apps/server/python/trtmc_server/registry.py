@@ -138,6 +138,21 @@ class ModelRegistry:
             raise ModelNotFoundError(f"model {model!r} is not registered")
         return capability in metadata.get("capabilities", [])
 
+    def video_geometry(self, model: str) -> dict[str, int]:
+        if not self.supports(model, "video_generation"):
+            raise ValueError("model does not support video generation")
+        return self._checked_video_geometry(self._metadata[model])
+
+    @staticmethod
+    def _checked_video_geometry(metadata: dict) -> dict[str, int]:
+        geometry = metadata.get("video", {})
+        if (not isinstance(geometry, dict) or
+                any(type(geometry.get(k)) is not int or geometry[k] <= 0
+                    for k in ("width", "height", "num_frames")) or geometry["num_frames"] < 2 or
+                geometry["width"] * geometry["height"] * geometry["num_frames"] > 512 * 1024 * 1024):
+            raise WorkerProtocolError("worker does not declare valid video geometry")
+        return dict(geometry)
+
     def default_model(self, capability: str) -> str:
         matches = [name for name in self._order if self.supports(name, capability)]
         if len(matches) != 1:
@@ -154,7 +169,8 @@ class ModelRegistry:
                 "trtmc": {"streaming": ("incremental" if self.supports_streaming(name) else
                                          "buffered" if self.supports(name, "text_generation") else "none"),
                           "capabilities": self._metadata.get(name, {}).get("capabilities", []),
-                          "protocol_version": self._metadata.get(name, {}).get("protocol_version")},
+                          "protocol_version": self._metadata.get(name, {}).get("protocol_version"),
+                          "video": self._metadata.get(name, {}).get("video")},
             }
             for name in self._order
         ]
@@ -179,5 +195,7 @@ class ModelRegistry:
         capabilities = metadata.get("capabilities")
         if (not isinstance(capabilities, list) or not capabilities or
                 not all(isinstance(value, str) for value in capabilities) or
-                not {"text_generation", "embeddings", "reranking", "audio_transcription", "object_detection", "vision_language_generation", "image_generation", "image_edit"}.intersection(capabilities)):
+                not {"text_generation", "embeddings", "reranking", "audio_transcription", "object_detection", "vision_language_generation", "image_generation", "image_edit", "video_generation"}.intersection(capabilities)):
             raise WorkerProtocolError("worker does not advertise a supported capability")
+        if "video_generation" in capabilities:
+            ModelRegistry._checked_video_geometry(metadata)
