@@ -117,7 +117,6 @@ def arguments(url: str, config: dict[str, Any], case: dict[str, Any], *, input_f
               "--output-tokens-mean", str(case["output_tokens"]),
               "--output-tokens-stddev", "0", "--concurrency", str(case["concurrency"]),
               "--request-count", str(workload.get("requests", 20)),
-              "--extra-inputs", "temperature:0", "seed:0", "top_k:1",
               ]
     if input_file is None:
         result += ["--synthetic-input-tokens-mean", str(case["input_tokens"]), "--synthetic-input-tokens-stddev", "0"]
@@ -125,6 +124,7 @@ def arguments(url: str, config: dict[str, Any], case: dict[str, Any], *, input_f
         result += ["--input-file", str(input_file), "--custom-dataset-type", "single_turn"]
     if workload.get("warmup_requests", 3):
         result += ["--warmup-request-count", str(workload.get("warmup_requests", 3)), "--warmup-concurrency", "1"]
+    result += ["--extra-inputs", "temperature:0", "seed:0", "top_k:1"]
     if case["endpoint"] == "chat":
         result.append("enable_thinking:false")
     if case["request_rate"] is not None:

@@ -73,6 +73,18 @@ def test_arguments_preserve_api_model_and_disable_unavailable_server_counts(tmp_
     assert args[args.index("--warmup-concurrency") + 1] == "1"
 
 
+@pytest.mark.parametrize("warmup", [0, 1])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_chat_arguments_parse_with_the_published_aiperf_cli(warmup, streaming):
+    app = pytest.importorskip("aiperf.cli").app
+    config = {"workload": {"endpoints": ["chat"], "streaming": [streaming], "warmup_requests": warmup},
+              "tokenizer": {"name": "Qwen/Qwen3-0.6B", "revision": "c" * 40}}
+    case, = cases(config)
+    _, bound, _ = app.parse_args(["profile", "--model", "Qwen/Qwen3-0.6B",
+        *arguments("http://127.0.0.1:8000", config, case)], print_error=False, exit_on_error=False)
+    assert dict(bound.arguments["cli_config"].extra_inputs)["enable_thinking"] is False
+
+
 def test_sweeps_are_explicit_and_validate_inputs():
     config = {"workload": {"endpoints": ["chat"], "input_tokens": [32, 64],
                            "concurrency": [1, 2], "streaming": [False, True]}}
