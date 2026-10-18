@@ -17,6 +17,12 @@ def fingerprint(value) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
+def template_tokens(tokenizer, messages) -> int:
+    rendered = tokenizer.apply_chat_template(messages, tokenize=False,
+        add_generation_prompt=True, enable_thinking=False)
+    return len(tokenizer.encode(rendered, add_special_tokens=False))
+
+
 def select(records, count, capacity, output, count_messages):
     if any(type(value) is not int or value < 1 for value in (count, capacity, output)) or output >= capacity:
         raise ConfigError("conversation count/context/output must be positive integers fitting the bundle")
@@ -54,8 +60,7 @@ def prepare(config, capacity: int, output: int, out: Path):
     if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
         raise ConfigError("think_time_ms must be a finite nonnegative number")
     def count_messages(messages):
-        return len(tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True, enable_thinking=False))
+        return template_tokens(tokenizer, messages)
     selected, ledger = select(records, spec["count"], capacity, output, count_messages)
     path = out / "inputs.jsonl"
     path.write_text("".join(json.dumps({"session_id": row["session_id"], "turns": [
@@ -98,8 +103,7 @@ def verify(run, joined, corpus):
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(corpus["tokenizer"]["name"],
         revision=corpus["tokenizer"]["revision"], trust_remote_code=False)
-    return verify_records(run, joined, corpus, lambda messages: len(tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=True, enable_thinking=False)))
+    return verify_records(run, joined, corpus, lambda messages: template_tokens(tokenizer, messages))
 
 
 def verify_records(run, joined, corpus, count_messages):
@@ -110,17 +114,18 @@ def verify_records(run, joined, corpus, count_messages):
     for raw in raw_records:
         meta = raw.get("metadata", {})
         if (not isinstance(meta, dict) or not isinstance(meta.get("x_request_id"), str) or
+                not isinstance(meta.get("x_correlation_id"), str) or not meta["x_correlation_id"] or
                 not isinstance(meta.get("conversation_id"), str) or type(meta.get("session_num")) is not int or
                 type(meta.get("turn_index")) is not int or meta["turn_index"] not in (0, 1) or
                 any(type(meta.get(name)) is not int or meta[name] < 1 for name in ("request_start_ns", "request_end_ns"))):
             raise ConfigError("conversation request metadata is missing identity or timing")
-    for raw in sorted(raw_records, key=lambda r: (r["metadata"]["session_num"], r["metadata"]["turn_index"])):
+    for raw in sorted(raw_records, key=lambda r: r["metadata"]["request_start_ns"]):
         meta = raw["metadata"]
         request_id, session, turn = meta.get("x_request_id"), meta.get("conversation_id"), meta.get("turn_index")
         if request_id in seen or session not in expected or type(turn) is not int or turn not in (0, 1):
             raise ConfigError("unknown or repeated conversation request identity")
         seen.add(request_id)
-        key = (meta.get("benchmark_phase"), meta["session_num"])
+        key = (meta.get("benchmark_phase"), meta["x_correlation_id"])
         previous = groups.setdefault(key, [])
         if len(previous) != turn or (previous and previous[0]["session"] != session):
             raise ConfigError("conversation turns are missing, repeated or out of order")

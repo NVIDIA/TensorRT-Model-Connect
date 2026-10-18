@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from trtmc_aiperf_qual.config import ConfigError
-from trtmc_aiperf_qual.text_conversations import fingerprint, select, verify_records
+from trtmc_aiperf_qual.text_conversations import fingerprint, select, template_tokens, verify_records
 from trtmc_aiperf_qual.text_profile import arguments, cases
 
 
@@ -18,6 +18,19 @@ def conversation(first, second):
 
 def count_messages(messages):
     return sum(len(message["content"]) for message in messages) + 10
+
+
+def test_context_budget_counts_token_ids_instead_of_tokenizer_container_fields():
+    class Tokenizer:
+        def apply_chat_template(self, messages, **options):
+            assert options == {"tokenize": False, "add_generation_prompt": True, "enable_thinking": False}
+            return "rendered original history"
+
+        def encode(self, text, *, add_special_tokens):
+            assert text == "rendered original history" and add_special_tokens is False
+            return [100, 200, 300, 400]
+
+    assert template_tokens(Tokenizer(), []) == 4
 
 
 def test_original_user_turns_survive_selection_and_rejections_are_visible():
@@ -50,7 +63,7 @@ def capture():
     history = [*original, {"role": "assistant", "content": "OK"}, {"role": "user", "content": texts[1]}]
     raw, joined = [], []
     for turn, (messages, text) in enumerate([(original, "OK"), (history, "ORCHID")]):
-        metadata = {"x_request_id": str(turn), "conversation_id": "sharegpt-0", "session_num": 0,
+        metadata = {"x_request_id": str(turn), "conversation_id": "sharegpt-0", "session_num": turn,
                     "x_correlation_id": "conversation", "turn_index": turn, "benchmark_phase": "profiling",
                     "request_start_ns": 1_000_000_000 + turn * 150_000_000,
                     "request_end_ns": 1_100_000_000 + turn * 150_000_000}
