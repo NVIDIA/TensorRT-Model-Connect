@@ -430,6 +430,9 @@ the complete decoded PNG against that invocation's native artifact SHA-256,
 and saves measured and warmup images separately by request identity in
 `images.json`. `summary.json` separates HTTP latency, Task time and images/sec.
 Transport identity does not replace the family's model-quality gate.
+The command checks the bundle's recorded checkpoint, revision and build controls
+against the selected existing profile, and retains the actual build provenance.
+Use a current-builder bundle with that provenance for qualification.
 See [Profile Image Generation with AIPerf](../../website/docs/user-guides/profile-images-with-aiperf.md)
 for the three-step interactive example.
 The inventory selects a normal full-model profile when one is available, with

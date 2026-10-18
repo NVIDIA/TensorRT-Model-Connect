@@ -13,6 +13,7 @@ import base64
 import hashlib
 import io
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,25 @@ from .endpoint_catalog import inventory
 from .endpoint_profile import source_identity
 from .services import gpu_exclusive, text_serving
 from .text_profile import check_aiperf, digest, join_records, statistics
+
+
+def bundle_identity(runtime: Path, bundle: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Use the public inspector to bind a claimed profile to the actual artifact."""
+    info = json.loads(subprocess.check_output([str(runtime / "trtmc"), "inspect", str(bundle)], text=True))
+    if info.get("family") != manifest["family"] or info.get("task") != manifest["task"]:
+        raise ConfigError("bundle family/Task differs from the selected image profile")
+    provenance = info.get("provenance") or {}
+    checkpoint, build = provenance.get("checkpoint", {}), provenance.get("build", {})
+    if (checkpoint.get("hf_id") != manifest["hf_id"] or
+            checkpoint.get("revision") != manifest["hf_revision"]):
+        raise ConfigError("bundle checkpoint/revision differs from the selected image profile")
+    if build.get("quantization") != manifest.get("quantization"):
+        raise ConfigError("bundle quantization differs from the selected image profile")
+    for key in ("precision", "quantization", "image_height", "image_width", "tensor_parallel_size",
+                "context_parallel_size", "fp32_layers"):
+        if key in manifest and build.get(key) != manifest[key]:
+            raise ConfigError(f"bundle {key} differs from the selected image profile")
+    return info
 
 
 def check_image(response: dict[str, Any], record: dict[str, Any], output: Path) -> int:
@@ -102,7 +122,9 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
     worker = Path(environment.values.get("image_worker", runtime / "trtmc-server"))
     with gpu_exclusive(environment):
         source = source_identity(repo, out)
-        provenance = {**source, "profile": name, "manifest": json.loads(entry.model.manifest_path.read_text()),
+        manifest = json.loads(entry.model.manifest_path.read_text())
+        actual_bundle = bundle_identity(runtime, bundle, manifest)
+        provenance = {**source, "profile": name, "manifest": manifest, "actual_bundle": actual_bundle,
                       "bundle_sha256": digest(bundle), "inputs_sha256": digest(inputs),
                       "prepared_inputs_sha256": digest(prepared), "workloads": controls,
                       "aiperf": check_aiperf(environment, {}), "worker_sha256": digest(worker),

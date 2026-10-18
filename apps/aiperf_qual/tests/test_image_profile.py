@@ -9,7 +9,8 @@ import json
 from PIL import Image
 import pytest
 
-from trtmc_aiperf_qual.image_profile import check_image, prepare_inputs
+from trtmc_aiperf_qual.config import ConfigError
+from trtmc_aiperf_qual.image_profile import bundle_identity, check_image, prepare_inputs
 
 
 def test_complete_png_identity_and_geometry_are_verified_before_saving(tmp_path):
@@ -39,3 +40,21 @@ def test_image_workload_keeps_catalog_controls_and_explicit_latent_replay(tmp_pa
     assert row == {"text": "A blue rectangle", "extra": {"size": "256x256", "num_inference_steps": 10,
         "seed": 0, "guidance_scale": 7.5, "cfg_scale": 7.5, "initial_latents_b64": replay}}
     assert workloads[0]["prompt_sha256"] == hashlib.sha256(b"A blue rectangle").hexdigest()
+
+
+@pytest.mark.parametrize("changed", ["family", "task", "hf_id", "revision", "precision", "image_width"])
+def test_wrong_bundle_cannot_be_qualified_as_the_selected_profile(tmp_path, monkeypatch, changed):
+    import trtmc_aiperf_qual.image_profile as module
+
+    manifest = {"family": "owner", "task": "image_generation", "hf_id": "owner/model",
+                "hf_revision": "a" * 40, "precision": "fp16", "image_width": 256}
+    info = {"family": "owner", "task": "image_generation", "provenance": {
+        "checkpoint": {"hf_id": "owner/model", "revision": "a" * 40},
+        "build": {"precision": "fp16", "image_width": 256}}}
+    monkeypatch.setattr(module.subprocess, "check_output", lambda *_, **__: json.dumps(info))
+    assert bundle_identity(tmp_path, tmp_path / "model.bundle", manifest) == info
+    destination = info if changed in {"family", "task"} else info["provenance"][
+        "checkpoint" if changed in {"hf_id", "revision"} else "build"]
+    destination[changed] = "wrong"
+    with pytest.raises(ConfigError):
+        bundle_identity(tmp_path, tmp_path / "wrong.bundle", manifest)
