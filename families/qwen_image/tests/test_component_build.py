@@ -16,12 +16,20 @@ from families.qwen_image import component_build
 
 def test_all_edit_components_finish_in_separate_checked_processes(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(current_device=lambda: 3)))
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[3]))
     settings = {name: {"marker": name, "shape": [1, 2, 3]} for name in
                 ("text_encoder", "denoiser", "vision", "vae_decoder", "vae_encoder")}
     calls = []
+    real_run = subprocess.run
 
-    def run(command, *, check):
+    def run(command, *, check, env):
         assert check is True and command[:3] == [sys.executable, "-m", "families.qwen_image.component_build"]
+        if not calls:
+            probe = real_run([*command[:3], "--help"], check=True, env=env,
+                             capture_output=True, text=True, timeout=30)
+            assert "separate TensorRT allocation lifetimes" in probe.stdout
         kind, model, output, device, options = command[3:]
         assert Path(model) == tmp_path / "model with spaces" and device == "3"
         assert json.loads(options) == settings[kind]
@@ -42,7 +50,7 @@ def test_all_edit_components_finish_in_separate_checked_processes(monkeypatch, t
 def test_failed_component_cannot_produce_a_partial_bundle(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(current_device=lambda: 0)))
 
-    def fail(command, *, check):
+    def fail(command, *, check, env):
         raise subprocess.CalledProcessError(1, command)
 
     monkeypatch.setattr(component_build.subprocess, "run", fail)
