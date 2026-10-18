@@ -112,11 +112,13 @@ def check_reference(payload: dict[str, Any], record: dict[str, Any], output: Pat
     return sha
 
 
-def check_controls(payload: dict[str, Any], record: dict[str, Any]) -> None:
+def check_controls(payload: dict[str, Any], record: dict[str, Any],
+                   workloads: list[dict[str, Any]] | None = None) -> None:
     """Bind the client's explicit settings and replay noise to its native request."""
     from trtmc_perf_serving.openai import image_generation
 
-    controls = image_generation({key: value for key, value in payload.items() if key != "image"}, {})
+    mapped = image_generation({key: value for key, value in payload.items() if key != "image"}, {})
+    controls = dict(mapped)
     prompt = controls.pop("prompt")
     controls.pop("initial_latents_path", None)
     negative = controls.pop("negative_prompt", "").encode()
@@ -127,6 +129,18 @@ def check_controls(payload: dict[str, Any], record: dict[str, Any]) -> None:
     noise = base64.b64decode(payload["initial_latents_b64"], validate=True) if "initial_latents_b64" in payload else None
     if (hashlib.sha256(noise).hexdigest() if noise is not None else None) != record["initial_latents_sha256"]:
         raise ValueError("client replay noise differs from the native request")
+    if workloads is not None:
+        mapped.setdefault("negative_prompt", "")
+        for item in workloads:
+            if (item["prompt_sha256"] != record["prompt_sha256"] or
+                    item.get("reference", {}).get("upload_sha256") != record.get("image_sha256")):
+                continue
+            expected = image_generation({"prompt": prompt, **item["controls"]}, {})
+            expected.setdefault("negative_prompt", "")
+            if mapped == expected:
+                break
+        else:
+            raise ValueError("client image/instruction controls differ from the fixed workload")
 
 
 def prepare_inputs(inputs: Path, destination: Path, base: dict[str, Any], *,
@@ -247,7 +261,7 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
             seen.add(identifier)
             record = by_id[identifier]["server"]
             payload = row["payload"]
-            check_controls(payload, record)
+            check_controls(payload, record, controls)
             response = json.loads(row["responses"][-1]["text"])
             checked += check_image(response, record, images / f"{index:04d}.png")
             identity = {"request_id": identifier, "phase": by_id[identifier]["phase"],
@@ -255,9 +269,6 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
             if image_edit:
                 identity["reference_sha256"] = check_reference(payload, record, images / f"{index:04d}-input.png")
                 identity["reference_path"] = f"images/{index:04d}-input.png"
-                if (record["prompt_sha256"], identity["reference_sha256"]) not in {
-                        (c["prompt_sha256"], c["reference"]["upload_sha256"]) for c in controls}:
-                    raise ValueError("client image/instruction pair differs from the fixed workload")
             identities.append(identity)
         measured = [r for r in joined if r["phase"] == "profiling"]
         if len(seen) != requests + warmup or len(measured) != requests:

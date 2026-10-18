@@ -49,6 +49,7 @@ class Editor:
     def submit(self, operation, payload):
         assert operation == "edit_image"
         self.calls.append(payload)
+        self.noise = Path(payload["initial_latents_path"]).read_bytes() if "initial_latents_path" in payload else None
         with Image.open(payload["image_path"]) as source:
             dimensions = source.size
             Image.new("RGB", (8, 4), color=source.getpixel((0, 0))).save(payload["output_path"])
@@ -147,6 +148,19 @@ def test_reference_pixel_limit_and_invalid_native_input_dimensions():
     with TestClient(app_for(editor)) as client:
         assert edit(client).status_code == 502
     assert editor.retired and not Path(editor.calls[0]["image_path"]).exists()
+
+
+def test_large_replay_form_field_uses_the_configured_body_limit():
+    editor = Editor()
+    app = create_app(editor, ServerConfig(max_body_bytes=2 * 1024 * 1024,
+                     max_prompt_bytes=128, max_generation_tokens=128))
+    noise = b"\0" * 800_000
+    encoded = base64.b64encode(noise).decode()
+    assert len(encoded) > 1024 * 1024
+    with TestClient(app) as client:
+        response = edit(client, fields={"initial_latents_b64": encoded})
+    assert response.status_code == 200 and editor.noise == noise
+    assert not Path(editor.calls[0]["initial_latents_path"]).exists()
 
 
 def test_cancelled_edit_keeps_both_uploads_until_the_native_call_finishes():

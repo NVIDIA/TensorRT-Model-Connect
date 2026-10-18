@@ -67,9 +67,6 @@ def test_image_inventory_covers_existing_checkpoints_and_excludes_legacy_video()
 
 
 def test_edit_inventory_requires_the_declared_reference_conditioned_task():
-    assert not group_inventory([entry("generator", task="image_generation")], "image-edit")
-    repo = Path(__file__).resolve().parents[3]
-    row, = inventory(repo, "image-edit")
-    assert row["checkpoint"] == "Qwen/Qwen-Image-Edit-2511"
-    assert row["profile"] == "qwen-image-edit-2511"
-    assert len(row["variants"]) == 1
+    for task in ("image_edit", "images_text_to_image_edit"):
+        row, = group_inventory([entry("generator", task="image_generation"), entry("editor", task=task)], "image-edit")
+        assert row["profile"] == "editor" and row["variants"][0]["task"] == task

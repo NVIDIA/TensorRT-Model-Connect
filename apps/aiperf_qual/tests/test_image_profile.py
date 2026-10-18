@@ -120,6 +120,11 @@ def test_qualification_rejects_changed_controls_or_replay_noise():
               "generation_config": {"height": 1024, "width": 1024, "seed": 42, "num_steps": 20,
                                     "guidance_scale": 4.0, "cfg_scale": 4.0}}
     check_controls(payload, record)
+    workload = {"prompt_sha256": record["prompt_sha256"],
+                "controls": {key: value for key, value in payload.items() if key not in {"model", "prompt"}}}
+    check_controls(payload, record, [workload])
+    with pytest.raises(ValueError):
+        check_controls(payload, record, [{**workload, "controls": {**workload["controls"], "seed": 43}}])
     for change in ({"seed": 43}, {"negative_prompt": "other"},
                    {"initial_latents_b64": base64.b64encode(b"\0" * 4).decode()}):
         with pytest.raises(ValueError):
