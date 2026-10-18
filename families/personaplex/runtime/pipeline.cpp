@@ -393,6 +393,8 @@ void SpeechPipeline::prepare_depth_input(const SpeechTemporalDeviceOutput& tempo
                                     forced_audio_provided &&
                                     forced_audio_provided[previous_codebook] != 0;
     const int32_t forced_previous = previous_is_forced ? forced_audio_tokens[previous_codebook] : 0;
+    // The depth transformer computes in its KV-cache dtype; its input is built in that dtype.
+    const DType depth_dtype = depth_engine_for_codebook(codebook).tensor_dtype("cache_k_0");
     personaplex_prepare_depth_embedding(
         static_cast<float*>(device_workspace_->depth_embed.data()), temporal_output.hidden,
         temporal_output.hidden_dtype,
@@ -404,7 +406,7 @@ void SpeechPipeline::prepare_depth_input(const SpeechTemporalDeviceOutput& tempo
         device_workspace_->depth_audio_embeddings.numel(), selected_tokens, codebook, text_token,
         text_token_is_forced, forced_previous, previous_is_forced, config_.depth_hidden_size,
         config_.temporal_hidden_size, config_.depth_text_vocab, config_.audio_vocab_size,
-        config_.num_depformer_emb, stream_);
+        config_.num_depformer_emb, depth_dtype, stream_);
     if (const auto error = cudaGetLastError(); error != cudaSuccess) {
         throw std::runtime_error(std::string("SpeechPipeline depth embedding: ") +
                                  cudaGetErrorString(error));

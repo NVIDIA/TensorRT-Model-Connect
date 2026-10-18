@@ -81,4 +81,25 @@ if(TRTMC_BUILD_TESTS)
     )
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+
+  add_executable(test_personaplex_depth_embedding_kernel
+    ${PROJECT_SOURCE_DIR}/families/personaplex/tests/cpp/test_depth_embedding_kernel.cpp
+    ${PROJECT_SOURCE_DIR}/families/personaplex/runtime/sampling_kernels.cu
+  )
+  target_include_directories(test_personaplex_depth_embedding_kernel PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_personaplex_depth_embedding_kernel SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_personaplex_depth_embedding_kernel PRIVATE
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  add_test(NAME test_personaplex_depth_embedding_kernel
+    COMMAND test_personaplex_depth_embedding_kernel)
+  set_tests_properties(test_personaplex_depth_embedding_kernel PROPERTIES
+    SKIP_RETURN_CODE 77
+    LABELS gpu
+  )
 endif()
