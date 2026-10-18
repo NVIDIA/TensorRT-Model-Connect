@@ -156,11 +156,14 @@ def verify_records(run, joined, corpus, count_tokens):
         abs(row["credit_schedule_error_ms"]) <= corpus["arrival_tolerance_ms"] for row in records)
     report = {"verified": eligible, "offered": len(records), **counts, "requests": records,
             "arrival_tolerance_ms": corpus["arrival_tolerance_ms"],
+            "scheduled_window_seconds": scheduled_span, "observed_window_seconds": elapsed,
             "offered_requests_per_second_scheduled_window": len(records) / scheduled_span if scheduled_span else None,
             "completed_requests_per_second_observed_window": counts["completed"] / elapsed if elapsed > 0 else None,
             "credit_schedule_error_ms": statistics([abs(row["credit_schedule_error_ms"]) for row in records]),
             "send_schedule_error_ms": statistics([abs(row["send_schedule_error_ms"]) for row in records]),
-            "native_input_token_source": "unavailable; pinned-tokenizer counts are reported separately"}
+            "native_input_token_source": "unavailable; pinned-tokenizer counts are reported separately",
+            "aiperf_replay_metrics": {key: value for key, value in getattr(run, "summary", {}).items()
+                                      if key.startswith("replay_")}}
     (run.directory / "trace-accounting.json").write_text(json.dumps(report, indent=2) + "\n")
     if not eligible:
         raise ConfigError("trace has unexpected failures, no native completion, or excessive credit-schedule lag; see trace-accounting.json")
