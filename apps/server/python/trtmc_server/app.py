@@ -595,8 +595,11 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         payload = {"prompt": request.prompt, "config": controls, "output_path": str(output)}
         if request.initial_latents_b64 is not None:
             payload["initial_latents_path"] = str(media.path)
+        negative = controls.get("negative_prompt", "").encode("utf-8")
         context.update(prompt_sha256=hashlib.sha256(request.prompt.encode()).hexdigest(),
-                       generation_config=controls,
+                       generation_config={key: value for key, value in controls.items() if key != "negative_prompt"},
+                       negative_prompt_sha256=hashlib.sha256(negative).hexdigest(),
+                       negative_prompt_bytes=len(negative),
                        initial_latents_sha256=hashlib.sha256(noise).hexdigest() if noise else None)
         encoded: dict[str, Any] = {}
 

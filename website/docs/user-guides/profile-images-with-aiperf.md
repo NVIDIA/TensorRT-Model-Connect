@@ -51,6 +51,7 @@ Each response contains one complete PNG in `data[0].b64_json`. It remains usable
 after the server removes its temporary files. Raw AIPerf exports retain the
 response; server records identify the same PNG by SHA-256 and include its actual
 dimensions, count, generation controls and request ID.
+Server records hash both positive and negative prompt text rather than storing it.
 
 Read client request latency and throughput in `profile_export_aiperf.json`.
 With one image per request, requests/sec is images/sec. Server `model_call_ms`

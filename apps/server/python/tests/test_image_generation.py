@@ -72,7 +72,8 @@ def test_complete_native_png_remains_decodable_after_request_cleanup(tmp_path):
     with client_for(registry, records) as client:
         response = client.post("/v1/images/generations", json={"model": "image", "prompt": "A red rectangle",
             "size": "8x4", "num_inference_steps": 10, "guidance_scale": 7.5, "cfg_scale": 1.0,
-            "seed": 42, "initial_latents_b64": base64.b64encode(b"\0" * 8).decode()},
+            "seed": 42, "negative_prompt": "private unwanted scene",
+            "initial_latents_b64": base64.b64encode(b"\0" * 8).decode()},
             headers={"X-Request-ID": "image-42"})
     assert response.status_code == 200 and response.headers["x-request-id"] == "image-42"
     data, = response.json()["data"]
@@ -82,7 +83,7 @@ def test_complete_native_png_remains_decodable_after_request_cleanup(tmp_path):
         assert image.size == (8, 4) and image.getpixel((7, 3)) == (255, 0, 0)
     call, = registry.calls
     assert call["config"] == {"width": 8, "height": 4, "num_steps": 10, "guidance_scale": 7.5,
-                              "cfg_scale": 1.0, "seed": 42}
+                              "cfg_scale": 1.0, "seed": 42, "negative_prompt": "private unwanted scene"}
     assert not Path(call["output_path"]).exists() and not Path(call["initial_latents_path"]).exists()
     record = json.loads(records.read_text())
     assert record["request_id"] == "image-42" and record["status"] == 200
@@ -90,6 +91,10 @@ def test_complete_native_png_remains_decodable_after_request_cleanup(tmp_path):
     assert (record["output_width"], record["output_height"], record["output_count"]) == (8, 4, 1)
     assert record["model_call_ms"] == 12.5 and record["timing_scope"] == "public_task_call_wall"
     assert record["initial_latents_sha256"] == hashlib.sha256(b"\0" * 8).hexdigest()
+    assert "private unwanted scene" not in records.read_text()
+    assert "negative_prompt" not in record["generation_config"]
+    assert record["negative_prompt_sha256"] == hashlib.sha256(b"private unwanted scene").hexdigest()
+    assert record["negative_prompt_bytes"] == len(b"private unwanted scene")
 
 
 @pytest.mark.parametrize("options", [{"n": 2}, {"stream": True}, {"response_format": "url"},
