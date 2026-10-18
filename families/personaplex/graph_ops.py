@@ -979,7 +979,11 @@ def add_apply_rope_native(
     """
     rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
     attention_size = num_heads * head_dim
-
+    output_dtype = inp.dtype
+    # Moshi rotates FP32 real/imaginary components, then rounds to the input dtype.
+    inp = _cast_back_to_trt_dtype(network, inp, trt.float32)
+    cos_cache_2d = _cast_back_to_trt_dtype(network, cos_cache_2d, trt.float32)
+    sin_cache_2d = _cast_back_to_trt_dtype(network, sin_cache_2d, trt.float32)
     inp_4d = reshape_rows_to_heads_4d(network, inp, num_heads, head_dim, sequence_length)
 
     # Reshape position_id [Sq] -> [1, Sq] (batch=1).
@@ -996,7 +1000,8 @@ def add_apply_rope_native(
     )
     rope.set_input(3, pos_2d.get_output(0))
 
-    return reshape_heads_4d_to_rows(network, rope.get_output(0), attention_size, sequence_length)
+    rotated = reshape_heads_4d_to_rows(network, rope.get_output(0), attention_size, sequence_length)
+    return _cast_back_to_trt_dtype(network, rotated, output_dtype)
 
 
 def add_apply_rope_native_sequence(

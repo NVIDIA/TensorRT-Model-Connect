@@ -279,13 +279,11 @@ def build_standard_decoder_engine(
             interleaved=interleaved_rope,
         )
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype
+            network, cos_half_np.shape, cos_half_np, dtype=np.float32
         )
-        cos_half_tensor = _cast_work_dtype(cos_half_tensor)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype
+            network, sin_half_np.shape, sin_half_np, dtype=np.float32
         )
-        sin_half_tensor = _cast_work_dtype(sin_half_tensor)
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]
         position_embed_table = const_in_work_dtype(

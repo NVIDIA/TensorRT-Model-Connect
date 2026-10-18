@@ -290,11 +290,11 @@ def build_dual_profile_decoder_engine(
             partial_rotary_factor,
             interleaved=interleaved_rope,
         )
-        cos_half_table = _const_in_work_dtype(
-            network, cos_half_np.shape, cos_half_np, work_np_dtype, work_trt_dtype
+        cos_half_table = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np, dtype=np.float32
         )
-        sin_half_table = _const_in_work_dtype(
-            network, sin_half_np.shape, sin_half_np, work_np_dtype, work_trt_dtype
+        sin_half_table = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np, dtype=np.float32
         )
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
