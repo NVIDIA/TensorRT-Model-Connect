@@ -298,16 +298,8 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
                 rows = join_records(run, records)
                 (run.directory / "joined.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
                 if corpus:
-                    from .text_corpus import verify
-                    try:
-                        verified = verify(run, rows, corpus)
-                    except ConfigError as error:
-                        (run.directory / "corpus-verification.json").write_text(json.dumps(
-                            {"verified": False, "error": str(error), "request_records": "joined.jsonl"}, indent=2) + "\n")
-                        raise
-                    if digest(Path(corpus["input_file"])) != corpus["input_file_sha256"]:
-                        raise ConfigError("real-prompt inputs changed during profiling")
-                    (run.directory / "corpus-verification.json").write_text(json.dumps(verified, indent=2) + "\n")
+                    from .text_corpus import verify_and_record
+                    verify_and_record(run, rows, corpus)
                 incomplete = (len([row for row in rows if row["phase"] == "profiling"]) != config["workload"].get("requests", 20)
                               or summarize(rows)["missing_metric_exports"] > 0)
                 entries.append({"case": case, "exit_code": run.exit_code or int(incomplete),

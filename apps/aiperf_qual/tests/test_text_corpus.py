@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from trtmc_aiperf_qual.config import ConfigError
-from trtmc_aiperf_qual.text_corpus import select_prompts, verify
+from trtmc_aiperf_qual.text_corpus import select_prompts, verify, verify_and_record
 from trtmc_aiperf_qual.text_profile import arguments, cases
 
 
@@ -52,7 +52,8 @@ def test_real_corpus_uses_published_loader_without_synthetic_length_rewriting(tm
         cases(config)
 
 
-def test_verification_joins_original_text_actual_wire_and_native_output():
+@pytest.fixture
+def captured_request(tmp_path):
     prompt = "original\u2028text"
     sha = hashlib.sha256(prompt.encode()).hexdigest()
     corpus = {"selected": [{"prompt": prompt, "prompt_sha256": sha, "prompt_bytes": len(prompt.encode()),
@@ -63,8 +64,19 @@ def test_verification_joins_original_text_actual_wire_and_native_output():
     server = {"status": 200, "prompt_sha256": sha, "prompt_bytes": len(prompt.encode()),
               "completion_sha256": hashlib.sha256(b"answer").hexdigest()}
     rows = [{"request_id": "request", "server": server}]
-    run = SimpleNamespace(raw_records=lambda phase: [raw])
+    source = tmp_path / "inputs.jsonl"
+    source.write_text(json.dumps({"text": prompt}) + "\n")
+    corpus.update(input_file=str(source), input_file_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    run = SimpleNamespace(raw_records=lambda phase: [raw], directory=tmp_path)
+    return run, rows, corpus, raw, server
+
+
+def test_verification_joins_original_text_actual_wire_and_native_output(captured_request):
+    run, rows, corpus, raw, server = captured_request
+    prompt = corpus["selected"][0]["prompt"]
     assert verify(run, rows, corpus)["requests"][0]["source_index"] == 7
+    verify_and_record(run, rows, corpus)
+    assert json.loads((run.directory / "corpus-verification.json").read_text())["verified"] is True
     raw["payload"]["prompt"] = "rewritten text"
     with pytest.raises(ConfigError, match="changed text"):
         verify(run, rows, corpus)
@@ -72,3 +84,27 @@ def test_verification_joins_original_text_actual_wire_and_native_output():
     server["completion_sha256"] = "0" * 64
     with pytest.raises(ConfigError, match="native input/output"):
         verify(run, rows, corpus)
+
+
+@pytest.mark.parametrize("payload", [None, False, [], ["text"], "text", {"prompt": []}])
+def test_malformed_export_preserves_a_failed_verification_record(captured_request, payload):
+    run, rows, corpus, raw, _ = captured_request
+    raw["payload"] = payload
+    with pytest.raises(ConfigError, match="changed text"):
+        verify_and_record(run, rows, corpus)
+    verdict = json.loads((run.directory / "corpus-verification.json").read_text())
+    assert verdict["verified"] is False and verdict["request_records"] == "joined.jsonl"
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_changed_or_missing_corpus_preserves_a_failed_verification_record(captured_request, missing):
+    run, rows, corpus, _, _ = captured_request
+    path = run.directory / "inputs.jsonl"
+    if missing:
+        path.unlink()
+    else:
+        path.write_text("changed\n")
+    with pytest.raises(ConfigError, match="input"):
+        verify_and_record(run, rows, corpus)
+    verdict = json.loads((run.directory / "corpus-verification.json").read_text())
+    assert verdict["verified"] is False and "input" in verdict["error"]

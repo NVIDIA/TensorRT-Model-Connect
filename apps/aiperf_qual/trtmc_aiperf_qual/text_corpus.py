@@ -85,14 +85,16 @@ def verify(run, joined: list[dict[str, Any]], corpus: dict[str, Any]) -> dict[st
     seen, measured, identities = set(), set(), []
     for raw in run.raw_records(phase=None):
         request_id = raw["metadata"].get("x_request_id")
-        prompt = raw.get("payload", {}).get("prompt")
-        if request_id in seen or request_id not in by_id or not isinstance(prompt, str) or prompt not in expected:
+        payload = raw.get("payload")
+        prompt = payload.get("prompt") if isinstance(payload, dict) else None
+        if (not isinstance(request_id, str) or request_id in seen or request_id not in by_id
+                or not isinstance(prompt, str) or prompt not in expected):
             raise ConfigError("real-prompt request has unknown/duplicate identity or changed text")
         seen.add(request_id)
         selected = expected[prompt]
         server = by_id[request_id]["server"]
         text = response_text(raw)
-        if (server is None or server.get("status") != 200 or text is None or
+        if (server is None or server.get("status") != 200 or not isinstance(text, str) or
                 server.get("prompt_sha256") != selected["prompt_sha256"] or
                 server.get("prompt_bytes") != selected["prompt_bytes"] or
                 server.get("completion_sha256") != hashlib.sha256(text.encode()).hexdigest()):
@@ -105,3 +107,21 @@ def verify(run, joined: list[dict[str, Any]], corpus: dict[str, Any]) -> dict[st
     if not seen or measured != set(expected):
         raise ConfigError("real-prompt profiling did not cover every selected prompt")
     return {"verified": True, "measured_unique_prompts": len(measured), "requests": identities}
+
+
+def verify_and_record(run, joined: list[dict[str, Any]], corpus: dict[str, Any]) -> None:
+    """Preserve a verification verdict for missing, changed or malformed inputs."""
+    path = run.directory / "corpus-verification.json"
+    try:
+        verified = verify(run, joined, corpus)
+        try:
+            unchanged = digest(Path(corpus["input_file"])) == corpus["input_file_sha256"]
+        except OSError as error:
+            raise ConfigError("real-prompt input file is unavailable") from error
+        if not unchanged:
+            raise ConfigError("real-prompt inputs changed during profiling")
+    except ConfigError as error:
+        path.write_text(json.dumps({"verified": False, "error": str(error),
+                                    "request_records": "joined.jsonl"}, indent=2) + "\n")
+        raise
+    path.write_text(json.dumps(verified, indent=2) + "\n")
