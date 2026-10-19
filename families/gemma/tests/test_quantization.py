@@ -47,6 +47,7 @@ _WEIGHT_STEMS = dict(quantization.PROJECTIONS)
 
 
 def _config() -> ModelConfig:
+    """Build a small Gemma model config for the tests."""
     return ModelConfig.create_tiny(
         "gemma2",
         hidden_size=HIDDEN,
@@ -85,6 +86,7 @@ def _write_checkpoint(path: Path) -> dict[str, torch.Tensor]:
 
 
 def _activation_scales(skip: tuple[str, ...] = ()) -> dict[str, float]:
+    """Build activation scales for every projection of the test config."""
     return {
         f"layer.{layer}.{stem}": 0.02
         for layer in range(LAYERS)
@@ -94,6 +96,7 @@ def _activation_scales(skip: tuple[str, ...] = ()) -> dict[str, float]:
 
 
 def test_quantize_fp8_weight_scale_and_bytes() -> None:
+    """The weight scale is amax / 448 and the bytes decode back to the weight."""
     weight = np.random.RandomState(0).randn(64, 128).astype(np.float32)
     packed, scale = quantize_fp8_weight(weight)
 
@@ -104,26 +107,31 @@ def test_quantize_fp8_weight_scale_and_bytes() -> None:
 
 
 def test_quantize_fp8_weight_never_overflows_to_nan() -> None:
+    """Values at the scale boundary clip to the largest finite fp8 value."""
     weight = np.full((4, 4), 3.0, dtype=np.float32)
     packed, _ = quantize_fp8_weight(weight)
     assert not np.isnan(packed.view(ml_dtypes.float8_e4m3fn).astype(np.float32)).any()
 
 
 def test_quantize_fp8_weight_rejects_zero_tensor() -> None:
+    """An all-zero weight has no usable scale and is refused."""
     with pytest.raises(ValueError):
         quantize_fp8_weight(np.zeros((2, 2), dtype=np.float32))
 
 
 def test_scale_key_identifies_model() -> None:
+    """The scale key names the Gemma version and the model shape."""
     assert scale_key(_config()) == f"gemma2-h{HIDDEN}-l{LAYERS}-i{MLP}"
 
 
 def test_missing_scale_entry_is_refused() -> None:
+    """A model shape without committed scales fails with a clear error."""
     with pytest.raises(NotImplementedError, match="no calibrated FP8 activation scales"):
         load_activation_scales(_config())
 
 
 def test_committed_scales_cover_every_projection() -> None:
+    """Every committed shape has a positive scale for every decoder projection."""
     path = Path(quantization.__file__).parent / quantization.ACTIVATION_SCALES_FILENAME
     for key, scales in json.loads(path.read_text(encoding="utf-8")).items():
         assert scales, key
@@ -133,6 +141,7 @@ def test_committed_scales_cover_every_projection() -> None:
 
 
 def test_calibrate_quantizes_the_checkpoint_weights(tmp_path: Path, monkeypatch) -> None:
+    """Calibration quantizes the checkpoint weights and keeps the committed activation scales."""
     tensors = _write_checkpoint(tmp_path)
     monkeypatch.setattr(quantization, "load_activation_scales", lambda config: _activation_scales())
     ctx = calibrate_gemma_fp8(tmp_path, _config(), graph_ops, model_prefix="model")
@@ -150,6 +159,7 @@ def test_calibrate_quantizes_the_checkpoint_weights(tmp_path: Path, monkeypatch)
 
 
 def test_projection_without_a_scale_stays_unquantized(tmp_path: Path, monkeypatch) -> None:
+    """A projection without a scale is left unquantized."""
     _write_checkpoint(tmp_path)
     monkeypatch.setattr(
         quantization, "load_activation_scales", lambda config: _activation_scales(("w_down",))
@@ -160,6 +170,7 @@ def test_projection_without_a_scale_stays_unquantized(tmp_path: Path, monkeypatc
 
 
 def test_load_weights_uses_shape_only_placeholders(tmp_path: Path, monkeypatch) -> None:
+    """Quantized projections get shape-only placeholders, not full copies."""
     _write_checkpoint(tmp_path)
     config = _config()
     monkeypatch.setattr(
@@ -181,6 +192,7 @@ def test_load_weights_uses_shape_only_placeholders(tmp_path: Path, monkeypatch) 
 
 @pytest.mark.parametrize("value", [None, "none", "fp8"])
 def test_request_accepts_supported_quantization(value) -> None:
+    """The build request accepts none and fp8 and rejects other values."""
     legacy = SimpleNamespace(
         model_dir=Path("m"),
         output_path=Path("o"),
@@ -207,6 +219,7 @@ def test_request_accepts_supported_quantization(value) -> None:
 
 
 def _fake_weights() -> WeightDict:
+    """Return random fp32 weights shaped like the tiny test model."""
     rng = np.random.RandomState(0)
     weights = WeightDict()
     weights["embedding"] = rng.randn(VOCAB, HIDDEN).astype(np.float16)
@@ -255,6 +268,7 @@ def test_engine_builds_with_fp8_weights(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_calibration_tool_maps_module_names_to_weight_stems() -> None:
+    """The calibration tool maps module names to internal weight names."""
     match = calibrate_fp8_scales._PROJECTION_NAME.search("model.layers.3.mlp.down_proj")
     assert match is not None and match.group(1) == "3"
     assert calibrate_fp8_scales._WEIGHT_STEM[match.group(2)] == "w_down"
@@ -262,6 +276,7 @@ def test_calibration_tool_maps_module_names_to_weight_stems() -> None:
 
 
 def test_calibration_tool_cli_parses_both_commands(monkeypatch, tmp_path: Path) -> None:
+    """The calibration tool command line accepts fetch and calibrate."""
     seen = {}
     monkeypatch.setattr(
         calibrate_fp8_scales, "fetch_prompts", lambda out, n: seen.update(fetch=(out, n))

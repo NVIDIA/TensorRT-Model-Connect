@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Developer tool: calibrate FP8 activation scales for a Gemma checkpoint.
+"""Developer tool: calibrate FP8 activation scales for a Gemma model shape.
 
-Not used when building an engine. Run it once per checkpoint and commit the
-updated ``fp8_activation_scales.json``::
+Not used when building an engine. Calibrate each supported model shape and
+commit the updated ``fp8_activation_scales.json``::
 
     python -m families.gemma.calibrate_fp8_scales fetch --out prompts.jsonl
     python -m families.gemma.calibrate_fp8_scales calibrate \
@@ -12,7 +12,7 @@ updated ``fp8_activation_scales.json``::
 
 ``calibrate`` loads the BF16 model in PyTorch, runs ModelOpt ``FP8_DEFAULT_CFG``
 over the prompts, and stores ``input_quantizer.amax / 448`` for every decoder
-projection under this model's key (see ``quantization.scale_key``).
+projection under the model-shape key (see ``quantization.scale_key``).
 ``fetch`` needs network access; ``calibrate`` needs a GPU.
 """
 
@@ -81,6 +81,7 @@ def fetch_prompts(out: Path, per_split: int) -> None:
 
 
 def calibrate(model_dir: Path, prompts: Path, max_tokens: int) -> None:
+    """Run ModelOpt FP8 calibration on the BF16 model and store the activation scales under its shape key."""
     import modelopt.torch.quantization as mtq
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -99,6 +100,7 @@ def calibrate(model_dir: Path, prompts: Path, max_tokens: int) -> None:
     model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.bfloat16).cuda().eval()
 
     def forward_loop(calibration_model) -> None:
+        """Feed every calibration prompt through the model once."""
         with torch.no_grad():
             for row in rows:
                 text = tokenizer.apply_chat_template(row["messages"], tokenize=False)
@@ -133,6 +135,7 @@ def calibrate(model_dir: Path, prompts: Path, max_tokens: int) -> None:
 
 
 def main() -> None:
+    """Parse the command line and run the fetch or calibrate command."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     fetch = commands.add_parser("fetch")

@@ -62,6 +62,7 @@ def scale_key(config) -> str:
 
 @dataclass(frozen=True)
 class _FP8Weight:
+    """One projection weight stored as raw fp8_e4m3 bytes with one per-tensor scale."""
     packed: np.ndarray  # [out_features, in_features] raw fp8_e4m3 bytes
     weight_scale: float
     out_features: int
@@ -70,17 +71,20 @@ class _FP8Weight:
 
 @dataclass(frozen=True)
 class _LayerScales:
+    """Static activation scale and FP8 weight of one quantized projection."""
     input_scale: float
     weight: _FP8Weight
 
 
 def _scale_const(network, graph_ops, value: float):
+    """Add a one-element fp32 scale constant to the network."""
     return graph_ops.add_constant(
         network, (1,), np.asarray([value], dtype=np.float32), dtype=np.float32
     )
 
 
 def _wrap_fp8_matmul(network, activation, scales: _LayerScales, *, graph_ops, keep_alive: list):
+    """Add the FP8 Q/DQ matmul for one projection: quantize the activation, dequantize the constant weight."""
     output_dtype = activation.dtype
     w = scales.weight
     n, k = w.out_features, w.in_features
@@ -121,10 +125,12 @@ class GemmaQuantContext:
     disable_dual_gemm_fusion = True
 
     def __post_init__(self):
+        """Give each context its own list for buffers that must outlive the build."""
         if self.keep_alive is None:
             object.__setattr__(self, "keep_alive", [])
 
     def should_quantize(self, weight_name: str) -> bool:
+        """Return True when this weight has a calibrated activation scale."""
         return weight_name in self.scales
 
     def maybe_quantized_matmul(
@@ -137,6 +143,7 @@ class GemmaQuantContext:
         weight_name: str,
         dtype: np.dtype = np.float32,
     ):
+        """Add the projection as an FP8 matmul, or as the unquantized matmul when it has no scale."""
         entry = self.scales.get(weight_name)
         if entry is None:
             return self.graph_ops.add_matmul_rhs_constant(
@@ -163,6 +170,7 @@ def quantize_fp8_weight(weight_fp32: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 def load_activation_scales(config) -> dict[str, float]:
+    """Return the committed activation scales for this model shape, or raise when none exist."""
     path = Path(__file__).parent / ACTIVATION_SCALES_FILENAME
     try:
         table = json.loads(path.read_text(encoding="utf-8"))
@@ -172,7 +180,7 @@ def load_activation_scales(config) -> dict[str, float]:
     if key not in table:
         raise NotImplementedError(
             f"no calibrated FP8 activation scales for {key!r}; available: "
-            f"{sorted(table)}. Run calibrate_fp8_scales.py for this checkpoint."
+            f"{sorted(table)}. Run calibrate_fp8_scales.py for this model shape."
         )
     return table[key]
 
