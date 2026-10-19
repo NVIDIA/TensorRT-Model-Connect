@@ -51,7 +51,7 @@ def test_preparation_pins_source_keeps_original_strings_and_labels_ordinary_mode
                          "runtime_audit": {"source_file": "AGENTS.md", "conclusion": "controlled fixture audit"}}}
     report = prepare(config, 40, 4, tmp_path, repo=Path(__file__).resolve().parents[3])
     assert report["source_sha256"] == source["sha256"]
-    assert json.loads((tmp_path / "inputs.jsonl").read_text())["text"] == prompt
+    assert json.loads((tmp_path / "inputs.jsonl").read_text(encoding="utf-8"))["text"] == prompt
     assert report["selected"][0]["question_id"] == 7
     assert report["runtime_mode"] == "ordinary_native_generation"
     assert report["speculative_execution"]["speculative_execution_qualified"] is False
