@@ -67,12 +67,15 @@ def _deformable_block(network, hidden, posed, reference, weights, prefix, shapes
 
 def build_encoder(network, vision, text, position, weights, shapes, config,
                   prefix="model.encoder", dtype=np.float32,
-                  text_mask=None, text_position=None, debug=None):
+                  text_mask=None, text_key_mask=None, text_position=None, debug=None):
     """Run the six fused encoder layers.
 
     ``position`` is the vision position + level embedding constant;
     ``text_position`` is the enhancer's sine embedding over the per-phrase
-    position ids; ``text_mask`` is the additive phrase block mask.
+    position ids; ``text_mask`` is the additive phrase block mask used by the
+    enhancer, and ``text_key_mask`` the additive ``(1, 1, length)`` term that
+    hides padded prompt positions from the fusion's vision queries. Without
+    the latter the vision tokens attend to whatever the padding produced.
     """
     reference = g.add_constant(
         network, (1, int(vision.shape[1]), len(shapes), 2),
@@ -84,7 +87,7 @@ def build_encoder(network, vision, text, position, weights, shapes, config,
         # declaration order.
         vision, text = build_fusion(
             network, vision, text, weights, f"{base}.fusion_layer",
-            config["fusion_attention_heads"], dtype)
+            config["fusion_attention_heads"], dtype, text_mask=text_key_mask)
         text = build_text_enhancer(
             network, text, weights, f"{base}.text_enhancer_layer",
             config["text_enhancer_heads"], dtype,

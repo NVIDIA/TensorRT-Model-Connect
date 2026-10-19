@@ -240,7 +240,7 @@ def build_decoder(network, target, reference, memory, text, weights, shapes, con
 
 
 def build_heads(network, hidden, entering, text, weights, config,
-                prefix="model.decoder", dtype=np.float32):
+                prefix="model.decoder", dtype=np.float32, text_mask=None):
     """Final contrastive logits and boxes from the last decoder layer.
 
     Two inputs that look interchangeable and are not:
@@ -259,6 +259,11 @@ def build_heads(network, hidden, entering, text, weights, config,
     queries = int(normed.shape[1])
     logits = network.add_matrix_multiply(
         normed, trt.MatrixOperation.NONE, text, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    # The reference fills every position outside the prompt with -inf, both
+    # the padded tail and, when the prompt is shorter, the concatenated rest.
+    if text_mask is not None:
+        logits = network.add_elementwise(
+            logits, text_mask, trt.ElementWiseOperation.SUM).get_output(0)
     pad = config["max_text_len"] - int(text.shape[1])
     if pad > 0:
         filler = np.full((1, queries, pad), -np.inf, dtype=dtype)

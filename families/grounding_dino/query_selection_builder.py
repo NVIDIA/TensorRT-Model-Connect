@@ -66,7 +66,7 @@ def encoder_proposals(shapes, dtype=np.float32):
 
 
 def build_query_selection(network, vision, text, weights, config, shapes,
-                          prefix="model", dtype=np.float32):
+                          prefix="model", dtype=np.float32, text_mask=None):
     """Pick the decoder's reference points from the encoder's proposals.
 
     Returns ``(target, reference_points)``; ``target`` is the learned content
@@ -93,6 +93,10 @@ def build_query_selection(network, vision, text, weights, config, shapes,
     # Contrastive scores: a dot product against the text, padded to max_text_len.
     scores = network.add_matrix_multiply(
         query, trt.MatrixOperation.NONE, text, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    # Padded prompt positions score -inf, exactly as the reference fills them.
+    if text_mask is not None:
+        scores = network.add_elementwise(
+            scores, text_mask, trt.ElementWiseOperation.SUM).get_output(0)
     text_len = int(text.shape[1])
     pad_width = config["max_text_len"] - text_len
     if pad_width > 0:
@@ -132,10 +136,13 @@ def build_query_selection(network, vision, text, weights, config, shapes,
     return target, reference
 
 
-def build_contrastive_logits(network, hidden, text, config, dtype=np.float32):
+def build_contrastive_logits(network, hidden, text, config, dtype=np.float32, text_mask=None):
     """Query-by-text similarity, padded to ``max_text_len``."""
     scores = network.add_matrix_multiply(
         hidden, trt.MatrixOperation.NONE, text, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    if text_mask is not None:
+        scores = network.add_elementwise(
+            scores, text_mask, trt.ElementWiseOperation.SUM).get_output(0)
     queries = int(hidden.shape[1])
     pad_width = config["max_text_len"] - int(text.shape[1])
     if pad_width > 0:

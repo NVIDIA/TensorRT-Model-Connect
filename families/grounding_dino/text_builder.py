@@ -78,22 +78,29 @@ def block_masks_and_positions(input_ids):
 
 
 def _embed(network, weights, input_ids, token_type_ids, position_ids, prefix, dtype):
-    """Word + position + token-type, summed, then normalised."""
-    tokens = np.asarray(input_ids, dtype=np.int64).reshape(-1)
+    """Word + position + token-type, summed, then normalised.
 
-    word = np.asarray(weights[f"{prefix}.embeddings.word_embeddings.weight"])[tokens]
+    The three id tensors are engine **inputs**, not build-time constants: the
+    prompt is only known at inference time, so each table is gathered at run
+    time. Everything downstream keeps a static length because the runtime pads
+    the prompt to ``max_text_len`` and masks the remainder.
+    """
+
+    def gather(name, ids):
+        values = np.ascontiguousarray(np.asarray(weights[name], dtype=dtype))
+        table = g.add_constant(network, values.shape, values, dtype)
+        return network.add_gather(table, ids, 0).get_output(0)
+
+    word = gather(f"{prefix}.embeddings.word_embeddings.weight", input_ids)
     # NOT the plain 0..n-1 range: positions restart at each phrase.
-    position = np.asarray(
-        weights[f"{prefix}.embeddings.position_embeddings.weight"])[
-            np.asarray(position_ids, dtype=np.int64).reshape(-1)]
-    types = np.asarray(token_type_ids, dtype=np.int64).reshape(-1)
-    token_type = np.asarray(
-        weights[f"{prefix}.embeddings.token_type_embeddings.weight"])[types]
+    position = gather(f"{prefix}.embeddings.position_embeddings.weight", position_ids)
+    token_type = gather(f"{prefix}.embeddings.token_type_embeddings.weight", token_type_ids)
 
-    summed = (word + position + token_type).astype(dtype).reshape(1, tokens.shape[0], -1)
-    embedded = g.add_constant(network, summed.shape, summed, dtype)
+    summed = g.add_sum(network, g.add_sum(network, word, position), token_type)
+    batched = network.add_shuffle(summed)
+    batched.reshape_dims = (1, int(summed.shape[0]), int(summed.shape[1]))
     return g.add_layer_norm(
-        network, embedded,
+        network, batched.get_output(0),
         weights[f"{prefix}.embeddings.LayerNorm.weight"],
         weights[f"{prefix}.embeddings.LayerNorm.bias"], _LAYER_NORM_EPS, dtype=dtype)
 
@@ -155,21 +162,16 @@ def _layer(network, hidden, mask, weights, prefix, heads, dtype):
         weights[f"{prefix}.output.LayerNorm.bias"], _LAYER_NORM_EPS, dtype=dtype)
 
 
-def build_text_encoder(network, weights, cfg, input_ids, token_type_ids, attention_mask,
-                       prefix=TEXT_PREFIX, dtype=np.float32, debug=None):
-    """Return the BERT hidden states, before the projection to the model width."""
-    block, position_ids = block_masks_and_positions(input_ids)
+def build_text_encoder(network, weights, cfg, input_ids, token_type_ids, position_ids,
+                       mask, prefix=TEXT_PREFIX, dtype=np.float32, debug=None):
+    """Return the BERT hidden states, before the projection to the model width.
+
+    ``mask`` is the additive ``(1, length, length)`` self-attention term the
+    runtime builds: the phrase block mask and the padding mask already
+    combined. ``block_masks_and_positions`` below is the same derivation in
+    numpy, kept for the parity harness and as the reference for the C++ port.
+    """
     hidden = _embed(network, weights, input_ids, token_type_ids, position_ids, prefix, dtype)
-
-    # The phrase block mask and the padding mask combine into one additive
-    # (1, length, length) term, broadcast over heads.
-    keep = block.astype(np.float32)
-    if attention_mask is not None:
-        padding = np.asarray(attention_mask, dtype=np.float32).reshape(1, -1)
-        keep = keep * padding
-    additive = ((1.0 - keep) * _MASK_FILL).astype(dtype).reshape(1, *keep.shape)
-    mask = g.add_constant(network, additive.shape, additive, dtype)
-
     for layer in range(cfg["num_hidden_layers"]):
         hidden = _layer(network, hidden, mask, weights,
                         f"{prefix}.encoder.layer.{layer}",
@@ -177,6 +179,27 @@ def build_text_encoder(network, weights, cfg, input_ids, token_type_ids, attenti
         if debug is not None:
             debug[f"text_layer_{layer}"] = hidden
     return hidden
+
+
+def self_attention_mask(block, attention_mask, dtype=np.float32):
+    """Combine the phrase block mask and the padding mask into one additive term.
+
+    The diagonal stays open even for padded positions: a fully masked softmax
+    row is NaN, and those positions are discarded everywhere downstream.
+    """
+    keep = np.asarray(block, dtype=bool).copy()
+    if attention_mask is not None:
+        padding = np.asarray(attention_mask, dtype=bool).reshape(-1)
+        keep &= padding[None, :]
+    np.fill_diagonal(keep, True)
+    additive = (1.0 - keep.astype(np.float32)) * _MASK_FILL
+    return additive.astype(dtype).reshape(1, *keep.shape)
+
+
+def key_mask(attention_mask, dtype=np.float32):
+    """Additive ``(1, 1, length)`` term that hides padded text keys."""
+    padding = np.asarray(attention_mask, dtype=np.float32).reshape(1, 1, -1)
+    return ((1.0 - padding) * _MASK_FILL).astype(dtype)
 
 
 def project_text(network, hidden, weights, dtype=np.float32):
