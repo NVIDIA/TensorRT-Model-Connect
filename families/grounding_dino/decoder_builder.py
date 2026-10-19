@@ -42,7 +42,7 @@ _LOGIT_EPS = 1e-5
 
 
 def sine_box_embedding(network, boxes, features=128, temperature=10000.0,
-                       scale=2.0 * np.pi, dtype=np.float32):
+                       scale=2.0 * np.pi, exchange_xy=True, dtype=np.float32):
     """Sine-embed ``(1, queries, 4)`` boxes into ``(1, queries, 4 * features)``.
 
     Built as graph ops rather than folded to a constant, because the boxes are
@@ -76,7 +76,19 @@ def sine_box_embedding(network, boxes, features=128, temperature=10000.0,
     interleaved = g.concat(
         network, [half_slice(0, trt.UnaryOperation.SIN),
                   half_slice(1, trt.UnaryOperation.COS)], axis=4)
-    flat = network.add_shuffle(interleaved)
+    packed = network.add_shuffle(interleaved)
+    packed.reshape_dims = (1, queries, coords, features)
+    blocks = packed.get_output(0)
+
+    # ``exchange_xy`` swaps the first two coordinate blocks, so the y embedding
+    # precedes the x one. It defaults to True in the reference and the decoder
+    # does not override it.
+    order = list(range(coords))
+    if exchange_xy and coords >= 2:
+        order[0], order[1] = order[1], order[0]
+    pieces = [network.add_slice(blocks, (0, 0, i, 0), (1, queries, 1, features),
+                                (1, 1, 1, 1)).get_output(0) for i in order]
+    flat = network.add_shuffle(g.concat(network, pieces, axis=2))
     flat.reshape_dims = (1, queries, coords * features)
     return flat.get_output(0)
 

@@ -15,11 +15,12 @@ Two rules here are stated in the reference and invisible in the shapes:
    ``value_proj`` reads the raw hidden states. Feeding the unposed tensor to
    all three is the mistake that cost RT-DETR a max difference of 8.883
    against 4.8e-07.
-2. **This checkpoint takes the centre-only branch.** With two-dimensional
-   reference points the update is
-   ``ref_xy + offsets / (W, H)`` per level. The four-dimensional box branch
-   (``ref_xy + offsets / n_points * ref_wh * 0.5``) belongs to the
-   box-refinement variants; cross-applying the two scores about 0.75.
+2. **Both reference branches are needed here.** With two-dimensional
+   reference points - the encoder - the update is ``ref_xy + offsets / (W, H)``
+   per level. With four-dimensional box references - the decoder - it is
+   ``ref_xy + offsets / n_points * ref_wh * 0.5``. The branch is chosen by the
+   reference width, as in the reference implementation; cross-applying the two
+   scores about 0.45.
 """
 
 from __future__ import annotations
@@ -82,16 +83,36 @@ def build_deformable_attention(network, hidden, posed, reference, weights, prefi
     softmax.axes = 1 << 2
     scores = softmax.get_output(0)
 
-    # offsets / (W, H) per level, then the grid convention: 2 * location - 1.
-    normaliser = np.empty((1, 1, levels, 1, 2), dtype=dtype)
-    for level, (height, level_width) in enumerate(shapes):
-        normaliser[0, 0, level, 0, 0] = level_width
-        normaliser[0, 0, level, 0, 1] = height
-    divisor = g.add_constant(network, normaliser.shape, normaliser, dtype)
-    scaled = network.add_elementwise(offsets, divisor, trt.ElementWiseOperation.DIV).get_output(0)
+    # Which branch applies is decided by the reference width, exactly as the
+    # reference implementation decides it.
+    coords = int(reference.shape[-1])
+    if coords == 2:
+        # Centre-only references: offsets are normalised by the level size.
+        normaliser = np.empty((1, 1, levels, 1, 2), dtype=dtype)
+        for level, (height, level_width) in enumerate(shapes):
+            normaliser[0, 0, level, 0, 0] = level_width
+            normaliser[0, 0, level, 0, 1] = height
+        divisor = g.add_constant(network, normaliser.shape, normaliser, dtype)
+        scaled = network.add_elementwise(
+            offsets, divisor, trt.ElementWiseOperation.DIV).get_output(0)
+        ref = _shuffle(network, reference, reshape=(queries, 1, levels, 1, 2))
+    elif coords == 4:
+        # Box references: offsets are a fraction of the box size, not of the
+        # level. ref_xy + offsets / n_points * ref_wh * 0.5.
+        boxed = _shuffle(network, reference, reshape=(queries, 1, levels, 1, 4))
+        ref = network.add_slice(boxed, (0, 0, 0, 0, 0),
+                                (queries, 1, levels, 1, 2), (1, 1, 1, 1, 1)).get_output(0)
+        size = network.add_slice(boxed, (0, 0, 0, 0, 2),
+                                 (queries, 1, levels, 1, 2), (1, 1, 1, 1, 1)).get_output(0)
+        factor = g.add_constant(network, (1, 1, 1, 1, 1),
+                                np.array([0.5 / points], dtype=dtype), dtype)
+        scaled = network.add_elementwise(
+            offsets, factor, trt.ElementWiseOperation.PROD).get_output(0)
+        scaled = network.add_elementwise(
+            scaled, size, trt.ElementWiseOperation.PROD).get_output(0)
+    else:
+        raise ValueError("deformable reference points must have 2 or 4 coordinates")
 
-    # reference is (1, queries, levels, 2); broadcast it over heads and points.
-    ref = _shuffle(network, reference, reshape=(queries, 1, levels, 1, 2))
     location = network.add_elementwise(ref, scaled, trt.ElementWiseOperation.SUM).get_output(0)
     two = g.add_constant(network, (1, 1, 1, 1, 1), np.array([2.0], dtype=dtype), dtype)
     one = g.add_constant(network, (1, 1, 1, 1, 1), np.array([1.0], dtype=dtype), dtype)
