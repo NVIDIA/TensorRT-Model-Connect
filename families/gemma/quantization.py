@@ -37,6 +37,8 @@ from .checkpoint_mapper import _has_tensor, _load_tensor, _open_safetensors
 
 FP8_E4M3_MAX = 448.0
 ACTIVATION_SCALES_FILENAME = "fp8_activation_scales.json"
+# A projection with no entry in that file stays unquantized. Gemma-3 layer 11 down_proj has no
+# entry: its calibrated scale is an outlier and one scale per tensor lowered accuracy.
 
 # HF projection stem -> internal weight-dict stem used by graph_blocks.
 PROJECTIONS = (

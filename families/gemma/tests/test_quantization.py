@@ -130,14 +130,20 @@ def test_missing_scale_entry_is_refused() -> None:
         load_activation_scales(_config())
 
 
+# Gemma-3 layer 11 down_proj has an activation outlier (calibrated scale 20.3, others <= 4.8).
+# One scale for the whole tensor cost token agreement with BF16, so the projection stays unquantized.
+_LEFT_UNQUANTIZED = {"gemma3-h2560-l34-i10240": {"layer.11.w_down"}}
+
+
 def test_committed_scales_cover_every_projection() -> None:
-    """Every committed shape has a positive scale for every decoder projection."""
+    """Every committed shape has a positive scale for every decoder projection, except the listed ones."""
     path = Path(quantization.__file__).parent / quantization.ACTIVATION_SCALES_FILENAME
     for key, scales in json.loads(path.read_text(encoding="utf-8")).items():
         assert scales, key
         assert all(value > 0 for value in scales.values()), key
         layers = {int(name.split(".")[1]) for name in scales}
-        assert len(scales) == len(layers) * len(_WEIGHT_STEMS), key
+        expected = {f"layer.{layer}.{stem}" for layer in layers for stem in _WEIGHT_STEMS.values()}
+        assert set(scales) == expected - _LEFT_UNQUANTIZED.get(key, set()), key
 
 
 def test_calibrate_quantizes_the_checkpoint_weights(tmp_path: Path, monkeypatch) -> None:
