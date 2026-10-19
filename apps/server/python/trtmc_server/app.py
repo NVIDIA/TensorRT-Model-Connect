@@ -347,7 +347,7 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
         if input_bytes > config.max_prompt_bytes:
             metrics.reject(route, 413)
             return error_response(
-                413, "content_too_large", "prompt exceeds the server limit", param="prompt"
+                413, "content_too_large", "prompt exceeds the server limit", param="input" if responses else "prompt"
             )
         requested_tokens = chat_max_tokens if chat_max_tokens is not None else request.max_tokens
         try:

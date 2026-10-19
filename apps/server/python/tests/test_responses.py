@@ -88,6 +88,16 @@ def test_responses_rejects_models_without_native_text_capability():
     assert not registry.requests
 
 
+def test_responses_input_limit_identifies_the_responses_field_before_native_dispatch():
+    registry = TextRegistry()
+    app = create_app(registry, ServerConfig(max_body_bytes=4096, max_prompt_bytes=4, max_generation_tokens=64))
+    with TestClient(app) as client:
+        response = client.post("/v1/responses", json={"model": "test/model", "input": "hello"})
+    assert response.status_code == 413
+    assert response.json()["error"]["param"] == "input"
+    assert not registry.requests
+
+
 @pytest.mark.parametrize("value", ["Infinity", "-Infinity", "NaN"])
 def test_nonfinite_responses_temperature_is_rejected_before_native_dispatch(value):
     registry = TextRegistry()
