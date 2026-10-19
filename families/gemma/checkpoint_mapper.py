@@ -80,8 +80,13 @@ def load_standard_weights(
     embedding_key: str | None = None,
     final_norm_key: str | None = None,
     lm_head_key: str = "lm_head.weight",
+    quant_ctx=None,
 ) -> WeightDict:
-    """Load HF safetensors and map to standard weight dict."""
+    """Load HF safetensors and map to standard weight dict.
+
+    Projections owned by ``quant_ctx`` are not loaded: the engine consumes the
+    FP8 bytes the context quantized itself, so only a shape-only placeholder is kept.
+    """
     model_dir = Path(model_dir)
     readers = _open_safetensors(model_dir)
 
@@ -117,31 +122,25 @@ def load_standard_weights(
         layer[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
         layer[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
-        # Q/K/V/O projections
-        q_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.q_proj.weight", model_prefix)
-        )
-        k_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.k_proj.weight", model_prefix)
-        )
-        v_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.v_proj.weight", model_prefix)
-        )
-        o_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.o_proj.weight", model_prefix)
-        )
+        def _projection(stem: str, hf_name: str) -> np.ndarray:
+            """Load one projection transposed to [in, out], or a quantized placeholder."""
+            name = f"{prefix}.{stem}"
+            if quant_ctx is not None and quant_ctx.should_quantize(name):
+                w = quant_ctx.scales[name].weight
+                zero = np.zeros((), dtype=_target_np_dtype(precision))
+                return np.broadcast_to(zero, (w.in_features, w.out_features))
+            raw = _load_tensor(readers, _layer_key(layer_idx, hf_name, model_prefix))
+            return _transpose_2d(raw, hf_name, precision=precision)
 
-        q_hidden = q_raw.shape[0]
-        gate_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.gate_proj.weight", model_prefix)
-        )
-        layer_mlp_size = gate_raw.shape[0]
+        # Q/K/V/O projections, transposed [out, in] -> [in, out]
+        q_t = _projection("w_q", "self_attn.q_proj.weight")
+        k_t = _projection("w_k", "self_attn.k_proj.weight")
+        v_t = _projection("w_v", "self_attn.v_proj.weight")
+        o_t = _projection("w_o", "self_attn.o_proj.weight")
 
-        # Transpose all projections [out, in] -> [in, out]
-        q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
-        k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
-        v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
-        o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
+        q_hidden = q_t.shape[1]
+        gate_t = _projection("w_gate", "mlp.gate_proj.weight")
+        layer_mlp_size = gate_t.shape[1]
 
         layer[f"{prefix}.w_q"] = q_t
         layer[f"{prefix}.w_k"] = k_t
@@ -172,14 +171,9 @@ def load_standard_weights(
             )
 
         # MLP projections
-        up_raw = _load_tensor(readers, _layer_key(layer_idx, "mlp.up_proj.weight", model_prefix))
-        down_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.down_proj.weight", model_prefix)
-        )
-
-        layer[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj", precision=precision)
-        layer[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj", precision=precision)
-        layer[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj", precision=precision)
+        layer[f"{prefix}.w_gate"] = gate_t
+        layer[f"{prefix}.w_up"] = _projection("w_up", "mlp.up_proj.weight")
+        layer[f"{prefix}.w_down"] = _projection("w_down", "mlp.down_proj.weight")
 
         return layer_idx, layer, q_hidden, layer_mlp_size
 
