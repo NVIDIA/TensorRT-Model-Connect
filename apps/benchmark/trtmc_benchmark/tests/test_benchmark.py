@@ -641,6 +641,8 @@ def test_tracking_and_pose_rates_count_actual_output_units() -> None:
     ("image_points_to_masks", "segment", {"image": "image.ppm"}, {"image_path": "image.ppm"}),
     ("image_text_to_instance_masks", "segment_prompted", {"image": "image.ppm", "prompt": "cup"},
      {"image_path": "image.ppm", "prompt": "cup"}),
+    ("image_text_to_boxes", "detect_prompted", {"image": "image.ppm", "prompt": "a car."},
+     {"image_path": "image.ppm", "prompt": "a car."}),
     ("stereo_images_to_disparity", "disparity", {"inputs": {"left_image": "image.ppm", "right_image": "second.ppm"}},
      {"left_image_path": "image.ppm", "right_image_path": "second.ppm"}),
     ("text_to_pooled_features", "encode", {"prompt": "text"}, {"prompt": "text"}),
