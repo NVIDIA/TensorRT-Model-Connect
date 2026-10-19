@@ -837,7 +837,9 @@ errors remain visible. Nonstreaming trace replay provides no TTFT/ITL samples.
 ### Controlled shared prefixes
 
 Use `config/text/qwen3-0.6b-shared-prefix.yaml` with the same environment and
-existing full Qwen bundle. First leave `workload.warmup_requests: 0`:
+existing full Qwen bundle. Keep exactly one workload case per invocation.
+Run each configuration separately so it starts its own server process.
+First leave `workload.warmup_requests: 0`:
 
 ```bash
 python -m trtmc_aiperf_qual text-profile \

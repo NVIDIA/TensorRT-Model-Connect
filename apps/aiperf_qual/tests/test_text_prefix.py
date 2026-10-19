@@ -8,6 +8,17 @@ import pytest
 
 from trtmc_aiperf_qual.config import ConfigError
 from trtmc_aiperf_qual.text_prefix import construct, verify
+from trtmc_aiperf_qual.text_profile import cases
+
+
+@pytest.mark.parametrize("axis,values", [
+    ("output_tokens", [16, 32]), ("concurrency", [1, 2]), ("request_rate", [None, 10]),
+])
+def test_controlled_prefix_sweeps_cannot_reuse_a_process_between_cases(axis, values):
+    workload = {"endpoints": ["completions"], "output_tokens": [16], "concurrency": [1],
+                "requests": 2, "warmup_requests": 0, axis: values}
+    with pytest.raises(ConfigError, match="one workload case per fresh server"):
+        cases({"corpus": {"format": "controlled_prefix", "count": 2}, "workload": workload})
 
 
 def test_overlap_counts_complete_prompt_tokens_at_the_suffix_boundary():
