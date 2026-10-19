@@ -103,6 +103,18 @@
           "default": []
         },
         {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "nvfp4"
+          ],
+          "help": "Build from an already quantized ModelOpt NVFP4 checkpoint (for example AxionML/Qwen3.5-9B-NVFP4, fp16 only); its packed weights and scales are used as-is"
+        },
+        {
           "name": "execution_variant",
           "flags": [
             "--execution-variant"

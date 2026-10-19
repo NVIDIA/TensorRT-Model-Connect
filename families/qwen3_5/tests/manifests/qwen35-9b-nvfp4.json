@@ -1,0 +1,27 @@
+{
+  "name": "qwen35-9b-nvfp4",
+  "hf_id": "AxionML/Qwen3.5-9B-NVFP4",
+  "hf_revision": "97aef92393f126bf649f310cd40861be8dad3279",
+  "bundle": "qwen35-9b-nvfp4.bundle",
+  "family": "qwen3_5",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "precision": "fp16",
+  "quantization": "nvfp4",
+  "testcases": [
+    {
+      "name": "qwen35-9b-nvfp4",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "reference": "none",
+      "expected_answers": [
+        "Paris"
+      ]
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

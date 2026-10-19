@@ -77,6 +77,11 @@ from .checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from .quantization import (
+    Qwen35QuantContext,
+    calibrate_qwen35,
+    is_nvfp4_checkpoint,
+)
 from . import graph_ops
 from . import graph_blocks
 
@@ -90,6 +95,40 @@ def _parse_layer_types(raw_types: list[str]) -> list[str]:
         "full_attention": "attention",
     }
     return [mapping.get(t.lower(), t.lower()) for t in raw_types]
+
+
+def _shape_only(in_features: int, out_features: int) -> np.ndarray:
+    """Zero-stride placeholder with the shape of a projection that is never loaded.
+
+    The quantized graph takes the checkpoint's packed bytes from the quantization
+    context, so the full-precision weight is not read.
+    """
+    return np.broadcast_to(np.zeros((), dtype=np.float16), (in_features, out_features))
+
+
+def _load_projection(
+    readers,
+    hf_key: str,
+    name: str,
+    quant_ctx: Qwen35QuantContext | None,
+    in_features: int,
+    out_features: int,
+) -> np.ndarray:
+    """Load one projection as ``[in, out]``, or a placeholder when it is quantized."""
+    if quant_ctx is not None and quant_ctx.should_quantize(name):
+        return _shape_only(in_features, out_features)
+    return _transpose_2d(_load_tensor(readers, hf_key), name)
+
+
+def _projection(network, x, in_features, out_features, weights, key, *, dtype, quant_ctx):
+    """Projection matmul: the quantized Q/DQ graph when ``key`` is quantized, else constant."""
+    if quant_ctx is not None:
+        return quant_ctx.maybe_quantized_matmul(
+            network, x, in_features, out_features, weights[key], key, dtype=dtype
+        )
+    return graph_ops.add_matmul_rhs_constant(
+        network, x, in_features, out_features, weights[key], dtype=dtype
+    )
 
 
 def _prepare_runtime_inputs(
@@ -135,6 +174,7 @@ class _Qwen35Model:
         self,
         model_dir: str,
         config: ModelConfig,
+        quant_ctx: Qwen35QuantContext | None = None,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -235,6 +275,7 @@ class _Qwen35Model:
                     deltanet_num_heads,
                     deltanet_num_kv_heads,
                     deltanet_head_dim,
+                    quant_ctx,
                 )
                 deltanet_count += 1
 
@@ -250,11 +291,14 @@ class _Qwen35Model:
                     num_heads,
                     num_kv_heads,
                     head_dim,
+                    quant_ctx,
                 )
                 attn_count += 1
 
             # SwiGLU MLP (all layer types)
-            self._load_mlp_weights(readers, weights, prefix, hf_prefix, hidden, mlp_size)
+            self._load_mlp_weights(
+                readers, weights, prefix, hf_prefix, hidden, mlp_size, quant_ctx
+            )
 
         # Final norm (also uses (1+weight) centering)
         final_norm_key = "model.language_model.norm.weight"
@@ -302,27 +346,30 @@ class _Qwen35Model:
         num_heads,
         num_kv_heads,
         head_dim,
+        quant_ctx=None,
     ):
         """Load DeltaNet (linear attention) layer weights."""
         attn_prefix = f"{hf_prefix}.linear_attn"
 
         # in_proj_qkv (QKV combined): [conv_dim, hidden] -> transpose
-        in_proj_raw = _load_tensor(readers, f"{attn_prefix}.in_proj_qkv.weight")
-        weights[f"{prefix}.deltanet_in_proj_qkv"] = _transpose_2d(
-            in_proj_raw, "deltanet_in_proj_qkv"
+        weights[f"{prefix}.deltanet_in_proj_qkv"] = _load_projection(
+            readers, f"{attn_prefix}.in_proj_qkv.weight", f"{prefix}.deltanet_in_proj_qkv", quant_ctx, hidden, conv_dim
         )
 
         # Gate projection (z): [d_inner, hidden] -> transpose
-        z_proj_raw = _load_tensor(readers, f"{attn_prefix}.in_proj_z.weight")
-        weights[f"{prefix}.deltanet_z_proj"] = _transpose_2d(z_proj_raw, "deltanet_z_proj")
+        weights[f"{prefix}.deltanet_z_proj"] = _load_projection(
+            readers, f"{attn_prefix}.in_proj_z.weight", f"{prefix}.deltanet_z_proj", quant_ctx, hidden, d_inner
+        )
 
         # Decay projection (a): [num_heads, hidden] -> transpose
-        a_proj_raw = _load_tensor(readers, f"{attn_prefix}.in_proj_a.weight")
-        weights[f"{prefix}.deltanet_a_proj"] = _transpose_2d(a_proj_raw, "deltanet_a_proj")
+        weights[f"{prefix}.deltanet_a_proj"] = _load_projection(
+            readers, f"{attn_prefix}.in_proj_a.weight", f"{prefix}.deltanet_a_proj", quant_ctx, hidden, num_heads
+        )
 
         # Beta projection (b): [num_heads, hidden] -> transpose
-        b_proj_raw = _load_tensor(readers, f"{attn_prefix}.in_proj_b.weight")
-        weights[f"{prefix}.deltanet_b_proj"] = _transpose_2d(b_proj_raw, "deltanet_b_proj")
+        weights[f"{prefix}.deltanet_b_proj"] = _load_projection(
+            readers, f"{attn_prefix}.in_proj_b.weight", f"{prefix}.deltanet_b_proj", quant_ctx, hidden, num_heads
+        )
 
         # A_log: [num_heads] -> precompute -exp(A_log)
         A_log = _load_tensor(readers, f"{attn_prefix}.A_log")
@@ -354,8 +401,9 @@ class _Qwen35Model:
             weights[f"{prefix}.deltanet_norm"] = np.ones(d_inner, dtype=np.float32)
 
         # Output projection: [hidden, d_inner] -> transpose
-        out_raw = _load_tensor(readers, f"{attn_prefix}.out_proj.weight")
-        weights[f"{prefix}.deltanet_out_proj"] = _transpose_2d(out_raw, "deltanet_out_proj")
+        weights[f"{prefix}.deltanet_out_proj"] = _load_projection(
+            readers, f"{attn_prefix}.out_proj.weight", f"{prefix}.deltanet_out_proj", quant_ctx, d_inner, hidden
+        )
 
     def _load_attention_weights(
         self,
@@ -369,35 +417,41 @@ class _Qwen35Model:
         num_heads,
         num_kv_heads,
         head_dim,
+        quant_ctx=None,
     ):
         """Load full self-attention layer weights."""
         attn_prefix = f"{hf_prefix}.self_attn"
 
-        # q_proj: [2*attn_size, hidden] -> split per head into query + gate
-        # HF does: q_proj(x).view(B, seq, num_heads, 2*head_dim).chunk(2, dim=-1)
-        # This interleaves: for each head, first head_dim dims are query, next are gate
-        q_raw = _load_tensor(readers, f"{attn_prefix}.q_proj.weight")
-        # q_raw: [num_heads * 2 * head_dim, hidden] = [8192, 4096]
-        # Reshape to [num_heads, 2*head_dim, hidden], split, reshape back
-        q_reshaped = q_raw.reshape(num_heads, 2 * head_dim, hidden)
-        q_part = q_reshaped[:, :head_dim, :].reshape(attn_size, hidden)
-        gate_part = q_reshaped[:, head_dim:, :].reshape(attn_size, hidden)
-        weights[f"{prefix}.w_q"] = _transpose_2d(q_part, "q_proj")
-        weights[f"{prefix}.w_gate_attn"] = _transpose_2d(gate_part, "gate_proj")
+        if quant_ctx is not None and quant_ctx.should_quantize(f"{prefix}.w_q"):
+            weights[f"{prefix}.w_q"] = _shape_only(hidden, attn_size)
+            weights[f"{prefix}.w_gate_attn"] = _shape_only(hidden, attn_size)
+        else:
+            # q_proj: [2*attn_size, hidden] -> split per head into query + gate
+            # HF does: q_proj(x).view(B, seq, num_heads, 2*head_dim).chunk(2, dim=-1)
+            # This interleaves: for each head, first head_dim dims are query, next are gate
+            q_raw = _load_tensor(readers, f"{attn_prefix}.q_proj.weight")
+            # q_raw: [num_heads * 2 * head_dim, hidden] = [8192, 4096]
+            # Reshape to [num_heads, 2*head_dim, hidden], split, reshape back
+            q_reshaped = q_raw.reshape(num_heads, 2 * head_dim, hidden)
+            q_part = q_reshaped[:, :head_dim, :].reshape(attn_size, hidden)
+            gate_part = q_reshaped[:, head_dim:, :].reshape(attn_size, hidden)
+            weights[f"{prefix}.w_q"] = _transpose_2d(q_part, "q_proj")
+            weights[f"{prefix}.w_gate_attn"] = _transpose_2d(gate_part, "gate_proj")
 
         # k_proj: [kv_size, hidden] -> keep compact
-        k_raw = _load_tensor(readers, f"{attn_prefix}.k_proj.weight")
-        k_t = _transpose_2d(k_raw, "k_proj")
-        weights[f"{prefix}.w_k"] = k_t
+        weights[f"{prefix}.w_k"] = _load_projection(
+            readers, f"{attn_prefix}.k_proj.weight", f"{prefix}.w_k", quant_ctx, hidden, kv_size
+        )
 
         # v_proj: [kv_size, hidden] -> keep compact
-        v_raw = _load_tensor(readers, f"{attn_prefix}.v_proj.weight")
-        v_t = _transpose_2d(v_raw, "v_proj")
-        weights[f"{prefix}.w_v"] = v_t
+        weights[f"{prefix}.w_v"] = _load_projection(
+            readers, f"{attn_prefix}.v_proj.weight", f"{prefix}.w_v", quant_ctx, hidden, kv_size
+        )
 
         # o_proj: [hidden, attn_size] -> transpose
-        o_raw = _load_tensor(readers, f"{attn_prefix}.o_proj.weight")
-        weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
+        weights[f"{prefix}.w_o"] = _load_projection(
+            readers, f"{attn_prefix}.o_proj.weight", f"{prefix}.w_o", quant_ctx, attn_size, hidden
+        )
 
         # QK-norm with (1+weight) centering, tiled to num_heads
         q_norm_key = f"{attn_prefix}.q_norm.weight"
@@ -419,6 +473,7 @@ class _Qwen35Model:
         hf_prefix,
         hidden,
         mlp_size,
+        quant_ctx=None,
     ):
         """Load SwiGLU MLP weights."""
         gate_key = f"{hf_prefix}.mlp.gate_proj.weight"
@@ -426,12 +481,14 @@ class _Qwen35Model:
         down_key = f"{hf_prefix}.mlp.down_proj.weight"
 
         if _has_tensor(readers, gate_key):
-            weights[f"{prefix}.w_gate"] = _transpose_2d(
-                _load_tensor(readers, gate_key), "gate_proj"
+            weights[f"{prefix}.w_gate"] = _load_projection(
+                readers, gate_key, f"{prefix}.w_gate", quant_ctx, hidden, mlp_size
             )
-            weights[f"{prefix}.w_up"] = _transpose_2d(_load_tensor(readers, up_key), "up_proj")
-            weights[f"{prefix}.w_down"] = _transpose_2d(
-                _load_tensor(readers, down_key), "down_proj"
+            weights[f"{prefix}.w_up"] = _load_projection(
+                readers, up_key, f"{prefix}.w_up", quant_ctx, hidden, mlp_size
+            )
+            weights[f"{prefix}.w_down"] = _load_projection(
+                readers, down_key, f"{prefix}.w_down", quant_ctx, mlp_size, hidden
             )
 
     def build_engine(
@@ -443,6 +500,7 @@ class _Qwen35Model:
         precision: str = "fp32",
         verbose: bool = False,
         debug_layer_outputs: bool = False,
+        quant_ctx: Qwen35QuantContext | None = None,
     ) -> bytes:
         """Build hybrid TRT engine with DeltaNet + attention layers."""
         hidden = config.hidden_size
@@ -489,6 +547,9 @@ class _Qwen35Model:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        if quant_ctx is not None:
+            # The plan inspector reads kernel names from the engine.
+            trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
         # --- Inputs ---
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -627,6 +688,7 @@ class _Qwen35Model:
                     head_dim=deltanet_head_dim,
                     mlp_size=mlp_size,
                     dtype=layer_np_dtype,
+                    quant_ctx=quant_ctx,
                 )
                 hidden_state = result["hidden"]
                 present_conv_outputs.append(result["present_conv"])
@@ -656,6 +718,7 @@ class _Qwen35Model:
                     max_cache_length=max_cache_length,
                     mlp_size=mlp_size,
                     dtype=layer_np_dtype,
+                    quant_ctx=quant_ctx,
                 )
                 hidden_state = result["hidden"]
                 present_k_outputs.append(result["present_k"])
@@ -801,6 +864,7 @@ def _add_deltanet_layer(
     head_dim: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
+    quant_ctx: Qwen35QuantContext | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one Gated DeltaNet layer (single-step decode).
 
@@ -823,28 +887,23 @@ def _add_deltanet_layer(
 
     # ===== 2. Input projections =====
     # QKV combined: [1, hidden] -> [1, conv_dim]
-    qkv = graph_ops.add_matmul_rhs_constant(
-        network,
-        normed,
-        hidden_size,
-        conv_dim,
-        weights[f"{prefix}.deltanet_in_proj_qkv"],
-        dtype=dtype,
+    qkv = _projection(
+        network, normed, hidden_size, conv_dim, weights, f"{prefix}.deltanet_in_proj_qkv", dtype=dtype, quant_ctx=quant_ctx
     )
 
     # Gate (z): [1, hidden] -> [1, d_inner]
-    z = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, d_inner, weights[f"{prefix}.deltanet_z_proj"], dtype=dtype
+    z = _projection(
+        network, normed, hidden_size, d_inner, weights, f"{prefix}.deltanet_z_proj", dtype=dtype, quant_ctx=quant_ctx
     )
 
     # Decay projection (a): [1, hidden] -> [1, num_heads]
-    a_raw = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, num_heads, weights[f"{prefix}.deltanet_a_proj"], dtype=dtype
+    a_raw = _projection(
+        network, normed, hidden_size, num_heads, weights, f"{prefix}.deltanet_a_proj", dtype=dtype, quant_ctx=quant_ctx
     )
 
     # Beta projection (b): [1, hidden] -> [1, num_heads]
-    b_raw = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, num_heads, weights[f"{prefix}.deltanet_b_proj"], dtype=dtype
+    b_raw = _projection(
+        network, normed, hidden_size, num_heads, weights, f"{prefix}.deltanet_b_proj", dtype=dtype, quant_ctx=quant_ctx
     )
 
     # ===== 3. Conv1d step on QKV =====
@@ -1109,13 +1168,8 @@ def _add_deltanet_layer(
     )
 
     # ===== 11. Output projection + residual =====
-    out = graph_ops.add_matmul_rhs_constant(
-        network,
-        gated.get_output(0),
-        d_inner,
-        hidden_size,
-        weights[f"{prefix}.deltanet_out_proj"],
-        dtype=dtype,
+    out = _projection(
+        network, gated.get_output(0), d_inner, hidden_size, weights, f"{prefix}.deltanet_out_proj", dtype=dtype, quant_ctx=quant_ctx
     )
 
     residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
@@ -1139,6 +1193,7 @@ def _add_deltanet_layer(
         hidden_size=hidden_size,
         mlp_size=mlp_size,
         dtype=dtype,
+        quant_ctx=quant_ctx,
     )
 
     mlp_residual = network.add_elementwise(hidden_after_attn, mlp_out, trt.ElementWiseOperation.SUM)
@@ -1173,6 +1228,7 @@ def _add_full_attention_layer(
     max_cache_length: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
+    quant_ctx: Qwen35QuantContext | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one full self-attention layer with output gating.
 
@@ -1199,14 +1255,14 @@ def _add_full_attention_layer(
     )
 
     # QKV projections
-    q = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attn_size, weights[f"{prefix}.w_q"], dtype=dtype
+    q = _projection(
+        network, normed, hidden_size, attn_size, weights, f"{prefix}.w_q", dtype=dtype, quant_ctx=quant_ctx
     )
-    k = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"], dtype=dtype
+    k = _projection(
+        network, normed, hidden_size, kv_attention_size, weights, f"{prefix}.w_k", dtype=dtype, quant_ctx=quant_ctx
     )
-    v = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"], dtype=dtype
+    v = _projection(
+        network, normed, hidden_size, kv_attention_size, weights, f"{prefix}.w_v", dtype=dtype, quant_ctx=quant_ctx
     )
 
     # Per-head QK norm
@@ -1277,8 +1333,15 @@ def _add_full_attention_layer(
     gate_attn_w = weights.get(f"{prefix}.w_gate_attn")
     attn_out = context_flat
     if gate_attn_w is not None:
-        gate = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden_size, attn_size, gate_attn_w, dtype=dtype
+        gate = _projection(
+            network,
+            normed,
+            hidden_size,
+            attn_size,
+            weights,
+            f"{prefix}.w_gate_attn",
+            dtype=dtype,
+            quant_ctx=quant_ctx,
         )
         gate_sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
         gated = network.add_elementwise(
@@ -1287,8 +1350,8 @@ def _add_full_attention_layer(
         attn_out = gated.get_output(0)
 
     # Output projection (AFTER gate)
-    attn_out = graph_ops.add_matmul_rhs_constant(
-        network, attn_out, attn_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype
+    attn_out = _projection(
+        network, attn_out, attn_size, hidden_size, weights, f"{prefix}.w_o", dtype=dtype, quant_ctx=quant_ctx
     )
 
     # Residual after attention
@@ -1313,6 +1376,7 @@ def _add_full_attention_layer(
         hidden_size=hidden_size,
         mlp_size=mlp_size,
         dtype=dtype,
+        quant_ctx=quant_ctx,
     )
 
     mlp_residual = network.add_elementwise(hidden_after_attn, mlp_out, trt.ElementWiseOperation.SUM)
@@ -1414,14 +1478,38 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             raise ValueError("Qwen3.5 max_sequence_length exceeds checkpoint context capacity")
         if request.tensor_parallel_size != 1:
             raise NotImplementedError("Qwen3.5 does not expose a tensor-parallel builder")
-        if request.quantization not in {None, "none"}:
-            raise NotImplementedError("Qwen3.5 does not support quantized builds")
+        quant_ctx = None
+        if request.quantization == "nvfp4":
+            if precision != "fp16":
+                raise ValueError("Qwen3.5 nvfp4 builds require precision fp16")
+            if request.fp32_layers:
+                raise ValueError("Qwen3.5 nvfp4 builds do not support fp32_layers")
+            text_cfg = config.raw.get("text_config", config.raw)
+            layer_types = _parse_layer_types(
+                text_cfg.get("layer_types", ["linear"] * config.num_hidden_layers)
+            )
+            quant_ctx = calibrate_qwen35(
+                model_dir,
+                graph_ops,
+                "nvfp4",
+                layer_types=layer_types,
+                num_heads=config.num_attention_heads,
+                head_dim=config.head_dim,
+            )
+        elif request.quantization not in {None, "none"}:
+            raise NotImplementedError(
+                f"Qwen3.5 does not support quantization={request.quantization!r}"
+            )
+        elif is_nvfp4_checkpoint(model_dir):
+            raise ValueError(
+                "this checkpoint stores NVFP4 weights; build it with --quantization nvfp4"
+            )
 
         model = _Qwen35Model()
         config.raw["_model_dir"] = str(model_dir)
         config.raw["_fp32_layers"] = list(request.fp32_layers)
         config.raw["_resolved_build_precision"] = precision
-        weights = model.load_weights(str(model_dir), config)
+        weights = model.load_weights(str(model_dir), config, quant_ctx)
         plan = model.build_engine(
             config,
             weights,
@@ -1429,6 +1517,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             precision=precision,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
+            quant_ctx=quant_ctx,
         )
 
         writer.set_header(family="qwen3_5", task=request.task, backend=request.backend)

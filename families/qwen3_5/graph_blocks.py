@@ -39,11 +39,17 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def make_matmul_fn(network, dtype):
-    """Create the Qwen3.5 projection matmul callable."""
+def make_matmul_fn(network, dtype, quant_ctx=None):
+    """Create the Qwen3.5 projection matmul callable.
+
+    With a quantization context, quantized projections go through its Q/DQ graph.
+    """
 
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
-        del weight_name
+        if quant_ctx is not None:
+            return quant_ctx.maybe_quantized_matmul(
+                network, lhs, lhs_w, rhs_w, rhs_weights, weight_name, dtype=dtype
+            )
         return graph_ops.add_matmul_rhs_constant(
             network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype
         )
@@ -114,9 +120,10 @@ def add_swiglu_mlp(
     mlp_size: int,
     dtype: np.dtype = np.float32,
     layer_prefix: str = "",
+    quant_ctx=None,
 ) -> trt.ITensor:
     """Gate/up/down SwiGLU MLP. Returns output tensor."""
-    matmul = _make_matmul_fn(network, dtype)
+    matmul = _make_matmul_fn(network, dtype, quant_ctx)
     _lp = layer_prefix or prefix
 
     gate = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_gate"], f"{_lp}.w_gate")
