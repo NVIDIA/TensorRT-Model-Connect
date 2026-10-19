@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import csv
 import hashlib
+import io
 import json
 from decimal import Decimal
 from types import SimpleNamespace
@@ -24,6 +26,21 @@ def test_selection_keeps_original_targets_and_records_context_rejections():
     assert [entry["status"] for entry in ledger] == ["rejected", "rejected", "selected"]
     assert selected[0]["source_index"] == 2 and selected[0]["original"] == row
     assert selected[0]["input_length"] == 91 and selected[0]["output_length"] == 16
+
+
+def test_incomplete_csv_rows_are_rejected_in_the_ledger_without_aborting_selection():
+    # DictReader represents missing trailing cells as None, not an empty string.
+    rows = list(csv.DictReader(io.StringIO(
+        "ContextTokens,GeneratedTokens,TIMESTAMP\n"
+        "5,2\n"
+        "5\n"
+        "5,2,2023-11-16 18:15:51.3910170\n")))
+    selected, ledger = select(rows, 1, 256, 16)
+    assert [row["status"] for row in ledger] == ["rejected", "rejected", "selected"]
+    assert selected[0]["source_index"] == 2 and selected[0]["output_length"] == 2
+    assert ledger[0]["original"]["TIMESTAMP"] is None
+    assert ledger[0]["reason"] == "trace timestamp is not a string"
+    assert ledger[1]["original"]["GeneratedTokens"] is None and ledger[1]["reason"]
 
 
 def test_trace_arguments_use_the_published_fixed_schedule_loader(tmp_path):

@@ -31,11 +31,15 @@ def select(rows, count: int, capacity: int, margin: int):
     for index, row in enumerate(rows):
         entry = {"source_index": index, "original": row}
         try:
+            if not isinstance(row, dict):
+                raise ValueError("trace row is not an object")
             inputs, outputs = int(row["ContextTokens"]), int(row["GeneratedTokens"])
+            if not isinstance(row["TIMESTAMP"], str):
+                raise ValueError("trace timestamp is not a string")
             timestamp_ms(row["TIMESTAMP"])
             if inputs < 1 or outputs < 1 or inputs + outputs + margin > capacity:
                 raise ValueError("input/output target plus safety margin does not fit bundle")
-        except (ValueError, KeyError, InvalidOperation) as error:
+        except (TypeError, ValueError, KeyError, InvalidOperation) as error:
             entry.update(status="rejected", reason=str(error))
         else:
             entry.update(status="selected", session_id=f"azure-{index}", input_length=inputs, output_length=outputs)
