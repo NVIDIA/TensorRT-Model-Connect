@@ -335,6 +335,9 @@ def profile(environment: Environment, config_path: Path, out: Path) -> dict[str,
                 entries.append({"case": case, "exit_code": run.exit_code or int(incomplete),
                                 "incomplete_export": incomplete, "command": run.command,
                                 "summary": summarize(rows), "aiperf_summary": run.summary})
+                if corpus and corpus.get("format") == "spec_bench":
+                    entries[-1].update(runtime_mode=corpus["runtime_mode"],
+                                       speculative_execution=corpus["speculative_execution"])
                 if corpus and corpus.get("format") == "sharegpt_multi_turn":
                     entries[-1]["per_turn"] = {str(turn): summarize([row for row in rows
                         if row["client_metadata"].get("turn_index") == turn]) for turn in (0, 1)}

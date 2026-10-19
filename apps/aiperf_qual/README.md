@@ -913,3 +913,59 @@ separate warmup, concurrency one, greedy sampling, a sixteen-token cap and
 unique request/response identities, output, native generation cap and Task timing.
 Failures preserve a verdict and the raw/joined request records. `report.json`
 keeps client end-to-end metrics separate from native `public_task_call_wall`.
+
+### SpecBench ordinary-generation baseline
+
+Use `config/text/qwen3-0.6b-specbench.yaml` with the same environment and
+already-built full Qwen3-0.6B FP16 bundle:
+
+```bash
+python -m trtmc_aiperf_qual text-profile \
+  --environment environment.yaml --config qwen3-0.6b-specbench.yaml \
+  --out artifacts/qwen-specbench
+```
+
+The configuration pins [Spec-Bench](https://github.com/hemingkx/Spec-Bench/tree/fd2c1cd7d2201ef71db4c5f4e455008f017967bf),
+Xia et al. (ACL 2024 Findings), at revision
+`fd2c1cd7d2201ef71db4c5f4e455008f017967bf`, the same source revision used by the
+tested AIPerf public loader. The upstream repository carries an Apache-2.0
+license. The JSONL checksum is recorded in the configuration. Selection keeps
+the first twelve distinct fitting original first-turn strings in source file
+order. `corpus.json` records question IDs, categories, original text/hashes,
+tokenizer lengths, rejected inputs and unexamined counts. There is no trimming,
+rewriting or truncation. This small context-bounded selection does not qualify
+the entire source corpus or a SpecBench quality score.
+
+Preparation materializes these exact strings for AIPerf's existing `single_turn`
+loader. The public SpecBench loader ordinarily downloads the full corpus and
+strips strings; the materialized selection keeps the existing 256-token bundle
+limit and original text explicit. No AIPerf source checkout or loader fork is
+required. The pilot runs twelve measured completions plus one separate warmup,
+concurrency one, greedy sampling and sixteen-token generation caps. Its unchanged
+owning-family checks run on the exact served bundle first.
+
+This is **ordinary native generation**. The pilot does not configure or qualify
+a draft model, speculative orchestration or acceptance counters. `corpus.json`,
+the request verification report and `report.json` state `ordinary_native_generation`
+and retain a separate manual runtime audit with source-file/revision hashes.
+Speculative execution is unqualified and acceptance metrics are unavailable.
+The verifier checks exact source/wire/native input and output identity, generation
+caps and native Task timing. Client timing and `public_task_call_wall` remain
+separate; build/load/startup/warmup are excluded. A corpus name is not evidence
+of speculative acceleration. No draft/target model, model spec, or speculative
+runtime is added.
+
+### Text workload pilot coverage
+
+These workload configurations use the existing Qwen3-0.6B full FP16 profile.
+Hardware qualification evidence covers GB300; other families/targets are not
+implied by this pilot table. All clients use the published AIPerf package.
+
+| Workload | Native HTTP endpoint | Qualified workload scope | Capability limit |
+| --- | --- | --- | --- |
+| Real prompts | `completions` | Twelve original pinned ShareGPT prompts | Selected subset; ordinary generation |
+| Conversations | `chat/completions` | Six two-turn conversations, live answers and think time | Nonstreaming native text history |
+| Production arrivals | `completions` | Twelve eligible Azure rows; original and scaled arrivals | Length-only source; synthesized prompts; rejections retained |
+| Shared prefixes | `completions` | Literal prefix/suffix corpus, fresh/warm process comparison | Cross-request cache-hit telemetry unavailable |
+| Responses | `responses` | Six original prompts, stateless typed text responses | No storage, history, tools or streaming |
+| SpecBench corpus | `completions` | Twelve fitting original first turns | Ordinary generation only; speculative execution and acceptance metrics unqualified |

@@ -64,6 +64,9 @@ def load_source(config: dict[str, Any]):
 
 
 def prepare(config: dict[str, Any], capacity: int, output: int, out: Path, *, repo: Path | None = None) -> dict[str, Any]:
+    if config["corpus"].get("format") == "spec_bench":
+        from .text_specbench import prepare as prepare_specbench
+        return prepare_specbench(config, capacity, output, out, repo=repo)
     if config["corpus"].get("format") == "controlled_prefix":
         from .text_prefix import prepare as prepare_prefix
         return prepare_prefix(config, capacity, output, out, repo=repo)
@@ -131,7 +134,10 @@ def verify_and_record(run, joined: list[dict[str, Any]], corpus: dict[str, Any])
     """Preserve a verification verdict for missing, changed or malformed inputs."""
     path = run.directory / "corpus-verification.json"
     try:
-        if corpus.get("format") == "controlled_prefix":
+        if corpus.get("format") == "spec_bench":
+            from .text_specbench import verify as verify_specbench
+            verified = verify_specbench(run, joined, corpus)
+        elif corpus.get("format") == "controlled_prefix":
             from .text_prefix import verify as verify_prefix
             verified = verify_prefix(run, joined, corpus)
         elif corpus.get("format") == "azure_trace":

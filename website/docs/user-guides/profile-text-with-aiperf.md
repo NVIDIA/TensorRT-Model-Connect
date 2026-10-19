@@ -223,3 +223,15 @@ This endpoint supports stateless single-turn text only. Storage, response-ID
 continuation, tools, media, reasoning-specific fields and streaming are rejected.
 Usage is unavailable because the native Task does not report input-token counts;
 use AIPerf's default client tokenizer estimates.
+
+## Benchmark SpecBench prompts
+
+The optional [SpecBench profile](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/apps/aiperf_qual/README.md#specbench-ordinary-generation-baseline)
+selects twelve fitting original prompts from a pinned source file and sends
+them through AIPerf's existing `single_turn` loader. Use the same built Qwen
+bundle and environment; the runner checks family correctness before profiling.
+
+This is an ordinary-generation corpus baseline. It does not add or qualify a
+draft model or speculative runtime, and it reports no acceptance rate or
+speculative speedup. The corpus ledger, raw requests and native output hashes
+show exactly what was measured.
