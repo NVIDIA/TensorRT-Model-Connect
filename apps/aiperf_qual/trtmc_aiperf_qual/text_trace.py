@@ -122,8 +122,9 @@ def verify_records(run, joined, corpus, count_tokens):
         tokens = count_tokens(prompt)
         if tokens + original["output_length"] > corpus["context_limit"]:
             raise ConfigError("actual generated trace prompt exceeds context; no truncation is allowed")
+        transport_failure = row.get("status") is None and bool(row.get("error"))
         if server is not None and (server.get("prompt_sha256") != hashlib.sha256(prompt.encode()).hexdigest() or
-                server.get("status") != row.get("status")):
+                (server.get("status") != row.get("status") and not transport_failure)):
             raise ConfigError("trace wire/native input or status identity does not match")
         status = row.get("status")
         if status == 200 and server is not None:

@@ -106,6 +106,32 @@ def test_transport_failure_without_native_dispatch_remains_in_the_failed_census(
     assert report["requests"][0]["server_record_present"] is False
 
 
+def test_transport_failure_after_native_completion_remains_in_the_failed_census(capture):
+    run, joined, corpus, raw = capture
+    raw[0].update(status=None, error={"type": "connection_error"}, responses=[])
+    with pytest.raises(ConfigError, match="unexpected failures"):
+        verify_records(run, joined, corpus, len)
+    report = json.loads((run.directory / "trace-accounting.json").read_text())
+    assert not report["verified"]
+    assert (report["offered"], report["completed"], report["rejected"], report["failed"]) == (3, 1, 1, 1)
+    assert report["requests"][0]["client_error"] == {"type": "connection_error"}
+    assert report["requests"][0]["server_record_present"] is True
+
+
+@pytest.mark.parametrize("status,error,changed_prompt", [
+    (503, {"type": "connection_error"}, False),
+    (None, None, False),
+    (None, {"type": "connection_error"}, True),
+])
+def test_transport_exception_preserves_other_status_and_prompt_identity_checks(capture, status, error, changed_prompt):
+    run, joined, corpus, raw = capture
+    raw[0].update(status=status, error=error, responses=[])
+    if changed_prompt:
+        joined[0]["server"]["prompt_sha256"] = hashlib.sha256(b"changed").hexdigest()
+    with pytest.raises(ConfigError, match="wire/native input or status identity"):
+        verify_records(run, joined, corpus, len)
+
+
 @pytest.mark.parametrize("change", ["missing", "cap", "failed", "schedule"])
 def test_missing_changed_failed_or_mistimed_requests_cannot_qualify(capture, change):
     run, joined, corpus, raw = capture
