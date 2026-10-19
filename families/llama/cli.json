@@ -113,6 +113,19 @@
           "default": false
         },
         {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "fp8",
+            "nvfp4"
+          ],
+          "help": "Build from an already quantized ModelOpt checkpoint (fp8: nvidia/Llama-3.1-8B-Instruct-FP8, nvfp4: nvidia/Llama-3.1-8B-Instruct-NVFP4); its packed weights and scales are used as-is"
+        },
+        {
           "name": "execution_variant",
           "flags": [
             "--execution-variant"
