@@ -94,17 +94,29 @@ def sine_box_embedding(network, boxes, features=128, temperature=10000.0,
 
 
 def _logit(network, x, dtype):
-    """``torch.special.logit`` with the reference's 1e-5 epsilon."""
-    low = g.add_constant(network, (1, 1, 1), np.full((1,), _LOGIT_EPS), dtype=dtype)
-    high = g.add_constant(network, (1, 1, 1), np.full((1,), 1.0 - _LOGIT_EPS), dtype=dtype)
-    one = g.add_constant(network, (1, 1, 1), np.full((1,), 1.0), dtype=dtype)
-    clamped = network.add_elementwise(x, low, trt.ElementWiseOperation.MAX).get_output(0)
+    """``torch.special.logit`` with the reference's 1e-5 epsilon.
+
+    Always evaluated in fp32, whatever the engine's working type. In fp16
+    ``1 - 1e-5`` rounds to exactly 1.0, so the upper clamp leaves a complement
+    of zero and the division returns ``+inf`` - which then propagates through
+    iterative box refinement into the reference points and the final head.
+    Measured, not assumed: an fp16 engine built with the clamp in fp16 scored
+    a logits cosine of -0.95 against the reference and put every one of the
+    900 queries above the detection threshold.
+    """
+    source = x if x.dtype == trt.float32 else network.add_cast(x, trt.float32).get_output(0)
+    low = g.add_constant(network, (1, 1, 1), np.full((1,), _LOGIT_EPS), dtype=np.float32)
+    high = g.add_constant(network, (1, 1, 1), np.full((1,), 1.0 - _LOGIT_EPS), dtype=np.float32)
+    one = g.add_constant(network, (1, 1, 1), np.full((1,), 1.0), dtype=np.float32)
+    clamped = network.add_elementwise(source, low, trt.ElementWiseOperation.MAX).get_output(0)
     clamped = network.add_elementwise(clamped, high, trt.ElementWiseOperation.MIN).get_output(0)
     complement = network.add_elementwise(
         one, clamped, trt.ElementWiseOperation.SUB).get_output(0)
     ratio = network.add_elementwise(
         clamped, complement, trt.ElementWiseOperation.DIV).get_output(0)
-    return network.add_unary(ratio, trt.UnaryOperation.LOG).get_output(0)
+    result = network.add_unary(ratio, trt.UnaryOperation.LOG).get_output(0)
+    target = trt.float16 if dtype == np.float16 else trt.float32
+    return result if target == trt.float32 else network.add_cast(result, target).get_output(0)
 
 
 def _attention(network, query_source, key_source, weights, prefix, heads, dtype,
