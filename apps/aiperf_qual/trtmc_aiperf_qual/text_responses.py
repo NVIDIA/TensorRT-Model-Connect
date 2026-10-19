@@ -44,6 +44,8 @@ def verify_records(run, joined):
     requests, ids, response_ids = [], set(), set()
     for row in run.raw_records(phase=None):
         meta, payload = row.get("metadata", {}), row.get("payload")
+        if not isinstance(meta, dict):
+            raise ConfigError("Responses request metadata is not an object")
         request_id = meta.get("x_request_id")
         server = native.get(request_id)
         prompt, text = prompt_text(payload), response_text(row)

@@ -86,3 +86,15 @@ def test_responses_rejects_models_without_native_text_capability():
         response = client.post("/v1/responses", json={"model": "test/model", "input": "hello"})
     assert response.status_code == 400 and response.json()["error"]["code"] == "unsupported_task"
     assert not registry.requests
+
+
+@pytest.mark.parametrize("value", ["Infinity", "-Infinity", "NaN"])
+def test_nonfinite_responses_temperature_is_rejected_before_native_dispatch(value):
+    registry = TextRegistry()
+    with make_client(registry) as client:
+        response = client.post("/v1/responses", content=(
+            '{"model":"test/model","input":"hello","temperature":' + value + '}'),
+            headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "temperature"
+    assert not registry.requests

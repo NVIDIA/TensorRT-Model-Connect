@@ -79,7 +79,7 @@ class ResponsesRequest(StrictRequest):
     input: str | list[ResponseInputMessage] = Field(min_length=1)
     instructions: str | None = None
     max_output_tokens: int | None = Field(default=None, ge=16)
-    temperature: float | None = Field(default=None, ge=0)
+    temperature: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     top_p: float | None = Field(default=None, ge=0, le=1)
     min_p: float | None = Field(default=None, ge=0, le=1)
     top_k: int | None = Field(default=None, ge=0)

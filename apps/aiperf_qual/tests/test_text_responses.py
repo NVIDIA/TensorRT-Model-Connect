@@ -80,3 +80,11 @@ def test_non_mapping_and_unsupported_input_shapes_are_not_interpreted_as_text():
                     {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "x"}]}]}]:
         assert prompt_text(payload) is None
     assert response_text({"status": 200, "responses": [{"text": "[]"}]}) is None
+
+
+def test_malformed_response_request_metadata_retains_a_failed_verification_record(capture):
+    run, joined, raw, _ = capture
+    raw["metadata"] = None
+    with pytest.raises(ConfigError, match="metadata is not an object"):
+        verify(run, joined)
+    assert json.loads((run.directory / "responses-verification.json").read_text())["verified"] is False
