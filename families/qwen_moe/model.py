@@ -63,6 +63,14 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+def _shape_only(rows: int, cols: int, dtype) -> np.ndarray:
+    """A read-only ``[rows, cols]`` view with no backing memory.
+
+    Stands in for a weight whose real bytes come from the quantization context.
+    """
+    return np.broadcast_to(np.zeros((), dtype=dtype), (rows, cols))
+
+
 class _QwenMoeModel:
     def load_weights(
         self,
@@ -70,6 +78,7 @@ class _QwenMoeModel:
         config: ModelConfig,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -122,24 +131,25 @@ class _QwenMoeModel:
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
             # Q/K/V/O projections (separate, no biases)
-            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            for stem, hf_stem in (
+                ("w_q", "q_proj"),
+                ("w_k", "k_proj"),
+                ("w_v", "v_proj"),
+                ("w_o", "o_proj"),
+            ):
+                name = f"{prefix}.{stem}"
+                if quant_ctx is not None and quant_ctx.should_quantize(name):
+                    # The engine reads the packed bytes from quant_ctx; only the
+                    # [in, out] shape is needed here.
+                    entry = quant_ctx.scales[name]
+                    weights[name] = _shape_only(entry.in_features, entry.out_features, weight_dtype)
+                else:
+                    raw_weight = _load_tensor(readers, f"{hf_prefix}.self_attn.{hf_stem}.weight")
+                    weights[name] = _transpose_2d(raw_weight, hf_stem, precision=precision)
+                    del raw_weight
 
             if attention_size == 0:
-                attention_size = q_raw.shape[0]
-
-            q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
-            k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
-            v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
-            o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
-            del q_raw, k_raw, v_raw, o_raw
-
-            weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_t
-            weights[f"{prefix}.w_v"] = v_t
-            weights[f"{prefix}.w_o"] = o_t
+                attention_size = weights[f"{prefix}.w_q"].shape[1]
 
             # Per-head Q/K RMSNorm (Qwen3 MoE)
             # HF stores [head_dim] weights shared across all heads;
@@ -181,37 +191,43 @@ class _QwenMoeModel:
 
                 # Pack expert weights per layer so the TRT graph can use a
                 # handful of batched matmuls instead of one branch per expert.
-                expert_w_gate = np.empty(
-                    (num_experts, hidden, moe_intermediate_size),
-                    dtype=weight_dtype,
-                )
-                expert_w_up = np.empty(
-                    (num_experts, hidden, moe_intermediate_size),
-                    dtype=weight_dtype,
-                )
-                expert_w_down = np.empty(
-                    (num_experts, moe_intermediate_size, hidden),
-                    dtype=weight_dtype,
-                )
-
-                for e in range(num_experts):
-                    exp_hf = f"{hf_prefix}.mlp.experts.{e}"
-                    gate_raw = _load_tensor(readers, f"{exp_hf}.gate_proj.weight")
-                    up_raw = _load_tensor(readers, f"{exp_hf}.up_proj.weight")
-                    down_raw = _load_tensor(readers, f"{exp_hf}.down_proj.weight")
-
-                    expert_w_gate[e] = _transpose_2d(
-                        gate_raw, f"expert_{e}_gate", precision=precision
+                # Quantized experts are stacked in quant_ctx instead.
+                if quant_ctx is None or not quant_ctx.should_quantize(
+                    f"{prefix}.experts.w_gate"
+                ):
+                    expert_w_gate = np.empty(
+                        (num_experts, hidden, moe_intermediate_size),
+                        dtype=weight_dtype,
                     )
-                    expert_w_up[e] = _transpose_2d(up_raw, f"expert_{e}_up", precision=precision)
-                    expert_w_down[e] = _transpose_2d(
-                        down_raw, f"expert_{e}_down", precision=precision
+                    expert_w_up = np.empty(
+                        (num_experts, hidden, moe_intermediate_size),
+                        dtype=weight_dtype,
                     )
-                    del gate_raw, up_raw, down_raw
+                    expert_w_down = np.empty(
+                        (num_experts, moe_intermediate_size, hidden),
+                        dtype=weight_dtype,
+                    )
 
-                weights[f"{prefix}.experts.w_gate"] = expert_w_gate
-                weights[f"{prefix}.experts.w_up"] = expert_w_up
-                weights[f"{prefix}.experts.w_down"] = expert_w_down
+                    for e in range(num_experts):
+                        exp_hf = f"{hf_prefix}.mlp.experts.{e}"
+                        gate_raw = _load_tensor(readers, f"{exp_hf}.gate_proj.weight")
+                        up_raw = _load_tensor(readers, f"{exp_hf}.up_proj.weight")
+                        down_raw = _load_tensor(readers, f"{exp_hf}.down_proj.weight")
+
+                        expert_w_gate[e] = _transpose_2d(
+                            gate_raw, f"expert_{e}_gate", precision=precision
+                        )
+                        expert_w_up[e] = _transpose_2d(
+                            up_raw, f"expert_{e}_up", precision=precision
+                        )
+                        expert_w_down[e] = _transpose_2d(
+                            down_raw, f"expert_{e}_down", precision=precision
+                        )
+                        del gate_raw, up_raw, down_raw
+
+                    weights[f"{prefix}.experts.w_gate"] = expert_w_gate
+                    weights[f"{prefix}.experts.w_up"] = expert_w_up
+                    weights[f"{prefix}.experts.w_down"] = expert_w_down
 
                 # Shared expert weights (Qwen2.5-MoE only)
                 if has_shared_expert:
@@ -322,6 +338,9 @@ class _QwenMoeModel:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        if quant_ctx is not None:
+            # Lets the engine inspector show which kernels the quantized matmuls use.
+            trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
         if precision == "fp16":
             work_np_dtype = np.float16
@@ -432,6 +451,7 @@ class _QwenMoeModel:
                 top_k=top_k,
                 has_shared_expert=has_shared_expert,
                 dtype=work_np_dtype,
+                quant_ctx=quant_ctx,
             )
 
             hidden_state = result["hidden"]
@@ -603,6 +623,8 @@ def _add_qwen3_moe_block(
     top_k: int,
     has_shared_expert: bool = True,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
+    weight_name: str = "",
 ) -> trt.ITensor:
     """Add Qwen MoE block with top-k softmax routing and optional shared expert.
 
@@ -632,6 +654,12 @@ def _add_qwen3_moe_block(
     norm_weights = network.add_elementwise(
         top_values, sum_val.get_output(0), trt.ElementWiseOperation.DIV
     )  # [1, top_k]
+
+    if quant_ctx is not None and quant_ctx.should_quantize(f"{weight_name}.experts.w_gate"):
+        # Gathered FP4 experts: only the selected experts are read and evaluated.
+        return quant_ctx.gathered_moe(
+            network, inp, top_indices, norm_weights.get_output(0), weight_name, hidden_size
+        )
 
     # 5. Compute all expert outputs with three packed batched matmuls.
     expert_outputs = _add_packed_swiglu_experts(
@@ -740,6 +768,7 @@ def _add_qwen3_moe_decoder_layer(
     top_k: int,
     has_shared_expert: bool = True,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
     """Add one Qwen MoE decoder layer: attention + (dense MLP or MoE)."""
 
@@ -767,6 +796,7 @@ def _add_qwen3_moe_decoder_layer(
         cos_half_tensor=cos_half_tensor,
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=head_dim,
+        quant_ctx=quant_ctx,
     )
     attn_out = attn["attn_out"]
 
@@ -809,6 +839,8 @@ def _add_qwen3_moe_decoder_layer(
             top_k,
             has_shared_expert=has_shared_expert,
             dtype=dtype,
+            quant_ctx=quant_ctx,
+            weight_name=prefix,
         )
 
     # Residual connection
@@ -906,8 +938,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Qwen-MoE max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Qwen-MoE has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "nvfp4"}:
+        raise NotImplementedError(
+            f"Qwen-MoE does not support quantization={request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("Qwen-MoE does not expose mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -916,9 +950,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    quantized = request.quantization == "nvfp4"
+    if quantized and (parallel.enabled or precision != "fp16"):
+        raise NotImplementedError(
+            "quantized Qwen-MoE builds need tensor_parallel_size=1 and fp16 precision"
+        )
     model = _QwenMoeModel()
     config.raw["_model_dir"] = str(model_dir)
-    weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = None
+    if quantized:
+        from .quantization import calibrate_qwen_moe
+
+        quant_ctx = calibrate_qwen_moe(model_dir, config, graph_ops, request.quantization)
+    weights = model.load_weights(
+        str(model_dir), config, precision=precision, quant_ctx=quant_ctx
+    )
     writer.set_header(family="qwen_moe", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -940,7 +986,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
