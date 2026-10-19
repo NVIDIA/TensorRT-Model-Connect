@@ -170,8 +170,12 @@ def build_decoder(network, target, reference, memory, text, weights, shapes, con
     heads = config["decoder_attention_heads"]
     levels = len(shapes)
 
+    entering = boxes
     for layer in range(config["decoder_layers"]):
         base = f"{prefix}.layers.{layer}"
+        # The final head scores against the reference ENTERING the last layer,
+        # not the one the last layer produces.
+        entering = boxes
 
         # Query position comes from the CURRENT boxes, through a small MLP.
         position = sine_box_embedding(network, boxes, config["d_model"] // 2, dtype=dtype)
@@ -232,4 +236,43 @@ def build_decoder(network, target, reference, memory, text, weights, shapes, con
         if debug is not None:
             debug[f"hidden_{layer}"] = hidden
             debug[f"boxes_{layer}"] = boxes
-    return hidden, boxes
+    return hidden, boxes, entering
+
+
+def build_heads(network, hidden, entering, text, weights, config,
+                prefix="model.decoder", dtype=np.float32):
+    """Final contrastive logits and boxes from the last decoder layer.
+
+    Two inputs that look interchangeable and are not:
+
+    * the head reads the decoder's **layer-normed** output
+      (``intermediate_hidden_states`` are ``decoder.layer_norm(hidden)``),
+      while the in-loop refinement reads the raw layer output. The same box
+      head therefore sees different tensors in the two places;
+    * the reference it adds is the box **entering** the last layer, not the
+      one that layer refined into.
+    """
+    normed = g.add_layer_norm(
+        network, hidden, weights[f"{prefix}.layer_norm.weight"],
+        weights[f"{prefix}.layer_norm.bias"], _LAYER_NORM_EPS, dtype=dtype)
+
+    queries = int(normed.shape[1])
+    logits = network.add_matrix_multiply(
+        normed, trt.MatrixOperation.NONE, text, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    pad = config["max_text_len"] - int(text.shape[1])
+    if pad > 0:
+        filler = np.full((1, queries, pad), -np.inf, dtype=dtype)
+        logits = g.concat(
+            network, [logits, g.add_constant(network, filler.shape, filler, dtype)], axis=2)
+
+    delta = normed
+    for index in range(config["box_head_layers"]):
+        delta = g.add_linear(network, delta,
+                             weights[f"bbox_embed.0.layers.{index}.weight"],
+                             weights[f"bbox_embed.0.layers.{index}.bias"], dtype=dtype)
+        if index + 1 < config["box_head_layers"]:
+            delta = g.add_relu(network, delta)
+    coords = network.add_elementwise(
+        delta, _logit(network, entering, dtype), trt.ElementWiseOperation.SUM).get_output(0)
+    boxes = network.add_activation(coords, trt.ActivationType.SIGMOID).get_output(0)
+    return logits, boxes
