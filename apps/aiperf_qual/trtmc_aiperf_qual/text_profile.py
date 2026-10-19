@@ -116,6 +116,8 @@ def cases(config: dict[str, Any]) -> list[dict[str, Any]]:
         multi_turn = config["corpus"].get("format") == "sharegpt_multi_turn"
         if multi_turn and len({item["output_tokens"] for item in result}) != 1:
             raise ConfigError("conversation profiles require one output-token cap for their per-turn settings")
+        if config["corpus"].get("format") == "spec_bench" and len({item["output_tokens"] for item in result}) != 1:
+            raise ConfigError("SpecBench profiles require one output-token cap for matched native accounting")
         if type(count) is not int or count < 1 or workload.get("requests", 20) < count * (2 if multi_turn else 1):
             raise ConfigError("corpus count must be positive and every prompt needs a measured request")
         allowed = {"chat"} if multi_turn else ({"completions"} if trace else {"completions", "responses"})

@@ -943,6 +943,8 @@ limit and original text explicit. No AIPerf source checkout or loader fork is
 required. The pilot runs twelve measured completions plus one separate warmup,
 concurrency one, greedy sampling and sixteen-token generation caps. Its unchanged
 owning-family checks run on the exact served bundle first.
+Use one output-token cap per profile; run separate configurations to compare caps
+so the recorded and native generation work remain aligned.
 
 This is **ordinary native generation**. The pilot does not configure or qualify
 a draft model, speculative orchestration or acceptance counters. `corpus.json`,

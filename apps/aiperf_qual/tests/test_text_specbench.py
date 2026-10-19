@@ -12,6 +12,15 @@ import pytest
 from trtmc_aiperf_qual.config import ConfigError
 from trtmc_aiperf_qual.text_specbench import prepare, select
 from trtmc_aiperf_qual.text_corpus import verify_and_record
+from trtmc_aiperf_qual.text_profile import cases
+
+
+def test_specbench_cap_sweeps_are_rejected_before_the_native_work_can_be_misidentified():
+    config = {"corpus": {"format": "spec_bench", "count": 1},
+              "workload": {"endpoints": ["completions"], "output_tokens": [16, 32],
+                           "requests": 1, "warmup_requests": 0}}
+    with pytest.raises(ConfigError, match="one output-token cap"):
+        cases(config)
 
 
 def test_selection_preserves_original_first_turn_and_source_identity():
