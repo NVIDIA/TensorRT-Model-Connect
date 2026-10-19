@@ -19,7 +19,7 @@ from typing import Any
 from pathlib import Path
 
 from anyio import CancelScope
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -94,6 +94,7 @@ class _BodyLimitMiddleware:
         if scope["type"] != "http" or scope["path"] not in {
             "/v1/completions",
             "/v1/chat/completions",
+            "/v1/responses",
             "/v1/embeddings",
             "/v1/ranking",
             "/v1/audio/transcriptions",
@@ -135,8 +136,9 @@ class _BodyLimitMiddleware:
             )(scope, receive, send)
 
 
-class _BodyTooLarge(Exception):
-    pass
+class _BodyTooLarge(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=413, detail="request body exceeds limit")
 
 
 def error_response(
@@ -266,6 +268,10 @@ def create_app(registry: ModelRegistry, config: ServerConfig) -> FastAPI:
     app.add_middleware(_BodyLimitMiddleware, limit=config.max_body_bytes)
 
     app.add_middleware(RequestPolicy, records=records)
+
+    @app.exception_handler(_BodyTooLarge)
+    async def body_too_large_handler(_request: Request, _error: _BodyTooLarge) -> JSONResponse:
+        return error_response(413, "content_too_large", "request body exceeds limit")
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, error: RequestValidationError) -> JSONResponse:

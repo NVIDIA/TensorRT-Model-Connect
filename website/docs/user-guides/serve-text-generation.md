@@ -119,7 +119,8 @@ the complete context limit; unsupported models return an explicit error.
 
 Responses supports a [subset of the Responses wire protocol](https://developers.openai.com/api/reference/resources/responses/methods/create):
 one text user input and optional string `instructions`, `max_output_tokens`
-(at least 16), and the sampling controls listed above. `store` defaults to
+(at least 16), `temperature`, `top_p`, `min_p`, `top_k`, `seed`, and
+`enable_thinking`. `store` defaults to
 `false`. `store=true`, `previous_response_id`, conversations/history, tools,
 media, reasoning-specific fields and `stream=true` are rejected. The endpoint
 returns one typed assistant message containing native output text. Its

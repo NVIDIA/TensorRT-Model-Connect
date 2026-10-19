@@ -98,6 +98,34 @@ def test_responses_input_limit_identifies_the_responses_field_before_native_disp
     assert not registry.requests
 
 
+@pytest.mark.parametrize("declared_length", [True, False])
+@pytest.mark.parametrize("route,field", [("/v1/responses", "input"), ("/v1/completions", "prompt")])
+def test_text_body_limit_rejects_oversized_json_before_native_dispatch(declared_length, route, field):
+    registry = TextRegistry()
+    app = create_app(registry, ServerConfig(max_body_bytes=128, max_prompt_bytes=1024, max_generation_tokens=64))
+    body = json.dumps({"model": "test/model", field: "x" * 256}).encode()
+    content = body if declared_length else iter([body[:64], body[64:]])
+    with TestClient(app) as client:
+        response = client.post(route, content=content, headers={"Content-Type": "application/json"})
+    assert ("content-length" in response.request.headers) is declared_length
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "content_too_large"
+    assert not registry.requests
+
+
+@pytest.mark.parametrize("route,field", [("/v1/responses", "input"), ("/v1/completions", "prompt")])
+def test_text_body_limit_preserves_valid_chunked_requests(route, field):
+    registry = TextRegistry()
+    app = create_app(registry, ServerConfig(max_body_bytes=128, max_prompt_bytes=1024, max_generation_tokens=64))
+    body = json.dumps({"model": "test/model", field: "hello"}).encode()
+    with TestClient(app) as client:
+        response = client.post(route, content=iter([body[:16], body[16:]]),
+                               headers={"Content-Type": "application/json"})
+    assert "content-length" not in response.request.headers
+    assert response.status_code == 200
+    assert registry.requests[0][1]["prompt"] == "hello"
+
+
 @pytest.mark.parametrize("value", ["Infinity", "-Infinity", "NaN"])
 def test_nonfinite_responses_temperature_is_rejected_before_native_dispatch(value):
     registry = TextRegistry()
