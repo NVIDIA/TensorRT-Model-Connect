@@ -18,7 +18,7 @@ class DockerImageManager:
         self.github = GitHubFiles(env)
 
     def ensure(self) -> str:
-        image = self.env.get("TRTMC_CI_IMAGE", "trtmc-ci:trt11.1")
+        image = self.env.get("TRTMC_CI_IMAGE", "trtmc-ci:trt11.4")
         self.commands.run(
             [
                 "docker",

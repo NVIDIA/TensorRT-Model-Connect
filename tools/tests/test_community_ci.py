@@ -677,8 +677,8 @@ def test_cpu_image_installs_the_same_pinned_community_requirements() -> None:
     assert "pip install --requirement /tmp/trtmc-community-ci.txt" in dockerfile
     assert '"libnvinfer11=${TENSORRT_APT_VERSION}"' in dockerfile
     assert '"libnvinfer-safe-headers-dev=${TENSORRT_APT_VERSION}"' in dockerfile
-    assert "libcurand-dev-13-3" in dockerfile
-    assert "cuda-nvrtc-dev-13-3" in dockerfile
+    assert "libcurand-dev-13-4" in dockerfile
+    assert "cuda-nvrtc-dev-13-4" in dockerfile
     assert "      jq \\\n" in dockerfile
     assert "2.12.0+cu130" in dockerfile
     assert "torch.version.cuda == '13.0'" in dockerfile

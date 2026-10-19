@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-FROM nvidia/cuda:13.3.0-devel-ubuntu24.04@sha256:ef2203909e80b8b976cfc672f7e2ae2b00bc0e25c404ee86d89e10a3802f1c52
+FROM nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:5626a7d0ecafe3e7c115a452f6b05f20f214f8509346196a7835b205dc5b7fd9
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TORCH_CUDA_ARCH_LIST=10.0
@@ -27,14 +27,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3.12 \
       python3.12-dev \
       python3.12-venv \
-      "libnvinfer-dev=11.1.0.106-1+cuda13.3" \
-      "libnvinfer-headers-dev=11.1.0.106-1+cuda13.3" \
-      "libnvinfer-headers-plugin-dev=11.1.0.106-1+cuda13.3" \
-      "libnvinfer-safe-headers-dev=11.1.0.106-1+cuda13.3" \
-      "libnvinfer-plugin11=11.1.0.106-1+cuda13.3" \
-      "libnvinfer11=11.1.0.106-1+cuda13.3" \
-      "libnvonnxparsers-dev=11.1.0.106-1+cuda13.3" \
-      "libnvonnxparsers11=11.1.0.106-1+cuda13.3" \
+      "libnvinfer-dev=11.4.0.106-1+cuda13.4" \
+      "libnvinfer-headers-dev=11.4.0.106-1+cuda13.4" \
+      "libnvinfer-headers-plugin-dev=11.4.0.106-1+cuda13.4" \
+      "libnvinfer-safe-headers-dev=11.4.0.106-1+cuda13.4" \
+      "libnvinfer-plugin11=11.4.0.106-1+cuda13.4" \
+      "libnvinfer11=11.4.0.106-1+cuda13.4" \
+      "libnvonnxparsers-dev=11.4.0.106-1+cuda13.4" \
+      "libnvonnxparsers11=11.4.0.106-1+cuda13.4" \
     && rm -rf /var/lib/apt/lists/*
 
 ENV VIRTUAL_ENV=/opt/venv
@@ -69,7 +69,7 @@ RUN python3.12 -m venv "$VIRTUAL_ENV" \
       "scikit-build-core==0.8.2" \
       "sentencepiece>=0.1.99" \
       "setuptools>=80,<82" \
-      "tensorrt==11.1.0.106" \
+      "tensorrt==11.4.0.106" \
       "tokenizers" \
       "transformers==5.2.0" \
     && pip install --force-reinstall \
@@ -87,7 +87,7 @@ ENV LD_LIBRARY_PATH=$TRT_LIB_DIR:$NCCL_LIB_DIR:$TVM_FFI_LIB_DIR:/usr/local/cuda/
 ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 
 RUN python3.12 -c \
-      "import importlib.metadata as m, tensorrt, torch, transformers, tvm_ffi; assert tensorrt.__version__ == '11.1.0.106'; assert torch.__version__ == '2.12.0+cu130'; assert transformers.__version__ == '5.2.0'; assert m.version('conan-py-build') == '0.4.3'; assert m.version('apache-tvm-ffi') == '0.1.12'; assert 80 <= int(m.version('setuptools').split('.', 1)[0]) < 82" \
+      "import importlib.metadata as m, tensorrt, torch, transformers, tvm_ffi; assert tensorrt.__version__ == '11.4.0.106'; assert torch.__version__ == '2.12.0+cu130'; assert transformers.__version__ == '5.2.0'; assert m.version('conan-py-build') == '0.4.3'; assert m.version('apache-tvm-ffi') == '0.1.12'; assert 80 <= int(m.version('setuptools').split('.', 1)[0]) < 82" \
     && test -f "$TRT_INC_DIR/NvInferVersion.h" \
     && test -f "$TRT_LIB_DIR/libnvinfer.so.11" \
     && test -f "$TRT_LIB_DIR/libnvonnxparser.so.11" \

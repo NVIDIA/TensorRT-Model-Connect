@@ -27,7 +27,7 @@ dependencies = [
     "sentencepiece>=0.1.99",
     "cuda-python>=13.0.3,<14",
     "apache-tvm-ffi==0.1.12",
-    "tensorrt==11.1.0.106",
+    "tensorrt==11.4.0.106",
     "PyYAML>=6.0",
 ]
 

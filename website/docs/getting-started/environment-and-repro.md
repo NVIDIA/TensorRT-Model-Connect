@@ -8,7 +8,7 @@ one installation path:
 
 | Path | Current boundary |
 | --- | --- |
-| Release wheel | Linux aarch64, Python 3.10 or 3.12, glibc 2.39 or newer, and official TensorRT 11.1.0.106. |
+| Release wheel | Linux aarch64, Python 3.10 or 3.12, glibc 2.39 or newer, and official TensorRT 11.4.0.106. |
 | Source build | Linux x86_64 or aarch64 with Docker, NVIDIA Container Toolkit, and enough disk space for the image and bundle. |
 
 x86_64 release wheels are not published yet. x86_64 users should use the
