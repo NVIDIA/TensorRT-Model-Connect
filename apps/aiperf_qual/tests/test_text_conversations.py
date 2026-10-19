@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import hashlib
 import json
 from types import SimpleNamespace
@@ -84,6 +85,22 @@ def test_live_assistant_history_and_per_turn_identity_are_verified(capture):
     assert result["verified"] and result["measured_conversations"] == 1
     assert [row["turn_index"] for row in result["requests"]] == [0, 1]
     assert result["requests"][1]["observed_gap_ms"] == 50
+
+
+@pytest.mark.parametrize("phase", ["profiling", "warmup"])
+def test_incomplete_replayed_profiling_group_is_rejected_even_after_full_coverage(capture, phase):
+    run, joined, corpus, raw = capture
+    replay = copy.deepcopy(raw[0])
+    replay["metadata"].update(x_request_id="replay-first-only", x_correlation_id="another-instance",
+        session_num=2, benchmark_phase=phase, request_start_ns=1_400_000_000, request_end_ns=1_500_000_000)
+    raw.append(replay)
+    joined.append({"request_id": "replay-first-only", "server": copy.deepcopy(joined[0]["server"])})
+    if phase == "profiling":
+        with pytest.raises(ConfigError, match="both turns"):
+            verify_records(run, joined, corpus, count_messages)
+    else:
+        # Warmup request limits may intentionally end before a conversation does.
+        assert verify_records(run, joined, corpus, count_messages)["verified"]
 
 
 @pytest.mark.parametrize("change", ["drop_history", "role", "original_text", "assistant_text", "native_history", "capacity"])

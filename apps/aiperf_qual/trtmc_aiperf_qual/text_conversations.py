@@ -158,6 +158,7 @@ def verify_records(run, joined, corpus, count_messages):
             "correlation_id": meta.get("x_correlation_id"), "input_tokens": tokens,
             "messages_sha256": fingerprint(messages), "completion_sha256": server["completion_sha256"],
             "configured_think_time_ms": corpus["think_time_ms"] if turn else 0, "observed_gap_ms": gap})
-    if measured != {(session, turn) for session in expected for turn in (0, 1)}:
+    if (any(len(group) != 2 for (phase, _), group in groups.items() if phase == "profiling") or
+            measured != {(session, turn) for session in expected for turn in (0, 1)}):
         raise ConfigError("profiling did not cover both turns of every selected conversation")
     return {"verified": True, "measured_conversations": len(expected), "requests": identities}
