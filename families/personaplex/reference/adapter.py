@@ -62,8 +62,8 @@ class Adapter:
                     tokens = self.generator.step(encoded[:, :, index:index + 1])
                     if tokens is None:
                         continue
+                    # Decode the returned stream once; the other codec is only needed for official warmup.
                     chunks.append(self.mimi.decode(tokens[:, 1:9])[0, 0].float())
-                    self.other_mimi.decode(tokens[:, 1:9])
                     if len(chunks) >= frames:
                         return chunks
             return chunks
