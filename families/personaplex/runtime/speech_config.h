@@ -54,6 +54,11 @@ struct SpeechConfig {
     int32_t text_eos_token_id{-1};
 
     std::vector<int32_t> text_prompt_ids;
+    std::vector<float> system_prompt_embeddings;
+    std::vector<int32_t> system_prompt_cache;
+    std::vector<uint8_t> system_prompt_provided;
+    int32_t system_prompt_offset{0};
+    bool listen_before_answer{false};
 };
 
 } // namespace trtmc

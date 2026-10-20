@@ -295,6 +295,8 @@ def _suite_side(environment: Environment, service: Mapping[str, Any], model: Map
         body = json.loads(record["responses"][-1]["text"])
         key = request_sha(record["payload"]["request"])
         by_request[key] = body.get("trtmc_observation") or {}
+        if item.get("postprocess"):
+            by_request[key]["artifact_directory"] = str(Path(service["records"]).parent / "scratch" / body["id"])
         timing_by_request[key] = {"model_call_ms": float((body.get("trtmc_timing") or {}).get("model_call_ms", 0)),
                                   "completion_tokens": by_request[key].get("output_tokens")}
     observations = {index: by_request[problem["request_sha"]] for index, problem in enumerate(problems)
@@ -308,7 +310,34 @@ def _suite_side(environment: Environment, service: Mapping[str, Any], model: Map
         side["rejected"] = {"greedy": out_of_capacity}
     if failing:
         side["failed"] = {"greedy": failed_reason(failing, len(failing))}
+    if item.get("postprocess"):
+        from .services import reference_python
+
+        postprocess(environment, item, observations, out, python=reference_python(environment, model))
     return side
+
+
+def postprocess(environment: Environment, item: Mapping[str, Any], observations: dict[int, Any], out: Path, *,
+                python: str | None = None) -> None:
+    """Augment saved outputs after profiling; a separate process releases its model on exit."""
+    import subprocess
+
+    config = item["postprocess"]
+    source, target = out.parent / f"{out.name}.postprocess-input.json", out.parent / f"{out.name}.postprocess-output.json"
+    source.write_text(json.dumps(observations))
+    command = [str(environment.values.get("scoring_python") or python or environment["serve_python"]),
+               str(environment.path("repo") / config["script"]), "--input", str(source), "--output", str(target),
+               *config.get("arguments", [])]
+    with (out.parent / f"{out.name}.postprocess.log").open("w") as log:
+        subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT,
+                       timeout=float(config.get("timeout_s", 14400)))
+    updated = {int(index): value for index, value in json.loads(target.read_text()).items()}
+    if set(updated) != set(observations):
+        raise ValueError("output postprocessing changed the sample identities")
+    for index, original in observations.items():
+        if any(updated[index].get(key) != value for key, value in original.items()):
+            raise ValueError("output postprocessing changed original evidence")
+    observations.update(updated)
 
 
 def run_side(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
@@ -782,7 +811,8 @@ def _probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any
 
 def keeps_artifacts(model: Mapping[str, Any]) -> bool:
     """A benchmark reads the output files the servers write (their scratch is then kept)."""
-    return any(item.get("metric") in gold_metrics.ARTIFACT_METRICS for item in model.get("absolute", []))
+    return any(item.get("postprocess") or item.get("metric") in gold_metrics.ARTIFACT_METRICS
+               for item in model.get("absolute", []))
 
 
 def run_native(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],

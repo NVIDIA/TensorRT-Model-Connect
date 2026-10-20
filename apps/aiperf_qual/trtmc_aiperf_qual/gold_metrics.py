@@ -41,6 +41,39 @@ def choice(gold: Any, observation: Mapping[str, Any] | None, task: str | None = 
     return bool(answer) and answer == str(gold).strip().upper(), answer
 
 
+def spoken_choice(gold: Any, observation: Mapping[str, Any] | None,
+                  task: str | None = None) -> tuple[bool, str]:
+    """Score a transcribed MCQ reply by an explicit letter or unique complete option text.
+
+    Missing, ambiguous and unparsable answers are wrong. Never guess a letter.
+    """
+    text = _text(observation).strip().lower()
+    def affirmative(start: int) -> bool:
+        clause = re.split(r"[.,;:!?]", text[:start])[-1]
+        return not re.search(r"\b(?:not|never|don't|doesn't|isn't|aren't|can't|cannot|won't)\b", clause)
+
+    patterns = (
+        r"\b(?:option|choice)\s+([a-d])\b",
+        r"\b(?:the\s+)?(?:correct\s+)?answer\s+(?:is|would be)\s+([a-d])(?=\s*(?:[.,:;!?]|$))",
+        r"\b([a-d])\s+is\s+(?:the\s+)?(?:correct\s+)?answer\b",
+        r"\b(?:i|you|we)(?:'d| would)?\s+(?:say|choose|pick)\s+([a-d])(?=\s*(?:[.,:;!?]|$))",
+    )
+    letters = {match.group(1) for pattern in patterns for match in re.finditer(pattern, text)
+               if affirmative(match.start())}
+    direct = re.fullmatch(r"(?:the (?:correct )?answer is\s+)?([a-d])[.!]?", text)
+    if direct:
+        letters.add(direct.group(1))
+    if not letters:
+        for letter, option in re.findall(r"(?m)^([A-D])\.\s*(.+)$", gold["prompt"]):
+            option = " ".join(re.findall(r"\w+", option.lower()))
+            raw = re.escape(option).replace(r"\ ", r"\W+")
+            positive = any(affirmative(match.start()) for match in re.finditer(r"(?<!\w)" + raw + r"(?!\w)", text))
+            if len(option) >= 3 and positive:
+                letters.add(letter.lower())
+    answer = next(iter(letters)).upper() if len(letters) == 1 else ""
+    return bool(answer) and answer == str(gold["answer"]).strip().upper(), answer
+
+
 def _squash(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
@@ -206,7 +239,7 @@ def box_iou50(gold: Any, observation: Mapping[str, Any] | None, task: str | None
     return _iou(predicted, target) >= 0.5, match.group(0)
 
 
-BINARY: dict[str, Callable[..., tuple[bool, str]]] = {"choice": choice, "contains": contains, "code_pass": code_pass,
+BINARY: dict[str, Callable[..., tuple[bool, str]]] = {"choice": choice, "spoken_choice": spoken_choice, "contains": contains, "code_pass": code_pass,
                                                       "top1": top1, "box_iou50": box_iou50}
 
 

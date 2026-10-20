@@ -7,6 +7,7 @@ greedy LMGen answers (at most ``max_new_tokens`` speech frames), decoded to 24 k
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, Mapping
@@ -42,6 +43,30 @@ class Adapter:
         for streaming in (self.mimi, self.other_mimi, self.generator):
             streaming.streaming_forever(1)
         warmup(self.mimi, self.other_mimi, self.generator, spec.device, self.frame_size)
+        self.system_prompt = None
+        adapter_options = getattr(spec, "options", {})
+        self.listen_before_answer = bool(adapter_options.get("listen_before_answer", False))
+        if prompt_path := adapter_options.get("system_prompt"):
+            prompt_path = Path(prompt_path)
+            if not prompt_path.is_absolute():
+                prompt_path = Path(sys.prefix) / prompt_path
+            with np.load(prompt_path, allow_pickle=False) as prompt:
+                self.system_prompt = json.loads(str(prompt["metadata"]))
+                voice_embeddings = prompt["embeddings"][:self.system_prompt["voice_frames"]].copy()
+            voice = Path(adapter_options["voice_prompt"])
+            if not voice.is_absolute():
+                voice = Path(sys.prefix) / voice
+            if (self.system_prompt["precision"] != spec.precision
+                    or self.system_prompt["voice"] != voice.name):
+                raise self.host.Error("the reference system prompt does not match its precision or voice")
+            self.generator.load_voice_prompt_embeddings(str(voice))
+            # Official voice assets store BF16 embeddings; match the requested model storage dtype.
+            self.generator.voice_prompt_embeddings = self.generator.voice_prompt_embeddings.to(spec.dtype)
+            actual_voice = self.generator.voice_prompt_embeddings.float().cpu().numpy().reshape(-1, 4096)
+            if not np.array_equal(actual_voice, voice_embeddings):
+                raise self.host.Error("the reference voice embeddings differ from the prepared prefix")
+            self.generator.text_prompt_tokens = self.system_prompt["text_token_ids"]
+            self.generator.audio_silence_frame_cnt = self.system_prompt["silence_frames"]
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         import torch
@@ -51,15 +76,31 @@ class Adapter:
         # Mono at Mimi's rate (librosa resampling): the environment's sphn stand-in reads 24 kHz files only.
         audio_path = str(self.host.required(request, "audio_path"))
         source_audio = self.host.load_audio(audio_path, int(self.mimi.sample_rate))[None, :]
-        for streaming in (self.mimi, self.other_mimi, self.generator):
-            streaming.reset_streaming()
-
+        question_frames = (source_audio.shape[-1] + self.frame_size - 1) // self.frame_size
+        system_prompt = getattr(self, "system_prompt", None)
+        if system_prompt is not None:
+            tail = int(request.get("tail_frames", 0))
+            if tail < 0 or tail > frames:
+                raise self.host.Error("tail_frames must fit the output frame budget")
+            source_audio = np.pad(source_audio, ((0, 0), (0, tail * self.frame_size)))
         def run() -> list[Any]:
+            for streaming in (self.mimi, self.other_mimi, self.generator):
+                streaming.reset_streaming()
+            if system_prompt is not None:
+                self.generator.step_system_prompts(self.mimi)
+                self.mimi.reset_streaming()
             chunks: list[Any] = []
+            input_frame = 0
             for encoded in encode_from_sphn(self.mimi, _iterate_audio(source_audio, sample_interval_size=self.frame_size,
                                                                       pad=True), max_batch=1):
                 for index in range(encoded.shape[-1]):
-                    tokens = self.generator.step(encoded[:, :, index:index + 1])
+                    forced = ({"moshi_tokens": self.generator._encode_zero_frame(),
+                               "text_token": self.generator.zero_text_code}
+                              if getattr(self, "listen_before_answer", False) and input_frame < question_frames else {})
+                    if getattr(self, "listen_before_answer", False) and input_frame == question_frames:
+                        forced = {"text_token": 0}  # EPAD: official Moshi spoken-QA response trigger.
+                    tokens = self.generator.step(encoded[:, :, index:index + 1], **forced)
+                    input_frame += 1
                     if tokens is None:
                         continue
                     # Decode the returned stream once; the other codec is only needed for official warmup.
@@ -73,5 +114,9 @@ class Adapter:
             raise self.host.Error("the native PersonaPlex produced no speech frames")
         audio = torch.cat(chunks).cpu().numpy().astype(np.float32)
         rate = int(self.mimi.sample_rate)
+        provenance = ({"system_prompt_voice": system_prompt["voice"],
+                       "system_prompt_frames": system_prompt["frames"]}
+                      if system_prompt is not None else {})
         return self.host.invocation({**self.host.tensor_observation(audio, artifact_base), "sample_rate": rate,
-                                     "output_tokens": len(chunks), "audio_seconds": audio.size / rate}, model_ms)
+                                     "output_tokens": len(chunks), "audio_seconds": audio.size / rate,
+                                     **provenance}, model_ms)

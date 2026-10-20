@@ -20,6 +20,7 @@ struct EncoderShapeInfo {
 };
 
 struct SpeechGenerationSettings {
+    int32_t listen_frames{0};
     int32_t hidden{0};
     int32_t num_cb{0};
     int32_t stream_cb{0};

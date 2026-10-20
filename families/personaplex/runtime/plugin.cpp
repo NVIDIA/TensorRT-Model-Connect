@@ -55,6 +55,22 @@ SpeechConfig parse_config(const BundleReader& bundle, const nlohmann::json& json
     config.temporal_text_embedding = floats("temporal_text.embeddings");
     config.depth_text_embedding = floats("depth_text.embeddings");
     config.depth_audio_embeddings = floats("depth_audio.embeddings");
+    if (json.contains("system_prompt")) {
+        config.listen_before_answer = json.value("listen_before_answer", false);
+        const auto& prompt = json.at("system_prompt");
+        config.system_prompt_offset = prompt.at("offset").get<std::int32_t>();
+        config.system_prompt_cache = prompt.at("cache").get<std::vector<std::int32_t>>();
+        config.system_prompt_provided = prompt.at("provided").get<std::vector<std::uint8_t>>();
+        config.system_prompt_embeddings = floats("system_prompt.embeddings");
+        const auto frames = prompt.at("frames").get<std::int32_t>();
+        if (prompt.at("version").get<int>() != 1 || frames <= 0 ||
+            config.system_prompt_offset != frames + 1 ||
+            config.system_prompt_embeddings.size() !=
+                static_cast<std::size_t>(frames) * config.temporal_hidden_size ||
+            config.system_prompt_cache.size() != 68 || config.system_prompt_provided.size() != 68 ||
+            !config.text_prompt_ids.empty())
+            throw std::runtime_error("PersonaPlex system-prompt state is invalid");
+    }
     if (config.sample_rate <= 0 || config.num_codebooks <= 0 || config.codebook_size <= 0 ||
         config.temporal_hidden_size <= 0 || config.temporal_num_layers <= 0 ||
         config.depth_hidden_size <= 0 || config.depth_num_layers <= 0 ||

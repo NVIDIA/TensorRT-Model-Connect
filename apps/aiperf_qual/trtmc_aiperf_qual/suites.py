@@ -315,6 +315,8 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
             record["audio"] = {"$file": {"suffix": ".wav", "b64": base64.b64encode(buffer.getvalue()).decode()}}
         if label_column:
             record["label"] = row[label_column]
+        if source.get("label_fields"):
+            record["label"] = {name: row[column] for name, column in source["label_fields"].items()}
         if source.get("label_image"):
             record["label"] = {"png_b64": base64.b64encode(row[label_column]["bytes"]).decode()}
         if source.get("polygon_label") and "image" in roles:  # an object mask as a polygon, with a point inside it
