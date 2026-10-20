@@ -189,11 +189,11 @@ def build_personaplex_tp_decoder_engine(
             partial_rotary_factor,
             interleaved=interleaved_rope,
         )
-        cos_half_tensor = _cast_work_dtype(
-            graph_ops.add_constant(network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np, dtype=np.float32
         )
-        sin_half_tensor = _cast_work_dtype(
-            graph_ops.add_constant(network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np, dtype=np.float32
         )
     else:
         raise NotImplementedError("PersonaPlex tensor-parallel builds require RoPE")
