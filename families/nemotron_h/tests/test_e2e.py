@@ -678,6 +678,8 @@ def _assert_correctness(
 def test_reference_routes_keep_tp4_on_golden_and_single_gpu_on_hf() -> None:
     expected_backends = {
         "nemotron-h-nano-9b": "hf_transformers",
+        "nemotron-h-nano-9b-fp8": "golden_snapshot",
+        "nemotron-h-nano-9b-nvfp4": "golden_snapshot",
         "nemotron-h-nano-9b-tp4": "golden_snapshot",
     }
     assert {name: case["reference_backend"] for name, (_, case) in _CASES.items()} == (
