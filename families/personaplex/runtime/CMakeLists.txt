@@ -81,4 +81,8 @@ if(TRTMC_BUILD_TESTS)
     )
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+  # The embedding plan uses the CUDA host conversions to round Half additions.
+  target_include_directories(test_personaplex_speech_temporal_embed_plan SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
 endif()
