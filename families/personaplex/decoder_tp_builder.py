@@ -419,9 +419,7 @@ def _add_tp_decoder_layer(
         else:
             norm2 = attn["normed"]
     else:
-        residual1 = network.add_elementwise(
-            hidden, attn_out, trt.ElementWiseOperation.SUM
-        ).get_output(0)
+        residual1 = graph_ops.add_residual_sum(network, hidden, attn_out)
         norm2 = _apply_norm(
             network,
             residual1,
@@ -448,17 +446,11 @@ def _add_tp_decoder_layer(
     mlp_out = add_all_reduce_sum(network, mlp_out, tp_size)
 
     if parallel_residual:
-        sum_attn = network.add_elementwise(
-            hidden, attn_out, trt.ElementWiseOperation.SUM
-        ).get_output(0)
-        residual2 = network.add_elementwise(
-            sum_attn, mlp_out, trt.ElementWiseOperation.SUM
-        ).get_output(0)
+        sum_attn = graph_ops.add_residual_sum(network, hidden, attn_out)
+        residual2 = graph_ops.add_residual_sum(network, sum_attn, mlp_out)
         post_attn_tensor = sum_attn
     else:
-        residual2 = network.add_elementwise(
-            residual1, mlp_out, trt.ElementWiseOperation.SUM
-        ).get_output(0)
+        residual2 = graph_ops.add_residual_sum(network, residual1, mlp_out)
         post_attn_tensor = residual1
 
     return {

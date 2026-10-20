@@ -666,10 +666,10 @@ def _add_decoder_layer(
         else:
             norm2 = attn["normed"]
     else:
-        residual1 = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
+        residual1 = graph_ops.add_residual_sum(network, hidden, attn_out)
         norm2 = _apply_norm(
             network,
-            residual1.get_output(0),
+            residual1,
             hidden_size,
             weights[f"{prefix}.post_attn_norm"],
             weights.get(f"{prefix}.post_attn_norm_beta"),
@@ -708,19 +708,15 @@ def _add_decoder_layer(
 
     # Final residual connection
     if parallel_residual:
-        sum_attn = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
-        residual2 = network.add_elementwise(
-            sum_attn.get_output(0), mlp_out, trt.ElementWiseOperation.SUM
-        )
-        post_attn_tensor = sum_attn.get_output(0)
+        sum_attn = graph_ops.add_residual_sum(network, hidden, attn_out)
+        residual2 = graph_ops.add_residual_sum(network, sum_attn, mlp_out)
+        post_attn_tensor = sum_attn
     else:
-        residual2 = network.add_elementwise(
-            residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM
-        )
-        post_attn_tensor = residual1.get_output(0)
+        residual2 = graph_ops.add_residual_sum(network, residual1, mlp_out)
+        post_attn_tensor = residual1
 
     return {
-        "hidden": residual2.get_output(0),
+        "hidden": residual2,
         "post_attn": post_attn_tensor,
         "present_k": present_k,
         "present_v": present_v,

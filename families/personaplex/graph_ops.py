@@ -25,6 +25,21 @@ def _cast_back_to_trt_dtype(
     return network.add_cast(tensor, target_dtype).get_output(0)
 
 
+def add_residual_sum(
+    network: trt.INetworkDefinition, residual: trt.ITensor, update: trt.ITensor
+) -> trt.ITensor:
+    """Add already rounded branch outputs and restore the residual dtype.
+
+    Summing in FP32 keeps the producer's Half rounding boundary distinct from
+    the residual add. Otherwise GEMM fusion can add the unrounded accumulator.
+    """
+    output_dtype = residual.dtype
+    residual = _cast_back_to_trt_dtype(network, residual, trt.float32)
+    update = _cast_back_to_trt_dtype(network, update, trt.float32)
+    total = network.add_elementwise(residual, update, trt.ElementWiseOperation.SUM).get_output(0)
+    return _cast_back_to_trt_dtype(network, total, output_dtype)
+
+
 def _add_matrix_multiply_with_fp32_accumulation(
     network: trt.INetworkDefinition,
     lhs: trt.ITensor,

@@ -523,12 +523,10 @@ def build_dual_profile_decoder_engine(
             else:
                 norm2 = normed
         else:
-            residual1 = network.add_elementwise(
-                hidden_state, attn_out, trt.ElementWiseOperation.SUM
-            )
+            residual1 = graph_ops.add_residual_sum(network, hidden_state, attn_out)
             norm2 = _norm_multi(
                 network,
-                residual1.get_output(0),
+                residual1,
                 hidden,
                 weights[f"{prefix}.post_attn_norm"],
                 weights.get(f"{prefix}.post_attn_norm_beta"),
@@ -563,15 +561,11 @@ def build_dual_profile_decoder_engine(
 
         # Final residual.
         if parallel_residual:
-            sum_attn = network.add_elementwise(hidden_state, attn_out, trt.ElementWiseOperation.SUM)
-            residual2 = network.add_elementwise(
-                sum_attn.get_output(0), mlp_out, trt.ElementWiseOperation.SUM
-            )
+            sum_attn = graph_ops.add_residual_sum(network, hidden_state, attn_out)
+            residual2 = graph_ops.add_residual_sum(network, sum_attn, mlp_out)
         else:
-            residual2 = network.add_elementwise(
-                residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM
-            )
-        hidden_state = residual2.get_output(0)
+            residual2 = graph_ops.add_residual_sum(network, residual1, mlp_out)
+        hidden_state = residual2
 
     # ---- Final norm + LM head -------------------------------------------
     final_norm = weights.get("final_norm")
