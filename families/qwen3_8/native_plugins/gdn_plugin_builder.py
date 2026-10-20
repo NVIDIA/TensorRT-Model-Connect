@@ -106,6 +106,7 @@ def ensure_plugin_loaded(*, verbose: bool = False) -> Path:
 def _array_constraint(ct, constraint_cls, dtype, shape, strides=None):
     """Array argument with constant shape and strides and 16-byte alignment assumptions.
 
+    A `None` in `shape` is a runtime extent (the strides that depend on it become runtime too).
     The alignment and divisibility hints let the tile compiler use vectorized accesses, as
     `ct.launch` does for real tensors. TensorRT aligns tensor and workspace buffers to 256
     bytes, and every sliced view used here starts at a multiple of 16 bytes.
@@ -114,7 +115,7 @@ def _array_constraint(ct, constraint_cls, dtype, shape, strides=None):
         rev, step = [], 1
         for n in reversed(shape):
             rev.append(step)
-            step *= n
+            step = None if (step is None or n is None) else step * n
         strides = tuple(reversed(rev))
     elem_bytes = 2 if dtype in (ct.bfloat16, ct.float16) else 4
     vec = 16 // elem_bytes
@@ -122,7 +123,7 @@ def _array_constraint(ct, constraint_cls, dtype, shape, strides=None):
         dtype, len(shape), index_dtype=ct.int32, stride_constant=tuple(strides),
         shape_constant=tuple(shape), alias_groups=[], stride_lower_bound_incl=0,
         may_alias_internally=False, base_addr_divisible_by=16,
-        stride_divisible_by=tuple(math.gcd(int(st), vec) for st in strides))
+        stride_divisible_by=tuple(1 if st is None else math.gcd(int(st), vec) for st in strides))
 
 
 def block_sizes() -> tuple[int, int, int]:
@@ -290,12 +291,15 @@ _PREFILL_CUBIN_CACHE: dict[tuple, dict[str, bytes]] = {}
 
 
 def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, seq_len: int,
-                           bf16: bool, gpu_code: str) -> dict[str, bytes]:
-    """Compile the five prefill stage kernels (cutile/gdn_prefill.py) for fixed shapes."""
+                           bf16: bool, gpu_code: str, dynamic: bool = False) -> dict[str, bytes]:
+    """Compile the six prefill stage kernels (cutile/gdn_prefill.py).
+
+    Static: shapes are constants for `seq_len` tokens. Dynamic: the token count is a runtime
+    extent (any 1 <= T <= seq_len; the kernels read it from the array shapes)."""
     conv_block = block_sizes()[0]
     block_v = prefill_block_v()
     chunk = prefill_chunk()
-    key = (num_heads, num_kv_heads, head_dim, seq_len, bf16, gpu_code, conv_block, block_v, chunk)
+    key = (num_heads, num_kv_heads, head_dim, seq_len, bf16, gpu_code, conv_block, block_v, chunk, dynamic)
     if key in _PREFILL_CUBIN_CACHE:
         return _PREFILL_CUBIN_CACHE[key]
 
@@ -308,9 +312,11 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
     H, D, NK, T = num_heads, head_dim, num_kv_heads, seq_len
     CD = 2 * NK * D + H * D
     act, f32, i32 = (ct.bfloat16 if bf16 else ct.float16), ct.float32, ct.int32
-    if T % chunk:
+    if T % chunk and not dynamic:
         raise ValueError(f"seq_len {T} must be a multiple of the prefill chunk {chunk}")
-    NC = T // chunk
+    NC = None if dynamic else T // chunk
+    if dynamic:
+        T = None  # runtime extent
 
     def arr(dtype, shape, strides=None):
         return _array_constraint(ct, ArrayConstraint, dtype, shape, strides)
@@ -318,7 +324,8 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
     def pow2(n):
         return 1 << (n - 1).bit_length()
 
-    qkv_rows = (T * CD, CD, D, 1)  # q, k, v are strided views of the [T, CD] conv output
+    TH = None if T is None else T * H
+    qkv_rows = (None if T is None else T * CD, CD, D, 1)  # q, k, v: strided views of the [T, CD] conv output
     stages = {
         "conv": (K.conv_kernel, [
             arr(act, (T, CD)), arr(act, (CD, _CONV_KERNEL)), arr(f32, (CD, _CONV_KERNEL)),
@@ -338,10 +345,10 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
         "inter": (K.inter_kernel, [
             arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)),
             arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)), arr(act, (1, T, H, D)),
-            arr(f32, (1, H, D, D)), arr(f32, (1, H, D, D)), NC, chunk, pow2(D), block_v]),
+            arr(f32, (1, H, D, D)), arr(f32, (1, H, D, D)), chunk, pow2(D), block_v]),
         "norm": (K.norm_kernel, [
-            arr(act, (T * H, D)), arr(act, (T * H, D)), arr(f32, (H, D)), arr(i32, (1,)),
-            arr(act, (T * H, D)), _NORM_EPS, D, pow2(D), H]),
+            arr(act, (TH, D)), arr(act, (TH, D)), arr(f32, (H, D)), arr(i32, (1,)),
+            arr(act, (TH, D)), _NORM_EPS, D, pow2(D), H]),
     }
     cubins = {}
     for name, (kernel, parameters) in stages.items():
@@ -355,8 +362,11 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
 
 
 def add_gdn_prefill_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads: int,
-                           head_dim: int, seq_len: int, bf16: bool):
-    """Add the static-shape prefill plugin layer (steps 3-10 for `seq_len` tokens).
+                           head_dim: int, seq_len: int, bf16: bool, dynamic: bool = False):
+    """Add the prefill plugin layer (steps 3-10).
+
+    Static (default): exactly `seq_len` rows per call. `dynamic=True`: the row count T of the
+    inputs is a runtime extent, 1 <= T <= `seq_len` (the TensorRT optimization profile maximum).
 
     `inputs` must be the 12 tensors listed in gdn_prefill_plugin.cpp (the last one is the int32
     `valid_len`, 1 <= valid_len <= seq_len). Returns the layer; outputs are
@@ -367,7 +377,7 @@ def add_gdn_prefill_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads
     conv_dim = 2 * num_kv_heads * head_dim + num_heads * head_dim
     cubins = compile_prefill_cubins(num_heads=num_heads, num_kv_heads=num_kv_heads,
                                     head_dim=head_dim, seq_len=seq_len, bf16=bf16,
-                                    gpu_code=_gpu_code())
+                                    gpu_code=_gpu_code(), dynamic=dynamic)
     creator = trt.get_plugin_registry().get_creator(PREFILL_PLUGIN_NAME, "1", "")
     if creator is None:
         raise RuntimeError(f"TensorRT plugin creator {PREFILL_PLUGIN_NAME} is not registered")
@@ -380,7 +390,7 @@ def add_gdn_prefill_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads
               int_field("head_dim", head_dim), int_field("conv_dim", conv_dim),
               int_field("seq_len", seq_len), int_field("act_bytes", 2),
               int_field("conv_block", conv_block), int_field("block_v", block_v),
-              int_field("chunk", chunk)]
+              int_field("chunk", chunk), int_field("dynamic", int(dynamic))]
     fields.append(trt.PluginField(
         "threads", np.array([_block_threads(blob) for blob in cubins.values()], dtype=np.int32),
         trt.PluginFieldType.INT32))

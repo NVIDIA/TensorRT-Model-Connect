@@ -199,12 +199,12 @@ def inter_kernel(
     Output,  # (1, T, H, V) activation dtype
     StateIn,  # (1, H, K, V) fp32
     StateOut,  # (1, H, K, V) fp32
-    NC: ConstInt,
     CS: ConstInt,
     BLOCK_K: ConstInt,
     BLOCK_V: ConstInt,
 ):
-    """Grid: (H, cdiv(V, BLOCK_V)). Sequential over the NC chunks (state passing)."""
+    """Grid: (H, cdiv(V, BLOCK_V)). Sequential over the chunks (state passing); the number of
+    chunks is the runtime extent of axis 1 of Q_ch."""
     h = ct.bid(0)
     pv = ct.bid(1)
     zero = ct.PaddingMode.ZERO
@@ -212,7 +212,7 @@ def inter_kernel(
                           padding_mode=zero).reshape((BLOCK_K, BLOCK_V)), ct.float32)
     r = ct.arange(CS, dtype=ct.int32)
     causal = ct.expand_dims(r, axis=1) >= ct.expand_dims(r, axis=0)
-    for ci in range(NC):
+    for ci in range(Q_ch.shape[1]):
         k_cum = ct.load(K_cumdecay, index=(h, ci, 0, 0), shape=(1, 1, CS, BLOCK_K),
                         padding_mode=zero).reshape((CS, BLOCK_K))
         v_corr = ct.load(V_corr, index=(h, ci, 0, pv), shape=(1, 1, CS, BLOCK_V),

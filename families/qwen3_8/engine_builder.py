@@ -1754,9 +1754,15 @@ class Qwen38Model:
     def build_engine_prefill(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, chunk_len: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        quant_ctx=None, verbose: bool = False, dynamic: bool = False,
+        opt_len: int = 0,
     ) -> bytes:
         """Build the multi-token prefill engine: `chunk_len` prompt tokens per call.
+
+        ``dynamic=True`` builds one engine whose token count T is a runtime dimension,
+        1 <= T <= `chunk_len` (optimization profile opt = `opt_len`, default `chunk_len` / 2);
+        it needs the cuTile GDN prefill plugin (TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1). Set
+        `valid_len` to T, the number of rows; every `(chunk_len, ...)` shape below is `(T, ...)`.
 
         Unlike `build_engine_multi_token` (which chains `chunk_len` single-token
         sub-steps and so still streams every weight `chunk_len` times), every
@@ -1847,11 +1853,22 @@ class Qwen38Model:
             trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # --- Inputs ---
-        token_ids = network.add_input("token_ids", trt.int32, (chunk_len,))
-        position_ids = network.add_input("position_id", trt.int32, (chunk_len,))
+        row_dim = -1 if dynamic else chunk_len
+        token_ids = network.add_input("token_ids", trt.int32, (row_dim,))
+        position_ids = network.add_input("position_id", trt.int32, (row_dim,))
         valid_len = network.add_input("valid_len", trt.int32, (1,))
         attention_mask = network.add_input(
-            "attention_mask", trt.float32, (chunk_len, max_cache_length + chunk_len))
+            "attention_mask", trt.float32,
+            (-1, -1) if dynamic else (chunk_len, max_cache_length + chunk_len))
+        if dynamic:
+            opt = opt_len or max(1, chunk_len // 2)
+            profile = builder.create_optimization_profile()
+            profile.set_shape("token_ids", (1,), (opt,), (chunk_len,))
+            profile.set_shape("position_id", (1,), (opt,), (chunk_len,))
+            profile.set_shape("attention_mask", (1, max_cache_length + 1),
+                              (opt, max_cache_length + opt),
+                              (chunk_len, max_cache_length + chunk_len))
+            trt_config.add_optimization_profile(profile)
 
         conv_state_inputs = []
         ssm_state_inputs = []
@@ -1910,9 +1927,12 @@ class Qwen38Model:
             cos_half_tensor = network.add_cast(cos_half_tensor, work_trt_dtype).get_output(0)
             sin_half_tensor = network.add_cast(sin_half_tensor, work_trt_dtype).get_output(0)
 
-        valid_rows = prefill_graph.add_valid_row_mask(network, valid_len, chunk_len)
-        conv_gather_index = prefill_graph.add_conv_state_gather_index(
-            network, valid_len, d_conv)
+        if dynamic:
+            valid_rows = conv_gather_index = None
+        else:
+            valid_rows = prefill_graph.add_valid_row_mask(network, valid_len, chunk_len)
+            conv_gather_index = prefill_graph.add_conv_state_gather_index(
+                network, valid_len, d_conv)
 
         # --- Embedding ---
         hidden_state = network.add_gather(embedding_table, token_ids, 0).get_output(0)
@@ -1949,6 +1969,7 @@ class Qwen38Model:
                     valid_rows=valid_rows,
                     conv_gather_index=conv_gather_index,
                     valid_len=valid_len,
+                    dynamic=dynamic,
                     weights=weights,
                     prefix=prefix,
                     chunk_len=chunk_len,
@@ -1981,7 +2002,7 @@ class Qwen38Model:
                     eps_tensor=layer_cast(eps_tensor),
                     weights=weights,
                     prefix=prefix,
-                    chunk_len=chunk_len,
+                    chunk_len=None if dynamic else chunk_len,
                     hidden_size=hidden,
                     attn_size=attn_size,
                     kv_attention_size=kv_attention_size,

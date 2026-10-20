@@ -291,8 +291,12 @@ def add_deltanet_layer_prefill(
     dtype: np.dtype = np.float32,
     quant_ctx=None,
     valid_len: trt.ITensor | None = None,
+    dynamic: bool = False,
 ) -> dict[str, trt.ITensor]:
     """One Gated DeltaNet layer over ``chunk_len`` tokens.
+
+    ``dynamic=True``: the token count is a runtime dimension, 1 <= T <= ``chunk_len`` (only with
+    the cuTile prefill plugin; ``valid_len`` is then the number of rows, normally T).
 
     ``hidden`` is ``[chunk_len, hidden_size]``. Returns the same
     ``{hidden, present_conv, present_ssm}`` as the single-token layer, with
@@ -315,6 +319,8 @@ def add_deltanet_layer_prefill(
         network, normed, hidden_size, num_heads, weights[f"{prefix}.deltanet_b_proj"],
         dtype=dtype)  # [T, H]
 
+    if dynamic and not (valid_len is not None and _use_cutile_gdn_prefill_plugin(qkv)):
+        raise ValueError("a dynamic-length prefill engine needs TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1")
     if valid_len is not None and _use_cutile_gdn_prefill_plugin(qkv):
         # Conv1d, gates, delta rule and gated RMSNorm as cuTile kernels (see
         # native_plugins/gdn_prefill_plugin.cpp). Rows >= valid_len are inert.
@@ -343,7 +349,7 @@ def add_deltanet_layer_prefill(
                 ssm_state_in, valid_len,
             ],
             num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
-            seq_len=T, bf16=qkv.dtype == trt.bfloat16)
+            seq_len=T, bf16=qkv.dtype == trt.bfloat16, dynamic=dynamic)
         gated = gdn_layer.get_output(0)
         present_conv = gdn_layer.get_output(1)
         present_ssm = gdn_layer.get_output(2)
@@ -509,7 +515,7 @@ def add_full_attention_layer_prefill(
     eps_tensor: trt.ITensor,
     weights,
     prefix: str,
-    chunk_len: int,
+    chunk_len: int | None,
     hidden_size: int,
     attn_size: int,
     kv_attention_size: int,
@@ -528,7 +534,8 @@ def add_full_attention_layer_prefill(
     mask: the first ``max_cache_length`` columns select the valid cache prefix,
     the last ``chunk_len`` columns are causal over the new tokens.
     Returns ``{hidden, present_k, present_v}`` with ``present_*`` shaped
-    ``[chunk_len, kv_attention_size]``.
+    ``[chunk_len, kv_attention_size]``. ``chunk_len=None`` makes the token count a runtime
+    dimension.
     """
     T = chunk_len
     normed = graph_blocks.apply_norm(
@@ -568,7 +575,7 @@ def add_full_attention_layer_prefill(
     context = graph_ops.add_attention_from_rows(
         network, q, all_k.get_output(0), all_v.get_output(0),
         num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
-        q_seq=T, kv_seq=max_cache_length + T, mask=mask_4d)
+        q_seq=T, kv_seq=None if T is None else max_cache_length + T, mask=mask_4d)
 
     gate_name = f"{prefix}.w_gate_attn"
     if weights.get(gate_name) is not None or _owned(quant_ctx, gate_name):
