@@ -97,7 +97,9 @@ class TextGeneration:
         config = transformers.AutoConfig.from_pretrained(spec.model, **spec.pretrained_kwargs())
         kwargs = spec.model_kwargs()
         if hasattr(config, "vision_config"):
-            self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
+            # processor_kwargs (for example max_pixels) must match the candidate's declared image budget.
+            self.processor = transformers.AutoProcessor.from_pretrained(
+                spec.model, **spec.pretrained_kwargs(), **dict(spec.options.get("processor_kwargs", {})))
             self.tokenizer = self.processor.tokenizer
             model_cls = transformers.AutoModelForImageTextToText
         else:

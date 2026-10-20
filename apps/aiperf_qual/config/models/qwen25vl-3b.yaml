@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Default TRTMC builds smart-resize images within the 448-square budget (200704 pixels); give the
+# reference the same documented processor limit so both sides receive the same image geometry.
 reference:
   requirements: families/qwen_vl/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  options: {processor_kwargs: {max_pixels: 200704}}

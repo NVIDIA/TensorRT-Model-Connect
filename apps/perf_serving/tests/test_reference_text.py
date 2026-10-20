@@ -78,3 +78,37 @@ def test_a_causal_lm_prompt_drops_the_eos_its_tokenizer_appends():
     assert kept["input_ids"].tolist() == [[5, 6, 9]]
     assert _without_appended_eos(inputs(5, 6), Tokenizer(), "no eos")["input_ids"].tolist() == [[5, 6]]
     assert _without_appended_eos(inputs(9), Tokenizer(), "")["input_ids"].tolist() == [[9]]  # never an empty prompt
+
+
+def test_an_image_text_reference_applies_its_processor_kwargs(monkeypatch):
+    from types import SimpleNamespace
+
+    import transformers
+
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+    from trtmc_perf_serving.backends.reference.text import TextGeneration
+
+    calls = []
+
+    class Model:
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return self
+
+    def processor(model, **kwargs):
+        calls.append((model, kwargs))
+        return SimpleNamespace(tokenizer=object())
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained",
+                        lambda *_args, **_kwargs: SimpleNamespace(vision_config={}, is_encoder_decoder=False))
+    monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", processor)
+    monkeypatch.setattr(transformers.AutoModelForImageTextToText, "from_pretrained",
+                        lambda *_args, **_kwargs: Model())
+    budget = ReferenceSpec(operation="generate", model="vl", revision="r", device="cpu",
+                           options={"processor_kwargs": {"max_pixels": 200704}})
+    TextGeneration(budget)
+    TextGeneration(ReferenceSpec(operation="generate", model="vl", device="cpu"))
+    assert calls == [("vl", {"trust_remote_code": False, "revision": "r", "max_pixels": 200704}),
+                     ("vl", {"trust_remote_code": False})]
