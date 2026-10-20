@@ -26,7 +26,8 @@ def test_dynamic_qwen3_preserves_processor_area_limits_and_runtime_contract(tmp_
                           "hidden_size": 1024, "num_heads": 16,
                           "num_position_embeddings": 2304,
                           "deepstack_visual_indexes": [5, 11, 17]},
-        "_family_build_options": {"qwen_vl_vision": {"dynamic_resolution": True}},
+        "_family_build_options": {"qwen_vl_vision": {"dynamic_resolution": True,
+                                                     "max_pixels": 4194304}},
     }, hidden_size=2048)
     (tmp_path / "preprocessor_config.json").write_text(json.dumps({
         "size": {"shortest_edge": 65536, "longest_edge": 4194304}}))
@@ -42,7 +43,7 @@ def test_dynamic_qwen3_preserves_processor_area_limits_and_runtime_contract(tmp_
     assert runtime["deepstack_num_levels"] == 3
 
 
-def test_ordinary_qwen3_build_uses_native_geometry_and_image_token_capacity(tmp_path):
+def test_ordinary_qwen3_build_reserves_its_448_square_image_tokens(tmp_path):
     config = SimpleNamespace(raw={
         "vision_config": {"patch_size": 16, "spatial_merge_size": 2,
                           "hidden_size": 1024, "num_heads": 16,
@@ -51,21 +52,16 @@ def test_ordinary_qwen3_build_uses_native_geometry_and_image_token_capacity(tmp_
     }, hidden_size=2048, max_position_embeddings=32768)
     (tmp_path / "preprocessor_config.json").write_text(json.dumps({
         "size": {"shortest_edge": 65536, "longest_edge": 4194304}}))
-    assert _dynamic_vision_profile(str(tmp_path), config) == (True, 65536, 200704, 4194304)
+    assert _dynamic_vision_profile(str(tmp_path), config) == (True, 65536, 200704, 200704)
     assert _QwenVLModel().get_vl_config(config)["dynamic_image_resolution"]
-    # 4,096 visual tokens at this checkpoint's maximum area, plus 256 text tokens.
+    # The profile admits up to 198 merged tokens at a 200:1 aspect ratio, plus 256 text tokens.
+    assert _default_sequence_length(str(tmp_path), config) == 454
+    config.raw["_family_build_options"] = {"qwen_vl_vision": {"max_pixels": 4194304}}
+    # 4,096 visual tokens at the checkpoint's own maximum area, plus 256 text tokens.
     assert _default_sequence_length(str(tmp_path), config) == 4352
     config.raw["_family_build_options"] = {"qwen_vl_vision": {"dynamic_resolution": False}}
     assert not _dynamic_vision_profile(str(tmp_path), config)[0]
     assert not _QwenVLModel().get_vl_config(config)["dynamic_image_resolution"]
-    assert _default_sequence_length(str(tmp_path), config) == 256
-
-
-def test_legacy_qwen2_default_profile_is_preserved(tmp_path):
-    config = SimpleNamespace(raw={"model_type": "qwen2_vl",
-                                 "vision_config": {"patch_size": 14, "spatial_merge_size": 2}},
-                             max_position_embeddings=32768)
-    assert not _dynamic_vision_profile(str(tmp_path), config)[0]
     assert _default_sequence_length(str(tmp_path), config) == 256
 
 

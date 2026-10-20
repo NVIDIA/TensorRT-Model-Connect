@@ -60,12 +60,6 @@ def _is_qwen3_vl(config: ModelConfig) -> bool:
     return bool(vc.get("deepstack_visual_indexes"))
 
 
-def _native_resolution_default(config: ModelConfig) -> bool:
-    if any(key in _vision_build_options(config) for key in ("image_height", "image_width")):
-        return False
-    return _is_qwen3_vl(config) or config.raw.get("model_type") == "qwen2_5_vl"
-
-
 def _add_nan_safe_deepstack_gate(
     network: trt.INetworkDefinition,
     deepstack_embed: trt.ITensor,
@@ -126,7 +120,8 @@ def _dynamic_vision_profile(
 ) -> tuple[bool, int, int, int]:
     """Resolve dynamic smart-resize limits from build and processor configs."""
     options = _vision_build_options(config)
-    enabled = bool(options.get("dynamic_resolution", _native_resolution_default(config)))
+    enabled = bool(options.get("dynamic_resolution", not any(
+        key in options for key in ("image_height", "image_width"))))
     processor_config: dict = {}
     processor_path = Path(model_dir) / "preprocessor_config.json"
     if processor_path.exists():
@@ -135,16 +130,18 @@ def _dynamic_vision_profile(
         if isinstance(loaded, dict):
             processor_config = loaded
 
-    size = processor_config.get("size", {}) if _is_qwen3_vl(config) else {}
-    if not isinstance(size, dict):
-        size = {}
-    default_min, default_max = (65536, 16777216) if _is_qwen3_vl(config) else (3136, 12845056)
     min_pixels = int(options.get("min_pixels", 0))
     max_pixels = int(options.get("max_pixels", 0))
     if min_pixels <= 0:
-        min_pixels = int(processor_config.get("min_pixels", size.get("shortest_edge", default_min)))
+        size = processor_config.get("size", {})
+        min_pixels = int(processor_config.get("min_pixels", size.get(
+            "shortest_edge", 65536 if _is_qwen3_vl(config) else 3136)))
     if max_pixels <= 0:
-        max_pixels = int(processor_config.get("max_pixels", size.get("longest_edge", default_max)))
+        # Preserve the existing 448-square token budget while allowing the
+        # checkpoint's smart-resize geometry within that declared build limit.
+        # A larger explicit max_pixels, such as the checkpoint's own limit,
+        # also enlarges the default text capacity below.
+        max_pixels = _DEFAULT_FIXED_IMAGE_SIZE**2
     opt_pixels = int(options.get("opt_pixels", 200704))
     if not min_pixels <= opt_pixels <= max_pixels:
         raise ValueError(
@@ -154,15 +151,17 @@ def _dynamic_vision_profile(
 
 
 def _default_sequence_length(model_dir: str, config: ModelConfig) -> int:
-    """Reserve one Native-sized image plus text, without resizing it."""
+    """Reserve the largest image the dynamic vision profile admits plus text."""
+    from .qwen_vl_vision_builder import _smart_resize_max_profile_patches
+
     length = 256
-    if _native_resolution_default(config):
-        enabled, _, _, maximum = _dynamic_vision_profile(model_dir, config)
-        if enabled:
-            vision = config.raw["vision_config"]
-            patch_size = int(vision.get("patch_size", 16 if _is_qwen3_vl(config) else 14))
-            factor = patch_size * int(vision.get("spatial_merge_size", 2))
-            length += maximum // (factor * factor)
+    enabled, minimum, _, maximum = _dynamic_vision_profile(model_dir, config)
+    if enabled:
+        vision = config.raw.get("vision_config", {})
+        patch_size = int(vision.get("patch_size", 16 if _is_qwen3_vl(config) else 14))
+        merge_size = int(vision.get("spatial_merge_size", 2))
+        patches = _smart_resize_max_profile_patches(minimum, maximum, patch_size, merge_size)
+        length += patches // (merge_size * merge_size)
     return min(config.max_position_embeddings, length)
 
 
@@ -347,7 +346,8 @@ class _QwenVLModel:
         dynamic_resolution = bool(
             profile.get(
                 "enabled",
-                _vision_build_options(config).get("dynamic_resolution", _native_resolution_default(config)),
+                _vision_build_options(config).get("dynamic_resolution", not any(
+                    key in _vision_build_options(config) for key in ("image_height", "image_width"))),
             )
         )
 
@@ -410,12 +410,13 @@ class _QwenVLModel:
 
         if dynamic_resolution:
             options = _vision_build_options(config)
-            default_min, default_max = (65536, 16777216) if _is_qwen3_vl(config) else (3136, 12845056)
             vl_cfg.update(
                 {
-                    "min_pixels": int(profile.get("min_pixels", options.get("min_pixels") or default_min)),
+                    "min_pixels": int(profile.get("min_pixels", options.get("min_pixels") or (
+                        65536 if _is_qwen3_vl(config) else 3136
+                    ))),
                     "max_pixels": int(
-                        profile.get("max_pixels", options.get("max_pixels") or default_max)
+                        profile.get("max_pixels", options.get("max_pixels") or _DEFAULT_FIXED_IMAGE_SIZE**2)
                     ),
                     "vision_embed_dim": int(
                         vision_config.get("embed_dim", vision_config.get("hidden_size", 1280))
