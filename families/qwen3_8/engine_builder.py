@@ -1948,6 +1948,7 @@ class Qwen38Model:
                     eps_tensor=layer_cast(eps_tensor),
                     valid_rows=valid_rows,
                     conv_gather_index=conv_gather_index,
+                    valid_len=valid_len,
                     weights=weights,
                     prefix=prefix,
                     chunk_len=chunk_len,

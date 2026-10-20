@@ -33,6 +33,8 @@ The math is in fp32, like the decode engine's recurrent step.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import tensorrt as trt
 
@@ -42,6 +44,13 @@ from . import graph_ops
 # Added before exp() to the entries a decay matrix must not use, so that
 # exp() yields exactly 0 instead of overflowing for future positions.
 _MASKED_EXPONENT = -1.0e9
+
+
+def _use_cutile_gdn_prefill_plugin(qkv: trt.ITensor) -> bool:
+    """Opt-in cuTile GDN prefill plugin (TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1); fp16/bf16 only."""
+    if os.environ.get("TRTMC_QWEN3_8_GDN_CUTILE_PREFILL") != "1":
+        return False
+    return qkv.dtype in (trt.float16, trt.bfloat16)
 
 
 def _owned(quant_ctx, name: str) -> bool:
@@ -281,6 +290,7 @@ def add_deltanet_layer_prefill(
     mlp_size: int,
     dtype: np.dtype = np.float32,
     quant_ctx=None,
+    valid_len: trt.ITensor | None = None,
 ) -> dict[str, trt.ITensor]:
     """One Gated DeltaNet layer over ``chunk_len`` tokens.
 
@@ -305,136 +315,169 @@ def add_deltanet_layer_prefill(
         network, normed, hidden_size, num_heads, weights[f"{prefix}.deltanet_b_proj"],
         dtype=dtype)  # [T, H]
 
-    # ===== causal depthwise conv1d over [old state | new tokens] =====
-    qkv_cols = _shuffle(network, qkv, first=(1, 0))  # [conv_dim, T]
-    ext = network.add_concatenation([conv_state_in, qkv_cols])
-    ext.axis = 1
-    ext_t = ext.get_output(0)  # [conv_dim, d_conv + T]
-    # The state after the last valid token is the d_conv newest columns.
-    present_conv = network.add_gather(ext_t, conv_gather_index, 1).get_output(0)
+    if valid_len is not None and _use_cutile_gdn_prefill_plugin(qkv):
+        # Conv1d, gates, delta rule and gated RMSNorm as cuTile kernels (see
+        # native_plugins/gdn_prefill_plugin.cpp). Rows >= valid_len are inert.
+        from .native_plugins.gdn_plugin_builder import add_gdn_prefill_plugin
 
-    conv_w = graph_ops.add_constant(
-        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype)
-    if conv_w.dtype != ext_t.dtype:
-        conv_w = network.add_cast(conv_w, ext_t.dtype).get_output(0)
-    conv_acc = None
-    for j in range(d_conv):
-        window = _slice(network, ext_t, (0, 1 + j), (conv_dim, T))
-        tap = _slice(network, conv_w, (0, j), (conv_dim, 1))
-        term = _ew(network, window, tap, trt.ElementWiseOperation.PROD)
-        conv_acc = term if conv_acc is None else _ew(
-            network, conv_acc, term, trt.ElementWiseOperation.SUM)
-    conv_bias = graph_ops.add_constant(
-        network, (conv_dim, 1),
-        np.asarray(weights[f"{prefix}.conv1d_bias"]).reshape(conv_dim, 1), dtype=dtype)
-    if conv_bias.dtype != conv_acc.dtype:
-        conv_bias = network.add_cast(conv_bias, conv_acc.dtype).get_output(0)
-    conv_acc = _ew(network, conv_acc, conv_bias, trt.ElementWiseOperation.SUM)
-    qkv_act = graph_ops.add_activation(network, conv_acc, "silu", dtype=dtype)  # [conv_dim, T]
+        def f32_const(shape, array):
+            return graph_ops.add_constant(network, shape, array, dtype=np.float32)
 
-    # ===== split Q, K, V and bring them to [heads, T, dim] =====
-    def heads_first(row_start: int, rows: int, heads: int) -> trt.ITensor:
-        part = _slice(network, qkv_act, (row_start, 0), (rows, T))
-        return _shuffle(network, part, reshape=(heads, head_dim, T), second=(0, 2, 1))
+        def bf16_rounded(array):
+            a = np.ascontiguousarray(array, dtype=np.float32)
+            if os.environ.get("TRTMC_QWEN3_8_GDN_CONV_FP32", "0") == "1" or qkv.dtype != trt.bfloat16:
+                return a
+            u = a.view(np.uint32)
+            u = (u + 0x7FFF + ((u >> 16) & 1)) & 0xFFFF0000
+            return u.astype(np.uint32).view(np.float32)
 
-    q_h = heads_first(0, qk_dim, num_kv_heads)  # [Hk, T, D]
-    k_h = heads_first(qk_dim, qk_dim, num_kv_heads)
-    v_h = heads_first(2 * qk_dim, d_inner, num_heads)  # [H, T, D]
-
-    q_h = graph_ops.add_l2_norm(network, q_h, 2, eps=1e-6, dtype=dtype)
-    k_h = graph_ops.add_l2_norm(network, k_h, 2, eps=1e-6, dtype=dtype)
-
-    group = num_heads // num_kv_heads
-    if group > 1:
-        ones = _const32(network, np.ones((1, group, 1, 1)))
-
-        def expand(x: trt.ITensor) -> trt.ITensor:
-            x4 = _shuffle(network, _f32(network, x), reshape=(num_kv_heads, 1, T, head_dim))
-            tiled = _ew(network, x4, ones, trt.ElementWiseOperation.PROD)
-            return _shuffle(network, tiled, reshape=(num_heads, T, head_dim))
-
-        q_h, k_h = expand(q_h), expand(k_h)
+        gdn_layer = add_gdn_prefill_plugin(
+            network, trt,
+            inputs=[
+                qkv, z, a_raw, b_raw, conv_state_in,
+                f32_const((conv_dim, d_conv), bf16_rounded(weights[f"{prefix}.conv1d_weight"])),
+                f32_const((conv_dim,), bf16_rounded(weights[f"{prefix}.conv1d_bias"])),
+                f32_const((num_heads,), weights[f"{prefix}.A"]),
+                f32_const((num_heads,), weights[f"{prefix}.dt_bias"]),
+                f32_const((d_inner,), weights[f"{prefix}.deltanet_norm"]),
+                ssm_state_in, valid_len,
+            ],
+            num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
+            seq_len=T, bf16=qkv.dtype == trt.bfloat16)
+        gated = gdn_layer.get_output(0)
+        present_conv = gdn_layer.get_output(1)
+        present_ssm = gdn_layer.get_output(2)
     else:
-        q_h, k_h = _f32(network, q_h), _f32(network, k_h)
-    v_h = _f32(network, v_h)
-    q_h = _ew(network, q_h, _const32(network, [[[1.0 / np.sqrt(head_dim)]]]),
-              trt.ElementWiseOperation.PROD)
+        # ===== causal depthwise conv1d over [old state | new tokens] =====
+        qkv_cols = _shuffle(network, qkv, first=(1, 0))  # [conv_dim, T]
+        ext = network.add_concatenation([conv_state_in, qkv_cols])
+        ext.axis = 1
+        ext_t = ext.get_output(0)  # [conv_dim, d_conv + T]
+        # The state after the last valid token is the d_conv newest columns.
+        present_conv = network.add_gather(ext_t, conv_gather_index, 1).get_output(0)
 
-    # ===== per-token decay and write strength, inert on padding rows =====
-    a_biased = _ew(network, _f32(network, a_raw),
-                   _const32(network, np.asarray(weights[f"{prefix}.dt_bias"]).reshape(1, -1)),
-                   trt.ElementWiseOperation.SUM)
-    # softplus(x) = max(x, 0) + log(1 + exp(-|x|)). The textbook log(1 + exp(x))
-    # overflows to +inf for large x; an inf log-decay turns every cumulative
-    # difference after it into NaN, which the one-token recurrence never sees.
-    x_pos = _ew(network, a_biased, _const32(network, [[0.0]]), trt.ElementWiseOperation.MAX)
-    x_neg = _ew(network, _ew(network, a_biased, _const32(network, [[-1.0]]),
-                             trt.ElementWiseOperation.PROD),
-                a_biased, trt.ElementWiseOperation.MAX)  # |x|, via max(-x, x)
-    neg_abs = _ew(network, x_neg, _const32(network, [[-1.0]]), trt.ElementWiseOperation.PROD)
-    softplus = _ew(
-        network,
-        x_pos,
-        network.add_unary(
-            _ew(network, network.add_unary(neg_abs, trt.UnaryOperation.EXP).get_output(0),
-                _const32(network, [[1.0]]), trt.ElementWiseOperation.SUM),
-            trt.UnaryOperation.LOG).get_output(0),
-        trt.ElementWiseOperation.SUM)
-    decay = _ew(network, softplus,
-                _const32(network, np.asarray(weights[f"{prefix}.A"]).reshape(1, -1)),
-                trt.ElementWiseOperation.PROD)  # [T, H]
-    decay = _ew(network, decay, valid_rows, trt.ElementWiseOperation.PROD)
-    g_h = _shuffle(network, decay, first=(1, 0))  # [H, T]
+        conv_w = graph_ops.add_constant(
+            network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype)
+        if conv_w.dtype != ext_t.dtype:
+            conv_w = network.add_cast(conv_w, ext_t.dtype).get_output(0)
+        conv_acc = None
+        for j in range(d_conv):
+            window = _slice(network, ext_t, (0, 1 + j), (conv_dim, T))
+            tap = _slice(network, conv_w, (0, j), (conv_dim, 1))
+            term = _ew(network, window, tap, trt.ElementWiseOperation.PROD)
+            conv_acc = term if conv_acc is None else _ew(
+                network, conv_acc, term, trt.ElementWiseOperation.SUM)
+        conv_bias = graph_ops.add_constant(
+            network, (conv_dim, 1),
+            np.asarray(weights[f"{prefix}.conv1d_bias"]).reshape(conv_dim, 1), dtype=dtype)
+        if conv_bias.dtype != conv_acc.dtype:
+            conv_bias = network.add_cast(conv_bias, conv_acc.dtype).get_output(0)
+        conv_acc = _ew(network, conv_acc, conv_bias, trt.ElementWiseOperation.SUM)
+        qkv_act = graph_ops.add_activation(network, conv_acc, "silu", dtype=dtype)  # [conv_dim, T]
 
-    beta = network.add_activation(b_raw, trt.ActivationType.SIGMOID).get_output(0)
-    beta = _ew(network, _f32(network, beta), valid_rows, trt.ElementWiseOperation.PROD)
-    beta_h = _shuffle(network, beta, first=(1, 0))  # [H, T]
+        # ===== split Q, K, V and bring them to [heads, T, dim] =====
+        def heads_first(row_start: int, rows: int, heads: int) -> trt.ITensor:
+            part = _slice(network, qkv_act, (row_start, 0), (rows, T))
+            return _shuffle(network, part, reshape=(heads, head_dim, T), second=(0, 2, 1))
 
-    # ===== delta rule, block by block =====
-    state = _f32(network, ssm_state_in)
-    outs = []
-    for c in range(T // block_len):
-        s0 = c * block_len
-        out_c, state = add_delta_rule_chunk(
+        q_h = heads_first(0, qk_dim, num_kv_heads)  # [Hk, T, D]
+        k_h = heads_first(qk_dim, qk_dim, num_kv_heads)
+        v_h = heads_first(2 * qk_dim, d_inner, num_heads)  # [H, T, D]
+
+        q_h = graph_ops.add_l2_norm(network, q_h, 2, eps=1e-6, dtype=dtype)
+        k_h = graph_ops.add_l2_norm(network, k_h, 2, eps=1e-6, dtype=dtype)
+
+        group = num_heads // num_kv_heads
+        if group > 1:
+            ones = _const32(network, np.ones((1, group, 1, 1)))
+
+            def expand(x: trt.ITensor) -> trt.ITensor:
+                x4 = _shuffle(network, _f32(network, x), reshape=(num_kv_heads, 1, T, head_dim))
+                tiled = _ew(network, x4, ones, trt.ElementWiseOperation.PROD)
+                return _shuffle(network, tiled, reshape=(num_heads, T, head_dim))
+
+            q_h, k_h = expand(q_h), expand(k_h)
+        else:
+            q_h, k_h = _f32(network, q_h), _f32(network, k_h)
+        v_h = _f32(network, v_h)
+        q_h = _ew(network, q_h, _const32(network, [[[1.0 / np.sqrt(head_dim)]]]),
+                  trt.ElementWiseOperation.PROD)
+
+        # ===== per-token decay and write strength, inert on padding rows =====
+        a_biased = _ew(network, _f32(network, a_raw),
+                       _const32(network, np.asarray(weights[f"{prefix}.dt_bias"]).reshape(1, -1)),
+                       trt.ElementWiseOperation.SUM)
+        # softplus(x) = max(x, 0) + log(1 + exp(-|x|)). The textbook log(1 + exp(x))
+        # overflows to +inf for large x; an inf log-decay turns every cumulative
+        # difference after it into NaN, which the one-token recurrence never sees.
+        x_pos = _ew(network, a_biased, _const32(network, [[0.0]]), trt.ElementWiseOperation.MAX)
+        x_neg = _ew(network, _ew(network, a_biased, _const32(network, [[-1.0]]),
+                                 trt.ElementWiseOperation.PROD),
+                    a_biased, trt.ElementWiseOperation.MAX)  # |x|, via max(-x, x)
+        neg_abs = _ew(network, x_neg, _const32(network, [[-1.0]]), trt.ElementWiseOperation.PROD)
+        softplus = _ew(
             network,
-            _slice(network, q_h, (0, s0, 0), (num_heads, block_len, head_dim)),
-            _slice(network, k_h, (0, s0, 0), (num_heads, block_len, head_dim)),
-            _slice(network, v_h, (0, s0, 0), (num_heads, block_len, head_dim)),
-            _slice(network, g_h, (0, s0), (num_heads, block_len)),
-            _slice(network, beta_h, (0, s0), (num_heads, block_len)),
-            state, block_len=block_len, num_heads=num_heads, head_dim=head_dim)
-        outs.append(out_c)
-    present_ssm = state
-    if len(outs) == 1:
-        recurrent = outs[0]
-    else:
-        cat = network.add_concatenation(outs)
-        cat.axis = 1
-        recurrent = cat.get_output(0)  # [H, T, D]
+            x_pos,
+            network.add_unary(
+                _ew(network, network.add_unary(neg_abs, trt.UnaryOperation.EXP).get_output(0),
+                    _const32(network, [[1.0]]), trt.ElementWiseOperation.SUM),
+                trt.UnaryOperation.LOG).get_output(0),
+            trt.ElementWiseOperation.SUM)
+        decay = _ew(network, softplus,
+                    _const32(network, np.asarray(weights[f"{prefix}.A"]).reshape(1, -1)),
+                    trt.ElementWiseOperation.PROD)  # [T, H]
+        decay = _ew(network, decay, valid_rows, trt.ElementWiseOperation.PROD)
+        g_h = _shuffle(network, decay, first=(1, 0))  # [H, T]
 
-    # ===== gated per-head RMSNorm: weight * norm(out) * silu(z) =====
-    recurrent = _shuffle(network, recurrent, first=(1, 0, 2))  # [T, H, D]
-    if recurrent.dtype != hidden.dtype:
-        recurrent = network.add_cast(recurrent, hidden.dtype).get_output(0)
-    norm_in = recurrent
-    norm_out_dtype = norm_in.dtype
-    if dtype != np.float32:
-        norm_in = network.add_cast(norm_in, trt.float32).get_output(0)
-    sq = _ew(network, norm_in, norm_in, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(sq, trt.ReduceOperation.AVG, 1 << 2, keep_dims=True).get_output(0)
-    denom = network.add_unary(
-        _ew(network, mean, _const32(network, [[[1e-6]]]), trt.ElementWiseOperation.SUM),
-        trt.UnaryOperation.SQRT).get_output(0)
-    normalized = _ew(network, norm_in, network.add_unary(
-        denom, trt.UnaryOperation.RECIP).get_output(0), trt.ElementWiseOperation.PROD)
-    flat = _shuffle(network, normalized, reshape=(T, d_inner))
-    gamma = graph_ops.add_constant(
-        network, (1, d_inner), weights[f"{prefix}.deltanet_norm"], dtype=np.float32)
-    normed_out = _ew(network, flat, gamma, trt.ElementWiseOperation.PROD)
-    if normed_out.dtype != norm_out_dtype:
-        normed_out = network.add_cast(normed_out, norm_out_dtype).get_output(0)
-    gated = _ew(network, normed_out, graph_ops.add_activation(network, z, "silu", dtype=dtype),
-                trt.ElementWiseOperation.PROD)
+        beta = network.add_activation(b_raw, trt.ActivationType.SIGMOID).get_output(0)
+        beta = _ew(network, _f32(network, beta), valid_rows, trt.ElementWiseOperation.PROD)
+        beta_h = _shuffle(network, beta, first=(1, 0))  # [H, T]
+
+        # ===== delta rule, block by block =====
+        state = _f32(network, ssm_state_in)
+        outs = []
+        for c in range(T // block_len):
+            s0 = c * block_len
+            out_c, state = add_delta_rule_chunk(
+                network,
+                _slice(network, q_h, (0, s0, 0), (num_heads, block_len, head_dim)),
+                _slice(network, k_h, (0, s0, 0), (num_heads, block_len, head_dim)),
+                _slice(network, v_h, (0, s0, 0), (num_heads, block_len, head_dim)),
+                _slice(network, g_h, (0, s0), (num_heads, block_len)),
+                _slice(network, beta_h, (0, s0), (num_heads, block_len)),
+                state, block_len=block_len, num_heads=num_heads, head_dim=head_dim)
+            outs.append(out_c)
+        present_ssm = state
+        if len(outs) == 1:
+            recurrent = outs[0]
+        else:
+            cat = network.add_concatenation(outs)
+            cat.axis = 1
+            recurrent = cat.get_output(0)  # [H, T, D]
+
+        # ===== gated per-head RMSNorm: weight * norm(out) * silu(z) =====
+        recurrent = _shuffle(network, recurrent, first=(1, 0, 2))  # [T, H, D]
+        if recurrent.dtype != hidden.dtype:
+            recurrent = network.add_cast(recurrent, hidden.dtype).get_output(0)
+        norm_in = recurrent
+        norm_out_dtype = norm_in.dtype
+        if dtype != np.float32:
+            norm_in = network.add_cast(norm_in, trt.float32).get_output(0)
+        sq = _ew(network, norm_in, norm_in, trt.ElementWiseOperation.PROD)
+        mean = network.add_reduce(sq, trt.ReduceOperation.AVG, 1 << 2, keep_dims=True).get_output(0)
+        denom = network.add_unary(
+            _ew(network, mean, _const32(network, [[[1e-6]]]), trt.ElementWiseOperation.SUM),
+            trt.UnaryOperation.SQRT).get_output(0)
+        normalized = _ew(network, norm_in, network.add_unary(
+            denom, trt.UnaryOperation.RECIP).get_output(0), trt.ElementWiseOperation.PROD)
+        flat = _shuffle(network, normalized, reshape=(T, d_inner))
+        gamma = graph_ops.add_constant(
+            network, (1, d_inner), weights[f"{prefix}.deltanet_norm"], dtype=np.float32)
+        normed_out = _ew(network, flat, gamma, trt.ElementWiseOperation.PROD)
+        if normed_out.dtype != norm_out_dtype:
+            normed_out = network.add_cast(normed_out, norm_out_dtype).get_output(0)
+        gated = _ew(network, normed_out, graph_ops.add_activation(network, z, "silu", dtype=dtype),
+                    trt.ElementWiseOperation.PROD)
 
     out = matmul(gated, d_inner, hidden_size, weights.get(f"{prefix}.deltanet_out_proj"),
                  f"{prefix}.deltanet_out_proj")

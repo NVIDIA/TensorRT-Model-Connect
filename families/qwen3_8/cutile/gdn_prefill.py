@@ -10,21 +10,45 @@ Adapted from NVIDIA/TileGym (MIT): the recurrent gated delta rule kernel
 
 A prefill call processes one chunk of T tokens. `valid_len` (int32 in device memory, 1 <= L <= T)
 is the number of real tokens; the rest are padding (last chunk of a prompt). Padding tokens do not
-touch the state: the recurrence runs only for the first `valid_len` tokens, the new conv state is
+touch the state: padding rows have g = 0 and beta = 0, so the recurrence leaves the state unchanged, the new conv state is
 the last four real inputs, and output rows at or after `valid_len` are zero.
 
 Stages, in launch order:
   1. conv_kernel       : y[T, CD] = silu(causal conv1d over [old state tail, x]) + bias
   2. conv_state_kernel : new conv state = last 4 real inputs
-  3. gate_kernel       : g[T, H] = A * softplus(a + dt_bias), beta[T, H] = sigmoid(b)
-  4. delta_kernel      : delta rule over the real tokens; q, k, v are strided views of y
-  5. norm_kernel       : out[T, H, V] = gamma * rmsnorm(o) * silu(z), zero for padding rows
+  3. gate_kernel       : g[T, H] = A * softplus(a + dt_bias), beta[T, H] = sigmoid(b); both 0 for padding rows
+  4. intra_kernel      : per chunk of CS tokens: decay, triangular solve (WY form), corrected values
+  5. inter_kernel      : state passing over the chunks and the chunk outputs (TF32 tensor cores)
+  6. norm_kernel       : out[T, H, V] = gamma * rmsnorm(o) * silu(z), zero for padding rows
 """
 
 import cuda.tile as ct
 
 ConstInt = ct.Constant[int]
 ConstFloat = ct.Constant[float]
+
+
+def _mm(a, b):
+    """fp32 matmul on TF32 tensor cores (fp32 accumulate)."""
+    a = ct.astype(a, ct.tfloat32)
+    b = ct.astype(b, ct.tfloat32)
+    return ct.astype(ct.matmul(a, b), ct.float32)
+
+
+def _solve_unit_lower(A, CS):
+    """(I - A)^-1 style solve used by the WY form: rows of strict-lower `A` folded in order.
+
+    The serial order is kept on purpose: a Neumann/doubling product is unstable in fp32 on the
+    nearly collinear keys of real models (see prefill_graph.py).
+    """
+    offs = ct.arange(CS, dtype=ct.int32)
+    for i in range(1, CS):
+        is_row = ct.expand_dims(offs == i, axis=1)
+        row = ct.sum(ct.where(is_row, A, 0.0), axis=0)
+        correction = ct.sum(ct.expand_dims(row, axis=1) * A, axis=0)
+        A = A + ct.where(is_row, ct.expand_dims(correction, axis=0), 0.0)
+    eye = ct.where(ct.expand_dims(offs, axis=1) == ct.expand_dims(offs, axis=0), 1.0, 0.0)
+    return A + eye
 
 
 @ct.kernel
@@ -88,6 +112,7 @@ def gate_kernel(
     a_in,  # (T, H)
     A,  # (H,)  = -exp(A_log)
     dt_bias,  # (H,)
+    valid_len,  # (1,) int32
     beta_out,  # (T, H)
     g_out,  # (T, H) fp32
     TILE_H: ConstInt,
@@ -101,85 +126,113 @@ def gate_kernel(
     a_coef = ct.astype(ct.gather(A, (offs,), check_bounds=True), ct.float32)
     dt_b = ct.astype(ct.gather(dt_bias, (offs,), check_bounds=True), ct.float32)
 
-    beta = ct.truediv(1.0, ct.add(1.0, ct.exp(ct.negative(b))))
-    g = a_coef * ct.log(ct.add(1.0, ct.exp(a + dt_b)))
+    length = ct.gather(valid_len, (0,), check_bounds=False)
+    keep = ct.astype(min(max(length - t, 0), 1), ct.float32)  # padding rows: g = 0, beta = 0
+    beta = ct.truediv(1.0, ct.add(1.0, ct.exp(ct.negative(b)))) * keep
+    g = a_coef * ct.log(ct.add(1.0, ct.exp(a + dt_b))) * keep
 
     ct.scatter(beta_out, (t, offs), ct.astype(beta, beta_out.dtype), check_bounds=True)
     ct.scatter(g_out, (t, offs), ct.astype(g, g_out.dtype), check_bounds=True)
 
 
-@ct.kernel
-def delta_kernel(
-    Query,  # (1, T, H_K, K)  strided view of y
+@ct.kernel(occupancy=2)
+def intra_kernel(
+    Query,  # (1, T, H_K, K) strided view of y
     Key,  # (1, T, H_K, K)
     Value,  # (1, T, H, V)
     Gate,  # (1, T, H) fp32
     Beta,  # (1, T, H)
-    Output,  # (1, T, H, V)
+    Q_out,  # (H, NC, CS, K) fp32: normalised, scaled q
+    K_out,  # (H, NC, CS, K) fp32: normalised k
+    V_corr,  # (H, NC, CS, V) fp32
+    K_cumdecay,  # (H, NC, CS, K) fp32
+    G_cum,  # (H, NC, CS) fp32
+    scale: ConstFloat,
+    CS: ConstInt,
+    BLOCK_K: ConstInt,
+):
+    """Grid: (H, NC). One chunk of CS tokens of one head: cumulative decay, the triangular solve
+    of the WY form, and the corrected values (inter-chunk work is in inter_kernel)."""
+    h = ct.bid(0)
+    c = ct.bid(1)
+    hk = h // (Value.shape[2] // Query.shape[2])
+    zero = ct.PaddingMode.ZERO
+    k_t = ct.astype(ct.load(Key, index=(0, c, hk, 0), shape=(1, CS, 1, BLOCK_K),
+                            padding_mode=zero).reshape((CS, BLOCK_K)), ct.float32)
+    k_t = k_t * ct.rsqrt(ct.sum(k_t * k_t, axis=1, keepdims=True) + 1e-6)
+    q_t = ct.astype(ct.load(Query, index=(0, c, hk, 0), shape=(1, CS, 1, BLOCK_K),
+                            padding_mode=zero).reshape((CS, BLOCK_K)), ct.float32)
+    q_t = q_t * ct.rsqrt(ct.sum(q_t * q_t, axis=1, keepdims=True) + 1e-6) * scale
+    beta = ct.astype(ct.load(Beta, index=(0, c, h), shape=(1, CS, 1),
+                             padding_mode=zero).reshape((CS,)), ct.float32)
+    g = ct.astype(ct.load(Gate, index=(0, c, h), shape=(1, CS, 1),
+                          padding_mode=zero).reshape((CS,)), ct.float32)
+    g_cum = ct.cumsum(g, axis=0)
+
+    r = ct.arange(CS, dtype=ct.int32)
+    rr = ct.expand_dims(r, axis=1)
+    cc = ct.expand_dims(r, axis=0)
+    decay = ct.where(rr >= cc, ct.exp(ct.expand_dims(g_cum, axis=1) - ct.expand_dims(g_cum, axis=0)), 0.0)
+    kb = k_t * ct.expand_dims(beta, axis=1)
+    attn = ct.where(rr > cc, -(_mm(kb, ct.transpose(k_t)) * decay), 0.0)
+    attn = _solve_unit_lower(attn, CS)
+
+    v_t = ct.astype(ct.load(Value, index=(0, c, h, 0), shape=(1, CS, 1, BLOCK_K),
+                            padding_mode=zero).reshape((CS, BLOCK_K)), ct.float32)
+    v_corr = _mm(attn, v_t * ct.expand_dims(beta, axis=1))
+    k_cum = _mm(attn, kb * ct.expand_dims(ct.exp(g_cum), axis=1))
+
+    ct.store(G_cum, index=(h, c, 0), tile=ct.reshape(g_cum, (1, 1, CS)))
+    ct.store(V_corr, index=(h, c, 0, 0), tile=ct.reshape(v_corr, (1, 1, CS, BLOCK_K)))
+    ct.store(K_cumdecay, index=(h, c, 0, 0), tile=ct.reshape(k_cum, (1, 1, CS, BLOCK_K)))
+    ct.store(Q_out, index=(h, c, 0, 0), tile=ct.reshape(q_t, (1, 1, CS, BLOCK_K)))
+    ct.store(K_out, index=(h, c, 0, 0), tile=ct.reshape(k_t, (1, 1, CS, BLOCK_K)))
+
+
+@ct.kernel
+def inter_kernel(
+    Q_ch,  # (H, NC, CS, K) fp32
+    K_ch,  # (H, NC, CS, K) fp32
+    V_corr,  # (H, NC, CS, V) fp32
+    K_cumdecay,  # (H, NC, CS, K) fp32
+    G_cum,  # (H, NC, CS) fp32
+    Output,  # (1, T, H, V) activation dtype
     StateIn,  # (1, H, K, V) fp32
     StateOut,  # (1, H, K, V) fp32
-    valid_len,  # (1,) int32
-    scale: ConstFloat,
+    NC: ConstInt,
+    CS: ConstInt,
     BLOCK_K: ConstInt,
     BLOCK_V: ConstInt,
 ):
-    """Grid: (H, cdiv(V, BLOCK_V), 1). Sequential over the first `valid_len` tokens."""
-    idx_hv = ct.bid(0)
-    idx_v = ct.bid(1)
-
-    H = Query.shape[2]
-    HV = Value.shape[2]
-    idx_h = idx_hv // (HV // H)
-    length = ct.gather(valid_len, (0,), check_bounds=False)
-
-    State = ct.load(
-        StateIn,
-        index=(0, idx_hv, 0, idx_v),
-        shape=(1, 1, BLOCK_K, BLOCK_V),
-        padding_mode=ct.PaddingMode.ZERO,
-    ).reshape((BLOCK_K, BLOCK_V))
-    State = ct.astype(State, ct.float32)
-
-    for idx_t in range(length):
-        QueryT = ct.load(
-            Query, index=(0, idx_t, idx_h, 0), shape=(1, 1, 1, BLOCK_K),
-            padding_mode=ct.PaddingMode.ZERO,
-        ).reshape((BLOCK_K,))
-        QueryT = ct.astype(QueryT, ct.float32)
-        KeyT = ct.load(
-            Key, index=(0, idx_t, idx_h, 0), shape=(1, 1, 1, BLOCK_K),
-            padding_mode=ct.PaddingMode.ZERO,
-        ).reshape((BLOCK_K,))
-        KeyT = ct.astype(KeyT, ct.float32)
-
-        QueryT = QueryT * ct.rsqrt(ct.sum(QueryT * QueryT, axis=0) + 1e-6)
-        KeyT = KeyT * ct.rsqrt(ct.sum(KeyT * KeyT, axis=0) + 1e-6)
-        QueryT = QueryT * scale
-
-        ValueT = ct.load(
-            Value, index=(0, idx_t, idx_hv, idx_v), shape=(1, 1, 1, BLOCK_V),
-            padding_mode=ct.PaddingMode.ZERO,
-        ).reshape((BLOCK_V,))
-        ValueT = ct.astype(ValueT, ct.float32)
-
-        gate_t = ct.astype(ct.gather(Gate, (0, idx_t, idx_hv), check_bounds=False), ct.float32)
-        beta_t = ct.astype(ct.gather(Beta, (0, idx_t, idx_hv), check_bounds=False), ct.float32)
-
-        State = State * ct.exp(gate_t)
-        KeyCol = ct.expand_dims(KeyT, axis=1)
-        KvMemT = ct.sum(State * KeyCol, axis=0)
-        DeltaT = (ValueT - KvMemT) * beta_t
-        State = State + KeyCol * ct.expand_dims(DeltaT, axis=0)
-        OutT = ct.sum(State * ct.expand_dims(QueryT, axis=1), axis=0)
-
-        ct.store(
-            Output,
-            index=(0, idx_t, idx_hv, idx_v),
-            tile=ct.astype(ct.reshape(OutT, (1, 1, 1, BLOCK_V)), Output.dtype),
-        )
-
-    ct.store(StateOut, index=(0, idx_hv, 0, idx_v),
-             tile=ct.reshape(State, (1, 1, BLOCK_K, BLOCK_V)))
+    """Grid: (H, cdiv(V, BLOCK_V)). Sequential over the NC chunks (state passing)."""
+    h = ct.bid(0)
+    pv = ct.bid(1)
+    zero = ct.PaddingMode.ZERO
+    S = ct.astype(ct.load(StateIn, index=(0, h, 0, pv), shape=(1, 1, BLOCK_K, BLOCK_V),
+                          padding_mode=zero).reshape((BLOCK_K, BLOCK_V)), ct.float32)
+    r = ct.arange(CS, dtype=ct.int32)
+    causal = ct.expand_dims(r, axis=1) >= ct.expand_dims(r, axis=0)
+    for ci in range(NC):
+        k_cum = ct.load(K_cumdecay, index=(h, ci, 0, 0), shape=(1, 1, CS, BLOCK_K),
+                        padding_mode=zero).reshape((CS, BLOCK_K))
+        v_corr = ct.load(V_corr, index=(h, ci, 0, pv), shape=(1, 1, CS, BLOCK_V),
+                         padding_mode=zero).reshape((CS, BLOCK_V))
+        v_new = v_corr - _mm(k_cum, S)
+        q = ct.load(Q_ch, index=(h, ci, 0, 0), shape=(1, 1, CS, BLOCK_K),
+                    padding_mode=zero).reshape((CS, BLOCK_K))
+        k = ct.load(K_ch, index=(h, ci, 0, 0), shape=(1, 1, CS, BLOCK_K),
+                    padding_mode=zero).reshape((CS, BLOCK_K))
+        gc = ct.load(G_cum, index=(h, ci, 0), shape=(1, 1, CS), padding_mode=zero).reshape((CS,))
+        inter = _mm(q * ct.expand_dims(ct.exp(gc), axis=1), S)
+        qk = _mm(q, ct.transpose(k))
+        decay = ct.where(causal, ct.exp(ct.expand_dims(gc, axis=1) - ct.expand_dims(gc, axis=0)), 0.0)
+        out = inter + _mm(ct.where(causal, qk * decay, 0.0), v_new)
+        ct.store(Output, index=(0, ci, h, pv),
+                 tile=ct.astype(ct.reshape(out, (1, CS, 1, BLOCK_V)), Output.dtype))
+        g_last = ct.astype(ct.load(G_cum, index=(h, ci, CS - 1), shape=(), padding_mode=zero), ct.float32)
+        k_w = k * ct.expand_dims(ct.exp(g_last - gc), axis=1)
+        S = S * ct.exp(g_last) + _mm(ct.transpose(k_w), v_new)
+    ct.store(StateOut, index=(0, h, 0, pv), tile=ct.reshape(S, (1, 1, BLOCK_K, BLOCK_V)))
 
 
 @ct.kernel

@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Static-shape Gated DeltaNet prefill chunk for Qwen3.8 (batch 1, seq_len tokens per call) as five
-// cuTile kernels (see ../cutile/gdn_prefill.py): conv1d+SiLU, conv state, gate/beta, delta rule,
-// gated RMSNorm.
+// Static-shape Gated DeltaNet prefill chunk for Qwen3.8 (batch 1, seq_len tokens per call) as six
+// cuTile kernels (see ../cutile/gdn_prefill.py): conv1d+SiLU, conv state, gate/beta, chunked delta
+// rule (intra-chunk, inter-chunk), gated RMSNorm.
 //
 // A prompt of N tokens runs as ceil(N / seq_len) calls. The last call may be padded: `valid_len`
 // gives the number of real tokens. Padding does not change the states, and output rows at or
@@ -18,7 +18,8 @@
 //          valid_len[1]                                           (int32, 1 <= valid_len <= T)
 // Outputs: out[T,d_inner], conv_state'[conv_dim,4]  (same type as qkv)
 //          ssm_state'[H,D,D]                                      (fp32)
-// Workspace: y[T,conv_dim] (act), g[T,H] (fp32), beta[T,H] (act), o[T,H,D] (act).
+// Workspace: y[T,conv_dim] (act), g[T,H] (fp32), beta[T,H] (act), o[T,H,D] (act),
+//            q, k, v_corr, k_cumdecay [H,T,D] (fp32), g_cum [H,T] (fp32).
 
 #include <NvInferRuntime.h>
 #include <array>
@@ -36,11 +37,11 @@ namespace {
 constexpr int32_t kNumInputs = 12;
 constexpr int32_t kNumOutputs = 3;
 constexpr int32_t kConvKernel = 4;
-constexpr int32_t kNumStages = 5;
+constexpr int32_t kNumStages = 6;
 constexpr char const* kStageField[kNumStages] = {"cubin_conv", "cubin_conv_state", "cubin_gate",
-                                                 "cubin_delta", "cubin_norm"};
+                                                 "cubin_intra", "cubin_inter", "cubin_norm"};
 constexpr char const* kStageSymbol[kNumStages] = {"gdnp_conv", "gdnp_conv_state", "gdnp_gate",
-                                                  "gdnp_delta", "gdnp_norm"};
+                                                  "gdnp_intra", "gdnp_inter", "gdnp_norm"};
 
 } // namespace
 
@@ -71,6 +72,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
                 else if (name == "act_bytes") act_bytes_ = as_int();
                 else if (name == "conv_block") conv_block_ = as_int();
                 else if (name == "block_v") block_v_ = as_int();
+                else if (name == "chunk") chunk_ = as_int();
             } else if (f.type == nvinfer1::PluginFieldType::kINT8) {
                 for (int32_t s = 0; s < kNumStages; ++s)
                     if (name == kStageField[s])
@@ -80,7 +82,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
         }
         valid_ = num_heads_ > 0 && num_kv_heads_ > 0 && head_dim_ > 0 && conv_dim_ > 0 &&
                  seq_len_ > 0 && (act_bytes_ == 2) && conv_block_ > 0 && block_v_ > 0 &&
-                 head_dim_ % block_v_ == 0;
+                 head_dim_ % block_v_ == 0 && chunk_ > 0 && seq_len_ % chunk_ == 0;
         for (int32_t s = 0; s < kNumStages; ++s)
             valid_ = valid_ && !cubins_[s].empty() && threads_[s] > 0;
     }
@@ -189,6 +191,14 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
         void* const beta = static_cast<char*>(g) + align_up(static_cast<std::size_t>(T) * H * 4);
         void* const o = static_cast<char*>(beta) +
                         align_up(static_cast<std::size_t>(T) * H * act_bytes_);
+        std::size_t const hd_bytes = align_up(static_cast<std::size_t>(H) * T * D * 4);
+        int32_t const NC = T / chunk_, CS = chunk_;
+        char* const wq = static_cast<char*>(o) + align_up(static_cast<std::size_t>(T) * H * D * act_bytes_);
+        void* const qn = wq;
+        void* const kn = wq + hd_bytes;
+        void* const vc = wq + 2 * hd_bytes;
+        void* const kc = wq + 3 * hd_bytes;
+        void* const gc = wq + 4 * hd_bytes;
         auto* const yb = static_cast<char*>(y);
         std::size_t const qk_bytes = static_cast<std::size_t>(NK) * D * act_bytes_;
         auto cast = [](void const* p) { return const_cast<void*>(p); };
@@ -217,31 +227,49 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
             return -1;
 
         // 3. gate / beta for all T rows
-        std::array<Arr, 6> gate{{
+        std::array<Arr, 7> gate{{
             {cast(inputs[3]), 2, {T, H, 0, 0}}, // b
             {cast(inputs[2]), 2, {T, H, 0, 0}}, // a
             {cast(inputs[7]), 1, {H, 0, 0, 0}}, // A
             {cast(inputs[8]), 1, {H, 0, 0, 0}}, // dt_bias
+            {cast(inputs[11]), 1, {1, 0, 0, 0}}, // valid_len
             {beta, 2, {T, H, 0, 0}},
             {g, 2, {T, H, 0, 0}},
         }};
-        if (!launch(kernels[2], {static_cast<unsigned>(T), 1, 1}, static_cast<unsigned>(threads_[2]), gate.data(), 6, stream))
+        if (!launch(kernels[2], {static_cast<unsigned>(T), 1, 1}, static_cast<unsigned>(threads_[2]), gate.data(), 7, stream))
             return -1;
 
-        // 4. delta rule over the real tokens; q, k, v are strided views of y
-        std::array<Arr, 9> delta{{
+        // 4a. per chunk: decay, triangular solve (WY form), corrected values. q, k, v are strided
+        //     views of y.
+        std::array<Arr, 10> intra{{
             {yb, 4, {1, T, NK, D}, row_strides},
             {yb + qk_bytes, 4, {1, T, NK, D}, row_strides},
             {yb + 2 * qk_bytes, 4, {1, T, H, D}, row_strides},
             {g, 3, {1, T, H, 0}},
             {beta, 3, {1, T, H, 0}},
+            {qn, 4, {H, NC, CS, D}},
+            {kn, 4, {H, NC, CS, D}},
+            {vc, 4, {H, NC, CS, D}},
+            {kc, 4, {H, NC, CS, D}},
+            {gc, 3, {H, NC, CS, 0}},
+        }};
+        if (!launch(kernels[3], {static_cast<unsigned>(H), static_cast<unsigned>(NC), 1}, static_cast<unsigned>(threads_[3]),
+                    intra.data(), 10, stream))
+            return -1;
+
+        // 4b. state passing over the chunks and the chunk outputs
+        std::array<Arr, 8> inter{{
+            {qn, 4, {H, NC, CS, D}},
+            {kn, 4, {H, NC, CS, D}},
+            {vc, 4, {H, NC, CS, D}},
+            {kc, 4, {H, NC, CS, D}},
+            {gc, 3, {H, NC, CS, 0}},
             {o, 4, {1, T, H, D}},
             {cast(inputs[10]), 4, {1, H, D, D}},
             {outputs[2], 4, {1, H, D, D}},
-            {cast(inputs[11]), 1, {1, 0, 0, 0}},
         }};
-        if (!launch(kernels[3], {static_cast<unsigned>(H), static_cast<unsigned>(D / block_v_), 1}, static_cast<unsigned>(threads_[3]),
-                    delta.data(), 9, stream))
+        if (!launch(kernels[4], {static_cast<unsigned>(H), static_cast<unsigned>(D / block_v_), 1}, static_cast<unsigned>(threads_[4]),
+                    inter.data(), 8, stream))
             return -1;
 
         // 5. gated RMSNorm, zero for padding rows
@@ -252,7 +280,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
             {cast(inputs[11]), 1, {1, 0, 0, 0}},
             {outputs[0], 2, {T * H, D, 0, 0}},
         }};
-        return launch(kernels[4], {static_cast<unsigned>(T * H), 1, 1}, static_cast<unsigned>(threads_[4]), norm.data(), 5, stream)
+        return launch(kernels[5], {static_cast<unsigned>(T * H), 1, 1}, static_cast<unsigned>(threads_[5]), norm.data(), 5, stream)
                    ? 0
                    : -1;
     }
@@ -267,6 +295,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
         fields_.push_back({"act_bytes", &act_bytes_, nvinfer1::PluginFieldType::kINT32, 1});
         fields_.push_back({"conv_block", &conv_block_, nvinfer1::PluginFieldType::kINT32, 1});
         fields_.push_back({"block_v", &block_v_, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"chunk", &chunk_, nvinfer1::PluginFieldType::kINT32, 1});
         fields_.push_back({"threads", threads_.data(), nvinfer1::PluginFieldType::kINT32,
                            kNumStages});
         for (int32_t s = 0; s < kNumStages; ++s)
@@ -281,7 +310,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
     std::size_t workspace_bytes() const noexcept {
         std::size_t const T = seq_len_, H = num_heads_, D = head_dim_, CD = conv_dim_;
         return align_up(T * CD * act_bytes_) + align_up(T * H * 4) + align_up(T * H * act_bytes_) +
-               align_up(T * H * D * act_bytes_);
+               align_up(T * H * D * act_bytes_) + 4 * align_up(H * T * D * 4) + align_up(H * T * 4);
     }
 
     int32_t num_heads_{0};
@@ -292,6 +321,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
     int32_t act_bytes_{0};
     int32_t conv_block_{0};
     int32_t block_v_{0};
+    int32_t chunk_{0};
     std::array<std::vector<char>, kNumStages> cubins_;
     std::array<int32_t, kNumStages> threads_{};
     bool valid_{false};

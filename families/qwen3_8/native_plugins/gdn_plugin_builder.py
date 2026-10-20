@@ -133,8 +133,13 @@ def block_sizes() -> tuple[int, int, int]:
 
 
 def prefill_block_v() -> int:
-    """V tile of the prefill delta-rule kernel (64 was fastest on RTX 5090 and B100)."""
-    return int(os.environ.get("TRTMC_GDN_PREFILL_BLOCK_V", "64"))
+    """V tile of the prefill inter-chunk kernel (32 was fastest on RTX 5090)."""
+    return int(os.environ.get("TRTMC_GDN_PREFILL_BLOCK_V", "32"))
+
+
+def prefill_chunk() -> int:
+    """Tokens per chunk of the chunked delta rule (32 was fastest on RTX 5090)."""
+    return int(os.environ.get("TRTMC_GDN_PREFILL_CHUNK", "32"))
 
 
 def compile_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, bf16: bool,
@@ -280,7 +285,7 @@ def add_gdn_decode_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads:
 
 PREFILL_PLUGIN_NAME = "Qwen38GdnPrefillTileGym"
 _PREFILL_SYMBOLS = {"conv": "gdnp_conv", "conv_state": "gdnp_conv_state", "gate": "gdnp_gate",
-                    "delta": "gdnp_delta", "norm": "gdnp_norm"}
+                    "intra": "gdnp_intra", "inter": "gdnp_inter", "norm": "gdnp_norm"}
 _PREFILL_CUBIN_CACHE: dict[tuple, dict[str, bytes]] = {}
 
 
@@ -289,7 +294,8 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
     """Compile the five prefill stage kernels (cutile/gdn_prefill.py) for fixed shapes."""
     conv_block = block_sizes()[0]
     block_v = prefill_block_v()
-    key = (num_heads, num_kv_heads, head_dim, seq_len, bf16, gpu_code, conv_block, block_v)
+    chunk = prefill_chunk()
+    key = (num_heads, num_kv_heads, head_dim, seq_len, bf16, gpu_code, conv_block, block_v, chunk)
     if key in _PREFILL_CUBIN_CACHE:
         return _PREFILL_CUBIN_CACHE[key]
 
@@ -302,6 +308,9 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
     H, D, NK, T = num_heads, head_dim, num_kv_heads, seq_len
     CD = 2 * NK * D + H * D
     act, f32, i32 = (ct.bfloat16 if bf16 else ct.float16), ct.float32, ct.int32
+    if T % chunk:
+        raise ValueError(f"seq_len {T} must be a multiple of the prefill chunk {chunk}")
+    NC = T // chunk
 
     def arr(dtype, shape, strides=None):
         return _array_constraint(ct, ArrayConstraint, dtype, shape, strides)
@@ -318,13 +327,18 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
             arr(act, (T, CD)), arr(act, (CD, _CONV_KERNEL)), arr(i32, (1,)),
             arr(act, (CD, _CONV_KERNEL)), conv_block]),
         "gate": (K.gate_kernel, [
-            arr(act, (T, H)), arr(act, (T, H)), arr(f32, (H,)), arr(f32, (H,)), arr(act, (T, H)),
-            arr(f32, (T, H)), pow2(H)]),
-        "delta": (K.delta_kernel, [
+            arr(act, (T, H)), arr(act, (T, H)), arr(f32, (H,)), arr(f32, (H,)), arr(i32, (1,)),
+            arr(act, (T, H)), arr(f32, (T, H)), pow2(H)]),
+        "intra": (K.intra_kernel, [
             arr(act, (1, T, NK, D), qkv_rows), arr(act, (1, T, NK, D), qkv_rows),
             arr(act, (1, T, H, D), qkv_rows), arr(f32, (1, T, H)), arr(act, (1, T, H)),
-            arr(act, (1, T, H, D)), arr(f32, (1, H, D, D)), arr(f32, (1, H, D, D)),
-            arr(i32, (1,)), float(D) ** -0.5, pow2(D), block_v]),
+            arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)),
+            arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)),
+            float(D) ** -0.5, chunk, pow2(D)]),
+        "inter": (K.inter_kernel, [
+            arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)),
+            arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)), arr(act, (1, T, H, D)),
+            arr(f32, (1, H, D, D)), arr(f32, (1, H, D, D)), NC, chunk, pow2(D), block_v]),
         "norm": (K.norm_kernel, [
             arr(act, (T * H, D)), arr(act, (T * H, D)), arr(f32, (H, D)), arr(i32, (1,)),
             arr(act, (T * H, D)), _NORM_EPS, D, pow2(D), H]),
@@ -357,7 +371,7 @@ def add_gdn_prefill_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads
     creator = trt.get_plugin_registry().get_creator(PREFILL_PLUGIN_NAME, "1", "")
     if creator is None:
         raise RuntimeError(f"TensorRT plugin creator {PREFILL_PLUGIN_NAME} is not registered")
-    conv_block, block_v = block_sizes()[0], prefill_block_v()
+    conv_block, block_v, chunk = block_sizes()[0], prefill_block_v(), prefill_chunk()
 
     def int_field(name, value):
         return trt.PluginField(name, np.array([value], dtype=np.int32), trt.PluginFieldType.INT32)
@@ -365,7 +379,8 @@ def add_gdn_prefill_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads
     fields = [int_field("num_heads", num_heads), int_field("num_kv_heads", num_kv_heads),
               int_field("head_dim", head_dim), int_field("conv_dim", conv_dim),
               int_field("seq_len", seq_len), int_field("act_bytes", 2),
-              int_field("conv_block", conv_block), int_field("block_v", block_v)]
+              int_field("conv_block", conv_block), int_field("block_v", block_v),
+              int_field("chunk", chunk)]
     fields.append(trt.PluginField(
         "threads", np.array([_block_threads(blob) for blob in cubins.values()], dtype=np.int32),
         trt.PluginFieldType.INT32))
