@@ -23,8 +23,5 @@
   ],
   "tensor_parallel_size": 1,
   "max_sequence_length": 512,
-  "fp32_layers": [
-    0,
-    1
-  ]
+  "fp32_layers": []
 }
