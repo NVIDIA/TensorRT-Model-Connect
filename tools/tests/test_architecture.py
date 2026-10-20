@@ -7,6 +7,7 @@ import ast
 import importlib.util
 import json
 import re
+import tomllib
 from pathlib import Path
 
 
@@ -553,6 +554,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     }
     expected_cmake = {
         "cmake/trtmcConfig.cmake.in",
+        "cmake/LibjpegTurbo.cmake",
         "cmake/edge_llm/EdgeLLM.cmake",
         "cmake/edge_llm/CheckNative.cmake",
         "cmake/edge_llm/EdgeLLMConfig.cmake.in",
@@ -560,10 +562,21 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "cmake/edge_llm/Prepare.cmake.in",
         "cmake/edge_llm/README.md",
     }
+    # The libjpeg-turbo decoder sources are each listed, with their upstream
+    # source, in the legal-header exception manifest.
+    legal_exceptions = tomllib.loads(
+        (REPO / "tools/legal_header_exceptions.toml").read_text(encoding="utf-8")
+    )["exceptions"]
     expected_third_party = {
         "third_party/stb/stb_image.h",
         "third_party/stb/stb_image_resize2.h",
         "third_party/stb/stb_image_write.h",
+        "third_party/libjpeg-turbo/LICENSE.md",
+        *(
+            entry["path"]
+            for entry in legal_exceptions
+            if entry["path"].startswith("third_party/libjpeg-turbo/")
+        ),
     }
 
     def files(root: str) -> set[str]:

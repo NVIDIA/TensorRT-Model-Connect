@@ -13,15 +13,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <csetjmp>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <jerror.h>
+#include <jpeglib.h>
 #include <limits>
-#include <memory>
 #include <stdexcept>
 #include <string>
-#include <turbojpeg.h>
 #include <vector>
 
 namespace trtmc::cli::io {
@@ -209,8 +211,56 @@ LoadedImage read_image_stb(const std::string& path) {
     return result;
 }
 
-// Match Pillow's default JPEG decoding: accurate integer IDCT, smooth chroma
-// upsampling, no decoder-side resizing or automatic EXIF orientation.
+// libjpeg reports errors through error_exit, which must not return; warnings
+// go through emit_message.
+struct JpegErrors {
+    jpeg_error_mgr base; // First member: libjpeg passes &base as cinfo->err.
+    std::jmp_buf jump;
+    bool truncated;
+};
+
+void jpeg_error_exit(j_common_ptr cinfo) {
+    std::longjmp(reinterpret_cast<JpegErrors*>(cinfo->err)->jump, 1);
+}
+
+// Like Pillow, tolerate warnings about damaged data but reject a file that
+// ends before the image does.
+void jpeg_emit_message(j_common_ptr cinfo, int level) {
+    auto* errors = reinterpret_cast<JpegErrors*>(cinfo->err);
+    if (level < 0 && errors->base.msg_code == JWRN_JPEG_EOF)
+        errors->truncated = true;
+}
+
+enum class JpegDecode { kDecoded, kCmyk, kFailed };
+
+// Runs every libjpeg call that can longjmp, so no C++ object is live between
+// the setjmp and a jump. The rows stay valid until jpeg_destroy_decompress.
+JpegDecode decode_jpeg_rows(jpeg_decompress_struct* cinfo, JpegErrors* errors,
+                            const std::vector<unsigned char>& compressed, JSAMPARRAY* rows) {
+    if (setjmp(errors->jump) != 0)
+        return JpegDecode::kFailed;
+    jpeg_create_decompress(cinfo);
+    jpeg_mem_src(cinfo, compressed.data(), static_cast<unsigned long>(compressed.size()));
+    jpeg_read_header(cinfo, TRUE);
+    if (cinfo->jpeg_color_space == JCS_CMYK || cinfo->jpeg_color_space == JCS_YCCK)
+        return JpegDecode::kCmyk;
+    // Pillow's defaults: accurate integer IDCT and smooth chroma upsampling,
+    // no decoder-side scaling.
+    cinfo->out_color_space = JCS_RGB;
+    cinfo->dct_method = JDCT_ISLOW;
+    cinfo->do_fancy_upsampling = TRUE;
+    jpeg_start_decompress(cinfo);
+    *rows = (*cinfo->mem->alloc_sarray)(reinterpret_cast<j_common_ptr>(cinfo), JPOOL_PERMANENT,
+                                        cinfo->output_width * 3U, cinfo->output_height);
+    while (cinfo->output_scanline < cinfo->output_height)
+        jpeg_read_scanlines(cinfo, *rows + cinfo->output_scanline,
+                            cinfo->output_height - cinfo->output_scanline);
+    jpeg_finish_decompress(cinfo);
+    return errors->truncated ? JpegDecode::kFailed : JpegDecode::kDecoded;
+}
+
+// Decode like Pillow's JPEG plugin, which uses the same libjpeg-turbo release
+// and settings. Orientation metadata is not applied, as Pillow does not.
 LoadedImage read_jpeg(const std::string& path) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     const auto size = input.tellg();
@@ -221,32 +271,27 @@ LoadedImage read_jpeg(const std::string& path) {
     if (!input.read(reinterpret_cast<char*>(compressed.data()), size))
         return {};
 
-    std::unique_ptr<void, decltype(&tjDestroy)> decoder(tjInitDecompress(), tjDestroy);
-    if (!decoder)
-        return {};
-    int width = 0, height = 0, subsampling = 0, colorspace = 0;
-    if (tjDecompressHeader3(decoder.get(), compressed.data(), compressed.size(), &width, &height,
-                            &subsampling, &colorspace) != 0 ||
-        width <= 0 || height <= 0)
-        return {};
-    // Preserve the existing CLI conversion for CMYK/YCCK inputs. RGB and
-    // grayscale inputs are decoded directly to RGB for model preprocessing.
-    if (colorspace == TJCS_CMYK || colorspace == TJCS_YCCK)
-        return read_image_stb(path);
-    if (static_cast<std::size_t>(width) >
-        std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(height) / 3U)
-        return {};
-    const auto count = static_cast<std::size_t>(width) * height * 3U;
-    std::vector<unsigned char> raw(count);
-    if (tjDecompress2(decoder.get(), compressed.data(), compressed.size(), raw.data(), width, 0,
-                      height, TJPF_RGB, TJFLAG_ACCURATEDCT | TJFLAG_STOPONWARNING) != 0)
-        return {};
+    jpeg_decompress_struct cinfo{};
+    JpegErrors errors{};
+    cinfo.err = jpeg_std_error(&errors.base);
+    errors.base.error_exit = jpeg_error_exit;
+    errors.base.emit_message = jpeg_emit_message;
+    JSAMPARRAY rows = nullptr;
+    const auto status = decode_jpeg_rows(&cinfo, &errors, compressed, &rows);
     LoadedImage result;
-    result.width = width;
-    result.height = height;
-    result.pixels.resize(count);
-    for (std::size_t index = 0; index < count; ++index)
-        result.pixels[index] = static_cast<float>(raw[index]) / 255.0F;
+    if (status == JpegDecode::kDecoded) {
+        result.width = static_cast<std::int32_t>(cinfo.output_width);
+        result.height = static_cast<std::int32_t>(cinfo.output_height);
+        const std::size_t row_size = static_cast<std::size_t>(cinfo.output_width) * 3U;
+        result.pixels.reserve(row_size * cinfo.output_height);
+        for (JDIMENSION y = 0; y < cinfo.output_height; ++y)
+            for (std::size_t x = 0; x < row_size; ++x)
+                result.pixels.push_back(static_cast<float>(rows[y][x]) / 255.0F);
+    }
+    jpeg_destroy_decompress(&cinfo);
+    // Keep the existing conversion for CMYK and YCCK inputs.
+    if (status == JpegDecode::kCmyk)
+        return read_image_stb(path);
     return result;
 }
 

@@ -20,3 +20,603 @@ path = "third_party/stb/stb_image_resize2.h"
 reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
 license = "MIT OR Public Domain"
 source = "https://github.com/nothings/stb/blob/cf79a4819767b5c136712221be78c83e28c54a6a/stb_image_resize2.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/README.ijg"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/README.ijg"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jaricom.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jaricom.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jcomapi.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jcomapi.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jconfig.h.in"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "BSD-3-Clause"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jconfig.h.in"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jconfigint.h.in"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "BSD-3-Clause"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jconfigint.h.in"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdapimin.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdapimin.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdapistd.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdapistd.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdarith.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdarith.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdatasrc.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdatasrc.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdcoefct.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdcoefct.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdcoefct.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdcoefct.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdcol565.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdcol565.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdcolext.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdcolext.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdcolor.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdcolor.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdct.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdct.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jddctmgr.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jddctmgr.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jddiffct.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jddiffct.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdhuff.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdhuff.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdhuff.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdhuff.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdinput.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdinput.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdlhuff.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdlhuff.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdlossls.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdlossls.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdmainct.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdmainct.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdmainct.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdmainct.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdmarker.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdmarker.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdmaster.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdmaster.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdmaster.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdmaster.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdmerge.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdmerge.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdmerge.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdmerge.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdmrg565.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdmrg565.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdmrgext.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdmrgext.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdphuff.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdphuff.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdpostct.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdpostct.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdsample.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdsample.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jdsample.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jdsample.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jerror.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jerror.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jerror.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jerror.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jidctflt.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jidctflt.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jidctfst.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jidctfst.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jidctint.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jidctint.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jidctred.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jidctred.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jinclude.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jinclude.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jlossls.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jlossls.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jmemmgr.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jmemmgr.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jmemnobs.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jmemnobs.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jmemsys.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jmemsys.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jmorecfg.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jmorecfg.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jpegapicomp.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jpegapicomp.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jpegint.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jpegint.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jpeglib.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jpeglib.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jquant1.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jquant1.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jquant2.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jquant2.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jsamplecomp.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jsamplecomp.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jsimd.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jsimd.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jsimddct.h"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jsimddct.h"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jstdhuff.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jstdhuff.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jutils.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jutils.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/jversion.h.in"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/jversion.h.in"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdapistd-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdapistd-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdapistd-16.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdapistd-16.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdapistd-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdapistd-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdcoefct-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdcoefct-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdcoefct-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdcoefct-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdcolor-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdcolor-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdcolor-16.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdcolor-16.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdcolor-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdcolor-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jddctmgr-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jddctmgr-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jddctmgr-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jddctmgr-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jddiffct-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jddiffct-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jddiffct-16.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jddiffct-16.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jddiffct-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jddiffct-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdlossls-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdlossls-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdlossls-16.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdlossls-16.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdlossls-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdlossls-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdmainct-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdmainct-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdmainct-16.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdmainct-16.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdmainct-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdmainct-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdmerge-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdmerge-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdmerge-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdmerge-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdpostct-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdpostct-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdpostct-16.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdpostct-16.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdpostct-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdpostct-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdsample-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdsample-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdsample-16.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdsample-16.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jdsample-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jdsample-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jidctflt-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jidctflt-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jidctflt-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jidctflt-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jidctfst-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jidctfst-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jidctfst-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jidctfst-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jidctint-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jidctint-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jidctint-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jidctint-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jidctred-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jidctred-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jidctred-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jidctred-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jquant1-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jquant1-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jquant1-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jquant1-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jquant2-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jquant2-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jquant2-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jquant2-8.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jutils-12.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jutils-12.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jutils-16.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jutils-16.c"
+
+[[exceptions]]
+path = "third_party/libjpeg-turbo/src/wrapper/jutils-8.c"
+reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
+license = "IJG"
+source = "https://github.com/libjpeg-turbo/libjpeg-turbo/blob/9217719d3a58633923b096af4c1d50d304768a64/src/wrapper/jutils-8.c"

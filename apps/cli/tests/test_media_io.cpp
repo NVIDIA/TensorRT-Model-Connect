@@ -25,7 +25,9 @@ int main(int argc, char** argv) {
         }
     };
     const fs::path fixtures(argv[1]);
-    for (const auto* name : {"rgb-444", "rgb-422", "rgb-420", "progressive-420", "grayscale"}) {
+    // extraneous-bytes.jpg makes libjpeg warn; Pillow still decodes it.
+    for (const auto* name :
+         {"rgb-444", "rgb-422", "rgb-420", "progressive-420", "grayscale", "extraneous-bytes"}) {
         const auto actual =
             trtmc::cli::io::read_image((fixtures / (std::string(name) + ".jpg")).string());
         const auto golden =

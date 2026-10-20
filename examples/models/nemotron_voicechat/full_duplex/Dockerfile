@@ -17,7 +17,6 @@ RUN apt-get update && \
       cmake \
       libasound2-dev \
       ninja-build \
-      libturbojpeg0-dev \
       nlohmann-json3-dev && \
     rm -rf /var/lib/apt/lists/*
 

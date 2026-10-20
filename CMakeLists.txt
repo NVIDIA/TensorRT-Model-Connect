@@ -331,8 +331,7 @@ foreach(_trtmc_description IN LISTS _trtmc_cli_descriptions)
     DESTINATION "${CMAKE_INSTALL_DATADIR}/trtmc/families/${_trtmc_description_family}")
 endforeach()
 
-find_path(TRTMC_TURBOJPEG_INCLUDE_DIR NAMES turbojpeg.h REQUIRED)
-find_library(TRTMC_TURBOJPEG_LIBRARY NAMES turbojpeg REQUIRED)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/LibjpegTurbo.cmake")
 
 add_library(trtmc_media_io STATIC apps/cli/io.cpp)
 target_include_directories(trtmc_media_io PRIVATE
@@ -340,8 +339,7 @@ target_include_directories(trtmc_media_io PRIVATE
   ${PROJECT_SOURCE_DIR}/core/runtime/include
 )
 target_include_directories(trtmc_media_io SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
-target_include_directories(trtmc_media_io SYSTEM PRIVATE ${TRTMC_TURBOJPEG_INCLUDE_DIR})
-target_link_libraries(trtmc_media_io PRIVATE ${TRTMC_TURBOJPEG_LIBRARY})
+target_link_libraries(trtmc_media_io PRIVATE trtmc_libjpeg_turbo)
 target_compile_options(trtmc_media_io PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(trtmc_cli STATIC

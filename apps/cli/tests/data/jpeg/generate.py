@@ -25,5 +25,13 @@ for name, source, options in [
     ("grayscale", image.convert("L"), {}),
 ]:
     source.save(root / f"{name}.jpg", quality=93, **options)
+
+# Stray bytes before the end-of-image marker make libjpeg warn ("extraneous
+# bytes before marker"); Pillow still decodes the image.
+encoded = (root / "rgb-420.jpg").read_bytes()
+(root / "extraneous-bytes.jpg").write_bytes(encoded[:-2] + b"\x00\x00\x00" + encoded[-2:])
+
+for name in ("rgb-444", "rgb-422", "rgb-420", "progressive-420", "grayscale",
+             "extraneous-bytes"):
     with Image.open(root / f"{name}.jpg") as decoded:
         decoded.convert("RGB").save(root / f"{name}.png")
