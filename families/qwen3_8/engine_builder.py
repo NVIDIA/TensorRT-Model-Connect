@@ -87,6 +87,7 @@ Weight key mapping (HF -> engine), verified against Qwen/Qwen3.8-27B:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -2268,6 +2269,33 @@ def _mark_debug_output(
     network.mark_output(out)
 
 
+def _use_cutile_gdn_plugin(qkv: trt.ITensor) -> bool:
+    """Opt-in cuTile GDN decode plugin (TRTMC_QWEN3_8_GDN_CUTILE=1); needs fp16/bf16 activations."""
+    if os.environ.get("TRTMC_QWEN3_8_GDN_CUTILE") != "1":
+        return False
+    return qkv.dtype in (trt.float16, trt.bfloat16)
+
+
+def _merge_gdn_projections(normed: trt.ITensor) -> bool:
+    """Opt-in (TRTMC_QWEN3_8_GDN_MERGE_PROJ=1): merge the GDN input projections into fewer GEMMs.
+
+    Plugin path only. Without quantization qkv, z, a and b become one GEMM. With FP8 qkv and z
+    become one FP8 GEMM (per-row weight scales) and the plugin computes a and b itself (a
+    dot product per head, in the gate kernel), because the a and b GEMM is slow next to the
+    plugin kernels.
+    """
+    return os.environ.get("TRTMC_QWEN3_8_GDN_MERGE_PROJ") == "1" and _use_cutile_gdn_plugin(normed)
+
+
+def _split_columns(network: trt.INetworkDefinition, tensor: trt.ITensor, widths: list[int]):
+    pieces, offset = [], 0
+    for width in widths:
+        pieces.append(network.add_slice(
+            tensor, start=(0, offset), shape=(1, width), stride=(1, 1)).get_output(0))
+        offset += width
+    return pieces
+
+
 def _add_deltanet_layer(
     *,
     network: trt.INetworkDefinition,
@@ -2310,289 +2338,354 @@ def _add_deltanet_layer(
     # ===== 2. Input projections =====
     matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
 
-    # QKV combined: [1, hidden] -> [1, conv_dim]
-    qkv = matmul(
-        normed, hidden_size, conv_dim,
-        weights.get(f"{prefix}.deltanet_in_proj_qkv"), f"{prefix}.deltanet_in_proj_qkv")
+    qkv_name, z_name = f"{prefix}.deltanet_in_proj_qkv", f"{prefix}.deltanet_z_proj"
+    merge = _merge_gdn_projections(normed)
+    merged_qz = None
+    fuse_ab = False
+    if merge and quant_ctx is not None:
+        merged_qz = quant_ctx.merged_fp8_matmul(network, normed, [qkv_name, z_name], dtype=dtype)
+    if merge and (quant_ctx is None or merged_qz is not None):
+        # Fewer GEMMs (TensorRT cannot fuse the projections across the plugin boundary), then
+        # split the outputs.
+        def concat_weights(names_widths):
+            return np.concatenate(
+                [np.asarray(weights[f"{prefix}.{name}"]).reshape(hidden_size, width)
+                 for name, width in names_widths], axis=1)
 
-    # Gate (z): [1, hidden] -> [1, d_inner]
-    z = matmul(
-        normed, hidden_size, d_inner,
-        weights.get(f"{prefix}.deltanet_z_proj"), f"{prefix}.deltanet_z_proj")
-
-    # Decay projection (a): [1, hidden] -> [1, num_heads]
-    a_raw = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, num_heads,
-        weights[f"{prefix}.deltanet_a_proj"], dtype=dtype)
-
-    # Beta projection (b): [1, hidden] -> [1, num_heads]
-    b_raw = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, num_heads,
-        weights[f"{prefix}.deltanet_b_proj"], dtype=dtype)
-
-    # ===== 3. Conv1d step on QKV =====
-    # conv_state_in: [conv_dim, d_conv]
-    # qkv: [1, conv_dim] -> [conv_dim, 1]
-    qkv_col = network.add_shuffle(qkv)
-    qkv_col.reshape_dims = (conv_dim, 1)
-
-    if d_conv > 1:
-        slice_layer = network.add_slice(
-            conv_state_in,
-            start=(0, 1),
-            shape=(conv_dim, d_conv - 1),
-            stride=(1, 1))
-        new_conv_state = network.add_concatenation(
-            [slice_layer.get_output(0), qkv_col.get_output(0)])
-        new_conv_state.axis = 1
-        present_conv = new_conv_state.get_output(0)
+        ab = [("deltanet_a_proj", num_heads), ("deltanet_b_proj", num_heads)]
+        if quant_ctx is None:
+            parts = [("deltanet_in_proj_qkv", conv_dim), ("deltanet_z_proj", d_inner)] + ab
+            merged = graph_ops.add_matmul_rhs_constant(
+                network, normed, hidden_size, sum(w for _, w in parts), concat_weights(parts),
+                dtype=dtype)
+            qkv, z, a_raw, b_raw = _split_columns(network, merged, [w for _, w in parts])
+        else:
+            qkv, z = _split_columns(network, merged_qz, [conv_dim, d_inner])
+            fuse_ab = True
+            # a and b are rows of one [2H, hidden] weight that the plugin reads with the
+            # normalized hidden row
+            a_raw = normed
+            b_raw = graph_ops.add_constant(
+                network, (2 * num_heads, hidden_size), concat_weights(ab).T, dtype=np.float32)
     else:
-        present_conv = qkv_col.get_output(0)
+        # QKV combined: [1, hidden] -> [1, conv_dim]
+        qkv = matmul(
+            normed, hidden_size, conv_dim,
+            weights.get(f"{prefix}.deltanet_in_proj_qkv"), f"{prefix}.deltanet_in_proj_qkv")
 
-    conv_w = graph_ops.add_constant(
-        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"],
-        dtype=dtype)
-    if conv_w.dtype != present_conv.dtype:
-        conv_w = network.add_cast(conv_w, present_conv.dtype).get_output(0)
-    conv_prod = network.add_elementwise(
-        present_conv, conv_w, trt.ElementWiseOperation.PROD)
-    conv_sum = network.add_reduce(
-        conv_prod.get_output(0), trt.ReduceOperation.SUM,
-        1 << 1, keep_dims=True)
-    conv_flat = network.add_shuffle(conv_sum.get_output(0))
-    conv_flat.reshape_dims = (1, conv_dim)
-    conv_out = graph_ops.add_bias_sum(
-        network, conv_flat.get_output(0), conv_dim,
-        weights[f"{prefix}.conv1d_bias"], dtype=dtype)
-    qkv_activated = graph_ops.add_activation(
-        network, conv_out, "silu", dtype=dtype)
+        # Gate (z): [1, hidden] -> [1, d_inner]
+        z = matmul(
+            normed, hidden_size, d_inner,
+            weights.get(f"{prefix}.deltanet_z_proj"), f"{prefix}.deltanet_z_proj")
 
-    # ===== 4. Split Q, K, V from activated output =====
-    offset = 0
-    q_slice = network.add_slice(
-        qkv_activated, start=(0, offset), shape=(1, qk_dim), stride=(1, 1))
-    q_raw_t = q_slice.get_output(0)
-    offset += qk_dim
+        # Decay projection (a): [1, hidden] -> [1, num_heads]
+        a_raw = graph_ops.add_matmul_rhs_constant(
+            network, normed, hidden_size, num_heads,
+            weights[f"{prefix}.deltanet_a_proj"], dtype=dtype)
 
-    k_slice = network.add_slice(
-        qkv_activated, start=(0, offset), shape=(1, qk_dim), stride=(1, 1))
-    k_raw_t = k_slice.get_output(0)
-    offset += qk_dim
+        # Beta projection (b): [1, hidden] -> [1, num_heads]
+        b_raw = graph_ops.add_matmul_rhs_constant(
+            network, normed, hidden_size, num_heads,
+            weights[f"{prefix}.deltanet_b_proj"], dtype=dtype)
 
-    v_slice = network.add_slice(
-        qkv_activated, start=(0, offset), shape=(1, d_inner), stride=(1, 1))
-    v_raw = v_slice.get_output(0)
 
-    # ===== 5. L2-normalize Q and K =====
-    # Reshape to [num_kv_heads, head_dim], normalize per-head, reshape back
-    q_heads_in = network.add_shuffle(q_raw_t)
-    q_heads_in.reshape_dims = (num_kv_heads, head_dim)
-    q_normed = graph_ops.add_l2_norm(
-        network, q_heads_in.get_output(0), 1, eps=1e-6, dtype=dtype)
+    if _use_cutile_gdn_plugin(qkv):
+        # Steps 3-10 as cuTile kernels (see native_plugins/gdn_tilegym_plugin.cpp).
+        from .native_plugins.gdn_plugin_builder import add_gdn_decode_plugin
 
-    k_heads_in = network.add_shuffle(k_raw_t)
-    k_heads_in.reshape_dims = (num_kv_heads, head_dim)
-    k_normed = graph_ops.add_l2_norm(
-        network, k_heads_in.get_output(0), 1, eps=1e-6, dtype=dtype)
+        def f32_const(shape, array):
+            return graph_ops.add_constant(network, shape, array, dtype=np.float32)
 
-    # ===== 6. keep compact Q,K from num_kv_heads -> num_heads =====
-    heads_per_group = num_heads // num_kv_heads
+        def bf16_rounded(array):
+            # Same values as the original path, which stores conv weight and bias in bf16.
+            # TRTMC_QWEN3_8_GDN_CONV_FP32=1 keeps the checkpoint fp32 values.
+            a = np.ascontiguousarray(array, dtype=np.float32)
+            if os.environ.get("TRTMC_QWEN3_8_GDN_CONV_FP32", "0") == "1" or qkv.dtype != trt.bfloat16:
+                return a
+            u = a.view(np.uint32)
+            u = (u + 0x7FFF + ((u >> 16) & 1)) & 0xFFFF0000
+            return u.astype(np.uint32).view(np.float32)
 
-    if heads_per_group > 1:
-        # Q: [num_kv_heads, head_dim] -> [num_kv_heads, 1, head_dim] ->
-        #    tile -> [num_kv_heads, heads_per_group, head_dim] ->
-        #    [num_heads, head_dim]
-        q_3d = network.add_shuffle(q_normed)
-        q_3d.reshape_dims = (num_kv_heads, 1, head_dim)
-        tile_ones = graph_ops.add_constant(
-            network, (1, heads_per_group, 1),
-            np.ones((1, heads_per_group, 1), dtype=dtype), dtype=dtype)
-        if tile_ones.dtype != q_3d.get_output(0).dtype:
-            tile_ones = network.add_cast(tile_ones, q_3d.get_output(0).dtype).get_output(0)
-        q_tiled = network.add_elementwise(
-            q_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD)
-        q_expanded_s = network.add_shuffle(q_tiled.get_output(0))
-        q_expanded_s.reshape_dims = (num_heads, head_dim)
-        q_expanded = q_expanded_s.get_output(0)
-
-        k_3d = network.add_shuffle(k_normed)
-        k_3d.reshape_dims = (num_kv_heads, 1, head_dim)
-        k_tiled = network.add_elementwise(
-            k_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD)
-        k_t_s = network.add_shuffle(k_tiled.get_output(0))
-        k_t_s.reshape_dims = (num_heads, head_dim)
-        k_t = k_t_s.get_output(0)
+        gdn_layer = add_gdn_decode_plugin(
+            network, trt,
+            inputs=[
+                qkv, z, a_raw, b_raw, conv_state_in,
+                f32_const((conv_dim, d_conv), bf16_rounded(weights[f"{prefix}.conv1d_weight"])),
+                f32_const((conv_dim,), bf16_rounded(weights[f"{prefix}.conv1d_bias"])),
+                f32_const((num_heads,), weights[f"{prefix}.A"]),
+                f32_const((num_heads,), weights[f"{prefix}.dt_bias"]),
+                f32_const((d_inner,), weights[f"{prefix}.deltanet_norm"]),
+                ssm_state_in,
+            ],
+            num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
+            bf16=qkv.dtype == trt.bfloat16, hidden_size=hidden_size if fuse_ab else 0)
+        gated = gdn_layer
+        present_conv = gdn_layer.get_output(1)
+        present_ssm = gdn_layer.get_output(2)
     else:
-        q_expanded = q_normed
-        k_t = k_normed
+        # ===== 3. Conv1d step on QKV =====
+        # conv_state_in: [conv_dim, d_conv]
+        # qkv: [1, conv_dim] -> [conv_dim, 1]
+        qkv_col = network.add_shuffle(qkv)
+        qkv_col.reshape_dims = (conv_dim, 1)
 
-    # V: [1, d_inner] -> [num_heads, head_dim]
-    v_heads = network.add_shuffle(v_raw)
-    v_heads.reshape_dims = (num_heads, head_dim)
-    v_t = v_heads.get_output(0)
+        if d_conv > 1:
+            slice_layer = network.add_slice(
+                conv_state_in,
+                start=(0, 1),
+                shape=(conv_dim, d_conv - 1),
+                stride=(1, 1))
+            new_conv_state = network.add_concatenation(
+                [slice_layer.get_output(0), qkv_col.get_output(0)])
+            new_conv_state.axis = 1
+            present_conv = new_conv_state.get_output(0)
+        else:
+            present_conv = qkv_col.get_output(0)
 
-    # ===== 7. Compute decay: -exp(A_log) * softplus(a + dt_bias) per head =====
-    # Transformers performs the decay and recurrent rule in FP32 even when
-    # the model projections use FP16.  Keeping these tensors in the model
-    # storage dtype quantizes the persistent state again on every token.
-    recurrent_dtype = trt.float32
+        conv_w = graph_ops.add_constant(
+            network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"],
+            dtype=dtype)
+        if conv_w.dtype != present_conv.dtype:
+            conv_w = network.add_cast(conv_w, present_conv.dtype).get_output(0)
+        conv_prod = network.add_elementwise(
+            present_conv, conv_w, trt.ElementWiseOperation.PROD)
+        conv_sum = network.add_reduce(
+            conv_prod.get_output(0), trt.ReduceOperation.SUM,
+            1 << 1, keep_dims=True)
+        conv_flat = network.add_shuffle(conv_sum.get_output(0))
+        conv_flat.reshape_dims = (1, conv_dim)
+        conv_out = graph_ops.add_bias_sum(
+            network, conv_flat.get_output(0), conv_dim,
+            weights[f"{prefix}.conv1d_bias"], dtype=dtype)
+        qkv_activated = graph_ops.add_activation(
+            network, conv_out, "silu", dtype=dtype)
 
-    def recurrent_cast(tensor: trt.ITensor) -> trt.ITensor:
-        if tensor.dtype == recurrent_dtype:
-            return tensor
-        return network.add_cast(tensor, recurrent_dtype).get_output(0)
+        # ===== 4. Split Q, K, V from activated output =====
+        offset = 0
+        q_slice = network.add_slice(
+            qkv_activated, start=(0, offset), shape=(1, qk_dim), stride=(1, 1))
+        q_raw_t = q_slice.get_output(0)
+        offset += qk_dim
 
-    # A: [num_heads] (precomputed as -exp(A_log))
-    A_const = graph_ops.add_constant(
-        network, (1, num_heads), weights[f"{prefix}.A"], dtype=np.float32)
+        k_slice = network.add_slice(
+            qkv_activated, start=(0, offset), shape=(1, qk_dim), stride=(1, 1))
+        k_raw_t = k_slice.get_output(0)
+        offset += qk_dim
 
-    # dt_bias: [num_heads]
-    dt_bias_const = graph_ops.add_constant(
-        network, (1, num_heads), weights[f"{prefix}.dt_bias"], dtype=np.float32)
-    a_biased = network.add_elementwise(
-        recurrent_cast(a_raw), dt_bias_const, trt.ElementWiseOperation.SUM)
+        v_slice = network.add_slice(
+            qkv_activated, start=(0, offset), shape=(1, d_inner), stride=(1, 1))
+        v_raw = v_slice.get_output(0)
 
-    # softplus(a + dt_bias): log(1 + exp(x))
-    a_exp = network.add_unary(a_biased.get_output(0), trt.UnaryOperation.EXP)
-    one = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=np.float32), dtype=np.float32)
-    a_exp_p1 = network.add_elementwise(
-        a_exp.get_output(0), one, trt.ElementWiseOperation.SUM)
-    a_softplus = network.add_unary(
-        a_exp_p1.get_output(0), trt.UnaryOperation.LOG)
+        # ===== 5. L2-normalize Q and K =====
+        # Reshape to [num_kv_heads, head_dim], normalize per-head, reshape back
+        q_heads_in = network.add_shuffle(q_raw_t)
+        q_heads_in.reshape_dims = (num_kv_heads, head_dim)
+        q_normed = graph_ops.add_l2_norm(
+            network, q_heads_in.get_output(0), 1, eps=1e-6, dtype=dtype)
 
-    # decay = A * softplus(...) per head: [1, num_heads]
-    decay_flat = network.add_elementwise(
-        A_const, a_softplus.get_output(0), trt.ElementWiseOperation.PROD)
-    # exp(decay) for the state update: [1, num_heads] -> [num_heads, 1, 1]
-    decay_reshaped = network.add_shuffle(decay_flat.get_output(0))
-    decay_reshaped.reshape_dims = (num_heads, 1, 1)
-    decay_exp = network.add_unary(
-        decay_reshaped.get_output(0), trt.UnaryOperation.EXP)
+        k_heads_in = network.add_shuffle(k_raw_t)
+        k_heads_in.reshape_dims = (num_kv_heads, head_dim)
+        k_normed = graph_ops.add_l2_norm(
+            network, k_heads_in.get_output(0), 1, eps=1e-6, dtype=dtype)
 
-    # ===== 8. Compute beta: sigmoid(b) per head =====
-    # b_raw: [1, num_heads]
-    beta = network.add_activation(b_raw, trt.ActivationType.SIGMOID)
-    # [1, num_heads] -> [num_heads, 1]
-    beta_reshaped = network.add_shuffle(recurrent_cast(beta.get_output(0)))
-    beta_reshaped.reshape_dims = (num_heads, 1)
+        # ===== 6. keep compact Q,K from num_kv_heads -> num_heads =====
+        heads_per_group = num_heads // num_kv_heads
 
-    # ===== 9. Delta rule state update =====
-    # HF state layout: [H, K_dim, V_dim]
-    # ssm_state_in: [num_heads, head_dim, head_dim]  (K on axis -2, V on axis -1)
-    # k: [num_heads, head_dim], q: [num_heads, head_dim], v: [num_heads, head_dim]
+        if heads_per_group > 1:
+            # Q: [num_kv_heads, head_dim] -> [num_kv_heads, 1, head_dim] ->
+            #    tile -> [num_kv_heads, heads_per_group, head_dim] ->
+            #    [num_heads, head_dim]
+            q_3d = network.add_shuffle(q_normed)
+            q_3d.reshape_dims = (num_kv_heads, 1, head_dim)
+            tile_ones = graph_ops.add_constant(
+                network, (1, heads_per_group, 1),
+                np.ones((1, heads_per_group, 1), dtype=dtype), dtype=dtype)
+            if tile_ones.dtype != q_3d.get_output(0).dtype:
+                tile_ones = network.add_cast(tile_ones, q_3d.get_output(0).dtype).get_output(0)
+            q_tiled = network.add_elementwise(
+                q_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD)
+            q_expanded_s = network.add_shuffle(q_tiled.get_output(0))
+            q_expanded_s.reshape_dims = (num_heads, head_dim)
+            q_expanded = q_expanded_s.get_output(0)
 
-    # 9a. Decay state first: state = state * exp(g)
-    decayed_state = network.add_elementwise(
-        decay_exp.get_output(0), recurrent_cast(ssm_state_in),
-        trt.ElementWiseOperation.PROD)
+            k_3d = network.add_shuffle(k_normed)
+            k_3d.reshape_dims = (num_kv_heads, 1, head_dim)
+            k_tiled = network.add_elementwise(
+                k_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD)
+            k_t_s = network.add_shuffle(k_tiled.get_output(0))
+            k_t_s.reshape_dims = (num_heads, head_dim)
+            k_t = k_t_s.get_output(0)
+        else:
+            q_expanded = q_normed
+            k_t = k_normed
 
-    # 9b. kv_mem = state^T @ k: read old value for this key
-    # [H, V, K] @ [H, K, 1] = [H, V, 1]  (transpose state to swap K/V axes)
-    k_recurrent = recurrent_cast(k_t)
-    v_recurrent = recurrent_cast(v_t)
-    q_recurrent = recurrent_cast(q_expanded)
+        # V: [1, d_inner] -> [num_heads, head_dim]
+        v_heads = network.add_shuffle(v_raw)
+        v_heads.reshape_dims = (num_heads, head_dim)
+        v_t = v_heads.get_output(0)
 
-    k_col = network.add_shuffle(k_recurrent)
-    k_col.reshape_dims = (num_heads, head_dim, 1)
-    kv_old_3d = network.add_matrix_multiply(
-        decayed_state.get_output(0), trt.MatrixOperation.TRANSPOSE,
-        k_col.get_output(0), trt.MatrixOperation.NONE)
-    kv_old = network.add_shuffle(kv_old_3d.get_output(0))
-    kv_old.reshape_dims = (num_heads, head_dim)
+        # ===== 7. Compute decay: -exp(A_log) * softplus(a + dt_bias) per head =====
+        # Transformers performs the decay and recurrent rule in FP32 even when
+        # the model projections use FP16.  Keeping these tensors in the model
+        # storage dtype quantizes the persistent state again on every token.
+        recurrent_dtype = trt.float32
 
-    # 9c. delta = (v - kv_mem) * beta
-    v_minus_old = network.add_elementwise(
-        v_recurrent, kv_old.get_output(0), trt.ElementWiseOperation.SUB)
-    v_delta = network.add_elementwise(
-        v_minus_old.get_output(0), beta_reshaped.get_output(0),
-        trt.ElementWiseOperation.PROD)
+        def recurrent_cast(tensor: trt.ITensor) -> trt.ITensor:
+            if tensor.dtype == recurrent_dtype:
+                return tensor
+            return network.add_cast(tensor, recurrent_dtype).get_output(0)
 
-    # 9d. state_new = decayed_state + outer(k, delta)
-    # outer: k[:, :, None] * delta[:, None, :] = [H, K, 1] @ [H, 1, V] = [H, K, V]
-    k_col2 = network.add_shuffle(k_recurrent)
-    k_col2.reshape_dims = (num_heads, head_dim, 1)
-    v_delta_row = network.add_shuffle(v_delta.get_output(0))
-    v_delta_row.reshape_dims = (num_heads, 1, head_dim)
-    outer_prod = network.add_matrix_multiply(
-        k_col2.get_output(0), trt.MatrixOperation.NONE,
-        v_delta_row.get_output(0), trt.MatrixOperation.NONE)
+        # A: [num_heads] (precomputed as -exp(A_log))
+        A_const = graph_ops.add_constant(
+            network, (1, num_heads), weights[f"{prefix}.A"], dtype=np.float32)
 
-    new_state = network.add_elementwise(
-        decayed_state.get_output(0), outer_prod.get_output(0),
-        trt.ElementWiseOperation.SUM)
-    present_ssm = new_state.get_output(0)
+        # dt_bias: [num_heads]
+        dt_bias_const = graph_ops.add_constant(
+            network, (1, num_heads), weights[f"{prefix}.dt_bias"], dtype=np.float32)
+        a_biased = network.add_elementwise(
+            recurrent_cast(a_raw), dt_bias_const, trt.ElementWiseOperation.SUM)
 
-    # 9e. output = state_new^T @ (q * scale)
-    # HF applies: query *= 1/sqrt(k_dim)
-    q_scale = graph_ops.add_constant(
-        network, (1, 1),
-        np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32), dtype=np.float32)
-    q_scaled = network.add_elementwise(
-        q_recurrent, q_scale, trt.ElementWiseOperation.PROD)
-    # [H, V, K] @ [H, K, 1] = [H, V, 1]
-    q_col = network.add_shuffle(q_scaled.get_output(0))
-    q_col.reshape_dims = (num_heads, head_dim, 1)
-    output_3d = network.add_matrix_multiply(
-        present_ssm, trt.MatrixOperation.TRANSPOSE,
-        q_col.get_output(0), trt.MatrixOperation.NONE)
-    output_flat = network.add_shuffle(output_3d.get_output(0))
-    output_flat.reshape_dims = (1, d_inner)
+        # softplus(a + dt_bias): log(1 + exp(x))
+        a_exp = network.add_unary(a_biased.get_output(0), trt.UnaryOperation.EXP)
+        one = graph_ops.add_constant(
+            network, (1, 1), np.array([1.0], dtype=np.float32), dtype=np.float32)
+        a_exp_p1 = network.add_elementwise(
+            a_exp.get_output(0), one, trt.ElementWiseOperation.SUM)
+        a_softplus = network.add_unary(
+            a_exp_p1.get_output(0), trt.UnaryOperation.LOG)
 
-    # ===== 10. Gated RMSNorm per-head: weight * norm(output) * silu(z) =====
-    # The reference recurrent kernel returns the attention output in the model
-    # storage dtype before Qwen3_5RMSNormGated casts it back to FP32.
-    recurrent_output = output_flat.get_output(0)
-    if recurrent_output.dtype != hidden.dtype:
-        recurrent_output = network.add_cast(
-            recurrent_output, hidden.dtype).get_output(0)
+        # decay = A * softplus(...) per head: [1, num_heads]
+        decay_flat = network.add_elementwise(
+            A_const, a_softplus.get_output(0), trt.ElementWiseOperation.PROD)
+        # exp(decay) for the state update: [1, num_heads] -> [num_heads, 1, 1]
+        decay_reshaped = network.add_shuffle(decay_flat.get_output(0))
+        decay_reshaped.reshape_dims = (num_heads, 1, 1)
+        decay_exp = network.add_unary(
+            decay_reshaped.get_output(0), trt.UnaryOperation.EXP)
 
-    # HF norm operates per head_v_dim: reshape to [num_heads, head_dim], norm, reshape back
-    deltanet_norm_w = weights[f"{prefix}.deltanet_norm"]
-    # Use same eps as HF Qwen3_5RMSNormGated (config.rms_norm_eps = 1e-6)
-    eps_small = graph_ops.add_constant(
-        network, (1, 1),
-        np.array([1e-6], dtype=np.float32), dtype=np.float32)
+        # ===== 8. Compute beta: sigmoid(b) per head =====
+        # b_raw: [1, num_heads]
+        beta = network.add_activation(b_raw, trt.ActivationType.SIGMOID)
+        # [1, num_heads] -> [num_heads, 1]
+        beta_reshaped = network.add_shuffle(recurrent_cast(beta.get_output(0)))
+        beta_reshaped.reshape_dims = (num_heads, 1)
 
-    # Reshape output and z to [num_heads, head_dim] for per-head norm
-    output_heads = network.add_shuffle(recurrent_output)
-    output_heads.reshape_dims = (num_heads, head_dim)
-    norm_input = output_heads.get_output(0)
-    norm_output_dtype = norm_input.dtype
-    if dtype != np.float32:
-        norm_input = network.add_cast(norm_input, trt.float32).get_output(0)
+        # ===== 9. Delta rule state update =====
+        # HF state layout: [H, K_dim, V_dim]
+        # ssm_state_in: [num_heads, head_dim, head_dim]  (K on axis -2, V on axis -1)
+        # k: [num_heads, head_dim], q: [num_heads, head_dim], v: [num_heads, head_dim]
 
-    # Per-head RMSNorm: norm each head independently
-    sq = network.add_elementwise(
-        norm_input, norm_input,
-        trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom_in = network.add_elementwise(
-        mean.get_output(0), eps_small, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(
-        norm_input, recip.get_output(0),
-        trt.ElementWiseOperation.PROD)
+        # 9a. Decay state first: state = state * exp(g)
+        decayed_state = network.add_elementwise(
+            decay_exp.get_output(0), recurrent_cast(ssm_state_in),
+            trt.ElementWiseOperation.PROD)
 
-    # Reshape back and apply weight
-    norm_flat = network.add_shuffle(normalized.get_output(0))
-    norm_flat.reshape_dims = (1, d_inner)
-    gamma_t = graph_ops.add_constant(
-        network, (1, d_inner), deltanet_norm_w, dtype=np.float32)
-    normed_output = network.add_elementwise(
-        norm_flat.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    normed_output_tensor = normed_output.get_output(0)
-    if normed_output_tensor.dtype != norm_output_dtype:
-        normed_output_tensor = network.add_cast(
-            normed_output_tensor, norm_output_dtype).get_output(0)
+        # 9b. kv_mem = state^T @ k: read old value for this key
+        # [H, V, K] @ [H, K, 1] = [H, V, 1]  (transpose state to swap K/V axes)
+        k_recurrent = recurrent_cast(k_t)
+        v_recurrent = recurrent_cast(v_t)
+        q_recurrent = recurrent_cast(q_expanded)
 
-    # Gate: multiply by silu(z)
-    z_activated = graph_ops.add_activation(network, z, "silu", dtype=dtype)
-    gated = network.add_elementwise(
-        normed_output_tensor, z_activated,
-        trt.ElementWiseOperation.PROD)
+        k_col = network.add_shuffle(k_recurrent)
+        k_col.reshape_dims = (num_heads, head_dim, 1)
+        kv_old_3d = network.add_matrix_multiply(
+            decayed_state.get_output(0), trt.MatrixOperation.TRANSPOSE,
+            k_col.get_output(0), trt.MatrixOperation.NONE)
+        kv_old = network.add_shuffle(kv_old_3d.get_output(0))
+        kv_old.reshape_dims = (num_heads, head_dim)
+
+        # 9c. delta = (v - kv_mem) * beta
+        v_minus_old = network.add_elementwise(
+            v_recurrent, kv_old.get_output(0), trt.ElementWiseOperation.SUB)
+        v_delta = network.add_elementwise(
+            v_minus_old.get_output(0), beta_reshaped.get_output(0),
+            trt.ElementWiseOperation.PROD)
+
+        # 9d. state_new = decayed_state + outer(k, delta)
+        # outer: k[:, :, None] * delta[:, None, :] = [H, K, 1] @ [H, 1, V] = [H, K, V]
+        k_col2 = network.add_shuffle(k_recurrent)
+        k_col2.reshape_dims = (num_heads, head_dim, 1)
+        v_delta_row = network.add_shuffle(v_delta.get_output(0))
+        v_delta_row.reshape_dims = (num_heads, 1, head_dim)
+        outer_prod = network.add_matrix_multiply(
+            k_col2.get_output(0), trt.MatrixOperation.NONE,
+            v_delta_row.get_output(0), trt.MatrixOperation.NONE)
+
+        new_state = network.add_elementwise(
+            decayed_state.get_output(0), outer_prod.get_output(0),
+            trt.ElementWiseOperation.SUM)
+        present_ssm = new_state.get_output(0)
+
+        # 9e. output = state_new^T @ (q * scale)
+        # HF applies: query *= 1/sqrt(k_dim)
+        q_scale = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32), dtype=np.float32)
+        q_scaled = network.add_elementwise(
+            q_recurrent, q_scale, trt.ElementWiseOperation.PROD)
+        # [H, V, K] @ [H, K, 1] = [H, V, 1]
+        q_col = network.add_shuffle(q_scaled.get_output(0))
+        q_col.reshape_dims = (num_heads, head_dim, 1)
+        output_3d = network.add_matrix_multiply(
+            present_ssm, trt.MatrixOperation.TRANSPOSE,
+            q_col.get_output(0), trt.MatrixOperation.NONE)
+        output_flat = network.add_shuffle(output_3d.get_output(0))
+        output_flat.reshape_dims = (1, d_inner)
+
+        # ===== 10. Gated RMSNorm per-head: weight * norm(output) * silu(z) =====
+        # The reference recurrent kernel returns the attention output in the model
+        # storage dtype before Qwen3_5RMSNormGated casts it back to FP32.
+        recurrent_output = output_flat.get_output(0)
+        if recurrent_output.dtype != hidden.dtype:
+            recurrent_output = network.add_cast(
+                recurrent_output, hidden.dtype).get_output(0)
+
+        # HF norm operates per head_v_dim: reshape to [num_heads, head_dim], norm, reshape back
+        deltanet_norm_w = weights[f"{prefix}.deltanet_norm"]
+        # Use same eps as HF Qwen3_5RMSNormGated (config.rms_norm_eps = 1e-6)
+        eps_small = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([1e-6], dtype=np.float32), dtype=np.float32)
+
+        # Reshape output and z to [num_heads, head_dim] for per-head norm
+        output_heads = network.add_shuffle(recurrent_output)
+        output_heads.reshape_dims = (num_heads, head_dim)
+        norm_input = output_heads.get_output(0)
+        norm_output_dtype = norm_input.dtype
+        if dtype != np.float32:
+            norm_input = network.add_cast(norm_input, trt.float32).get_output(0)
+
+        # Per-head RMSNorm: norm each head independently
+        sq = network.add_elementwise(
+            norm_input, norm_input,
+            trt.ElementWiseOperation.PROD)
+        mean = network.add_reduce(
+            sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+        denom_in = network.add_elementwise(
+            mean.get_output(0), eps_small, trt.ElementWiseOperation.SUM)
+        sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+        recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
+        normalized = network.add_elementwise(
+            norm_input, recip.get_output(0),
+            trt.ElementWiseOperation.PROD)
+
+        # Reshape back and apply weight
+        norm_flat = network.add_shuffle(normalized.get_output(0))
+        norm_flat.reshape_dims = (1, d_inner)
+        gamma_t = graph_ops.add_constant(
+            network, (1, d_inner), deltanet_norm_w, dtype=np.float32)
+        normed_output = network.add_elementwise(
+            norm_flat.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
+        normed_output_tensor = normed_output.get_output(0)
+        if normed_output_tensor.dtype != norm_output_dtype:
+            normed_output_tensor = network.add_cast(
+                normed_output_tensor, norm_output_dtype).get_output(0)
+
+        # Gate: multiply by silu(z)
+        z_activated = graph_ops.add_activation(network, z, "silu", dtype=dtype)
+        gated = network.add_elementwise(
+            normed_output_tensor, z_activated,
+            trt.ElementWiseOperation.PROD)
 
     # ===== 11. Output projection + residual =====
     out = matmul(

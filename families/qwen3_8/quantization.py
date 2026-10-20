@@ -142,7 +142,7 @@ class _FP8Weight:
     """The checkpoint's own packed FP8 weight, reused bit-exact."""
 
     packed: np.ndarray  # [out_features, in_features] raw fp8_e4m3 bytes (as uint8)
-    weight_scale: float
+    weight_scale: float | np.ndarray  # per tensor, or one value per output row
     out_features: int
     in_features: int
 
@@ -237,16 +237,17 @@ class _FP8Format:
 
         keep_alive.append(w.packed)
 
-        def scale_const(value: float):
-            return graph_ops.add_constant(
-                network, (1,), np.asarray([value], dtype=np.float32), dtype=np.float32
-            )
+        def scale_const(value):
+            values = np.asarray(value, dtype=np.float32).reshape(-1)
+            return graph_ops.add_constant(network, (values.size,), values, dtype=np.float32)
 
         # --- weight side: reuse the checkpoint's own packed FP8 bytes as-is ---
         w_fp8 = trt.Weights(trt.DataType.FP8, w.packed.ctypes.data, n * k)
         w_const = network.add_constant((n, k), w_fp8).get_output(0)
         w_scale = scale_const(w.weight_scale)
         w_dequant = network.add_dequantize(w_const, w_scale, output_dtype)
+        if np.ndim(w.weight_scale) > 0:  # one scale per output row
+            w_dequant.axis = 0
 
         # --- activation side: quantize with the checkpoint's real scale ---
         act_scale = scale_const(scales.input_scale)
@@ -318,6 +319,30 @@ class Qwen38QuantContext:
             graph_ops=self.graph_ops,
             keep_alive=self.keep_alive,
         )
+
+    def merged_fp8_matmul(self, network, lhs, weight_names: list[str], dtype: np.dtype = np.float32):
+        """One FP8 GEMM for several projections of the same input, outputs side by side.
+
+        The weight rows are concatenated and every projection keeps its own weight scale (one
+        scale per output row), so the result equals the separate GEMMs. Needs all weights to be
+        FP8 with the same input scale; returns None otherwise.
+        """
+        scales = [self.profile.scales.get(name) for name in weight_names]
+        if any(s is None or not isinstance(s.weight, _FP8Weight) for s in scales):
+            return None
+        if len({s.input_scale for s in scales}) != 1 or \
+                len({s.weight.in_features for s in scales}) != 1:
+            return None
+        weight = _FP8Weight(
+            packed=np.ascontiguousarray(np.concatenate([s.weight.packed for s in scales], axis=0)),
+            weight_scale=np.concatenate([
+                np.full(s.weight.out_features, s.weight.weight_scale, dtype=np.float32)
+                for s in scales]),
+            out_features=sum(s.weight.out_features for s in scales),
+            in_features=scales[0].weight.in_features)
+        return _wrap_matmul(
+            network, lhs, _LayerScales(input_scale=scales[0].input_scale, weight=weight),
+            dtype=dtype, graph_ops=self.graph_ops, keep_alive=self.keep_alive)
 
 
 def _read_input_scale(readers, hf_prefix: str) -> float | None:
