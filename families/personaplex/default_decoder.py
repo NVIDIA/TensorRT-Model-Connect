@@ -305,8 +305,9 @@ def build_standard_decoder_engine(
             dtype=np.float32,
         )
 
+    # RMSNorm computes in FP32; 1e-8 would underflow if stored as FP16 first.
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype), dtype=work_np_dtype
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32), dtype=np.float32
     )
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
     # ---------------------------------------------------------------
