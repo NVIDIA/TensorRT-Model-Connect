@@ -135,7 +135,9 @@ def add_rms_norm(
     """RMSNorm: gamma * (x / sqrt(mean(x^2) + eps)).
 
     FP32 precision boundary: when dtype != float32, casts to FP32 before
-    norm computation for numerical stability, then casts back.
+    norm computation for numerical stability, then casts back. gamma is
+    first rounded to the input dtype, because the reference stores the norm
+    weight in the model dtype and only computes in FP32.
 
     TRT's native normalization API implements mean-centered LayerNorm, not
     RMSNorm, so this remains a manual shared implementation.
@@ -152,6 +154,10 @@ def add_rms_norm(
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
     gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
+    if need_cast:
+        # Small BF16 checkpoint weights are not all exact in Half.
+        gamma_t = network.add_cast(gamma_t, output_dtype).get_output(0)
+        gamma_t = network.add_cast(gamma_t, trt.float32).get_output(0)
     scaled = network.add_elementwise(
         normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
     )
