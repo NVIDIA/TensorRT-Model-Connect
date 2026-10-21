@@ -25,6 +25,7 @@ benchmarks:
         split: test
         revision: b02edcef1330480be3a11bd6f7434ac32f05ad08
         audio_column: audio
+        audio_sample_rate: 24000  # Mimi's rate: both sides read the same resampled 16 kHz questions
         label_fields: {answer: reference, prompt: prompt}
       selection: {method: first, count: 455}
       fields: {audio: audio_path}

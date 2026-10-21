@@ -4,7 +4,9 @@ The `personaplex-7b` AIPerf profile uses all 455 questions from VoiceBench
 OpenBookQA, pinned to dataset revision
 `b02edcef1330480be3a11bd6f7434ac32f05ad08`. Each question has an objective
 A/B/C/D answer. Only the question audio enters the model; the question text and
-gold answer are available to the scorer only.
+gold answer are available to the scorer only. The suite resamples the 16 kHz
+questions once to Mimi's 24 kHz rate (SciPy polyphase), so both sides read the
+same samples and neither pipeline resamples.
 
 Both sides use the official NATM1 voice and the same teacher role prompt,
 greedy decoding, an FP16 temporal/depth model, and an FP32 Mimi codec. The

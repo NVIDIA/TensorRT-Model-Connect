@@ -44,6 +44,7 @@ def test_prefix_rejects_another_dtype_or_insufficient_context(tmp_path, precisio
 @pytest.mark.parametrize("listen", [False, True])
 def test_prompt_and_full_reply_window_are_inside_the_native_task(monkeypatch, tmp_path, listen):
     torch = pytest.importorskip("torch")
+    soundfile = pytest.importorskip("soundfile")
     from families.personaplex.reference.adapter import Adapter
 
     events = []
@@ -98,7 +99,9 @@ def test_prompt_and_full_reply_window_are_inside_the_native_task(monkeypatch, tm
     adapter.host = SimpleNamespace(required=lambda r, k: r[k], load_audio=lambda *a: np.ones(1920),
                                    timed=timed, tensor_observation=lambda audio, base: {"samples": audio.size},
                                    invocation=lambda observation, ms: observation)
-    result = adapter.invoke({"audio_path": "question.wav", "tail_frames": 2, "max_new_tokens": 10}, tmp_path / "out")
+    question = tmp_path / "question.wav"  # the reference only checks its rate; load_audio is stubbed
+    soundfile.write(question, np.zeros(1920, dtype=np.float32), 24_000)
+    result = adapter.invoke({"audio_path": str(question), "tail_frames": 2, "max_new_tokens": 10}, tmp_path / "out")
     assert result["output_tokens"] == 3 and result["samples"] == 3 * 1920
     assert result["system_prompt_voice"] == "NATM1.pt"
     assert bool(steps[0]) is listen

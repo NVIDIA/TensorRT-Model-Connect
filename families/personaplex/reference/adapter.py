@@ -69,12 +69,16 @@ class Adapter:
             self.generator.audio_silence_frame_cnt = self.system_prompt["silence_frames"]
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
+        import soundfile
         import torch
         from moshi.models.lm import _iterate_audio, encode_from_sphn
 
         frames = int(request.get("max_new_tokens", 300))
-        # Mono at Mimi's rate (librosa resampling): the environment's sphn stand-in reads 24 kHz files only.
+        # Suites deliver audio at Mimi's rate (``audio_sample_rate``), so the TRTMC side reads the same samples;
+        # the reference never resamples (the official sphn loader runs its resampler even on 24 kHz input).
         audio_path = str(self.host.required(request, "audio_path"))
+        if (rate := soundfile.info(audio_path).samplerate) != self.mimi.sample_rate:
+            raise self.host.Error(f"PersonaPlex reference input must be {self.mimi.sample_rate} Hz audio, not {rate} Hz")
         source_audio = self.host.load_audio(audio_path, int(self.mimi.sample_rate))[None, :]
         question_frames = (source_audio.shape[-1] + self.frame_size - 1) // self.frame_size
         system_prompt = getattr(self, "system_prompt", None)
