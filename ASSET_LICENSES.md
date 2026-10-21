@@ -41,6 +41,9 @@ distributed under the Apache License 2.0 with the rest of the project:
 
 - `families/deepseek_ocr/tests/data/orc_test_img.jpeg` — screenshot of
   project source text created for OCR regression testing
+- `apps/cli/tests/data/jpeg/*.jpg` and `*.png` — deterministic synthetic
+  gradients and Pillow-decoded RGB goldens produced by the adjacent
+  `generate.py` for JPEG decoder regression testing
 
 ## Project overview media
 
