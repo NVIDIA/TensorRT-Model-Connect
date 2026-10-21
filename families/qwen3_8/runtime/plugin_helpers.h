@@ -20,6 +20,13 @@ std::vector<char> require_section(const BundleReader& bundle, std::string_view n
 std::string require_text_section(const BundleReader& bundle, std::string_view name);
 std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<char>& plan,
                                         const char* label);
+
+// Load libtrtmc_qwen3_8_native_plugin.so (the cuTile GDN TensorRT plugins) so its plugin
+// creators are registered before an engine that uses them is deserialized. The library is
+// looked up next to this runtime library first, then on the default library search path.
+// Returns false if it is not available; engines without the plugins do not need it.
+// Safe to call repeatedly; the library stays loaded for the life of the process.
+bool load_native_plugin_library();
 std::shared_ptr<ITokenizer> create_tokenizer(const BundleReader& bundle);
 
 } // namespace trtmc::qwen3_8

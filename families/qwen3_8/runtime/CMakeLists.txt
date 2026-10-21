@@ -22,6 +22,7 @@ target_link_libraries(trtmc_model_qwen3_8 PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_qwen3_8 PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -33,6 +34,41 @@ set_target_properties(trtmc_model_qwen3_8 PROPERTIES
   INSTALL_RPATH "\$ORIGIN"
 )
 install(TARGETS trtmc_model_qwen3_8 LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+# TensorRT plugins for engines built with the cuTile GDN kernels. Such an engine carries its
+# cubins and names the plugin; the plugin library only has to be loaded before the engine is
+# deserialized, which plugin_helpers.cpp does from the directory of this library. It calls the
+# CUDA driver API, so it is skipped where libcuda is not installed (for example CPU-only builds).
+option(TRTMC_QWEN3_8_NATIVE_PLUGIN "Build the qwen3_8 cuTile GDN TensorRT plugin library" ON)
+if(TRTMC_QWEN3_8_NATIVE_PLUGIN)
+  find_library(TRTMC_QWEN3_8_CUDA_DRIVER_LIBRARY NAMES cuda
+    PATHS /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib64
+          /usr/local/cuda/lib64/stubs)
+  if(TRTMC_QWEN3_8_CUDA_DRIVER_LIBRARY AND TRTMC_TRT_INCLUDE_DIR AND TRTMC_CUDA_INCLUDE_DIR)
+    add_library(trtmc_qwen3_8_native_plugin SHARED
+      ${CMAKE_CURRENT_SOURCE_DIR}/../native_plugins/gdn_tilegym_plugin.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/../native_plugins/gdn_prefill_plugin.cpp
+    )
+    target_include_directories(trtmc_qwen3_8_native_plugin SYSTEM PRIVATE
+      ${TRTMC_TRT_INCLUDE_DIR}
+      ${TRTMC_CUDA_INCLUDE_DIR}
+    )
+    target_link_libraries(trtmc_qwen3_8_native_plugin PRIVATE
+      ${TRTMC_TRT_LIBRARY}
+      ${TRTMC_QWEN3_8_CUDA_DRIVER_LIBRARY}
+    )
+    target_compile_options(trtmc_qwen3_8_native_plugin PRIVATE -O3 -Wall -Wextra -Wpedantic)
+    set_target_properties(trtmc_qwen3_8_native_plugin PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+      BUILD_RPATH "\$ORIGIN"
+      INSTALL_RPATH "\$ORIGIN"
+    )
+    add_dependencies(trtmc_model_qwen3_8 trtmc_qwen3_8_native_plugin)
+    install(TARGETS trtmc_qwen3_8_native_plugin LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  else()
+    message(STATUS "qwen3_8: native GDN plugin library not built (needs libcuda, TensorRT and CUDA headers)")
+  endif()
+endif()
 
 if(TRTMC_BUILD_TESTS)
   add_executable(test_qwen3_8_recurrent_output_initializers

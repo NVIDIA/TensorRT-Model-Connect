@@ -155,6 +155,8 @@ ITask* create(const FamilyContext& context) {
 #endif
     }
     const RuntimeConfig config = parse_runtime_config(context.reader);
+    // Engines built with the cuTile GDN plugins refer to them by name; register them first.
+    load_native_plugin_library();
     auto decoder = load_engine(context.backend, require_section(context.reader, "engine.plan"),
                                "qwen3_8 decoder");
     const cudaStream_t stream = decoder->stream();
