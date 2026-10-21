@@ -19,6 +19,12 @@
 // The last chunk of a prompt may be partial (n < chunk_len()). The engine
 // takes valid_len=n and keeps padding rows from touching the recurrent state,
 // so no special handling is needed here beyond passing n.
+//
+// A dynamic engine (`dynamic` constructor flag) takes any row count
+// 1 <= n <= chunk_len() directly: token_ids/position_id/attention_mask are
+// shaped for n rows, there are no padding rows, and chunk_len() is only the
+// largest call. A prompt longer than chunk_len() is still fed in chunks of
+// chunk_len() plus a shorter last chunk, as for a static engine.
 
 #include "families/qwen3_8/runtime/hybrid_state.h"
 #include "trtmc/runtime/trt_module.h"
@@ -33,7 +39,7 @@ class Qwen38PrefillRunner {
   public:
     Qwen38PrefillRunner(std::unique_ptr<ITrtModule> module, Qwen38HybridState& state,
                         int32_t chunk_len, int32_t hidden_size, int32_t vocab_size,
-                        cudaStream_t stream);
+                        cudaStream_t stream, bool dynamic = false);
 
     // Bind the shared state's buffers and this runner's scratch to the engine.
     // Call once per generation, after the state is reset. Does not touch the
@@ -41,6 +47,7 @@ class Qwen38PrefillRunner {
     void bind_state();
 
     int32_t chunk_len() const { return chunk_len_; }
+    bool dynamic() const { return dynamic_; }
 
     // True if a chunk of n tokens still fits in the KV cache.
     bool fits(int32_t n) const;
@@ -59,6 +66,7 @@ class Qwen38PrefillRunner {
     int32_t chunk_len_;
     int32_t hidden_size_;
     int32_t vocab_size_;
+    bool dynamic_;
 
     std::vector<DeviceTensor> present_k_;
     std::vector<DeviceTensor> present_v_;

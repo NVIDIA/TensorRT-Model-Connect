@@ -48,6 +48,7 @@ struct RuntimeConfig {
     bool has_mtp;
     std::int32_t mtp_num_draft_tokens;
     std::int32_t prefill_chunk_len; // 0: no prefill_engine.plan, single-token prefill
+    bool prefill_dynamic;           // engine takes any token count in [1, prefill_chunk_len]
 };
 
 template <typename T>
@@ -73,8 +74,12 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         throw std::runtime_error("qwen3_8 runtime.json must be an object");
     // prefill_chunk_len is optional: bundles built before the multi-token
     // prefill engine existed carry 22 fields and prefill token by token.
+    // prefill_dynamic is optional too: present only for a dynamic-length prefill engine.
     const bool has_prefill_field = json.contains("prefill_chunk_len");
-    if (json.size() != (has_prefill_field ? 23U : 22U))
+    const bool has_dynamic_field = json.contains("prefill_dynamic");
+    if (has_dynamic_field && !has_prefill_field)
+        throw std::runtime_error("qwen3_8 runtime.json has prefill_dynamic without prefill_chunk_len");
+    if (json.size() != 22U + (has_prefill_field ? 1U : 0U) + (has_dynamic_field ? 1U : 0U))
         throw std::runtime_error("qwen3_8 runtime.json has an unexpected field set");
     if (require_value<std::string>(json, "decoder_engine_layout") != "single")
         throw std::runtime_error("qwen3_8 requires decoder_engine_layout='single'");
@@ -101,6 +106,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<bool>(json, "has_mtp"),
         require_value<std::int32_t>(json, "mtp_num_draft_tokens"),
         has_prefill_field ? require_value<std::int32_t>(json, "prefill_chunk_len") : 0,
+        has_dynamic_field ? require_value<bool>(json, "prefill_dynamic") : false,
     };
     const auto layer_types = require_value<std::vector<std::string>>(json, "layer_types");
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
@@ -115,6 +121,8 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (config.prefill_chunk_len < 0 || config.prefill_chunk_len == 1)
         throw std::runtime_error("qwen3_8 runtime.json has invalid prefill_chunk_len");
+    if (config.prefill_dynamic && config.prefill_chunk_len < 2)
+        throw std::runtime_error("qwen3_8 runtime.json has prefill_dynamic without a prefill engine");
     if (config.precision != "fp16" && config.precision != "fp32" && config.precision != "bf16")
         throw std::runtime_error("qwen3_8 runtime.json contains invalid precision");
     if (config.has_mtp && config.mtp_num_draft_tokens < 1)
@@ -206,7 +214,7 @@ ITask* create(const FamilyContext& context) {
                         "qwen3_8 prefill");
         prefill_runner = std::make_unique<Qwen38PrefillRunner>(
             std::move(prefill_module), *state, config.prefill_chunk_len, config.hidden_size,
-            config.vocab_size, stream);
+            config.vocab_size, stream, config.prefill_dynamic);
     }
 
     RecurrentGenConfig generation;

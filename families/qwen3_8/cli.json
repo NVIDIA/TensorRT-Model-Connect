@@ -123,7 +123,25 @@
             "--prefill-chunk-len"
           ],
           "type": "int",
-          "help": "Prompt tokens per multi-token prefill engine call (default 128; 0 = single-token prefill)"
+          "help": "Prompt tokens per multi-token prefill engine call (default 128; 0 = single-token prefill). With --prefill-dynamic: the largest call (default 1024)"
+        },
+        {
+          "name": "prefill_dynamic",
+          "flags": [
+            "--prefill-dynamic"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false,
+          "help": "Build the prefill engine with a runtime token count (1 .. --prefill-chunk-len): a prompt up to that length takes one call. Needs the cuTile GDN prefill plugin (TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1) and fp16/bf16"
+        },
+        {
+          "name": "prefill_opt_len",
+          "flags": [
+            "--prefill-opt-len"
+          ],
+          "type": "int",
+          "help": "Token count the dynamic prefill engine is tuned for (default 256); only with --prefill-dynamic"
         },
         {
           "name": "mtp_seq_len",

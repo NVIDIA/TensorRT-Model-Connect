@@ -43,7 +43,8 @@ def build(
     fp32_layers: list[int] | tuple[int, ...] = (),
     quantization: str | None = None, mtp_seq_len: int | None = None,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
-    prefill_chunk_len: int | None = None,
+    prefill_chunk_len: int | None = None, prefill_dynamic: bool = False,
+    prefill_opt_len: int | None = None,
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
     execution = execution_inputs(execution_variant, companion)
@@ -59,6 +60,8 @@ def build(
         fp32_layers=tuple(fp32_layers),
         quantization=quantization,
         prefill_chunk_len=prefill_chunk_len,
+        prefill_dynamic=prefill_dynamic,
+        prefill_opt_len=prefill_opt_len,
         mtp_seq_len=mtp_seq_len,
     )
     if execution is not None:

@@ -24,6 +24,9 @@ _BUNDLE_FILES = (
 
 
 _DEFAULT_PREFILL_SEQ_LEN = 128
+# --prefill-dynamic: largest call and the token count the engine is tuned for.
+_DEFAULT_DYNAMIC_PREFILL_MAX_LEN = 1024
+_DEFAULT_DYNAMIC_PREFILL_OPT_LEN = 256
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -80,6 +83,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: Qwen38Model, **
         "mtp_num_draft_tokens",
         "prefill_chunk_len",
     }
+    if runtime.get("prefill_dynamic"):
+        fields.add("prefill_dynamic")
     missing = fields - runtime.keys()
     if missing:
         raise ValueError(f"Qwen3.8 runtime config is missing {sorted(missing)}")
@@ -187,19 +192,30 @@ def _build_native(request, writer) -> None:
 
     # Prompt tokens per multi-token prefill call. 0 keeps the old
     # one-decode-step-per-prompt-token prefill (no prefill_engine.plan).
-    prefill_chunk_len = (
-        int(request.prefill_chunk_len) if request.prefill_chunk_len is not None
-        else _DEFAULT_PREFILL_SEQ_LEN)
+    prefill_dynamic = bool(request.prefill_dynamic)
+    if request.prefill_chunk_len is not None:
+        prefill_chunk_len = int(request.prefill_chunk_len)
+    elif prefill_dynamic:
+        prefill_chunk_len = _DEFAULT_DYNAMIC_PREFILL_MAX_LEN
+    else:
+        prefill_chunk_len = _DEFAULT_PREFILL_SEQ_LEN
     if prefill_chunk_len > max_sequence_length:
         # Largest valid chunk that still fits the cache.
         prefill_chunk_len = (
             (max_sequence_length // 64) * 64 if max_sequence_length >= 64
             else 1 << (max_sequence_length.bit_length() - 1))
     prefill_plan = None
+    prefill_opt_len = 0
+    if prefill_dynamic:
+        if prefill_chunk_len < 2:
+            raise ValueError("--prefill-dynamic needs a multi-token prefill engine")
+        prefill_opt_len = min(
+            int(request.prefill_opt_len or _DEFAULT_DYNAMIC_PREFILL_OPT_LEN), prefill_chunk_len)
     if prefill_chunk_len >= 2:
         prefill_plan = model.build_engine_prefill(
             config, weights, max_sequence_length, prefill_chunk_len,
             precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
+            dynamic=prefill_dynamic, opt_len=prefill_opt_len,
         )
     else:
         prefill_chunk_len = 0
@@ -260,6 +276,7 @@ def _build_native(request, writer) -> None:
             has_mtp=has_mtp,
             mtp_num_draft_tokens=(mtp_seq_len - 1) if has_mtp else 0,
             prefill_chunk_len=prefill_chunk_len,
+            prefill_dynamic=prefill_dynamic,
         ),
     )
     for filename in _BUNDLE_FILES:

@@ -39,6 +39,8 @@ class BuildRequest:
     fp32_layers: tuple[int, ...] = ()
     mtp_seq_len: int | None = None
     prefill_chunk_len: int | None = None
+    prefill_dynamic: bool = False
+    prefill_opt_len: int | None = None
     dynamic_kv_cache: ClassVar[bool] = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
@@ -76,6 +78,16 @@ class BuildRequest:
             raise ValueError(
                 "prefill_chunk_len must be 0 (single-token prefill), a power of two below 64, "
                 "or a multiple of 64")
+        if self.prefill_opt_len is not None and not self.prefill_dynamic:
+            raise ValueError("prefill_opt_len needs prefill_dynamic")
+        if self.prefill_dynamic:
+            if self.prefill_chunk_len == 0:
+                raise ValueError("prefill_dynamic needs a multi-token prefill engine "
+                                 "(prefill_chunk_len must not be 0)")
+            if self.prefill_opt_len is not None and not (
+                1 <= self.prefill_opt_len <= (self.prefill_chunk_len or 1 << 30)
+            ):
+                raise ValueError("prefill_opt_len must be in [1, prefill_chunk_len]")
         if not isinstance(self.dynamic_kv_cache, bool):
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
@@ -104,7 +116,8 @@ def coerce_request(request: object) -> BuildRequest:
     if unknown := set(vars(request)) - names - set(unsupported):
         raise ValueError(f"unknown qwen3_8 build inputs: {sorted(unknown)}")
     # Knobs only this family owns are absent from the shared core request.
-    family_defaults = {"prefill_chunk_len": None}
+    family_defaults = {
+        "prefill_chunk_len": None, "prefill_dynamic": False, "prefill_opt_len": None}
     return BuildRequest(**{
         name: getattr(request, name, family_defaults[name]) if name in family_defaults
         else getattr(request, name)

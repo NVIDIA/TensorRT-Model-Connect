@@ -24,9 +24,9 @@ void check_cuda(cudaError_t status, const char* what) {
 Qwen38PrefillRunner::Qwen38PrefillRunner(std::unique_ptr<ITrtModule> module,
                                          Qwen38HybridState& state, int32_t chunk_len,
                                          int32_t hidden_size, int32_t vocab_size,
-                                         cudaStream_t stream)
+                                         cudaStream_t stream, bool dynamic)
     : module_(std::move(module)), state_(state), stream_(stream), chunk_len_(chunk_len),
-      hidden_size_(hidden_size), vocab_size_(vocab_size) {
+      hidden_size_(hidden_size), vocab_size_(vocab_size), dynamic_(dynamic) {
     if (!module_ || !module_->ok())
         throw std::runtime_error("Qwen38PrefillRunner: invalid prefill module");
     if (chunk_len_ < 2)
@@ -84,21 +84,24 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
 
     const int32_t pos0 = kv.position();
     const int32_t max_len = kv.max_length();
-    const int32_t kv_len = max_len + chunk_len_;
+    // A static engine always takes chunk_len_ rows; a dynamic one takes exactly n.
+    const int32_t rows = dynamic_ ? n : chunk_len_;
+    const int32_t kv_len = max_len + rows;
 
-    // Rows >= n are padding: any token id / position works because the engine
-    // keeps them out of the recurrent state and the runtime never commits
-    // their K/V rows. Pad with the last real token and consecutive positions.
-    for (int32_t i = 0; i < chunk_len_; ++i) {
+    // Rows >= n are padding (static engine only): any token id / position works
+    // because the engine keeps them out of the recurrent state and the runtime
+    // never commits their K/V rows. Pad with the last real token and consecutive
+    // positions.
+    for (int32_t i = 0; i < rows; ++i) {
         tokens_buf_[static_cast<std::size_t>(i)] = tokens[std::min(i, n - 1)];
         positions_buf_[static_cast<std::size_t>(i)] = pos0 + i;
     }
 
-    // Additive mask (chunk_len, max_len + chunk_len): visible cache prefix
-    // [0, pos0), then causal over the chunk's own rows.
-    mask_buf_.assign(static_cast<std::size_t>(chunk_len_) * static_cast<std::size_t>(kv_len),
+    // Additive mask (rows, max_len + rows): visible cache prefix [0, pos0),
+    // then causal over the chunk's own rows.
+    mask_buf_.assign(static_cast<std::size_t>(rows) * static_cast<std::size_t>(kv_len),
                      kMaskedScore);
-    for (int32_t i = 0; i < chunk_len_; ++i) {
+    for (int32_t i = 0; i < rows; ++i) {
         float* row =
             mask_buf_.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
         std::fill(row, row + pos0, 0.0F);
@@ -110,7 +113,7 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
     {
         Tensor t;
         t.data = tokens_buf_.data();
-        t.shape = {chunk_len_};
+        t.shape = {rows};
         t.dtype = DType::kInt32;
         inputs["token_ids"] = t;
         t.data = positions_buf_.data();
@@ -119,7 +122,7 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
         t.shape = {1};
         inputs["valid_len"] = t;
         t.data = mask_buf_.data();
-        t.shape = {chunk_len_, kv_len};
+        t.shape = {rows, kv_len};
         t.dtype = DType::kFloat32;
         inputs["attention_mask"] = t;
     }
