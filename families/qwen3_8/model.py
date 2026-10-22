@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from .config import ModelConfig
@@ -26,7 +27,7 @@ _BUNDLE_FILES = (
 # KV cache length when --max-sequence-length is not given (capped by the checkpoint's context).
 _DEFAULT_MAX_SEQUENCE_LENGTH = 4096
 _DEFAULT_PREFILL_SEQ_LEN = 128
-# --prefill-dynamic: largest call and the token count the engine is tuned for.
+# Dynamic prefill engine: largest call and the token count the engine is tuned for.
 _DEFAULT_DYNAMIC_PREFILL_MAX_LEN = 1024
 _DEFAULT_DYNAMIC_PREFILL_OPT_LEN = 256
 
@@ -57,10 +58,41 @@ def _resolve_lengths(
         raise ValueError("qwen3_8 max_sequence_length exceeds checkpoint context capacity")
     if prefill_dynamic and prefill_chunk_len > cache_len:
         raise ValueError(
-            f"--prefill-dynamic takes up to --prefill-chunk-len = {prefill_chunk_len} tokens in "
+            f"the dynamic prefill engine takes up to --prefill-chunk-len = {prefill_chunk_len} tokens in "
             f"one call, but the KV cache holds {cache_len} tokens; raise --max-sequence-length "
             f"(at most {max_position_embeddings}) or lower --prefill-chunk-len")
     return cache_len, prefill_chunk_len
+
+
+def _choose_prefill_engine(
+    engine: str,
+    *,
+    precision: str,
+    mtp: bool,
+    prefill_chunk_len: int | None,
+    plugin_unavailable,
+) -> tuple[bool, str | None]:
+    """(use the dynamic prefill engine, why the static one was chosen instead).
+
+    `auto` takes the dynamic engine when it can be built and falls back to the static one,
+    returning the reason; `dynamic` raises instead of falling back. `plugin_unavailable` is
+    called last and returns None or the reason the cuTile GDN prefill plugin cannot be used.
+    """
+    if engine == "static":
+        return False, None
+    if prefill_chunk_len == 0:  # no prefill engine at all (build_request rejects 'dynamic' here)
+        return False, None
+    if precision == "fp32":
+        reason = "the dynamic prefill engine needs fp16 or bf16 (cuTile GDN plugin)"
+    elif mtp:
+        reason = "MTP engines are not supported with the dynamic prefill engine yet"
+    else:
+        reason = plugin_unavailable()
+    if reason is None:
+        return True, None
+    if engine == "dynamic":
+        raise ValueError(f"--prefill-engine dynamic is not available: {reason}")
+    return False, reason
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -184,7 +216,15 @@ def _build_native(request, writer) -> None:
     precision = str(request.precision).lower()
     if precision not in {"fp16", "fp32", "bf16"}:
         raise ValueError("qwen3_8 precision must be fp16, bf16, or fp32")
-    prefill_dynamic = bool(request.prefill_dynamic)
+    from .native_plugins.gdn_plugin_builder import prefill_plugin_unavailable_reason
+
+    prefill_dynamic, static_reason = _choose_prefill_engine(
+        request.prefill_engine, precision=precision, mtp=request.mtp_seq_len is not None,
+        prefill_chunk_len=request.prefill_chunk_len,
+        plugin_unavailable=prefill_plugin_unavailable_reason)
+    if static_reason is not None:
+        print(f"[trtmc build] qwen3_8: building the static prefill engine: {static_reason}",
+              file=sys.stderr)
     max_sequence_length, prefill_chunk_len = _resolve_lengths(
         config.max_position_embeddings, request.max_sequence_length,
         request.prefill_chunk_len, prefill_dynamic)
@@ -230,7 +270,7 @@ def _build_native(request, writer) -> None:
     prefill_opt_len = 0
     if prefill_dynamic:
         if prefill_chunk_len < 2:
-            raise ValueError("--prefill-dynamic needs a multi-token prefill engine")
+            raise ValueError("the dynamic prefill engine needs a multi-token prefill engine")
         prefill_opt_len = min(
             int(request.prefill_opt_len or _DEFAULT_DYNAMIC_PREFILL_OPT_LEN), prefill_chunk_len)
     if prefill_chunk_len >= 2:

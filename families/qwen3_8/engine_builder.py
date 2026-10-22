@@ -1794,7 +1794,7 @@ class Qwen38Model:
 
         ``dynamic=True`` builds one engine whose token count T is a runtime dimension,
         1 <= T <= `chunk_len` (optimization profile opt = `opt_len`, default `chunk_len` / 2);
-        it needs the cuTile GDN prefill plugin (TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1). Set
+        it always uses the cuTile GDN prefill plugin (fp16 or bf16 only). Set
         `valid_len` to T, the number of rows; every `(chunk_len, ...)` shape below is `(T, ...)`.
 
         A dynamic engine (or `dynamic_cache=True`, for a fixed token count) takes the cache by its

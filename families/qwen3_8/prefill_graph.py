@@ -319,9 +319,12 @@ def add_deltanet_layer_prefill(
         network, normed, hidden_size, num_heads, weights[f"{prefix}.deltanet_b_proj"],
         dtype=dtype)  # [T, H]
 
-    if dynamic and not (valid_len is not None and _use_cutile_gdn_prefill_plugin(qkv)):
-        raise ValueError("a dynamic-length prefill engine needs TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1")
-    if valid_len is not None and _use_cutile_gdn_prefill_plugin(qkv):
+    if dynamic and qkv.dtype not in (trt.float16, trt.bfloat16):
+        raise ValueError("a dynamic-length prefill engine needs fp16 or bf16 activations "
+                         "(the cuTile GDN prefill plugin)")
+    # The dynamic engine always uses the plugin: the block loop of the separate-ops delta rule
+    # has a fixed length per graph, so it cannot follow a runtime token count.
+    if valid_len is not None and (dynamic or _use_cutile_gdn_prefill_plugin(qkv)):
         # Conv1d, gates, delta rule and gated RMSNorm as cuTile kernels (see
         # native_plugins/gdn_prefill_plugin.cpp). Rows >= valid_len are inert.
         from .native_plugins.gdn_plugin_builder import add_gdn_prefill_plugin

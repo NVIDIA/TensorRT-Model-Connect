@@ -74,6 +74,23 @@ def _cuda_include_dir() -> Path:
     raise RuntimeError("cuda.h not found; set CUDA_HOME to a CUDA toolkit")
 
 
+def prefill_plugin_unavailable_reason() -> str | None:
+    """None if the cuTile GDN prefill plugin can be built and loaded here, else why not."""
+    import importlib.util
+
+    try:
+        if importlib.util.find_spec("cuda.tile") is None:
+            return "the cuda-tile package is not installed"
+    except ModuleNotFoundError:
+        return "the cuda-tile package is not installed"
+    try:
+        ensure_plugin_loaded()
+    except Exception as error:  # build tools, TensorRT or CUDA headers missing, ...
+        first = str(error).strip().splitlines()[0] if str(error).strip() else type(error).__name__
+        return f"the plugin library could not be built or loaded ({first})"
+    return None
+
+
 def ensure_plugin_loaded(*, verbose: bool = False) -> Path:
     """Build the plugin library once per process and load it for graph construction."""
     global _PLUGIN_PATH, _PLUGIN_HANDLE

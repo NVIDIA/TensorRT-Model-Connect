@@ -29,30 +29,41 @@ def test_prefill_chunk_len_rejects_unsupported_values(value) -> None:
         _request(prefill_chunk_len=value)
 
 
-def test_prefill_dynamic_defaults_off() -> None:
+def test_prefill_engine_defaults_to_auto() -> None:
     request = _request()
-    assert request.prefill_dynamic is False
+    assert request.prefill_engine == "auto"
     assert request.prefill_opt_len is None
+
+
+@pytest.mark.parametrize("engine", ["auto", "dynamic", "static"])
+def test_prefill_engine_accepts_known_values(engine) -> None:
+    assert _request(prefill_engine=engine).prefill_engine == engine
 
 
 @pytest.mark.parametrize("chunk", [None, 64, 1024])
 @pytest.mark.parametrize("opt", [None, 1, 256, 1024])
-def test_prefill_dynamic_accepts_opt_len_up_to_chunk(chunk, opt) -> None:
+def test_prefill_opt_len_up_to_chunk(chunk, opt) -> None:
     if opt is not None and chunk is not None and opt > chunk:
         pytest.skip("opt above the chunk is rejected, see the next test")
-    request = _request(prefill_dynamic=True, prefill_chunk_len=chunk, prefill_opt_len=opt)
-    assert request.prefill_dynamic and request.prefill_opt_len == opt
+    request = _request(prefill_engine="dynamic", prefill_chunk_len=chunk, prefill_opt_len=opt)
+    assert request.prefill_opt_len == opt
 
 
-def test_prefill_dynamic_rejects_bad_combinations() -> None:
-    with pytest.raises(ValueError, match="prefill_opt_len needs prefill_dynamic"):
-        _request(prefill_opt_len=256)
+def test_prefill_engine_rejects_bad_combinations() -> None:
+    with pytest.raises(ValueError, match="prefill_engine must be"):
+        _request(prefill_engine="fast")
+    with pytest.raises(ValueError, match="needs the dynamic prefill engine"):
+        _request(prefill_engine="static", prefill_opt_len=256)
     with pytest.raises(ValueError, match="multi-token prefill"):
-        _request(prefill_dynamic=True, prefill_chunk_len=0)
+        _request(prefill_engine="dynamic", prefill_chunk_len=0)
     with pytest.raises(ValueError, match="prefill_opt_len"):
-        _request(prefill_dynamic=True, prefill_chunk_len=512, prefill_opt_len=513)
+        _request(prefill_engine="dynamic", prefill_chunk_len=512, prefill_opt_len=513)
     with pytest.raises(ValueError, match="prefill_opt_len"):
-        _request(prefill_dynamic=True, prefill_opt_len=0)
+        _request(prefill_opt_len=0)
+
+
+def test_auto_engine_with_no_prefill_engine_is_allowed() -> None:
+    assert _request(prefill_chunk_len=0).prefill_engine == "auto"
 
 
 def test_coerce_request_defaults_family_only_fields_for_core_requests() -> None:
@@ -75,5 +86,5 @@ def test_coerce_request_defaults_family_only_fields_for_core_requests() -> None:
 
     coerced = coerce_request(CoreRequest())
     assert coerced.prefill_chunk_len is None
-    assert coerced.prefill_dynamic is False
+    assert coerced.prefill_engine == "auto"
     assert coerced.prefill_opt_len is None

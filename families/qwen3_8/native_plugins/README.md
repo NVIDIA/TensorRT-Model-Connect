@@ -30,16 +30,21 @@ family library (option `TRTMC_QWEN3_8_NATIVE_PLUGIN`, on by default; skipped wit
 the TensorRT and CUDA headers), and `plugin_helpers.cpp` loads it before the first engine. Engines
 without plugins do not need it.
 
-The prefill plugin is used by the prefill engine with `TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1`. With
-`--prefill-dynamic` the engine takes any token count from 1 to `--prefill-chunk-len`, and the
-plugin reads the count at run time.
+The prefill plugin is what makes the prefill engine dynamic: by default (`--prefill-engine auto`)
+the build makes an engine that takes any token count from 1 to `--prefill-chunk-len` (default
+1024) in one call, and the plugin reads the count at run time. A delta rule built from separate
+TensorRT ops has a fixed number of blocks per graph, so it cannot follow a runtime count. The
+build uses the static prefill engine instead, and says why, when the plugin cannot be used (fp32,
+MTP engines, no cuda-tile package or plugin build tools); `--prefill-engine dynamic` fails in
+those cases and `--prefill-engine static` skips the plugin. `TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1`
+only adds the plugin to a static prefill engine.
 
 ## Use
 
 | Environment variable | Effect |
 |---|---|
 | `TRTMC_QWEN3_8_GDN_CUTILE=1` | Use the decode plugin for the 48 GDN layers (fp16 or bf16 activations only). Default off: the original separate TensorRT ops. |
-| `TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1` | Use the prefill plugin for the GDN layers of the prefill engine (fp16 or bf16 activations only). Needed for `--prefill-dynamic`. Default off. |
+| `TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1` | Use the prefill plugin in a static prefill engine (fp16 or bf16 only). The dynamic prefill engine always uses it. Default off. |
 | `TRTMC_QWEN3_8_GDN_MERGE_PROJ=1` | With the decode plugin, fewer input GEMMs. No quantization: one GEMM for qkv, z, a, b, then slice. FP8 weights (qkv and z with the same input scale): one FP8 GEMM for qkv and z (rows concatenated, one weight scale per row) and the plugin computes a and b itself. Otherwise the four projections stay separate. |
 | `TRTMC_QWEN3_8_GDN_CONV_FP32=1` | Keep the conv weight and bias as fp32 checkpoint values. Default (bf16 models): the host rounds them to bf16, as the original ops store them. The kernel still accumulates in fp32. |
 | `TRT_ROOT`, `TRT_LIB_DIR`, `CUDA_HOME` | Where to find TensorRT headers, `libnvinfer.so.11` and `cuda.h` if they are not in the usual places |

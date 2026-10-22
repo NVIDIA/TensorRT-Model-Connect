@@ -71,7 +71,7 @@
             "--max-sequence-length"
           ],
           "type": "int",
-          "help": "KV cache length in tokens, the longest prompt plus generation (default: the smaller of the checkpoint context and 4096; with --prefill-dynamic at least --prefill-chunk-len)"
+          "help": "KV cache length in tokens, the longest prompt plus generation (default: the smaller of the checkpoint context and 4096; with the dynamic prefill engine at least --prefill-chunk-len)"
         },
         {
           "name": "tensor_parallel_size",
@@ -124,17 +124,21 @@
             "--prefill-chunk-len"
           ],
           "type": "int",
-          "help": "Prompt tokens per multi-token prefill engine call (default 128; 0 = single-token prefill). With --prefill-dynamic: the largest call (default 1024)"
+          "help": "Prompt tokens per multi-token prefill engine call (0 = single-token prefill). Static engine: default 128. Dynamic engine: the largest call, default 1024"
         },
         {
-          "name": "prefill_dynamic",
+          "name": "prefill_engine",
           "flags": [
-            "--prefill-dynamic"
+            "--prefill-engine"
           ],
-          "type": "bool",
-          "action": "store_true",
-          "default": false,
-          "help": "Build the prefill engine with a runtime token count (1 .. --prefill-chunk-len): a prompt up to that length takes one call. Needs the cuTile GDN prefill plugin (TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1) and fp16/bf16"
+          "type": "string",
+          "choices": [
+            "auto",
+            "dynamic",
+            "static"
+          ],
+          "default": "auto",
+          "help": "Prefill engine: dynamic takes any token count from 1 to --prefill-chunk-len (default 1024) in one call and needs the cuTile GDN plugin, fp16 or bf16, and no MTP engines; static takes a fixed --prefill-chunk-len (default 128) per call; auto (default) builds the dynamic engine when it is available and otherwise the static one, printing the reason"
         },
         {
           "name": "prefill_opt_len",
@@ -142,7 +146,7 @@
             "--prefill-opt-len"
           ],
           "type": "int",
-          "help": "Token count the dynamic prefill engine is tuned for (default 256); only with --prefill-dynamic"
+          "help": "Token count the dynamic prefill engine is tuned for (default 256)"
         },
         {
           "name": "mtp_seq_len",
