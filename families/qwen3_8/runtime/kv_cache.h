@@ -31,6 +31,20 @@ struct Qwen38KvCacheNames {
     std::vector<std::string> present_v;
     std::string position_id{"position_id"};
     std::string attention_mask{"attention_mask"};
+    std::string cache_write_idx{"cache_write_idx"};
+    std::string kv_len{"kv_len"};
+};
+
+// Native KV cache: the engines update the cache in place (IKVCacheUpdateLayer) and attention
+// reads only the filled rows. The buffers are [1, num_kv_heads, max_length + pad_rows, head_dim]
+// (head-major), shared by every engine that uses them, so all of them must be built with the
+// same row count. `pad_rows` keeps a padded last chunk of a fixed-size prefill engine inside
+// the buffer. The engines take `cache_write_idx` and `kv_len` instead of an attention mask and
+// have no present_k/present_v outputs; the cache outputs are bound to the cache buffers.
+struct Qwen38KvCacheLayout {
+    bool native{false};
+    int32_t num_kv_heads{0};
+    int32_t pad_rows{0};
 };
 
 class Qwen38KvCache : public Qwen38InferenceState {
@@ -40,7 +54,8 @@ class Qwen38KvCache : public Qwen38InferenceState {
     // cache_dtype controls the element type for K/V cache buffers (default FP32).
     // names provides explicit tensor names for engine I/O binding.
     Qwen38KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-                  DType cache_dtype = DType::kFloat32, Qwen38KvCacheNames names = {});
+                  DType cache_dtype = DType::kFloat32, Qwen38KvCacheNames names = {},
+                  Qwen38KvCacheLayout layout = {});
 
     // --- Qwen38InferenceState overrides ---
     void reset() override;
@@ -64,6 +79,7 @@ class Qwen38KvCache : public Qwen38InferenceState {
     // cache (e.g. a batched multi-token verification engine) needs these to
     // size and type its own output scratch buffers consistently.
     int32_t kv_dim() const { return kv_dim_; }
+    bool native() const { return native_; }
     DType dtype() const { return cache_dtype_; }
 
     // Write per-layer KV produced by a batched prefill engine into the cache
@@ -99,6 +115,8 @@ class Qwen38KvCache : public Qwen38InferenceState {
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
+    void write_native_decode_inputs(TensorMap& inputs);
+    void shift_native_rows();
 
     // Scratch for the cache-full row shift. cudaMemcpyAsync has undefined
     // behavior on overlapping ranges, so the shift stages through this buffer.
@@ -120,6 +138,12 @@ class Qwen38KvCache : public Qwen38InferenceState {
     std::vector<int32_t> pos_buf_vec_;
     bool has_position_input_{false};
     bool dynamic_binding_enabled_{false};
+    bool native_{false};
+    int32_t num_kv_heads_{0};
+    int32_t head_dim_{0};
+    int32_t cache_rows_{0};
+    int32_t write_idx_buf_{0};
+    int32_t kv_len_buf_{0};
     int32_t bound_cache_rows_{0};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};

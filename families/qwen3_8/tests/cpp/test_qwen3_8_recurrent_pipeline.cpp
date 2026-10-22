@@ -44,6 +44,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -421,6 +422,79 @@ static int test_typed_bundle(const char* bundle_path, const char* runtime_root,
     return passed ? 0 : 1;
 }
 
+// Native KV cache: the engine writes the cache in place, so the runtime only supplies the write
+// index and the number of rows to read, and shifts the rows of every head when the cache is full.
+static void test_native_kv_cache() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    constexpr int kHeads = 2, kHeadDim = 2, kMaxLength = 4, kPadRows = 2;
+    constexpr int kRows = kMaxLength + kPadRows;
+    trtmc::Qwen38KvCacheLayout layout;
+    layout.native = true;
+    layout.num_kv_heads = kHeads;
+    layout.pad_rows = kPadRows;
+    trtmc::Qwen38KvCache kv(1, kMaxLength, kHeads * kHeadDim, stream, trtmc::DType::kFloat32,
+                            trtmc::Qwen38KvCacheNames{}, layout);
+    check(kv.ok() && kv.native(), "native kv cache allocates without present buffers");
+
+    // [1, heads, rows, head_dim]: value = 100 * head + 10 * row + column
+    std::vector<float> host(static_cast<std::size_t>(kHeads) * kRows * kHeadDim);
+    for (int h = 0; h < kHeads; ++h)
+        for (int r = 0; r < kRows; ++r)
+            for (int c = 0; c < kHeadDim; ++c)
+                host[static_cast<std::size_t>((h * kRows + r) * kHeadDim + c)] =
+                    static_cast<float>(100 * h + 10 * r + c);
+    cudaMemcpy(kv.cache_k(0).data(), host.data(), host.size() * sizeof(float),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(kv.cache_v(0).data(), host.data(), host.size() * sizeof(float),
+               cudaMemcpyHostToDevice);
+
+    const auto index = [](trtmc::TensorMap& inputs, const char* name) {
+        return *static_cast<const int32_t*>(inputs.at(name).data);
+    };
+    for (int step = 0; step < kMaxLength; ++step) {
+        trtmc::TensorMap inputs;
+        kv.prepare_step(inputs);
+        check(index(inputs, "cache_write_idx") == step, "native kv: write index is the position");
+        check(index(inputs, "kv_len") == step + 1, "native kv: reads position + 1 rows");
+        check(inputs.count("attention_mask") == 0, "native kv: no attention mask");
+        kv.advance();
+    }
+    check(kv.position() == kMaxLength, "native kv: position reaches max_length");
+
+    // Full: the oldest row is dropped (rows 1..3 move to 0..2 in every head); the new row goes last.
+    trtmc::TensorMap inputs;
+    kv.prepare_step(inputs);
+    check(index(inputs, "cache_write_idx") == kMaxLength - 1, "native kv: full cache writes the last row");
+    check(index(inputs, "kv_len") == kMaxLength, "native kv: full cache reads max_length rows");
+    std::vector<float> after(host.size());
+    cudaStreamSynchronize(stream);
+    cudaMemcpy(after.data(), kv.cache_k(0).data(), after.size() * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    bool shifted = true;
+    for (int h = 0; h < kHeads; ++h)
+        for (int r = 0; r < kRows; ++r)
+            for (int c = 0; c < kHeadDim; ++c) {
+                const std::size_t at = static_cast<std::size_t>((h * kRows + r) * kHeadDim + c);
+                const std::size_t from = r < kMaxLength - 1
+                                             ? static_cast<std::size_t>((h * kRows + r + 1) * kHeadDim + c)
+                                             : at;  // row max_length - 1 and the pad rows stay
+                shifted = shifted && after[at] == host[from];
+            }
+    check(shifted, "native kv: full cache shifts every head by one row");
+    kv.advance();
+    check(kv.position() == kMaxLength, "native kv: position stays at max_length");
+
+    bool threw = false;
+    try {
+        kv.write_prefill_kv({kv.cache_k(0).data()}, {kv.cache_v(0).data()}, 1);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "native kv: the engine writes the cache, no copy-in");
+    cudaStreamDestroy(stream);
+}
+
 int main(int argc, char** argv) {
     if (argc != 1) {
         if (argc != 5) {
@@ -441,6 +515,7 @@ int main(int argc, char** argv) {
     test_mamba_pipeline();
     test_rwkv_pipeline();
     test_hybrid_pipeline();
+    test_native_kv_cache();
     test_generate_applies_chat_template();
     if (failures > 0)
         std::cerr << failures << " FAILED\n";

@@ -28,10 +28,19 @@ int32_t round_up_rows(int32_t value, int32_t bucket, int32_t maximum) {
 } // namespace
 
 Qwen38KvCache::Qwen38KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
-                             cudaStream_t stream, DType cache_dtype, Qwen38KvCacheNames names)
+                             cudaStream_t stream, DType cache_dtype, Qwen38KvCacheNames names,
+                             Qwen38KvCacheLayout layout)
     : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim), stream_(stream),
       cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)),
       names_(std::move(names)) {
+    native_ = layout.native;
+    if (native_) {
+        if (layout.num_kv_heads <= 0 || kv_dim % layout.num_kv_heads != 0 || layout.pad_rows < 0)
+            throw std::runtime_error("Qwen38KvCache: invalid native KV cache layout");
+        num_kv_heads_ = layout.num_kv_heads;
+        head_dim_ = kv_dim / layout.num_kv_heads;
+        cache_rows_ = max_length + layout.pad_rows;
+    }
 
     // If names were not supplied, generate standard defaults.
     if (names_.cache_k.empty()) {
@@ -43,8 +52,9 @@ Qwen38KvCache::Qwen38KvCache(int32_t num_layers, int32_t max_length, int32_t kv_
             std::string suffix = "_" + std::to_string(i);
             names_.cache_k.push_back("cache_k" + suffix);
             names_.cache_v.push_back("cache_v" + suffix);
-            names_.present_k.push_back("present_k" + suffix);
-            names_.present_v.push_back("present_v" + suffix);
+            // Native engines have no present rows; their updated-cache outputs alias the cache.
+            names_.present_k.push_back((native_ ? "cache_k_out" : "present_k") + suffix);
+            names_.present_v.push_back((native_ ? "cache_v_out" : "present_v") + suffix);
         }
     }
 
@@ -54,10 +64,15 @@ Qwen38KvCache::Qwen38KvCache(int32_t num_layers, int32_t max_length, int32_t kv_
     present_v_.reserve(static_cast<std::size_t>(num_layers));
 
     for (int32_t i = 0; i < num_layers; ++i) {
-        cache_k_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
-        cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
-        present_k_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
-        present_v_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
+        const std::vector<int64_t> cache_shape =
+            native_ ? std::vector<int64_t>{1, num_kv_heads_, cache_rows_, head_dim_}
+                    : std::vector<int64_t>{max_length, kv_dim};
+        cache_k_.emplace_back(cache_shape, cache_dtype_, stream);
+        cache_v_.emplace_back(cache_shape, cache_dtype_, stream);
+        if (!native_) {
+            present_k_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
+            present_v_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
+        }
     }
 
     // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
@@ -186,10 +201,59 @@ void Qwen38KvCache::write_decode_mask(TensorMap& inputs) {
     inputs[names_.attention_mask] = mask_t;
 }
 
+void Qwen38KvCache::write_native_decode_inputs(TensorMap& inputs) {
+    // The new row goes at `position_`; with a full cache the oldest row is dropped first, as the
+    // non-native cache does, so the new row lands in the last slot and the position stays at the end.
+    if (position_ >= max_length_) {
+        shift_native_rows();
+        write_idx_buf_ = max_length_ - 1;
+        kv_len_buf_ = max_length_;
+    } else {
+        write_idx_buf_ = position_;
+        kv_len_buf_ = position_ + 1;
+    }
+    Tensor t;
+    t.shape = {1};
+    t.dtype = DType::kInt32;
+    t.data = &write_idx_buf_;
+    inputs[names_.cache_write_idx] = t;
+    t.data = &kv_len_buf_;
+    inputs[names_.kv_len] = t;
+}
+
+// Cache full: move rows [1, max_length) of every head down by one row.
+void Qwen38KvCache::shift_native_rows() {
+    const auto head_row_bytes = static_cast<std::size_t>(head_dim_) * cache_element_size_;
+    const auto head_stride = static_cast<std::size_t>(cache_rows_) * head_row_bytes;
+    const auto move_bytes = static_cast<std::size_t>(max_length_ - 1) * head_row_bytes;
+    if (move_bytes == 0)
+        return;
+    DeviceTensor& scratch_tensor = shift_scratch();
+    if (!scratch_tensor.ok())
+        throw std::runtime_error("Qwen38KvCache: failed to allocate scratch for the cache shift");
+    auto* scratch = static_cast<uint8_t*>(scratch_tensor.data());
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        for (DeviceTensor* cache : {&cache_k_[static_cast<std::size_t>(i)], &cache_v_[static_cast<std::size_t>(i)]}) {
+            auto* base = static_cast<uint8_t*>(cache->data());
+            for (int32_t h = 0; h < num_kv_heads_; ++h) {
+                uint8_t* head = base + static_cast<std::size_t>(h) * head_stride;
+                cudaMemcpyAsync(scratch, head + head_row_bytes, move_bytes, cudaMemcpyDeviceToDevice, stream_);
+                cudaMemcpyAsync(head, scratch, move_bytes, cudaMemcpyDeviceToDevice, stream_);
+            }
+        }
+    }
+}
+
 void Qwen38KvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
     if (seq_len <= 0)
         seq_len = 1;
     write_position_input(inputs, seq_len);
+    if (native_) {
+        if (seq_len != 1)
+            throw std::runtime_error("Qwen38KvCache: the native KV cache decodes one token per step");
+        write_native_decode_inputs(inputs);
+        return;
+    }
     if (seq_len > 1)
         write_batched_mask(inputs, seq_len);
     else
@@ -206,6 +270,17 @@ void Qwen38KvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_le
 void Qwen38KvCache::bind_to(ITrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
+    if (native_) {
+        // Static cache inputs. The updated-cache outputs alias them: binding the input binds the
+        // whole alias group, and the module rejects binding the output by name.
+        dynamic_binding_enabled_ = false;
+        for (int32_t i = 0; i < num_layers_; ++i) {
+            const auto li = static_cast<std::size_t>(i);
+            module.bind_external(names_.cache_k[li], cache_k_[li].data());
+            module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        }
+        return;
+    }
     // Enable dynamic row binding only when cache_k[0] itself is dynamic.
     // Static-shape engines with fixed [max_length, kv_dim] cache reject
     // setInputShape on cache inputs even when other inputs are dynamic.
@@ -232,6 +307,8 @@ void Qwen38KvCache::bind_to(ITrtModule& module) {
 }
 
 void Qwen38KvCache::bind_cache_inputs(ITrtModule& module) {
+    if (native_)
+        throw std::runtime_error("Qwen38KvCache: a native KV cache has no separate cache-input binding");
     has_position_input_ = module.has_input(names_.position_id);
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
@@ -244,6 +321,8 @@ void Qwen38KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
                                      const std::vector<const void*>& prefill_v, int32_t seq_len) {
     if (seq_len <= 0)
         return;
+    if (native_)
+        throw std::runtime_error("Qwen38KvCache::write_prefill_kv: the native KV cache is written by the engine");
     if (seq_len > max_length_)
         throw std::runtime_error("Qwen38KvCache::write_prefill_kv: seq_len exceeds max_length");
     if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
@@ -267,6 +346,8 @@ void Qwen38KvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
                                       const std::vector<const void*>& prefill_v, int32_t seq_len) {
     if (seq_len <= 0)
         return;
+    if (native_)
+        throw std::runtime_error("Qwen38KvCache::append_prefill_kv: the native KV cache is written by the engine");
     if (position_ + seq_len > max_length_)
         throw std::runtime_error("Qwen38KvCache::append_prefill_kv: append exceeds max_length");
     if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
@@ -296,6 +377,10 @@ void Qwen38KvCache::advance(int32_t n_tokens) {
     // n_tokens > 1 reserved for future batched prefill (TASK-10).
     assert(n_tokens == 1 && "Qwen38KvCache::advance: only n_tokens==1 supported");
     (void)n_tokens;
+    if (native_) {  // the engine already wrote the row
+        position_ = std::min(position_ + 1, max_length_);
+        return;
+    }
 
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
@@ -383,7 +468,8 @@ bool Qwen38KvCache::ok() const {
         }
         return true;
     };
-    return group_ok(cache_k_) && group_ok(cache_v_) && group_ok(present_k_) && group_ok(present_v_);
+    return group_ok(cache_k_) && group_ok(cache_v_) &&
+           (native_ || (group_ok(present_k_) && group_ok(present_v_)));
 }
 
 } // namespace trtmc

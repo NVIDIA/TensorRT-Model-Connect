@@ -508,6 +508,58 @@ def reshape_heads_4d_to_rows(
     return out.get_output(0)
 
 
+def add_native_kv_attention(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k: trt.ITensor,
+    v: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    cache_write_idx: trt.ITensor,
+    kv_len: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    q_seq: int | None,
+    causal: bool,
+    tag: str | None = None,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Write this step's K/V rows into the cache in place, then attend over the filled rows.
+
+    q/k/v are row-major ``[S, H * D]``; the caches are ``[1, Hkv, rows, D]`` network inputs.
+    ``IKVCacheUpdateLayer`` writes the S new rows at ``cache_write_idx`` (int32 ``[1]``) and its
+    outputs share the cache memory, so the caches are not copied. ``kv_len`` (int32 ``[1]``) is the
+    number of cache rows to read, including the new ones: attention covers those rows only, not the
+    cache capacity. ``causal`` aligns the causal mask to the end of those rows (``LOWER_RIGHT``),
+    which a batch of new tokens needs; a single token sees every row and needs no mask.
+
+    Returns ``(context rows [S, H * D], updated cache_k, updated cache_v)``.
+    """
+    if not hasattr(network, "add_kv_cache_update"):
+        raise RuntimeError("the native KV cache needs TensorRT add_kv_cache_update")
+    k_4d = reshape_rows_to_heads_4d(network, k, num_kv_heads, head_dim, q_seq, None if tag is None else tag + ".k")
+    v_4d = reshape_rows_to_heads_4d(network, v, num_kv_heads, head_dim, q_seq, None if tag is None else tag + ".v")
+    update_k = network.add_kv_cache_update(cache_k, k_4d, cache_write_idx, trt.KVCacheMode.LINEAR)
+    update_v = network.add_kv_cache_update(cache_v, v_4d, cache_write_idx, trt.KVCacheMode.LINEAR)
+    if update_k is None or update_v is None:
+        raise RuntimeError("TensorRT failed to create the KV cache update layers")
+    q_4d = reshape_rows_to_heads_4d(network, q, num_heads, head_dim, q_seq, None if tag is None else tag + ".q")
+    attn = network.add_attention(
+        _prescale_query(network, q_4d, None), update_k.get_output(0), update_v.get_output(0),
+        trt.AttentionNormalizationOp.SOFTMAX, False)
+    if attn is None:
+        raise RuntimeError("TensorRT failed to create the attention layer")
+    attn.decomposable = True
+    attn.key_value_lengths = kv_len
+    if causal:
+        attn.causal_kind = trt.CausalMaskKind.LOWER_RIGHT
+    context = reshape_heads_4d_to_rows(
+        network, attn.get_output(0), num_heads * head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".ctx")
+    return context, update_k.get_output(0), update_v.get_output(0)
+
+
 def add_2d_mask_to_4d(
     network: trt.INetworkDefinition,
     mask_2d: trt.ITensor,
@@ -583,6 +635,27 @@ def add_apply_rope_native(
     return reshape_heads_4d_to_rows(network, rope.get_output(0), attention_size, sequence_length)
 
 
+def _prescale_query(
+    network: trt.INetworkDefinition, q_4d: trt.ITensor, scale: float | None
+) -> trt.ITensor:
+    """Q * scale (default 1/sqrt(D)); IAttention does not scale the scores itself."""
+    # Pre-scale Q: TRT IAttention does not apply score scaling itself.
+    # Match the scale constant's dtype to Q's dtype: in strongly-typed networks
+    # a FP32 constant mixed with a FP16/BF16 Q causes add_elementwise to emit
+    # a type-mismatch error and produce a tensor with corrupted dimensions,
+    # which makes add_attention return None.
+    if scale is None:
+        head_dim = q_4d.shape[-1]
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    # Use FP16 weights directly for FP16; BF16 has no numpy native type so
+    # create as FP32 and cast; FP32 falls through to the default.
+    scale_np_dtype = np.float16 if q_4d.dtype == trt.float16 else np.float32
+    scale_t = add_constant(network, (1, 1, 1, 1), np.array([[[[scale]]]]), dtype=scale_np_dtype)
+    if q_4d.dtype == trt.bfloat16:
+        scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
+    return network.add_elementwise(q_4d, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+
+
 def add_attention_core(
     network: trt.INetworkDefinition,
     q_4d: trt.ITensor,
@@ -630,24 +703,10 @@ def add_attention_core(
         if mask is not None and mask.dtype != trt.float32:
             mask = network.add_cast(mask, trt.float32).get_output(0)
 
-    # Pre-scale Q: TRT IAttention does not apply score scaling itself.
-    # Match the scale constant's dtype to Q's dtype: in strongly-typed networks
-    # a FP32 constant mixed with a FP16/BF16 Q causes add_elementwise to emit
-    # a type-mismatch error and produce a tensor with corrupted dimensions,
-    # which makes add_attention return None.
-    if scale is None:
-        head_dim = q_4d.shape[-1]
-        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    # Use FP16 weights directly for FP16; BF16 has no numpy native type so
-    # create as FP32 and cast; FP32 falls through to the default.
-    scale_np_dtype = np.float16 if q_4d.dtype == trt.float16 else np.float32
-    scale_t = add_constant(network, (1, 1, 1, 1), np.array([[[[scale]]]]), dtype=scale_np_dtype)
-    if q_4d.dtype == trt.bfloat16:
-        scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
-    q_scaled = network.add_elementwise(q_4d, scale_t, trt.ElementWiseOperation.PROD)
+    q_scaled = _prescale_query(network, q_4d, scale)
 
     attn = network.add_attention(
-        q_scaled.get_output(0),
+        q_scaled,
         k_4d,
         v_4d,
         trt.AttentionNormalizationOp.SOFTMAX,

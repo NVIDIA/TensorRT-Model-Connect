@@ -49,6 +49,7 @@ struct RuntimeConfig {
     std::int32_t mtp_num_draft_tokens;
     std::int32_t prefill_chunk_len; // 0: no prefill_engine.plan, single-token prefill
     bool prefill_dynamic;           // engine takes any token count in [1, prefill_chunk_len]
+    bool kv_native;                 // engines update the KV cache in place (see Qwen38KvCacheLayout)
 };
 
 template <typename T>
@@ -77,9 +78,11 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     // prefill_dynamic is optional too: present only for a dynamic-length prefill engine.
     const bool has_prefill_field = json.contains("prefill_chunk_len");
     const bool has_dynamic_field = json.contains("prefill_dynamic");
+    const bool has_native_field = json.contains("kv_native");
     if (has_dynamic_field && !has_prefill_field)
         throw std::runtime_error("qwen3_8 runtime.json has prefill_dynamic without prefill_chunk_len");
-    if (json.size() != 22U + (has_prefill_field ? 1U : 0U) + (has_dynamic_field ? 1U : 0U))
+    if (json.size() != 22U + (has_prefill_field ? 1U : 0U) + (has_dynamic_field ? 1U : 0U) +
+                         (has_native_field ? 1U : 0U))
         throw std::runtime_error("qwen3_8 runtime.json has an unexpected field set");
     if (require_value<std::string>(json, "decoder_engine_layout") != "single")
         throw std::runtime_error("qwen3_8 requires decoder_engine_layout='single'");
@@ -107,6 +110,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::int32_t>(json, "mtp_num_draft_tokens"),
         has_prefill_field ? require_value<std::int32_t>(json, "prefill_chunk_len") : 0,
         has_dynamic_field ? require_value<bool>(json, "prefill_dynamic") : false,
+        has_native_field ? require_value<bool>(json, "kv_native") : false,
     };
     const auto layer_types = require_value<std::vector<std::string>>(json, "layer_types");
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
@@ -123,6 +127,8 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         throw std::runtime_error("qwen3_8 runtime.json has invalid prefill_chunk_len");
     if (config.prefill_dynamic && config.prefill_chunk_len < 2)
         throw std::runtime_error("qwen3_8 runtime.json has prefill_dynamic without a prefill engine");
+    if (config.kv_native && config.has_mtp)
+        throw std::runtime_error("qwen3_8 runtime.json has kv_native with MTP engines");
     if (config.precision != "fp16" && config.precision != "fp32" && config.precision != "bf16")
         throw std::runtime_error("qwen3_8 runtime.json contains invalid precision");
     if (config.has_mtp && config.mtp_num_draft_tokens < 1)
@@ -162,8 +168,13 @@ ITask* create(const FamilyContext& context) {
     const cudaStream_t stream = decoder->stream();
     const std::int32_t kv_dim = config.num_key_value_heads * config.head_dim;
 
+    Qwen38KvCacheLayout kv_layout;
+    kv_layout.native = config.kv_native;
+    kv_layout.num_kv_heads = config.num_key_value_heads;
+    kv_layout.pad_rows = config.prefill_chunk_len;
     auto kv = std::make_unique<Qwen38KvCache>(config.num_attention_layers, config.max_cache_length,
-                                              kv_dim, stream, state_dtype(config.precision));
+                                              kv_dim, stream, state_dtype(config.precision),
+                                              Qwen38KvCacheNames{}, kv_layout);
     if (!kv->ok())
         throw std::runtime_error("qwen3_8 failed to create KV cache");
 

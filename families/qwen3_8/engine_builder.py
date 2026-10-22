@@ -118,6 +118,11 @@ def _parse_layer_types(raw_types: list[str]) -> list[str]:
     return [mapping.get(t.lower(), t.lower()) for t in raw_types]
 
 
+def native_kv_available() -> bool:
+    """True if this TensorRT can build the native KV cache (in-place cache update layer)."""
+    return hasattr(trt.INetworkDefinition, "add_kv_cache_update") and hasattr(trt.IAttention, "key_value_lengths")
+
+
 def _prepare_runtime_inputs(
     network,
     work_trt_dtype,
@@ -126,8 +131,13 @@ def _prepare_runtime_inputs(
     ssm_state_inputs,
     cache_k_inputs,
     cache_v_inputs,
+    cast_caches=True,
 ):
-    """Cast storage tensors while preserving DeltaNet recurrence in FP32."""
+    """Cast storage tensors while preserving DeltaNet recurrence in FP32.
+
+    ``attention_mask=None`` (native KV cache) is passed through, and ``cast_caches=False`` leaves the
+    caches as the network inputs they are: the in-place cache update needs the input tensor itself.
+    """
     if work_trt_dtype == trt.float32:
         return (
             attention_mask,
@@ -144,13 +154,13 @@ def _prepare_runtime_inputs(
         ]
 
     return (
-        network.add_cast(attention_mask, work_trt_dtype).get_output(0),
+        None if attention_mask is None else network.add_cast(attention_mask, work_trt_dtype).get_output(0),
         cast_all(conv_state_inputs),
         # HF keeps the DeltaNet recurrent state in FP32. Never quantize this
         # persistent input before the per-token recurrence.
         ssm_state_inputs,
-        cast_all(cache_k_inputs),
-        cast_all(cache_v_inputs),
+        cast_all(cache_k_inputs) if cast_caches else cache_k_inputs,
+        cast_all(cache_v_inputs) if cast_caches else cache_v_inputs,
     )
 
 
@@ -553,8 +563,17 @@ class Qwen38Model:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
+        native_kv: bool = False, cache_pad_rows: int = 0,
     ) -> bytes:
-        """Build hybrid TRT engine with DeltaNet + attention layers."""
+        """Build hybrid TRT engine with DeltaNet + attention layers.
+
+        ``native_kv=True`` uses the native KV cache: `cache_k_{i}`/`cache_v_{i}` are
+        `(1, Hkv, max_cache_length + cache_pad_rows, head_dim)` network inputs that the engine writes in
+        place (`cache_k_out_{i}`/`cache_v_out_{i}` must be bound to the same memory), `cache_write_idx`
+        and `kv_len` (int32 `(1,)`: the position, and the position + 1) replace `attention_mask`, and
+        attention reads only the `kv_len` filled rows. `cache_pad_rows` is the extra rows the other
+        engines sharing the buffers need (the prefill chunk length).
+        """
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
@@ -618,8 +637,13 @@ class Qwen38Model:
         # --- Inputs ---
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input(
-            "attention_mask", trt.float32, (1, attention_window))
+        if native_kv:
+            attention_mask = None
+            cache_write_idx = network.add_input("cache_write_idx", trt.int32, (1,))
+            kv_len = network.add_input("kv_len", trt.int32, (1,))
+        else:
+            attention_mask = network.add_input(
+                "attention_mask", trt.float32, (1, attention_window))
 
         # DeltaNet state inputs (conv + ssm per DeltaNet layer)
         conv_state_inputs = []
@@ -635,18 +659,22 @@ class Qwen38Model:
             ssm_state_inputs.append(ss)
 
         # Attention KV cache inputs
+        cache_dims = (
+            (1, num_kv_heads, max_cache_length + cache_pad_rows, head_dim) if native_kv
+            else (max_cache_length, kv_attention_size))
         cache_k_inputs = []
         cache_v_inputs = []
         for ai in range(num_attn):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", ai),
-                work_trt_dtype, (max_cache_length, kv_attention_size))
+                work_trt_dtype, cache_dims)
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", ai),
-                work_trt_dtype, (max_cache_length, kv_attention_size))
+                work_trt_dtype, cache_dims)
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
+        raw_caches = (cache_k_inputs, cache_v_inputs)
         (
             attention_mask,
             conv_state_inputs,
@@ -661,7 +689,10 @@ class Qwen38Model:
             ssm_state_inputs,
             cache_k_inputs,
             cache_v_inputs,
+            cast_caches=not native_kv,
         )
+        if native_kv:
+            cache_k_inputs, cache_v_inputs = raw_caches
 
         # --- Shared constants ---
         embedding_table = graph_ops.add_constant(
@@ -751,8 +782,9 @@ class Qwen38Model:
                     hidden=layer_cast(hidden_state),
                     cache_k=layer_cast(cache_k_inputs[attn_counter]),
                     cache_v=layer_cast(cache_v_inputs[attn_counter]),
-                    attention_mask=layer_cast(attention_mask),
+                    attention_mask=None if native_kv else layer_cast(attention_mask),
                     position_id=position_id,
+                    kv_update=(cache_write_idx, kv_len) if native_kv else None,
                     cos_half_tensor=layer_cast(cos_half_tensor),
                     sin_half_tensor=layer_cast(sin_half_tensor),
                     eps_tensor=layer_cast(eps_tensor),
@@ -833,8 +865,8 @@ class Qwen38Model:
                 pk = network.add_cast(pk, work_trt_dtype).get_output(0)
             if pv.dtype != work_trt_dtype:
                 pv = network.add_cast(pv, work_trt_dtype).get_output(0)
-            pk.name = graph_ops.layer_tensor_name("present_k", ai)
-            pv.name = graph_ops.layer_tensor_name("present_v", ai)
+            pk.name = graph_ops.layer_tensor_name("cache_k_out" if native_kv else "present_k", ai)
+            pv.name = graph_ops.layer_tensor_name("cache_v_out" if native_kv else "present_v", ai)
             network.mark_output(pk)
             network.mark_output(pv)
 
@@ -1755,7 +1787,8 @@ class Qwen38Model:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, chunk_len: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False, dynamic: bool = False,
-        opt_len: int = 0, past_opt_len: int = 0,
+        opt_len: int = 0, past_opt_len: int = 0, dynamic_cache: bool = False,
+        native_kv: bool = False,
     ) -> bytes:
         """Build the multi-token prefill engine: `chunk_len` prompt tokens per call.
 
@@ -1764,11 +1797,18 @@ class Qwen38Model:
         it needs the cuTile GDN prefill plugin (TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1). Set
         `valid_len` to T, the number of rows; every `(chunk_len, ...)` shape below is `(T, ...)`.
 
-        A dynamic engine also takes the cache by its filled length: `cache_k_{i}` and `cache_v_{i}`
+        A dynamic engine (or `dynamic_cache=True`, for a fixed token count) takes the cache by its
+        filled length: `cache_k_{i}` and `cache_v_{i}`
         are `(P, kv_attention_size)` with P (0 .. `max_cache_length`) the rows already filled,
         bound on the first P rows of the cache buffers, and `attention_mask` is `(T, P + T)`. So
         attention covers P + T keys, not the whole cache capacity. `past_opt_len` is the P the
         optimization profile is tuned for.
+
+        ``native_kv=True`` uses the native KV cache (see `build_engine`): `cache_k_{i}`/`cache_v_{i}` are
+        `(1, Hkv, max_cache_length + chunk_len, head_dim)` inputs written in place, `cache_write_idx`
+        and `kv_len` (the filled rows, then that + the rows of this call) replace `attention_mask`, and
+        there are no `present_k`/`present_v` outputs. The extra `chunk_len` rows keep a padded last chunk
+        of a fixed-size engine inside the buffer.
 
         Unlike `build_engine_multi_token` (which chains `chunk_len` single-token
         sub-steps and so still streams every weight `chunk_len` times), every
@@ -1859,22 +1899,34 @@ class Qwen38Model:
             trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # --- Inputs ---
+        cache_dynamic = (dynamic or dynamic_cache) and not native_kv
         row_dim = -1 if dynamic else chunk_len
         token_ids = network.add_input("token_ids", trt.int32, (row_dim,))
         position_ids = network.add_input("position_id", trt.int32, (row_dim,))
         valid_len = network.add_input("valid_len", trt.int32, (1,))
-        attention_mask = network.add_input(
-            "attention_mask", trt.float32,
-            (-1, -1) if dynamic else (chunk_len, max_cache_length + chunk_len))
-        if dynamic:
-            opt = opt_len or max(1, chunk_len // 2)
+        if native_kv:
+            attention_mask = None
+            cache_write_idx = network.add_input("cache_write_idx", trt.int32, (1,))
+            kv_len = network.add_input("kv_len", trt.int32, (1,))
+        else:
+            attention_mask = network.add_input(
+                "attention_mask", trt.float32,
+                (-1, -1) if dynamic else (chunk_len, -1 if cache_dynamic else max_cache_length + chunk_len))
+        if dynamic or cache_dynamic:
             profile = builder.create_optimization_profile()
-            profile.set_shape("token_ids", (1,), (opt,), (chunk_len,))
-            profile.set_shape("position_id", (1,), (opt,), (chunk_len,))
             # The cache inputs carry only the P rows already filled, so attention covers P + T
             # keys, not the whole cache; the mask is [T, P + T].
             past_opt = min(max(past_opt_len, 0), max_cache_length)
-            profile.set_shape("attention_mask", (1, 1), (opt, past_opt + opt),
+        if dynamic:
+            opt = opt_len or max(1, chunk_len // 2)
+            profile.set_shape("token_ids", (1,), (opt,), (chunk_len,))
+            profile.set_shape("position_id", (1,), (opt,), (chunk_len,))
+            if not native_kv:
+                profile.set_shape("attention_mask", (1, 1), (opt, past_opt + opt),
+                                  (chunk_len, max_cache_length + chunk_len))
+        elif cache_dynamic and not native_kv:
+            profile.set_shape("attention_mask", (chunk_len, chunk_len),
+                              (chunk_len, past_opt + chunk_len),
                               (chunk_len, max_cache_length + chunk_len))
 
         conv_state_inputs = []
@@ -1889,17 +1941,20 @@ class Qwen38Model:
 
         cache_k_inputs = []
         cache_v_inputs = []
-        past_dim = -1 if dynamic else max_cache_length
+        past_dim = -1 if cache_dynamic else max_cache_length
+        cache_dims = ((1, num_kv_heads, max_cache_length + chunk_len, head_dim) if native_kv
+                      else (past_dim, kv_attention_size))
         for ai in range(num_attn):
             for kind, inputs in (("cache_k", cache_k_inputs), ("cache_v", cache_v_inputs)):
                 name = graph_ops.layer_tensor_name(kind, ai)
-                inputs.append(network.add_input(name, work_trt_dtype, (past_dim, kv_attention_size)))
-                if dynamic:
+                inputs.append(network.add_input(name, work_trt_dtype, cache_dims))
+                if cache_dynamic:
                     profile.set_shape(name, (0, kv_attention_size), (past_opt, kv_attention_size),
                                       (max_cache_length, kv_attention_size))
-        if dynamic:
+        if dynamic or cache_dynamic:
             trt_config.add_optimization_profile(profile)
 
+        raw_caches = (cache_k_inputs, cache_v_inputs)
         (
             attention_mask,
             conv_state_inputs,
@@ -1909,8 +1964,10 @@ class Qwen38Model:
         ) = _prepare_runtime_inputs(
             network, work_trt_dtype, attention_mask,
             conv_state_inputs, ssm_state_inputs,
-            cache_k_inputs, cache_v_inputs,
+            cache_k_inputs, cache_v_inputs, cast_caches=not native_kv,
         )
+        if native_kv:
+            cache_k_inputs, cache_v_inputs = raw_caches
 
         # --- Shared constants ---
         embedding_table = graph_ops.add_constant(
@@ -2005,14 +2062,16 @@ class Qwen38Model:
                     hidden=layer_cast(hidden_state),
                     cache_k=layer_cast(cache_k_inputs[attn_counter]),
                     cache_v=layer_cast(cache_v_inputs[attn_counter]),
-                    attention_mask=layer_cast(attention_mask),
+                    attention_mask=None if native_kv else layer_cast(attention_mask),
                     position_ids=position_ids,
+                    kv_update=(cache_write_idx, kv_len) if native_kv else None,
                     cos_half_tensor=layer_cast(cos_half_tensor),
                     sin_half_tensor=layer_cast(sin_half_tensor),
                     eps_tensor=layer_cast(eps_tensor),
                     weights=weights,
                     prefix=prefix,
                     chunk_len=None if dynamic else chunk_len,
+                    dynamic_cache=cache_dynamic,
                     hidden_size=hidden,
                     attn_size=attn_size,
                     kv_attention_size=kv_attention_size,
@@ -2081,8 +2140,8 @@ class Qwen38Model:
                 pk = network.add_cast(pk, work_trt_dtype).get_output(0)
             if pv.dtype != work_trt_dtype:
                 pv = network.add_cast(pv, work_trt_dtype).get_output(0)
-            pk.name = graph_ops.layer_tensor_name("present_k", ai)
-            pv.name = graph_ops.layer_tensor_name("present_v", ai)
+            pk.name = graph_ops.layer_tensor_name("cache_k_out" if native_kv else "present_k", ai)
+            pv.name = graph_ops.layer_tensor_name("cache_v_out" if native_kv else "present_v", ai)
             network.mark_output(pk)
             network.mark_output(pv)
 
@@ -2778,6 +2837,7 @@ def _add_full_attention_layer(
     mlp_size: int,
     dtype: np.dtype = np.float32,
     quant_ctx=None,
+    kv_update=None,
 ) -> dict[str, trt.ITensor]:
     """Add one full self-attention layer with output gating.
 
@@ -2833,26 +2893,32 @@ def _add_full_attention_layer(
     present_k = k
     present_v = v
 
-    # Reshape K, V for concatenation
-    k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, kv_attention_size)
-    v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, kv_attention_size)
+    if kv_update is not None:
+        # Native KV cache: write the new row into the cache in place, attend over kv_len rows.
+        context_flat, present_k, present_v = graph_ops.add_native_kv_attention(
+            network, q, k, v, cache_k, cache_v, *kv_update, num_heads=num_heads,
+            num_kv_heads=num_kv_heads, head_dim=head_dim, q_seq=1, causal=False)
+    else:
+        # Reshape K, V for concatenation
+        k_reshape = network.add_shuffle(k)
+        k_reshape.reshape_dims = (1, kv_attention_size)
+        v_reshape = network.add_shuffle(v)
+        v_reshape.reshape_dims = (1, kv_attention_size)
 
-    # Concatenate with cache
-    all_k = network.add_concatenation(
-        [cache_k, k_reshape.get_output(0)])
-    all_k.axis = 0
-    all_v = network.add_concatenation(
-        [cache_v, v_reshape.get_output(0)])
-    all_v.axis = 0
+        # Concatenate with cache
+        all_k = network.add_concatenation(
+            [cache_k, k_reshape.get_output(0)])
+        all_k.axis = 0
+        all_v = network.add_concatenation(
+            [cache_v, v_reshape.get_output(0)])
+        all_v.axis = 0
 
-    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
-    context_flat = graph_ops.add_attention_from_rows(
-        network, q, all_k.get_output(0), all_v.get_output(0),
-        num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
-        q_seq=1, kv_seq=attention_window,
-        mask=mask_4d)
+        mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+        context_flat = graph_ops.add_attention_from_rows(
+            network, q, all_k.get_output(0), all_v.get_output(0),
+            num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
+            q_seq=1, kv_seq=attention_window,
+            mask=mask_4d)
 
     # Gate: applied BEFORE o_proj (HF order). `weights` won't hold this
     # tensor when quant_ctx already owns it (load_weights() skips

@@ -272,9 +272,12 @@ def test_attention_prefill_matches_single_token(precision, tolerance) -> None:
 @pytest.mark.gpu
 @pytest.mark.parametrize("precision,tolerance", [("fp32", 1e-5), ("fp16", 3e-2)])
 @pytest.mark.parametrize("cached", [0, 5, 13])
-def test_attention_prefill_dynamic_cache_matches_full_cache(precision, tolerance, cached) -> None:
+@pytest.mark.parametrize("rows_dynamic", [True, False], ids=["dynamic-rows", "fixed-rows"])
+def test_attention_prefill_dynamic_cache_matches_full_cache(
+    precision, tolerance, cached, rows_dynamic
+) -> None:
     """Attention over only the filled cache rows (dynamic past length) = attention over the whole
-    cache buffer with the unfilled rows masked."""
+    cache buffer with the unfilled rows masked, with a dynamic or a fixed token count."""
     _need_gpu()
     from families.qwen3_8 import graph_ops, prefill_graph
 
@@ -289,18 +292,22 @@ def test_attention_prefill_dynamic_cache_matches_full_cache(precision, tolerance
     def build(dynamic: bool) -> bytes:
         net = _Net(precision)
         n = net.network
-        row_dim = -1 if dynamic else rows
+        row_dim = -1 if dynamic and rows_dynamic else rows
         x = n.add_input("x", net.trt_dtype, (row_dim, HID))
         pos = n.add_input("pos", trt.int32, (row_dim,))
-        mask = n.add_input("mask", trt.float32, (-1, -1) if dynamic else (rows, max_cache + rows))
+        mask = n.add_input(
+            "mask", trt.float32,
+            (-1, -1) if dynamic and rows_dynamic else (rows, -1 if dynamic else max_cache + rows))
         past = -1 if dynamic else max_cache
         cache_k = n.add_input("cache_k", net.trt_dtype, (past, KV_SIZE))
         cache_v = n.add_input("cache_v", net.trt_dtype, (past, KV_SIZE))
         if dynamic:
             profile = net.builder.create_optimization_profile()
-            profile.set_shape("x", (1, HID), (rows, HID), (rows, HID))
-            profile.set_shape("pos", (1,), (rows,), (rows,))
-            profile.set_shape("mask", (1, 1), (rows, 5 + rows), (rows, max_cache + rows))
+            if rows_dynamic:
+                profile.set_shape("x", (1, HID), (rows, HID), (rows, HID))
+                profile.set_shape("pos", (1,), (rows,), (rows,))
+            profile.set_shape("mask", (1, 1) if rows_dynamic else (rows, rows),
+                              (rows, 5 + rows), (rows, max_cache + rows))
             for name in ("cache_k", "cache_v"):
                 profile.set_shape(name, (0, KV_SIZE), (5, KV_SIZE), (max_cache, KV_SIZE))
             net.config.add_optimization_profile(profile)
@@ -309,11 +316,11 @@ def test_attention_prefill_dynamic_cache_matches_full_cache(precision, tolerance
         sin_t = graph_ops.add_constant(n, sin.shape, sin, dtype=net.np_dtype)
         out = prefill_graph.add_full_attention_layer_prefill(
             network=n, hidden=x, cache_k=cache_k, cache_v=cache_v, attention_mask=net.cast_in(mask),
-            position_ids=pos, chunk_len=None if dynamic else rows, eps_tensor=eps,
+            position_ids=pos, chunk_len=None if dynamic and rows_dynamic else rows, eps_tensor=eps,
             cos_half_tensor=cos_t, sin_half_tensor=sin_t, weights=weights, prefix="L",
             hidden_size=HID, attn_size=ATT_SIZE, kv_attention_size=KV_SIZE, num_heads=ATT_HEADS,
             num_kv_heads=KV_HEADS, head_dim=ATT_D, rotary_embedding_dim=ROT,
-            max_cache_length=max_cache, mlp_size=MLP, dtype=net.np_dtype)
+            max_cache_length=max_cache, mlp_size=MLP, dtype=net.np_dtype, dynamic_cache=dynamic)
         net.mark(hidden=out["hidden"], present_k=out["present_k"], present_v=out["present_v"])
         return net.build()
 
@@ -362,3 +369,138 @@ def test_attention_prefill_dynamic_cache_matches_full_cache(precision, tolerance
                                     "cache_k": base_k, "cache_v": base_v})
     for name in names:
         _assert_close(got[name], full[name], tolerance, f"{name} (cached={cached})")
+
+
+def _run_in_place(plan: bytes, feeds: dict, outputs: list[str], alias: dict) -> tuple[dict, dict]:
+    """Like `_run`, but each output in `alias` shares memory with the named input (the KV cache
+    update writes in place). Returns (outputs, the input tensors after the run)."""
+    engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+    context = engine.create_execution_context()
+    tensors, result = {}, {}
+    for i in range(engine.num_io_tensors):
+        name = engine.get_tensor_name(i)
+        if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+            tensors[name] = feeds[name].contiguous().cuda()
+            context.set_tensor_address(name, tensors[name].data_ptr())
+    for i in range(engine.num_io_tensors):
+        name = engine.get_tensor_name(i)
+        if engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
+            if name in alias:
+                context.set_tensor_address(name, tensors[alias[name]].data_ptr())
+            else:
+                dtype = {trt.float32: torch.float32, trt.float16: torch.float16}[
+                    engine.get_tensor_dtype(name)]
+                result[name] = torch.zeros(tuple(context.get_tensor_shape(name)), dtype=dtype,
+                                           device="cuda")
+                context.set_tensor_address(name, result[name].data_ptr())
+    context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+    return ({n: result[n].float().cpu() for n in outputs},
+            {n: t.float().cpu() for n, t in tensors.items()})
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision,tolerance", [("fp32", 1e-4), ("fp16", 3e-2)])
+@pytest.mark.parametrize("cached", [0, 5, 13])
+@pytest.mark.parametrize("rows", [1, 16])
+def test_attention_native_kv_cache_matches_concat(precision, tolerance, cached, rows) -> None:
+    """KV cache update in place + attention over `kv_len` rows = concat + masked attention over the
+    whole cache buffer. `rows=1` is the decode layer, `rows=16` the prefill layer."""
+    _need_gpu()
+    from families.qwen3_8 import engine_builder, graph_ops, prefill_graph
+
+    max_cache, pad = 24, 16
+    rng = np.random.default_rng(3)
+    weights = _attention_weights(rng, "L")
+    cos = graph_ops.make_rope_table_half_dim(
+        max_cache + pad, ATT_D, 10000.0, cosine=True, partial_rotary_factor=ROT / ATT_D)
+    sin = graph_ops.make_rope_table_half_dim(
+        max_cache + pad, ATT_D, 10000.0, cosine=False, partial_rotary_factor=ROT / ATT_D)
+
+    def common(net, x, ck, cv, pos, mask, kv_update):
+        n = net.network
+        eps = graph_ops.add_constant(n, (1, 1), np.array([1e-6]), dtype=net.np_dtype)
+        return dict(
+            network=n, hidden=x, cache_k=ck, cache_v=cv, attention_mask=mask,
+            eps_tensor=eps,
+            cos_half_tensor=graph_ops.add_constant(n, cos.shape, cos, dtype=net.np_dtype),
+            sin_half_tensor=graph_ops.add_constant(n, sin.shape, sin, dtype=net.np_dtype),
+            weights=weights, prefix="L", hidden_size=HID, attn_size=ATT_SIZE,
+            kv_attention_size=KV_SIZE, num_heads=ATT_HEADS, num_kv_heads=KV_HEADS, head_dim=ATT_D,
+            rotary_embedding_dim=ROT, max_cache_length=max_cache, mlp_size=MLP,
+            dtype=net.np_dtype, kv_update=kv_update)
+
+    def layer(net, pos, kwargs):
+        if rows == 1:
+            return engine_builder._add_full_attention_layer(position_id=pos, **kwargs)
+        return prefill_graph.add_full_attention_layer_prefill(
+            position_ids=pos, chunk_len=rows, **kwargs)
+
+    def build_concat() -> bytes:
+        net = _Net(precision)
+        n = net.network
+        x = n.add_input("x", net.trt_dtype, (rows, HID))
+        pos = n.add_input("pos", trt.int32, (rows,))
+        mask = n.add_input("mask", trt.float32, (rows, max_cache + rows) if rows > 1
+                           else (1, max_cache + 1))
+        ck = n.add_input("cache_k", net.trt_dtype, (max_cache, KV_SIZE))
+        cv = n.add_input("cache_v", net.trt_dtype, (max_cache, KV_SIZE))
+        out = layer(net, pos, common(net, x, ck, cv, pos, net.cast_in(mask), None))
+        net.mark(hidden=out["hidden"], present_k=out["present_k"], present_v=out["present_v"])
+        return net.build()
+
+    def build_native() -> bytes:
+        net = _Net(precision)
+        n = net.network
+        x = n.add_input("x", net.trt_dtype, (rows, HID))
+        pos = n.add_input("pos", trt.int32, (rows,))
+        write_idx = n.add_input("write_idx", trt.int32, (1,))
+        kv_len = n.add_input("kv_len", trt.int32, (1,))
+        shape = (1, KV_HEADS, max_cache + pad, ATT_D)
+        ck = n.add_input("cache_k", net.trt_dtype, shape)
+        cv = n.add_input("cache_v", net.trt_dtype, shape)
+        out = layer(net, pos, common(net, x, ck, cv, pos, None, (write_idx, kv_len)))
+        net.mark(hidden=out["hidden"])
+        for name, tensor in (("cache_k_out", out["present_k"]), ("cache_v_out", out["present_v"])):
+            tensor.name = name
+            n.mark_output(tensor)
+        return net.build()
+
+    dtype = torch.float32 if precision == "fp32" else torch.float16
+    xs = torch.from_numpy(_rnd(rng, rows, HID, scale=1.0)).to(dtype)
+    base_k = torch.from_numpy(_rnd(rng, max_cache, KV_SIZE, scale=1.0)).to(dtype)
+    base_v = torch.from_numpy(_rnd(rng, max_cache, KV_SIZE, scale=1.0)).to(dtype)
+    pos = torch.arange(cached, cached + rows, dtype=torch.int32)
+
+    mask = torch.full((rows, max_cache + rows), -1e4)
+    mask[:, :cached] = 0
+    for i in range(rows):
+        mask[i, max_cache:max_cache + i + 1] = 0
+    if rows == 1:
+        mask = mask.reshape(1, max_cache + 1)
+    names = ["hidden", "present_k", "present_v"]
+    ref = _run(build_concat(), {"x": xs, "pos": pos, "mask": mask, "cache_k": base_k,
+                                "cache_v": base_v}, names)
+
+    def heads_major(rows_kv):  # [S, Hkv * D] -> [1, Hkv, S, D], padded to max_cache + pad rows
+        out = torch.zeros(1, KV_HEADS, max_cache + pad, ATT_D, dtype=dtype)
+        out[0, :, :rows_kv.shape[0]] = rows_kv.reshape(-1, KV_HEADS, ATT_D).permute(1, 0, 2)
+        return out
+
+    cache_k, cache_v = heads_major(base_k), heads_major(base_v)
+    got, after = _run_in_place(
+        build_native(),
+        {"x": xs, "pos": pos, "write_idx": torch.tensor([cached], dtype=torch.int32),
+         "kv_len": torch.tensor([cached + rows], dtype=torch.int32),
+         "cache_k": cache_k, "cache_v": cache_v},
+        ["hidden"], {"cache_k_out": "cache_k", "cache_v_out": "cache_v"})
+    _assert_close(got["hidden"], ref["hidden"], tolerance, f"hidden (cached={cached})")
+    for name, key in (("present_k", "cache_k"), ("present_v", "cache_v")):
+        new_rows = after[key][0, :, cached:cached + rows].permute(1, 0, 2).reshape(rows, KV_SIZE)
+        _assert_close(new_rows, ref[name], tolerance, f"{name} written (cached={cached})")
+    # rows outside the written range are untouched
+    for key, base in (("cache_k", base_k), ("cache_v", base_v)):
+        expected = heads_major(base).float()
+        keep = torch.ones(max_cache + pad, dtype=torch.bool)
+        keep[cached:cached + rows] = False
+        assert torch.equal(after[key][0][:, keep], expected[0][:, keep]), f"{key} rows outside the write changed"

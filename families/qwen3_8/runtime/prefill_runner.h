@@ -20,6 +20,12 @@
 // takes valid_len=n and keeps padding rows from touching the recurrent state,
 // so no special handling is needed here beyond passing n.
 //
+// With a native KV cache (Qwen38KvCacheLayout, runtime.json kv_native) the engine writes the K/V
+// rows into the cache itself and reads only the filled rows: the runner passes cache_write_idx (the
+// position) and kv_len (position + rows) instead of an attention mask, binds only the cache
+// inputs (the cache outputs alias them), keeps no K/V scratch, and only moves the cache position
+// afterwards.
+//
 // A dynamic engine whose cache_k/cache_v inputs are dynamic too takes only the filled rows of
 // the cache: each call binds them with shape (position, kv_dim) on the same buffers, and the
 // attention mask is (rows, position + rows), so attention covers the filled positions plus the
@@ -73,6 +79,7 @@ class Qwen38PrefillRunner {
     int32_t vocab_size_;
     bool dynamic_;
     bool dynamic_cache_{false}; // cache_k/cache_v are bound with the filled length each call
+    bool native_{false};        // the KV cache is updated in place by the engine
 
     std::vector<DeviceTensor> present_k_;
     std::vector<DeviceTensor> present_v_;

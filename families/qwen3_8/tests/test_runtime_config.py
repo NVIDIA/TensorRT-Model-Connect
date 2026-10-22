@@ -42,3 +42,15 @@ def test_dynamic_prefill_runtime_json_publishes_the_flag(tmp_path) -> None:
     assert runtime["prefill_dynamic"] is True
     assert runtime["prefill_chunk_len"] == 1024
     assert len(runtime) == 24
+
+
+def test_native_kv_runtime_json_publishes_the_flag(tmp_path) -> None:
+    runtime = _runtime(tmp_path, prefill_chunk_len=128, prefill_dynamic=False, kv_native=True)
+    assert runtime["kv_native"] is True
+    assert len(runtime) == 24
+
+
+def test_old_cache_runtime_json_has_no_native_field(tmp_path) -> None:
+    runtime = _runtime(tmp_path, prefill_chunk_len=128, prefill_dynamic=False, kv_native=False)
+    assert "kv_native" not in runtime
+    assert len(runtime) == 23

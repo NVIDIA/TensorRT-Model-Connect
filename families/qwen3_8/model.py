@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from .config import ModelConfig
-from .engine_builder import Qwen38Model
+from .engine_builder import Qwen38Model, native_kv_available
 
 
 _BUNDLE_FILES = (
@@ -119,6 +119,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: Qwen38Model, **
     }
     if runtime.get("prefill_dynamic"):
         fields.add("prefill_dynamic")
+    if runtime.get("kv_native"):
+        fields.add("kv_native")
     missing = fields - runtime.keys()
     if missing:
         raise ValueError(f"Qwen3.8 runtime config is missing {sorted(missing)}")
@@ -212,15 +214,10 @@ def _build_native(request, writer) -> None:
     weights = model.load_weights(
         str(model_dir), config, precision=precision,
         quant_ctx=quant_ctx, readers=readers)
-    plan = model.build_engine(
-        config,
-        weights,
-        max_sequence_length,
-        precision=precision,
-        quant_ctx=quant_ctx,
-        verbose=bool(request.verbose),
-        debug_layer_outputs=False,
-    )
+    has_mtp = _mtp_enabled(request, weights)
+    # Native KV cache: the engines write the cache in place and attention reads only the filled
+    # rows. The MTP engines share the cache buffers with the old layout, so they keep it.
+    native_kv = (not has_mtp) and native_kv_available()
 
     # Prompt tokens per multi-token prefill call. 0 keeps the old
     # one-decode-step-per-prompt-token prefill (no prefill_engine.plan).
@@ -240,12 +237,24 @@ def _build_native(request, writer) -> None:
         prefill_plan = model.build_engine_prefill(
             config, weights, max_sequence_length, prefill_chunk_len,
             precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
-            dynamic=prefill_dynamic, opt_len=prefill_opt_len,
+            dynamic=prefill_dynamic, opt_len=prefill_opt_len, dynamic_cache=True,
+            native_kv=native_kv,
         )
     else:
         prefill_chunk_len = 0
 
-    has_mtp = _mtp_enabled(request, weights)
+    plan = model.build_engine(
+        config,
+        weights,
+        max_sequence_length,
+        precision=precision,
+        quant_ctx=quant_ctx,
+        verbose=bool(request.verbose),
+        debug_layer_outputs=False,
+        native_kv=native_kv,
+        cache_pad_rows=prefill_chunk_len,
+    )
+
     mtp_plan = None
     draft_chain_plan = None
     multi_token_plan = None
@@ -302,6 +311,7 @@ def _build_native(request, writer) -> None:
             mtp_num_draft_tokens=(mtp_seq_len - 1) if has_mtp else 0,
             prefill_chunk_len=prefill_chunk_len,
             prefill_dynamic=prefill_dynamic,
+            kv_native=native_kv,
         ),
     )
     for filename in _BUNDLE_FILES:

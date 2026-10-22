@@ -33,15 +33,17 @@ Qwen38PrefillRunner::Qwen38PrefillRunner(std::unique_ptr<ITrtModule> module,
         throw std::runtime_error("Qwen38PrefillRunner: chunk_len must be >= 2");
 
     const Qwen38KvCache& kv = *state_.kv_cache();
+    native_ = kv.native();
     present_k_.reserve(static_cast<std::size_t>(kv.num_layers()));
     present_v_.reserve(static_cast<std::size_t>(kv.num_layers()));
-    for (int32_t i = 0; i < kv.num_layers(); ++i) {
+    // A native KV cache is written by the engine: no K/V scratch.
+    for (int32_t i = 0; i < (native_ ? 0 : kv.num_layers()); ++i) {
         present_k_.emplace_back(std::vector<int64_t>{chunk_len_, kv.kv_dim()}, kv.dtype(), stream_);
         present_v_.emplace_back(std::vector<int64_t>{chunk_len_, kv.kv_dim()}, kv.dtype(), stream_);
         if (!present_k_.back().ok() || !present_v_.back().ok())
             throw std::runtime_error("Qwen38PrefillRunner: failed to allocate present K/V scratch");
     }
-    dynamic_cache_ = dynamic_ && module_->has_input("cache_k_0") && module_->input_is_dynamic("cache_k_0");
+    dynamic_cache_ = module_->has_input("cache_k_0") && module_->input_is_dynamic("cache_k_0");
     tokens_buf_.resize(static_cast<std::size_t>(chunk_len_));
     positions_buf_.resize(static_cast<std::size_t>(chunk_len_));
 }
@@ -55,6 +57,8 @@ void Qwen38PrefillRunner::bind_state() {
         const auto li = static_cast<std::size_t>(i);
         module_->bind_external("cache_k" + suffix, kv.cache_k(i).data());
         module_->bind_external("cache_v" + suffix, kv.cache_v(i).data());
+        if (native_)  // the updated-cache outputs alias the cache inputs, bound with them
+            continue;
         module_->bind_external("present_k" + suffix, present_k_[li].data());
         module_->bind_external("present_v" + suffix, present_v_[li].data());
     }
@@ -103,16 +107,20 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
 
     // Additive mask (rows, cache_cols + rows): visible cache prefix [0, pos0),
     // then causal over the chunk's own rows.
-    mask_buf_.assign(static_cast<std::size_t>(rows) * static_cast<std::size_t>(kv_len),
-                     kMaskedScore);
-    for (int32_t i = 0; i < rows; ++i) {
-        float* row =
-            mask_buf_.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
-        std::fill(row, row + pos0, 0.0F);
-        std::fill(row + cache_cols, row + cache_cols + i + 1, 0.0F);
+    if (!native_) {
+        mask_buf_.assign(static_cast<std::size_t>(rows) * static_cast<std::size_t>(kv_len),
+                         kMaskedScore);
+        for (int32_t i = 0; i < rows; ++i) {
+            float* row = mask_buf_.data() +
+                         static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
+            std::fill(row, row + pos0, 0.0F);
+            std::fill(row + cache_cols, row + cache_cols + i + 1, 0.0F);
+        }
     }
 
     int32_t valid_len = n;
+    int32_t write_idx = pos0;   // native KV cache: where this call's rows go, and how many rows
+    int32_t kv_rows = pos0 + rows;  // attention reads (filled + new)
     TensorMap inputs;
     {
         Tensor t;
@@ -125,10 +133,19 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
         t.data = &valid_len;
         t.shape = {1};
         inputs["valid_len"] = t;
-        t.data = mask_buf_.data();
-        t.shape = {rows, kv_len};
-        t.dtype = DType::kFloat32;
-        inputs["attention_mask"] = t;
+        if (native_) {
+            t.dtype = DType::kInt32;
+            t.shape = {1};
+            t.data = &write_idx;
+            inputs["cache_write_idx"] = t;
+            t.data = &kv_rows;
+            inputs["kv_len"] = t;
+        } else {
+            t.data = mask_buf_.data();
+            t.shape = {rows, kv_len};
+            t.dtype = DType::kFloat32;
+            inputs["attention_mask"] = t;
+        }
     }
 
     if (dynamic_cache_) {
@@ -166,6 +183,11 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
                    "failed to copy hidden states");
     }
 
+    if (native_) {  // the engine wrote the K/V rows; only the position moves
+        kv.set_position(pos0 + n);
+        ssm.advance(n);
+        return;
+    }
     std::vector<const void*> pk;
     std::vector<const void*> pv;
     pk.reserve(present_k_.size());

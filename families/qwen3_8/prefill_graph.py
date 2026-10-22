@@ -527,6 +527,8 @@ def add_full_attention_layer_prefill(
     mlp_size: int,
     dtype: np.dtype = np.float32,
     quant_ctx=None,
+    dynamic_cache: bool = False,
+    kv_update=None,
 ) -> dict[str, trt.ITensor]:
     """One full self-attention layer over ``chunk_len`` tokens.
 
@@ -535,7 +537,10 @@ def add_full_attention_layer_prefill(
     the last ``chunk_len`` columns are causal over the new tokens.
     Returns ``{hidden, present_k, present_v}`` with ``present_*`` shaped
     ``[chunk_len, kv_attention_size]``. ``chunk_len=None`` makes the token count a runtime
-    dimension.
+    dimension; ``kv_update=(cache_write_idx, kv_len)`` switches to the native KV cache: the caches are
+    ``[1, Hkv, rows, D]`` inputs written in place (no mask, no concat) and ``present_k``/``present_v``
+    are the updated caches (see ``graph_ops.add_native_kv_attention``); ``dynamic_cache`` does the same for the cache rows (``cache_k``/``cache_v`` are
+    then ``[P, kv_attention_size]`` and the mask ``[chunk_len, P + chunk_len]``).
     """
     T = chunk_len
     normed = graph_blocks.apply_norm(
@@ -566,16 +571,23 @@ def add_full_attention_layer_prefill(
         network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor, position_ids,
         rotary_embedding_dim, sequence_length=T)
 
-    all_k = network.add_concatenation([cache_k, k])
-    all_k.axis = 0
-    all_v = network.add_concatenation([cache_v, v])
-    all_v.axis = 0
+    present_k, present_v = k, v
+    if kv_update is not None:
+        context, present_k, present_v = graph_ops.add_native_kv_attention(
+            network, q, k, v, cache_k, cache_v, *kv_update, num_heads=num_heads,
+            num_kv_heads=num_kv_heads, head_dim=head_dim, q_seq=T, causal=True)
+    else:
+        all_k = network.add_concatenation([cache_k, k])
+        all_k.axis = 0
+        all_v = network.add_concatenation([cache_v, v])
+        all_v.axis = 0
 
-    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
-    context = graph_ops.add_attention_from_rows(
-        network, q, all_k.get_output(0), all_v.get_output(0),
-        num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
-        q_seq=T, kv_seq=None if T is None else max_cache_length + T, mask=mask_4d)
+        mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+        context = graph_ops.add_attention_from_rows(
+            network, q, all_k.get_output(0), all_v.get_output(0),
+            num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
+            q_seq=T, kv_seq=None if (T is None or dynamic_cache) else max_cache_length + T,
+            mask=mask_4d)
 
     gate_name = f"{prefix}.w_gate_attn"
     if weights.get(gate_name) is not None or _owned(quant_ctx, gate_name):
@@ -596,6 +608,6 @@ def add_full_attention_layer_prefill(
         mlp_size=mlp_size, dtype=dtype, quant_ctx=quant_ctx)
     return {
         "hidden": _ew(network, hidden_after_attn, mlp_out, trt.ElementWiseOperation.SUM),
-        "present_k": k,
-        "present_v": v,
+        "present_k": present_k,
+        "present_v": present_v,
     }
